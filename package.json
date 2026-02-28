@@ -3,6 +3,8 @@
   "scripts": {
     "build": "pnpm --filter=\"!@celox-sim/celox-napi\" -r build",
     "build:napi": "pnpm --filter @celox-sim/celox-napi build:debug",
+    "build:napi:release": "pnpm --filter @celox-sim/celox-napi build",
+    "bench": "pnpm run build:napi:release && pnpm run build && pnpm --filter @celox-sim/celox -r bench",
     "test": "pnpm run build:napi && cargo test && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test",
     "test:rust": "cargo test",
     "test:js": "pnpm run build:napi && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test"

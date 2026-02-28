@@ -19,5 +19,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/matchers.ts", "dist"]
+  "exclude": ["src/**/*.test.ts", "src/**/*.bench.ts", "src/matchers.ts", "dist"]
 }
