@@ -459,12 +459,20 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     for (path, parser) in &parsers {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let _errors = analyzer.analyze_pass2(
+        let errors = analyzer.analyze_pass2(
             &path.prj,
             &parser.veryl,
             &mut analyzer_context,
             Some(&mut ir),
         );
+
+        if !errors.is_empty() {
+            eprintln!(
+                "[celox-gen-ts] pass2 errors for {}: {:?}",
+                path.src.display(),
+                errors.iter().map(|e| format!("{e}")).collect::<Vec<_>>()
+            );
+        }
 
         let modules = generate_all(&ir);
         let source_file = path
@@ -474,6 +482,13 @@ pub fn gen_ts(project_path: String) -> Result<String> {
             .to_string_lossy()
             .trim_start_matches('/')
             .replace('\\', "/");
+
+        eprintln!(
+            "[celox-gen-ts] {} -> {} modules (source_file={})",
+            path.src.display(),
+            modules.len(),
+            source_file,
+        );
 
         let module_names: Vec<String> = modules.iter().map(|m| m.module_name.clone()).collect();
         if !module_names.is_empty() {
