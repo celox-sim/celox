@@ -70,4 +70,25 @@ describe("simulation", () => {
     },
     { iterations: 3, time: 0 },
   );
+
+  // Testbench pattern: write input + tick + read back
+  bench("testbench_tick_top_n1000_x1", () => {
+    sim.dut.rst = 0;
+    sim.tick();
+    // biome-ignore lint: read to measure full testbench cycle
+    sim.dut.rst;
+  });
+
+  bench(
+    "testbench_tick_top_n1000_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.dut.rst = 0;
+        sim.tick();
+        // biome-ignore lint: read to measure full testbench cycle
+        sim.dut.rst;
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
 });

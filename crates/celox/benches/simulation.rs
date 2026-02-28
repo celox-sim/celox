@@ -55,6 +55,25 @@ fn benchmark_counter(c: &mut Criterion) {
             }
         })
     });
+
+    // Testbench pattern: write input + tick + read input back
+    c.bench_function("testbench_tick_top_n1000_x1", |b| {
+        b.iter(|| {
+            sim.modify(|io| io.set(rst, 0u8)).unwrap();
+            sim.tick(clk).unwrap();
+            std::hint::black_box(sim.get(rst));
+        })
+    });
+
+    c.bench_function("testbench_tick_top_n1000_x1000000", |b| {
+        b.iter(|| {
+            for _ in 0..1000000 {
+                sim.modify(|io| io.set(rst, 0u8)).unwrap();
+                sim.tick(clk).unwrap();
+                std::hint::black_box(sim.get(rst));
+            }
+        })
+    });
 }
 
 criterion_group!(benches, benchmark_counter);
