@@ -9,6 +9,24 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  rust:
+    name: Rust Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Run tests
+        run: cargo test
+
   js:
     name: JS Build & Test
     runs-on: ubuntu-latest
