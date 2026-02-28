@@ -1,57 +1,57 @@
-# シミュレータ アーキテクチャ
+# Simulator Architecture
 
-`veryl-simulator` は、Veryl RTL から JIT コンパイルされたネイティブコードを生成し、サイクルベースのシミュレーションを実行するエンジンです。
+`veryl-simulator` is an engine that generates JIT-compiled native code from Veryl RTL and executes cycle-based simulation.
 
-## 設計思想とターゲット
+## Design Philosophy and Target
 
-本シミュレータは、**「最新の同期回路設計（RTL）の検証効率を最大化すること」**を目的として設計されています。
+This simulator is designed with the goal of **maximizing verification efficiency for modern synchronous circuit designs (RTL)**.
 
--   **RTL 特化**: ゲートレベルの遅延（# 遅延）や詳細なデルタサイクルの挙動など、シミュレーション速度とのトレードオフになる物理的タイミングの再現は、設計対象を RTL レベルの論理検証に絞ることで意図的に簡略化されています。
--   **パフォーマンス優先**: インタプリタ的なエミュレーションではなく、SIR (Simulator IR) から JIT コンパイルすることで、ネイティブコードに近い実行スループットを実現します。
--   **設計目標としての整合性**: マルチクロックやゼロ遅延のクロック木など、実際の RTL 設計で遭遇する課題に対して、一貫性を保証するための「マルチフェーズ評価」や「カスケードクロック検出」といった仕組みが設計・実装されています。ただし、現時点では特定の条件下で[競合状態（レースコンディション）が発生する制限](./cascade-limitations.md)があります。
+-   **RTL-focused**: Physical timing reproduction that trades off against simulation speed -- such as gate-level delays (# delays) and detailed delta-cycle behavior -- is intentionally simplified by restricting the design scope to RTL-level logic verification.
+-   **Performance-first**: Rather than interpreter-style emulation, the simulator JIT-compiles from SIR (Simulator IR) to achieve execution throughput close to native code.
+-   **Consistency as a design goal**: Mechanisms such as "multi-phase evaluation" and "cascade clock detection" have been designed and implemented to guarantee consistency for challenges encountered in real RTL designs, such as multi-clock domains and zero-delay clock trees. However, there are currently [race condition limitations under certain conditions](./cascade-limitations.md).
 
-## コンパイルパイプライン
+## Compilation Pipeline
 
-Veryl ソースコードから実行までの変換は、以下の 3 つの主要なフェーズで構成されます。
+The transformation from Veryl source code to execution consists of the following three major phases.
 
 1.  **Frontend (Parser/Analyzer)**:
-    -   Veryl ソースを解析し、アナライザー IR を生成します。
-    -   `parser::parse_ir` がこれを入力とし、各モジュールを `SimModule` （SLT（論理式）および SIR（命令列）を含む構造体）に変換します。
+    -   Parses Veryl source and generates the analyzer IR.
+    -   `parser::parse_ir` takes this as input and converts each module into a `SimModule` (a struct containing SLT (logic expressions) and SIR (instruction sequences)).
 
 2.  **Middle-end (Flattening/Scheduling)**:
-    -   **Flattening**: インスタンス階層を平坦化し、モジュールローカルな `VarId` をグローバルな `AbsoluteAddr` へ変換します。ポート接続は `LogicPath` に変換されます。
-    -   **Atomization**: 依存関係をビット精度で解析するため、`LogicPath` をビット境界（atom）で分割します。
-    -   **Scheduling**: 分割された atom をトポロジカルソートし、組合せ回路の実行順序を決定します。
+    -   **Flattening**: Flattens the instance hierarchy and converts module-local `VarId`s into global `AbsoluteAddr`s. Port connections are converted into `LogicPath`s.
+    -   **Atomization**: Splits `LogicPath`s at bit boundaries (atoms) to analyze dependencies at bit-level precision.
+    -   **Scheduling**: Topologically sorts the split atoms to determine the execution order of combinational logic.
 
 3.  **Backend (JIT Compilation)**:
-    -   **Memory Layout**: 全変数のメモリオフセットを決定し、単一のメモリバッファ上に配置します。
-    -   **JIT Engine**: [Cranelift](https://cranelift.dev/) を使用して SIR をネイティブ機械語にコンパイルします。
-    -   **Runtime**: コンパイルされた関数ポインタを `EventRef` として管理し、シミュレーションを実行します。
+    -   **Memory Layout**: Determines memory offsets for all variables and places them on a single memory buffer.
+    -   **JIT Engine**: Uses [Cranelift](https://cranelift.dev/) to compile SIR into native machine code.
+    -   **Runtime**: Manages compiled function pointers as `EventRef`s and executes the simulation.
 
-## メモリモデル
+## Memory Model
 
-シミュレータは、**単一メモリバッファ上の 2 領域モデル**を採用しています。
+The simulator employs a **two-region model on a single memory buffer**.
 
--   **Stable 領域**: 現在の確定値を保持します。組合せ回路の入力および出力はここを参照します。
--   **Working 領域**: FF の次状態を一時的に保持します。
--   **SignalRef**: `HashMap` を介さない直接的なメモリアクセスを可能にする、オフセットとメタデータをキャッシュしたハンドルです。
+-   **Stable region**: Holds the current committed values. Combinational logic inputs and outputs reference this region.
+-   **Working region**: Temporarily holds the next state of flip-flops.
+-   **SignalRef**: A handle that caches offsets and metadata, enabling direct memory access without going through a `HashMap`.
 
-## 実行制御ロジック
+## Execution Control Logic
 
-`Simulation::step` は、以下のフローでシミュレーション時間を 1 歩進めます。
+`Simulation::step` advances the simulation time by one step using the following flow.
 
-1.  **イベントの抽出**: スケジューラから現在の時刻で発生するイベント（クロック変化など）をすべて取り出します。
-2.  **クロックエッジの検出**:
-    -   前回の値を `BitSet` で保持しており、今回の更新値と比較することで `posedge` / `negedge` を判定します。
-    -   `DomainKind` に基づき、ターゲットとなる FF 群がトリガーされたかを確認します。
-3.  **サイレントエッジのスキップ**: 信号値は変更されたが FF のトリガー条件を満たさない（例：立ち上がり指定での立ち下がり）場合、不必要な FF 評価をスキップします。
-4.  **マルチフェーズ評価**:
-    -   複数のドメインが同時にトリガーされた場合、イベント駆動モデルとしての一貫性を保つため、まず全ドメインで `eval_only` による次状態計算を行います。その後、全計算の完了を待って `apply` により値を Stable 領域に一斉に書き込みます。これにより、同時発生したイベント間での値の不整合を回避します。
-5.  **カスケードクロック検出**:
-    -   FF の出力が別の FF のクロックになっている（ゼロ遅延クロックツリー）場合を考慮し、ドメイン評価後にクロック信号の変化を再スキャンし、安定するまで評価を繰り返します。
+1.  **Event extraction**: Retrieves all events occurring at the current time (such as clock changes) from the scheduler.
+2.  **Clock edge detection**:
+    -   Previous values are retained in a `BitSet` and compared with the updated values to determine `posedge` / `negedge`.
+    -   Based on `DomainKind`, checks whether the target flip-flop groups have been triggered.
+3.  **Silent edge skipping**: When a signal value has changed but the flip-flop trigger condition is not met (e.g., a falling edge when a rising edge is specified), unnecessary flip-flop evaluation is skipped.
+4.  **Multi-phase evaluation**:
+    -   When multiple domains are triggered simultaneously, to maintain consistency as an event-driven model, next-state computation via `eval_only` is first performed across all domains. Then, after all computations are complete, values are written to the Stable region all at once via `apply`. This avoids value inconsistencies between simultaneously occurring events.
+5.  **Cascade clock detection**:
+    -   To handle cases where a flip-flop output serves as the clock for another flip-flop (zero-delay clock tree), clock signal changes are re-scanned after domain evaluation, and evaluation is repeated until the state stabilizes.
 
-## 関連コンポーネント
+## Related Components
 
--   **`JitBackend`**: コンパイル済み関数ポインタ (`SimFunc`) を保持し、`EventRef` を通じて直接呼び出します。
--   **`Scheduler`**: `BinaryHeap` によるイベント管理を行い、時刻順にイベントをディスパッチします。
--   **`VcdWriter`**: シミュレーション中の信号変化を VCD フォーマットで記録します。
+-   **`JitBackend`**: Holds compiled function pointers (`SimFunc`) and invokes them directly through `EventRef`.
+-   **`Scheduler`**: Manages events using a `BinaryHeap` and dispatches them in chronological order.
+-   **`VcdWriter`**: Records signal changes during simulation in VCD format.

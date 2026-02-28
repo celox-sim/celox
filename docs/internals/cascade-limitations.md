@@ -1,13 +1,13 @@
-# カスケードクロックと競合状態の処理 (Cascade & Race Condition)
+# Cascade Clocks and Race Condition Handling
 
-本ドキュメントでは、`veryl-simulator` におけるカスケードクロック（クロックの連鎖）やそれによって引き起こされるレースコンディションの解決策と実装詳細について解説します。
+This document explains the resolution strategies and implementation details for cascade clocks (chained clocks) and the race conditions they can cause in `veryl-simulator`.
 
-## 1. カスケードクロックにおける整合性の保証
+## 1. Consistency Guarantees for Cascade Clocks
 
-現在の実装では、同一時刻に複数のクロック（およびトリガー信号）が変化する場合、マルチフェーズ評価（Multi-phase Evaluation）を用いることで、論理的な整合性を保証しています。
+The current implementation uses multi-phase evaluation to guarantee logical consistency when multiple clocks (and trigger signals) change at the same simulation time.
 
-### 組合せカスケードにおける整合性
-あるクロック `clk` の変化が、組合せ回路（`assign`）を介して別のクロック `gclk` を駆動している場合でも、FFの更新タイミングが適切に制御されます。
+### Consistency in Combinational Cascades
+Even when a change in clock `clk` drives another clock `gclk` through a combinational circuit (`assign`), the FF update timing is properly controlled.
 
 ```veryl
 assign gclk = clk;
@@ -17,19 +17,19 @@ always_ff (clk) {
 }
 
 always_ff (gclk) {
-    cnt2 = cnt2 + cnt1; // ここで cnt1 の「更新前の値」を正しく参照する
+    cnt2 = cnt2 + cnt1; // Must correctly reference the "pre-update" value of cnt1
 }
 ```
 
--   **挙動**: 
-    1.  **Phase 1 (Discovery)**: `clk` と `gclk` のエッジを検出。それぞれの FF ブロックを `eval_only` (計算フェーズ) で実行し、結果を一時的な領域（Working Region）に保持します。このとき `cnt2` の計算には、まだ更新されていない Stable 領域の `cnt1` が使用されます。
-    2.  **Phase 2 (Apply)**: 全てのトリガードメインの評価が完了したあと、一斉に結果を Stable 領域に反映（Commit）します。
-    3.  **Phase 3 (Stabilize)**: 更新された値に基づいて組合せ回路を再評価します。
+-   **Behavior**:
+    1.  **Phase 1 (Discovery)**: Detect the edges of `clk` and `gclk`. Execute each FF block in `eval_only` (computation phase) and hold the results in a temporary area (Working Region). At this point, the computation of `cnt2` uses the value of `cnt1` from the not-yet-updated Stable region.
+    2.  **Phase 2 (Apply)**: After all triggered domains have been evaluated, commit the results to the Stable region all at once.
+    3.  **Phase 3 (Stabilize)**: Re-evaluate combinational circuits based on the updated values.
 
-これにより、物理的な RTL 挙動と一致する「非ブロッキング代入」的な動作が保証されます。
+This guarantees "non-blocking assignment" behavior consistent with physical RTL semantics.
 
-### 順序カスケード（クロック分周など）
-FF の出力が別の FF のトリガーとなっている場合（例：分周器）も、トリガー発見ループによって正しく処理されます。
+### Sequential Cascades (e.g., Clock Division)
+When an FF output serves as a trigger for another FF (e.g., a clock divider), the trigger discovery loop handles this correctly.
 
 ```veryl
 always_ff (clk) {
@@ -41,24 +41,24 @@ always_ff (clk_div) {
 }
 ```
 
--   **挙動**: 
-    -   `clk` の評価によって `clk_div` が変化すると、メインループ内の「トリガー発見ループ」がこれを検出し、同一ステップ内で `clk_div` ドメインも実行リストに加えます。
-    -   マルチフェーズ評価により、`clk_div` の変化が見えても、`cnt` の更新は `clk` による他の信号の更新と同期して行われます。
+-   **Behavior**:
+    -   When the evaluation of `clk` causes `clk_div` to change, the "trigger discovery loop" within the main loop detects this and adds the `clk_div` domain to the execution list within the same simulation step.
+    -   Thanks to multi-phase evaluation, even though the change in `clk_div` is visible, the update of `cnt` is synchronized with the updates of other signals driven by `clk`.
 
-## 2. 検証済みテスト
+## 2. Verified Tests
 
-これらの挙動は、`tests/cascade_race.rs` において検証されており、全てのテストが **PASSED** となることが確認されています。
+These behaviors are verified in `tests/cascade_race.rs`, where all tests are confirmed to **PASS**.
 
--   `test_cascade_race_condition`: 組合せカスケードによる値の先取り防止を検証。
--   `test_sequential_cascade_race_condition`: 順序カスケード（分周クロック）によるトリガー伝播の正確性を検証。
+-   `test_cascade_race_condition`: Verifies prevention of premature value capture in combinational cascades.
+-   `test_sequential_cascade_race_condition`: Verifies correctness of trigger propagation in sequential cascades (divided clocks).
 
-## 3. 実装のポイント
+## 3. Implementation Details
 
-1.  **Working Region (2-Region Memory)**: 計算結果を即座に反映せず、一時的に保持する Working 領域を導入しました。
-2.  **Split Blocks (eval_only / apply)**: JIT コンパイラが FF ブロックを「計算」と「更新」の 2 つの実行単位に分割して生成します。
-3.  **Trigger Discovery Loop**: シミュレーションステップ内で、信号の変化が新たなトリガーを引き起こさなくなるまで評価と組合せ伝播を繰り返します。
+1.  **Working Region (2-Region Memory)**: A Working region was introduced to temporarily hold computation results instead of applying them immediately.
+2.  **Split Blocks (eval_only / apply)**: The JIT compiler generates FF blocks split into two execution units: "compute" and "update."
+3.  **Trigger Discovery Loop**: Within a simulation step, evaluation and combinational propagation repeat until no signal change triggers a new domain.
 
-## 4. 現在の制限
+## 4. Current Limitations
 
--   **循環依存 (Zero-delay Loop)**: クロック間に組合せ回路のループがある場合、シミュレータのビルド時（`Simulator::builder().build()`）に `CombinationalLoop` エラーとして静的に検出・拒否されます。
--   **シングルフェーズ最適化**: あるシミュレーションステップにおいて、発火したトリガーが1つだけかつカスケード対象でない場合、eval_only/apply の分割をスキップし `eval_ff_at` で一括実行する最適化が適用されます。これは設計全体の性質ではなくステップ単位の判定です。
+-   **Circular Dependencies (Zero-delay Loop)**: If a combinational loop exists between clocks, it is statically detected and rejected as a `CombinationalLoop` error at simulator build time (`Simulator::builder().build()`).
+-   **Single-phase Optimization**: When only a single trigger fires in a simulation step and it is not a cascade target, the eval_only/apply split is skipped and `eval_ff_at` is used for batch execution as an optimization. This decision is made on a per-step basis, not based on the overall design properties.

@@ -1,62 +1,62 @@
-# SLT 組合せ回路解析ガイド
+# SLT Combinational Circuit Analysis Guide
 
-## 概要
+## Overview
 
-本ドキュメントでは、シミュレータが組合せ回路（`always_comb` ブロック）をどのように解析し、
-実行可能な命令列に変換するかを説明する。
+This document explains how the simulator analyzes combinational circuits (`always_comb` blocks)
+and transforms them into executable instruction sequences.
 
-組合せ回路の処理は以下のパイプラインで行われる：
+Combinational circuit processing follows this pipeline:
 
 ```
-always_comb ブロック (veryl_analyzer::ir)
-    │
-    ▼  記号的評価 (comb.rs)
-LogicPath<VarId>  ──  NodeId参照 + ソース依存情報
-    │
-    ▼  フラット化 (flatting.rs)
+always_comb block (veryl_analyzer::ir)
+    |
+    v  Symbolic evaluation (comb.rs)
+LogicPath<VarId>  --  NodeId references + source dependency info
+    |
+    v  Flattening (flatting.rs)
 LogicPath<AbsoluteAddr>
-    │
-    ▼  atomize (flatting.rs)
-LogicPath<AbsoluteAddr>  ──  ビット境界で分割済み
-    │
-    ▼  トポロジカルソート + lowering (scheduler.rs + lower.rs)
-ExecutionUnit<AbsoluteAddr>  ──  SIR 命令列
+    |
+    v  atomize (flatting.rs)
+LogicPath<AbsoluteAddr>  --  Split along bit boundaries
+    |
+    v  Topological sort + lowering (scheduler.rs + lower.rs)
+ExecutionUnit<AbsoluteAddr>  --  SIR instruction sequence
 ```
 
-## SLTNode（Symbolic Logic Tree）
+## SLTNode (Symbolic Logic Tree)
 
-`SLTNode<A>` は組合せ回路の式を表現する木構造である。
-現行実装では、ノードは `SLTNodeArena` に保持され、式は `NodeId` で参照される。
+`SLTNode<A>` is a tree structure that represents expressions in combinational circuits.
+In the current implementation, nodes are stored in an `SLTNodeArena` and expressions are referenced by `NodeId`.
 
 ```rust
 pub enum SLTNode<A> {
-    // 入力変数の参照
+    // Reference to an input variable
     Input {
-        variable: A,                    // 変数アドレス
-        index: Vec<NodeId>,             // 動的インデックス式（多次元対応）
-        access: BitAccess,             // 参照するビット範囲
+        variable: A,                    // Variable address
+        index: Vec<NodeId>,             // Dynamic index expressions (multi-dimensional)
+        access: BitAccess,             // Bit range being referenced
     },
 
-    // 定数
-    Constant(BigUint, usize),           // (値, ビット幅)
+    // Constant
+    Constant(BigUint, usize),           // (value, bit width)
 
-    // 二項演算
+    // Binary operation
     Binary(NodeId, BinaryOp, NodeId),
 
-    // 単項演算
+    // Unary operation
     Unary(UnaryOp, NodeId),
 
-    // 条件選択（if文から生成）
+    // Conditional select (generated from if statements)
     Mux {
         cond: NodeId,
         then_expr: NodeId,
         else_expr: NodeId,
     },
 
-    // ビット結合（{a, b} や部分代入の再構成）
-    Concat(Vec<(NodeId, usize)>),       // (式参照, ビット幅) のリスト
+    // Bit concatenation ({a, b} or reconstruction from partial assignments)
+    Concat(Vec<(NodeId, usize)>),       // List of (expression reference, bit width)
 
-    // ビットスライス（v[7:0] など）
+    // Bit slice (e.g. v[7:0])
     Slice {
         expr: NodeId,
         access: BitAccess,
@@ -64,43 +64,43 @@ pub enum SLTNode<A> {
 }
 ```
 
-### `Input` ノードの動的インデックス
+### Dynamic Indexing in `Input` Nodes
 
-配列の動的アクセス `arr[i][j]` は以下のように表現される：
+A dynamic array access `arr[i][j]` is represented as follows:
 
 ```
 Input {
-    variable: arr の VarId,
-    index: [NodeId(i の式), NodeId(j の式)],
+    variable: VarId of arr,
+    index: [NodeId(expression for i), NodeId(expression for j)],
     access: BitAccess { lsb: 0, msb: element_width - 1 },
 }
 ```
 
-`index` が空の場合は静的アクセスであり、`access` のみでビット位置が確定する。
+When `index` is empty, the access is static, and the bit position is determined solely by `access`.
 
-## LogicPath — データパスの表現
+## LogicPath -- Data Path Representation
 
-`LogicPath` は組合せ回路における1つのデータパスを表現する。
-「どの変数のどのビット範囲が、どの式で、どの入力に依存して決定されるか」を記述する。
+`LogicPath` represents a single data path in a combinational circuit.
+It describes "which bit range of which variable is determined by which expression, depending on which inputs."
 
 ```rust
 pub struct LogicPath<A> {
-    pub target: VarAtomBase<A>,              // 書き込み先（変数 + ビット範囲）
-    pub sources: HashSet<VarAtomBase<A>>,     // 読み出し元の集合
-    pub expr: NodeId,                         // 値を計算する式木の参照
+    pub target: VarAtomBase<A>,              // Write destination (variable + bit range)
+    pub sources: HashSet<VarAtomBase<A>>,     // Set of read sources
+    pub expr: NodeId,                         // Reference to the expression tree that computes the value
 }
 ```
 
-### `VarAtomBase` — ビット範囲付き変数参照
+### `VarAtomBase` -- Variable Reference with Bit Range
 
 ```rust
 pub struct VarAtomBase<A> {
-    pub id: A,              // 変数アドレス
-    pub access: BitAccess,  // ビット範囲 [lsb, msb]
+    pub id: A,              // Variable address
+    pub access: BitAccess,  // Bit range [lsb, msb]
 }
 ```
 
-### 例
+### Example
 
 ```systemverilog
 always_comb {
@@ -108,68 +108,68 @@ always_comb {
 }
 ```
 
-この場合、以下の `LogicPath` が生成される：
+This produces the following `LogicPath`:
 
 ```
 LogicPath {
     target: VarAtom { id: y, access: [0, width-1] },
-    expr: n42,  // 例: Arena上のノードID
+    expr: n42,  // e.g. node ID in the Arena
     sources: { VarAtom(a, [0, width-1]), VarAtom(b, [0, width-1]) },
 }
 ```
 
-## 記号的評価アルゴリズム
+## Symbolic Evaluation Algorithm
 
-### エントリポイント: `parse_comb`
+### Entry Point: `parse_comb`
 
-`parse_comb` は `CombDeclaration`（`always_comb` ブロック）を受け取り、
-`CombResult`（`LogicPath` のリストとビット境界マップ）を返す。
+`parse_comb` takes a `CombDeclaration` (an `always_comb` block) and returns
+a `CombResult` (a list of `LogicPath`s and a bit boundary map).
 
 ```
-parse_comb(module, decl) → CombResult { paths, boundaries }
+parse_comb(module, decl) -> CombResult { paths, boundaries }
 ```
 
-### SymbolicStore — 記号的状態
+### SymbolicStore -- Symbolic State
 
-`SymbolicStore` は各変数の現在の記号的な値を管理するデータ構造である。
+`SymbolicStore` is the data structure that manages the current symbolic value of each variable.
 
 ```rust
 pub type SymbolicStore<A> =
     HashMap<VarId, RangeStore<Option<(NodeId, HashSet<VarAtomBase<A>>)>>>;
 ```
 
-構造を分解すると：
+Breaking down the structure:
 
-- 外側の `HashMap<VarId, ...>`: 変数ごとのエントリ
-- `RangeStore<...>`: ビット範囲ごとの式を管理（後述）
-- `Option<...>`: `None` = 未変更、`Some` = 代入済み
-- `(NodeId, HashSet<VarAtomBase>)`: (式木参照, ソース依存集合) のペア
+- Outer `HashMap<VarId, ...>`: per-variable entries
+- `RangeStore<...>`: manages expressions per bit range (described below)
+- `Option<...>`: `None` = unmodified, `Some` = assigned
+- `(NodeId, HashSet<VarAtomBase>)`: a pair of (expression tree reference, source dependency set)
 
-初期状態では全変数が `None`（未変更）で初期化される。
-代入文が評価されるたびに、対象変数の対応するビット範囲が `Some(...)` に更新される。
+In the initial state, all variables are initialized to `None` (unmodified).
+Each time an assignment statement is evaluated, the corresponding bit range of the target variable is updated to `Some(...)`.
 
-### RangeStore — ビット範囲の管理
+### RangeStore -- Bit Range Management
 
-`RangeStore<T>` はビット範囲ごとに値を管理する区間マップである。
+`RangeStore<T>` is an interval map that manages values per bit range.
 
 ```rust
 pub struct RangeStore<T> {
-    pub ranges: BTreeMap<usize, (T, usize)>,  // key: lsb, value: (値, 幅)
+    pub ranges: BTreeMap<usize, (T, usize)>,  // key: lsb, value: (value, width)
 }
 ```
 
-主要操作：
+Key operations:
 
-| メソッド | 説明 |
+| Method | Description |
 |---|---|
-| `new(initial, width)` | 全ビット範囲を `initial` で初期化 |
-| `split_at(bit)` | 指定ビット位置で範囲を分割 |
-| `update(access, value)` | 指定ビット範囲の値を更新 |
-| `get_parts(access)` | 指定範囲内の全パーツを取得 |
+| `new(initial, width)` | Initialize the entire bit range with `initial` |
+| `split_at(bit)` | Split a range at the specified bit position |
+| `update(access, value)` | Update the value for a specified bit range |
+| `get_parts(access)` | Retrieve all parts within a specified range |
 
-これにより部分代入が正確に追跡される。
+This allows partial assignments to be tracked precisely.
 
-#### 例: 部分代入の追跡
+#### Example: Tracking Partial Assignments
 
 ```systemverilog
 logic [7:0] y;
@@ -180,117 +180,117 @@ always_comb {
 ```
 
 ```
-初期状態:  RangeStore: { 0: (None, 8) }
+Initial state:  RangeStore: { 0: (None, 8) }
 
-y[3:0] = a の後:
+After y[3:0] = a:
   split_at(0), split_at(4)
   update([0,3], Some(Input(a)))
   RangeStore: { 0: (Some(Input(a)), 4), 4: (None, 4) }
 
-y[7:4] = b の後:
+After y[7:4] = b:
   update([4,7], Some(Input(b)))
   RangeStore: { 0: (Some(Input(a)), 4), 4: (Some(Input(b)), 4) }
 ```
 
-### 文の評価
+### Statement Evaluation
 
-#### `eval_assign` — 代入文
+#### `eval_assign` -- Assignment Statement
 
-静的インデックスの代入を処理する。RHS の式を記号的に評価し、結果を `SymbolicStore` に書き込む。
+Handles assignments with static indices. Symbolically evaluates the RHS expression and writes the result to the `SymbolicStore`.
 
 ```
 eval_assign(module, store, boundaries, stmt)
-  → (updated_store, updated_boundaries)
+  -> (updated_store, updated_boundaries)
 ```
 
-1. RHS の式を `eval_expression` で評価 → `(NodeId, sources)`
-2. LHS のビット範囲を計算
-3. `store[lhs_var].update(access, Some((expr, sources)))` で記号的状態を更新
+1. Evaluate the RHS expression with `eval_expression` -> `(NodeId, sources)`
+2. Compute the bit range of the LHS
+3. Update the symbolic state with `store[lhs_var].update(access, Some((expr, sources)))`
 
-#### `eval_dynamic_assign` — 動的インデックス代入
+#### `eval_dynamic_assign` -- Dynamic Index Assignment
 
-`arr[i] = value` のような動的インデックスへの代入を処理する。
-動的インデックスの場合、書き込み先のビット位置が実行時にしか決まらないため、
-変数全体のビット範囲を対象とする `LogicPath` を即座に生成する。
+Handles assignments to dynamic indices such as `arr[i] = value`.
+Since the write destination bit position can only be determined at runtime for dynamic indices,
+a `LogicPath` covering the entire bit range of the variable is generated immediately.
 
-#### `eval_if` — 条件文
+#### `eval_if` -- Conditional Statement
 
-`if` 文の各分岐を独立に評価し、結果を `Mux` ノードで合成する。
+Evaluates each branch of an `if` statement independently and merges the results using `Mux` nodes.
 
 ```
 eval_if(module, store, boundaries, stmt)
 ```
 
-1. 条件式を評価 → `cond_node`
-2. then ブランチを `store` のクローンで評価 → `then_store`
-3. else ブランチを `store` のクローンで評価 → `else_store`
-4. 各変数について `then_store` と `else_store` の結果を `Mux` で合成
+1. Evaluate the condition expression -> `cond_node`
+2. Evaluate the then branch with a clone of `store` -> `then_store`
+3. Evaluate the else branch with a clone of `store` -> `else_store`
+4. Merge the results of `then_store` and `else_store` for each variable using `Mux`
 
-**重要**: `else` 節がない場合、未代入のビット範囲は `None`（未変更）のまま残る。
-最終的に `None` のパーツは `Input`（自身の現在値）として復元される。
-これは組合せ回路のラッチ推論に対応する。
+**Important**: When there is no `else` clause, unassigned bit ranges remain as `None` (unmodified).
+In the final stage, `None` parts are restored as `Input` (a reference to the current value of the variable itself).
+This corresponds to latch inference in combinational circuits.
 
-### ビット境界（Boundary）の収集
+### Bit Boundary Collection
 
-`BoundaryMap<A>` は各変数について、ビット境界の集合を保持する。
+`BoundaryMap<A>` holds the set of bit boundaries for each variable.
 
 ```rust
 pub type BoundaryMap<A> = HashMap<A, BTreeSet<usize>>;
 ```
 
-境界は式の評価中に自動的に収集される。変数のビットスライス `v[7:4]` が参照されると、
-`v` の境界セットにビット位置 `4` と `8` が追加される。
+Boundaries are collected automatically during expression evaluation. When a bit slice `v[7:4]` of a variable is referenced,
+bit positions `4` and `8` are added to the boundary set of `v`.
 
-### LogicPath の最終生成
+### Final LogicPath Generation
 
-`parse_comb` の最終段階で、`SymbolicStore` から `LogicPath` を生成する：
+In the final stage of `parse_comb`, `LogicPath`s are generated from the `SymbolicStore`:
 
-1. 各変数の `RangeStore` から `Some(...)` のパーツ（＝代入された範囲）を取得
-2. 恒等変換（`Input(self)` への代入）は除外
-3. 残りの各パーツに対して `LogicPath` を生成
+1. Retrieve the `Some(...)` parts (i.e., assigned ranges) from each variable's `RangeStore`
+2. Exclude identity transformations (assignments to `Input(self)`)
+3. Generate a `LogicPath` for each remaining part
 
-### `combine_parts` — パーツの結合
+### `combine_parts` -- Merging Parts
 
-`combine_parts` は複数のビット範囲パーツを1つの式に結合する。
+`combine_parts` merges multiple bit range parts into a single expression.
 
 ```rust
 combine_parts(parts: Vec<((NodeId, sources), BitAccess)>) -> (NodeId, sources)
 ```
 
-- パーツが1つの場合: そのまま返す
-- パーツが複数の場合: `Concat` ノードで結合する
+- If there is only one part: return it as-is
+- If there are multiple parts: combine them with a `Concat` node
 
-`combine_parts_with_default` は `None`（未変更）パーツを含む場合に使用し、
-`None` の箇所には `Input`（現在値の参照）を挿入する。
+`combine_parts_with_default` is used when `None` (unmodified) parts are present,
+inserting `Input` (a reference to the current value) in place of `None` entries.
 
-## Atomize — ビット境界による分割
+## Atomize -- Splitting Along Bit Boundaries
 
-フラット化後、複数モジュールの `LogicPath` を統合する際に、
-異なるモジュールが同一変数の異なるビット範囲を参照する場合がある。
+After flattening, when integrating `LogicPath`s from multiple modules,
+different modules may reference different bit ranges of the same variable.
 
-`atomize_logic_paths` は境界マップに基づき、各 `LogicPath` を最小のビット単位（atom）に分割する。
-これにより、スケジューラが正確な依存関係を構築できる。
+`atomize_logic_paths` splits each `LogicPath` into minimal bit units (atoms) based on the boundary map.
+This enables the scheduler to build precise dependency relationships.
 
 ```
-atomize_logic_paths(paths, boundaries) → atomized_paths
+atomize_logic_paths(paths, boundaries) -> atomized_paths
 ```
 
-各 `LogicPath` のターゲットとソースの `BitAccess` が境界で分割され、
-必要に応じて `Slice` ノードが挿入される。
+The `BitAccess` of each `LogicPath`'s target and sources is split at the boundaries,
+and `Slice` nodes are inserted as needed.
 
-## スケジューリング
+## Scheduling
 
-`scheduler::sort` が全ての `LogicPath` をトポロジカルソートし、`ExecutionUnit` を生成する。
+`scheduler::sort` topologically sorts all `LogicPath`s and produces `ExecutionUnit`s.
 
-### アルゴリズム
+### Algorithm
 
-1. **空間インデックスの構築**: 各変数のどのビット範囲をどの `LogicPath` が駆動するかをマッピング
-2. **多重ドライバ検出**: 同一ビット範囲を複数のパスが駆動していればエラー
-3. **依存グラフの構築**: 各パスのソースがどのパスのターゲットと重なるかを検査し、辺を追加
-4. **Kahn のアルゴリズム**: トポロジカルソートを実行。サイクルがあれば `CombinationalLoop` エラー
-5. **SIR 生成**: ソート順に各 `LogicPath` の `expr(NodeId)` を `SLTToSIRLowerer` で SIR に変換
+1. **Build spatial index**: Map which bit range of each variable is driven by which `LogicPath`
+2. **Detect multiple drivers**: Report an error if multiple paths drive the same bit range
+3. **Build dependency graph**: Inspect whether each path's sources overlap with another path's targets, and add edges accordingly
+4. **Kahn's algorithm**: Execute topological sort. Report a `CombinationalLoop` error if a cycle is found
+5. **SIR generation**: Convert each `LogicPath`'s `expr(NodeId)` to SIR using `SLTToSIRLowerer` in sorted order
 
-### エラー
+### Errors
 
 ```rust
 pub enum SchedulerError<A> {
@@ -299,25 +299,25 @@ pub enum SchedulerError<A> {
 }
 ```
 
-## SLT → SIR Lowering
+## SLT -> SIR Lowering
 
-`SLTToSIRLowerer` が `SLTNode` を再帰的に SIR 命令列に変換する。
+`SLTToSIRLowerer` recursively converts `SLTNode`s into SIR instruction sequences.
 
-主要な変換ルール：
+Key conversion rules:
 
 | SLTNode | SIR |
 |---|---|
-| `Input` | `Load` 命令（動的インデックスがある場合はオフセット計算を含む） |
-| `Constant` | `Imm` 命令 |
-| `Binary` | 左右を再帰 lowering → `Binary` 命令 |
-| `Unary` | オペランドを再帰 lowering → `Unary` 命令 |
-| `Mux` | `Branch` 終端命令による条件分岐 |
-| `Concat` | 各パーツを lowering → シフト + OR で結合 |
-| `Slice` | 式を lowering → シフト + マスク |
+| `Input` | `Load` instruction (includes offset calculation when dynamic indices are present) |
+| `Constant` | `Imm` instruction |
+| `Binary` | Recursively lower left and right -> `Binary` instruction |
+| `Unary` | Recursively lower operand -> `Unary` instruction |
+| `Mux` | Conditional branch via `Branch` terminator instruction |
+| `Concat` | Lower each part -> combine with shift + OR |
+| `Slice` | Lower expression -> shift + mask |
 
-### Mux の Lowering
+### Mux Lowering
 
-`Mux` は制御フローに変換される：
+`Mux` is converted into control flow:
 
 ```
 Block_current:
@@ -333,13 +333,13 @@ Block_else:
     Jump(Block_merge, [else_reg])
 
 Block_merge (params: [result_reg]):
-    ... 後続の処理 ...
+    ... subsequent processing ...
 ```
 
-これにより短絡評価が自然に実現される（選択されなかった分岐の式は評価されない）。
+This naturally achieves short-circuit evaluation (the expression in the unselected branch is not evaluated).
 
-## 関連ドキュメント
+## Related Documents
 
-- [アーキテクチャ概要](./architecture.md) — シミュレータ全体の設計
-- [SIR 中間表現リファレンス](./ir-reference.md) — lowering 先の SIR 命令セット詳細
-- [最適化アルゴリズム](./optimizations.md) — ハッシュ・コンシングやホイスティングの詳細
+- [Architecture Overview](./architecture.md) -- Overall simulator design
+- [SIR Intermediate Representation Reference](./ir-reference.md) -- Detailed SIR instruction set (the lowering target)
+- [Optimization Algorithms](./optimizations.md) -- Details on hash consing, hoisting, and more

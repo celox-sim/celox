@@ -7,6 +7,42 @@ export default defineConfig({
 
   appearance: "dark",
 
+  locales: {
+    root: {
+      label: "English",
+      lang: "en",
+    },
+    ja: {
+      label: "Japanese",
+      lang: "ja",
+      themeConfig: {
+        nav: [
+          { text: "ガイド", link: "/ja/guide/introduction" },
+          { text: "内部構造", link: "/internals/architecture" },
+          {
+            text: "GitHub",
+            link: "https://github.com/tignear/celox",
+          },
+        ],
+        sidebar: {
+          "/ja/guide/": [
+            {
+              text: "ガイド",
+              items: [
+                { text: "概要", link: "/ja/guide/introduction" },
+                { text: "はじめる", link: "/ja/guide/getting-started" },
+                {
+                  text: "テストの書き方",
+                  link: "/ja/guide/writing-tests",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  },
+
   themeConfig: {
     nav: [
       { text: "Guide", link: "/guide/introduction" },

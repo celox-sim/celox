@@ -1,28 +1,28 @@
-# SIR 中間表現リファレンス
+# SIR Intermediate Representation Reference
 
-SIR (Simulator Intermediate Representation) は `veryl-simulator` の実行用 IR です。
-Veryl の解析結果をレジスタベース命令列へ落とし込み、Cranelift JIT の入力になります。
+SIR (Simulator Intermediate Representation) is the execution IR for `veryl-simulator`.
+It lowers Veryl analysis results into a register-based instruction sequence that serves as input to the Cranelift JIT.
 
-## 概要
+## Overview
 
--   **レジスタベース**: 仮想レジスタ (`RegisterId`) による SSA 風表現
--   **CFG 表現**: `BasicBlock` + `SIRTerminator` による制御フロー
--   **領域付きメモリ**: `RegionedAbsoluteAddr` と `SIROffset` によるビット精度アクセス
+-   **Register-based**: SSA-like representation using virtual registers (`RegisterId`)
+-   **CFG representation**: Control flow via `BasicBlock` + `SIRTerminator`
+-   **Region-qualified memory**: Bit-precision access through `RegionedAbsoluteAddr` and `SIROffset`
 
-## アドレス体系
+## Address System
 
-| 型 | 用途 | 段階 |
+| Type | Purpose | Stage |
 | :--- | :--- | :--- |
-| `VarId` | モジュール内ローカル変数 ID | `SimModule` 内部 |
-| `AbsoluteAddr` | グローバル変数 (`InstanceId` + `VarId`) | フラット化後 |
-| `RegionedAbsoluteAddr` | メモリ領域（Stable/Working）付きアドレス | 実行・最適化 |
-| `SignalRef` | 実行用物理メモリアドレスハンドル | 実行（高速アクセス） |
+| `VarId` | Module-local variable ID | Within `SimModule` |
+| `AbsoluteAddr` | Global variable (`InstanceId` + `VarId`) | After flattening |
+| `RegionedAbsoluteAddr` | Address with memory region (Stable/Working) qualifier | Execution/optimization |
+| `SignalRef` | Physical memory address handle for execution | Execution (fast access) |
 
-## 主要データ構造
+## Key Data Structures
 
 ### `Program`
 
-シミュレーション全体を表現する構造体です。FF 評価が 3 つの種類に分かれているのが特徴です。
+A struct representing the entire simulation. A notable characteristic is that flip-flop evaluation is split into three variants.
 
 ```rust
 pub struct Program {
@@ -30,17 +30,17 @@ pub struct Program {
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-    // ... その他メタデータ
+    // ... other metadata
 }
 ```
 
--   **`eval_apply_ffs`**: 通常の FF 同期評価。単一ドメイン動作時に使用。
--   **`eval_only_ffs`**: 次状態の計算のみを行い、Working 領域に書き込むフェーズ。
--   **`apply_ffs`**: Working 領域から Stable 領域へ値を確定させるフェーズ。
+-   **`eval_apply_ffs`**: Standard synchronous flip-flop evaluation. Used when operating in a single domain.
+-   **`eval_only_ffs`**: Phase that only computes the next state and writes it to the Working region.
+-   **`apply_ffs`**: Phase that commits values from the Working region to the Stable region.
 
 ### `ExecutionUnit`
 
-実行の最小単位です（※実装上の綴りは `ExecutionUnit` です）。
+The smallest unit of execution.
 
 ```rust
 pub struct ExecutionUnit<A> {
@@ -50,19 +50,19 @@ pub struct ExecutionUnit<A> {
 }
 ```
 
-## 命令セット
+## Instruction Set
 
--   `Imm(rd, value)`: 即値代入
--   `Binary(rd, rs1, op, rs2)`: 二項演算
--   `Unary(rd, op, rs)`: 単項演算
--   `Load(rd, addr, offset, bits)`: メモリ読み込み
--   `Store(addr, offset, bits, rs)`: メモリ書き込み (RMW)
--   `Commit(src, dst, offset, bits)`: 領域間コピー
--   `Concat(rd, [msb..lsb])`: レジスタ連結
+-   `Imm(rd, value)`: Immediate value assignment
+-   `Binary(rd, rs1, op, rs2)`: Binary operation
+-   `Unary(rd, op, rs)`: Unary operation
+-   `Load(rd, addr, offset, bits)`: Memory load
+-   `Store(addr, offset, bits, rs)`: Memory store (RMW)
+-   `Commit(src, dst, offset, bits)`: Cross-region copy
+-   `Concat(rd, [msb..lsb])`: Register concatenation
 
-## 制御フロー
+## Control Flow
 
--   `Jump(block_id, args)`: 無条件遷移（ブロック引数付き）
--   `Branch { cond, true_block, false_block }`: 条件分岐
--   `Return`: 実行終了
--   `Error(code)`: ランタイムエラー
+-   `Jump(block_id, args)`: Unconditional branch (with block arguments)
+-   `Branch { cond, true_block, false_block }`: Conditional branch
+-   `Return`: End of execution
+-   `Error(code)`: Runtime error

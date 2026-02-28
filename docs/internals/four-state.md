@@ -1,96 +1,96 @@
-# 4-State シミュレーション
+# 4-State Simulation
 
-`veryl-simulator` は IEEE 1800 準拠の 4-state (0, 1, X, Z) シミュレーションをサポートしています。
+`veryl-simulator` supports IEEE 1800 compliant 4-state (0, 1, X, Z) simulation.
 
-## 表現モデル
+## Representation Model
 
-4-state 値は **value/mask ペア** で表現されます。各ビットについて：
+4-state values are represented as **value/mask pairs**. For each bit:
 
-| mask | value | 意味 |
-|------|-------|------|
-| 0    | 0     | `0`  |
-| 0    | 1     | `1`  |
-| 1    | 0     | `X`  |
-| 1    | 1     | 予約（正規化により排除） |
+| mask | value | Meaning |
+|------|-------|---------|
+| 0    | 0     | `0`     |
+| 0    | 1     | `1`     |
+| 1    | 0     | `X`     |
+| 1    | 1     | Reserved (eliminated by normalization) |
 
-64bit を超える信号はチャンク (`i64 × N`) に分割され、value チャンク列と mask チャンク列のペアとして保持されます（`TransValue::FourState { values, masks }`）。
+Signals wider than 64 bits are split into chunks (`i64 x N`) and stored as a pair of value chunk arrays and mask chunk arrays (`TransValue::FourState { values, masks }`).
 
-## 正規化不変条件
+## Normalization Invariant
 
-**IEEE 1800 正規化: `v &= ~m`**
+**IEEE 1800 normalization: `v &= ~m`**
 
-mask が 1 のビット位置では、対応する value ビットを常に 0 に保ちます。これにより `(mask=1, value=1)` の不正状態を排除し、比較やデバッグ出力の一貫性を保証します。
+At bit positions where the mask is 1, the corresponding value bit is always kept at 0. This eliminates the invalid state `(mask=1, value=1)` and guarantees consistency for comparisons and debug output.
 
-### 適用箇所
+### Application Points
 
-正規化は **`TransValue::FourState` を生成するすべての演算パス** で適用されます。
+Normalization is applied in **all computation paths that produce a `TransValue::FourState`**.
 
-| 場所 (arith.rs) | 演算 | 幅 |
+| Location (arith.rs) | Operation | Width |
 |-----------------|------|-----|
-| Assign (単一チャンク) | 代入・型変換 | ≤ 64bit |
-| Assign (マルチチャンク) | 代入・型変換 | > 64bit |
-| Binary ops (単一) | 算術・論理・比較・シフト | ≤ 64bit |
-| Binary ops (マルチ) | 同上 | > 64bit |
-| Unary ops (単一) | ビット反転・否定・リダクション | ≤ 64bit |
-| Unary ops (マルチ) | 同上 | > 64bit |
-| Concat (単一) | 連結 | ≤ 64bit |
-| Concat (マルチ) | 連結 | > 64bit |
+| Assign (single chunk) | Assignment/type conversion | ≤ 64bit |
+| Assign (multi-chunk) | Assignment/type conversion | > 64bit |
+| Binary ops (single) | Arithmetic/logic/comparison/shift | ≤ 64bit |
+| Binary ops (multi) | Same as above | > 64bit |
+| Unary ops (single) | Bitwise inversion/negation/reduction | ≤ 64bit |
+| Unary ops (multi) | Same as above | > 64bit |
+| Concat (single) | Concatenation | ≤ 64bit |
+| Concat (multi) | Concatenation | > 64bit |
 
-### メモリ Load での正規化が不要な理由
+### Why Normalization Is Not Needed on Memory Load
 
-`memory.rs` の Load 操作では正規化を行いません。メモリに書き込まれる値は以下のいずれかであり、いずれも正規化済みです：
+The Load operation in `memory.rs` does not perform normalization. Values written to memory are always one of the following, both of which are already normalized:
 
-1. arith.rs の演算結果（上記のとおり正規化済み）
-2. 外部 API (`set_four_state`) 経由の入力値
+1. Results from operations in arith.rs (normalized as described above)
+2. Input values via the external API (`set_four_state`)
 
-したがって、**メモリ上の値は常に正規化済み**という不変条件が成立し、Load 時の再正規化は不要です。
+Therefore, the invariant that **values in memory are always normalized** holds, and re-normalization on Load is unnecessary.
 
-## X 伝搬ルール
+## X Propagation Rules
 
-各演算での X（mask）伝搬は IEEE 1800 のセマンティクスに従います。
+X (mask) propagation in each operation follows IEEE 1800 semantics.
 
-### ビット演算
+### Bitwise Operations
 
-| 演算 | mask 計算 | 備考 |
+| Operation | Mask computation | Notes |
 |------|----------|------|
-| `a & b` | `(ma \| mb) & ~(~va & ~ma) & ~(~vb & ~mb)` | 確定 0 が X を打ち消す |
-| `a \| b` | `(ma \| mb) & ~(va & ~ma) & ~(vb & ~mb)` | 確定 1 が X を打ち消す |
-| `a ^ b` | `ma \| mb` | いずれかが X なら X |
+| `a & b` | `(ma \| mb) & ~(~va & ~ma) & ~(~vb & ~mb)` | A known 0 cancels X |
+| `a \| b` | `(ma \| mb) & ~(va & ~ma) & ~(vb & ~mb)` | A known 1 cancels X |
+| `a ^ b` | `ma \| mb` | X if either operand is X |
 
-### シフト演算
+### Shift Operations
 
-| 条件 | mask 計算 |
+| Condition | Mask computation |
 |------|----------|
-| シフト量が確定 | mask をシフト量だけシフト |
-| シフト量に X あり | 結果全体を all-X |
+| Shift amount is known | Shift the mask by the shift amount |
+| Shift amount contains X | Entire result becomes all-X |
 
-### 算術・比較演算
+### Arithmetic and Comparison Operations
 
-| 演算 | mask 計算 | 備考 |
+| Operation | Mask computation | Notes |
 |------|----------|------|
-| `+`, `-`, `*`, `/`, `%` | いずれかのオペランドに X → 結果全体が all-X | 保守的伝搬 |
-| `==`, `!=`, `<`, `>` 等 | 同上（1bit 結果） | |
+| `+`, `-`, `*`, `/`, `%` | If either operand contains X, the entire result becomes all-X | Conservative propagation |
+| `==`, `!=`, `<`, `>` etc. | Same as above (1-bit result) | |
 
-### Mux (三項演算子)
+### Mux (Ternary Operator)
 
-| 条件 | 動作 |
+| Condition | Behavior |
 |------|------|
-| セレクタが確定 | 選択された分岐の value/mask を使用 |
-| セレクタに X あり | 両分岐の mask を OR した保守的マスク |
+| Selector is known | Use value/mask of the selected branch |
+| Selector contains X | Conservative mask: OR of both branches' masks |
 
-### リダクション演算
+### Reduction Operations
 
-| 演算 | mask 計算 |
+| Operation | Mask computation |
 |------|----------|
-| `&` (reduction AND) | 確定 0 が存在すれば結果は確定 0、それ以外は X |
-| `\|` (reduction OR) | 確定 1 が存在すれば結果は確定 1、それ以外は X |
-| `^` (reduction XOR) | いずれかのビットが X なら結果は X |
+| `&` (reduction AND) | If a known 0 exists, the result is a known 0; otherwise X |
+| `\|` (reduction OR) | If a known 1 exists, the result is a known 1; otherwise X |
+| `^` (reduction XOR) | If any bit is X, the result is X |
 
-## 2-state 変数との境界
+## Boundary with 2-State Variables
 
-`bit` 型（2-state）変数にストアする際、mask は強制的に 0 にリセットされます（`memory.rs` のストア後処理）。これにより、2-state 変数を経由した X の意図しない伝搬を防ぎます。
+When storing to a `bit`-type (2-state) variable, the mask is forcibly reset to 0 (post-store processing in `memory.rs`). This prevents unintended propagation of X through 2-state variables.
 
-## テストカバレッジ
+## Test Coverage
 
-`tests/four_state.rs` に 4-state 関連テストがあります。
-詳細なカバレッジ状況と追加計画は [four_state_test_plan.md](../four_state_test_plan.md) を参照してください。
+4-state related tests are located in `tests/four_state.rs`.
+For detailed coverage status and plans for additional tests, see [four_state_test_plan.md](../four_state_test_plan.md).

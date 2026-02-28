@@ -1,44 +1,44 @@
-# 実装状況のリファレンス
+# Implementation Status Reference
 
-`veryl-simulator` の現在の実装状況と、サポートされている機能の概要です。
+This is an overview of the current implementation status and supported features of `veryl-simulator`.
 
-## 1. コア・ランタイム
+## 1. Core Runtime
 
--   **JIT コンパイル**: [Cranelift](https://cranelift.dev/) による SIR からネイティブコードへの変換。
--   **メモリモデル**: Stable/Working 領域を分離した単一バッファ管理。
--   **スケジューラ**: イベント駆動型（BinaryHeap ベース）の時刻管理。
--   **マルチクロック同期 (実験的)**: クロックドメインごとの評価、およびドメイン間の連鎖（カスケードクロック）の自動検出をサポート。※[評価順序や一貫性に制限あり](./cascade-limitations.md)。
--   **マルチフェーズ評価 (開発中)**: 同時発生イベントに対する一貫性を保証するための評価戦略。IR レベルでの分離は実装済みだが、ランタイムでの完全な適用は進行中。
+-   **JIT Compilation**: SIR-to-native-code translation via [Cranelift](https://cranelift.dev/).
+-   **Memory Model**: Single-buffer management with separate Stable/Working regions.
+-   **Scheduler**: Event-driven time management (BinaryHeap-based).
+-   **Multi-clock Synchronization (Experimental)**: Supports per-clock-domain evaluation and automatic detection of cross-domain chaining (cascade clocks). *[Evaluation order and consistency are subject to limitations](./cascade-limitations.md).*
+-   **Multi-phase Evaluation (In Development)**: An evaluation strategy to guarantee consistency for simultaneously occurring events. IR-level separation is implemented, but full application at the runtime level is ongoing.
 
-## 2. 言語機能
+## 2. Language Features
 
-### 組合せ回路
--   **基本演算**: 算術、論理、比較、シフト、連結、スライス。
--   **制御構造**: `if`, `case` などの条件分岐。
--   **最適化**: SLT 段階での共有部分式ホイスティング、SIR 段階での Load/Store Coalescing。
+### Combinational Circuits
+-   **Basic Operations**: Arithmetic, logic, comparison, shift, concatenation, slicing.
+-   **Control Structures**: Conditional branching with `if`, `case`, etc.
+-   **Optimizations**: Common sub-expression hoisting at the SLT stage, Load/Store Coalescing at the SIR stage.
 
-### 順序回路
--   **トリガー**: `posedge`, `negedge` クロック、非同期リセット（High/Low active）。
--   **リセット同期**: 同期リセット (`if_reset`) のサポート。
--   **データパス**: 複数クロックドメイン間の信号転送（※ユーザー側での同期設計が前提）。
+### Sequential Circuits
+-   **Triggers**: `posedge`, `negedge` clocks, asynchronous reset (high/low active).
+-   **Reset Synchronization**: Synchronous reset (`if_reset`) support.
+-   **Data Paths**: Signal transfer across multiple clock domains (*assumes user-side synchronization design*).
 
-## 3. インターフェース・周辺機能
+## 3. Interfaces and Peripheral Features
 
--   **インターフェース**: `modport` を含む階層的な接続の解決。
--   **波形出力**: VCD フォーマットの生成。
--   **SignalRef**: 外部 API からの高速な信号アクセス。
+-   **Interfaces**: Hierarchical connection resolution including `modport`.
+-   **Waveform Output**: VCD format generation.
+-   **SignalRef**: Fast signal access from external APIs.
 
-## 4. 未実装・今後の課題
+## 4. Unimplemented Features and Future Work
 
--   **システムタスク**: `$display`, `$finish` などのホスト側コールバックを要する機能。
--   **アサーション**: `assert`, `assume` などの動的な検証機能。
--   **マルチスレッド**: 実行ユニット単位またはドメイン単位の並列実行。
--   **4-state**: IEEE 1800 準拠の value/mask モデルによる X 伝搬を実装済み。算術・論理・シフト・連結・Mux・FF の各演算で正規化 (`v &= ~m`) を適用。詳細は [four_state.md](./four-state.md) を参照。
+-   **System Tasks**: Features requiring host-side callbacks, such as `$display` and `$finish`.
+-   **Assertions**: Dynamic verification features such as `assert` and `assume`.
+-   **Multithreading**: Parallel execution at the execution-unit or domain level.
+-   **4-state**: X propagation via an IEEE 1800-compliant value/mask model is implemented. Normalization (`v &= ~m`) is applied across arithmetic, logic, shift, concatenation, Mux, and FF operations. See [four_state.md](./four-state.md) for details.
 
-## 5. 設計方針としての制限事項
+## 5. Intentional Design Limitations
 
-本シミュレータは、高抽象度な RTL 検証の効率化を最優先しているため、物理的なタイミング詳細に依存する以下の機能は設計対象外、またはサポートが制限されています。
+This simulator prioritizes efficient high-abstraction RTL verification. As such, the following features that depend on physical timing details are out of scope or have limited support.
 
--   **ゲートレベル遅延**: `#` による遅延記述および慣性遅延のシミュレーション。
--   **ポストレイアウト検証**: タイミングバックアノテーション。
--   **詳細なデルタサイクル挙動**: 標準 Verilog のイベントディスパッチ順序に依存したトリッキーな挙動の再現。
+-   **Gate-level Delays**: Delay specifications using `#` and inertial delay simulation.
+-   **Post-layout Verification**: Timing back-annotation.
+-   **Detailed Delta-cycle Behavior**: Reproducing tricky behaviors that depend on the standard Verilog event dispatch order.
