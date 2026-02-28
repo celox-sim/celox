@@ -5,6 +5,10 @@
 - [Node.js](https://nodejs.org/)（v18 以上）
 - [pnpm](https://pnpm.io/)
 
+::: tip スターターテンプレート
+すぐに使えるプロジェクトテンプレートが [`examples/template`](https://github.com/celox-sim/celox/tree/master/examples/template) にあります。ディレクトリをコピーして `pnpm install && pnpm test` を実行すればすぐに始められます。
+:::
+
 ## プロジェクトのセットアップ
 
 新しいプロジェクトディレクトリを作成して初期化します：
@@ -138,10 +142,6 @@ Vite プラグインが `.veryl` ファイルを自動的に解析して TypeScr
 ```bash
 pnpm test
 ```
-
-::: tip スターターテンプレート
-すぐに使えるプロジェクトテンプレートが [`examples/template`](https://github.com/celox-sim/celox/tree/master/examples/template) にあります。設定済みの `Veryl.toml`、`vitest.config.ts`、サンプルの Veryl モジュールと TypeScript テストが含まれています。ディレクトリをコピーすればすぐに開発を始められます。
-:::
 
 ## 次のステップ
 

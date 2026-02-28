@@ -5,6 +5,10 @@
 - [Node.js](https://nodejs.org/) (v18+)
 - [pnpm](https://pnpm.io/)
 
+::: tip Starter Template
+A ready-to-use project template is available at [`examples/template`](https://github.com/celox-sim/celox/tree/master/examples/template). Copy the directory and run `pnpm install && pnpm test` to get started immediately.
+:::
+
 ## Project Setup
 
 Create a new project directory and initialize it:
@@ -138,10 +142,6 @@ Then run:
 ```bash
 pnpm test
 ```
-
-::: tip Starter Template
-A ready-to-use project template is available at [`examples/template`](https://github.com/celox-sim/celox/tree/master/examples/template). It includes a pre-configured `Veryl.toml`, `vitest.config.ts`, sample Veryl modules, and TypeScript tests -- copy the directory and start building right away.
-:::
 
 ## Next Steps
 
