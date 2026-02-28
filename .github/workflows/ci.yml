@@ -5,12 +5,16 @@ on:
     branches: [master]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
   rust:
-    name: Rust Build & Test
+    name: Rust Test & NAPI Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,23 +25,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build
-
       - name: Run tests
         run: cargo test
-
-  js:
-    name: JS Build & Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - uses: pnpm/action-setup@v4
         with:
@@ -48,15 +37,112 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build NAPI (debug)
+        run: pnpm run build:napi
+
+      - name: Upload NAPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-linux-x64-gnu
+          path: |
+            crates/celox-napi/celox.linux-x64-gnu.node
+            crates/celox-napi/index.js
+            crates/celox-napi/index.d.ts
+
+  napi-windows:
+    name: NAPI Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
       - name: Build NAPI (debug)
         run: pnpm run build:napi
+
+      - name: Upload NAPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-win32-x64-msvc
+          path: |
+            crates/celox-napi/celox.win32-x64-msvc.node
+            crates/celox-napi/index.js
+            crates/celox-napi/index.d.ts
+
+  js-ubuntu:
+    name: JS Test (Ubuntu)
+    needs: rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Download NAPI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: napi-linux-x64-gnu
+          path: crates/celox-napi
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build packages
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm --filter="!@celox-sim/celox-napi" -r test
+
+  js-windows:
+    name: JS Test (Windows)
+    needs: napi-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Download NAPI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: napi-win32-x64-msvc
+          path: crates/celox-napi
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build packages
         run: pnpm run build
