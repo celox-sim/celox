@@ -1,0 +1,15 @@
+{
+  "name": "my-celox-project",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@celox-sim/celox": "^0.1.0",
+    "@celox-sim/vite-plugin": "^0.1.0",
+    "vitest": "^3.0.0"
+  }
+}
