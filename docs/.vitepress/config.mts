@@ -42,6 +42,10 @@ export default defineConfig({
                   text: "4 値シミュレーション",
                   link: "/ja/guide/four-state",
                 },
+                {
+                  text: "型変換",
+                  link: "/ja/guide/type-conversion",
+                },
               ],
             },
           ],
