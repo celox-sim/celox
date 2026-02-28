@@ -37,20 +37,18 @@ function createMockNative(): {
   buffer: SharedArrayBuffer;
 } {
   const buffer = new SharedArrayBuffer(64);
+  const evalFn = () => {
+    const view = new DataView(buffer);
+    const a = view.getUint16(2, true);
+    const b = view.getUint16(4, true);
+    view.setUint32(8, a + b, true);
+  };
   const handle: NativeSimulatorHandle = {
-    tick: vi.fn().mockImplementation(() => {
-      // Simulate FF evaluation: sum = a + b
-      const view = new DataView(buffer);
-      const a = view.getUint16(2, true);
-      const b = view.getUint16(4, true);
-      view.setUint32(8, a + b, true);
+    tick: vi.fn().mockImplementation(evalFn),
+    tickN: vi.fn().mockImplementation((_eventId: number, count: number) => {
+      for (let i = 0; i < count; i++) evalFn();
     }),
-    evalComb: vi.fn().mockImplementation(() => {
-      const view = new DataView(buffer);
-      const a = view.getUint16(2, true);
-      const b = view.getUint16(4, true);
-      view.setUint32(8, a + b, true);
-    }),
+    evalComb: vi.fn().mockImplementation(evalFn),
     dump: vi.fn(),
     dispose: vi.fn(),
   };
@@ -97,7 +95,7 @@ describe("Simulator", () => {
     });
 
     sim.tick(3);
-    expect(mock.handle.tick).toHaveBeenCalledTimes(3);
+    expect(mock.handle.tickN).toHaveBeenCalledWith(0, 3);
   });
 
   test("tick with event handle", () => {
@@ -122,7 +120,7 @@ describe("Simulator", () => {
 
     const clk = sim.event("clk");
     sim.tick(clk, 5);
-    expect(mock.handle.tick).toHaveBeenCalledTimes(5);
+    expect(mock.handle.tickN).toHaveBeenCalledWith(0, 5);
   });
 
   test("event() throws for unknown event", () => {
