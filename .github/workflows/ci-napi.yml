@@ -213,3 +213,40 @@ jobs:
         with:
           files: crates/celox-napi/artifacts/**/*.node
           generate_release_notes: true
+
+  publish-js:
+    needs: publish
+    runs-on: ubuntu-latest
+    name: Publish JS Packages
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Publishing version: $VERSION"
+          (cd packages/celox && npm version "$VERSION" --no-git-tag-version)
+          (cd packages/vite-plugin && npm version "$VERSION" --no-git-tag-version)
+
+      - name: Build packages
+        run: pnpm --filter="!@celox-sim/celox-napi" -r build
+
+      - name: Publish @celox-sim/celox
+        working-directory: packages/celox
+        run: pnpm publish --provenance --access public --no-git-checks
+
+      - name: Publish @celox-sim/vite-plugin
+        working-directory: packages/vite-plugin
+        run: pnpm publish --provenance --access public --no-git-checks

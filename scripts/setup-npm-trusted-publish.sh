@@ -15,6 +15,8 @@
 set -euo pipefail
 
 PACKAGES=(
+  "@celox-sim/celox"
+  "@celox-sim/vite-plugin"
   "@celox-sim/celox-napi"
   "@celox-sim/celox-napi-linux-x64-gnu"
   "@celox-sim/celox-napi-linux-arm64-gnu"
