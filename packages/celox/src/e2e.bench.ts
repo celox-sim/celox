@@ -1,14 +1,17 @@
 /**
- * Performance benchmarks — mirrors `crates/celox/benches/simulation.rs`.
+ * Performance benchmarks — mirrors `crates/celox/benches/simulation.rs`
+ * and `crates/celox/benches/overhead.rs`.
  *
  * Measures the same operations so JS and Rust numbers are directly comparable:
  *   1. Build (JIT compile)
  *   2. Single tick
  *   3. 1M ticks in a loop
+ *   4. Simulator::tick vs Simulation::step overhead
  */
 
 import { bench, describe, afterAll } from "vitest";
 import { Simulator } from "./simulator.js";
+import { Simulation } from "./simulation.js";
 import type { ModuleDefinition } from "./types.js";
 import {
   loadNativeAddon,
@@ -138,6 +141,99 @@ describe("simulation", () => {
         // biome-ignore lint: read array element to measure .at() overhead
         simArr.dut.cnt.at(0);
       }
+    },
+    { iterations: 3, time: 0 },
+  );
+});
+
+/**
+ * Overhead comparison — mirrors `crates/celox/benches/overhead.rs`.
+ *
+ * Compares Simulator.tick() vs Simulation.step() to measure the
+ * scheduling overhead of the time-based API.
+ */
+describe("overhead", () => {
+  // Simulator.tick — same as Rust simulator_tick_x10000
+  const simTick = Simulator.fromSource<TopPorts>(CODE, "Top");
+  simTick.dut.rst = 1;
+  simTick.tick();
+  simTick.dut.rst = 0;
+  simTick.tick();
+
+  afterAll(() => {
+    simTick.dispose();
+  });
+
+  bench(
+    "simulator_tick_x10000",
+    () => {
+      for (let i = 0; i < 10_000; i++) {
+        simTick.tick();
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  // Simulation.step — same as Rust simulation_step_x20000
+  const simStep = Simulation.fromSource<TopPorts>(CODE, "Top");
+  simStep.addClock("clk", { period: 10 });
+
+  afterAll(() => {
+    simStep.dispose();
+  });
+
+  bench(
+    "simulation_step_x20000",
+    () => {
+      // 20000 steps = 10000 cycles (rising + falling)
+      for (let i = 0; i < 20_000; i++) {
+        simStep.step();
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+});
+
+/**
+ * Simulation (time-based) benchmarks — mirrors the simulation describe
+ * above but uses the Simulation API instead of Simulator.
+ */
+describe("simulation-time-based", () => {
+  bench(
+    "simulation_time_build_top_n1000",
+    () => {
+      const sim = Simulation.fromSource<TopPorts>(CODE, "Top");
+      sim.dispose();
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  const sim = Simulation.fromSource<TopPorts>(CODE, "Top");
+  sim.addClock("clk", { period: 10 });
+
+  afterAll(() => {
+    sim.dispose();
+  });
+
+  bench("simulation_time_step_x1", () => {
+    sim.step();
+  });
+
+  bench(
+    "simulation_time_step_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.step();
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  bench(
+    "simulation_time_runUntil_1000000",
+    () => {
+      const base = sim.time();
+      sim.runUntil(base + 1_000_000);
     },
     { iterations: 3, time: 0 },
   );
