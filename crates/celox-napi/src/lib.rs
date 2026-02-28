@@ -48,8 +48,9 @@ pub struct NativeSimulatorHandle {
 impl NativeSimulatorHandle {
     /// Create a new simulator from Veryl source code.
     #[napi(constructor)]
-    pub fn new(code: String, top: String) -> Result<Self> {
+    pub fn new(code: String, top: String, four_state: Option<bool>) -> Result<Self> {
         let sim = celox::Simulator::builder(&code, &top)
+            .four_state(four_state.unwrap_or(false))
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -459,20 +460,12 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     for (path, parser) in &parsers {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let errors = analyzer.analyze_pass2(
+        let _errors = analyzer.analyze_pass2(
             &path.prj,
             &parser.veryl,
             &mut analyzer_context,
             Some(&mut ir),
         );
-
-        if !errors.is_empty() {
-            eprintln!(
-                "[celox-gen-ts] pass2 errors for {}: {:?}",
-                path.src.display(),
-                errors.iter().map(|e| format!("{e}")).collect::<Vec<_>>()
-            );
-        }
 
         let modules = generate_all(&ir);
         // On Windows, metadata.paths() may return extended-length paths
@@ -485,13 +478,6 @@ pub fn gen_ts(project_path: String) -> Result<String> {
             .unwrap_or(&src_normalized)
             .trim_start_matches('/')
             .to_string();
-
-        eprintln!(
-            "[celox-gen-ts] {} -> {} modules (source_file={})",
-            path.src.display(),
-            modules.len(),
-            source_file,
-        );
 
         let module_names: Vec<String> = modules.iter().map(|m| m.module_name.clone()).collect();
         if !module_names.is_empty() {
