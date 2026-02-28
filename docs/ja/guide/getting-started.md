@@ -6,7 +6,7 @@
 - [pnpm](https://pnpm.io/)
 
 ::: tip スターターテンプレート
-すぐに使えるプロジェクトテンプレートが [`examples/template`](https://github.com/celox-sim/celox/tree/master/examples/template) にあります。ディレクトリをコピーして `pnpm install && pnpm test` を実行すればすぐに始められます。
+すぐに使えるプロジェクトテンプレートが [`celox-template`](https://github.com/celox-sim/celox-template) にあります。GitHub で **Use this template** をクリックするかリポジトリをクローンして、`pnpm install && pnpm test` を実行すればすぐに始められます。
 :::
 
 ## プロジェクトのセットアップ
