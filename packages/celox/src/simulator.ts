@@ -50,6 +50,7 @@ export class Simulator<P = Record<string, unknown>> {
   private readonly _handle: NativeSimulatorHandle;
   private readonly _dut: P;
   private readonly _events: Record<string, number>;
+  private readonly _defaultEventId: number;
   private readonly _state: DirtyState;
   private _disposed = false;
 
@@ -63,6 +64,8 @@ export class Simulator<P = Record<string, unknown>> {
     this._dut = dut;
     this._events = events;
     this._state = state;
+    const keys = Object.keys(events);
+    this._defaultEventId = keys.length > 0 ? events[keys[0]!]! : -1;
   }
 
   /**
@@ -206,11 +209,11 @@ export class Simulator<P = Record<string, unknown>> {
       ticks = count ?? 1;
     } else if (typeof eventOrCount === "number") {
       // tick(count) — default event
-      eventId = this.defaultEventId();
+      eventId = this._defaultEventId;
       ticks = eventOrCount;
     } else {
       // tick() — default event, 1 tick
-      eventId = this.defaultEventId();
+      eventId = this._defaultEventId;
       ticks = 1;
     }
 
@@ -248,14 +251,6 @@ export class Simulator<P = Record<string, unknown>> {
   // -----------------------------------------------------------------------
   // Internal
   // -----------------------------------------------------------------------
-
-  private defaultEventId(): number {
-    const keys = Object.keys(this._events);
-    if (keys.length === 0) {
-      throw new Error("No events defined for this module");
-    }
-    return this._events[keys[0]!]!;
-  }
 
   private ensureAlive(): void {
     if (this._disposed) {
