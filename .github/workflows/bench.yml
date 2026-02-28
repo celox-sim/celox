@@ -1,0 +1,82 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+concurrency:
+  group: bench
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── Rust benchmarks ──
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Rust benchmarks
+        run: cargo bench -p celox -- --output-format bencher | tee rust-output.txt
+
+      # ── TypeScript benchmarks ──
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build NAPI (release)
+        run: pnpm run build:napi:release
+
+      - name: Build packages
+        run: pnpm run build
+
+      - name: Run TypeScript benchmarks
+        run: pnpm --filter @celox-sim/celox bench -- --outputJson ts-output.json
+
+      - name: Convert TypeScript benchmark output
+        run: node scripts/convert-bench.mjs ts-output.json ts-converted.json
+
+      # ── Publish results ──
+      - name: Store Rust benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Rust Benchmarks
+          tool: cargo
+          output-file-path: rust-output.txt
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: false
+          alert-threshold: "200%"
+          comment-on-alert: true
+
+      - name: Store TypeScript benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: TypeScript Benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: ts-converted.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: true
+          alert-threshold: "200%"
+          comment-on-alert: true
