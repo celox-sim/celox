@@ -38,6 +38,10 @@ const sim = Simulation.create(MyModule, { fourState: true });
 
 設計内部で 4 値の値が `bit` 型の変数に代入されると、マスク（X ビット）は自動的に 0 にクリアされます。これにより 2 値の境界を越えた意図しない X 伝搬が防止されます。
 
+::: tip
+4 値シミュレーションを使うには、ポートを `bit` ではなく `logic` で宣言してください。`bit` で宣言されたポートは X/Z 値を暗黙的に落とします。
+:::
+
 ## X 値の書き込み
 
 ### 全ビットを X にする
@@ -118,6 +122,33 @@ if (mask !== 0) {
 | 1 | 0 | `X` |
 
 ## 例：X 伝搬のテスト
+
+以下のようなプロジェクト構成を想定します：
+
+```
+my-project/
+├── src/
+│   └── ALU.veryl          # logic ポートを持つ設計
+└── test/
+    └── alu.test.ts        # 4 値テスト
+```
+
+`src/ALU.veryl` では `logic` 型のポート（4 値対応）を使います：
+
+```veryl
+module ALU (
+    clk: input  clock,
+    rst: input  reset,
+    a:   input  logic<8>,
+    b:   input  logic<8>,
+    op:  input  logic<2>,
+    y:   output logic<8>,
+) {
+    // ...
+}
+```
+
+`test/alu.test.ts`:
 
 ```typescript
 import { describe, test, expect } from "vitest";

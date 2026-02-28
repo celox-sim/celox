@@ -38,6 +38,10 @@ Whether a signal supports 4-state depends on its Veryl type:
 
 When a 4-state value is assigned to a `bit`-type variable inside the design, the mask (X bits) is automatically cleared to 0. This prevents unintended X propagation through 2-state boundaries.
 
+::: tip
+To use 4-state simulation, declare your ports as `logic` rather than `bit`. Ports declared as `bit` will silently drop X/Z values.
+:::
+
 ## Writing X Values
 
 ### Assigning All-X
@@ -118,6 +122,33 @@ The return value is a tuple `[value, mask]` where:
 | 1 | 0 | `X` |
 
 ## Example: Testing X Propagation
+
+Suppose your project has the following structure:
+
+```
+my-project/
+├── src/
+│   └── ALU.veryl          # Design with logic ports
+└── test/
+    └── alu.test.ts        # 4-state test
+```
+
+Where `src/ALU.veryl` uses `logic` type ports (4-state capable):
+
+```veryl
+module ALU (
+    clk: input  clock,
+    rst: input  reset,
+    a:   input  logic<8>,
+    b:   input  logic<8>,
+    op:  input  logic<2>,
+    y:   output logic<8>,
+) {
+    // ...
+}
+```
+
+Then `test/alu.test.ts`:
 
 ```typescript
 import { describe, test, expect } from "vitest";
