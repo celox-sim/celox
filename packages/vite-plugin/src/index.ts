@@ -135,11 +135,15 @@ function findVerylProjectRoot(startDir: string): string {
  * Make `absPath` relative to `base`, using forward slashes.
  */
 function makeRelative(absPath: string, base: string): string {
-  let rel = absPath;
-  if (absPath.startsWith(base)) {
-    rel = absPath.slice(base.length);
+  // Normalise to forward slashes so the comparison works on Windows
+  const normAbs = absPath.replace(/\\/g, "/");
+  const normBase = base.replace(/\\/g, "/").replace(/\/$/, "");
+  let rel = normAbs;
+  if (normAbs.startsWith(normBase + "/")) {
+    rel = normAbs.slice(normBase.length + 1);
+  } else if (normAbs.startsWith(normBase)) {
+    rel = normAbs.slice(normBase.length);
   }
-  // Trim leading slash
   if (rel.startsWith("/")) {
     rel = rel.slice(1);
   }

@@ -462,7 +462,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
             .unwrap_or(&path.src)
             .to_string_lossy()
             .trim_start_matches('/')
-            .to_string();
+            .replace('\\', "/");
 
         let module_names: Vec<String> = modules.iter().map(|m| m.module_name.clone()).collect();
         if !module_names.is_empty() {
