@@ -51,6 +51,7 @@ tempfile        = "3.26"
 thiserror       = "2.0"
 toml            = "1.0.3"
 url             = { version = "2.5", features = ["serde"] }
+vcd             = "0.7.0"
 walkdir         = "2.5.0"
 
 [profile.dev.build-override]
