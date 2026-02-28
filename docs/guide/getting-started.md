@@ -6,7 +6,7 @@
 - [pnpm](https://pnpm.io/)
 
 ::: tip Starter Template
-A ready-to-use project template is available at [`examples/template`](https://github.com/celox-sim/celox/tree/master/examples/template). Copy the directory and run `pnpm install && pnpm test` to get started immediately.
+A ready-to-use project template is available at [`celox-template`](https://github.com/celox-sim/celox-template). Click **Use this template** on GitHub or clone the repository, then run `pnpm install && pnpm test` to get started immediately.
 :::
 
 ## Project Setup
