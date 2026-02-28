@@ -68,6 +68,7 @@ export interface RawNapiAddon {
     new (code: string, top: string): RawNapiSimulationHandle;
     fromProject(projectPath: string, top: string): RawNapiSimulationHandle;
   };
+  genTs(projectPath: string): string;
 }
 
 // ---------------------------------------------------------------------------

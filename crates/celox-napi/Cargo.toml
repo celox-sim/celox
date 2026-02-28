@@ -14,6 +14,7 @@ crate-type = ["cdylib"]
 napi              = { version = "3", features = ["napi8", "serde-json"] }
 napi-derive       = "3"
 celox             = { version = "0.18.0", path = "../celox" }
+celox-ts-gen      = { version = "0.18.0", path = "../celox-ts-gen" }
 veryl-analyzer    = { workspace = true }
 veryl-metadata    = { workspace = true }
 veryl-parser      = { workspace = true }

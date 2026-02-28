@@ -24,8 +24,6 @@ export interface GenTsPortInfo {
 
 /** Plugin options. */
 export interface CeloxPluginOptions {
-  /** Explicit path to the `celox-gen-ts` binary. */
-  genTsBinary?: string;
   /** Explicit path to the Veryl project root (directory containing Veryl.toml). */
   projectRoot?: string;
 }

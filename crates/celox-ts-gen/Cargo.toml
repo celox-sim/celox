@@ -8,17 +8,11 @@ description.workspace = true
 edition.workspace     = true
 
 [dependencies]
-clap            = { workspace = true }
-miette          = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 veryl-analyzer  = { workspace = true }
-veryl-metadata  = { workspace = true }
 veryl-parser    = { workspace = true }
 
 [dev-dependencies]
-insta = "1.46"
-
-[[bin]]
-name = "celox-gen-ts"
-path = "src/main.rs"
+insta           = "1.46"
+veryl-metadata  = { workspace = true }

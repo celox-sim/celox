@@ -2,7 +2,6 @@ import { resolve, isAbsolute, dirname } from "node:path";
 import { existsSync } from "node:fs";
 import type { Plugin } from "vite";
 import type { CeloxPluginOptions, GenTsModule } from "./types.js";
-import { findGenTsBinary } from "./generator.js";
 import { GenTsCache } from "./cache.js";
 import { generateSidecars, cleanSidecars } from "./sidecar.js";
 
@@ -40,8 +39,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
         projectRoot = findVerylProjectRoot(config.root);
       }
 
-      const binary = findGenTsBinary(options?.genTsBinary, projectRoot);
-      cache = new GenTsCache(binary, projectRoot);
+      cache = new GenTsCache(projectRoot);
     },
 
     buildStart() {

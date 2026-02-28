@@ -7,10 +7,7 @@ export class GenTsCache {
   private _data: GenTsJsonOutput | undefined;
   private _mtimeKey = "";
 
-  constructor(
-    private readonly _binary: string,
-    private readonly _projectRoot: string,
-  ) {}
+  constructor(private readonly _projectRoot: string) {}
 
   /** Get cached data, refreshing if any .veryl file has changed. */
   get(): GenTsJsonOutput {
@@ -18,7 +15,7 @@ export class GenTsCache {
     if (this._data && this._mtimeKey === key) {
       return this._data;
     }
-    this._data = runGenTs(this._binary, this._projectRoot);
+    this._data = runGenTs(this._projectRoot);
     this._mtimeKey = key;
     return this._data;
   }

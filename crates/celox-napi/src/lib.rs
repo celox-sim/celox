@@ -1,8 +1,12 @@
 mod layout;
 
+use std::collections::HashMap;
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::Metadata;
+use veryl_parser::Parser;
 
 use layout::{build_event_map, build_signal_layout};
 
@@ -520,4 +524,117 @@ impl NativeSimulationHandle {
 pub struct StepSyncedResult {
     pub time: Option<f64>,
     pub buffer: Buffer,
+}
+
+/// Generate TypeScript type information as JSON for a Veryl project.
+///
+/// Equivalent to running `celox-gen-ts --json` from the given project directory.
+#[napi]
+pub fn gen_ts(project_path: String) -> Result<String> {
+    use celox_ts_gen::{JsonModuleEntry, JsonOutput, generate_all};
+
+    let toml_path = Metadata::search_from(&project_path)
+        .map_err(|e| Error::from_reason(format!("Could not find Veryl.toml: {e}")))?;
+    let mut metadata = Metadata::load(&toml_path)
+        .map_err(|e| Error::from_reason(format!("Failed to load Veryl.toml: {e}")))?;
+
+    let base_path = toml_path
+        .parent()
+        .unwrap_or(&toml_path)
+        .to_string_lossy()
+        .to_string();
+
+    let paths = metadata
+        .paths::<std::path::PathBuf>(&[], true, true)
+        .map_err(|e| Error::from_reason(format!("Failed to gather sources: {e}")))?;
+    if paths.is_empty() {
+        return Err(Error::from_reason("No Veryl source files found"));
+    }
+
+    // Parse and analyze pass 1
+    symbol_table::clear();
+    attribute_table::clear();
+
+    let analyzer = Analyzer::new(&metadata);
+    let mut parsers = Vec::new();
+
+    for path in &paths {
+        let input = std::fs::read_to_string(&path.src)
+            .map_err(|e| Error::from_reason(format!("{}: {e}", path.src.display())))?;
+        let parser = Parser::parse(&input, &path.src)
+            .map_err(|e| Error::from_reason(format!("Parse error: {e}")))?;
+
+        let errors = analyzer.analyze_pass1(&path.prj, &parser.veryl);
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+            return Err(Error::from_reason(format!(
+                "Errors in analysis pass 1: {}",
+                msgs.join("; ")
+            )));
+        }
+
+        parsers.push((path.clone(), parser));
+    }
+
+    let errors = Analyzer::analyze_post_pass1();
+    if !errors.is_empty() {
+        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        return Err(Error::from_reason(format!(
+            "Errors in post-pass 1 analysis: {}",
+            msgs.join("; ")
+        )));
+    }
+
+    // Pass 2: per-file IR → generate
+    let mut all_modules = Vec::new();
+    let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (path, parser) in &parsers {
+        let mut analyzer_context = Context::default();
+        let mut ir = Ir::default();
+        let _errors = analyzer.analyze_pass2(
+            &path.prj,
+            &parser.veryl,
+            &mut analyzer_context,
+            Some(&mut ir),
+        );
+
+        let modules = generate_all(&ir);
+        let source_file = path
+            .src
+            .strip_prefix(&base_path)
+            .unwrap_or(&path.src)
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+
+        let module_names: Vec<String> = modules.iter().map(|m| m.module_name.clone()).collect();
+        if !module_names.is_empty() {
+            file_modules.insert(source_file.clone(), module_names);
+        }
+
+        for m in modules {
+            all_modules.push(JsonModuleEntry {
+                module_name: m.module_name,
+                source_file: source_file.clone(),
+                dts_content: m.dts_content,
+                ports: m.ports,
+                events: m.events,
+            });
+        }
+    }
+
+    let _errors = Analyzer::analyze_post_pass2();
+
+    // Sort for deterministic output
+    all_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+
+    let output = JsonOutput {
+        project_path: base_path,
+        modules: all_modules,
+        file_modules,
+    };
+
+    serde_json::to_string(&output)
+        .map_err(|e| Error::from_reason(format!("Failed to serialize JSON: {e}")))
 }

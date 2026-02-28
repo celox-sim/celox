@@ -399,6 +399,7 @@ name = "celox-napi"
 version = "0.18.0"
 dependencies = [
  "celox",
+ "celox-ts-gen",
  "napi",
  "napi-build",
  "napi-derive",
@@ -413,9 +414,7 @@ dependencies = [
 name = "celox-ts-gen"
 version = "0.18.0"
 dependencies = [
- "clap",
  "insta",
- "miette",
  "serde",
  "serde_json",
  "veryl-analyzer",
