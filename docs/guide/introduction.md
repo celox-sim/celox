@@ -6,7 +6,7 @@ Celox is a JIT (Just-In-Time) simulator for [Veryl HDL](https://veryl-lang.org/)
 
 - **JIT Compilation** -- Veryl designs are compiled through a multi-stage pipeline (Veryl &rarr; SLT &rarr; SIR &rarr; native code) for near-native execution speed.
 - **Event-Driven Scheduling** -- An event-driven scheduler with multi-clock domain support handles complex timing interactions.
-- **4-State Simulation** -- IEEE 1800-compliant 4-state (0, 1, X, Z) value representation with proper X propagation.
+- **4-State Simulation** -- IEEE 1800-compliant 4-state value representation with proper X propagation.
 - **TypeScript Testbenches** -- Write testbenches in TypeScript with type-safe signal access and modern developer tooling.
 - **VCD Waveform Output** -- Generate VCD files for waveform inspection with standard viewers.
 
