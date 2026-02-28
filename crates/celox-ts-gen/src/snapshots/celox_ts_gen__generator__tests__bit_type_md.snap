@@ -1,0 +1,19 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].md_content"
+---
+# BitModule
+
+## Ports
+
+| Port | Direction | Type | Width | TS Type | 4-State |
+|------|-----------|------|-------|---------|--------|
+| data | input | bit | 8 | `number` | no |
+| en | input | bit | 1 | `number` | no |
+| result | output | bit | 8 | `number` (readonly) | no |
+
+## Events
+
+| Event | Port |
+|-------|------|
+| clk | clk |

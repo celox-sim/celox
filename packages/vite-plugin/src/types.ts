@@ -10,6 +10,7 @@ export interface GenTsModule {
   readonly moduleName: string;
   readonly sourceFile: string;
   readonly dtsContent: string;
+  readonly mdContent: string;
   readonly ports: Record<string, GenTsPortInfo>;
   readonly events: readonly string[];
 }

@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import typedocSidebar from "../api/typedoc-sidebar.json";
 
 export default defineConfig({
   title: "Celox",
@@ -18,6 +19,7 @@ export default defineConfig({
       themeConfig: {
         nav: [
           { text: "ガイド", link: "/ja/guide/introduction" },
+          { text: "API", link: "/api/" },
           { text: "内部構造", link: "/internals/architecture" },
           { text: "ベンチマーク", link: "/ja/benchmarks/" },
           {
@@ -51,6 +53,7 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: "Guide", link: "/guide/introduction" },
+      { text: "API", link: "/api/" },
       { text: "Internals", link: "/internals/architecture" },
       { text: "Benchmarks", link: "/benchmarks/" },
       {
@@ -68,7 +71,14 @@ export default defineConfig({
             { text: "Getting Started", link: "/guide/getting-started" },
             { text: "Writing Tests", link: "/guide/writing-tests" },
             { text: "4-State Simulation", link: "/guide/four-state" },
+            { text: "Type Conversion", link: "/guide/type-conversion" },
           ],
+        },
+      ],
+      "/api/": [
+        {
+          text: "API Reference",
+          items: typedocSidebar as any,
         },
       ],
       "/internals/": [

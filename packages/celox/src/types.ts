@@ -44,7 +44,10 @@ export interface PortInfo {
 // Signal layout (produced by Stream B's NAPI `create()`)
 // ---------------------------------------------------------------------------
 
-/** Byte-level location of a signal inside the SharedArrayBuffer. */
+/**
+ * Byte-level location of a signal inside the SharedArrayBuffer.
+ * @internal
+ */
 export interface SignalLayout {
   /** Byte offset within the STABLE region. */
   readonly offset: number;
@@ -61,7 +64,10 @@ export interface SignalLayout {
 // NAPI handles (produced by Stream B)
 // ---------------------------------------------------------------------------
 
-/** Opaque handle returned by NAPI for event-based simulation. */
+/**
+ * Opaque handle returned by NAPI for event-based simulation.
+ * @internal
+ */
 export interface NativeSimulatorHandle {
   tick(eventId: number): void;
   tickN(eventId: number, count: number): void;
@@ -70,7 +76,10 @@ export interface NativeSimulatorHandle {
   dispose(): void;
 }
 
-/** Opaque handle returned by NAPI for time-based simulation. */
+/**
+ * Opaque handle returned by NAPI for time-based simulation.
+ * @internal
+ */
 export interface NativeSimulationHandle {
   addClock(eventId: number, period: number, initialDelay: number): void;
   schedule(eventId: number, time: number, value: number): void;
@@ -82,10 +91,16 @@ export interface NativeSimulationHandle {
   dispose(): void;
 }
 
-/** Union of both handle types for code that is handle-agnostic. */
+/**
+ * Union of both handle types for code that is handle-agnostic.
+ * @internal
+ */
 export type NativeHandle = NativeSimulatorHandle | NativeSimulationHandle;
 
-/** Result returned by NAPI `create()`. */
+/**
+ * Result returned by NAPI `create()`.
+ * @internal
+ */
 export interface CreateResult<H extends NativeHandle = NativeHandle> {
   /** The simulator's internal memory buffer shared zero-copy. */
   readonly buffer: ArrayBuffer | SharedArrayBuffer;

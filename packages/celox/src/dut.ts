@@ -24,6 +24,7 @@ import { isFourStateValue } from "./types.js";
  * Simulator/Simulation instance.  The Simulator clears `dirty` after
  * tick()/runUntil(); the DUT sets it on any input write and checks it
  * before any output read.
+ * @internal
  */
 export interface DirtyState {
   dirty: boolean;

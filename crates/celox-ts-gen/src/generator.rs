@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use veryl_analyzer::ir::{Component, Ir, TypeKind, VarKind};
 use veryl_parser::resource_table;
 
-/// A generated TypeScript module definition (`.d.ts` + `.js` content).
+/// A generated TypeScript module definition (`.d.ts` + `.js` + `.md` content).
 #[derive(Debug, Clone)]
 pub struct GeneratedModule {
     pub module_name: String,
     pub dts_content: String,
     pub js_content: String,
+    pub md_content: String,
     pub ports: HashMap<String, JsonPortInfo>,
     pub events: Vec<String>,
 }
@@ -41,6 +42,7 @@ pub struct JsonModuleEntry {
     pub module_name: String,
     pub source_file: String,
     pub dts_content: String,
+    pub md_content: String,
     pub ports: HashMap<String, JsonPortInfo>,
     pub events: Vec<String>,
 }
@@ -113,6 +115,7 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
 
         let dts_content = generate_dts(&module_name, &ports);
         let js_content = generate_js(&module_name, &ports);
+        let md_content = generate_md(&module_name, &ports);
 
         let json_ports: HashMap<String, JsonPortInfo> = ports
             .iter()
@@ -140,6 +143,7 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
             module_name,
             dts_content,
             js_content,
+            md_content,
             ports: json_ports,
             events,
         });
@@ -315,6 +319,53 @@ fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
     out
 }
 
+fn generate_md(module_name: &str, ports: &[PortInfo]) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("# {}\n\n", module_name));
+
+    // Ports table
+    out.push_str("## Ports\n\n");
+    out.push_str("| Port | Direction | Type | Width | TS Type | 4-State |\n");
+    out.push_str("|------|-----------|------|-------|---------|--------|\n");
+
+    for port in ports {
+        if port.type_info == TypeInfo::Clock {
+            continue;
+        }
+        let ts_type = ts_type_for_width(port.width);
+        let readonly_note = if port.is_output {
+            format!("`{}` (readonly)", ts_type)
+        } else {
+            format!("`{}`", ts_type)
+        };
+        let four_state = if port.is_4state { "yes" } else { "no" };
+        let type_str = type_info_str(port.type_info);
+
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            port.name, port.direction, type_str, port.width, readonly_note, four_state,
+        ));
+    }
+
+    // Events table
+    let clock_ports: Vec<&PortInfo> = ports
+        .iter()
+        .filter(|p| p.type_info == TypeInfo::Clock)
+        .collect();
+
+    if !clock_ports.is_empty() {
+        out.push_str("\n## Events\n\n");
+        out.push_str("| Event | Port |\n");
+        out.push_str("|-------|------|\n");
+        for port in &clock_ports {
+            out.push_str(&format!("| {} | {} |\n", port.name, port.name));
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +411,7 @@ module Adder (
         assert_eq!(modules.len(), 1);
         assert_snapshot!("basic_adder_dts", modules[0].dts_content);
         assert_snapshot!("basic_adder_js", modules[0].js_content);
+        assert_snapshot!("basic_adder_md", modules[0].md_content);
     }
 
     #[test]
@@ -380,6 +432,7 @@ module WideAdder (
         assert_eq!(modules.len(), 1);
         assert_snapshot!("wide_port_dts", modules[0].dts_content);
         assert_snapshot!("wide_port_js", modules[0].js_content);
+        assert_snapshot!("wide_port_md", modules[0].md_content);
     }
 
     #[test]
@@ -400,6 +453,7 @@ module BitModule (
         assert_eq!(modules.len(), 1);
         assert_snapshot!("bit_type_dts", modules[0].dts_content);
         assert_snapshot!("bit_type_js", modules[0].js_content);
+        assert_snapshot!("bit_type_md", modules[0].md_content);
     }
 
     #[test]
@@ -417,6 +471,7 @@ module ConstGen (
         assert_eq!(modules.len(), 1);
         assert_snapshot!("output_only_dts", modules[0].dts_content);
         assert_snapshot!("output_only_js", modules[0].js_content);
+        assert_snapshot!("output_only_md", modules[0].md_content);
     }
 
     #[test]
@@ -436,6 +491,7 @@ module PureAdder (
         assert_eq!(modules.len(), 1);
         assert_snapshot!("no_clock_dts", modules[0].dts_content);
         assert_snapshot!("no_clock_js", modules[0].js_content);
+        assert_snapshot!("no_clock_md", modules[0].md_content);
     }
 
     #[test]
@@ -463,6 +519,7 @@ module Counter #(
         assert_eq!(modules.len(), 1);
         assert_snapshot!("array_port_dts", modules[0].dts_content);
         assert_snapshot!("array_port_js", modules[0].js_content);
+        assert_snapshot!("array_port_md", modules[0].md_content);
 
         // Verify arrayDims is set correctly
         let cnt_port = &modules[0].ports["cnt"];

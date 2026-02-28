@@ -8,8 +8,9 @@
     "test": "pnpm run build:napi && cargo test && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test",
     "test:rust": "cargo test",
     "test:js": "pnpm run build:napi && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test",
+    "docs:api": "typedoc",
     "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
+    "docs:build": "pnpm run docs:api && vitepress build docs",
     "docs:preview": "vitepress preview docs"
   },
   "pnpm": {
@@ -23,6 +24,9 @@
     ]
   },
   "devDependencies": {
+    "typedoc": "^0.28.0",
+    "typedoc-plugin-markdown": "^4.4.0",
+    "typedoc-vitepress-theme": "^1.1.0",
     "vitepress": "^1.6.4"
   }
 }
