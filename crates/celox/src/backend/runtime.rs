@@ -58,6 +58,7 @@ pub struct JitBackend {
     pub eval_only_event_map: HashMap<AbsoluteAddr, EventRef>,
     pub apply_event_map: HashMap<AbsoluteAddr, EventRef>,
     pub id_to_addr: Vec<AbsoluteAddr>,
+    pub id_to_event: Vec<EventRef>,
 }
 
 impl JitBackend {
@@ -233,6 +234,11 @@ impl JitBackend {
             }
         }
 
+        let id_to_event: Vec<EventRef> = id_to_addr
+            .iter()
+            .map(|addr| event_map[addr])
+            .collect();
+
         let comb_func: SimFunc = unsafe { std::mem::transmute(comb_code_ptr) };
 
         debug_assert_eq!(
@@ -257,6 +263,7 @@ impl JitBackend {
             eval_only_event_map,
             apply_event_map,
             id_to_addr,
+            id_to_event,
         };
         if options.four_state {
             for (addr, &offset) in &backend.engine.translator.layout.offsets {

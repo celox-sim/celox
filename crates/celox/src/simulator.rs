@@ -213,8 +213,7 @@ impl Simulator {
 
     /// Triggers a clock/event by its numeric ID.
     pub fn tick_by_id(&mut self, event_id: usize) -> Result<(), RuntimeErrorCode> {
-        let addr = self.backend.id_to_addr[event_id];
-        let event = self.backend.resolve_event(&addr);
+        let event = self.backend.id_to_event[event_id];
         self.tick(event)
     }
 }
