@@ -54,7 +54,7 @@ jobs:
         run: pnpm --filter @celox-sim/celox bench -- --outputJson ts-output.json
 
       - name: Convert TypeScript benchmark output
-        run: node scripts/convert-bench.mjs ts-output.json ts-converted.json
+        run: node scripts/convert-bench.mjs packages/celox/ts-output.json ts-converted.json
 
       # ── Publish results ──
       - name: Store Rust benchmark result
