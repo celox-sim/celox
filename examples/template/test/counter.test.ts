@@ -1,4 +1,4 @@
-import { describe, test, expect, afterEach } from "vitest";
+import { describe, test, expect } from "vitest";
 import { Simulation } from "@celox-sim/celox";
 
 interface CounterPorts {
@@ -8,15 +8,8 @@ interface CounterPorts {
 }
 
 describe("Counter", () => {
-  let sim: Simulation | undefined;
-
-  afterEach(() => {
-    sim?.dispose();
-    sim = undefined;
-  });
-
   test("counts up on each clock edge when enabled", () => {
-    sim = Simulation.fromProject<CounterPorts>(".", "Counter");
+    const sim = Simulation.fromProject<CounterPorts>(".", "Counter");
 
     // Add a clock with period 10 (toggle every 5 time units)
     sim.addClock("clk", { period: 10 });
@@ -36,5 +29,7 @@ describe("Counter", () => {
     const count = sim.dut.count;
     expect(count).toBeGreaterThan(0);
     expect(sim.time()).toBe(100);
+
+    sim.dispose();
   });
 });
