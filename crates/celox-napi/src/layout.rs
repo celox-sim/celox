@@ -11,6 +11,8 @@ pub struct SignalLayout {
     pub is_4state: bool,
     pub direction: &'static str,
     pub type_kind: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub array_dims: Vec<usize>,
 }
 
 /// Build a map of signal name -> layout info from named signals.
@@ -30,15 +32,24 @@ pub fn build_signal_layout(signals: &[NamedSignal]) -> HashMap<String, SignalLay
             PortTypeKind::Bit => "bit",
             PortTypeKind::Other => "other",
         };
+        let (width, array_dims) = if ns.info.array_dims.is_empty() {
+            (ns.signal.width, vec![])
+        } else {
+            let element_width = ns.signal.width
+                / ns.info.array_dims.iter().product::<usize>();
+            (element_width, ns.info.array_dims.clone())
+        };
+
         map.insert(
             ns.name.clone(),
             SignalLayout {
                 offset: ns.signal.offset,
-                width: ns.signal.width,
-                byte_size: get_byte_size(ns.signal.width),
+                width,
+                byte_size: get_byte_size(width),
                 is_4state: ns.signal.is_4state,
                 direction,
                 type_kind,
+                array_dims,
             },
         );
     }

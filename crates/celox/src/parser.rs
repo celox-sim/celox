@@ -474,6 +474,12 @@ fn module_variables(registry: &ModuleRegistry) -> HashMap<StrId, HashMap<VarPath
                     kind: type_kind_to_domain_kind(&varibale.r#type.kind),
                     var_kind: varibale.kind,
                     type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind),
+                    array_dims: varibale
+                        .r#type
+                        .array
+                        .iter()
+                        .filter_map(|d| *d)
+                        .collect(),
                 },
             );
         }

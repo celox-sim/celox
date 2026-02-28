@@ -15,11 +15,14 @@ pub struct GeneratedModule {
 
 /// JSON-serializable port information for `--json` output.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JsonPortInfo {
     pub direction: &'static str,
     pub r#type: &'static str,
     pub width: usize,
     pub is4state: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub array_dims: Option<Vec<usize>>,
 }
 
 /// Top-level JSON output for `celox-gen-ts --json`.
@@ -68,9 +71,19 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
 
             let is_hierarchical = var_path.0.len() > 1;
 
-            let total_width = variable
-                .total_width()
-                .unwrap_or(1)
+            let element_width = variable.total_width().unwrap_or(1);
+
+            let array_dims: Option<Vec<usize>> = {
+                let dims: Vec<usize> = variable
+                    .r#type
+                    .array
+                    .iter()
+                    .filter_map(|d| *d)
+                    .collect();
+                if dims.is_empty() { None } else { Some(dims) }
+            };
+
+            let total_width = element_width
                 * variable.r#type.total_array().unwrap_or(1);
 
             let type_info = classify_type(&variable.r#type.kind);
@@ -87,10 +100,11 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
                 name,
                 direction,
                 type_info,
-                width: total_width,
+                width: if array_dims.is_some() { element_width } else { total_width },
                 is_4state,
                 is_output: variable.kind == VarKind::Output,
                 is_hierarchical,
+                array_dims,
             });
         }
 
@@ -110,6 +124,7 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
                         r#type: type_info_str(p.type_info),
                         width: p.width,
                         is4state: p.is_4state,
+                        array_dims: p.array_dims.clone(),
                     },
                 )
             })
@@ -143,6 +158,7 @@ struct PortInfo {
     is_4state: bool,
     is_output: bool,
     is_hierarchical: bool,
+    array_dims: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -214,7 +230,19 @@ fn generate_dts(module_name: &str, ports: &[PortInfo]) -> String {
         }
         let ts_type = ts_type_for_width(port.width);
         let readonly = if port.is_output { "readonly " } else { "" };
-        out.push_str(&format!("  {}{}: {};\n", readonly, port.name, ts_type));
+        if port.array_dims.is_some() {
+            let set_method = if port.is_output {
+                String::new()
+            } else {
+                format!(" set(i: number, value: {}): void;", ts_type)
+            };
+            out.push_str(&format!(
+                "  {}{}: {{ at(i: number): {};{} readonly length: number }};\n",
+                readonly, port.name, ts_type, set_method,
+            ));
+        } else {
+            out.push_str(&format!("  {}{}: {};\n", readonly, port.name, ts_type));
+        }
     }
     out.push_str("}\n\n");
 
@@ -249,9 +277,20 @@ fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
         } else {
             ""
         };
+        let array_dims_str = match &port.array_dims {
+            Some(dims) => {
+                let dims_str = dims
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(", arrayDims: [{}]", dims_str)
+            }
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "    {}: {{ direction: \"{}\", type: \"{}\", width: {}{}{} }},\n",
-            port.name, port.direction, type_str, port.width, four_state_str, hierarchical_str
+            "    {}: {{ direction: \"{}\", type: \"{}\", width: {}{}{}{} }},\n",
+            port.name, port.direction, type_str, port.width, four_state_str, hierarchical_str, array_dims_str
         ));
     }
     out.push_str("  },\n");
@@ -397,5 +436,37 @@ module PureAdder (
         assert_eq!(modules.len(), 1);
         assert_snapshot!("no_clock_dts", modules[0].dts_content);
         assert_snapshot!("no_clock_js", modules[0].js_content);
+    }
+
+    #[test]
+    fn test_array_port() {
+        let code = r#"
+module Counter #(
+    param N: u32 = 4,
+)(
+    clk: input clock,
+    rst: input reset,
+    cnt: output logic<32>[N],
+) {
+    for i in 0..N: g {
+        always_ff (clk, rst) {
+            if_reset {
+                cnt[i] = 0;
+            } else {
+                cnt[i] += 1;
+            }
+        }
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        assert_eq!(modules.len(), 1);
+        assert_snapshot!("array_port_dts", modules[0].dts_content);
+        assert_snapshot!("array_port_js", modules[0].js_content);
+
+        // Verify arrayDims is set correctly
+        let cnt_port = &modules[0].ports["cnt"];
+        assert_eq!(cnt_port.width, 32);
+        assert_eq!(cnt_port.array_dims, Some(vec![4]));
     }
 }

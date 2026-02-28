@@ -109,6 +109,7 @@ interface RawSignalLayout {
   is_4state: boolean;
   direction: string;
   type_kind: string;
+  array_dims?: number[];
 }
 
 /**
@@ -117,11 +118,11 @@ interface RawSignalLayout {
  * the DUT-compatible layout (without type_kind).
  */
 export function parseNapiLayout(json: string): {
-  signals: Record<string, SignalLayout & { typeKind: string }>;
+  signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[] }>;
   forDut: Record<string, SignalLayout>;
 } {
   const raw: Record<string, RawSignalLayout> = JSON.parse(json);
-  const signals: Record<string, SignalLayout & { typeKind: string }> = {};
+  const signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[] }> = {};
   const forDut: Record<string, SignalLayout> = {};
 
   for (const [name, r] of Object.entries(raw)) {
@@ -132,7 +133,14 @@ export function parseNapiLayout(json: string): {
       is4state: r.is_4state,
       direction: r.direction as "input" | "output" | "inout",
     };
-    signals[name] = { ...sl, typeKind: r.type_kind };
+    const entry: SignalLayout & { typeKind: string; arrayDims?: number[] } = {
+      ...sl,
+      typeKind: r.type_kind,
+    };
+    if (r.array_dims && r.array_dims.length > 0) {
+      entry.arrayDims = r.array_dims;
+    }
+    signals[name] = entry;
     forDut[name] = sl;
   }
 
@@ -144,7 +152,7 @@ export function parseNapiLayout(json: string): {
  * This auto-detects port metadata so users don't need to hand-write ModuleDefinition.
  */
 export function buildPortsFromLayout(
-  signals: Record<string, SignalLayout & { typeKind: string }>,
+  signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[] }>,
   _events: Record<string, number>,
 ): Record<string, PortInfo> {
   const ports: Record<string, PortInfo> = {};
@@ -167,12 +175,16 @@ export function buildPortsFromLayout(
         break;
     }
 
-    ports[name] = {
+    const port: PortInfo = {
       direction: sig.direction,
       type: portType,
       width: sig.width,
       is4state: sig.is4state,
     };
+    if (sig.arrayDims && sig.arrayDims.length > 0) {
+      (port as { arrayDims: readonly number[] }).arrayDims = sig.arrayDims;
+    }
+    ports[name] = port;
   }
 
   return ports;

@@ -38,6 +38,9 @@ pub struct VariableInfo {
     pub kind: DomainKind,
     pub var_kind: veryl_analyzer::ir::VarKind,
     pub type_kind: PortTypeKind,
+    /// Per-dimension sizes for array ports (e.g. `[4]` for `logic<32>[4]`).
+    /// Empty means scalar.
+    pub array_dims: Vec<usize>,
 }
 
 impl fmt::Debug for VariableInfo {
