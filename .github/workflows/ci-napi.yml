@@ -247,6 +247,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Publishing version: $VERSION"
+          (cd crates/celox-napi && npm version "$VERSION" --no-git-tag-version)
           (cd packages/celox && npm version "$VERSION" --no-git-tag-version)
           (cd packages/vite-plugin && npm version "$VERSION" --no-git-tag-version)
 
