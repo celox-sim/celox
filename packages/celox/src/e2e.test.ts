@@ -755,3 +755,211 @@ module InitTest (
     sim.dispose();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 4-state: high-level DUT API (Simulator.fromSource)
+// ---------------------------------------------------------------------------
+
+describe("E2E: 4-state high-level DUT API", () => {
+  test("counter in 4-state mode: reset clears X, counting works", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulator.fromSource<CounterPorts>(
+      COUNTER_SOURCE, "Counter", { fourState: true },
+    );
+
+    // In 4-state mode, count starts as X. Reset should clear it.
+    sim.dut.rst = 1;
+    sim.tick();
+    sim.dut.rst = 0;
+    sim.tick();
+    expect(sim.dut.count).toBe(0);
+
+    // Enable counting — should work exactly like 2-state
+    sim.dut.en = 1;
+    sim.tick();
+    expect(sim.dut.count).toBe(1);
+
+    sim.tick();
+    expect(sim.dut.count).toBe(2);
+
+    sim.tick();
+    expect(sim.dut.count).toBe(3);
+
+    sim.dispose();
+  });
+
+  test("multiplexer with X selector produces X output", () => {
+    const addon = loadNativeAddon();
+    const raw = new addon.NativeSimulatorHandle(MULTIPLEXER_SOURCE, "Mux4", { fourState: true });
+    const layout = parseNapiLayout(raw.layoutJson);
+    const buf = raw.sharedMemory().buffer;
+    const view = new DataView(buf);
+
+    const sigSel = layout.forDut.sel;
+    const sigD0 = layout.forDut.d0;
+    const sigY = layout.forDut.y;
+
+    // Set d0 = 0xAA (defined)
+    view.setUint8(sigD0.offset, 0xAA);
+    view.setUint8(sigD0.offset + sigD0.byteSize, 0);
+
+    // Set sel = X
+    view.setUint8(sigSel.offset, 0);
+    view.setUint8(sigSel.offset + sigSel.byteSize, 0x03);
+
+    raw.evalComb();
+
+    // With X selector, output should be all-X
+    const [, mY] = readFourState(buf, sigY);
+    expect(mY).toBe(0xFF);
+
+    raw.dispose();
+  });
+
+  test("FF via DUT API: write X input, tick, read output", () => {
+    interface FFPorts {
+      rst: number;
+      d: number;
+      readonly q: number;
+    }
+
+    const sim = Simulator.fromSource<FFPorts>(FF_SOURCE, "FF", { fourState: true });
+
+    // Reset to clear initial X
+    sim.dut.rst = 1;
+    sim.tick();
+    sim.dut.rst = 0;
+    expect(sim.dut.q).toBe(0);
+
+    // Write a defined value
+    sim.dut.d = 0x42;
+    sim.tick();
+    expect(sim.dut.q).toBe(0x42);
+
+    // Write X to d, tick — q should capture it (value read still returns a number)
+    (sim.dut as any).d = X;
+    sim.tick();
+    expect(typeof sim.dut.q).toBe("number");
+
+    // Write defined value again — q should recover
+    sim.dut.d = 0x99;
+    sim.tick();
+    expect(sim.dut.q).toBe(0x99);
+
+    sim.dispose();
+  });
+
+  test("X to defined transition: adder recovers from X", () => {
+    interface Ports {
+      a: number;
+      b: number;
+      readonly y: number;
+    }
+
+    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
+
+    // Start with X
+    (sim.dut as any).a = X;
+    sim.dut.b = 10;
+    // Output has X — just verify it doesn't crash
+    expect(typeof sim.dut.y).toBe("number");
+
+    // Clear X by writing defined values
+    sim.dut.a = 20;
+    sim.dut.b = 30;
+    expect(sim.dut.y).toBe(50);
+
+    sim.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4-state: Simulation (time-based) tests
+// ---------------------------------------------------------------------------
+
+describe("E2E: 4-state Simulation (time-based)", () => {
+  test("FF with clock-driven 4-state: reset clears X, captures defined values", () => {
+    interface FFPorts {
+      rst: number;
+      d: number;
+      readonly q: number;
+    }
+
+    const sim = Simulation.fromSource<FFPorts>(FF_SOURCE, "FF", { fourState: true });
+
+    sim.addClock("clk", { period: 10 });
+    expect(sim.time()).toBe(0);
+
+    // Reset to clear initial X on q
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+    sim.dut.rst = 0;
+    expect(sim.dut.q).toBe(0);
+
+    // Drive d with defined value
+    sim.dut.d = 0x55;
+    sim.runUntil(40);
+    expect(sim.dut.q).toBe(0x55);
+
+    // Drive d with different value
+    sim.dut.d = 0xAA;
+    sim.runUntil(60);
+    expect(sim.dut.q).toBe(0xAA);
+
+    sim.dispose();
+  });
+
+  test("counter in 4-state time-based mode", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(
+      COUNTER_SOURCE, "Counter", { fourState: true },
+    );
+
+    sim.addClock("clk", { period: 10 });
+
+    // Reset
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+    sim.dut.rst = 0;
+    sim.dut.en = 1;
+
+    sim.runUntil(100);
+
+    const count = sim.dut.count;
+    expect(count).toBeGreaterThan(0);
+    expect(sim.time()).toBe(100);
+
+    sim.dispose();
+  });
+
+  test("4-state combinational in time-based simulation", () => {
+    interface Ports {
+      a: number;
+      b: number;
+      readonly y: number;
+    }
+
+    const sim = Simulation.fromSource<Ports>(
+      ADDER_4STATE_SOURCE, "Adder4S", { fourState: true },
+    );
+
+    // No clock needed for pure combinational — just set values and read
+    sim.dut.a = 100;
+    sim.dut.b = 55;
+    // runUntil(0) to force eval
+    sim.runUntil(0);
+    expect(sim.dut.y).toBe(155);
+
+    sim.dispose();
+  });
+});

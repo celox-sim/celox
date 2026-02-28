@@ -14,6 +14,7 @@ import { FourState, X } from "./types.js";
 function mockHandle(): NativeSimulatorHandle {
   return {
     tick: vi.fn(),
+    tickN: vi.fn(),
     evalComb: vi.fn(),
     dump: vi.fn(),
     dispose: vi.fn(),
@@ -359,6 +360,88 @@ describe("createDut — 4-state", () => {
     expect(() => {
       (dut as any).a = X;
     }).toThrow("not 4-state");
+  });
+
+  test("writing FourState to non-4-state signal throws", () => {
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      a: { offset: 0, width: 8, byteSize: 1, is4state: false, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      a: { direction: "input", type: "logic", width: 8 },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+
+    expect(() => {
+      (dut as any).a = FourState(0xA5, 0x0F);
+    }).toThrow("not 4-state");
+  });
+
+  test("writing defined value to 4-state signal clears mask", () => {
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      a: { offset: 0, width: 8, byteSize: 1, is4state: true, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      a: { direction: "input", type: "logic", width: 8, is4state: true },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+
+    // First write X
+    (dut as any).a = X;
+    const [, maskBefore] = readFourState(buffer, layout.a);
+    expect(maskBefore).toBe(0xFF);
+
+    // Then write a defined value — mask should clear
+    dut.a = 42;
+    const [value, maskAfter] = readFourState(buffer, layout.a);
+    expect(value).toBe(42);
+    expect(maskAfter).toBe(0);
+  });
+
+  test("reading 4-state output returns value part only", () => {
+    const buffer = makeBuffer(64);
+    const view = new DataView(buffer);
+    const layout: Record<string, SignalLayout> = {
+      y: { offset: 0, width: 8, byteSize: 1, is4state: true, direction: "output" },
+    };
+    const ports: Record<string, PortInfo> = {
+      y: { direction: "output", type: "logic", width: 8, is4state: true },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ readonly y: number }>(buffer, layout, ports, handle, state);
+
+    // Set value=0xAB, mask=0x0F (lower 4 bits are X)
+    view.setUint8(0, 0xAB);
+    view.setUint8(1, 0x0F);
+
+    // DUT getter returns the value part
+    expect(dut.y).toBe(0xAB);
+  });
+
+  test("write X sets dirty flag", () => {
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      a: { offset: 0, width: 8, byteSize: 1, is4state: true, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      a: { direction: "input", type: "logic", width: 8, is4state: true },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+
+    (dut as any).a = X;
+    expect(state.dirty).toBe(true);
   });
 });
 
