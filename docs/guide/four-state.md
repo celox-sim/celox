@@ -1,6 +1,6 @@
 # 4-State Simulation
 
-Celox supports IEEE 1800-compliant 4-state simulation with X (unknown) and Z (high-impedance) values. This page explains how to use 4-state features from TypeScript testbenches.
+Celox supports IEEE 1800-compliant 4-state simulation with X (unknown) values. This page explains how to use 4-state features from TypeScript testbenches.
 
 ## Enabling 4-State Mode
 
@@ -23,7 +23,7 @@ const sim = Simulation.create(MyModule, { fourState: true });
 ```
 
 ::: warning
-Without `fourState: true`, all signals behave as 2-state. X and Z values cannot be written or read.
+Without `fourState: true`, all signals behave as 2-state. X values cannot be written or read.
 :::
 
 ## Veryl Types and 4-State
@@ -39,7 +39,7 @@ Whether a signal supports 4-state depends on its Veryl type:
 When a 4-state value is assigned to a `bit`-type variable inside the design, the mask (X bits) is automatically cleared to 0. This prevents unintended X propagation through 2-state boundaries.
 
 ::: tip
-To use 4-state simulation, declare your ports as `logic` rather than `bit`. Ports declared as `bit` will silently drop X/Z values.
+To use 4-state simulation, declare your ports as `logic` rather than `bit`. Ports declared as `bit` will silently drop X values.
 :::
 
 ## Writing X Values
@@ -77,16 +77,6 @@ For wide signals (> 53 bits), use `bigint`:
 
 ```typescript
 sim.dut.wide_data = FourState(0x1234n, 0xFF00n);
-```
-
-### Z Sentinel
-
-The `Z` sentinel is also available for high-impedance:
-
-```typescript
-import { Z } from "@celox-sim/celox";
-
-sim.dut.bus = Z;
 ```
 
 ## Reading 4-State Values

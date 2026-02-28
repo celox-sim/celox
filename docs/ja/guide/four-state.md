@@ -1,6 +1,6 @@
 # 4 値シミュレーション
 
-Celox は IEEE 1800 準拠の 4 値シミュレーションをサポートし、X（不定）と Z（ハイインピーダンス）の値を扱えます。このページでは TypeScript テストベンチから 4 値機能を使う方法を説明します。
+Celox は IEEE 1800 準拠の 4 値シミュレーションをサポートし、X（不定）値を扱えます。このページでは TypeScript テストベンチから 4 値機能を使う方法を説明します。
 
 ## 4 値モードの有効化
 
@@ -23,7 +23,7 @@ const sim = Simulation.create(MyModule, { fourState: true });
 ```
 
 ::: warning
-`fourState: true` を指定しない場合、すべてのシグナルは 2 値として動作します。X/Z 値の書き込み・読み出しはできません。
+`fourState: true` を指定しない場合、すべてのシグナルは 2 値として動作します。X 値の書き込み・読み出しはできません。
 :::
 
 ## Veryl の型と 4 値
@@ -39,7 +39,7 @@ const sim = Simulation.create(MyModule, { fourState: true });
 設計内部で 4 値の値が `bit` 型の変数に代入されると、マスク（X ビット）は自動的に 0 にクリアされます。これにより 2 値の境界を越えた意図しない X 伝搬が防止されます。
 
 ::: tip
-4 値シミュレーションを使うには、ポートを `bit` ではなく `logic` で宣言してください。`bit` で宣言されたポートは X/Z 値を暗黙的に落とします。
+4 値シミュレーションを使うには、ポートを `bit` ではなく `logic` で宣言してください。`bit` で宣言されたポートは X 値を暗黙的に落とします。
 :::
 
 ## X 値の書き込み
@@ -77,16 +77,6 @@ sim.tick();
 
 ```typescript
 sim.dut.wide_data = FourState(0x1234n, 0xFF00n);
-```
-
-### Z センチネル
-
-ハイインピーダンス用の `Z` センチネルも利用できます：
-
-```typescript
-import { Z } from "@celox-sim/celox";
-
-sim.dut.bus = Z;
 ```
 
 ## 4 値の読み出し
