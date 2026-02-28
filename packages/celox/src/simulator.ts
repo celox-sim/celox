@@ -131,7 +131,8 @@ export class Simulator<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulator<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const raw = new addon.NativeSimulatorHandle(source, top);
+    const napiOpts = options?.fourState ? { fourState: options.fourState } : undefined;
+    const raw = new addon.NativeSimulatorHandle(source, top, napiOpts);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -164,7 +165,8 @@ export class Simulator<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulator<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const raw = addon.NativeSimulatorHandle.fromProject(projectPath, top);
+    const napiOpts = options?.fourState ? { fourState: options.fourState } : undefined;
+    const raw = addon.NativeSimulatorHandle.fromProject(projectPath, top, napiOpts);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);

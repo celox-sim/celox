@@ -10,6 +10,20 @@ use veryl_parser::Parser;
 
 use layout::{build_event_map, build_signal_layout};
 
+/// Options for creating a simulator/simulation handle.
+#[napi(object)]
+pub struct NapiOptions {
+    pub four_state: Option<bool>,
+}
+
+/// Helper to extract the builder config from NapiOptions.
+fn apply_options(options: &Option<NapiOptions>) -> bool {
+    options
+        .as_ref()
+        .and_then(|o| o.four_state)
+        .unwrap_or(false)
+}
+
 /// Load a Veryl project's source files and metadata from a directory.
 ///
 /// Searches upward from `project_path` for `Veryl.toml`, gathers all `.veryl`
@@ -48,9 +62,10 @@ pub struct NativeSimulatorHandle {
 impl NativeSimulatorHandle {
     /// Create a new simulator from Veryl source code.
     #[napi(constructor)]
-    pub fn new(code: String, top: String, four_state: Option<bool>) -> Result<Self> {
+    pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
+        let four_state = apply_options(&options);
         let sim = celox::Simulator::builder(&code, &top)
-            .four_state(four_state.unwrap_or(false))
+            .four_state(four_state)
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -59,7 +74,7 @@ impl NativeSimulatorHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
-        let layout_map = build_signal_layout(&signals);
+        let layout_map = build_signal_layout(&signals, four_state);
         let event_map = build_event_map(&events);
 
         let layout_json = serde_json::to_string(&layout_map)
@@ -82,11 +97,13 @@ impl NativeSimulatorHandle {
     /// `.veryl` source files, and builds the simulator using the project's
     /// clock/reset settings.
     #[napi(factory)]
-    pub fn from_project(project_path: String, top: String) -> Result<Self> {
+    pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
+        let four_state = apply_options(&options);
         let (source, metadata) = load_project_source(&project_path)?;
 
         let sim = celox::Simulator::builder(&source, &top)
             .with_metadata(metadata)
+            .four_state(four_state)
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -95,7 +112,7 @@ impl NativeSimulatorHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
-        let layout_map = build_signal_layout(&signals);
+        let layout_map = build_signal_layout(&signals, four_state);
         let event_map = build_event_map(&events);
 
         let layout_json = serde_json::to_string(&layout_map)
@@ -214,8 +231,10 @@ pub struct NativeSimulationHandle {
 impl NativeSimulationHandle {
     /// Create a new timed simulation from Veryl source code.
     #[napi(constructor)]
-    pub fn new(code: String, top: String) -> Result<Self> {
+    pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
+        let four_state = apply_options(&options);
         let sim = celox::Simulation::builder(&code, &top)
+            .four_state(four_state)
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -224,7 +243,7 @@ impl NativeSimulationHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
-        let layout_map = build_signal_layout(&signals);
+        let layout_map = build_signal_layout(&signals, four_state);
         let event_map = build_event_map(&events);
 
         let layout_json = serde_json::to_string(&layout_map)
@@ -243,11 +262,13 @@ impl NativeSimulationHandle {
 
     /// Create a new timed simulation from a Veryl project directory.
     #[napi(factory)]
-    pub fn from_project(project_path: String, top: String) -> Result<Self> {
+    pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
+        let four_state = apply_options(&options);
         let (source, metadata) = load_project_source(&project_path)?;
 
         let sim = celox::Simulation::builder(&source, &top)
             .with_metadata(metadata)
+            .four_state(four_state)
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -256,7 +277,7 @@ impl NativeSimulationHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
-        let layout_map = build_signal_layout(&signals);
+        let layout_map = build_signal_layout(&signals, four_state);
         let event_map = build_event_map(&events);
 
         let layout_json = serde_json::to_string(&layout_map)

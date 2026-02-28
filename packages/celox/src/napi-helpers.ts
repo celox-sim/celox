@@ -53,14 +53,18 @@ export interface RawNapiSimulationHandle {
   dispose(): void;
 }
 
+export interface NapiOptions {
+  fourState?: boolean;
+}
+
 export interface RawNapiAddon {
   NativeSimulatorHandle: {
-    new (code: string, top: string): RawNapiSimulatorHandle;
-    fromProject(projectPath: string, top: string): RawNapiSimulatorHandle;
+    new (code: string, top: string, options?: NapiOptions): RawNapiSimulatorHandle;
+    fromProject(projectPath: string, top: string, options?: NapiOptions): RawNapiSimulatorHandle;
   };
   NativeSimulationHandle: {
-    new (code: string, top: string): RawNapiSimulationHandle;
-    fromProject(projectPath: string, top: string): RawNapiSimulationHandle;
+    new (code: string, top: string, options?: NapiOptions): RawNapiSimulationHandle;
+    fromProject(projectPath: string, top: string, options?: NapiOptions): RawNapiSimulationHandle;
   };
   genTs(projectPath: string): string;
 }

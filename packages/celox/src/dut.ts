@@ -33,11 +33,20 @@ export interface DirtyState {
 // DataView helpers
 // ---------------------------------------------------------------------------
 
-/** Read an unsigned integer of the given byte-size (little-endian). */
+/** Read an unsigned integer of the given byte-size (little-endian), masked to width. */
 function readNumber(view: DataView, offset: number, width: number): number {
-  if (width <= 8) return view.getUint8(offset);
-  if (width <= 16) return view.getUint16(offset, true);
-  if (width <= 32) return view.getUint32(offset, true);
+  if (width <= 8) {
+    const raw = view.getUint8(offset);
+    return width === 8 ? raw : raw & ((1 << width) - 1);
+  }
+  if (width <= 16) {
+    const raw = view.getUint16(offset, true);
+    return width === 16 ? raw : raw & ((1 << width) - 1);
+  }
+  if (width <= 32) {
+    const raw = view.getUint32(offset, true);
+    return width === 32 ? raw : (raw & ((1 << width) - 1)) >>> 0;
+  }
   // 33..53 bits — fits safely in a JS number
   const lo = view.getUint32(offset, true);
   const hi = view.getUint32(offset + 4, true) & ((1 << (width - 32)) - 1);
@@ -276,6 +285,17 @@ function defineSignalProperty(
         writeFourState(view, sig, value);
       } else {
         writeSignal(view, sig, value as number | bigint);
+        // Clear mask when writing a defined value to a 4-state signal
+        if (sig.is4state) {
+          const maskLayout: SignalLayout = {
+            offset: sig.offset + sig.byteSize,
+            width: sig.width,
+            byteSize: sig.byteSize,
+            is4state: false,
+            direction: sig.direction,
+          };
+          writeSignal(view, maskLayout, sig.width <= 53 ? 0 : 0n);
+        }
       }
 
       state.dirty = true;
@@ -388,9 +408,11 @@ function createArrayDut(
         writeFourState(view, elemSig, value);
       } else if (elementWidth <= 53 && typeof value === "number") {
         writeNumber(view, offset, elementWidth, value);
+        if (is4state) writeNumber(view, offset + elementByteSize, elementWidth, 0);
       } else {
         const bigVal = typeof value === "bigint" ? value : BigInt(value as number);
         writeBigInt(view, offset, elementByteSize, bigVal);
+        if (is4state) writeBigInt(view, offset + elementByteSize, elementByteSize, 0n);
       }
       state.dirty = true;
     },
