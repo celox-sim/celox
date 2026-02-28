@@ -20,6 +20,20 @@ Install Celox and Vitest:
 pnpm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
 ```
 
+After following the steps below, your project will look like this:
+
+```
+my-celox-project/
+├── Veryl.toml            # Veryl project config
+├── vitest.config.ts      # Vitest + Celox plugin
+├── tsconfig.json
+├── package.json
+├── src/
+│   └── Adder.veryl       # Veryl design files
+└── test/
+    └── adder.test.ts     # TypeScript testbenches
+```
+
 ### Veryl.toml
 
 Create a `Veryl.toml` at the project root:
@@ -124,6 +138,10 @@ Then run:
 ```bash
 pnpm test
 ```
+
+::: tip Starter Template
+A ready-to-use project template is available at [`examples/template`](https://github.com/celox-sim/celox/tree/master/examples/template). It includes a pre-configured `Veryl.toml`, `vitest.config.ts`, sample Veryl modules, and TypeScript tests -- copy the directory and start building right away.
+:::
 
 ## Next Steps
 
