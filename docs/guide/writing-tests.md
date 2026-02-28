@@ -84,5 +84,5 @@ pnpm test
 
 ## Further Reading
 
-- [4-State Simulation](/internals/four-state) -- How X and Z values are handled.
+- [4-State Simulation](./four-state.md) -- Using X and Z values in testbenches.
 - [Architecture](/internals/architecture) -- The simulation pipeline in detail.

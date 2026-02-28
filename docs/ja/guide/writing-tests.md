@@ -84,5 +84,5 @@ pnpm test
 
 ## 関連資料
 
-- [4 値シミュレーション](/internals/four-state) -- X 値と Z 値の処理方法。
+- [4 値シミュレーション](./four-state.md) -- テストベンチでの X/Z 値の使い方。
 - [アーキテクチャ](/internals/architecture) -- シミュレーションパイプラインの詳細。

@@ -35,6 +35,10 @@ export default defineConfig({
                   text: "テストの書き方",
                   link: "/ja/guide/writing-tests",
                 },
+                {
+                  text: "4 値シミュレーション",
+                  link: "/ja/guide/four-state",
+                },
               ],
             },
           ],
@@ -61,6 +65,7 @@ export default defineConfig({
             { text: "Introduction", link: "/guide/introduction" },
             { text: "Getting Started", link: "/guide/getting-started" },
             { text: "Writing Tests", link: "/guide/writing-tests" },
+            { text: "4-State Simulation", link: "/guide/four-state" },
           ],
         },
       ],
