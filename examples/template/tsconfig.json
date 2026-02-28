@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowArbitraryExtensions": true
   },
-  "include": ["test"]
+  "include": ["test", "src"]
 }

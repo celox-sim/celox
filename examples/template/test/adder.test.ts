@@ -1,16 +1,10 @@
 import { describe, test, expect } from "vitest";
 import { Simulator } from "@celox-sim/celox";
-
-interface AdderPorts {
-  rst: number;
-  a: number;
-  b: number;
-  readonly sum: number;
-}
+import { Adder } from "../src/Adder.veryl";
 
 describe("Adder", () => {
   test("adds two numbers", () => {
-    const sim = Simulator.fromProject<AdderPorts>(".", "Adder");
+    const sim = Simulator.create(Adder);
 
     sim.dut.a = 100;
     sim.dut.b = 200;
@@ -21,7 +15,7 @@ describe("Adder", () => {
   });
 
   test("handles overflow into 17th bit", () => {
-    const sim = Simulator.fromProject<AdderPorts>(".", "Adder");
+    const sim = Simulator.create(Adder);
 
     sim.dut.a = 0xffff;
     sim.dut.b = 1;

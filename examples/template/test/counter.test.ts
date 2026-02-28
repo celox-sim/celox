@@ -1,15 +1,10 @@
 import { describe, test, expect } from "vitest";
 import { Simulation } from "@celox-sim/celox";
-
-interface CounterPorts {
-  rst: number;
-  en: number;
-  readonly count: number;
-}
+import { Counter } from "../src/Counter.veryl";
 
 describe("Counter", () => {
   test("counts up on each clock edge when enabled", () => {
-    const sim = Simulation.fromProject<CounterPorts>(".", "Counter");
+    const sim = Simulation.create(Counter);
 
     // Add a clock with period 10 (toggle every 5 time units)
     sim.addClock("clk", { period: 10 });
