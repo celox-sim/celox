@@ -5,30 +5,33 @@
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
-    "name": "celox",
-    "triples": {
-      "defaults": false,
-      "additional": [
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-        "aarch64-unknown-linux-musl",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-pc-windows-msvc"
-      ]
-    }
+    "binaryName": "celox",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
   },
   "scripts": {
+    "artifacts": "napi artifacts",
     "build": "napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi",
-    "build:debug": "napi build --platform --manifest-path ../../Cargo.toml -p celox-napi"
+    "build:debug": "napi build --platform --manifest-path ../../Cargo.toml -p celox-napi",
+    "prepublishOnly": "napi prepublish -t npm",
+    "version": "napi version"
+  },
+  "engines": {
+    "node": ">= 18"
   },
   "files": [
     "index.js",
     "index.d.ts"
   ],
   "devDependencies": {
-    "@napi-rs/cli": "^3.0.0"
+    "@napi-rs/cli": "^3.2.0"
   },
   "repository": {
     "type": "git",
@@ -36,7 +39,8 @@
     "directory": "crates/celox-napi"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "license": "MIT OR Apache-2.0"
 }

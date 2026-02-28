@@ -29,7 +29,7 @@ importers:
   crates/celox-napi:
     devDependencies:
       '@napi-rs/cli':
-        specifier: ^3.0.0
+        specifier: ^3.2.0
         version: 3.5.1(@emnapi/runtime@1.8.1)(@types/node@25.3.2)
 
   examples/template:
@@ -45,6 +45,10 @@ importers:
         version: 3.2.4(@types/node@25.3.2)(yaml@2.8.2)
 
   packages/celox:
+    dependencies:
+      '@celox-sim/celox-napi':
+        specifier: workspace:*
+        version: link:../../crates/celox-napi
     devDependencies:
       '@types/node':
         specifier: ^25.3.2
