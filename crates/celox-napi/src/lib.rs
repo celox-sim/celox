@@ -168,74 +168,17 @@ impl NativeSimulatorHandle {
         Ok(())
     }
 
-    /// Read signal bytes from memory. Returns a copy of the stable region.
+    /// Return the simulator's stable memory region as a zero-copy `Uint8Array`.
+    /// JS can access `.buffer` to get the underlying `ArrayBuffer`.
     #[napi]
-    pub fn read_memory(&self) -> Result<Buffer> {
-        let sim = self
-            .sim
-            .as_ref()
-            .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        let (ptr, _) = sim.memory_as_ptr();
-        let stable_size = sim.stable_region_size();
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, stable_size) };
-        Ok(Buffer::from(bytes.to_vec()))
-    }
-
-    /// Write bytes into the stable region of memory.
-    #[napi]
-    pub fn write_memory(&mut self, data: Buffer, offset: u32) -> Result<()> {
+    pub fn shared_memory(&mut self) -> Result<Uint8Array> {
         let sim = self
             .sim
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         let (ptr, _) = sim.memory_as_mut_ptr();
         let stable_size = sim.stable_region_size();
-        let offset = offset as usize;
-        if offset + data.len() > stable_size {
-            return Err(Error::from_reason("Write exceeds stable region"));
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset), data.len());
-        }
-        Ok(())
-    }
-
-    /// Tick with synchronised memory: write input buffer → tick → return output buffer.
-    #[napi]
-    pub fn tick_synced(&mut self, event_id: u32, input: Buffer) -> Result<Buffer> {
-        let sim = self
-            .sim
-            .as_mut()
-            .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        let (ptr, _) = sim.memory_as_mut_ptr();
-        let stable_size = sim.stable_region_size();
-        let copy_len = stable_size.min(input.len());
-        unsafe {
-            std::ptr::copy_nonoverlapping(input.as_ptr(), ptr, copy_len);
-        }
-        sim.tick_by_id(event_id as usize)
-            .map_err(|e| Error::from_reason(format!("{}", e)))?;
-        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, stable_size) };
-        Ok(Buffer::from(bytes.to_vec()))
-    }
-
-    /// Eval combinational with synchronised memory.
-    #[napi]
-    pub fn eval_comb_synced(&mut self, input: Buffer) -> Result<Buffer> {
-        let sim = self
-            .sim
-            .as_mut()
-            .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        let (ptr, _) = sim.memory_as_mut_ptr();
-        let stable_size = sim.stable_region_size();
-        let copy_len = stable_size.min(input.len());
-        unsafe {
-            std::ptr::copy_nonoverlapping(input.as_ptr(), ptr, copy_len);
-        }
-        sim.eval_comb()
-            .map_err(|e| Error::from_reason(format!("{}", e)))?;
-        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, stable_size) };
-        Ok(Buffer::from(bytes.to_vec()))
+        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, |_, _| {}) })
     }
 
     /// Invalidate this handle (no-op on the Rust side; drop happens via GC).
@@ -419,97 +362,17 @@ impl NativeSimulationHandle {
         Ok(())
     }
 
-    /// Read signal bytes from memory. Returns a copy of the stable region.
+    /// Return the simulation's stable memory region as a zero-copy `Uint8Array`.
+    /// JS can access `.buffer` to get the underlying `ArrayBuffer`.
     #[napi]
-    pub fn read_memory(&self) -> Result<Buffer> {
-        let sim = self
-            .sim
-            .as_ref()
-            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
-        let (ptr, _) = sim.memory_as_ptr();
-        let stable_size = sim.stable_region_size();
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, stable_size) };
-        Ok(Buffer::from(bytes.to_vec()))
-    }
-
-    /// Write bytes into the stable region of memory.
-    #[napi]
-    pub fn write_memory(&mut self, data: Buffer, offset: u32) -> Result<()> {
+    pub fn shared_memory(&mut self) -> Result<Uint8Array> {
         let sim = self
             .sim
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
         let (ptr, _) = sim.memory_as_mut_ptr();
         let stable_size = sim.stable_region_size();
-        let offset = offset as usize;
-        if offset + data.len() > stable_size {
-            return Err(Error::from_reason("Write exceeds stable region"));
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset), data.len());
-        }
-        Ok(())
-    }
-
-    /// Run-until with synchronised memory.
-    #[napi]
-    pub fn run_until_synced(&mut self, end_time: f64, input: Buffer) -> Result<Buffer> {
-        let sim = self
-            .sim
-            .as_mut()
-            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
-        let (ptr, _) = sim.memory_as_mut_ptr();
-        let stable_size = sim.stable_region_size();
-        let copy_len = stable_size.min(input.len());
-        unsafe {
-            std::ptr::copy_nonoverlapping(input.as_ptr(), ptr, copy_len);
-        }
-        sim.run_until(end_time as u64)
-            .map_err(|e| Error::from_reason(format!("{}", e)))?;
-        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, stable_size) };
-        Ok(Buffer::from(bytes.to_vec()))
-    }
-
-    /// Step with synchronised memory.
-    #[napi]
-    pub fn step_synced(&mut self, input: Buffer) -> Result<StepSyncedResult> {
-        let sim = self
-            .sim
-            .as_mut()
-            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
-        let (ptr, _) = sim.memory_as_mut_ptr();
-        let stable_size = sim.stable_region_size();
-        let copy_len = stable_size.min(input.len());
-        unsafe {
-            std::ptr::copy_nonoverlapping(input.as_ptr(), ptr, copy_len);
-        }
-        let time = sim
-            .step()
-            .map_err(|e| Error::from_reason(format!("{}", e)))?;
-        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, stable_size) };
-        Ok(StepSyncedResult {
-            time: time.map(|t| t as f64),
-            buffer: Buffer::from(bytes.to_vec()),
-        })
-    }
-
-    /// Eval combinational with synchronised memory.
-    #[napi]
-    pub fn eval_comb_synced(&mut self, input: Buffer) -> Result<Buffer> {
-        let sim = self
-            .sim
-            .as_mut()
-            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
-        let (ptr, _) = sim.memory_as_mut_ptr();
-        let stable_size = sim.stable_region_size();
-        let copy_len = stable_size.min(input.len());
-        unsafe {
-            std::ptr::copy_nonoverlapping(input.as_ptr(), ptr, copy_len);
-        }
-        sim.eval_comb()
-            .map_err(|e| Error::from_reason(format!("{}", e)))?;
-        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, stable_size) };
-        Ok(Buffer::from(bytes.to_vec()))
+        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, |_, _| {}) })
     }
 
     /// Invalidate this handle.
@@ -517,13 +380,6 @@ impl NativeSimulationHandle {
     pub fn dispose(&mut self) {
         self.sim = None;
     }
-}
-
-/// Result from `step_synced` — contains both the time and the updated buffer.
-#[napi(object)]
-pub struct StepSyncedResult {
-    pub time: Option<f64>,
-    pub buffer: Buffer,
 }
 
 /// Generate TypeScript type information as JSON for a Veryl project.

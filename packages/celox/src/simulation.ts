@@ -16,8 +16,7 @@ import {
   loadNativeAddon,
   parseNapiLayout,
   buildPortsFromLayout,
-  syncFromNative,
-  wrapSimulationHandle,
+  wrapDirectSimulationHandle,
 } from "./napi-helpers.js";
 
 /**
@@ -127,15 +126,13 @@ export class Simulation<P = Record<string, unknown>> {
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
-    const stableSize = raw.stableSize;
 
     const ports = buildPortsFromLayout(layout.signals, events);
 
-    const buf = new SharedArrayBuffer(stableSize);
-    syncFromNative(raw, buf);
+    const buf = raw.sharedMemory().buffer;
 
     const state: DirtyState = { dirty: false };
-    const handle = wrapSimulationHandle(raw, buf, stableSize);
+    const handle = wrapDirectSimulationHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
 
     return new Simulation<P>(handle, dut, events, state);
@@ -163,15 +160,13 @@ export class Simulation<P = Record<string, unknown>> {
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
-    const stableSize = raw.stableSize;
 
     const ports = buildPortsFromLayout(layout.signals, events);
 
-    const buf = new SharedArrayBuffer(stableSize);
-    syncFromNative(raw, buf);
+    const buf = raw.sharedMemory().buffer;
 
     const state: DirtyState = { dirty: false };
-    const handle = wrapSimulationHandle(raw, buf, stableSize);
+    const handle = wrapDirectSimulationHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
 
     return new Simulation<P>(handle, dut, events, state);

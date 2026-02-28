@@ -35,10 +35,14 @@ interface TopPorts {
 }
 
 describe("testbench", () => {
-  bench("testbench_build_top_n1000", () => {
-    const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
-    sim.dispose();
-  });
+  bench(
+    "testbench_build_top_n1000",
+    () => {
+      const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
+      sim.dispose();
+    },
+    { iterations: 3, time: 0 },
+  );
 
   const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
 
@@ -58,12 +62,16 @@ describe("testbench", () => {
     sim.dut.cnt[0];
   });
 
-  bench("testbench_tick_top_n1000_x1000000", () => {
-    for (let i = 0; i < 1_000_000; i++) {
-      sim.dut.rst = 0;
-      sim.tick();
-      // biome-ignore lint: read output to measure full testbench cycle
-      sim.dut.cnt[0];
-    }
-  });
+  bench(
+    "testbench_tick_top_n1000_x10000",
+    () => {
+      for (let i = 0; i < 10_000; i++) {
+        sim.dut.rst = 0;
+        sim.tick();
+        // biome-ignore lint: read output to measure full testbench cycle
+        sim.dut.cnt[0];
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
 });

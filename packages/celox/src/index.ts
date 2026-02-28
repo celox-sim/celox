@@ -38,9 +38,8 @@ export {
   loadNativeAddon,
   parseNapiLayout,
   buildPortsFromLayout,
-  syncFromNative,
-  wrapSimulatorHandle,
-  wrapSimulationHandle,
+  wrapDirectSimulatorHandle,
+  wrapDirectSimulationHandle,
   createSimulatorBridge,
   createSimulationBridge,
 } from "./napi-helpers.js";

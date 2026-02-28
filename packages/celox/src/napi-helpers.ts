@@ -5,7 +5,7 @@
  *   - Loading the native addon
  *   - Parsing NAPI layout JSON into SignalLayout
  *   - Building PortInfo from NAPI layout (auto-detect ports)
- *   - Wrapping NAPI handles with synced memory operations
+ *   - Wrapping NAPI handles with zero-copy direct operations
  *   - Creating bridge functions for Simulator.create() / Simulation.create()
  */
 
@@ -30,12 +30,9 @@ export interface RawNapiSimulatorHandle {
   readonly stableSize: number;
   readonly totalSize: number;
   tick(eventId: number): void;
-  tickSynced(eventId: number, input: Buffer): Buffer;
   evalComb(): void;
-  evalCombSynced(input: Buffer): Buffer;
   dump(timestamp: number): void;
-  readMemory(): Buffer;
-  writeMemory(data: Buffer, offset: number): void;
+  sharedMemory(): Uint8Array;
   dispose(): void;
 }
 
@@ -47,15 +44,11 @@ export interface RawNapiSimulationHandle {
   addClock(eventId: number, period: number, initialDelay: number): void;
   schedule(eventId: number, time: number, value: number): void;
   runUntil(endTime: number): void;
-  runUntilSynced(endTime: number, input: Buffer): Buffer;
   step(): number | null;
-  stepSynced(input: Buffer): { time: number | null; buffer: Buffer };
   time(): number;
   evalComb(): void;
-  evalCombSynced(input: Buffer): Buffer;
   dump(timestamp: number): void;
-  readMemory(): Buffer;
-  writeMemory(data: Buffer, offset: number): void;
+  sharedMemory(): Uint8Array;
   dispose(): void;
 }
 
@@ -185,140 +178,22 @@ export function buildPortsFromLayout(
 }
 
 // ---------------------------------------------------------------------------
-// Memory synchronisation helpers
+// Handle wrapping — zero-copy direct operations
 // ---------------------------------------------------------------------------
 
 /**
- * One-time initial copy from native memory into a buffer.
+ * Wrap a raw NAPI simulator handle with direct (zero-copy) operations.
+ * The buffer is shared between JS and Rust — no copies per tick.
  */
-export function syncFromNative(
-  raw: { readMemory(): Buffer },
-  buf: ArrayBuffer | SharedArrayBuffer,
-): void {
-  const nativeBuf = raw.readMemory();
-  const target = new Uint8Array(buf);
-  target.set(nativeBuf);
-}
-
-function copyResultToBuffer(
-  result: Buffer,
-  buf: ArrayBuffer | SharedArrayBuffer,
-): void {
-  const target = new Uint8Array(buf);
-  target.set(result);
-}
-
-// ---------------------------------------------------------------------------
-// Handle wrapping — synced operations (1 NAPI call + 2 copies)
-// ---------------------------------------------------------------------------
-
-/**
- * Wrap a raw NAPI simulator handle to use synced operations.
- * Sends the buffer contents as a Buffer argument, receives updated Buffer back.
- */
-export function wrapSimulatorHandle(
+export function wrapDirectSimulatorHandle(
   raw: RawNapiSimulatorHandle,
-  buf: ArrayBuffer | SharedArrayBuffer,
-  _stableSize: number,
 ): NativeSimulatorHandle {
   return {
     tick(eventId: number): void {
-      const input = Buffer.from(buf);
-      const result = raw.tickSynced(eventId, input);
-      copyResultToBuffer(result, buf);
-    },
-    evalComb(): void {
-      const input = Buffer.from(buf);
-      const result = raw.evalCombSynced(input);
-      copyResultToBuffer(result, buf);
-    },
-    dump(timestamp: number): void {
-      raw.dump(timestamp);
-    },
-    dispose(): void {
-      raw.dispose();
-    },
-  };
-}
-
-/**
- * Wrap a raw NAPI simulation handle to use synced operations.
- */
-export function wrapSimulationHandle(
-  raw: RawNapiSimulationHandle,
-  buf: ArrayBuffer | SharedArrayBuffer,
-  _stableSize: number,
-): NativeSimulationHandle {
-  return {
-    addClock(eventId: number, period: number, initialDelay: number): void {
-      raw.addClock(eventId, period, initialDelay);
-    },
-    schedule(eventId: number, time: number, value: number): void {
-      raw.schedule(eventId, time, value);
-    },
-    runUntil(endTime: number): void {
-      const input = Buffer.from(buf);
-      const result = raw.runUntilSynced(endTime, input);
-      copyResultToBuffer(result, buf);
-    },
-    step(): number | null {
-      const input = Buffer.from(buf);
-      const r = raw.stepSynced(input);
-      copyResultToBuffer(r.buffer, buf);
-      return r.time;
-    },
-    time(): number {
-      return raw.time();
-    },
-    evalComb(): void {
-      const input = Buffer.from(buf);
-      const result = raw.evalCombSynced(input);
-      copyResultToBuffer(result, buf);
-    },
-    dump(timestamp: number): void {
-      raw.dump(timestamp);
-    },
-    dispose(): void {
-      raw.dispose();
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Legacy bridge helpers — used by napi-bridge.ts for backward compat
-// ---------------------------------------------------------------------------
-
-function copyNativeToShared(
-  nativeHandle: { readMemory(): Buffer },
-  sab: SharedArrayBuffer,
-): void {
-  const nativeBuf = nativeHandle.readMemory();
-  const target = new Uint8Array(sab);
-  target.set(nativeBuf);
-}
-
-function copySharedToNative(
-  sab: SharedArrayBuffer,
-  nativeHandle: { writeMemory(data: Buffer, offset: number): void },
-): void {
-  const src = Buffer.from(sab);
-  nativeHandle.writeMemory(src, 0);
-}
-
-function bridgeSimulatorHandle(
-  raw: RawNapiSimulatorHandle,
-  sab: SharedArrayBuffer,
-): NativeSimulatorHandle {
-  return {
-    tick(eventId: number): void {
-      copySharedToNative(sab, raw);
       raw.tick(eventId);
-      copyNativeToShared(raw, sab);
     },
     evalComb(): void {
-      copySharedToNative(sab, raw);
       raw.evalComb();
-      copyNativeToShared(raw, sab);
     },
     dump(timestamp: number): void {
       raw.dump(timestamp);
@@ -329,9 +204,11 @@ function bridgeSimulatorHandle(
   };
 }
 
-function bridgeSimulationHandle(
+/**
+ * Wrap a raw NAPI simulation handle with direct (zero-copy) operations.
+ */
+export function wrapDirectSimulationHandle(
   raw: RawNapiSimulationHandle,
-  sab: SharedArrayBuffer,
 ): NativeSimulationHandle {
   return {
     addClock(eventId: number, period: number, initialDelay: number): void {
@@ -341,23 +218,16 @@ function bridgeSimulationHandle(
       raw.schedule(eventId, time, value);
     },
     runUntil(endTime: number): void {
-      copySharedToNative(sab, raw);
       raw.runUntil(endTime);
-      copyNativeToShared(raw, sab);
     },
     step(): number | null {
-      copySharedToNative(sab, raw);
-      const t = raw.step();
-      copyNativeToShared(raw, sab);
-      return t;
+      return raw.step();
     },
     time(): number {
       return raw.time();
     },
     evalComb(): void {
-      copySharedToNative(sab, raw);
       raw.evalComb();
-      copyNativeToShared(raw, sab);
     },
     dump(timestamp: number): void {
       raw.dump(timestamp);
@@ -369,7 +239,7 @@ function bridgeSimulationHandle(
 }
 
 // ---------------------------------------------------------------------------
-// Simulator bridge (backward compat — used by Simulator.create())
+// Legacy layout parser (used by bridge helpers)
 // ---------------------------------------------------------------------------
 
 function parseLegacyLayout(json: string): Record<string, SignalLayout> {
@@ -387,6 +257,10 @@ function parseLegacyLayout(json: string): Record<string, SignalLayout> {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Simulator bridge (used by Simulator.create())
+// ---------------------------------------------------------------------------
+
 /**
  * Create a `NativeCreateFn` from a raw NAPI addon, suitable for
  * `Simulator.create(module, { __nativeCreate: ... })`.
@@ -401,14 +275,11 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 
     const layout = parseLegacyLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
-    const stableSize = raw.stableSize;
 
-    const sab = new SharedArrayBuffer(stableSize);
-    copyNativeToShared(raw, sab);
+    const buf = raw.sharedMemory().buffer;
+    const handle = wrapDirectSimulatorHandle(raw);
 
-    const handle = bridgeSimulatorHandle(raw, sab);
-
-    return { buffer: sab, layout, events, handle };
+    return { buffer: buf, layout, events, handle };
   };
 }
 
@@ -426,13 +297,10 @@ export function createSimulationBridge(addon: RawNapiAddon): NativeCreateSimulat
 
     const layout = parseLegacyLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
-    const stableSize = raw.stableSize;
 
-    const sab = new SharedArrayBuffer(stableSize);
-    copyNativeToShared(raw, sab);
+    const buf = raw.sharedMemory().buffer;
+    const handle = wrapDirectSimulationHandle(raw);
 
-    const handle = bridgeSimulationHandle(raw, sab);
-
-    return { buffer: sab, layout, events, handle };
+    return { buffer: buf, layout, events, handle };
   };
 }
