@@ -124,8 +124,6 @@ export interface EventHandle {
 
 /** Sentinel representing all-X. */
 export const X = Symbol.for("veryl:X");
-/** Sentinel representing all-Z. */
-export const Z = Symbol.for("veryl:Z");
 
 /** A 4-state value with explicit bit-level mask. */
 export interface FourStateValue {

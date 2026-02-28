@@ -21,7 +21,7 @@ export type {
 } from "./types.js";
 
 // 4-state helpers
-export { X, Z, FourState, isFourStateValue } from "./types.js";
+export { X, FourState, isFourStateValue } from "./types.js";
 
 // Simulator (event-based)
 export { Simulator } from "./simulator.js";
