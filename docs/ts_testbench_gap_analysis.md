@@ -28,20 +28,9 @@
 
 ## 機能ギャップ一覧
 
-### 1. VCD 波形出力が TS から設定不可 [Bug]
+### ~~1. VCD 波形出力が TS から設定不可~~ [修正済み]
 
-**深刻度**: 高 — ビジョンで明示された機能が動作しない
-
-`SimulatorOptions.vcd` は TypeScript の型定義に存在するが、NAPI 層に渡されていない。Rust の `SimulatorBuilder.vcd(path)` は正しく動作するが、接続が欠落している。
-
-```
-packages/celox/src/types.ts:123   — vcd?: string  (定義あり)
-crates/celox-napi/src/lib.rs:15   — NapiOptions { four_state }  (vcd フィールドなし)
-```
-
-**現状**: `dump(timestamp)` メソッドは NAPI に公開されているが、VCD Writer の初期化 (`builder.vcd(path)`) が呼ばれないため、`dump()` を呼んでも何も書き出されない。
-
-**修正方針**: `NapiOptions` に `vcd: Option<String>` を追加し、`apply_options` で `builder.vcd()` を呼ぶ。
+`NapiOptions` に `vcd: Option<String>` を追加し、全コンストラクタ/ファクトリで `builder.vcd(path)` に接続。TS 側の `fromSource` / `fromProject` / ブリッジ関数からも `vcd` オプションが NAPI に渡されるようになった。
 
 ---
 
@@ -54,12 +43,12 @@ crates/celox-napi/src/lib.rs:15   — NapiOptions { four_state }  (vcd フィー
 | **`build_with_trace()`** | `builder.build_with_trace()` | 未公開 | 未公開 | コンパイルトレース結果を取得 |
 | **`false_loop(from, to)`** | `builder.false_loop(...)` | 未公開 | 未公開 | 偽の組み合わせループを break |
 | **`true_loop(from, to, max_iter)`** | `builder.true_loop(...)` | 未公開 | 未公開 | 真のループに収束上限を設定 |
-| **`next_event_time()`** | `Simulation::next_event_time()` | 未公開 | 未公開 | 次イベントの時刻を先読み |
+| ~~**`next_event_time()`**~~ | `Simulation::next_event_time()` | **公開済み** | **公開済み** | `sim.nextEventTime()` で利用可能 |
 | **`get_four_state(signal)`** | `Simulator::get_four_state()` | 未公開 | 未公開 | DUT getter は値のみ返す。マスク読み取りは低レベル buffer 操作が必要 |
 
 #### 優先度判定
 
-- **高**: `next_event_time()` — テストベンチでの時間制御に有用
+- ~~**高**: `next_event_time()` — テストベンチでの時間制御に有用~~ (実装済み)
 - **中**: `optimize`, `false_loop`, `true_loop` — パワーユーザー向け
 - **低**: `TraceOptions` / `build_with_trace` — 開発者デバッグ用
 
@@ -181,10 +170,10 @@ dut.rst = 0;
 
 ## 推奨実装ロードマップ
 
-### Phase 3a: 即時対応 (既存コードの接続・小規模変更)
+### ~~Phase 3a: 即時対応 (既存コードの接続・小規模変更)~~ [完了]
 
-1. **VCD 出力修正** — `NapiOptions` に `vcd` フィールド追加、builder に接続
-2. **`next_event_time()` 公開** — NAPI メソッド追加のみ
+1. ~~**VCD 出力修正** — `NapiOptions` に `vcd` フィールド追加、builder に接続~~ ✅
+2. ~~**`next_event_time()` 公開** — NAPI メソッド追加のみ~~ ✅
 
 ### Phase 3b: テストベンチ体験の向上
 

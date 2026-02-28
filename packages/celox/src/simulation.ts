@@ -124,8 +124,10 @@ export class Simulation<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulation<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const napiOpts = options?.fourState ? { fourState: options.fourState } : undefined;
-    const raw = new addon.NativeSimulationHandle(source, top, napiOpts);
+    const napiOpts: Record<string, unknown> = {};
+    if (options?.fourState) napiOpts.fourState = options.fourState;
+    if (options?.vcd) napiOpts.vcd = options.vcd;
+    const raw = new addon.NativeSimulationHandle(source, top, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -159,8 +161,10 @@ export class Simulation<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulation<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const napiOpts = options?.fourState ? { fourState: options.fourState } : undefined;
-    const raw = addon.NativeSimulationHandle.fromProject(projectPath, top, napiOpts);
+    const napiOpts: Record<string, unknown> = {};
+    if (options?.fourState) napiOpts.fourState = options.fourState;
+    if (options?.vcd) napiOpts.vcd = options.vcd;
+    const raw = addon.NativeSimulationHandle.fromProject(projectPath, top, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -235,6 +239,16 @@ export class Simulation<P = Record<string, unknown>> {
   time(): number {
     this.ensureAlive();
     return this._handle.time();
+  }
+
+  /**
+   * Peek at the time of the next scheduled event without advancing.
+   *
+   * @returns The time of the next event, or `null` if no events are scheduled.
+   */
+  nextEventTime(): number | null {
+    this.ensureAlive();
+    return this._handle.nextEventTime();
   }
 
   /** Write current signal values to VCD at the given timestamp. */

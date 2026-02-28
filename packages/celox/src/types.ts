@@ -86,6 +86,7 @@ export interface NativeSimulationHandle {
   runUntil(endTime: number): void;
   step(): number | null;
   time(): number;
+  nextEventTime(): number | null;
   evalComb(): void;
   dump(timestamp: number): void;
   dispose(): void;

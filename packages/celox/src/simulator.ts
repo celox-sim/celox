@@ -133,8 +133,10 @@ export class Simulator<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulator<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const napiOpts = options?.fourState ? { fourState: options.fourState } : undefined;
-    const raw = new addon.NativeSimulatorHandle(source, top, napiOpts);
+    const napiOpts: Record<string, unknown> = {};
+    if (options?.fourState) napiOpts.fourState = options.fourState;
+    if (options?.vcd) napiOpts.vcd = options.vcd;
+    const raw = new addon.NativeSimulatorHandle(source, top, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -167,8 +169,10 @@ export class Simulator<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulator<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const napiOpts = options?.fourState ? { fourState: options.fourState } : undefined;
-    const raw = addon.NativeSimulatorHandle.fromProject(projectPath, top, napiOpts);
+    const napiOpts: Record<string, unknown> = {};
+    if (options?.fourState) napiOpts.fourState = options.fourState;
+    if (options?.vcd) napiOpts.vcd = options.vcd;
+    const raw = addon.NativeSimulatorHandle.fromProject(projectPath, top, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);

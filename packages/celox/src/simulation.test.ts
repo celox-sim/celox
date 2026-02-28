@@ -53,6 +53,7 @@ function createMockNative(): {
       return currentTime;
     }),
     time: vi.fn().mockImplementation(() => currentTime),
+    nextEventTime: vi.fn().mockReturnValue(null),
     evalComb: vi.fn().mockImplementation(() => {
       const view = new DataView(buffer);
       view.setUint8(4, view.getUint8(2));

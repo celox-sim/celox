@@ -14,14 +14,27 @@ use layout::{build_event_map, build_signal_layout};
 #[napi(object)]
 pub struct NapiOptions {
     pub four_state: Option<bool>,
+    pub vcd: Option<String>,
+}
+
+/// Parsed builder options from NapiOptions.
+struct ParsedOptions {
+    four_state: bool,
+    vcd: Option<String>,
 }
 
 /// Helper to extract the builder config from NapiOptions.
-fn apply_options(options: &Option<NapiOptions>) -> bool {
-    options
-        .as_ref()
-        .and_then(|o| o.four_state)
-        .unwrap_or(false)
+fn parse_options(options: &Option<NapiOptions>) -> ParsedOptions {
+    match options.as_ref() {
+        Some(o) => ParsedOptions {
+            four_state: o.four_state.unwrap_or(false),
+            vcd: o.vcd.clone(),
+        },
+        None => ParsedOptions {
+            four_state: false,
+            vcd: None,
+        },
+    }
 }
 
 /// Load a Veryl project's source files and metadata from a directory.
@@ -63,9 +76,13 @@ impl NativeSimulatorHandle {
     /// Create a new simulator from Veryl source code.
     #[napi(constructor)]
     pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
-        let four_state = apply_options(&options);
-        let sim = celox::Simulator::builder(&code, &top)
-            .four_state(four_state)
+        let opts = parse_options(&options);
+        let mut builder = celox::Simulator::builder(&code, &top)
+            .four_state(opts.four_state);
+        if let Some(path) = &opts.vcd {
+            builder = builder.vcd(path);
+        }
+        let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -74,7 +91,7 @@ impl NativeSimulatorHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
-        let layout_map = build_signal_layout(&signals, four_state);
+        let layout_map = build_signal_layout(&signals, opts.four_state);
         let event_map = build_event_map(&events);
 
         let layout_json = serde_json::to_string(&layout_map)
@@ -98,12 +115,16 @@ impl NativeSimulatorHandle {
     /// clock/reset settings.
     #[napi(factory)]
     pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
-        let four_state = apply_options(&options);
+        let opts = parse_options(&options);
         let (source, metadata) = load_project_source(&project_path)?;
 
-        let sim = celox::Simulator::builder(&source, &top)
+        let mut builder = celox::Simulator::builder(&source, &top)
             .with_metadata(metadata)
-            .four_state(four_state)
+            .four_state(opts.four_state);
+        if let Some(path) = &opts.vcd {
+            builder = builder.vcd(path);
+        }
+        let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -112,7 +133,7 @@ impl NativeSimulatorHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
-        let layout_map = build_signal_layout(&signals, four_state);
+        let layout_map = build_signal_layout(&signals, opts.four_state);
         let event_map = build_event_map(&events);
 
         let layout_json = serde_json::to_string(&layout_map)
@@ -232,9 +253,13 @@ impl NativeSimulationHandle {
     /// Create a new timed simulation from Veryl source code.
     #[napi(constructor)]
     pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
-        let four_state = apply_options(&options);
-        let sim = celox::Simulation::builder(&code, &top)
-            .four_state(four_state)
+        let opts = parse_options(&options);
+        let mut builder = celox::Simulation::builder(&code, &top)
+            .four_state(opts.four_state);
+        if let Some(path) = &opts.vcd {
+            builder = builder.vcd(path);
+        }
+        let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -243,7 +268,7 @@ impl NativeSimulationHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
-        let layout_map = build_signal_layout(&signals, four_state);
+        let layout_map = build_signal_layout(&signals, opts.four_state);
         let event_map = build_event_map(&events);
 
         let layout_json = serde_json::to_string(&layout_map)
@@ -263,12 +288,16 @@ impl NativeSimulationHandle {
     /// Create a new timed simulation from a Veryl project directory.
     #[napi(factory)]
     pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
-        let four_state = apply_options(&options);
+        let opts = parse_options(&options);
         let (source, metadata) = load_project_source(&project_path)?;
 
-        let sim = celox::Simulation::builder(&source, &top)
+        let mut builder = celox::Simulation::builder(&source, &top)
             .with_metadata(metadata)
-            .four_state(four_state)
+            .four_state(opts.four_state);
+        if let Some(path) = &opts.vcd {
+            builder = builder.vcd(path);
+        }
+        let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -277,7 +306,7 @@ impl NativeSimulationHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
-        let layout_map = build_signal_layout(&signals, four_state);
+        let layout_map = build_signal_layout(&signals, opts.four_state);
         let event_map = build_event_map(&events);
 
         let layout_json = serde_json::to_string(&layout_map)
@@ -371,6 +400,16 @@ impl NativeSimulationHandle {
             .as_ref()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
         Ok(sim.time() as f64)
+    }
+
+    /// Returns the time of the next scheduled event, or null if none.
+    #[napi]
+    pub fn next_event_time(&self) -> Result<Option<f64>> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        Ok(sim.next_event_time().map(|t| t as f64))
     }
 
     /// Evaluate combinational logic.
