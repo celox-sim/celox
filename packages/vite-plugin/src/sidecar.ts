@@ -1,5 +1,5 @@
 import { writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
-import { join, resolve, dirname, relative } from "node:path";
+import { join, resolve, dirname, relative, isAbsolute } from "node:path";
 import type { GenTsJsonOutput } from "./types.js";
 
 /** Default directory (relative to project root) for generated sidecar files. */
@@ -28,6 +28,10 @@ export function generateSidecars(
     if (!existsSync(verylPath)) continue;
 
     const rel = relative(root, verylPath);
+    // Skip files outside the project root (e.g. standard library from global
+    // cache).  On Windows, relative() across different drives returns an
+    // absolute path; on all platforms, paths outside root start with "..".
+    if (isAbsolute(rel) || rel.startsWith("..")) continue;
     const sidecarPath = sidecarPathFor(join(outDir, rel));
 
     const modules = moduleNames

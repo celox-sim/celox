@@ -28,8 +28,12 @@ jobs:
         run: cargo test
 
   js:
-    name: JS Build & Test
-    runs-on: ubuntu-latest
+    name: JS Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:
