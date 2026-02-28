@@ -204,7 +204,7 @@ fn type_info_str(info: TypeInfo) -> &'static str {
 fn generate_dts(module_name: &str, ports: &[PortInfo]) -> String {
     let mut out = String::new();
 
-    out.push_str("import type { ModuleDefinition } from \"@veryl-lang/simulator\";\n\n");
+    out.push_str("import type { ModuleDefinition } from \"@celox-sim/celox\";\n\n");
 
     // Ports interface — exclude clock ports (they go to events)
     out.push_str(&format!("export interface {}Ports {{\n", module_name));

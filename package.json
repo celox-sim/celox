@@ -2,6 +2,12 @@
   "private": true,
   "scripts": {
     "build": "pnpm -r build",
-    "test": "pnpm -r test"
+    "test": "PATH=\"$PWD/target/debug:$PATH\" pnpm -r test"
+  },
+  "pnpm": {
+    "overrides": {
+      "@celox-sim/celox": "workspace:*",
+      "@celox-sim/vite-plugin": "workspace:*"
+    }
   }
 }

@@ -1,5 +1,5 @@
 import { writeFileSync, unlinkSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import type { GenTsJsonOutput } from "./types.js";
 
 /**
@@ -15,7 +15,10 @@ export function generateSidecars(
   const written: string[] = [];
 
   for (const [sourceFile, moduleNames] of Object.entries(data.fileModules)) {
-    const verylPath = join(projectRoot, sourceFile);
+    const verylPath = resolve(projectRoot, sourceFile);
+    // Skip files that don't exist on disk (e.g. standard library paths
+    // reported with a stripped leading "/" by celox-gen-ts)
+    if (!existsSync(verylPath)) continue;
     const sidecarPath = sidecarPathFor(verylPath);
 
     const modules = moduleNames

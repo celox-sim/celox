@@ -10,6 +10,9 @@ node_modules/
 # TypeScript
 dist/
 
+# Generated Veryl type sidecars
+*.d.veryl.ts
+
 # IDE
 .vscode/
 .idea/
