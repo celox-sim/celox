@@ -19,6 +19,7 @@ export default defineConfig({
         nav: [
           { text: "ガイド", link: "/ja/guide/introduction" },
           { text: "内部構造", link: "/internals/architecture" },
+          { text: "ベンチマーク", link: "/ja/benchmarks/" },
           {
             text: "GitHub",
             link: "https://github.com/celox-sim/celox",
@@ -39,7 +40,6 @@ export default defineConfig({
                   text: "4 値シミュレーション",
                   link: "/ja/guide/four-state",
                 },
-                { text: "ベンチマーク", link: "/ja/guide/benchmarks" },
               ],
             },
           ],
@@ -52,6 +52,7 @@ export default defineConfig({
     nav: [
       { text: "Guide", link: "/guide/introduction" },
       { text: "Internals", link: "/internals/architecture" },
+      { text: "Benchmarks", link: "/benchmarks/" },
       {
         text: "GitHub",
         link: "https://github.com/celox-sim/celox",
@@ -67,7 +68,6 @@ export default defineConfig({
             { text: "Getting Started", link: "/guide/getting-started" },
             { text: "Writing Tests", link: "/guide/writing-tests" },
             { text: "4-State Simulation", link: "/guide/four-state" },
-            { text: "Benchmarks", link: "/guide/benchmarks" },
           ],
         },
       ],
