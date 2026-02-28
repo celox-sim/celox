@@ -16,7 +16,10 @@ pub struct SignalLayout {
 }
 
 /// Build a map of signal name -> layout info from named signals.
-pub fn build_signal_layout(signals: &[NamedSignal]) -> HashMap<String, SignalLayout> {
+///
+/// `four_state_mode`: whether the simulator is running in 4-state mode.
+/// When false, `is_4state` is always reported as false (no mask space exists).
+pub fn build_signal_layout(signals: &[NamedSignal], four_state_mode: bool) -> HashMap<String, SignalLayout> {
     let mut map = HashMap::new();
     for ns in signals {
         let direction = match ns.info.var_kind {
@@ -46,7 +49,7 @@ pub fn build_signal_layout(signals: &[NamedSignal]) -> HashMap<String, SignalLay
                 offset: ns.signal.offset,
                 width,
                 byte_size: get_byte_size(width),
-                is_4state: ns.signal.is_4state,
+                is_4state: four_state_mode && ns.signal.is_4state,
                 direction,
                 type_kind,
                 array_dims,
