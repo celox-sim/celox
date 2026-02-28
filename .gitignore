@@ -1,0 +1,19 @@
+# Rust
+target/
+Cargo.lock
+
+# Node
+node_modules/
+.pnpm-store/
+*.node
+.pnpm-buildscripts.json
+
+# TypeScript
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

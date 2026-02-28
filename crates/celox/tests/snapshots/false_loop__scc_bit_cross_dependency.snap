@@ -1,0 +1,110 @@
+---
+source: crates/celox/tests/false_loop.rs
+assertion_line: 449
+expression: sir_output
+---
+=== Evaluation Flip-Flops (eval_apply_ffs) ===
+
+=== Evaluation Flip-Flops (eval_only_ffs) ===
+
+=== Application Flip-Flops (apply_ffs) ===
+
+=== Evaluation Combinational Logic (eval_comb) ===
+Execution Unit 0:
+  Entry Block: 0
+  Registers:
+    r0: logic<1>
+    r1: logic<1>
+    r2: logic<1>
+    r3: logic<1>
+    r4: bit<64>
+    r5: logic<1>
+    r6: bit<1>
+    r7: logic<1>
+    r8: logic<1>
+    r9: logic<1>
+    r10: logic<1>
+    r11: bit<64>
+    r12: logic<1>
+    r13: bit<1>
+    r14: logic<1>
+    r15: logic<1>
+    r16: logic<1>
+    r17: logic<1>
+    r18: bit<64>
+    r19: logic<1>
+    r20: bit<1>
+    r21: logic<1>
+    r22: logic<1>
+    r23: logic<1>
+    r24: logic<1>
+    r25: bit<64>
+    r26: logic<1>
+    r27: bit<1>
+    r28: logic<1>
+    r29: logic<2>
+    r30: bit<64>
+    r31: logic<2>
+    r32: bit<2>
+    r33: logic<2>
+  b0:
+    r0 = Load(addr=sel (region=0), offset=0, bits=1)
+    Branch(r0 ? b1 : b2)
+  b1:
+    r2 = Load(addr=v (region=0), offset=0, bits=1)
+    Jump(b3 [r2])
+  b2:
+    r3 = Load(addr=i (region=0), offset=1, bits=1)
+    Jump(b3 [r3])
+  b3:
+    r4 = SIRValue(0x0)
+    r5 = r1 Shr r4
+    r6 = SIRValue(0x1)
+    r7 = r5 And r6
+    Store(addr=v (region=0), offset=1, bits=1, src_reg = 7)
+    Branch(r0 ? b4 : b5)
+  b4:
+    r9 = Load(addr=i (region=0), offset=0, bits=1)
+    Jump(b6 [r9])
+  b5:
+    r10 = Load(addr=v (region=0), offset=1, bits=1)
+    Jump(b6 [r10])
+  b6:
+    r11 = SIRValue(0x0)
+    r12 = r8 Shr r11
+    r13 = SIRValue(0x1)
+    r14 = r12 And r13
+    Store(addr=v (region=0), offset=0, bits=1, src_reg = 14)
+    Branch(r0 ? b7 : b8)
+  b7:
+    r16 = Load(addr=v (region=0), offset=0, bits=1)
+    Jump(b9 [r16])
+  b8:
+    r17 = Load(addr=i (region=0), offset=1, bits=1)
+    Jump(b9 [r17])
+  b9:
+    r18 = SIRValue(0x0)
+    r19 = r15 Shr r18
+    r20 = SIRValue(0x1)
+    r21 = r19 And r20
+    Store(addr=v (region=0), offset=1, bits=1, src_reg = 21)
+    Branch(r0 ? b10 : b11)
+  b10:
+    r23 = Load(addr=i (region=0), offset=0, bits=1)
+    Jump(b12 [r23])
+  b11:
+    r24 = Load(addr=v (region=0), offset=1, bits=1)
+    Jump(b12 [r24])
+  b12:
+    r25 = SIRValue(0x0)
+    r26 = r22 Shr r25
+    r27 = SIRValue(0x1)
+    r28 = r26 And r27
+    Store(addr=v (region=0), offset=0, bits=1, src_reg = 28)
+    r29 = Load(addr=v (region=0), offset=0, bits=2)
+    r30 = SIRValue(0x0)
+    r31 = r29 Shr r30
+    r32 = SIRValue(0x3)
+    r33 = r31 And r32
+    Store(addr=o (region=0), offset=0, bits=2, src_reg = 33)
+    Return

@@ -1,0 +1,24 @@
+[package]
+name                  = "celox-napi"
+version               = "0.18.0"
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description.workspace = true
+edition.workspace     = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi              = { version = "3", features = ["napi8", "serde-json"] }
+napi-derive       = "3"
+celox             = { version = "0.18.0", path = "../celox" }
+veryl-analyzer    = { workspace = true }
+veryl-metadata    = { workspace = true }
+veryl-parser      = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

@@ -1,0 +1,98 @@
+---
+source: crates/celox/tests/data_access.rs
+assertion_line: 242
+expression: output
+---
+=== Evaluation Flip-Flops (eval_apply_ffs) ===
+
+=== Evaluation Flip-Flops (eval_only_ffs) ===
+
+=== Application Flip-Flops (apply_ffs) ===
+
+=== Evaluation Combinational Logic (eval_comb) ===
+Execution Unit 0:
+  Entry Block: 0
+  Registers:
+    r0: bit<8>
+    r1: bit<64>
+    r2: logic<8>
+    r3: bit<8>
+    r4: logic<8>
+    r5: bit<8>
+    r6: bit<64>
+    r7: logic<8>
+    r8: bit<8>
+    r9: logic<8>
+    r10: bit<8>
+    r11: bit<64>
+    r12: logic<8>
+    r13: bit<8>
+    r14: logic<8>
+    r15: bit<8>
+    r16: bit<64>
+    r17: logic<8>
+    r18: bit<8>
+    r19: logic<8>
+    r20: logic<32>
+    r21: bit<64>
+    r22: logic<2>
+    r23: bit<6>
+    r24: bit<64>
+    r25: logic<8>
+    r26: logic<8>
+    r27: bit<64>
+    r28: bit<64>
+    r29: bit<64>
+    r30: bit<64>
+    r31: logic<8>
+    r32: bit<8>
+    r33: logic<8>
+    r34: bit<64>
+    r35: logic<8>
+    r36: bit<8>
+    r37: logic<8>
+  b0:
+    r22 = Load(addr=i (region=0), offset=0, bits=2)
+    r0 = SIRValue(0xdd)
+    r1 = SIRValue(0x0)
+    r2 = r0 Shr r1
+    r3 = SIRValue(0xff)
+    r4 = r2 And r3
+    Store(addr=a (region=0), offset=24, bits=8, src_reg = 4)
+    r5 = SIRValue(0xcc)
+    r6 = SIRValue(0x0)
+    r7 = r5 Shr r6
+    r8 = SIRValue(0xff)
+    r9 = r7 And r8
+    Store(addr=a (region=0), offset=16, bits=8, src_reg = 9)
+    r10 = SIRValue(0xbb)
+    r11 = SIRValue(0x0)
+    r12 = r10 Shr r11
+    r13 = SIRValue(0xff)
+    r14 = r12 And r13
+    Store(addr=a (region=0), offset=8, bits=8, src_reg = 14)
+    r15 = SIRValue(0xaa)
+    r16 = SIRValue(0x0)
+    r17 = r15 Shr r16
+    r18 = SIRValue(0xff)
+    r19 = r17 And r18
+    Store(addr=a (region=0), offset=0, bits=8, src_reg = 19)
+    r21 = SIRValue(0x0)
+    r23 = SIRValue(0x0)
+    r24 = SIRValue(0x2)
+    r25 = r23 Shl r24
+    r26 = r22 Or r25
+    r27 = SIRValue(0x8)
+    r28 = r26 Mul r27
+    r29 = r21 Add r28
+    r20 = Load(addr=a (region=0), offset=r29, bits=32)
+    r30 = SIRValue(0x0)
+    r31 = r20 Shr r30
+    r32 = SIRValue(0xff)
+    r33 = r31 And r32
+    r34 = SIRValue(0x0)
+    r35 = r33 Shr r34
+    r36 = SIRValue(0xff)
+    r37 = r35 And r36
+    Store(addr=o (region=0), offset=0, bits=8, src_reg = 37)
+    Return

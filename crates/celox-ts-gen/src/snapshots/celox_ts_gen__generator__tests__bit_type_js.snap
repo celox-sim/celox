@@ -1,0 +1,16 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].js_content"
+---
+exports.BitModule = {
+  __celox_module: true,
+  name: "BitModule",
+  source: require("fs").readFileSync(__dirname + "/../BitModule.veryl", "utf-8"),
+  ports: {
+    clk: { direction: "input", type: "clock", width: 1, is4state: true },
+    data: { direction: "input", type: "bit", width: 8 },
+    en: { direction: "input", type: "bit", width: 1 },
+    result: { direction: "output", type: "bit", width: 8 },
+  },
+  events: ["clk"],
+};

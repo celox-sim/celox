@@ -1,0 +1,3 @@
+[submodule "deps/veryl"]
+	path = deps/veryl
+	url = https://github.com/tignear/veryl.git

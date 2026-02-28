@@ -1,0 +1,14 @@
+{
+  "name": "@celox-sim/celox-napi",
+  "version": "0.18.0",
+  "description": "Celox simulator NAPI bindings",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "celox",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "license": "MIT OR Apache-2.0"
+}

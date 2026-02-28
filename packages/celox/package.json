@@ -1,0 +1,44 @@
+{
+  "name": "@celox-sim/celox",
+  "version": "0.1.0",
+  "description": "TypeScript runtime for Celox HDL simulation",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "celox",
+    "hdl",
+    "simulator",
+    "testbench",
+    "hardware"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "vitest": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

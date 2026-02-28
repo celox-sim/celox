@@ -1,0 +1,131 @@
+---
+source: crates/celox/tests/flip_flop.rs
+assertion_line: 917
+expression: output
+---
+=== Evaluation Flip-Flops (eval_apply_ffs) ===
+Trigger Group: clk (AbsoluteAddr(inst0, var1))
+  Execution Unit 0:
+    Entry Block: 0
+    Registers:
+      r0: logic<1>
+      r1: bit<32>
+      r2: bit<32>
+      r3: bit<32>
+      r4: bit<32>
+      r5: bit<32>
+      r6: bit<32>
+      r7: bit<32>
+      r8: bit<32>
+      r9: bit<32>
+      r10: bit<32>
+      r11: logic<32>
+      r12: bit<32>
+      r13: logic<32>
+      r14: logic<32>
+      r15: bit<32>
+      r16: logic<32>
+      r17: logic<32>
+      r18: bit<32>
+      r19: logic<32>
+      r20: logic<32>
+      r21: bit<32>
+      r22: logic<32>
+      r23: logic<32>
+      r24: bit<32>
+      r25: logic<32>
+      r26: logic<32>
+      r27: bit<32>
+      r28: logic<32>
+      r29: logic<32>
+      r30: bit<32>
+      r31: logic<32>
+      r32: logic<32>
+      r33: bit<32>
+      r34: logic<32>
+      r35: logic<32>
+      r36: bit<32>
+      r37: logic<32>
+      r38: logic<32>
+      r39: bit<32>
+      r40: logic<32>
+    b0:
+      r0 = Load(addr=rst (region=0), offset=0, bits=1)
+      Branch(r0 ? b1 : b2)
+    b1:
+      r1 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=0, bits=32, src_reg = 1)
+      r2 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=32, bits=32, src_reg = 2)
+      r3 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=64, bits=32, src_reg = 3)
+      r4 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=96, bits=32, src_reg = 4)
+      r5 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=128, bits=32, src_reg = 5)
+      r6 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=160, bits=32, src_reg = 6)
+      r7 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=192, bits=32, src_reg = 7)
+      r8 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=224, bits=32, src_reg = 8)
+      r9 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=256, bits=32, src_reg = 9)
+      r10 = SIRValue(0x0)
+      Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 10)
+      Jump(b3)
+    b2:
+      r11 = Load(addr=cnt (region=0), offset=0, bits=32)
+      r14 = Load(addr=cnt (region=0), offset=32, bits=32)
+      r17 = Load(addr=cnt (region=0), offset=64, bits=32)
+      r20 = Load(addr=cnt (region=0), offset=96, bits=32)
+      r23 = Load(addr=cnt (region=0), offset=128, bits=32)
+      r26 = Load(addr=cnt (region=0), offset=160, bits=32)
+      r29 = Load(addr=cnt (region=0), offset=192, bits=32)
+      r32 = Load(addr=cnt (region=0), offset=224, bits=32)
+      r12 = SIRValue(0x1)
+      r13 = r11 Add r12
+      Store(addr=cnt (region=0), offset=0, bits=32, src_reg = 13)
+      r35 = Load(addr=cnt (region=0), offset=256, bits=32)
+      r15 = SIRValue(0x1)
+      r16 = r14 Add r15
+      Store(addr=cnt (region=0), offset=32, bits=32, src_reg = 16)
+      r38 = Load(addr=cnt (region=0), offset=288, bits=32)
+      r18 = SIRValue(0x1)
+      r19 = r17 Add r18
+      Store(addr=cnt (region=0), offset=64, bits=32, src_reg = 19)
+      r21 = SIRValue(0x1)
+      r22 = r20 Add r21
+      Store(addr=cnt (region=0), offset=96, bits=32, src_reg = 22)
+      r24 = SIRValue(0x1)
+      r25 = r23 Add r24
+      Store(addr=cnt (region=0), offset=128, bits=32, src_reg = 25)
+      r27 = SIRValue(0x1)
+      r28 = r26 Add r27
+      Store(addr=cnt (region=0), offset=160, bits=32, src_reg = 28)
+      r30 = SIRValue(0x1)
+      r31 = r29 Add r30
+      Store(addr=cnt (region=0), offset=192, bits=32, src_reg = 31)
+      r33 = SIRValue(0x1)
+      r34 = r32 Add r33
+      Store(addr=cnt (region=0), offset=224, bits=32, src_reg = 34)
+      r36 = SIRValue(0x1)
+      r37 = r35 Add r36
+      Store(addr=cnt (region=0), offset=256, bits=32, src_reg = 37)
+      r39 = SIRValue(0x1)
+      r40 = r38 Add r39
+      Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 40)
+      Jump(b3)
+    b3:
+      Return
+
+=== Evaluation Flip-Flops (eval_only_ffs) ===
+
+=== Application Flip-Flops (apply_ffs) ===
+
+=== Evaluation Combinational Logic (eval_comb) ===
+Execution Unit 0:
+  Entry Block: 0
+  Registers:
+  b0:
+    Return

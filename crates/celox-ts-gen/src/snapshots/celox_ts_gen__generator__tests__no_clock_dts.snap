@@ -1,0 +1,13 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].dts_content"
+---
+import type { ModuleDefinition } from "@veryl-lang/simulator";
+
+export interface PureAdderPorts {
+  a: number;
+  b: number;
+  readonly sum: number;
+}
+
+export declare const PureAdder: ModuleDefinition<PureAdderPorts>;

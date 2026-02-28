@@ -1,0 +1,15 @@
+module Module04 (
+    clk: input clock,
+    rst: input reset,
+    a  : input logic<64>,
+    b  : output logic<64>,
+    c  : input logic,
+) {
+    always_ff (clk, rst) {
+        if_reset {
+            b = 0;
+        } else {
+            b = a;
+        }
+    }
+}

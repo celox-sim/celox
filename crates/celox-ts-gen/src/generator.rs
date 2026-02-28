@@ -1,0 +1,401 @@
+use serde::Serialize;
+use std::collections::HashMap;
+use veryl_analyzer::ir::{Component, Ir, TypeKind, VarKind};
+use veryl_parser::resource_table;
+
+/// A generated TypeScript module definition (`.d.ts` + `.js` content).
+#[derive(Debug, Clone)]
+pub struct GeneratedModule {
+    pub module_name: String,
+    pub dts_content: String,
+    pub js_content: String,
+    pub ports: HashMap<String, JsonPortInfo>,
+    pub events: Vec<String>,
+}
+
+/// JSON-serializable port information for `--json` output.
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonPortInfo {
+    pub direction: &'static str,
+    pub r#type: &'static str,
+    pub width: usize,
+    pub is4state: bool,
+}
+
+/// Top-level JSON output for `celox-gen-ts --json`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonOutput {
+    pub project_path: String,
+    pub modules: Vec<JsonModuleEntry>,
+    pub file_modules: HashMap<String, Vec<String>>,
+}
+
+/// Per-module entry in JSON output.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonModuleEntry {
+    pub module_name: String,
+    pub source_file: String,
+    pub dts_content: String,
+    pub ports: HashMap<String, JsonPortInfo>,
+    pub events: Vec<String>,
+}
+
+/// Generate TypeScript type definitions and JS metadata for all modules in the IR.
+pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
+    let mut result = Vec::new();
+
+    for component in &ir.components {
+        let Component::Module(module) = component else {
+            continue;
+        };
+
+        let module_name = resource_table::get_str_value(module.name)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let mut ports = Vec::new();
+
+        for (var_path, var_id) in &module.ports {
+            let variable = &module.variables[var_id];
+
+            let name = var_path
+                .0
+                .iter()
+                .map(|s| resource_table::get_str_value(*s).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(".");
+
+            let is_hierarchical = var_path.0.len() > 1;
+
+            let total_width = variable
+                .total_width()
+                .unwrap_or(1)
+                * variable.r#type.total_array().unwrap_or(1);
+
+            let type_info = classify_type(&variable.r#type.kind);
+            let direction = match variable.kind {
+                VarKind::Input => "input",
+                VarKind::Output => "output",
+                VarKind::Inout => "inout",
+                _ => continue,
+            };
+
+            let is_4state = is_4state_type(&variable.r#type.kind);
+
+            ports.push(PortInfo {
+                name,
+                direction,
+                type_info,
+                width: total_width,
+                is_4state,
+                is_output: variable.kind == VarKind::Output,
+                is_hierarchical,
+            });
+        }
+
+        // Sort ports for deterministic output
+        ports.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let dts_content = generate_dts(&module_name, &ports);
+        let js_content = generate_js(&module_name, &ports);
+
+        let json_ports: HashMap<String, JsonPortInfo> = ports
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    JsonPortInfo {
+                        direction: p.direction,
+                        r#type: type_info_str(p.type_info),
+                        width: p.width,
+                        is4state: p.is_4state,
+                    },
+                )
+            })
+            .collect();
+
+        let events: Vec<String> = ports
+            .iter()
+            .filter(|p| p.type_info == TypeInfo::Clock)
+            .map(|p| p.name.clone())
+            .collect();
+
+        result.push(GeneratedModule {
+            module_name,
+            dts_content,
+            js_content,
+            ports: json_ports,
+            events,
+        });
+    }
+
+    // Sort modules for deterministic output
+    result.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+    result
+}
+
+struct PortInfo {
+    name: String,
+    direction: &'static str,
+    type_info: TypeInfo,
+    width: usize,
+    is_4state: bool,
+    is_output: bool,
+    is_hierarchical: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TypeInfo {
+    Clock,
+    Reset,
+    Logic,
+    Bit,
+    Other,
+}
+
+fn classify_type(kind: &TypeKind) -> TypeInfo {
+    match kind {
+        TypeKind::Clock | TypeKind::ClockPosedge | TypeKind::ClockNegedge => TypeInfo::Clock,
+        TypeKind::Reset
+        | TypeKind::ResetAsyncHigh
+        | TypeKind::ResetAsyncLow
+        | TypeKind::ResetSyncHigh
+        | TypeKind::ResetSyncLow => TypeInfo::Reset,
+        TypeKind::Logic => TypeInfo::Logic,
+        TypeKind::Bit => TypeInfo::Bit,
+        _ => TypeInfo::Other,
+    }
+}
+
+fn is_4state_type(kind: &TypeKind) -> bool {
+    matches!(
+        kind,
+        TypeKind::Clock
+            | TypeKind::ClockPosedge
+            | TypeKind::ClockNegedge
+            | TypeKind::Reset
+            | TypeKind::ResetAsyncHigh
+            | TypeKind::ResetAsyncLow
+            | TypeKind::ResetSyncHigh
+            | TypeKind::ResetSyncLow
+            | TypeKind::Logic
+    )
+}
+
+fn ts_type_for_width(width: usize) -> &'static str {
+    if width <= 53 {
+        "number"
+    } else {
+        "bigint"
+    }
+}
+
+fn type_info_str(info: TypeInfo) -> &'static str {
+    match info {
+        TypeInfo::Clock => "clock",
+        TypeInfo::Reset => "reset",
+        TypeInfo::Logic => "logic",
+        TypeInfo::Bit => "bit",
+        TypeInfo::Other => "other",
+    }
+}
+
+fn generate_dts(module_name: &str, ports: &[PortInfo]) -> String {
+    let mut out = String::new();
+
+    out.push_str("import type { ModuleDefinition } from \"@veryl-lang/simulator\";\n\n");
+
+    // Ports interface — exclude clock ports (they go to events)
+    out.push_str(&format!("export interface {}Ports {{\n", module_name));
+    for port in ports {
+        if port.type_info == TypeInfo::Clock {
+            continue;
+        }
+        let ts_type = ts_type_for_width(port.width);
+        let readonly = if port.is_output { "readonly " } else { "" };
+        out.push_str(&format!("  {}{}: {};\n", readonly, port.name, ts_type));
+    }
+    out.push_str("}\n\n");
+
+    // Module definition export
+    out.push_str(&format!(
+        "export declare const {}: ModuleDefinition<{}Ports>;\n",
+        module_name, module_name
+    ));
+
+    out
+}
+
+fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "exports.{} = {{\n  __celox_module: true,\n  name: \"{}\",\n",
+        module_name, module_name
+    ));
+    out.push_str(&format!(
+        "  source: require(\"fs\").readFileSync(__dirname + \"/../{}.veryl\", \"utf-8\"),\n",
+        module_name
+    ));
+
+    // Ports object
+    out.push_str("  ports: {\n");
+    for port in ports {
+        let type_str = type_info_str(port.type_info);
+        let four_state_str = if port.is_4state { ", is4state: true" } else { "" };
+        let hierarchical_str = if port.is_hierarchical {
+            ", hierarchical: true"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "    {}: {{ direction: \"{}\", type: \"{}\", width: {}{}{} }},\n",
+            port.name, port.direction, type_str, port.width, four_state_str, hierarchical_str
+        ));
+    }
+    out.push_str("  },\n");
+
+    // Events list (clock ports)
+    let events: Vec<&str> = ports
+        .iter()
+        .filter(|p| p.type_info == TypeInfo::Clock)
+        .map(|p| p.name.as_str())
+        .collect();
+    out.push_str("  events: [");
+    for (i, ev) in events.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!("\"{}\"", ev));
+    }
+    out.push_str("],\n");
+
+    out.push_str("};\n");
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta::assert_snapshot;
+    use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
+    use veryl_metadata::Metadata;
+    use veryl_parser::Parser;
+
+    fn generate_from_source(code: &str) -> Vec<GeneratedModule> {
+        symbol_table::clear();
+        attribute_table::clear();
+
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parser = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+
+        analyzer.analyze_pass1("prj", &parser.veryl);
+        Analyzer::analyze_post_pass1();
+        analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
+        Analyzer::analyze_post_pass2();
+
+        generate_all(&ir)
+    }
+
+    #[test]
+    fn test_basic_adder() {
+        let code = r#"
+module Adder (
+    clk: input clock,
+    rst: input reset,
+    a: input logic<16>,
+    b: input logic<16>,
+    sum: output logic<17>,
+) {
+    always_comb {
+        sum = a + b;
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        assert_eq!(modules.len(), 1);
+        assert_snapshot!("basic_adder_dts", modules[0].dts_content);
+        assert_snapshot!("basic_adder_js", modules[0].js_content);
+    }
+
+    #[test]
+    fn test_wide_port_bigint() {
+        let code = r#"
+module WideAdder (
+    clk: input clock,
+    a: input logic<64>,
+    b: input logic<64>,
+    sum: output logic<65>,
+) {
+    always_comb {
+        sum = a + b;
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        assert_eq!(modules.len(), 1);
+        assert_snapshot!("wide_port_dts", modules[0].dts_content);
+        assert_snapshot!("wide_port_js", modules[0].js_content);
+    }
+
+    #[test]
+    fn test_bit_type() {
+        let code = r#"
+module BitModule (
+    clk: input clock,
+    en: input bit,
+    data: input bit<8>,
+    result: output bit<8>,
+) {
+    always_comb {
+        result = data;
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        assert_eq!(modules.len(), 1);
+        assert_snapshot!("bit_type_dts", modules[0].dts_content);
+        assert_snapshot!("bit_type_js", modules[0].js_content);
+    }
+
+    #[test]
+    fn test_output_only() {
+        let code = r#"
+module ConstGen (
+    val: output logic<8>,
+) {
+    always_comb {
+        val = 42;
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        assert_eq!(modules.len(), 1);
+        assert_snapshot!("output_only_dts", modules[0].dts_content);
+        assert_snapshot!("output_only_js", modules[0].js_content);
+    }
+
+    #[test]
+    fn test_no_clock_comb_only() {
+        let code = r#"
+module PureAdder (
+    a: input logic<8>,
+    b: input logic<8>,
+    sum: output logic<9>,
+) {
+    always_comb {
+        sum = a + b;
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        assert_eq!(modules.len(), 1);
+        assert_snapshot!("no_clock_dts", modules[0].dts_content);
+        assert_snapshot!("no_clock_js", modules[0].js_content);
+    }
+}

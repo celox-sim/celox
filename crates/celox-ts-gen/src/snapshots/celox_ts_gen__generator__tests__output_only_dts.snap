@@ -1,0 +1,11 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].dts_content"
+---
+import type { ModuleDefinition } from "@veryl-lang/simulator";
+
+export interface ConstGenPorts {
+  readonly val: number;
+}
+
+export declare const ConstGen: ModuleDefinition<ConstGenPorts>;

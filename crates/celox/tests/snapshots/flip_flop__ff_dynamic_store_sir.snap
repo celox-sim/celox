@@ -1,0 +1,35 @@
+---
+source: crates/celox/tests/flip_flop.rs
+expression: output
+---
+=== Evaluation Flip-Flops (eval_apply_ffs) ===
+Trigger Group: clk (AbsoluteAddr(inst0, var0))
+  Execution Unit 0:
+    Entry Block: 0
+    Registers:
+      r0: logic<8>
+      r1: logic<32>
+      r2: logic<2>
+      r3: bit<64>
+      r4: bit<64>
+    b0:
+      Commit(src=a (region=0), dst=a (region=1), offset=0, bits=32)
+      r0 = Load(addr=val (region=0), offset=0, bits=8)
+      r2 = Load(addr=i (region=0), offset=0, bits=2)
+      r1 = Ident r0
+      r3 = SIRValue(0x8)
+      r4 = r2 Mul r3
+      Store(addr=a (region=1), offset=r4, bits=32, src_reg = 1)
+      Commit(src=a (region=1), dst=a (region=0), offset=0, bits=32)
+      Return
+
+=== Evaluation Flip-Flops (eval_only_ffs) ===
+
+=== Application Flip-Flops (apply_ffs) ===
+
+=== Evaluation Combinational Logic (eval_comb) ===
+Execution Unit 0:
+  Entry Block: 0
+  Registers:
+  b0:
+    Return

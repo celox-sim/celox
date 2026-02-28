@@ -1,0 +1,13 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].js_content"
+---
+exports.ConstGen = {
+  __celox_module: true,
+  name: "ConstGen",
+  source: require("fs").readFileSync(__dirname + "/../ConstGen.veryl", "utf-8"),
+  ports: {
+    val: { direction: "output", type: "logic", width: 8, is4state: true },
+  },
+  events: [],
+};

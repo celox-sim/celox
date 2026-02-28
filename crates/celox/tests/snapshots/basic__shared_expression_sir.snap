@@ -1,0 +1,49 @@
+---
+source: crates/celox/tests/basic.rs
+assertion_line: 159
+expression: output
+---
+=== Evaluation Flip-Flops (eval_apply_ffs) ===
+
+=== Evaluation Flip-Flops (eval_only_ffs) ===
+
+=== Application Flip-Flops (apply_ffs) ===
+
+=== Evaluation Combinational Logic (eval_comb) ===
+Execution Unit 0:
+  Entry Block: 0
+  Registers:
+    r0: logic<32>
+    r1: logic<32>
+    r2: logic<32>
+    r3: bit<32>
+    r4: logic<32>
+    r5: bit<64>
+    r6: logic<32>
+    r7: bit<32>
+    r8: logic<32>
+    r9: bit<32>
+    r10: logic<32>
+    r11: bit<64>
+    r12: logic<32>
+    r13: bit<32>
+    r14: logic<32>
+  b0:
+    r0 = Load(addr=a (region=0), offset=0, bits=32)
+    r1 = Load(addr=b (region=0), offset=0, bits=32)
+    r2 = r0 Add r1
+    r3 = SIRValue(0x2)
+    r4 = r2 Or r3
+    r5 = SIRValue(0x0)
+    r6 = r4 Shr r5
+    r7 = SIRValue(0xffffffff)
+    r8 = r6 And r7
+    Store(addr=y (region=0), offset=0, bits=32, src_reg = 8)
+    r9 = SIRValue(0x1)
+    r10 = r2 And r9
+    r11 = SIRValue(0x0)
+    r12 = r10 Shr r11
+    r13 = SIRValue(0xffffffff)
+    r14 = r12 And r13
+    Store(addr=x (region=0), offset=0, bits=32, src_reg = 14)
+    Return

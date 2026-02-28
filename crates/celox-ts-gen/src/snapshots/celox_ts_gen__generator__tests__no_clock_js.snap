@@ -1,0 +1,15 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].js_content"
+---
+exports.PureAdder = {
+  __celox_module: true,
+  name: "PureAdder",
+  source: require("fs").readFileSync(__dirname + "/../PureAdder.veryl", "utf-8"),
+  ports: {
+    a: { direction: "input", type: "logic", width: 8, is4state: true },
+    b: { direction: "input", type: "logic", width: 8, is4state: true },
+    sum: { direction: "output", type: "logic", width: 9, is4state: true },
+  },
+  events: [],
+};

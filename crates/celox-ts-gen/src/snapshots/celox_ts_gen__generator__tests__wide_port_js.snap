@@ -1,0 +1,16 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].js_content"
+---
+exports.WideAdder = {
+  __celox_module: true,
+  name: "WideAdder",
+  source: require("fs").readFileSync(__dirname + "/../WideAdder.veryl", "utf-8"),
+  ports: {
+    a: { direction: "input", type: "logic", width: 64, is4state: true },
+    b: { direction: "input", type: "logic", width: 64, is4state: true },
+    clk: { direction: "input", type: "clock", width: 1, is4state: true },
+    sum: { direction: "output", type: "logic", width: 65, is4state: true },
+  },
+  events: ["clk"],
+};

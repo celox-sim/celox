@@ -1,0 +1,70 @@
+---
+source: crates/celox/tests/basic.rs
+assertion_line: 190
+expression: output
+---
+=== Evaluation Flip-Flops (eval_apply_ffs) ===
+
+=== Evaluation Flip-Flops (eval_only_ffs) ===
+
+=== Application Flip-Flops (apply_ffs) ===
+
+=== Evaluation Combinational Logic (eval_comb) ===
+Execution Unit 0:
+  Entry Block: 0
+  Registers:
+    r0: logic<1>
+    r1: logic<32>
+    r2: logic<32>
+    r3: logic<32>
+    r4: bit<64>
+    r5: logic<32>
+    r6: bit<32>
+    r7: logic<32>
+    r8: logic<32>
+    r9: bit<32>
+    r10: logic<32>
+    r11: bit<32>
+    r12: logic<32>
+    r13: bit<64>
+    r14: logic<32>
+    r15: bit<32>
+    r16: logic<32>
+    r17: bit<32>
+    r18: logic<32>
+    r19: bit<64>
+    r20: logic<32>
+    r21: bit<32>
+    r22: logic<32>
+  b0:
+    r0 = Load(addr=c (region=0), offset=0, bits=1)
+    Branch(r0 ? b1 : b2)
+  b1:
+    r2 = Load(addr=a (region=0), offset=0, bits=32)
+    Jump(b3 [r2])
+  b2:
+    r3 = Load(addr=b (region=0), offset=0, bits=32)
+    Jump(b3 [r3])
+  b3:
+    r4 = SIRValue(0x0)
+    r5 = r1 Shr r4
+    r6 = SIRValue(0xffffffff)
+    r7 = r5 And r6
+    Store(addr=m (region=0), offset=0, bits=32, src_reg = 7)
+    r9 = SIRValue(0x1)
+    r10 = r7 Add r9
+    r11 = SIRValue(0x2)
+    r12 = r10 Or r11
+    r13 = SIRValue(0x0)
+    r14 = r12 Shr r13
+    r15 = SIRValue(0xffffffff)
+    r16 = r14 And r15
+    Store(addr=y (region=0), offset=0, bits=32, src_reg = 16)
+    r17 = SIRValue(0x1)
+    r18 = r10 And r17
+    r19 = SIRValue(0x0)
+    r20 = r18 Shr r19
+    r21 = SIRValue(0xffffffff)
+    r22 = r20 And r21
+    Store(addr=x (region=0), offset=0, bits=32, src_reg = 22)
+    Return

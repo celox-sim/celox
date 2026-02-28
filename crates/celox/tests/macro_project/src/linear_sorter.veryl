@@ -1,0 +1,56 @@
+module SorterCell #(
+    param WIDTH: u32 = 16,
+) (
+    clk  : input  clock        ,
+    rst  : input  reset        ,
+    en   : input  logic        ,
+    i_val: input  logic<WIDTH>,
+    o_val: output logic<WIDTH>, // Value pushed to the next cell (combinational)
+    o_reg: output logic<WIDTH>, // Current stored value (registered)
+) {
+    var r_val: logic<WIDTH>;
+
+    always_ff {
+        if_reset {
+            r_val = -1 ; // Initialize with Max Value
+        } else if en {
+            if i_val <: r_val {
+                // Keep the new smaller value
+                r_val = i_val;
+            }
+        }
+    }
+
+    // Explicitly expose the internal state through a port
+    assign o_reg = r_val;
+
+    // Combinational logic: if we take i_val, push out r_val. 
+    // Otherwise, push out i_val.
+    assign o_val = if (i_val <: r_val) ? r_val : i_val;
+}
+
+module LinearSorter #(
+    param WIDTH: u32 = 16,
+    param DEPTH: u32 = 8 ,
+) (
+    clk  : input  clock               ,
+    rst  : input  reset               ,
+    en   : input  logic               ,
+    d_in : input  logic<WIDTH>        ,
+    d_out: output logic<WIDTH> [DEPTH], // Array of stored values
+) {
+    // Connection wires for the "push" chain
+    var c_val: logic<WIDTH> [DEPTH + 1];
+    assign c_val[0] = d_in;
+
+    for i in 0..DEPTH :cell {
+        inst s: SorterCell (
+            clk  ,
+            rst  ,
+            en   ,
+            i_val: c_val[i],
+            o_val: c_val[i + 1],
+            o_reg: d_out[i], // Connect each cell's stored value to the output array
+        );
+    }
+}
