@@ -30,6 +30,11 @@
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/celox-sim/celox.git",
+    "directory": "crates/celox-napi"
+  },
   "publishConfig": {
     "access": "public"
   },
