@@ -182,7 +182,7 @@ jobs:
 
       - name: Move artifacts
         working-directory: crates/celox-napi
-        run: npx napi artifacts --artifacts-dir artifacts
+        run: npx napi artifacts --build-output-dir artifacts
 
       - name: Prepublish
         working-directory: crates/celox-napi
