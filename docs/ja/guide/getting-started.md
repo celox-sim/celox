@@ -3,10 +3,11 @@
 ## 前提条件
 
 - [Node.js](https://nodejs.org/)（v18 以上）
-- [pnpm](https://pnpm.io/)
+- パッケージマネージャ（[npm](https://docs.npmjs.com/)、[pnpm](https://pnpm.io/)、[yarn](https://yarnpkg.com/) など）
+- [Rust](https://www.rust-lang.org/tools/install) ツールチェーン -- プラットフォーム向けのプリビルドネイティブアドオンがない場合に必要
 
 ::: tip スターターテンプレート
-すぐに使えるプロジェクトテンプレートが [`celox-template`](https://github.com/celox-sim/celox-template) にあります。GitHub で **Use this template** をクリックするかリポジトリをクローンして、`pnpm install && pnpm test` を実行すればすぐに始められます。
+すぐに使えるプロジェクトテンプレートが [`celox-template`](https://github.com/celox-sim/celox-template) にあります。GitHub で **Use this template** をクリックするかリポジトリをクローンして、`npm install && npm test` を実行すればすぐに始められます。
 :::
 
 ## プロジェクトのセットアップ
@@ -15,13 +16,13 @@
 
 ```bash
 mkdir my-celox-project && cd my-celox-project
-pnpm init
+npm init -y
 ```
 
 Celox と Vitest をインストールします：
 
 ```bash
-pnpm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
+npm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
 ```
 
 以下の手順を完了すると、プロジェクト構成は次のようになります：
@@ -140,7 +141,7 @@ Vite プラグインが `.veryl` ファイルを自動的に解析して TypeScr
 実行します：
 
 ```bash
-pnpm test
+npm test
 ```
 
 ## 次のステップ

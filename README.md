@@ -15,7 +15,7 @@ JIT simulator for [Veryl HDL](https://veryl-lang.org/). Compiles Veryl designs w
 A ready-to-use project template is available at [`celox-template`](https://github.com/celox-sim/celox-template).
 
 ```bash
-pnpm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
+npm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
 ```
 
 Write a Veryl module:
@@ -56,7 +56,7 @@ describe("Adder", () => {
 ```
 
 ```bash
-pnpm test
+npm test
 ```
 
 See the [Getting Started](https://celox-sim.github.io/celox/guide/getting-started) guide for full setup instructions.
@@ -68,7 +68,7 @@ See the [Getting Started](https://celox-sim.github.io/celox/guide/getting-starte
 | `crates/celox` | Core simulator (IR, JIT compilation, runtime) |
 | `crates/celox-macros` | Procedural macros |
 | `crates/celox-napi` | N-API bindings for Node.js |
-| `crates/celox-ts-gen` | CLI tool for TypeScript type generation |
+| `crates/celox-ts-gen` | TypeScript type generation library |
 | `packages/celox` | TypeScript runtime package |
 | `packages/vite-plugin` | Vite plugin for development integration |
 

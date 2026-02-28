@@ -3,10 +3,11 @@
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) (v18+)
-- [pnpm](https://pnpm.io/)
+- A package manager ([npm](https://docs.npmjs.com/), [pnpm](https://pnpm.io/), [yarn](https://yarnpkg.com/), etc.)
+- [Rust](https://www.rust-lang.org/tools/install) toolchain -- required when a prebuilt native addon is not available for your platform
 
 ::: tip Starter Template
-A ready-to-use project template is available at [`celox-template`](https://github.com/celox-sim/celox-template). Click **Use this template** on GitHub or clone the repository, then run `pnpm install && pnpm test` to get started immediately.
+A ready-to-use project template is available at [`celox-template`](https://github.com/celox-sim/celox-template). Click **Use this template** on GitHub or clone the repository, then run `npm install && npm test` to get started immediately.
 :::
 
 ## Project Setup
@@ -15,13 +16,13 @@ Create a new project directory and initialize it:
 
 ```bash
 mkdir my-celox-project && cd my-celox-project
-pnpm init
+npm init -y
 ```
 
 Install Celox and Vitest:
 
 ```bash
-pnpm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
+npm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
 ```
 
 After following the steps below, your project will look like this:
@@ -140,7 +141,7 @@ Add a test script to `package.json`:
 Then run:
 
 ```bash
-pnpm test
+npm test
 ```
 
 ## Next Steps
