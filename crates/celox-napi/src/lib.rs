@@ -475,13 +475,16 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         }
 
         let modules = generate_all(&ir);
-        let source_file = path
-            .src
-            .strip_prefix(&base_path)
-            .unwrap_or(&path.src)
-            .to_string_lossy()
+        // On Windows, metadata.paths() may return extended-length paths
+        // (\\?\...) while base_path does not have the prefix, so strip it
+        // before computing the relative source_file key.
+        let src_normalized = path.src.to_string_lossy().replace(r"\\?\", "").replace('\\', "/");
+        let base_normalized = base_path.replace('\\', "/");
+        let source_file = src_normalized
+            .strip_prefix(&base_normalized)
+            .unwrap_or(&src_normalized)
             .trim_start_matches('/')
-            .replace('\\', "/");
+            .to_string();
 
         eprintln!(
             "[celox-gen-ts] {} -> {} modules (source_file={})",
