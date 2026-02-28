@@ -2,61 +2,130 @@
 
 ## 前提条件
 
-- [Rust](https://www.rust-lang.org/tools/install)（edition 2024）
 - [Node.js](https://nodejs.org/)（v18 以上）
 - [pnpm](https://pnpm.io/)
 
-## インストール
+## プロジェクトのセットアップ
 
-サブモジュールを含めてリポジトリをクローンします：
-
-```bash
-git clone --recursive https://github.com/celox-sim/celox.git
-cd celox
-```
-
-Node.js の依存関係をインストールします：
+新しいプロジェクトディレクトリを作成して初期化します：
 
 ```bash
-pnpm install
+mkdir my-celox-project && cd my-celox-project
+pnpm init
 ```
 
-## ビルド
-
-Rust クレートをビルドします：
+Celox と Vitest をインストールします：
 
 ```bash
-cargo build
+pnpm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
 ```
 
-NAPI バインディングをビルドします（TypeScript 連携に必要）：
+### Veryl.toml
 
-```bash
-pnpm build:napi
+プロジェクトルートに `Veryl.toml` を作成します：
+
+```toml
+[project]
+name    = "my_project"
+version = "0.1.0"
+
+[build]
+clock_type = "posedge"
+reset_type = "async_low"
+sources    = ["src"]
 ```
 
-TypeScript パッケージをビルドします：
+### vitest.config.ts
 
-```bash
-pnpm build
+```typescript
+import { defineConfig } from "vitest/config";
+import celox from "@celox-sim/vite-plugin";
+
+export default defineConfig({
+  plugins: [celox()],
+});
 ```
 
-## テストの実行
+### tsconfig.json
 
-すべてのテスト（Rust + TypeScript）を実行します：
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "allowArbitraryExtensions": true,
+    "rootDirs": ["src", ".celox/src"]
+  },
+  "include": ["test", "src", ".celox/src"]
+}
+```
+
+## Veryl モジュールを書く
+
+`src/Adder.veryl` を作成します：
+
+```veryl
+module Adder (
+    clk: input clock,
+    rst: input reset,
+    a: input logic<16>,
+    b: input logic<16>,
+    sum: output logic<17>,
+) {
+    always_comb {
+        sum = a + b;
+    }
+}
+```
+
+## テストを書く
+
+`test/adder.test.ts` を作成します：
+
+```typescript
+import { describe, test, expect } from "vitest";
+import { Simulator } from "@celox-sim/celox";
+import { Adder } from "../src/Adder.veryl";
+
+describe("Adder", () => {
+  test("adds two numbers", () => {
+    const sim = Simulator.create(Adder);
+
+    sim.dut.a = 100;
+    sim.dut.b = 200;
+    sim.tick();
+    expect(sim.dut.sum).toBe(300);
+
+    sim.dispose();
+  });
+});
+```
+
+Vite プラグインが `.veryl` ファイルを自動的に解析して TypeScript の型定義を生成するため、`import { Adder } from "../src/Adder.veryl"` のインポートは完全に型付けされます。
+
+## テストを実行する
+
+`package.json` にテストスクリプトを追加します：
+
+```json
+{
+  "scripts": {
+    "test": "vitest run"
+  }
+}
+```
+
+実行します：
 
 ```bash
 pnpm test
 ```
 
-または、Rust と TypeScript のテストを個別に実行します：
-
-```bash
-pnpm test:rust    # cargo test
-pnpm test:js      # TypeScript tests
-```
-
 ## 次のステップ
 
-- [テストの書き方](./writing-tests.md) -- TypeScript テストベンチの書き方を学びます。
-- [はじめに](./introduction.md) -- プロジェクトアーキテクチャの概要。
+- [テストの書き方](./writing-tests.md) -- イベントベースとタイムベースのシミュレーションパターン。
+- [はじめに](./introduction.md) -- アーキテクチャの概要。

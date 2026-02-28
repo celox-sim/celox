@@ -1,76 +1,88 @@
 # Writing Tests
 
-Celox supports writing testbenches in TypeScript, providing type-safe access to your Veryl design signals with modern developer tooling.
+Celox provides two simulation modes: **event-based** (`Simulator`) for manual clock control, and **time-based** (`Simulation`) for automatic clock generation.
 
-## Overview
+## Event-Based Simulation
 
-The TypeScript testbench workflow consists of three parts:
-
-1. **Type Generation** -- `celox-ts-gen` generates TypeScript type definitions from your Veryl design, providing type-safe signal accessors.
-2. **NAPI Bindings** -- `celox-napi` exposes the JIT simulator runtime to Node.js via N-API with zero-copy memory sharing.
-3. **TypeScript Runtime** -- The `@celox-sim/celox` package provides the high-level API for driving simulations.
-
-## Project Setup
-
-Ensure the NAPI bindings and TypeScript packages are built:
-
-```bash
-pnpm build:napi
-pnpm build
-```
-
-## Writing a Testbench
-
-A typical testbench imports the simulator runtime and the generated types for your design:
+`Simulator` gives you direct control over clock ticks. This is useful for combinational logic or when you need fine-grained control over timing.
 
 ```typescript
+import { describe, test, expect } from "vitest";
 import { Simulator } from "@celox-sim/celox";
+import { Adder } from "../src/Adder.veryl";
 
-// Create a simulator instance for your design
-const sim = await Simulator.create("path/to/your/design.veryl");
+describe("Adder", () => {
+  test("adds two numbers", () => {
+    const sim = Simulator.create(Adder);
 
-// Access signals with type-safe accessors
-sim.dut.clk.set(0n);
-sim.dut.reset.set(1n);
+    sim.dut.a = 100;
+    sim.dut.b = 200;
+    sim.tick();
+    expect(sim.dut.sum).toBe(300);
 
-// Advance simulation
-await sim.step();
-
-// Read signal values
-const output = sim.dut.result.get();
+    sim.dispose();
+  });
+});
 ```
 
-## Clock and Reset
+- `Simulator.create(Module)` creates a simulator instance from a Veryl module definition.
+- Signal values are read and written via `sim.dut.<port>`.
+- `sim.tick()` advances the simulation by one clock cycle.
+- `sim.dispose()` frees the native resources.
 
-Drive clock and reset signals to initialize your design:
+## Time-Based Simulation
+
+`Simulation` manages clock generation for you. This is the natural choice for sequential logic with clocked flip-flops.
 
 ```typescript
-// Assert reset
-sim.dut.reset.set(1n);
-await sim.tick(5); // Hold reset for 5 clock cycles
+import { describe, test, expect } from "vitest";
+import { Simulation } from "@celox-sim/celox";
+import { Counter } from "../src/Counter.veryl";
 
-// Release reset
-sim.dut.reset.set(0n);
-await sim.tick(1);
+describe("Counter", () => {
+  test("counts up when enabled", () => {
+    const sim = Simulation.create(Counter);
+
+    sim.addClock("clk", { period: 10 });
+
+    // Assert reset
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+
+    // Release reset and enable counting
+    sim.dut.rst = 0;
+    sim.dut.en = 1;
+    sim.runUntil(100);
+
+    expect(sim.dut.count).toBeGreaterThan(0);
+    expect(sim.time()).toBe(100);
+
+    sim.dispose();
+  });
+});
 ```
+
+- `sim.addClock("clk", { period: 10 })` adds a clock with period 10 (toggles every 5 time units).
+- `sim.runUntil(t)` advances simulation time to `t`.
+- `sim.time()` returns the current simulation time.
+
+## Type-Safe Imports
+
+The Vite plugin automatically generates TypeScript type definitions for your `.veryl` files. When you write:
+
+```typescript
+import { Counter } from "../src/Counter.veryl";
+```
+
+All ports are fully typed -- you get autocompletion and compile-time checks for port names, and the correct numeric type (`number` or `bigint`) based on signal width.
 
 ## Running Tests
 
-Tests can be run with any standard Node.js test runner. The project uses Vitest:
-
 ```bash
-pnpm test:js
-```
-
-## Benchmarks
-
-To run benchmarks with a release build:
-
-```bash
-pnpm bench
+pnpm test
 ```
 
 ## Further Reading
 
-- [4-State Simulation](../internals/four-state.md) -- How X and Z values are handled.
-- [Architecture](../internals/architecture.md) -- The simulation pipeline in detail.
+- [4-State Simulation](/internals/four-state) -- How X and Z values are handled.
+- [Architecture](/internals/architecture) -- The simulation pipeline in detail.

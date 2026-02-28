@@ -2,61 +2,130 @@
 
 ## Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) (edition 2024)
 - [Node.js](https://nodejs.org/) (v18+)
 - [pnpm](https://pnpm.io/)
 
-## Installation
+## Project Setup
 
-Clone the repository with submodules:
-
-```bash
-git clone --recursive https://github.com/celox-sim/celox.git
-cd celox
-```
-
-Install Node.js dependencies:
+Create a new project directory and initialize it:
 
 ```bash
-pnpm install
+mkdir my-celox-project && cd my-celox-project
+pnpm init
 ```
 
-## Building
-
-Build the Rust crates:
+Install Celox and Vitest:
 
 ```bash
-cargo build
+pnpm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
 ```
 
-Build the NAPI bindings (required for TypeScript integration):
+### Veryl.toml
 
-```bash
-pnpm build:napi
+Create a `Veryl.toml` at the project root:
+
+```toml
+[project]
+name    = "my_project"
+version = "0.1.0"
+
+[build]
+clock_type = "posedge"
+reset_type = "async_low"
+sources    = ["src"]
 ```
 
-Build the TypeScript packages:
+### vitest.config.ts
 
-```bash
-pnpm build
+```typescript
+import { defineConfig } from "vitest/config";
+import celox from "@celox-sim/vite-plugin";
+
+export default defineConfig({
+  plugins: [celox()],
+});
 ```
 
-## Running Tests
+### tsconfig.json
 
-Run all tests (Rust + TypeScript):
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "allowArbitraryExtensions": true,
+    "rootDirs": ["src", ".celox/src"]
+  },
+  "include": ["test", "src", ".celox/src"]
+}
+```
+
+## Write a Veryl Module
+
+Create `src/Adder.veryl`:
+
+```veryl
+module Adder (
+    clk: input clock,
+    rst: input reset,
+    a: input logic<16>,
+    b: input logic<16>,
+    sum: output logic<17>,
+) {
+    always_comb {
+        sum = a + b;
+    }
+}
+```
+
+## Write a Test
+
+Create `test/adder.test.ts`:
+
+```typescript
+import { describe, test, expect } from "vitest";
+import { Simulator } from "@celox-sim/celox";
+import { Adder } from "../src/Adder.veryl";
+
+describe("Adder", () => {
+  test("adds two numbers", () => {
+    const sim = Simulator.create(Adder);
+
+    sim.dut.a = 100;
+    sim.dut.b = 200;
+    sim.tick();
+    expect(sim.dut.sum).toBe(300);
+
+    sim.dispose();
+  });
+});
+```
+
+The Vite plugin automatically analyzes your `.veryl` files and generates TypeScript type definitions, so imports like `import { Adder } from "../src/Adder.veryl"` are fully typed.
+
+## Run Tests
+
+Add a test script to `package.json`:
+
+```json
+{
+  "scripts": {
+    "test": "vitest run"
+  }
+}
+```
+
+Then run:
 
 ```bash
 pnpm test
 ```
 
-Or run Rust and TypeScript tests separately:
-
-```bash
-pnpm test:rust    # cargo test
-pnpm test:js      # TypeScript tests
-```
-
 ## Next Steps
 
-- [Writing Tests](./writing-tests.md) -- Learn how to write TypeScript testbenches.
-- [Introduction](./introduction.md) -- Overview of the project architecture.
+- [Writing Tests](./writing-tests.md) -- Event-based and time-based simulation patterns.
+- [Introduction](./introduction.md) -- Architecture overview.
