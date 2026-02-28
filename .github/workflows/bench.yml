@@ -49,7 +49,7 @@ jobs:
         run: pnpm run build
 
       - name: Run TypeScript benchmarks
-        run: pnpm --filter @celox-sim/celox bench -- --outputJson ts-output.json
+        run: pnpm --filter @celox-sim/celox bench --outputJson ts-output.json
 
       - name: Convert TypeScript benchmark output
         run: node scripts/convert-bench.mjs packages/celox/ts-output.json ts-converted.json

@@ -19,22 +19,19 @@ const raw = JSON.parse(readFileSync(inputPath, "utf8"));
 
 const results = [];
 
-for (const file of raw.testResults ?? []) {
-  for (const suite of file.children ?? []) {
-    for (const task of suite.children ?? []) {
-      const r = task.result?.benchmark;
-      if (!r) continue;
-
-      // r.mean is in seconds — convert to milliseconds
-      const meanMs = r.mean * 1000;
-      const rme = r.rme ?? 0;
+for (const file of raw.files ?? []) {
+  for (const group of file.groups ?? []) {
+    for (const bench of group.benchmarks ?? []) {
+      // bench.mean is in milliseconds
+      const meanMs = bench.mean;
+      const rme = bench.rme ?? 0;
 
       results.push({
-        name: `ts/${task.name}`,
+        name: `ts/${bench.name}`,
         unit: "ms",
         value: meanMs,
         range: `± ${rme.toFixed(1)}%`,
-        extra: `${r.samples} samples`,
+        extra: `${bench.sampleCount} samples`,
       });
     }
   }
