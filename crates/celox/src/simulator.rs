@@ -93,7 +93,7 @@ impl Simulator {
         if self.dirty {
             self.backend.eval_comb()?;
         }
-        self.backend.eval_ff_at(event)?;
+        self.backend.eval_apply_ff_at(event)?;
         self.backend.eval_comb()?;
         self.dirty = false;
         Ok(())

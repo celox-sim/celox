@@ -290,7 +290,7 @@ impl Simulation {
                             any_new_outer_loop_trigger = true;
 
                             // Directly execute eval + apply
-                            self.simulator.backend.eval_ff_at(ev)?;
+                            self.simulator.backend.eval_apply_ff_at(ev)?;
 
                             // The FF has been applied. We do NOT add it to `newly_triggered`
                             // because it's already committed. We just break the inner loop
@@ -316,8 +316,8 @@ impl Simulation {
                             self.simulator.backend.eval_only_ff_at(ev)?;
                         } else if let Some(ev) = info.eval_ff_event {
                             // If this domain wasn't split into eval/apply, we can safely use the
-                            // unified eval_ff_at since no cascade optimizations applied to it.
-                            self.simulator.backend.eval_ff_at(ev)?;
+                            // unified eval_apply_ff_at since no cascade optimizations applied to it.
+                            self.simulator.backend.eval_apply_ff_at(ev)?;
                         } else {
                             unreachable!(
                                 "FF trigger discovered but no corresponding execution unit found for domain"

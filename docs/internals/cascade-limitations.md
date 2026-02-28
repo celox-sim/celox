@@ -61,4 +61,4 @@ These behaviors are verified in `tests/cascade_race.rs`, where all tests are con
 ## 4. Current Limitations
 
 -   **Circular Dependencies (Zero-delay Loop)**: If a combinational loop exists between clocks, it is statically detected and rejected as a `CombinationalLoop` error at simulator build time (`Simulator::builder().build()`).
--   **Single-phase Optimization**: When only a single trigger fires in a simulation step and it is not a cascade target, the eval_only/apply split is skipped and `eval_ff_at` is used for batch execution as an optimization. This decision is made on a per-step basis, not based on the overall design properties.
+-   **Single-phase Optimization**: When only a single trigger fires in a simulation step and it is not a cascade target, the eval_only/apply split is skipped and `eval_apply_ff_at` is used for batch execution as an optimization. This decision is made on a per-step basis, not based on the overall design properties.

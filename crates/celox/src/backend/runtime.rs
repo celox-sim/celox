@@ -13,7 +13,7 @@ pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 /// Opaque handle to a compiled event (clock / async-reset) function.
 /// Holds the JIT-compiled function pointer directly — no indirection.
 /// Obtained once via [`JitBackend::resolve_event`] and passed to
-/// [`JitBackend::eval_ff_at`] for zero-cost dispatch.
+/// [`JitBackend::eval_apply_ff_at`] for zero-cost dispatch.
 #[derive(Clone, Copy)]
 pub struct EventRef {
     pub func: SimFunc,
@@ -234,10 +234,7 @@ impl JitBackend {
             }
         }
 
-        let id_to_event: Vec<EventRef> = id_to_addr
-            .iter()
-            .map(|addr| event_map[addr])
-            .collect();
+        let id_to_event: Vec<EventRef> = id_to_addr.iter().map(|addr| event_map[addr]).collect();
 
         let comb_func: SimFunc = unsafe { std::mem::transmute(comb_code_ptr) };
 
@@ -508,7 +505,7 @@ impl JitBackend {
 
     /// Resolve an `AbsoluteAddr` (clock or async-reset signal) into an
     /// [`EventRef`] handle.  This does a one-time `HashMap` lookup; the
-    /// returned handle can then be passed to [`eval_ff_at`] for zero-cost
+    /// returned handle can then be passed to [`eval_apply_ff_at`] for zero-cost
     /// direct function-pointer dispatch.
     pub fn resolve_event(&self, addr: &AbsoluteAddr) -> EventRef {
         self.event_map[addr]
@@ -526,7 +523,7 @@ impl JitBackend {
         self.apply_event_map.get(addr).copied()
     }
 
-    pub fn eval_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+    pub fn eval_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
         self.run_sim_func(event.func)
     }
 
