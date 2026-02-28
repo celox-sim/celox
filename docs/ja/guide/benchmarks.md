@@ -6,7 +6,7 @@ Celox には Rust コアと TypeScript ランタイムの両方のベンチマ�
 
 最新の結果と履歴トレンドはこちら：
 
-**[ベンチマークダッシュボード](/celox/dev/bench/)**
+**[ベンチマークダッシュボード](https://celox-sim.github.io/celox/dev/bench/)**
 
 ## 測定対象
 
