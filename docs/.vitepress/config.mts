@@ -81,6 +81,7 @@ export default defineConfig({
             { text: "4-State Simulation", link: "/guide/four-state" },
             { text: "Type Conversion", link: "/guide/type-conversion" },
             { text: "Vite Plugin", link: "/guide/vite-plugin" },
+            { text: "Benchmarks", link: "/guide/benchmarks" },
           ],
         },
       ],
