@@ -25,5 +25,9 @@ crates/celox-napi/index.d.ts
 # Claude Code
 .claude/settings.local.json
 
+# VitePress
+docs/.vitepress/dist
+docs/.vitepress/cache
+
 # OS
 .DS_Store

@@ -7,7 +7,10 @@
     "bench": "pnpm run build:napi:release && pnpm run build && pnpm --filter @celox-sim/celox -r bench",
     "test": "pnpm run build:napi && cargo test && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test",
     "test:rust": "cargo test",
-    "test:js": "pnpm run build:napi && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test"
+    "test:js": "pnpm run build:napi && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "pnpm": {
     "overrides": {
@@ -18,5 +21,8 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ]
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
   }
 }

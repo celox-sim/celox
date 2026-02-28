@@ -340,6 +340,6 @@ Block_merge (params: [result_reg]):
 
 ## 関連ドキュメント
 
-- [アーキテクチャ概要](architecture.md) — シミュレータ全体の設計
-- [SIR 中間表現リファレンス](ir_reference.md) — lowering 先の SIR 命令セット詳細
-- [最適化アルゴリズム](optimizations.md) — ハッシュ・コンシングやホイスティングの詳細
+- [アーキテクチャ概要](./architecture.md) — シミュレータ全体の設計
+- [SIR 中間表現リファレンス](./ir-reference.md) — lowering 先の SIR 命令セット詳細
+- [最適化アルゴリズム](./optimizations.md) — ハッシュ・コンシングやホイスティングの詳細
