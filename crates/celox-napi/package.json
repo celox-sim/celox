@@ -20,7 +20,8 @@
     }
   },
   "scripts": {
-    "build": "napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi"
+    "build": "napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi",
+    "build:debug": "napi build --platform --manifest-path ../../Cargo.toml -p celox-napi"
   },
   "files": [
     "index.js",

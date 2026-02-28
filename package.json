@@ -2,7 +2,7 @@
   "private": true,
   "scripts": {
     "build": "pnpm --filter=\"!@celox-sim/celox-napi\" -r build",
-    "build:napi": "cargo build -p celox-napi && node scripts/copy-napi-addon.mjs",
+    "build:napi": "pnpm --filter @celox-sim/celox-napi build:debug",
     "test": "pnpm run build:napi && cargo test && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test",
     "test:rust": "cargo test",
     "test:js": "pnpm run build:napi && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test"

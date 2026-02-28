@@ -76,22 +76,15 @@ export interface RawNapiAddon {
 // ---------------------------------------------------------------------------
 
 import { createRequire } from "node:module";
-import path from "node:path";
-import process from "node:process";
-
-function napiAddonFilename(): string {
-  const p = process.platform;
-  const a = process.arch;
-  if (p === "darwin") return `celox.darwin-${a}.node`;
-  if (p === "win32") return `celox.win32-${a}-msvc.node`;
-  return `celox.linux-${a}-gnu.node`;
-}
 
 /**
  * Load the native NAPI addon.
  *
- * @param addonPath  Explicit path to the `.node` file.
- *                   If omitted, tries common locations relative to this package.
+ * Resolution: `@celox-sim/celox-napi` package (works both in workspace dev
+ * and when installed from npm — napi-rs generated index.js handles platform
+ * detection). An explicit path can override this.
+ *
+ * @param addonPath  Explicit path to the `.node` file (overrides auto-detection).
  */
 export function loadNativeAddon(addonPath?: string): RawNapiAddon {
   const require = createRequire(import.meta.url);
@@ -100,33 +93,15 @@ export function loadNativeAddon(addonPath?: string): RawNapiAddon {
     return require(addonPath) as RawNapiAddon;
   }
 
-  // 1. Try the published npm package (napi-rs generated index.js handles platform detection)
   try {
     return require("@celox-sim/celox-napi") as RawNapiAddon;
-  } catch {
-    // Not installed as npm package — fall through to workspace paths
+  } catch (e) {
+    throw new Error(
+      `Failed to load NAPI addon from @celox-sim/celox-napi. ` +
+        `Build it with: pnpm run build:napi`,
+      { cause: e },
+    );
   }
-
-  // 2. Workspace development: next to the celox-napi crate
-  const candidates = [
-    path.resolve(
-      import.meta.dirname ?? __dirname,
-      `../../../crates/celox-napi/${napiAddonFilename()}`,
-    ),
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      return require(candidate) as RawNapiAddon;
-    } catch {
-      // Try next candidate
-    }
-  }
-
-  throw new Error(
-    `Failed to load NAPI addon. Tried: @celox-sim/celox-napi (npm), ${candidates.join(", ")}. ` +
-      `Install the package or build it with: cargo build -p celox-napi`,
-  );
 }
 
 // ---------------------------------------------------------------------------
