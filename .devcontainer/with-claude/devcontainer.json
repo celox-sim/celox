@@ -1,0 +1,18 @@
+{
+    "name": "Celox (with Claude)",
+    "image": "mcr.microsoft.com/devcontainers/universal:2",
+    "features": {
+        "ghcr.io/devcontainers/features/rust:1": {},
+        "ghcr.io/devcontainers/features/node:1": {},
+        "ghcr.io/devcontainers-extra/features/pnpm:2": {}
+    },
+    "mounts": [
+        "source=celox-claude-config,target=/home/codespace/.claude,type=volume"
+    ],
+    "remoteEnv": {
+        "CLAUDE_CONFIG_DIR": "/home/codespace/.claude",
+        "PNPM_HOME": "/home/codespace/.local/share/pnpm",
+        "PATH": "${containerEnv:PATH}:/home/codespace/.local/share/pnpm"
+    },
+    "postCreateCommand": "sudo mkdir -p /home/codespace/.local/share/pnpm /home/codespace/.claude && sudo chown -R $(whoami):$(whoami) /home/codespace/.local /home/codespace/.claude && pnpm config set global-bin-dir $PNPM_HOME && curl -fsSL https://claude.ai/install.sh | bash && git submodule update --init --recursive && cargo install cargo-insta"
+}

@@ -1,0 +1,14 @@
+{
+    "name": "Celox",
+    "image": "mcr.microsoft.com/devcontainers/universal:2",
+    "features": {
+        "ghcr.io/devcontainers/features/rust:1": {},
+        "ghcr.io/devcontainers/features/node:1": {},
+        "ghcr.io/devcontainers-extra/features/pnpm:2": {}
+    },
+    "remoteEnv": {
+        "PNPM_HOME": "/home/codespace/.local/share/pnpm",
+        "PATH": "${containerEnv:PATH}:/home/codespace/.local/share/pnpm"
+    },
+    "postCreateCommand": "sudo mkdir -p /home/codespace/.local/share/pnpm && sudo chown -R $(whoami):$(whoami) /home/codespace/.local && pnpm config set global-bin-dir $PNPM_HOME && git submodule update --init --recursive && cargo install cargo-insta"
+}
