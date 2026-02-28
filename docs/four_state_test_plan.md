@@ -24,9 +24,9 @@
 |------|--------|--------|------|
 | ADD  | [x] `test_four_state_arithmetic_ops` | [x] `test_four_state_wide_arith` | |
 | SUB  | [x] `test_four_state_arithmetic_ops` | [x] `test_four_state_wide_arith` | |
-| MUL  | [x] `test_four_state_mul_with_x` | [ ] | 保守的 all-X |
-| DIV  | [x] `test_four_state_div_with_x` | [ ] | 保守的 all-X |
-| MOD  | [x] `test_four_state_mod_with_x` | [ ] | 保守的 all-X |
+| MUL  | [x] `test_four_state_mul_with_x` | [x] `test_four_state_wide_mul_with_x` | 保守的 all-X |
+| DIV  | [x] `test_four_state_div_with_x` | [x] `test_four_state_wide_div_with_x` | 保守的 all-X |
+| MOD  | [x] `test_four_state_mod_with_x` | [x] `test_four_state_wide_mod_with_x` | 保守的 all-X |
 
 ## 3. シフト演算 (Shift)
 
@@ -35,22 +35,22 @@
 | 定数シフト量 | [x] `test_four_state_shift_by_constant` | [x] 同左 | [x] `test_four_state_wide_signed` |
 | 変数シフト量 (確定) | [x] `test_four_state_wide_shifts` | [x] 同左 | [x] `test_four_state_sar_x_shift_amount` (確定ケース) |
 | シフト量に X | [x] `test_four_state_shift_by_x_amount` | [x] `test_four_state_wide_shifts` | [x] `test_four_state_sar_x_shift_amount` |
-| データと量の両方に X | [x] `test_four_state_shift_both_x` | [x] 同左 | [ ] |
+| データと量の両方に X | [x] `test_four_state_shift_both_x` | [x] 同左 | [x] `test_four_state_sar_both_x` |
 
 ## 4. 比較演算 (Comparison)
 
 | 演算 | 単一幅 | ワイド | 備考 |
 |------|--------|--------|------|
 | EQ (`==`) | [x] `test_four_state_comparison_with_x` | [x] `test_four_state_wide_comparison_with_x` | |
-| NE (`!=`) | [x] `test_four_state_ne_with_x` | [ ] | |
+| NE (`!=`) | [x] `test_four_state_ne_with_x` | [x] `test_four_state_wide_ne_with_x` | |
 | LT (`<` unsigned) | [x] `test_four_state_comparison_with_x` | [x] `test_four_state_wide_comparison_with_x` | |
-| GT (`>` unsigned) | [x] `test_four_state_gt_with_x` | [ ] | |
-| LE (`<=` unsigned) | [x] `test_four_state_ge_le_with_x` | [ ] | |
-| GE (`>=` unsigned) | [x] `test_four_state_ge_le_with_x` | [ ] | |
-| LT (`<` signed) | [x] `test_four_state_signed_comparison_with_x` | [ ] | `signed logic<8>` |
-| GT (`>` signed) | [x] `test_four_state_signed_comparison_with_x` | [ ] | |
-| LE (`<=` signed) | [x] `test_four_state_signed_comparison_with_x` | [ ] | |
-| GE (`>=` signed) | [x] `test_four_state_signed_comparison_with_x` | [ ] | |
+| GT (`>` unsigned) | [x] `test_four_state_gt_with_x` | [x] `test_four_state_wide_gt_with_x` | |
+| LE (`<=` unsigned) | [x] `test_four_state_ge_le_with_x` | [x] `test_four_state_wide_ge_le_with_x` | |
+| GE (`>=` unsigned) | [x] `test_four_state_ge_le_with_x` | [x] `test_four_state_wide_ge_le_with_x` | |
+| LT (`<` signed) | [x] `test_four_state_signed_comparison_with_x` | [x] `test_four_state_wide_signed_comparison_with_x` | `signed logic<128>` |
+| GT (`>` signed) | [x] `test_four_state_signed_comparison_with_x` | [x] `test_four_state_wide_signed_comparison_with_x` | |
+| LE (`<=` signed) | [x] `test_four_state_signed_comparison_with_x` | [x] `test_four_state_wide_signed_comparison_with_x` | |
+| GE (`>=` signed) | [x] `test_four_state_signed_comparison_with_x` | [x] `test_four_state_wide_signed_comparison_with_x` | |
 
 ## 5. 単項演算 (Unary)
 
@@ -58,7 +58,7 @@
 |------|--------|--------|
 | Bitwise NOT (`~`) | [x] `test_four_state_unary_ops` | [x] `test_four_state_wide_unary_not_with_x` |
 | Negation (`-`) | [x] `test_four_state_negation_with_x` | [x] `test_four_state_wide_negation_with_x` |
-| Logical NOT (`!`) | [x] `test_four_state_logical_not_with_x` | [ ] |
+| Logical NOT (`!`) | [x] `test_four_state_logical_not_with_x` | [x] `test_four_state_wide_logical_not_with_x` |
 | Reduction AND | [x] `test_four_state_unary_ops` (部分) | [x] `test_four_state_wide_reduction_with_x` |
 | Reduction OR | [x] `test_four_state_unary_ops` (部分) | [x] 同上 (※保守的実装) |
 | Reduction XOR | [x] `test_four_state_reduction_xor_with_x` | [x] 同上 |
@@ -71,7 +71,7 @@
 | 2要素 (ワイド混合) | [x] `test_four_state_wide_concat_mixed` |
 | 3要素以上 | [x] `test_four_state_concat_three_elements` |
 | 奇数幅 (例: 3bit + 5bit) | [x] `test_four_state_concat_odd_width` |
-| チャンク境界をまたぐ X | [ ] |
+| チャンク境界をまたぐ X | [x] `test_four_state_concat_chunk_boundary_x` |
 
 ## 7. Mux / 三項演算子
 
@@ -89,7 +89,7 @@
 |----------|-----------|
 | X キャプチャ | [x] `test_four_state_ff_capture_and_reset` |
 | リセットで X クリア | [x] 同上 |
-| 同期リセット + X | [ ] |
+| 同期リセット + X | [x] `test_four_state_ff_sync_reset_with_x` |
 | FF 内条件分岐 + X | [x] `test_four_state_ff_conditional_with_x` |
 
 ## 9. 型変換・代入
@@ -100,7 +100,7 @@
 | bit → logic (mask=0 維持) | [x] `test_four_state_mixing` |
 | 狭幅 → 広幅 + X | [x] `test_four_state_width_widening_with_x` |
 | 広幅 → 狭幅 + X | [x] `test_four_state_width_narrowing_with_x` |
-| 明示的キャスト + X | [ ] |
+| 明示的キャスト + X | [x] `test_four_state_explicit_cast_with_x` |
 
 ## 10. 境界幅
 
