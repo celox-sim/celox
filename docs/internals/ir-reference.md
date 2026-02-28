@@ -56,8 +56,8 @@ pub struct ExecutionUnit<A> {
 -   `Binary(rd, rs1, op, rs2)`: Binary operation
 -   `Unary(rd, op, rs)`: Unary operation
 -   `Load(rd, addr, offset, bits)`: Memory load
--   `Store(addr, offset, bits, rs)`: Memory store (RMW)
--   `Commit(src, dst, offset, bits)`: Cross-region copy
+-   `Store(addr, offset, bits, rs, triggers)`: Memory store (RMW) with trigger notifications
+-   `Commit(src, dst, offset, bits, triggers)`: Cross-region copy with trigger notifications
 -   `Concat(rd, [msb..lsb])`: Register concatenation
 
 ## Control Flow
