@@ -217,8 +217,10 @@ export class Simulator<P = Record<string, unknown>> {
       ticks = 1;
     }
 
-    for (let i = 0; i < ticks; i++) {
+    if (ticks === 1) {
       this._handle.tick(eventId);
+    } else if (ticks > 1) {
+      this._handle.tickN(eventId, ticks);
     }
     this._state.dirty = false;
   }

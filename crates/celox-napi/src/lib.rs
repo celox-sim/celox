@@ -146,6 +146,17 @@ impl NativeSimulatorHandle {
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
+    /// Trigger a clock/event N times in a single NAPI call.
+    #[napi]
+    pub fn tick_n(&mut self, event_id: u32, count: u32) -> Result<()> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        sim.tick_by_id_n(event_id as usize, count)
+            .map_err(|e| Error::from_reason(format!("{}", e)))
+    }
+
     /// Evaluate combinational logic.
     #[napi]
     pub fn eval_comb(&mut self) -> Result<()> {

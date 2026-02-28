@@ -30,6 +30,7 @@ export interface RawNapiSimulatorHandle {
   readonly stableSize: number;
   readonly totalSize: number;
   tick(eventId: number): void;
+  tickN(eventId: number, count: number): void;
   evalComb(): void;
   dump(timestamp: number): void;
   sharedMemory(): Uint8Array;
@@ -191,6 +192,9 @@ export function wrapDirectSimulatorHandle(
   return {
     tick(eventId: number): void {
       raw.tick(eventId);
+    },
+    tickN(eventId: number, count: number): void {
+      raw.tickN(eventId, count);
     },
     evalComb(): void {
       raw.evalComb();

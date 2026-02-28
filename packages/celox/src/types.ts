@@ -64,6 +64,7 @@ export interface SignalLayout {
 /** Opaque handle returned by NAPI for event-based simulation. */
 export interface NativeSimulatorHandle {
   tick(eventId: number): void;
+  tickN(eventId: number, count: number): void;
   evalComb(): void;
   dump(timestamp: number): void;
   dispose(): void;

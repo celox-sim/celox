@@ -216,4 +216,14 @@ impl Simulator {
         let event = self.backend.id_to_event[event_id];
         self.tick(event)
     }
+
+    /// Triggers a clock/event N times by its numeric ID.
+    /// Avoids repeated cross-boundary calls when used from FFI.
+    pub fn tick_by_id_n(&mut self, event_id: usize, count: u32) -> Result<(), RuntimeErrorCode> {
+        let event = self.backend.id_to_event[event_id];
+        for _ in 0..count {
+            self.tick(event)?;
+        }
+        Ok(())
+    }
 }
