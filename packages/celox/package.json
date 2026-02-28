@@ -28,6 +28,11 @@
     "testbench",
     "hardware"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/celox-sim/celox",
+    "directory": "packages/celox"
+  },
   "license": "MIT",
   "peerDependencies": {
     "vitest": ">=1.0.0"
