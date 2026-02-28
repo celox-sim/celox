@@ -191,7 +191,7 @@ jobs:
       - name: List packages
         working-directory: crates/celox-napi
         run: |
-          echo "Publishing version: $(node -p \"require('./package.json').version\")"
+          echo "Publishing version: $(node -p "require('./package.json').version")"
           echo "=== Main package ==="
           ls -la index.js index.d.ts *.node 2>/dev/null || true
           echo "=== Platform packages ==="
