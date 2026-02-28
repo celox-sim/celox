@@ -1,6 +1,6 @@
 # Simulator Architecture
 
-`veryl-simulator` is an engine that generates JIT-compiled native code from Veryl RTL and executes cycle-based simulation.
+Celox is an engine that generates JIT-compiled native code from Veryl RTL and executes cycle-based simulation.
 
 ## Design Philosophy and Target
 

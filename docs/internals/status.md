@@ -1,6 +1,6 @@
 # Implementation Status Reference
 
-This is an overview of the current implementation status and supported features of `veryl-simulator`.
+This is an overview of the current implementation status and supported features of Celox.
 
 ## 1. Core Runtime
 

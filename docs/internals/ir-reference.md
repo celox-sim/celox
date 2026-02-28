@@ -1,6 +1,6 @@
 # SIR Intermediate Representation Reference
 
-SIR (Simulator Intermediate Representation) is the execution IR for `veryl-simulator`.
+SIR (Simulator Intermediate Representation) is the execution IR for Celox.
 It lowers Veryl analysis results into a register-based instruction sequence that serves as input to the Cranelift JIT.
 
 ## Overview

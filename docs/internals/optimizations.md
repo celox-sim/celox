@@ -1,6 +1,6 @@
 # Simulator Optimization Algorithms
 
-`veryl-simulator` applies optimizations across multiple layers from compile time to runtime to accelerate simulation.
+Celox applies optimizations across multiple layers from compile time to runtime to accelerate simulation.
 
 ## 1. Logic Layer (SLT) Optimizations
 

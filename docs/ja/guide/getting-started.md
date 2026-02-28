@@ -11,7 +11,7 @@
 サブモジュールを含めてリポジトリをクローンします：
 
 ```bash
-git clone --recursive https://github.com/tignear/celox.git
+git clone --recursive https://github.com/celox-sim/celox.git
 cd celox
 ```
 

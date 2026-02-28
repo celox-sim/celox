@@ -21,7 +21,7 @@ export default defineConfig({
           { text: "内部構造", link: "/internals/architecture" },
           {
             text: "GitHub",
-            link: "https://github.com/tignear/celox",
+            link: "https://github.com/celox-sim/celox",
           },
         ],
         sidebar: {
@@ -49,7 +49,7 @@ export default defineConfig({
       { text: "Internals", link: "/internals/architecture" },
       {
         text: "GitHub",
-        link: "https://github.com/tignear/celox",
+        link: "https://github.com/celox-sim/celox",
       },
     ],
 
@@ -87,7 +87,7 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: "github", link: "https://github.com/tignear/celox" },
+      { icon: "github", link: "https://github.com/celox-sim/celox" },
     ],
   },
 });

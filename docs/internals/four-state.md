@@ -1,6 +1,6 @@
 # 4-State Simulation
 
-`veryl-simulator` supports IEEE 1800 compliant 4-state (0, 1, X, Z) simulation.
+Celox supports IEEE 1800-compliant 4-state (0, 1, X, Z) simulation.
 
 ## Representation Model
 

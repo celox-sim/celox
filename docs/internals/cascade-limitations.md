@@ -1,6 +1,6 @@
 # Cascade Clocks and Race Condition Handling
 
-This document explains the resolution strategies and implementation details for cascade clocks (chained clocks) and the race conditions they can cause in `veryl-simulator`.
+This document explains the resolution strategies and implementation details for cascade clocks (chained clocks) and the race conditions they can cause in Celox.
 
 ## 1. Consistency Guarantees for Cascade Clocks
 
