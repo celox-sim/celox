@@ -49,8 +49,6 @@ jobs:
           node-version: 22
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -120,8 +118,6 @@ jobs:
           node-version: 22
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Download binding artifact
         uses: actions/download-artifact@v4
@@ -153,8 +149,6 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Install dependencies
         working-directory: crates/celox-napi
@@ -237,8 +231,6 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
