@@ -94,7 +94,7 @@ export default defineConfig({
               link: "/internals/combinational-analysis",
             },
             {
-              text: "Cascade Limitations",
+              text: "Cascade Clocks",
               link: "/internals/cascade-limitations",
             },
             { text: "Status", link: "/internals/status" },
