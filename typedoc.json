@@ -1,0 +1,16 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": [
+    "packages/celox/src/index.ts",
+    "packages/celox/src/matchers.ts"
+  ],
+  "tsconfig": "packages/celox/tsconfig.typedoc.json",
+  "out": "docs/api",
+  "plugin": [
+    "typedoc-plugin-markdown",
+    "typedoc-vitepress-theme"
+  ],
+  "docsRoot": "./docs",
+  "excludePrivate": true,
+  "excludeInternal": true
+}

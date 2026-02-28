@@ -22,6 +22,7 @@ import {
 /**
  * Placeholder for the NAPI binding's `createSimulation()`.
  * Stream B will provide the real implementation.
+ * @internal
  */
 export type NativeCreateSimulationFn = (
   source: string,
@@ -33,6 +34,7 @@ let _nativeCreate: NativeCreateSimulationFn | undefined;
 
 /**
  * Register the NAPI binding at module load time.
+ * @internal
  */
 export function setNativeSimulationCreate(fn: NativeCreateSimulationFn): void {
   _nativeCreate = fn;

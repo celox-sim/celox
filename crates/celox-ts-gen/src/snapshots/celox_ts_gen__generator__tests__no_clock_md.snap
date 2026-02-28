@@ -1,0 +1,13 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].md_content"
+---
+# PureAdder
+
+## Ports
+
+| Port | Direction | Type | Width | TS Type | 4-State |
+|------|-----------|------|-------|---------|--------|
+| a | input | logic | 8 | `number` | yes |
+| b | input | logic | 8 | `number` | yes |
+| sum | output | logic | 9 | `number` (readonly) | yes |

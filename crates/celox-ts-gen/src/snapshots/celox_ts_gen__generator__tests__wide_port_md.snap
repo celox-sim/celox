@@ -1,0 +1,19 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].md_content"
+---
+# WideAdder
+
+## Ports
+
+| Port | Direction | Type | Width | TS Type | 4-State |
+|------|-----------|------|-------|---------|--------|
+| a | input | logic | 64 | `bigint` | yes |
+| b | input | logic | 64 | `bigint` | yes |
+| sum | output | logic | 65 | `bigint` (readonly) | yes |
+
+## Events
+
+| Event | Port |
+|-------|------|
+| clk | clk |

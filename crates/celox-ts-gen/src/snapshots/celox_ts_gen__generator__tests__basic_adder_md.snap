@@ -1,0 +1,20 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].md_content"
+---
+# Adder
+
+## Ports
+
+| Port | Direction | Type | Width | TS Type | 4-State |
+|------|-----------|------|-------|---------|--------|
+| a | input | logic | 16 | `number` | yes |
+| b | input | logic | 16 | `number` | yes |
+| rst | input | reset | 1 | `number` | yes |
+| sum | output | logic | 17 | `number` (readonly) | yes |
+
+## Events
+
+| Event | Port |
+|-------|------|
+| clk | clk |

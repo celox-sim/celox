@@ -29,5 +29,8 @@ crates/celox-napi/index.d.ts
 docs/.vitepress/dist
 docs/.vitepress/cache
 
+# TypeDoc generated API docs
+docs/api/
+
 # OS
 .DS_Store

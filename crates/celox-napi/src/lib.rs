@@ -510,6 +510,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
                 module_name: m.module_name,
                 source_file: source_file.clone(),
                 dts_content: m.dts_content,
+                md_content: m.md_content,
                 ports: m.ports,
                 events: m.events,
             });

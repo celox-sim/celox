@@ -25,6 +25,7 @@ import {
  * Stream B will provide the real implementation; until then tests can
  * inject a mock via `Simulator.create()` options or by replacing this
  * module.
+ * @internal
  */
 export type NativeCreateFn = (
   source: string,
@@ -37,6 +38,7 @@ let _nativeCreate: NativeCreateFn | undefined;
 /**
  * Register the NAPI binding at module load time.
  * Called once by the package entry point after loading the native addon.
+ * @internal
  */
 export function setNativeSimulatorCreate(fn: NativeCreateFn): void {
   _nativeCreate = fn;
