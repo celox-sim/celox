@@ -2,7 +2,10 @@
   "private": true,
   "scripts": {
     "build": "pnpm -r build",
-    "test": "pnpm -r test"
+    "build:napi": "cargo build -p celox-napi && node scripts/copy-napi-addon.mjs",
+    "test": "pnpm run build:napi && cargo test && pnpm -r build && pnpm -r test",
+    "test:rust": "cargo test",
+    "test:js": "pnpm run build:napi && pnpm -r build && pnpm -r test"
   },
   "pnpm": {
     "overrides": {

@@ -77,6 +77,15 @@ export interface RawNapiAddon {
 
 import { createRequire } from "node:module";
 import path from "node:path";
+import process from "node:process";
+
+function napiAddonFilename(): string {
+  const p = process.platform;
+  const a = process.arch;
+  if (p === "darwin") return `celox.darwin-${a}.node`;
+  if (p === "win32") return `celox.win32-${a}-msvc.node`;
+  return `celox.linux-${a}-gnu.node`;
+}
 
 /**
  * Load the native NAPI addon.
@@ -96,7 +105,7 @@ export function loadNativeAddon(addonPath?: string): RawNapiAddon {
     // Workspace development: next to the celox-napi crate
     path.resolve(
       import.meta.dirname ?? __dirname,
-      "../../../crates/celox-napi/celox.linux-x64-gnu.node",
+      `../../../crates/celox-napi/${napiAddonFilename()}`,
     ),
   ];
 
