@@ -343,30 +343,58 @@ function createArrayDut(
   const elementWidth = port.width;
   const elementByteSize = Math.ceil(elementWidth / 8);
   const totalElements = dims.reduce((a, b) => a * b, 1);
+  const isOutput = port.direction === "output";
+  const isInput = port.direction === "input";
+  const baseOffset = baseSig.offset;
+  const is4state = baseSig.is4state;
 
-  const arr = Object.create(null);
+  return {
+    length: totalElements,
 
-  // Define length property
-  Object.defineProperty(arr, "length", {
-    value: totalElements,
-    enumerable: false,
-    configurable: false,
-    writable: false,
-  });
+    at(i: number): number | bigint {
+      if (state.dirty && !isInput) {
+        handle.evalComb();
+        state.dirty = false;
+      }
+      const offset = baseOffset + i * elementByteSize;
+      if (elementWidth <= 53) {
+        return readNumber(view, offset, elementWidth);
+      }
+      return readBigInt(view, offset, elementByteSize);
+    },
 
-  // Define indexed accessors for each element
-  for (let i = 0; i < totalElements; i++) {
-    const elemSig: SignalLayout = {
-      offset: baseSig.offset + i * elementByteSize,
-      width: elementWidth,
-      byteSize: elementByteSize,
-      is4state: baseSig.is4state,
-      direction: baseSig.direction,
-    };
-    defineSignalProperty(arr, String(i), view, elemSig, port, handle, state);
-  }
-
-  return arr;
+    set(i: number, value: number | bigint | symbol | FourStateValue): void {
+      if (isOutput) {
+        throw new Error("Cannot write to output array port");
+      }
+      const offset = baseOffset + i * elementByteSize;
+      if (value === Symbol.for("veryl:X")) {
+        if (!is4state) {
+          throw new Error("Array port is not 4-state; cannot assign X");
+        }
+        const elemSig: SignalLayout = {
+          offset, width: elementWidth, byteSize: elementByteSize,
+          is4state, direction: baseSig.direction,
+        };
+        writeAllX(view, elemSig);
+      } else if (isFourStateValue(value)) {
+        if (!is4state) {
+          throw new Error("Array port is not 4-state; cannot assign FourState");
+        }
+        const elemSig: SignalLayout = {
+          offset, width: elementWidth, byteSize: elementByteSize,
+          is4state, direction: baseSig.direction,
+        };
+        writeFourState(view, elemSig, value);
+      } else if (elementWidth <= 53 && typeof value === "number") {
+        writeNumber(view, offset, elementWidth, value);
+      } else {
+        const bigVal = typeof value === "bigint" ? value : BigInt(value as number);
+        writeBigInt(view, offset, elementByteSize, bigVal);
+      }
+      state.dirty = true;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
