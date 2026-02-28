@@ -16,6 +16,11 @@
     "build": "tsc"
   },
   "keywords": ["celox", "veryl", "hdl", "vite", "vitest", "plugin"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/celox-sim/celox",
+    "directory": "packages/vite-plugin"
+  },
   "license": "MIT",
   "peerDependencies": {
     "vite": ">=5.0.0"
