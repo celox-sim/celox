@@ -46,6 +46,10 @@ export default defineConfig({
                   text: "型変換",
                   link: "/ja/guide/type-conversion",
                 },
+                {
+                  text: "Vite プラグイン",
+                  link: "/ja/guide/vite-plugin",
+                },
               ],
             },
           ],
@@ -76,6 +80,7 @@ export default defineConfig({
             { text: "Writing Tests", link: "/guide/writing-tests" },
             { text: "4-State Simulation", link: "/guide/four-state" },
             { text: "Type Conversion", link: "/guide/type-conversion" },
+            { text: "Vite Plugin", link: "/guide/vite-plugin" },
           ],
         },
       ],
