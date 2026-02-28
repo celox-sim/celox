@@ -1,15 +1,16 @@
 {
   "private": true,
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "pnpm --filter=\"!@celox-sim/celox-napi\" -r build",
     "build:napi": "cargo build -p celox-napi && node scripts/copy-napi-addon.mjs",
-    "test": "pnpm run build:napi && cargo test && pnpm -r build && pnpm -r test",
+    "test": "pnpm run build:napi && cargo test && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test",
     "test:rust": "cargo test",
-    "test:js": "pnpm run build:napi && pnpm -r build && pnpm -r test"
+    "test:js": "pnpm run build:napi && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test"
   },
   "pnpm": {
     "overrides": {
       "@celox-sim/celox": "workspace:*",
+      "@celox-sim/celox-napi": "workspace:*",
       "@celox-sim/vite-plugin": "workspace:*"
     },
     "onlyBuiltDependencies": [

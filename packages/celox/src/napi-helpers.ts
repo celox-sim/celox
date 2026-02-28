@@ -100,9 +100,15 @@ export function loadNativeAddon(addonPath?: string): RawNapiAddon {
     return require(addonPath) as RawNapiAddon;
   }
 
-  // Try common locations relative to the package
+  // 1. Try the published npm package (napi-rs generated index.js handles platform detection)
+  try {
+    return require("@celox-sim/celox-napi") as RawNapiAddon;
+  } catch {
+    // Not installed as npm package — fall through to workspace paths
+  }
+
+  // 2. Workspace development: next to the celox-napi crate
   const candidates = [
-    // Workspace development: next to the celox-napi crate
     path.resolve(
       import.meta.dirname ?? __dirname,
       `../../../crates/celox-napi/${napiAddonFilename()}`,
@@ -118,8 +124,8 @@ export function loadNativeAddon(addonPath?: string): RawNapiAddon {
   }
 
   throw new Error(
-    `Failed to load NAPI addon. Tried: ${candidates.join(", ")}. ` +
-      `Build it first with: cargo build -p celox-napi`,
+    `Failed to load NAPI addon. Tried: @celox-sim/celox-napi (npm), ${candidates.join(", ")}. ` +
+      `Install the package or build it with: cargo build -p celox-napi`,
   );
 }
 

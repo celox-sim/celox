@@ -10,6 +10,11 @@ node_modules/
 # TypeScript
 dist/
 
+# NAPI CI-generated files
+crates/celox-napi/npm/
+crates/celox-napi/index.js
+crates/celox-napi/index.d.ts
+
 # Generated Veryl type sidecars
 .celox/
 
