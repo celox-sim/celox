@@ -90,7 +90,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.target }}
-          path: crates/celox-napi/*.node
+          path: |
+            crates/celox-napi/*.node
+            crates/celox-napi/index.js
+            crates/celox-napi/index.d.ts
           if-no-files-found: error
 
   test:
