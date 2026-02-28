@@ -16,7 +16,6 @@ import { readFourState } from "./dut.js";
 import { X, FourState } from "./types.js";
 import {
   createSimulatorBridge,
-  createSimulationBridge,
   loadNativeAddon,
   parseNapiLayout,
   type RawNapiAddon,
@@ -95,13 +94,6 @@ module Mux4 (
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulator.fromSource (event-based)", () => {
-  let sim: Simulator | undefined;
-
-  afterEach(() => {
-    sim?.dispose();
-    sim = undefined;
-  });
-
   test("combinational adder: a + b = sum", () => {
     interface AdderPorts {
       rst: number;
@@ -110,7 +102,7 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
       readonly sum: number;
     }
 
-    sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
+    const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
 
     sim.dut.a = 100;
     sim.dut.b = 200;
@@ -126,6 +118,8 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
     sim.dut.b = 0;
     sim.tick();
     expect(sim.dut.sum).toBe(0);
+
+    sim.dispose();
   });
 
   test("combinational adder: lazy evalComb on output read", () => {
@@ -136,11 +130,13 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
       readonly sum: number;
     }
 
-    sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
+    const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
 
     sim.dut.a = 42;
     sim.dut.b = 58;
     expect(sim.dut.sum).toBe(100);
+
+    sim.dispose();
   });
 
   test("sequential counter: counts on clock edges", () => {
@@ -150,7 +146,7 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
       readonly count: number;
     }
 
-    sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+    const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
 
     // Reset the counter
     sim.dut.rst = 1;
@@ -179,6 +175,8 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
     sim.dut.en = 1;
     sim.tick(5);
     expect(sim.dut.count).toBe(8);
+
+    sim.dispose();
   });
 
   test("combinational multiplexer", () => {
@@ -191,7 +189,7 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
       readonly y: number;
     }
 
-    sim = Simulator.fromSource<Mux4Ports>(MULTIPLEXER_SOURCE, "Mux4");
+    const sim = Simulator.fromSource<Mux4Ports>(MULTIPLEXER_SOURCE, "Mux4");
 
     sim.dut.d0 = 0xAA;
     sim.dut.d1 = 0xBB;
@@ -209,6 +207,8 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
 
     sim.dut.sel = 3;
     expect(sim.dut.y).toBe(0xDD);
+
+    sim.dispose();
   });
 });
 
@@ -217,13 +217,6 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulation.fromSource (time-based)", () => {
-  let sim: Simulation | undefined;
-
-  afterEach(() => {
-    sim?.dispose();
-    sim = undefined;
-  });
-
   test("counter with timed clock: step-by-step", () => {
     interface CounterPorts {
       rst: number;
@@ -231,7 +224,7 @@ describe("E2E: Simulation.fromSource (time-based)", () => {
       readonly count: number;
     }
 
-    sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
 
     sim.addClock("clk", { period: 10 });
     expect(sim.time()).toBe(0);
@@ -247,6 +240,8 @@ describe("E2E: Simulation.fromSource (time-based)", () => {
     const count = sim.dut.count;
     expect(count).toBeGreaterThan(0);
     expect(sim.time()).toBe(100);
+
+    sim.dispose();
   });
 });
 
@@ -255,13 +250,6 @@ describe("E2E: Simulation.fromSource (time-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulator.fromProject (event-based)", () => {
-  let sim: Simulator | undefined;
-
-  afterEach(() => {
-    sim?.dispose();
-    sim = undefined;
-  });
-
   test("combinational adder from project directory", () => {
     interface AdderPorts {
       rst: number;
@@ -270,7 +258,7 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
       readonly sum: number;
     }
 
-    sim = Simulator.fromProject<AdderPorts>(ADDER_PROJECT, "Adder");
+    const sim = Simulator.fromProject<AdderPorts>(ADDER_PROJECT, "Adder");
 
     sim.dut.a = 100;
     sim.dut.b = 200;
@@ -281,6 +269,8 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
     sim.dut.b = 1;
     sim.tick();
     expect(sim.dut.sum).toBe(0x10000);
+
+    sim.dispose();
   });
 
   test("sequential counter from project directory", () => {
@@ -290,7 +280,7 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
       readonly count: number;
     }
 
-    sim = Simulator.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
+    const sim = Simulator.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
 
     // Reset the counter
     sim.dut.rst = 1;
@@ -309,6 +299,8 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
 
     sim.tick();
     expect(sim.dut.count).toBe(3);
+
+    sim.dispose();
   });
 });
 
@@ -317,13 +309,6 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulation.fromProject (time-based)", () => {
-  let sim: Simulation | undefined;
-
-  afterEach(() => {
-    sim?.dispose();
-    sim = undefined;
-  });
-
   test("counter with timed clock from project directory", () => {
     interface CounterPorts {
       rst: number;
@@ -331,7 +316,7 @@ describe("E2E: Simulation.fromProject (time-based)", () => {
       readonly count: number;
     }
 
-    sim = Simulation.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
+    const sim = Simulation.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
 
     sim.addClock("clk", { period: 10 });
     expect(sim.time()).toBe(0);
@@ -347,6 +332,8 @@ describe("E2E: Simulation.fromProject (time-based)", () => {
     const count = sim.dut.count;
     expect(count).toBeGreaterThan(0);
     expect(sim.time()).toBe(100);
+
+    sim.dispose();
   });
 });
 
@@ -355,23 +342,6 @@ describe("E2E: Simulation.fromProject (time-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulator.create (backward compat)", () => {
-  let sim: Simulator | undefined;
-  let addon: RawNapiAddon;
-  let nativeCreateSimulator: ReturnType<typeof createSimulatorBridge>;
-
-  // Load addon once
-  try {
-    addon = loadNativeAddon();
-    nativeCreateSimulator = createSimulatorBridge(addon);
-  } catch (e) {
-    throw new Error(`Failed to load NAPI addon for backward compat tests: ${e}`);
-  }
-
-  afterEach(() => {
-    sim?.dispose();
-    sim = undefined;
-  });
-
   test("combinational adder via Simulator.create()", () => {
     interface AdderPorts {
       rst: number;
@@ -380,7 +350,10 @@ describe("E2E: Simulator.create (backward compat)", () => {
       readonly sum: number;
     }
 
-    sim = Simulator.create<AdderPorts>(
+    const addon = loadNativeAddon();
+    const nativeCreateSimulator = createSimulatorBridge(addon);
+
+    const sim = Simulator.create<AdderPorts>(
       {
         __celox_module: true,
         name: "Adder",
@@ -401,6 +374,8 @@ describe("E2E: Simulator.create (backward compat)", () => {
     sim.dut.b = 200;
     sim.tick();
     expect(sim.dut.sum).toBe(300);
+
+    sim.dispose();
   });
 });
 
