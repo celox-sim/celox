@@ -17,6 +17,7 @@
 ```bash
 mkdir my-celox-project && cd my-celox-project
 npm init -y
+npm pkg set type=module
 ```
 
 Celox と Vitest をインストールします：

@@ -17,6 +17,7 @@ Create a new project directory and initialize it:
 ```bash
 mkdir my-celox-project && cd my-celox-project
 npm init -y
+npm pkg set type=module
 ```
 
 Install Celox and Vitest:

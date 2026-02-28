@@ -184,6 +184,13 @@ jobs:
         working-directory: crates/celox-napi
         run: npx napi artifacts --build-output-dir artifacts
 
+      - name: Copy index files from build artifacts
+        working-directory: crates/celox-napi
+        run: |
+          FIRST_DIR=$(ls -d artifacts/bindings-*/ | head -1)
+          cp "$FIRST_DIR/index.js" .
+          cp "$FIRST_DIR/index.d.ts" .
+
       - name: Prepublish
         working-directory: crates/celox-napi
         run: npx napi prepublish -t npm
@@ -193,7 +200,7 @@ jobs:
         run: |
           echo "Publishing version: $(node -p "require('./package.json').version")"
           echo "=== Main package ==="
-          ls -la index.js index.d.ts *.node 2>/dev/null || true
+          ls -la index.js index.d.ts *.node
           echo "=== Platform packages ==="
           ls -la npm/*/
 
