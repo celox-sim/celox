@@ -32,9 +32,9 @@ jobs:
             os: ubuntu-latest
             zigbuild: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     name: Build - ${{ matrix.target }}
@@ -74,25 +74,17 @@ jobs:
       - name: Build (napi-cross)
         if: matrix.napi-cross
         working-directory: crates/celox-napi
-        run: |
-          npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi \
-            --target ${{ matrix.target }} \
-            --use-napi-cross
+        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target ${{ matrix.target }} --use-napi-cross
 
       - name: Build (zigbuild)
         if: matrix.zigbuild
         working-directory: crates/celox-napi
-        run: |
-          npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi \
-            --target ${{ matrix.target }} \
-            -x
+        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target ${{ matrix.target }} -x
 
       - name: Build (native)
         if: ${{ !matrix.napi-cross && !matrix.zigbuild }}
         working-directory: crates/celox-napi
-        run: |
-          npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi \
-            --target ${{ matrix.target }}
+        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -110,7 +102,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     name: Test - ${{ matrix.target }}
