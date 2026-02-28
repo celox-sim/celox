@@ -1,25 +1,34 @@
-import { writeFileSync, unlinkSync, existsSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
+import { join, resolve, dirname, relative } from "node:path";
 import type { GenTsJsonOutput } from "./types.js";
 
+/** Default directory (relative to project root) for generated sidecar files. */
+export const SIDECAR_DIR = ".celox";
+
 /**
- * Generate `.d.veryl.ts` sidecar files next to each `.veryl` source file.
+ * Generate `.d.veryl.ts` sidecar files in the sidecar directory,
+ * mirroring the source tree structure.
  *
- * TypeScript picks these up via `allowArbitraryExtensions: true` in tsconfig.
- * The file `Adder.d.veryl.ts` provides types for `import { Adder } from './Adder.veryl'`.
+ * TypeScript picks these up via `allowArbitraryExtensions` + `rootDirs`
+ * in tsconfig.  For example, `src/Adder.veryl` produces
+ * `.celox/src/Adder.d.veryl.ts`.
  */
 export function generateSidecars(
   data: GenTsJsonOutput,
   projectRoot: string,
 ): string[] {
   const written: string[] = [];
+  const root = resolve(projectRoot);
+  const outDir = join(root, SIDECAR_DIR);
 
   for (const [sourceFile, moduleNames] of Object.entries(data.fileModules)) {
     const verylPath = resolve(projectRoot, sourceFile);
     // Skip files that don't exist on disk (e.g. standard library paths
     // reported with a stripped leading "/" by celox-gen-ts)
     if (!existsSync(verylPath)) continue;
-    const sidecarPath = sidecarPathFor(verylPath);
+
+    const rel = relative(root, verylPath);
+    const sidecarPath = sidecarPathFor(join(outDir, rel));
 
     const modules = moduleNames
       .map((name) => data.modules.find((m) => m.moduleName === name))
@@ -31,6 +40,7 @@ export function generateSidecars(
     // Each module's dtsContent already contains the import and interface
     const content = modules.map((m) => m.dtsContent).join("\n");
 
+    mkdirSync(dirname(sidecarPath), { recursive: true });
     writeFileSync(sidecarPath, content, "utf-8");
     written.push(sidecarPath);
   }
@@ -54,11 +64,10 @@ export function cleanSidecars(paths: string[]): void {
 }
 
 /**
- * Given `/path/to/Adder.veryl`, returns `/path/to/Adder.d.veryl.ts`.
+ * Given `/path/to/.celox/src/Adder.veryl`, returns `/path/to/.celox/src/Adder.d.veryl.ts`.
  */
 function sidecarPathFor(verylPath: string): string {
   const dir = dirname(verylPath);
-  // "Adder.veryl" → "Adder.d.veryl.ts"
   const base = verylPath.slice(dir.length + 1); // "Adder.veryl"
   const stem = base.replace(/\.veryl$/, "");
   return join(dir, `${stem}.d.veryl.ts`);

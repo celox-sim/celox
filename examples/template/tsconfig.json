@@ -6,7 +6,8 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "allowArbitraryExtensions": true
+    "allowArbitraryExtensions": true,
+    "rootDirs": ["src", ".celox/src"]
   },
-  "include": ["test", "src"]
+  "include": ["test", "src", ".celox/src"]
 }

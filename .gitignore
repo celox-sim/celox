@@ -11,7 +11,7 @@ node_modules/
 dist/
 
 # Generated Veryl type sidecars
-*.d.veryl.ts
+.celox/
 
 # IDE
 .vscode/
