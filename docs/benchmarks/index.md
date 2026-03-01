@@ -4,9 +4,9 @@ Celox includes benchmark suites for both the Rust core and the TypeScript runtim
 
 ## Dashboard
 
-View the latest results and historical trends:
+<ClientOnly><BenchmarkDashboard /></ClientOnly>
 
-**[Benchmark Dashboard](https://celox-sim.github.io/celox/dev/bench/)**
+You can also view the raw data on the [external dashboard](https://celox-sim.github.io/celox/dev/bench/).
 
 ## What is Measured
 

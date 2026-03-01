@@ -81,7 +81,7 @@ export default defineConfig({
             { text: "4-State Simulation", link: "/guide/four-state" },
             { text: "Type Conversion", link: "/guide/type-conversion" },
             { text: "Vite Plugin", link: "/guide/vite-plugin" },
-            { text: "Benchmarks", link: "/guide/benchmarks" },
+            { text: "Benchmarks", link: "/benchmarks/" },
           ],
         },
       ],
@@ -116,5 +116,14 @@ export default defineConfig({
     socialLinks: [
       { icon: "github", link: "https://github.com/celox-sim/celox" },
     ],
+  },
+
+  vite: {
+    ssr: {
+      noExternal: ["vue-chartjs"],
+    },
+    optimizeDeps: {
+      include: ["chart.js"],
+    },
   },
 });

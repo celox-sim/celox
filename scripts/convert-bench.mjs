@@ -22,14 +22,14 @@ const results = [];
 for (const file of raw.files ?? []) {
   for (const group of file.groups ?? []) {
     for (const bench of group.benchmarks ?? []) {
-      // bench.mean is in milliseconds
-      const meanMs = bench.mean;
+      // bench.mean is in milliseconds — convert to µs
+      const meanUs = bench.mean * 1000;
       const rme = bench.rme ?? 0;
 
       results.push({
         name: `ts/${bench.name}`,
-        unit: "ms",
-        value: meanMs,
+        unit: "us",
+        value: meanUs,
         range: `± ${rme.toFixed(1)}%`,
         extra: `${bench.sampleCount} samples`,
       });

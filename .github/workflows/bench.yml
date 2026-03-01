@@ -54,13 +54,17 @@ jobs:
       - name: Convert TypeScript benchmark output
         run: node scripts/convert-bench.mjs packages/celox/ts-output.json ts-converted.json
 
+      # ── Convert Rust output to unified µs format ──
+      - name: Convert Rust benchmark output
+        run: node scripts/convert-rust-bench.mjs rust-output.txt rust-converted.json
+
       # ── Publish results ──
       - name: Store Rust benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Rust Benchmarks
-          tool: cargo
-          output-file-path: rust-output.txt
+          tool: customSmallerIsBetter
+          output-file-path: rust-converted.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
           auto-push: false
