@@ -273,7 +273,7 @@ fn convert_glue_block(
     cache: &mut HashMap<NodeId, NodeId>,
 ) -> Vec<LogicPath<AbsoluteAddr>> {
     let GlueBlock {
-        module_name: _,
+        module_id: _,
         input_ports,
         output_ports,
         arena: _,
@@ -302,16 +302,17 @@ fn convert_glue_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{module::ModuleParser, registry::ModuleRegistry};
+    use crate::ir::ModuleId;
+    use crate::parser::module::{ModuleParser, resolve_module_name};
     use veryl_analyzer::{
         self, Analyzer, Context, attribute_table,
-        ir::{Component, Ir, VarPath},
+        ir::{Component, Declaration, Ir, VarPath},
         symbol_table,
     };
     use veryl_metadata::Metadata;
     use veryl_parser::{Parser, resource_table::StrId};
 
-    fn setup(code: &str) -> (HashMap<StrId, SimModule>, Ir) {
+    fn setup(code: &str) -> (HashMap<ModuleId, SimModule>, HashMap<StrId, ModuleId>, Ir) {
         symbol_table::clear();
         attribute_table::clear();
 
@@ -327,25 +328,37 @@ mod tests {
         analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
         Analyzer::analyze_post_pass2();
 
-        let mut modules = HashMap::default();
-        let mut ir_modules = HashMap::default();
+        // First pass: assign ModuleIds
+        let mut name_to_id: HashMap<StrId, ModuleId> = HashMap::default();
+        let mut ir_modules: Vec<(ModuleId, &veryl_analyzer::ir::Module)> = Vec::new();
+        let mut next_id = 0usize;
         for component in &ir.components {
-            if let Component::Module(m) = component {
-                modules.insert(m.name, m.clone());
-                ir_modules.insert(m.name, m);
+            if let Component::Module(module) = component {
+                let id = ModuleId(next_id);
+                next_id += 1;
+                name_to_id.insert(module.name, id);
+                ir_modules.push((id, module));
             }
         }
 
+        // Second pass: parse with inst_ids
         let mut sim_modules = HashMap::default();
-        let registry = ModuleRegistry {
-            modules: ir_modules,
-        };
-        for module in modules.values() {
-            let sim_module = ModuleParser::parse(module, &registry, &crate::parser::BuildConfig::default()).expect("module parse failed");
-            sim_modules.insert(module.name, sim_module);
+        for &(mid, module) in &ir_modules {
+            let inst_ids: Vec<ModuleId> = module.declarations.iter()
+                .filter_map(|d| match d {
+                    Declaration::Inst(inst) => {
+                        let child_name = resolve_module_name(&inst.component);
+                        Some(name_to_id[&child_name])
+                    }
+                    _ => None,
+                })
+                .collect();
+            let sim_module = ModuleParser::parse(module, &crate::parser::BuildConfig::default(), &inst_ids)
+                .expect("module parse failed");
+            sim_modules.insert(mid, sim_module);
         }
 
-        (sim_modules, ir)
+        (sim_modules, name_to_id, ir)
     }
 
     #[test]
@@ -376,7 +389,7 @@ mod tests {
             }
         "#;
 
-        let (sim_modules, ir) = setup(code);
+        let (sim_modules, name_to_id, ir) = setup(code);
 
         let top_module_ir = ir
             .components
@@ -409,8 +422,8 @@ mod tests {
             })
             .unwrap();
 
-        let top_module_sim = &sim_modules[&top_module_ir.name];
-        let child_module_sim = &sim_modules[&child_module_ir.name];
+        let top_module_sim = &sim_modules[&name_to_id[&top_module_ir.name]];
+        let child_module_sim = &sim_modules[&name_to_id[&child_module_ir.name]];
 
         let mut instance_ids = HashMap::default();
         let top_path = InstancePath(vec![]);

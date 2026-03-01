@@ -27,8 +27,8 @@ impl MemoryLayout {
     pub fn build(program: &Program, options: &SimulatorOptions) -> Self {
         let mut stable_vars_to_layout = Vec::new();
 
-        for (instance_id, module_name) in &program.instance_module {
-            let variables = &program.module_variables[module_name];
+        for (instance_id, module_id) in &program.instance_module {
+            let variables = &program.module_variables[module_id];
             for info in variables.values() {
                 let addr = AbsoluteAddr {
                     instance_id: *instance_id,

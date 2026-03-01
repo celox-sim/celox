@@ -1,12 +1,11 @@
 use crate::HashMap;
 use crate::flatting;
-use crate::ir::{AbsoluteAddr, InstanceId, InstancePath};
+use crate::ir::{AbsoluteAddr, InstanceId, InstancePath, ModuleId};
 use crate::logic_tree::SLTNodeArena;
-use crate::parser::module::ModuleParser;
-use crate::parser::registry::ModuleRegistry;
+use crate::parser::module::{ModuleParser, resolve_module_name};
 use veryl_analyzer::{
     Analyzer, Context,
-    ir::{Component, Ir, VarId},
+    ir::{Component, Declaration, Ir, VarId},
 };
 use veryl_metadata::Metadata;
 use veryl_parser::{Parser, resource_table};
@@ -16,7 +15,7 @@ fn setup_to_flatting(
     top_name: &str,
 ) -> (
     crate::ir::RelocationModule,
-    HashMap<veryl_parser::resource_table::StrId, crate::ir::SimModule>,
+    HashMap<ModuleId, crate::ir::SimModule>,
     crate::logic_tree::SLTNodeArena<crate::ir::AbsoluteAddr>,
 ) {
     let metadata = Metadata::create_default("prj").unwrap();
@@ -32,25 +31,37 @@ fn setup_to_flatting(
 
     let top_id = resource_table::insert_str(top_name);
 
-    // Mock parse_ir logic
-    let mut module_registry = ModuleRegistry {
-        modules: HashMap::default(),
-    };
+    // Mock parse_ir logic with ModuleId
+    let mut name_to_id: HashMap<resource_table::StrId, ModuleId> = HashMap::default();
+    let mut ir_modules: HashMap<ModuleId, &veryl_analyzer::ir::Module> = HashMap::default();
+    let mut next_module_id = 0usize;
     for component in &ir.components {
         if let Component::Module(module) = component {
-            module_registry.modules.insert(module.name, module);
+            let id = ModuleId(next_module_id);
+            next_module_id += 1;
+            name_to_id.insert(module.name, id);
+            ir_modules.insert(id, module);
         }
     }
 
-    let mut modules = HashMap::default();
-    for component in &ir.components {
-        if let Component::Module(module) = component {
-            // Need to handle potential errors in real code, but unwrap/panic is fine for tests?
-            // ModuleParser::parse returns SimModule directly.
-            let m = ModuleParser::parse(module, &module_registry, &crate::parser::BuildConfig::default()).expect("module parse failed");
-            modules.insert(m.name, m);
-        }
+    // Parse each module with proper inst_ids
+    let mut modules: HashMap<ModuleId, crate::ir::SimModule> = HashMap::default();
+    for (&mid, &module) in &ir_modules {
+        let inst_ids: Vec<ModuleId> = module.declarations.iter()
+            .filter_map(|d| match d {
+                Declaration::Inst(inst) => {
+                    let child_name = resolve_module_name(&inst.component);
+                    Some(name_to_id[&child_name])
+                }
+                _ => None,
+            })
+            .collect();
+        let m = ModuleParser::parse(module, &crate::parser::BuildConfig::default(), &inst_ids)
+            .expect("module parse failed");
+        modules.insert(mid, m);
     }
+
+    let top_module_id = name_to_id[&top_id];
 
     // Prepare for flatting
     let instance_id = InstanceId(0);
@@ -58,7 +69,7 @@ fn setup_to_flatting(
     let mut instance_ids = HashMap::default();
     instance_ids.insert(path.clone(), instance_id);
 
-    let sim_module = &modules[&top_id];
+    let sim_module = &modules[&top_module_id];
 
     // Assign IDs to children (simple 1-level support for tests)
     let mut next_instance_id = 1;
@@ -318,11 +329,12 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
     // Use the real parser::parse_ir and flatten, but SKIP optimization to verify structure
     // crate::parser::parse(&top_id, &ir).expect("Failed to parse program")
     let build_config = crate::parser::BuildConfig::default();
-    let (registry, sim_modules) = crate::parser::parse_ir(&ir, &build_config).expect("Failed to parse IR");
+    let result = crate::parser::parse_ir(&ir, &build_config, &top_id).expect("Failed to parse IR");
     crate::parser::flatten(
-        &top_id,
-        &registry,
-        sim_modules,
+        &result.root_id,
+        &result.module_ir,
+        result.modules,
+        result.module_names,
         &build_config,
         &[],
         &[],
@@ -382,7 +394,11 @@ fn test_instances_inherit_module_boundaries() {
 
     // Find VarId for 'x' in Child module
     let child_name = resource_table::insert_str("Child");
-    let child_vars = &program.module_variables[&child_name];
+    let child_module_id = program.module_names.iter()
+        .find(|(_, name)| **name == child_name)
+        .map(|(id, _)| *id)
+        .expect("Child module not found");
+    let child_vars = &program.module_variables[&child_module_id];
     let x_info = child_vars
         .iter()
         .find(|(path, _)| path.0.len() == 1 && path.0[0] == resource_table::insert_str("x"))
@@ -459,7 +475,9 @@ fn test_boundary_propagation() {
 
     let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
 
-    let b_id = modules[&resource_table::insert_str("Child")]
+    let b_id = modules.values()
+        .find(|m| m.name == resource_table::insert_str("Child"))
+        .expect("Child module not found")
         .variables
         .iter()
         .find(|(_, v)| v.path.0.len() == 1 && v.path.0[0] == resource_table::insert_str("b"))

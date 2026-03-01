@@ -50,9 +50,27 @@ module Top (
 }
     "#;
 
-    // The key assertion: building a simulator with two different packages
-    // instantiating the same generic module must succeed. Before the ModuleId
-    // refactor, this would fail because both instantiations shared a single
-    // module identity.
-    let _sim = Simulator::builder(code, "Top").build().unwrap();
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+
+    // Verify 8-bit passthrough via GenericPass::<Byte>
+    sim.modify(|io| {
+        io.set(a, 0xABu8);
+        io.set(c, 0x1234u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(b), 0xABu8.into());
+    assert_eq!(sim.get(d), 0x1234u16.into());
+
+    // Verify with different values
+    sim.modify(|io| {
+        io.set(a, 0xFFu8);
+        io.set(c, 0xFFFFu16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(b), 0xFFu8.into());
+    assert_eq!(sim.get(d), 0xFFFFu16.into());
 }

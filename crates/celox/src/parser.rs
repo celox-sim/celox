@@ -1,8 +1,8 @@
 use crate::{HashMap, HashSet, flatting};
 use thiserror::Error;
 
-use crate::parser::{module::ModuleParser, registry::ModuleRegistry};
-use veryl_analyzer::ir::{Component, VarPath};
+use crate::parser::module::ModuleParser;
+use veryl_analyzer::ir::{Component, Module, VarPath};
 use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 
@@ -36,9 +36,10 @@ pub mod module;
 pub mod registry;
 mod scheduler;
 use crate::ir::{
-    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, Program,
+    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, ModuleId, Program,
     RegionedAbsoluteAddr, STABLE_REGION, SimModule, VariableInfo,
 };
+use veryl_analyzer::ir::Declaration;
 use crate::logic_tree::{LogicPath, SLTNodeArena};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
@@ -138,58 +139,132 @@ pub(crate) fn resolve_dims(
         .collect()
 }
 
+pub struct ParseIrResult<'a> {
+    pub modules: HashMap<ModuleId, SimModule>,
+    pub module_ir: HashMap<ModuleId, &'a Module>,
+    pub module_names: HashMap<ModuleId, StrId>,
+    pub root_id: ModuleId,
+}
+
 pub fn parse_ir<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
     config: &BuildConfig,
-) -> Result<(ModuleRegistry<'a>, HashMap<StrId, SimModule>), ParserError> {
-    let mut module_registry = ModuleRegistry {
-        modules: HashMap::default(),
-    };
-    // scan module
+    top: &StrId,
+) -> Result<ParseIrResult<'a>, ParserError> {
+    // Pre-step: build name_to_ir and generic_names
+    let mut name_to_ir: HashMap<StrId, &'a Module> = HashMap::default();
+    let mut generic_names: HashSet<StrId> = HashSet::default();
     for component in &ir.components {
         match component {
             Component::Module(module) => {
-                module_registry.modules.insert(module.name, module);
+                let is_generic = module.variables.values().any(|v| v.r#type.is_unknown());
+                if is_generic {
+                    generic_names.insert(module.name);
+                }
+                name_to_ir.insert(module.name, module);
             }
-            Component::Interface(_interface) => {
+            Component::Interface(_) => {
                 unreachable!("Interface component must be eliminated before simulator parse_ir")
             }
-            Component::SystemVerilog(system_verilog) => {
+            Component::SystemVerilog(sv) => {
                 return Err(ParserError::UnsupportedSimulatorParser {
                     feature: "systemverilog component",
-                    detail: format!("name: {:?}", system_verilog.name),
-                });
-            }
-        }
-    }
-    // parse module
-    let mut modules = HashMap::default();
-    for component in &ir.components {
-        match component {
-            Component::Module(module) => {
-                let m = ModuleParser::parse(module, &module_registry, config)?;
-                modules.insert(m.name, m);
-            }
-            Component::Interface(_interface) => {
-                unreachable!("Interface component must be eliminated before simulator parse_ir")
-            }
-            Component::SystemVerilog(system_verilog) => {
-                return Err(ParserError::UnsupportedSimulatorParser {
-                    feature: "systemverilog component",
-                    detail: format!("name: {:?}", system_verilog.name),
+                    detail: format!("name: {:?}", sv.name),
                 });
             }
         }
     }
 
-    Ok((module_registry, modules))
+    let mut modules: HashMap<ModuleId, SimModule> = HashMap::default();
+    let mut module_ir: HashMap<ModuleId, &'a Module> = HashMap::default();
+    let mut module_names: HashMap<ModuleId, StrId> = HashMap::default();
+    let mut name_to_id: HashMap<StrId, ModuleId> = HashMap::default();
+    let mut next_id: usize = 0;
+
+    // Allocate root
+    let root_id = ModuleId(next_id);
+    next_id += 1;
+    let root_ir = name_to_ir[top];
+    name_to_id.insert(*top, root_id);
+    module_names.insert(root_id, *top);
+    module_ir.insert(root_id, root_ir);
+
+    // Worklist: (my_id, ir_module)
+    let mut worklist: Vec<(ModuleId, &'a Module)> = vec![(root_id, root_ir)];
+    // inst_id sequences per module (for ModuleParser)
+    let mut inst_sequences: HashMap<ModuleId, Vec<ModuleId>> = HashMap::default();
+
+    let mut i = 0;
+    while i < worklist.len() {
+        let (my_id, ir_module) = worklist[i];
+        i += 1;
+
+        let mut inst_ids = Vec::new();
+        for decl in &ir_module.declarations {
+            if let Declaration::Inst(inst_decl) = decl {
+                match &inst_decl.component {
+                    Component::SystemVerilog(_) => {
+                        // SV modules: allocate a placeholder ModuleId.
+                        // ModuleParser::parse_inst_declaration will return an error.
+                        let child_id = ModuleId(next_id);
+                        next_id += 1;
+                        inst_ids.push(child_id);
+                    }
+                    Component::Module(child_module) => {
+                        let child_name = child_module.name;
+                        if generic_names.contains(&child_name) {
+                            // Generic: each inst gets a unique concrete module
+                            let child_id = ModuleId(next_id);
+                            next_id += 1;
+                            module_names.insert(child_id, child_name);
+                            module_ir.insert(child_id, child_module);
+                            worklist.push((child_id, child_module));
+                            inst_ids.push(child_id);
+                        } else {
+                            // Non-generic: dedup by name
+                            let child_id = if let Some(&existing) = name_to_id.get(&child_name) {
+                                existing
+                            } else {
+                                let id = ModuleId(next_id);
+                                next_id += 1;
+                                name_to_id.insert(child_name, id);
+                                module_names.insert(id, child_name);
+                                module_ir.insert(id, name_to_ir[&child_name]);
+                                worklist.push((id, name_to_ir[&child_name]));
+                                id
+                            };
+                            inst_ids.push(child_id);
+                        }
+                    }
+                    Component::Interface(_) => {
+                        unreachable!("Interface component in inst declaration")
+                    }
+                }
+            }
+        }
+        inst_sequences.insert(my_id, inst_ids);
+    }
+
+    // Parse all discovered modules
+    for (mid, ir_module) in &module_ir {
+        let inst_ids = inst_sequences.get(mid).map(|v| v.as_slice()).unwrap_or(&[]);
+        let sim_module = ModuleParser::parse(ir_module, config, inst_ids)?;
+        modules.insert(*mid, sim_module);
+    }
+
+    Ok(ParseIrResult {
+        modules,
+        module_ir,
+        module_names,
+        root_id,
+    })
 }
 
 fn create_absolute_addr(
     instance_path: &[(String, usize)],
     var_path: &[String],
-    instance_modules: &HashMap<InstanceId, StrId>,
-    modules: &HashMap<StrId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
     expanded: &HashMap<InstancePath, InstanceId>,
 ) -> AbsoluteAddr {
     let instance_path = InstancePath(
@@ -223,8 +298,8 @@ fn parse_ignored_loops(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
     )],
-    instance_modules: &HashMap<InstanceId, StrId>,
-    modules: &HashMap<StrId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
     expanded: &HashMap<InstancePath, InstanceId>,
 ) -> HashSet<(AbsoluteAddr, AbsoluteAddr)> {
     let mut res = HashSet::default();
@@ -254,8 +329,8 @@ fn parse_true_loops(
         (Vec<(String, usize)>, Vec<String>),
         usize,
     )],
-    instance_modules: &HashMap<InstanceId, StrId>,
-    modules: &HashMap<StrId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
     expanded: &HashMap<InstancePath, InstanceId>,
 ) -> HashMap<(AbsoluteAddr, AbsoluteAddr), usize> {
     let mut res = HashMap::default();
@@ -282,9 +357,10 @@ fn parse_true_loops(
     res
 }
 pub(crate) fn flatten(
-    top: &StrId,
-    registry: &ModuleRegistry,
-    modules: HashMap<StrId, SimModule>,
+    root_id: &ModuleId,
+    module_ir: &HashMap<ModuleId, &Module>,
+    modules: HashMap<ModuleId, SimModule>,
+    module_names: HashMap<ModuleId, StrId>,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -305,7 +381,7 @@ pub(crate) fn flatten(
         t.sim_modules = Some(modules.clone());
     }
 
-    let (expanded, instance_modules) = expand_hierarchy(top, &modules);
+    let (expanded, instance_modules) = expand_hierarchy(root_id, &modules);
     let global_boundaries = propagate_boundaries(&expanded, &instance_modules, &modules);
 
     let clock_domains = unify_clock_domains(&expanded, &instance_modules, &modules);
@@ -324,8 +400,8 @@ pub(crate) fn flatten(
     // Build reset -> clock mapping with AbsoluteAddr
     let mut reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr> = HashMap::default();
     for (_path, id) in &expanded {
-        let module_name = &instance_modules[id];
-        let sim_module = &modules[module_name];
+        let module_id = &instance_modules[id];
+        let sim_module = &modules[module_id];
         for (reset_var_id, clock_var_id) in &sim_module.reset_clock_map {
             let reset_addr = AbsoluteAddr {
                 instance_id: *id,
@@ -380,7 +456,8 @@ pub(crate) fn flatten(
             eval_comb: Vec::new(),
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
-            module_variables: module_variables(registry, config).unwrap_or_default(),
+            module_variables: module_variables(module_ir, config).unwrap_or_default(),
+            module_names: module_names.clone(),
             clock_domains: HashMap::default(),
             topological_clocks: Vec::new(),
             cascaded_clocks: BTreeSet::new(),
@@ -453,7 +530,8 @@ pub(crate) fn flatten(
         eval_comb: schduled,
         instance_ids: expanded,
         instance_module: instance_modules,
-        module_variables: module_variables(registry, config)?,
+        module_variables: module_variables(module_ir, config)?,
+        module_names,
         clock_domains,
         topological_clocks,
         cascaded_clocks,
@@ -467,8 +545,8 @@ pub(crate) fn flatten(
         HashMap::default();
     let module_vars = &program.module_variables;
     for (id, addr) in program.topological_clocks.iter().enumerate() {
-        if let Some(module_name) = program.instance_module.get(&addr.instance_id) {
-            if let Some(vars) = module_vars.get(module_name) {
+        if let Some(module_id) = program.instance_module.get(&addr.instance_id) {
+            if let Some(vars) = module_vars.get(module_id) {
                 // Find variable info by var_id
                 if let Some(info) = vars.values().find(|v| v.id == addr.var_id) {
                     let kind = info.kind;
@@ -588,11 +666,11 @@ pub(crate) fn flatten(
     Ok(program)
 }
 fn module_variables(
-    registry: &ModuleRegistry,
+    module_ir: &HashMap<ModuleId, &Module>,
     config: &BuildConfig,
-) -> Result<HashMap<StrId, HashMap<VarPath, VariableInfo>>, ParserError> {
+) -> Result<HashMap<ModuleId, HashMap<VarPath, VariableInfo>>, ParserError> {
     let mut res = HashMap::default();
-    for (name, module) in &registry.modules {
+    for (id, module) in module_ir {
         let mut variables = HashMap::default();
         for (id, varibale) in &module.variables {
             variables.insert(
@@ -613,7 +691,7 @@ fn module_variables(
                 },
             );
         }
-        res.insert(*name, variables);
+        res.insert(*id, variables);
     }
     Ok(res)
 }
@@ -686,11 +764,11 @@ fn is_4state_type(kind: &veryl_analyzer::ir::TypeKind) -> bool {
 }
 
 fn expand_hierarchy(
-    top: &StrId,
-    modules: &HashMap<StrId, SimModule>,
+    top: &ModuleId,
+    modules: &HashMap<ModuleId, SimModule>,
 ) -> (
     HashMap<InstancePath, InstanceId>,
-    HashMap<InstanceId, StrId>,
+    HashMap<InstanceId, ModuleId>,
 ) {
     let mut expanded = HashMap::default();
     let mut instance_modules = HashMap::default();
@@ -713,15 +791,15 @@ fn expand_hierarchy(
 
 fn propagate_boundaries(
     expanded: &HashMap<InstancePath, InstanceId>,
-    instance_modules: &HashMap<InstanceId, StrId>,
-    modules: &HashMap<StrId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
 ) -> HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>> {
     let mut current_boundaries = HashMap::default();
 
     // Initialize with local boundaries
     for id in expanded.values() {
-        let module_name = &instance_modules[id];
-        let sim_module = &modules[module_name];
+        let module_id = &instance_modules[id];
+        let sim_module = &modules[module_id];
         for (var_id, boundaries) in &sim_module.comb_boundaries {
             let addr = AbsoluteAddr {
                 instance_id: *id,
@@ -736,8 +814,8 @@ fn propagate_boundaries(
     while changed {
         changed = false;
         for (path, id) in expanded {
-            let module_name = &instance_modules[id];
-            let sim_module = &modules[module_name];
+            let module_id = &instance_modules[id];
+            let sim_module = &modules[module_id];
 
             for (inst_name, glue_blocks) in &sim_module.glue_blocks {
                 for (idx, glue_block) in glue_blocks.iter().enumerate() {
@@ -844,11 +922,11 @@ fn propagate_boundaries(
 }
 
 fn expand(
-    target: &StrId,
+    target: &ModuleId,
     path: Vec<(StrId, usize)>,
-    modules: &HashMap<StrId, SimModule>,
+    modules: &HashMap<ModuleId, SimModule>,
     expanded: &mut HashMap<InstancePath, InstanceId>,
-    instance_modules: &mut HashMap<InstanceId, StrId>,
+    instance_modules: &mut HashMap<InstanceId, ModuleId>,
     instance_id: &mut usize,
 ) {
     let module = &modules[target];
@@ -858,10 +936,10 @@ fn expand(
             path.push((*inst_name, idx));
             let id = InstanceId(*instance_id);
             expanded.insert(InstancePath(path.clone()), id);
-            instance_modules.insert(id, gb.module_name);
+            instance_modules.insert(id, gb.module_id);
             *instance_id += 1;
             expand(
-                &gb.module_name,
+                &gb.module_id,
                 path,
                 modules,
                 expanded,
@@ -890,16 +968,17 @@ pub fn parse(
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
 ) -> Result<Program, ParserError> {
-    let (regsitry, sim_modules) = parse_ir(ir, config)?;
+    let result = parse_ir(ir, config, top)?;
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.analyzer_ir
     {
         t.analyzer_ir = Some(ir.to_string());
     }
     let mut program = flatten(
-        top,
-        &regsitry,
-        sim_modules,
+        &result.root_id,
+        &result.module_ir,
+        result.modules,
+        result.module_names,
         config,
         ignored_loops,
         true_loops,
@@ -958,14 +1037,14 @@ fn relocate_executation_unit<A, B>(
 
 fn unify_clock_domains(
     expanded: &HashMap<InstancePath, InstanceId>,
-    instance_modules: &HashMap<InstanceId, StrId>,
-    modules: &HashMap<StrId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
     let mut drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
 
     for (path, id) in expanded {
-        let module_name = &instance_modules[id];
-        let sim_module = &modules[module_name];
+        let module_id = &instance_modules[id];
+        let sim_module = &modules[module_id];
 
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
@@ -1081,8 +1160,8 @@ fn unify_clock_domains(
 
 fn relocate_units(
     expanded: &HashMap<InstancePath, InstanceId>,
-    instance_modules: &HashMap<InstanceId, StrId>,
-    modules: &HashMap<StrId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
     global_boundaries: &HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     trace_opts: &crate::debug::TraceOptions,
@@ -1108,8 +1187,8 @@ fn relocate_units(
     let mut comb_blocks = Vec::new();
 
     for (path, id) in expanded {
-        let module_name = &instance_modules[id];
-        let sim_module = &modules[module_name];
+        let module_id = &instance_modules[id];
+        let sim_module = &modules[module_id];
 
         let relocated_module = flatting::flatting(
             sim_module,
@@ -1265,8 +1344,8 @@ fn analyze_clock_dependencies(
     arena: &SLTNodeArena<AbsoluteAddr>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     expanded: &HashMap<InstancePath, InstanceId>,
-    instance_modules: &HashMap<InstanceId, StrId>,
-    modules: &HashMap<StrId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
     config: &BuildConfig,
 ) -> (Vec<AbsoluteAddr>, BTreeSet<AbsoluteAddr>) {
     // Build static clock dependency graph & Topo Sort
@@ -1384,8 +1463,8 @@ fn analyze_clock_dependencies(
 
     // Include other potential event signals (like synchronous resets) so they can be scheduled
     for id in expanded.values() {
-        let module_name = &instance_modules[id];
-        let sim_module = &modules[module_name];
+        let module_id = &instance_modules[id];
+        let sim_module = &modules[module_id];
         for (var_id, var) in &sim_module.variables {
             let kind = type_kind_to_domain_kind(&var.r#type.kind, config);
             let is_trigger = matches!(

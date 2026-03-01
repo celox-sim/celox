@@ -70,8 +70,9 @@ pub struct Program {
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     pub instance_ids: HashMap<InstancePath, InstanceId>,
-    pub instance_module: HashMap<InstanceId, StrId>,
-    pub module_variables: HashMap<StrId, HashMap<VarPath, VariableInfo>>,
+    pub instance_module: HashMap<InstanceId, ModuleId>,
+    pub module_variables: HashMap<ModuleId, HashMap<VarPath, VariableInfo>>,
+    pub module_names: HashMap<ModuleId, StrId>,
     pub clock_domains: HashMap<AbsoluteAddr, AbsoluteAddr>,
     pub topological_clocks: Vec<AbsoluteAddr>,
     pub cascaded_clocks: BTreeSet<AbsoluteAddr>,
@@ -88,14 +89,14 @@ impl Program {
             instance_path_str_id.push((id, path.1));
         }
         let instance_id = self.instance_ids[&InstancePath(instance_path_str_id)];
-        let module_name = self.instance_module[&instance_id];
+        let module_id = self.instance_module[&instance_id];
         let mut var_path_str_id = Vec::new();
         for path in var_path {
             let id = veryl_parser::resource_table::insert_str(path);
             var_path_str_id.push(id);
         }
 
-        let variable = &self.module_variables[&module_name][&VarPath(var_path_str_id)];
+        let variable = &self.module_variables[&module_id][&VarPath(var_path_str_id)];
         AbsoluteAddr {
             instance_id,
             var_id: variable.id,
@@ -111,8 +112,8 @@ impl Program {
             .iter()
             .find(|(_, id)| **id == instance_id)
             .map(|(path, _)| path);
-        let module_name = self.instance_module.get(&instance_id).unwrap();
-        let module_vars = self.module_variables.get(module_name).unwrap();
+        let module_id = self.instance_module.get(&instance_id).unwrap();
+        let module_vars = self.module_variables.get(module_id).unwrap();
         let var_path = module_vars
             .iter()
             .find(|(_, info)| info.id == var_id)
@@ -141,8 +142,8 @@ impl Program {
     }
 
     pub fn get_variable_info(&self, addr: &AbsoluteAddr) -> Option<&VariableInfo> {
-        let module_name = self.instance_module.get(&addr.instance_id)?;
-        let module_vars = self.module_variables.get(module_name)?;
+        let module_id = self.instance_module.get(&addr.instance_id)?;
+        let module_vars = self.module_variables.get(module_id)?;
         module_vars.values().find(|info| info.id == addr.var_id)
     }
 
@@ -270,11 +271,20 @@ use veryl_parser::resource_table::StrId;
 pub struct BlockId(pub usize);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlueBlock {
-    pub module_name: StrId,
+    pub module_id: ModuleId,
     pub input_ports: Vec<(Vec<VarId>, LogicPath<GlueAddr>)>,
     pub output_ports: Vec<(Vec<VarId>, LogicPath<GlueAddr>)>,
     pub arena: SLTNodeArena<GlueAddr>,
 }
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModuleId(pub usize);
+
+impl fmt::Display for ModuleId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mod{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InstanceId(pub usize);
 

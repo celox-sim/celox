@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    BitAccess, BlockId, ExecutionUnit, GlueAddr, GlueBlock, SIRBuilder, SIRTerminator, SimModule,
-    TriggerSet, VarAtomBase,
+    BitAccess, BlockId, ExecutionUnit, GlueAddr, GlueBlock, ModuleId, SIRBuilder, SIRTerminator,
+    SimModule, TriggerSet, VarAtomBase,
 };
 
 use crate::logic_tree::{
@@ -11,7 +11,7 @@ use crate::logic_tree::{
 };
 use crate::parser::{
     BuildConfig, ParserError, bitaccess::eval_var_select, bitslicer::BitSlicer, ff::FfParser,
-    registry::ModuleRegistry, resolve_total_width,
+    registry::get_port_type, resolve_total_width,
 };
 use crate::{HashMap, HashSet};
 use veryl_analyzer::ir::{Component, Declaration, InstDeclaration, Module, VarId};
@@ -19,7 +19,8 @@ use veryl_parser::resource_table::StrId;
 
 pub struct ModuleParser<'a> {
     module: &'a Module,
-    registry: &'a ModuleRegistry<'a>,
+    inst_ids: &'a [ModuleId],
+    inst_idx: usize,
     slicer: BitSlicer,
     store: SymbolicStore<VarId>,
     comb_blocks: Vec<LogicPath<VarId>>,
@@ -30,7 +31,7 @@ pub struct ModuleParser<'a> {
     reset_clock_map: HashMap<VarId, VarId>,
 }
 
-fn resolve_module_name(component: &Component) -> StrId {
+pub(crate) fn resolve_module_name(component: &Component) -> StrId {
     match component {
         Component::Module(module) => module.name,
         Component::Interface(_) => {
@@ -43,22 +44,23 @@ fn resolve_module_name(component: &Component) -> StrId {
 impl<'a> ModuleParser<'a> {
     pub fn parse(
         module: &'a Module,
-        registry: &'a ModuleRegistry,
         config: &BuildConfig,
+        inst_ids: &'a [ModuleId],
     ) -> Result<SimModule, ParserError> {
-        let parser = Self::new(module, registry, config)?;
+        let parser = Self::new(module, config, inst_ids)?;
         parser.parse_inner()
     }
 
     fn new(
         module: &'a Module,
-        registry: &'a ModuleRegistry,
         config: &BuildConfig,
+        inst_ids: &'a [ModuleId],
     ) -> Result<Self, ParserError> {
         Ok(Self {
             module,
+            inst_ids,
+            inst_idx: 0,
             slicer: BitSlicer::new(module)?,
-            registry,
             store: SymbolicStore::default(),
             comb_blocks: Vec::new(),
             comb_boundaries: HashMap::default(),
@@ -82,7 +84,7 @@ impl<'a> ModuleParser<'a> {
         Ok(())
     }
 
-    fn parse_inst_declaration(&mut self, decl: &InstDeclaration) -> Result<(), ParserError> {
+    fn parse_inst_declaration(&mut self, decl: &InstDeclaration, module_id: ModuleId) -> Result<(), ParserError> {
         if let Component::SystemVerilog(system_verilog) = &decl.component {
             return Err(ParserError::UnsupportedSimulatorParser {
                 feature: "systemverilog module instantiation",
@@ -90,7 +92,10 @@ impl<'a> ModuleParser<'a> {
             });
         }
 
-        let module_name = resolve_module_name(&decl.component);
+        let child_module = match &decl.component {
+            Component::Module(m) => m,
+            _ => unreachable!(),
+        };
 
         // 1. Inputs (Parent -> Child)
         let mut input_ports = Vec::new();
@@ -133,7 +138,7 @@ impl<'a> ModuleParser<'a> {
             let mut current_lsb = 0;
 
             for child_port_id in &input.id {
-                let ty = self.registry.get_port_type(module_name, child_port_id)?;
+                let ty = get_port_type(child_module, child_port_id)?;
                 let width = ty.width();
                 let access = BitAccess::new(current_lsb, current_lsb + width - 1);
                 // Slice the expression
@@ -165,7 +170,7 @@ impl<'a> ModuleParser<'a> {
             // RHS: Concat of Child Ports.
             let mut parts = Vec::new();
             for child_port_id in &output.id {
-                let ty = self.registry.get_port_type(module_name, child_port_id)?;
+                let ty = get_port_type(child_module, child_port_id)?;
                 let width = ty.width();
                 let node = glue_arena.alloc(SLTNode::Input {
                     variable: GlueAddr::Child(*child_port_id),
@@ -216,7 +221,7 @@ impl<'a> ModuleParser<'a> {
                 let mut sources = HashSet::default();
                 for child_port_id in &output.id {
                     // Each child port is a source
-                    let ty = self.registry.get_port_type(module_name, child_port_id)?;
+                    let ty = get_port_type(child_module, child_port_id)?;
                     let width = ty.width();
                     sources.insert(VarAtomBase::new(
                         GlueAddr::Child(*child_port_id),
@@ -238,7 +243,7 @@ impl<'a> ModuleParser<'a> {
 
         // Construct GlueBlock
         let block = GlueBlock {
-            module_name,
+            module_id,
             input_ports,
             output_ports,
             arena: glue_arena,
@@ -267,7 +272,9 @@ impl<'a> ModuleParser<'a> {
                     self.parse_comb_declaration(comb_decl)?;
                 }
                 Declaration::Inst(inst_decl) => {
-                    self.parse_inst_declaration(inst_decl)
+                    let mid = self.inst_ids[self.inst_idx];
+                    self.inst_idx += 1;
+                    self.parse_inst_declaration(inst_decl, mid)
                         .map_err(ParserError::from)?;
                 }
                 _ => {}

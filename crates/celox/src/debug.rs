@@ -1,7 +1,6 @@
 use crate::HashMap;
-use crate::ir::{AbsoluteAddr, ExecutionUnit, RegionedAbsoluteAddr, SimModule};
+use crate::ir::{AbsoluteAddr, ExecutionUnit, ModuleId, RegionedAbsoluteAddr, SimModule};
 use crate::logic_tree::{LogicPath, SLTNodeArena};
-use veryl_parser::resource_table::StrId;
 mod output;
 #[derive(Debug, Clone, Default)]
 pub struct TraceOptions {
@@ -21,7 +20,7 @@ pub struct TraceOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct CompilationTrace {
-    pub sim_modules: Option<HashMap<StrId, SimModule>>,
+    pub sim_modules: Option<HashMap<ModuleId, SimModule>>,
     pub pre_atomized_comb_blocks:
         Option<(Vec<LogicPath<AbsoluteAddr>>, SLTNodeArena<AbsoluteAddr>)>,
     pub atomized_comb_blocks: Option<(Vec<LogicPath<AbsoluteAddr>>, SLTNodeArena<AbsoluteAddr>)>,

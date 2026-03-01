@@ -41,8 +41,8 @@ impl VcdWriter {
             Vec<(String, AbsoluteAddr, usize)>,
         > = HashMap::default();
 
-        for (instance_id, module_name) in &program.instance_module {
-            let variables = &program.module_variables[module_name];
+        for (instance_id, module_id) in &program.instance_module {
+            let variables = &program.module_variables[module_id];
             for (var_path, info) in variables {
                 let addr = AbsoluteAddr {
                     instance_id: *instance_id,

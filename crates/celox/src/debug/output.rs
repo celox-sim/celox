@@ -1,9 +1,9 @@
 use crate::HashMap;
 /// Module for outputting SIR and SLT from Veryl source code
-use crate::ir::{Program, RegionedAbsoluteAddr, SIRInstruction, SimModule};
+use crate::ir::{ModuleId, Program, RegionedAbsoluteAddr, SIRInstruction, SimModule};
 
 use crate::debug::CompilationTrace;
-use veryl_parser::resource_table::{self, StrId};
+use veryl_parser::resource_table;
 
 impl CompilationTrace {
     /// Format pre-optimized SIR to string representation
@@ -257,15 +257,15 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
 }
 
 /// Format SLT (Simulation Logic Tree) to string representation
-pub fn format_slt(sim_modules: &HashMap<StrId, SimModule>) -> String {
+pub fn format_slt(sim_modules: &HashMap<ModuleId, SimModule>) -> String {
     let mut output = String::new();
 
     output.push_str("=== Simulation Logic Tree (SLT) ===\n\n");
 
-    for (name, sim_module) in sim_modules {
+    for (_id, sim_module) in sim_modules {
         output.push_str(&format!(
             "Module: {}\n",
-            resource_table::get_str_value(*name).unwrap()
+            resource_table::get_str_value(sim_module.name).unwrap()
         ));
         output.push_str("Combinational Logic Blocks:\n");
 

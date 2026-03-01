@@ -176,8 +176,8 @@ impl Simulator {
             .instance_ids
             .get(&InstancePath(vec![]))
             .expect("top-level instance not found");
-        let module_name = &self.program.instance_module[top_instance_id];
-        let module_vars = &self.program.module_variables[module_name];
+        let module_id = &self.program.instance_module[top_instance_id];
+        let module_vars = &self.program.module_variables[module_id];
 
         let mut result = Vec::new();
         for (var_path, info) in module_vars {
@@ -263,11 +263,12 @@ impl Simulator {
             .instance_ids
             .get(&InstancePath(current_path.to_vec()))
             .expect("instance not found");
-        let module_name_id = &self.program.instance_module[instance_id];
-        let module_name = veryl_parser::resource_table::get_str_value(*module_name_id)
-            .unwrap()
-            .to_string();
-        let module_vars = &self.program.module_variables[module_name_id];
+        let module_id = &self.program.instance_module[instance_id];
+        let module_name = self.program.module_names.get(module_id)
+            .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}", module_id));
+        let module_vars = &self.program.module_variables[module_id];
 
         // Build signals for this instance
         let mut signals = Vec::new();
