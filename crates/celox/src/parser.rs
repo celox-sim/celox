@@ -2,7 +2,7 @@ use crate::{HashMap, HashSet, flatting};
 use thiserror::Error;
 
 use crate::parser::module::ModuleParser;
-use veryl_analyzer::ir::{Component, Module, VarPath};
+use veryl_analyzer::ir::{Component, Module, VarKind, VarPath};
 use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 
@@ -212,8 +212,12 @@ pub fn parse_ir<'a>(
                     }
                     Component::Module(child_module) => {
                         let child_name = child_module.name;
-                        if generic_names.contains(&child_name) {
-                            // Generic: each inst gets a unique concrete module
+                        let has_params = child_module
+                            .variables
+                            .values()
+                            .any(|v| v.kind == VarKind::Param);
+                        if generic_names.contains(&child_name) || has_params {
+                            // Generic or parametric: each inst gets a unique concrete module
                             let child_id = ModuleId(next_id);
                             next_id += 1;
                             module_names.insert(child_id, child_name);
@@ -221,7 +225,7 @@ pub fn parse_ir<'a>(
                             worklist.push((child_id, child_module));
                             inst_ids.push(child_id);
                         } else {
-                            // Non-generic: dedup by name
+                            // Non-generic, non-parametric: dedup by name
                             let child_id = if let Some(&existing) = name_to_id.get(&child_name) {
                                 existing
                             } else {
@@ -229,8 +233,8 @@ pub fn parse_ir<'a>(
                                 next_id += 1;
                                 name_to_id.insert(child_name, id);
                                 module_names.insert(id, child_name);
-                                module_ir.insert(id, name_to_ir[&child_name]);
-                                worklist.push((id, name_to_ir[&child_name]));
+                                module_ir.insert(id, child_module);
+                                worklist.push((id, child_module));
                                 id
                             };
                             inst_ids.push(child_id);

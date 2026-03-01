@@ -1,8 +1,40 @@
-use celox::Simulator;
+use celox::{BigUint, Simulator};
+
+/// Helper: pack 32-bit values into a single BigUint for an array port.
+/// Element 0 occupies the least-significant bits.
+fn pack_u32(values: &[u32]) -> BigUint {
+    let mut result = BigUint::from(0u32);
+    for (i, &v) in values.iter().enumerate() {
+        result |= BigUint::from(v) << (i * 32);
+    }
+    result
+}
+
+/// Helper: extract a 32-bit element from a packed BigUint array.
+fn extract_u32(packed: &BigUint, index: usize) -> u32 {
+    let shifted = packed >> (index * 32);
+    let mask = BigUint::from(u32::MAX);
+    u32::try_from(shifted & mask).unwrap_or(0)
+}
+
+/// Helper: extract an N-bit element from a packed BigUint array.
+fn extract_bits(packed: &BigUint, index: usize, width: usize) -> u32 {
+    let shifted = packed >> (index * width);
+    let mask = (BigUint::from(1u32) << width) - BigUint::from(1u32);
+    u32::try_from(shifted & mask).unwrap_or(0)
+}
+
+/// Helper: pack N-bit values into a single BigUint.
+fn pack_bits(values: &[u32], width: usize) -> BigUint {
+    let mut result = BigUint::from(0u32);
+    for (i, &v) in values.iter().enumerate() {
+        result |= BigUint::from(v) << (i * width);
+    }
+    result
+}
 
 /// Tests that two different packages can instantiate the same generic module,
-/// each getting a unique ModuleId. This validates the ModuleId refactor that
-/// enables multiple concrete instantiations of a single generic module.
+/// each getting a unique ModuleId.
 #[test]
 fn test_generic_module_instantiation() {
     let code = r#"
@@ -56,7 +88,6 @@ module Top (
     let c = sim.signal("c");
     let d = sim.signal("d");
 
-    // Verify 8-bit passthrough via GenericPass::<Byte>
     sim.modify(|io| {
         io.set(a, 0xABu8);
         io.set(c, 0x1234u16);
@@ -65,7 +96,6 @@ module Top (
     assert_eq!(sim.get(b), 0xABu8.into());
     assert_eq!(sim.get(d), 0x1234u16.into());
 
-    // Verify with different values
     sim.modify(|io| {
         io.set(a, 0xFFu8);
         io.set(c, 0xFFFFu16);
@@ -75,9 +105,69 @@ module Top (
     assert_eq!(sim.get(d), 0xFFFFu16.into());
 }
 
+/// Tests proto package function resolution (E::gt → IntElement::gt).
+#[test]
+fn test_proto_function_basic() {
+    let code = r#"
+proto package Element {
+    type data;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic;
+}
+
+package IntElement for Element {
+    type data = logic<8>;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >: b;
+    }
+}
+
+module GenericCompare::<E: Element> (
+    a: input  E::data,
+    b: input  E::data,
+    r: output logic,
+) {
+    always_comb {
+        r = E::gt(a, b);
+    }
+}
+
+module Top (
+    a: input  logic<8>,
+    b: input  logic<8>,
+    r: output logic,
+) {
+    inst inner: GenericCompare::<IntElement> (a, b, r);
+}
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let r = sim.signal("r");
+
+    sim.modify(|io| {
+        io.set(a, 10u8);
+        io.set(b, 5u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(r), 1u8.into()); // 10 > 5
+
+    sim.modify(|io| {
+        io.set(a, 3u8);
+        io.set(b, 7u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(r), 0u8.into()); // 3 > 7 is false
+}
+
 /// Shared Veryl source for the compare matrix sorter tests.
-/// Proto package functions (`E::gt`, `E::ge`) and constants (`E::max_value`)
-/// are not yet supported in comb lowering, so all tests using this code are `#[ignore]`.
+/// Uses proto package functions (`E::gt`, `E::ge`) and constants (`E::max_value`).
 const COMPARE_MATRIX_CODE: &str = r#"
 proto package Element {
     type data;
@@ -239,7 +329,7 @@ module CompareMatrixStage1CMInt32 #(
     in_data  : input  logic<32>        [P],
     out_score: output logic<$clog2(P)> [P],
 ) {
-    inst inner: CompareMatrixStage1CM::<IntElement> (in_data, out_score);
+    inst inner: CompareMatrixStage1CM::<IntElement> #(P: P) (in_data, out_score);
 }
 
 module CompareMatrixSelectorInt32 #(
@@ -249,7 +339,7 @@ module CompareMatrixSelectorInt32 #(
     in_scores: input  logic<$clog2(P)> [P],
     out_data : output logic<32>        [P],
 ) {
-    inst inner: CompareMatrixSelector::<IntElement> (in_data, in_scores, out_data);
+    inst inner: CompareMatrixSelector::<IntElement> #(P: P) (in_data, in_scores, out_data);
 }
 
 module CompareMatrixStage1Int32 #(
@@ -258,7 +348,7 @@ module CompareMatrixStage1Int32 #(
     in_data : input  logic<32> [P],
     out_data: output logic<32> [P],
 ) {
-    inst inner: CompareMatrixStage1::<IntElement> (in_data, out_data);
+    inst inner: CompareMatrixStage1::<IntElement> #(P: P) (in_data, out_data);
 }
 
 module CompareMatrixMergerInt32 #(
@@ -269,56 +359,74 @@ module CompareMatrixMergerInt32 #(
     in_b    : input  logic<32> [B],
     out_data: output logic<32> [A + B],
 ) {
-    inst inner: CompareMatrixMerger::<IntElement> (in_a, in_b, out_data);
+    inst inner: CompareMatrixMerger::<IntElement> #(A: A, B: B) (in_a, in_b, out_data);
 }
 "#;
 
-/// Tests the compare matrix scoring module.
-/// Input 4 values, verify scores reflect sorted order (descending).
+/// Tests proto constant (E::max_value) resolution.
 #[test]
-#[ignore]
-fn test_compare_matrix_stage1cm() {
-    let top = r#"
-module Top #(
-    param P: u32 = 4,
-) (
-    in_data  : input  logic<32>        [P],
-    out_score: output logic<$clog2(P)> [P],
+fn test_proto_const_max_value() {
+    let code = format!(
+        "{COMPARE_MATRIX_CODE}\n{}",
+        r#"
+module TestConst::<E: Element> (
+    out: output E::data,
 ) {
-    inst cm: CompareMatrixStage1CMInt32 #(P: P) (in_data, out_score);
+    assign out = E::max_value;
 }
-    "#;
-    let code = format!("{COMPARE_MATRIX_CODE}\n{top}");
+
+module Top (
+    out: output logic<32>,
+) {
+    inst t: TestConst::<IntElement> (out);
+}
+    "#
+    );
 
     let mut sim = Simulator::builder(&code, "Top").build().unwrap();
-    let in0 = sim.signal("in_data[0]");
-    let in1 = sim.signal("in_data[1]");
-    let in2 = sim.signal("in_data[2]");
-    let in3 = sim.signal("in_data[3]");
-    let s0 = sim.signal("out_score[0]");
-    let s1 = sim.signal("out_score[1]");
-    let s2 = sim.signal("out_score[2]");
-    let s3 = sim.signal("out_score[3]");
+    let out = sim.signal("out");
+    assert_eq!(
+        sim.get(out),
+        BigUint::from(u32::MAX),
+        "E::max_value should be ~0 = 0xFFFFFFFF"
+    );
+}
 
-    // Input: [10, 40, 20, 30] → descending order: 40(3), 30(2), 20(1), 10(0)
+/// Tests the compare matrix scoring module (CompareMatrixStage1CM).
+/// Input 4 values, verify scores reflect sorted order.
+#[test]
+fn test_compare_matrix_stage1cm() {
+    let code = format!(
+        "{COMPARE_MATRIX_CODE}\n{}",
+        r#"
+module Top (
+    in_data  : input  logic<32>        [4],
+    out_score: output logic<2>         [4],
+) {
+    inst cm: CompareMatrixStage1CM::<IntElement> #(P: 4) (in_data, out_score);
+}
+    "#
+    );
+
+    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+    let in_data = sim.signal("in_data");
+    let out_score = sim.signal("out_score");
+
+    // Input: [10, 40, 20, 30] → scores: 10→0, 40→3, 20→1, 30→2
     sim.modify(|io| {
-        io.set(in0, 10u32);
-        io.set(in1, 40u32);
-        io.set(in2, 20u32);
-        io.set(in3, 30u32);
+        io.set_wide(in_data, pack_u32(&[10, 40, 20, 30]));
     })
     .unwrap();
 
-    assert_eq!(sim.get(s0), 0u32.into()); // 10 is smallest → score 0
-    assert_eq!(sim.get(s1), 3u32.into()); // 40 is largest  → score 3
-    assert_eq!(sim.get(s2), 1u32.into()); // 20 → score 1
-    assert_eq!(sim.get(s3), 2u32.into()); // 30 → score 2
+    let scores = sim.get(out_score);
+    assert_eq!(extract_bits(&scores, 0, 2), 0); // 10 is smallest → score 0
+    assert_eq!(extract_bits(&scores, 1, 2), 3); // 40 is largest  → score 3
+    assert_eq!(extract_bits(&scores, 2, 2), 1); // 20 → score 1
+    assert_eq!(extract_bits(&scores, 3, 2), 2); // 30 → score 2
 }
 
-/// Tests the compare matrix selector module.
-/// Input data + pre-computed scores, verify reordered output.
+/// Tests the compare matrix selector module (through wrapper, verifying parameter forwarding).
 #[test]
-#[ignore]
 fn test_compare_matrix_selector() {
     let top = r#"
 module Top #(
@@ -334,43 +442,28 @@ module Top #(
     let code = format!("{COMPARE_MATRIX_CODE}\n{top}");
 
     let mut sim = Simulator::builder(&code, "Top").build().unwrap();
-    let in0 = sim.signal("in_data[0]");
-    let in1 = sim.signal("in_data[1]");
-    let in2 = sim.signal("in_data[2]");
-    let in3 = sim.signal("in_data[3]");
-    let sc0 = sim.signal("in_scores[0]");
-    let sc1 = sim.signal("in_scores[1]");
-    let sc2 = sim.signal("in_scores[2]");
-    let sc3 = sim.signal("in_scores[3]");
-    let o0 = sim.signal("out_data[0]");
-    let o1 = sim.signal("out_data[1]");
-    let o2 = sim.signal("out_data[2]");
-    let o3 = sim.signal("out_data[3]");
+    let in_data = sim.signal("in_data");
+    let in_scores = sim.signal("in_scores");
+    let out_data = sim.signal("out_data");
 
     // Data: [10, 40, 20, 30], Scores: [0, 3, 1, 2]
     // Output should place each value at its score index
     sim.modify(|io| {
-        io.set(in0, 10u32);
-        io.set(in1, 40u32);
-        io.set(in2, 20u32);
-        io.set(in3, 30u32);
-        io.set(sc0, 0u32);
-        io.set(sc1, 3u32);
-        io.set(sc2, 1u32);
-        io.set(sc3, 2u32);
+        io.set_wide(in_data, pack_u32(&[10, 40, 20, 30]));
+        io.set_wide(in_scores, pack_bits(&[0, 3, 1, 2], 2));
     })
     .unwrap();
 
-    assert_eq!(sim.get(o0), 10u32.into()); // score 0 → slot 0
-    assert_eq!(sim.get(o1), 20u32.into()); // score 1 → slot 1
-    assert_eq!(sim.get(o2), 30u32.into()); // score 2 → slot 2
-    assert_eq!(sim.get(o3), 40u32.into()); // score 3 → slot 3
+    let out = sim.get(out_data);
+    assert_eq!(extract_u32(&out, 0), 10); // score 0 → slot 0
+    assert_eq!(extract_u32(&out, 1), 20); // score 1 → slot 1
+    assert_eq!(extract_u32(&out, 2), 30); // score 2 → slot 2
+    assert_eq!(extract_u32(&out, 3), 40); // score 3 → slot 3
 }
 
-/// Tests full sorting via CompareMatrixStage1 (scoring + selection).
-/// Input unsorted values, output sorted descending.
+/// Tests full sorting via CompareMatrixStage1 (scoring + selection through wrapper chain).
+/// Input unsorted values, output sorted ascending.
 #[test]
-#[ignore]
 fn test_compare_matrix_stage1_sort() {
     let top = r#"
 module Top #(
@@ -385,34 +478,25 @@ module Top #(
     let code = format!("{COMPARE_MATRIX_CODE}\n{top}");
 
     let mut sim = Simulator::builder(&code, "Top").build().unwrap();
-    let in0 = sim.signal("in_data[0]");
-    let in1 = sim.signal("in_data[1]");
-    let in2 = sim.signal("in_data[2]");
-    let in3 = sim.signal("in_data[3]");
-    let o0 = sim.signal("out_data[0]");
-    let o1 = sim.signal("out_data[1]");
-    let o2 = sim.signal("out_data[2]");
-    let o3 = sim.signal("out_data[3]");
+    let in_data = sim.signal("in_data");
+    let out_data = sim.signal("out_data");
 
     // Input: [10, 40, 20, 30] → sorted ascending: [10, 20, 30, 40]
     sim.modify(|io| {
-        io.set(in0, 10u32);
-        io.set(in1, 40u32);
-        io.set(in2, 20u32);
-        io.set(in3, 30u32);
+        io.set_wide(in_data, pack_u32(&[10, 40, 20, 30]));
     })
     .unwrap();
 
-    assert_eq!(sim.get(o0), 10u32.into());
-    assert_eq!(sim.get(o1), 20u32.into());
-    assert_eq!(sim.get(o2), 30u32.into());
-    assert_eq!(sim.get(o3), 40u32.into());
+    let out = sim.get(out_data);
+    assert_eq!(extract_u32(&out, 0), 10);
+    assert_eq!(extract_u32(&out, 1), 20);
+    assert_eq!(extract_u32(&out, 2), 30);
+    assert_eq!(extract_u32(&out, 3), 40);
 }
 
 /// Tests the compare matrix merger.
-/// Two sorted arrays in, one merged sorted array out.
+/// Two sorted ascending arrays in, one merged sorted ascending array out.
 #[test]
-#[ignore]
 fn test_compare_matrix_merger() {
     let top = r#"
 module Top #(
@@ -429,31 +513,22 @@ module Top #(
     let code = format!("{COMPARE_MATRIX_CODE}\n{top}");
 
     let mut sim = Simulator::builder(&code, "Top").build().unwrap();
-    let a0 = sim.signal("in_a[0]");
-    let a1 = sim.signal("in_a[1]");
-    let a2 = sim.signal("in_a[2]");
-    let b0 = sim.signal("in_b[0]");
-    let b1 = sim.signal("in_b[1]");
-    let o0 = sim.signal("out_data[0]");
-    let o1 = sim.signal("out_data[1]");
-    let o2 = sim.signal("out_data[2]");
-    let o3 = sim.signal("out_data[3]");
-    let o4 = sim.signal("out_data[4]");
+    let in_a = sim.signal("in_a");
+    let in_b = sim.signal("in_b");
+    let out_data = sim.signal("out_data");
 
-    // Sorted inputs: A=[50, 30, 10], B=[40, 20]
-    // Merged sorted descending: [50, 40, 30, 20, 10]
+    // Sorted ascending inputs: A=[10, 30, 50], B=[20, 40]
+    // Merged sorted ascending: [10, 20, 30, 40, 50]
     sim.modify(|io| {
-        io.set(a0, 50u32);
-        io.set(a1, 30u32);
-        io.set(a2, 10u32);
-        io.set(b0, 40u32);
-        io.set(b1, 20u32);
+        io.set_wide(in_a, pack_u32(&[10, 30, 50]));
+        io.set_wide(in_b, pack_u32(&[20, 40]));
     })
     .unwrap();
 
-    assert_eq!(sim.get(o0), 50u32.into());
-    assert_eq!(sim.get(o1), 40u32.into());
-    assert_eq!(sim.get(o2), 30u32.into());
-    assert_eq!(sim.get(o3), 20u32.into());
-    assert_eq!(sim.get(o4), 10u32.into());
+    let out = sim.get(out_data);
+    assert_eq!(extract_u32(&out, 0), 10);
+    assert_eq!(extract_u32(&out, 1), 20);
+    assert_eq!(extract_u32(&out, 2), 30);
+    assert_eq!(extract_u32(&out, 3), 40);
+    assert_eq!(extract_u32(&out, 4), 50);
 }
