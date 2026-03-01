@@ -17,6 +17,8 @@ pub struct NamedSignal {
     pub name: String,
     pub signal: SignalRef,
     pub info: VariableInfo,
+    /// For reset signals, the name of the associated clock (from FfDeclaration).
+    pub associated_clock: Option<String>,
 }
 
 /// A named event with its resolved ID and event reference.
@@ -186,10 +188,19 @@ impl Simulator {
                 var_id: info.id,
             };
             let signal = self.backend.resolve_signal(&addr);
+
+            // Resolve associated clock for reset signals
+            let associated_clock = self
+                .program
+                .reset_clock_map
+                .get(&addr)
+                .map(|clock_addr| self.program.get_path(clock_addr));
+
             result.push(NamedSignal {
                 name,
                 signal,
                 info: info.clone(),
+                associated_clock,
             });
         }
         result

@@ -77,6 +77,8 @@ pub struct Program {
     pub cascaded_clocks: BTreeSet<AbsoluteAddr>,
     pub arena: SLTNodeArena<AbsoluteAddr>,
     pub num_events: usize,
+    /// Maps reset AbsoluteAddr → clock AbsoluteAddr (from FfDeclaration).
+    pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
 }
 impl Program {
     pub fn get_addr(&self, instance_path: &[(&str, usize)], var_path: &[&str]) -> AbsoluteAddr {
@@ -430,6 +432,8 @@ pub struct SimModule {
     pub comb_boundaries: HashMap<VarId, std::collections::BTreeSet<usize>>,
     pub arena: SLTNodeArena<VarId>,
     pub store: SymbolicStore<VarId>,
+    /// Maps reset VarId → clock VarId, derived from FfDeclarations.
+    pub reset_clock_map: HashMap<VarId, VarId>,
 }
 
 impl fmt::Debug for SimModule {
@@ -445,6 +449,7 @@ impl fmt::Debug for SimModule {
             .field("comb_boundaries", &self.comb_boundaries)
             .field("arena", &self.arena)
             .field("store", &self.store)
+            .field("reset_clock_map", &self.reset_clock_map)
             .finish()
     }
 }

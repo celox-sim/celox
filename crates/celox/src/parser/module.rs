@@ -27,6 +27,7 @@ pub struct ModuleParser<'a> {
     glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     ff_parser: FfParser<'a>,
     arena: SLTNodeArena<VarId>,
+    reset_clock_map: HashMap<VarId, VarId>,
 }
 
 fn resolve_module_name(component: &Component) -> StrId {
@@ -60,6 +61,7 @@ impl<'a> ModuleParser<'a> {
             glue_blocks: HashMap::default(),
             ff_parser: FfParser::new(module, *config),
             arena: SLTNodeArena::new(),
+            reset_clock_map: HashMap::default(),
         }
     }
 
@@ -252,6 +254,10 @@ impl<'a> ModuleParser<'a> {
                 Declaration::Ff(ff_decl) => {
                     let trigger_set = self.ff_parser.detect_trigger_set(ff_decl);
                     ff_groups.entry(trigger_set).or_default().push(ff_decl);
+                    // Build reset -> clock mapping
+                    if let Some(reset) = &ff_decl.reset {
+                        self.reset_clock_map.insert(reset.id, ff_decl.clock.id);
+                    }
                 }
                 Declaration::Comb(comb_decl) => {
                     self.parse_comb_declaration(comb_decl)?;
@@ -398,6 +404,7 @@ impl<'a> ModuleParser<'a> {
             comb_boundaries,
             arena: self.arena,
             store: self.store,
+            reset_clock_map: self.reset_clock_map,
         })
     }
 }

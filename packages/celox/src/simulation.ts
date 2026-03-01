@@ -7,7 +7,6 @@
 
 import type {
   CreateResult,
-  EventHandle,
   FourStateValue,
   ModuleDefinition,
   NativeSimulationHandle,
@@ -55,7 +54,8 @@ export class Simulation<P = Record<string, unknown>> {
   private readonly _events: Record<string, number>;
   private readonly _state: DirtyState;
   private readonly _buffer: ArrayBuffer | SharedArrayBuffer;
-  private readonly _layout: Record<string, SignalLayout & { typeKind?: string }>;
+  private readonly _layout: Record<string, SignalLayout & { typeKind?: string; associatedClock?: string }>;
+  private readonly _clocks = new Map<string, { period: number; eventId: number }>();
   private _disposed = false;
 
   private constructor(
@@ -64,7 +64,7 @@ export class Simulation<P = Record<string, unknown>> {
     events: Record<string, number>,
     state: DirtyState,
     buffer: ArrayBuffer | SharedArrayBuffer,
-    layout: Record<string, SignalLayout & { typeKind?: string }>,
+    layout: Record<string, SignalLayout & { typeKind?: string; associatedClock?: string }>,
   ) {
     this._handle = handle;
     this._dut = dut;
@@ -205,6 +205,7 @@ export class Simulation<P = Record<string, unknown>> {
     this.ensureAlive();
     const eventId = this.resolveEvent(name);
     this._handle.addClock(eventId, opts.period, opts.initialDelay ?? 0);
+    this._clocks.set(name, { period: opts.period, eventId });
   }
 
   /**
@@ -310,37 +311,40 @@ export class Simulation<P = Record<string, unknown>> {
   }
 
   /**
-   * Wait for `count` cycles of the given clock event.
+   * Wait for `count` rising edges of the given clock.
    *
-   * Celox schedules 2 steps per clock cycle (rising + falling edge),
-   * so this steps `count * 2` times.
+   * Detects actual 0→1 transitions by reading the clock signal directly
+   * from the shared buffer (clock ports are excluded from the DUT proxy).
+   * The clock must have been registered via `addClock`.
    *
-   * @returns The simulation time after the cycles complete.
+   * @returns The simulation time after the edges are observed.
    * @throws SimulationTimeoutError if `maxSteps` is exceeded.
    */
   waitForCycles(
-    _event: string | EventHandle,
+    clock: string,
     count: number,
     opts?: { maxSteps?: number },
   ): number {
     this.ensureAlive();
-    const totalSteps = count * 2;
-    const max = opts?.maxSteps ?? 100_000;
-    let stepped = 0;
-    for (let i = 0; i < totalSteps; i++) {
-      const t = this._handle.step();
-      this._state.dirty = false;
-      if (t == null) break;
-      stepped++;
-      if (stepped >= max) {
-        throw new SimulationTimeoutError(
-          `waitForCycles: exceeded ${max} steps at time ${this._handle.time()}`,
-          this._handle.time(),
-          stepped,
-        );
-      }
+    if (!this._clocks.has(clock)) {
+      throw new Error(
+        `No clock registered for '${clock}'. Call addClock() first.`,
+      );
     }
-    return this._handle.time();
+    const sig = this._layout[clock];
+    if (!sig) {
+      throw new Error(`No layout entry for clock '${clock}'.`);
+    }
+    const view = new DataView(this._buffer);
+    const readClk = () => view.getUint8(sig.offset);
+    let prev = readClk();
+    let remaining = count;
+    return this.waitUntil(() => {
+      const curr = readClk();
+      if (prev === 0 && curr !== 0) remaining--;
+      prev = curr;
+      return remaining <= 0;
+    }, opts);
   }
 
   /**
@@ -350,12 +354,14 @@ export class Simulation<P = Record<string, unknown>> {
    * - `reset` / `reset_async_high` / `reset_sync_high` → active-high (1)
    * - `reset_async_low` / `reset_sync_low` → active-low (0)
    *
-   * Writes the active value, advances `activeCycles` clock cycles
-   * (default 2), then writes the inactive value.
+   * For sync resets (with an associated clock from FfDeclaration), advances
+   * `activeCycles` worth of the associated clock's period using `runUntil`.
+   * For async resets without an associated clock, `duration` must be specified.
+   * An explicit `duration` overrides cycle-based calculation for either type.
    */
   reset(
     signal: string,
-    opts?: { activeCycles?: number },
+    opts?: { activeCycles?: number; duration?: number },
   ): void {
     this.ensureAlive();
     const sig = this._layout[signal];
@@ -373,13 +379,26 @@ export class Simulation<P = Record<string, unknown>> {
     const isActiveLow = typeKind === "reset_async_low" || typeKind === "reset_sync_low";
     const activeValue = isActiveLow ? 0 : 1;
     const inactiveValue = isActiveLow ? 1 : 0;
-    const cycles = opts?.activeCycles ?? 2;
 
     const dut = this._dut as Record<string, unknown>;
     dut[signal] = activeValue;
-    for (let i = 0; i < cycles * 2; i++) {
-      this._handle.step();
+
+    const associatedClock = sig.associatedClock;
+
+    if (opts?.duration != null) {
+      // Explicit duration (works for both sync and async resets)
+      this._handle.runUntil(this._handle.time() + opts.duration);
+    } else if (associatedClock) {
+      // Clock-associated reset → advance by activeCycles
+      const cycles = opts?.activeCycles ?? 2;
+      this.waitForCycles(associatedClock, cycles);
+    } else {
+      // No associated clock and no explicit duration → error
+      throw new Error(
+        `Reset '${signal}' has no associated clock. Specify opts.duration.`,
+      );
     }
+
     dut[signal] = inactiveValue;
     this._state.dirty = false;
   }

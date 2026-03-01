@@ -250,6 +250,33 @@ pub(crate) fn flatten(
     let ignored_loops = parse_ignored_loops(ignored_loops, &instance_modules, &modules, &expanded);
     let true_loops = parse_true_loops(true_loops, &instance_modules, &modules, &expanded);
 
+    // Build reset -> clock mapping with AbsoluteAddr
+    let mut reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr> = HashMap::default();
+    for (_path, id) in &expanded {
+        let module_name = &instance_modules[id];
+        let sim_module = &modules[module_name];
+        for (reset_var_id, clock_var_id) in &sim_module.reset_clock_map {
+            let reset_addr = AbsoluteAddr {
+                instance_id: *id,
+                var_id: *reset_var_id,
+            };
+            let clock_addr = AbsoluteAddr {
+                instance_id: *id,
+                var_id: *clock_var_id,
+            };
+            // Use canonical clock domain if available
+            let canonical_clock = clock_domains
+                .get(&clock_addr)
+                .copied()
+                .unwrap_or(clock_addr);
+            let canonical_reset = clock_domains
+                .get(&reset_addr)
+                .copied()
+                .unwrap_or(reset_addr);
+            reset_clock_map.insert(canonical_reset, canonical_clock);
+        }
+    }
+
     let (topological_clocks, cascaded_clocks) = analyze_clock_dependencies(
         &mut eval_apply_ffs,
         &comb_blocks,
@@ -288,6 +315,7 @@ pub(crate) fn flatten(
             cascaded_clocks: BTreeSet::new(),
             arena: SLTNodeArena::new(),
             num_events: 0,
+            reset_clock_map: HashMap::default(),
         };
         let mut target_arena = SLTNodeArena::new();
         ParserError::Scheduler(e.map_addr(&global_arena, &mut target_arena, &|addr| {
@@ -360,6 +388,7 @@ pub(crate) fn flatten(
         cascaded_clocks,
         arena: global_arena,
         num_events,
+        reset_clock_map,
     };
 
     // --- Trigger Injection ---

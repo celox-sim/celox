@@ -58,6 +58,10 @@ export interface SignalLayout {
   /** If true, an equal-sized mask follows immediately after the value. */
   readonly is4state: boolean;
   readonly direction: "input" | "output" | "inout";
+  /** The Veryl type kind (e.g. "clock", "reset_async_high", "logic"). */
+  readonly typeKind?: string;
+  /** For reset signals, the name of the associated clock (from FfDeclaration). */
+  readonly associatedClock?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -30,7 +30,10 @@ const TopModule: ModuleDefinition<TopPorts> = {
   events: ["clk"],
 };
 
-function createMockNative(): {
+function createMockNative(opts?: {
+  resetTypeKind?: string;
+  associatedClock?: string;
+}): {
   create: NativeCreateSimulationFn;
   handle: NativeSimulationHandle;
   buffer: SharedArrayBuffer;
@@ -51,6 +54,8 @@ function createMockNative(): {
       currentTime += 5;
       const view = new DataView(buffer);
       view.setUint8(4, view.getUint8(2));
+      // Toggle clock (offset 6) on each step to simulate half-period=5
+      view.setUint8(6, view.getUint8(6) === 0 ? 1 : 0);
       return currentTime;
     }),
     time: vi.fn().mockImplementation(() => currentTime),
@@ -63,11 +68,14 @@ function createMockNative(): {
     dispose: vi.fn(),
   };
 
+  const resetTypeKind = opts?.resetTypeKind ?? "reset_async_high";
+  const associatedClock = opts?.associatedClock;
+
   const create: NativeCreateSimulationFn = vi.fn().mockReturnValue({
     buffer,
     layout: {
       clk: { offset: 6, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: "clock" },
-      rst: { offset: 0, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: "reset_async_high" },
+      rst: { offset: 0, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: resetTypeKind, ...(associatedClock ? { associatedClock } : {}) },
       d:   { offset: 2, width: 8, byteSize: 1, is4state: false, direction: "input", typeKind: "logic" },
       q:   { offset: 4, width: 8, byteSize: 1, is4state: false, direction: "output", typeKind: "logic" },
     },
@@ -254,92 +262,115 @@ describe("Simulation", () => {
     ).toThrow(SimulationTimeoutError);
   });
 
-  test("waitForCycles: advances correct number of steps", () => {
+  test("waitForCycles: counts rising edges", () => {
     const mock = createMockNative();
     const sim = Simulation.create(TopModule, {
       __nativeCreate: mock.create,
     });
 
+    sim.addClock("clk", { period: 10 });
     const t = sim.waitForCycles("clk", 3);
-    // 3 cycles = 6 steps, each step increments by 5 → time = 30
-    expect(t).toBe(30);
-    expect(mock.handle.step).toHaveBeenCalledTimes(6);
+    // clk toggles each step: 0→1→0→1→0→1 (5 steps for 3 rising edges)
+    expect(mock.handle.step).toHaveBeenCalledTimes(5);
+    expect(t).toBe(25);
   });
 
-  test("waitForCycles: throws on timeout", () => {
+  test("waitForCycles: throws without addClock", () => {
     const mock = createMockNative();
     const sim = Simulation.create(TopModule, {
       __nativeCreate: mock.create,
     });
 
-    expect(() =>
-      sim.waitForCycles("clk", 1000, { maxSteps: 3 }),
-    ).toThrow(SimulationTimeoutError);
+    expect(() => sim.waitForCycles("clk", 3)).toThrow("No clock registered");
   });
 
-  test("reset: active-high (default) asserts 1 then releases to 0", () => {
-    const mock = createMockNative();
+  test("reset: active-high with associatedClock steps until target time", () => {
+    const mock = createMockNative({ associatedClock: "clk" });
     const sim = Simulation.create(TopModule, {
       __nativeCreate: mock.create,
     });
 
+    sim.addClock("clk", { period: 10 });
     sim.reset("rst");
-    // Default: activeCycles=2 → 4 steps, then rst released to 0
-    expect(mock.handle.step).toHaveBeenCalledTimes(4);
+    // Default activeCycles=2: 3 steps for 2 rising edges (0→1→0→1)
+    expect(mock.handle.step).toHaveBeenCalledTimes(3);
+    // Released to inactive value (0 for active-high)
     const view = new DataView(mock.buffer);
     expect(view.getUint8(0)).toBe(0);
   });
 
-  test("reset: custom activeCycles", () => {
+  test("reset: custom activeCycles with associatedClock", () => {
+    const mock = createMockNative({ associatedClock: "clk" });
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    sim.addClock("clk", { period: 10 });
+    sim.reset("rst", { activeCycles: 3 });
+    // 3 cycles: 5 steps for 3 rising edges (0→1→0→1→0→1)
+    expect(mock.handle.step).toHaveBeenCalledTimes(5);
+  });
+
+  test("reset: explicit duration overrides cycle calculation", () => {
+    const mock = createMockNative({ associatedClock: "clk" });
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    sim.addClock("clk", { period: 10 });
+    sim.reset("rst", { duration: 50 });
+    // Explicit duration → runUntil(0 + 50 = 50)
+    expect(mock.handle.runUntil).toHaveBeenCalledWith(50);
+  });
+
+  test("reset: active-low with associatedClock asserts 0 then releases to 1", () => {
+    const mock = createMockNative({
+      resetTypeKind: "reset_async_low",
+      associatedClock: "clk",
+    });
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    sim.addClock("clk", { period: 10 });
+    sim.reset("rst");
+    // active-low: releases to 1
+    const view = new DataView(mock.buffer);
+    expect(view.getUint8(0)).toBe(1);
+    // activeCycles=2: 3 steps for 2 rising edges
+    expect(mock.handle.step).toHaveBeenCalledTimes(3);
+  });
+
+  test("reset: throws when no associatedClock and no duration", () => {
+    // No associatedClock in layout
     const mock = createMockNative();
     const sim = Simulation.create(TopModule, {
       __nativeCreate: mock.create,
     });
 
-    sim.reset("rst", { activeCycles: 3 });
-    // 3 cycles → 6 steps
-    expect(mock.handle.step).toHaveBeenCalledTimes(6);
+    expect(() => sim.reset("rst")).toThrow("has no associated clock");
   });
 
-  test("reset: active-low asserts 0 then releases to 1", () => {
-    // Create mock with active-low reset
-    const buffer = new SharedArrayBuffer(64);
-    let currentTime = 0;
+  test("reset: no associatedClock but duration specified works", () => {
+    // No associatedClock in layout, but duration is given
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
 
-    const handle: NativeSimulationHandle = {
-      addClock: vi.fn(),
-      schedule: vi.fn(),
-      runUntil: vi.fn(),
-      step: vi.fn().mockImplementation(() => {
-        currentTime += 5;
-        return currentTime;
-      }),
-      time: vi.fn().mockImplementation(() => currentTime),
-      nextEventTime: vi.fn().mockReturnValue(null),
-      evalComb: vi.fn(),
-      dump: vi.fn(),
-      dispose: vi.fn(),
-    };
+    sim.reset("rst", { duration: 100 });
+    expect(mock.handle.runUntil).toHaveBeenCalledWith(100);
+  });
 
-    const create: NativeCreateSimulationFn = vi.fn().mockReturnValue({
-      buffer,
-      layout: {
-        clk: { offset: 6, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: "clock" },
-        rst: { offset: 0, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: "reset_async_low" },
-        d:   { offset: 2, width: 8, byteSize: 1, is4state: false, direction: "input", typeKind: "logic" },
-        q:   { offset: 4, width: 8, byteSize: 1, is4state: false, direction: "output", typeKind: "logic" },
-      },
-      events: { clk: 0 },
-      handle,
-    } satisfies CreateResult<NativeSimulationHandle>);
-
-    const sim = Simulation.create(TopModule, { __nativeCreate: create });
-
-    sim.reset("rst");
-    // active-low: asserts 0, releases to 1
-    expect(handle.step).toHaveBeenCalledTimes(4);
-    const view = new DataView(buffer);
-    expect(view.getUint8(0)).toBe(1); // released to inactive = 1
+  test("reset: throws when associatedClock not registered via addClock", () => {
+    const mock = createMockNative({ associatedClock: "clk" });
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+    // addClock not called
+    expect(() => sim.reset("rst")).toThrow(
+      "No clock registered for 'clk'",
+    );
   });
 
   test("reset: throws on non-reset port", () => {

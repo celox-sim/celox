@@ -236,6 +236,7 @@ interface RawSignalLayout {
   direction: string;
   type_kind: string;
   array_dims?: number[];
+  associated_clock?: string;
 }
 
 /**
@@ -244,11 +245,11 @@ interface RawSignalLayout {
  * the DUT-compatible layout (without type_kind).
  */
 export function parseNapiLayout(json: string): {
-  signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[] }>;
+  signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[]; associatedClock?: string }>;
   forDut: Record<string, SignalLayout>;
 } {
   const raw: Record<string, RawSignalLayout> = JSON.parse(json);
-  const signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[] }> = {};
+  const signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[]; associatedClock?: string }> = {};
   const forDut: Record<string, SignalLayout> = {};
 
   for (const [name, r] of Object.entries(raw)) {
@@ -259,12 +260,15 @@ export function parseNapiLayout(json: string): {
       is4state: r.is_4state,
       direction: r.direction as "input" | "output" | "inout",
     };
-    const entry: SignalLayout & { typeKind: string; arrayDims?: number[] } = {
+    const entry: SignalLayout & { typeKind: string; arrayDims?: number[]; associatedClock?: string } = {
       ...sl,
       typeKind: r.type_kind,
     };
     if (r.array_dims && r.array_dims.length > 0) {
       entry.arrayDims = r.array_dims;
+    }
+    if (r.associated_clock) {
+      entry.associatedClock = r.associated_clock;
     }
     signals[name] = entry;
     forDut[name] = sl;

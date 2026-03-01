@@ -13,6 +13,8 @@ pub struct SignalLayout {
     pub type_kind: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub array_dims: Vec<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub associated_clock: Option<String>,
 }
 
 /// Build a map of signal name -> layout info from named signals.
@@ -56,6 +58,7 @@ pub fn build_signal_layout(signals: &[NamedSignal], four_state_mode: bool) -> Ha
                 direction,
                 type_kind,
                 array_dims,
+                associated_clock: ns.associated_clock.clone(),
             },
         );
     }
