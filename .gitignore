@@ -34,6 +34,7 @@ docs/.vitepress/cache
 docs/api/
 
 # Overlay filesystem
+.overlays/
 .overlay-upper/
 .overlay-work/
 

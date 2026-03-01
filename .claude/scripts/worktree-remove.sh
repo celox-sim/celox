@@ -2,19 +2,18 @@
 set -euo pipefail
 
 # WorktreeRemove hook for Claude Code
-# Unmounts the overlayfs and removes the git worktree.
+# Unmounts all overlayfs layers and removes the git worktree.
 #
 # Input (JSON on stdin): { "worktree_path": "...", "cwd": "...", ... }
 
 INPUT=$(cat)
 WORKTREE_DIR=$(echo "$INPUT" | jq -r '.worktree_path')
 MAIN_DIR=$(echo "$INPUT" | jq -r '.cwd')
-WT_TARGET="$WORKTREE_DIR/target"
 
-# 1. Unmount overlayfs if mounted
-if mountpoint -q "$WT_TARGET" 2>/dev/null; then
-  fusermount3 -u "$WT_TARGET" || fusermount -u "$WT_TARGET" || true
-fi
+# 1. Unmount all overlayfs mounts within the worktree (reverse order for safety)
+mount | grep -F " on $WORKTREE_DIR/" | awk '{print $3}' | sort -r | while read -r mnt; do
+  fusermount3 -u "$mnt" 2>/dev/null || fusermount -u "$mnt" 2>/dev/null || true
+done
 
 # 2. Extract branch name before removing worktree
 BRANCH=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
