@@ -72,15 +72,17 @@ describe("Counter", () => {
 
 ### リセットヘルパー
 
+アクティブレベルは Veryl のポート型（`reset`、`reset_async_high`、`reset_async_low` など）から自動的に判定されるため、極性を手動で指定する必要はありません。
+
 ```typescript
 const sim = Simulation.create(Counter);
 sim.addClock("clk", { period: 10 });
 
-// rst=1 を 2 サイクル維持してから 0 に戻す
+// rst を 2 サイクル（デフォルト）アサートしてから解除
 sim.reset("rst");
 
-// カスタム: 3 サイクル、アクティブローリセット
-sim.reset("rst_n", { activeCycles: 3, activeValue: 0 });
+// カスタム: 3 クロックサイクル間リセットを保持
+sim.reset("rst_n", { activeCycles: 3 });
 ```
 
 ### 条件待ち
@@ -128,6 +130,8 @@ const sim = Simulator.fromSource(source, "Top", {
   fourState: true,      // 4 値 (X/Z) シミュレーションを有効化
   vcd: "./dump.vcd",    // VCD 波形出力を書き出す
   optimize: true,       // Cranelift 最適化パスを有効化
+  clockType: "posedge", // クロック極性 (デフォルト: "posedge")
+  resetType: "async_low", // リセットタイプ (デフォルト: "async_low")
 });
 ```
 

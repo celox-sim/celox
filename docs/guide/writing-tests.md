@@ -72,15 +72,17 @@ The `Simulation` class provides convenience methods for common testbench pattern
 
 ### Reset Helper
 
+The active level is determined automatically from the Veryl port type (`reset`, `reset_async_high`, `reset_async_low`, etc.), so you never need to specify the polarity manually.
+
 ```typescript
 const sim = Simulation.create(Counter);
 sim.addClock("clk", { period: 10 });
 
-// Assert rst=1 for 2 cycles, then release to 0
+// Assert rst for 2 cycles (default), then release
 sim.reset("rst");
 
-// Custom: 3 cycles, active-low reset
-sim.reset("rst_n", { activeCycles: 3, activeValue: 0 });
+// Custom: hold reset for 3 clock cycles
+sim.reset("rst_n", { activeCycles: 3 });
 ```
 
 ### Waiting for Conditions
@@ -128,6 +130,8 @@ const sim = Simulator.fromSource(source, "Top", {
   fourState: true,      // Enable 4-state (X/Z) simulation
   vcd: "./dump.vcd",    // Write VCD waveform output
   optimize: true,       // Enable Cranelift optimization passes
+  clockType: "posedge", // Clock polarity (default: "posedge")
+  resetType: "async_low", // Reset type (default: "async_low")
 });
 ```
 
