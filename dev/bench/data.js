@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772398866357,
+  "lastUpdate": 1772398866764,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -1401,6 +1401,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "verilator/testbench_tick_top_n1000_x1000000",
             "value": 151177.716,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "62b8ddffda41525315fd755b173b6ff20e478a48",
+          "message": "Introduce ModuleId for generic module instantiation support\n\nReplace StrId-keyed module maps with ModuleId(usize) to uniquely\nidentify each concrete instantiation of generic modules. Previously,\nGenericPass::<Byte> and GenericPass::<Word> shared a single SimModule\nwith unresolved 1-bit types, producing wrong simulation values.\n\nKey changes:\n- Add ModuleId newtype; GlueBlock stores module_id instead of module_name\n- parse_ir uses worklist to discover modules, assigning unique ModuleIds\n  per generic instantiation while deduplicating non-generic modules\n- ModuleParser receives pre-assigned inst_ids slice instead of registry\n- Remove ModuleRegistry (port types resolved directly from InstDeclaration\n  component modules)\n- Update flatten, expand, relocate_units, module_variables and all\n  downstream consumers to use ModuleId\n- Replace compare_matrix test with test_generic_module_instantiation\n  that verifies 8-bit and 16-bit passthrough via proto package generics\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-01T20:49:56Z",
+          "tree_id": "1e8fde7dd37913ee2d9157204fe64961100394fd",
+          "url": "https://github.com/celox-sim/celox/commit/62b8ddffda41525315fd755b173b6ff20e478a48"
+        },
+        "date": 1772398866635,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "value": 12288242.12,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "value": 0.15458000000000002,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "value": 165396.379,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "value": 0.15485,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "value": 154174.732,
             "unit": "us"
           }
         ]
