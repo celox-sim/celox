@@ -36,6 +36,7 @@ pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{AbsoluteAddr, PortTypeKind, SignalRef};
 pub use malachite_bigint::BigUint;
+pub use veryl_metadata::{ClockType, ResetType};
 pub use parser::ParserError;
 pub use parser::SchedulerError;
 pub use simulation::Simulation;

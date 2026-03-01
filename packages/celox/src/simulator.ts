@@ -107,8 +107,8 @@ export class Simulator<P = Record<string, unknown>> {
       );
     }
 
-    const { fourState, vcd, optimize, falseLoops, trueLoops } = options ?? {};
-    const result = createFn(module.source, module.name, { fourState, vcd, optimize, falseLoops, trueLoops });
+    const { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType } = options ?? {};
+    const result = createFn(module.source, module.name, { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType });
     const state: DirtyState = { dirty: false };
 
     const dut = createDut<P>(

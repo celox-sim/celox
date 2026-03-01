@@ -30,7 +30,7 @@ pub fn build_signal_layout(signals: &[NamedSignal], four_state_mode: bool) -> Ha
         };
         let type_kind = match ns.info.type_kind {
             PortTypeKind::Clock => "clock",
-            PortTypeKind::Reset | PortTypeKind::ResetAsyncHigh => "reset_async_high",
+            PortTypeKind::ResetAsyncHigh => "reset_async_high",
             PortTypeKind::ResetAsyncLow => "reset_async_low",
             PortTypeKind::ResetSyncHigh => "reset_sync_high",
             PortTypeKind::ResetSyncLow => "reset_sync_low",

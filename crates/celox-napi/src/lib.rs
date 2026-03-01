@@ -47,6 +47,10 @@ pub struct NapiOptions {
     pub optimize: Option<bool>,
     pub false_loops: Option<Vec<NapiFalseLoop>>,
     pub true_loops: Option<Vec<NapiTrueLoop>>,
+    /// Clock polarity: "posedge" or "negedge".
+    pub clock_type: Option<String>,
+    /// Reset type: "async_high", "async_low", "sync_high", or "sync_low".
+    pub reset_type: Option<String>,
 }
 
 /// Parsed builder options from NapiOptions.
@@ -63,6 +67,8 @@ struct ParsedOptions {
         (Vec<(String, usize)>, Vec<String>),
         usize,
     )>,
+    clock_type: Option<celox::ClockType>,
+    reset_type: Option<celox::ResetType>,
 }
 
 /// Convert a NapiSignalPath to the Rust builder's tuple format.
@@ -76,8 +82,34 @@ fn convert_signal_path(p: &NapiSignalPath) -> (Vec<(String, usize)>, Vec<String>
     (inst, var_path)
 }
 
+/// Parse a clock type string into ClockType.
+fn parse_clock_type(s: &str) -> Result<celox::ClockType> {
+    match s {
+        "posedge" => Ok(celox::ClockType::PosEdge),
+        "negedge" => Ok(celox::ClockType::NegEdge),
+        _ => Err(Error::from_reason(format!(
+            "Invalid clock_type '{}'. Expected 'posedge' or 'negedge'.",
+            s
+        ))),
+    }
+}
+
+/// Parse a reset type string into ResetType.
+fn parse_reset_type(s: &str) -> Result<celox::ResetType> {
+    match s {
+        "async_high" => Ok(celox::ResetType::AsyncHigh),
+        "async_low" => Ok(celox::ResetType::AsyncLow),
+        "sync_high" => Ok(celox::ResetType::SyncHigh),
+        "sync_low" => Ok(celox::ResetType::SyncLow),
+        _ => Err(Error::from_reason(format!(
+            "Invalid reset_type '{}'. Expected 'async_high', 'async_low', 'sync_high', or 'sync_low'.",
+            s
+        ))),
+    }
+}
+
 /// Helper to extract the builder config from NapiOptions.
-fn parse_options(options: &Option<NapiOptions>) -> ParsedOptions {
+fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
     match options.as_ref() {
         Some(o) => {
             let false_loops = o
@@ -106,21 +138,35 @@ fn parse_options(options: &Option<NapiOptions>) -> ParsedOptions {
                         .collect()
                 })
                 .unwrap_or_default();
-            ParsedOptions {
+            let clock_type = o
+                .clock_type
+                .as_deref()
+                .map(parse_clock_type)
+                .transpose()?;
+            let reset_type = o
+                .reset_type
+                .as_deref()
+                .map(parse_reset_type)
+                .transpose()?;
+            Ok(ParsedOptions {
                 four_state: o.four_state.unwrap_or(false),
                 optimize: o.optimize,
                 vcd: o.vcd.clone(),
                 false_loops,
                 true_loops,
-            }
+                clock_type,
+                reset_type,
+            })
         }
-        None => ParsedOptions {
+        None => Ok(ParsedOptions {
             four_state: false,
             optimize: None,
             vcd: None,
             false_loops: Vec::new(),
             true_loops: Vec::new(),
-        },
+            clock_type: None,
+            reset_type: None,
+        }),
     }
 }
 
@@ -164,6 +210,12 @@ fn apply_options<'a, T>(
     for (from, to, max_iter) in &opts.true_loops {
         builder = builder.true_loop(from.clone(), to.clone(), *max_iter);
     }
+    if let Some(ct) = opts.clock_type {
+        builder = builder.clock_type(ct);
+    }
+    if let Some(rt) = opts.reset_type {
+        builder = builder.reset_type(rt);
+    }
     builder
 }
 
@@ -184,7 +236,7 @@ impl NativeSimulatorHandle {
     /// Create a new simulator from Veryl source code.
     #[napi(constructor)]
     pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
-        let opts = parse_options(&options);
+        let opts = parse_options(&options)?;
         let builder = apply_options(celox::Simulator::builder(&code, &top), &opts);
         let sim = builder
             .build()
@@ -219,7 +271,7 @@ impl NativeSimulatorHandle {
     /// clock/reset settings.
     #[napi(factory)]
     pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
-        let opts = parse_options(&options);
+        let opts = parse_options(&options)?;
         let (source, metadata) = load_project_source(&project_path)?;
 
         let builder = apply_options(
@@ -355,7 +407,7 @@ impl NativeSimulationHandle {
     /// Create a new timed simulation from Veryl source code.
     #[napi(constructor)]
     pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
-        let opts = parse_options(&options);
+        let opts = parse_options(&options)?;
         let builder = apply_options(celox::Simulation::builder(&code, &top), &opts);
         let sim = builder
             .build()
@@ -386,7 +438,7 @@ impl NativeSimulationHandle {
     /// Create a new timed simulation from a Veryl project directory.
     #[napi(factory)]
     pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
-        let opts = parse_options(&options);
+        let opts = parse_options(&options)?;
         let (source, metadata) = load_project_source(&project_path)?;
 
         let builder = apply_options(

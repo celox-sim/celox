@@ -301,6 +301,47 @@ describe("Simulation", () => {
     expect(mock.handle.step).toHaveBeenCalledTimes(6);
   });
 
+  test("reset: active-low asserts 0 then releases to 1", () => {
+    // Create mock with active-low reset
+    const buffer = new SharedArrayBuffer(64);
+    let currentTime = 0;
+
+    const handle: NativeSimulationHandle = {
+      addClock: vi.fn(),
+      schedule: vi.fn(),
+      runUntil: vi.fn(),
+      step: vi.fn().mockImplementation(() => {
+        currentTime += 5;
+        return currentTime;
+      }),
+      time: vi.fn().mockImplementation(() => currentTime),
+      nextEventTime: vi.fn().mockReturnValue(null),
+      evalComb: vi.fn(),
+      dump: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const create: NativeCreateSimulationFn = vi.fn().mockReturnValue({
+      buffer,
+      layout: {
+        clk: { offset: 6, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: "clock" },
+        rst: { offset: 0, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: "reset_async_low" },
+        d:   { offset: 2, width: 8, byteSize: 1, is4state: false, direction: "input", typeKind: "logic" },
+        q:   { offset: 4, width: 8, byteSize: 1, is4state: false, direction: "output", typeKind: "logic" },
+      },
+      events: { clk: 0 },
+      handle,
+    } satisfies CreateResult<NativeSimulationHandle>);
+
+    const sim = Simulation.create(TopModule, { __nativeCreate: create });
+
+    sim.reset("rst");
+    // active-low: asserts 0, releases to 1
+    expect(handle.step).toHaveBeenCalledTimes(4);
+    const view = new DataView(buffer);
+    expect(view.getUint8(0)).toBe(1); // released to inactive = 1
+  });
+
   test("reset: throws on non-reset port", () => {
     const mock = createMockNative();
     const sim = Simulation.create(TopModule, {

@@ -128,6 +128,10 @@ export interface SimulatorOptions {
   falseLoops?: LoopBreak[];
   /** True-loop declarations with convergence limits. */
   trueLoops?: TrueLoopSpec[];
+  /** Clock polarity. Default: "posedge". */
+  clockType?: "posedge" | "negedge";
+  /** Reset type. Default: "async_low". */
+  resetType?: "async_high" | "async_low" | "sync_high" | "sync_low";
 }
 
 // ---------------------------------------------------------------------------
