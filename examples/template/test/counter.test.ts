@@ -10,12 +10,12 @@ describe("Counter", () => {
     sim.addClock("clk", { period: 10 });
     expect(sim.time()).toBe(0);
 
-    // Assert reset
-    sim.dut.rst = 1;
+    // Assert reset (active-low: 0 = asserted)
+    sim.dut.rst = 0;
     sim.runUntil(20);
 
     // Release reset and enable counting
-    sim.dut.rst = 0;
+    sim.dut.rst = 1;
     sim.dut.en = 1;
 
     // Run for a while and verify count increments
