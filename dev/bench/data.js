@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772365355707,
+  "lastUpdate": 1772367419781,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -197,6 +197,72 @@ window.BENCHMARK_DATA = {
             "name": "rust/testbench_tick_top_n1000_x1000000",
             "value": 199716.341,
             "range": "± 289.372 us",
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "8d149808a083ce434b92b708a2182431edebe778",
+          "message": "Fix counter test reset polarity for async_low reset type\n\nThe project uses reset_type = \"async_low\", so reset is active-low.\nThe test was asserting rst=1 (inactive) and releasing with rst=0\n(active), which is backwards.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-01T12:07:43Z",
+          "tree_id": "3f83d5cd703b2e01f9fb60bab87492f1c372c323",
+          "url": "https://github.com/celox-sim/celox/commit/8d149808a083ce434b92b708a2182431edebe778"
+        },
+        "date": 1772367418254,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "rust/simulator_tick_x10000",
+            "value": 1592.917,
+            "range": "± 32.833 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_step_x20000",
+            "value": 9851.003,
+            "range": "± 58.575 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_top_n1000",
+            "value": 764589.111,
+            "range": "± 7885.955 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1",
+            "value": 0.158,
+            "range": "± 0.001 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1000000",
+            "value": 159334.907,
+            "range": "± 632.294 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1",
+            "value": 0.326,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1000000",
+            "value": 333774.663,
+            "range": "± 2692.970 us",
             "unit": "us"
           }
         ]
