@@ -33,5 +33,9 @@ docs/.vitepress/cache
 # TypeDoc generated API docs
 docs/api/
 
+# Overlay filesystem
+.overlay-upper/
+.overlay-work/
+
 # OS
 .DS_Store

@@ -66,10 +66,10 @@ function createMockNative(): {
   const create: NativeCreateSimulationFn = vi.fn().mockReturnValue({
     buffer,
     layout: {
-      clk: { offset: 6, width: 1, byteSize: 1, is4state: false, direction: "input" },
-      rst: { offset: 0, width: 1, byteSize: 1, is4state: false, direction: "input" },
-      d:   { offset: 2, width: 8, byteSize: 1, is4state: false, direction: "input" },
-      q:   { offset: 4, width: 8, byteSize: 1, is4state: false, direction: "output" },
+      clk: { offset: 6, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: "clock" },
+      rst: { offset: 0, width: 1, byteSize: 1, is4state: false, direction: "input", typeKind: "reset_async_high" },
+      d:   { offset: 2, width: 8, byteSize: 1, is4state: false, direction: "input", typeKind: "logic" },
+      q:   { offset: 4, width: 8, byteSize: 1, is4state: false, direction: "output", typeKind: "logic" },
     },
     events: { clk: 0 },
     handle,
@@ -277,28 +277,45 @@ describe("Simulation", () => {
     ).toThrow(SimulationTimeoutError);
   });
 
-  test("reset: asserts and releases reset signal", () => {
+  test("reset: active-high (default) asserts 1 then releases to 0", () => {
     const mock = createMockNative();
     const sim = Simulation.create(TopModule, {
       __nativeCreate: mock.create,
     });
 
     sim.reset("rst");
-    // Default: activeCycles=2 → 4 steps, then rst set to 0
+    // Default: activeCycles=2 → 4 steps, then rst released to 0
     expect(mock.handle.step).toHaveBeenCalledTimes(4);
-    // After reset, rst should be 0
     const view = new DataView(mock.buffer);
     expect(view.getUint8(0)).toBe(0);
   });
 
-  test("reset: custom activeCycles and activeValue", () => {
+  test("reset: custom activeCycles", () => {
     const mock = createMockNative();
     const sim = Simulation.create(TopModule, {
       __nativeCreate: mock.create,
     });
 
-    sim.reset("rst", { activeCycles: 3, activeValue: 1 });
+    sim.reset("rst", { activeCycles: 3 });
     // 3 cycles → 6 steps
     expect(mock.handle.step).toHaveBeenCalledTimes(6);
+  });
+
+  test("reset: throws on non-reset port", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    expect(() => sim.reset("d")).toThrow("not a reset signal");
+  });
+
+  test("reset: throws on unknown port", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    expect(() => sim.reset("nonexistent")).toThrow("Unknown port");
   });
 });

@@ -55,7 +55,7 @@ export class Simulation<P = Record<string, unknown>> {
   private readonly _events: Record<string, number>;
   private readonly _state: DirtyState;
   private readonly _buffer: ArrayBuffer | SharedArrayBuffer;
-  private readonly _layout: Record<string, SignalLayout>;
+  private readonly _layout: Record<string, SignalLayout & { typeKind?: string }>;
   private _disposed = false;
 
   private constructor(
@@ -64,7 +64,7 @@ export class Simulation<P = Record<string, unknown>> {
     events: Record<string, number>,
     state: DirtyState,
     buffer: ArrayBuffer | SharedArrayBuffer,
-    layout: Record<string, SignalLayout>,
+    layout: Record<string, SignalLayout & { typeKind?: string }>,
   ) {
     this._handle = handle;
     this._dut = dut;
@@ -149,7 +149,7 @@ export class Simulation<P = Record<string, unknown>> {
     const handle = wrapDirectSimulationHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
 
-    return new Simulation<P>(handle, dut, events, state, buf, layout.forDut);
+    return new Simulation<P>(handle, dut, events, state, buf, layout.signals);
   }
 
   /**
@@ -184,7 +184,7 @@ export class Simulation<P = Record<string, unknown>> {
     const handle = wrapDirectSimulationHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
 
-    return new Simulation<P>(handle, dut, events, state, buf, layout.forDut);
+    return new Simulation<P>(handle, dut, events, state, buf, layout.signals);
   }
 
   /** The DUT accessor object — read/write ports as plain properties. */
@@ -346,24 +346,41 @@ export class Simulation<P = Record<string, unknown>> {
   /**
    * Assert and release a reset signal.
    *
-   * Writes `activeValue` (default 1) to the named port, advances
-   * `activeCycles` clock cycles (default 2), then writes 0.
+   * The active level is determined automatically from the Veryl type:
+   * - `reset` / `reset_async_high` / `reset_sync_high` → active-high (1)
+   * - `reset_async_low` / `reset_sync_low` → active-low (0)
+   *
+   * Writes the active value, advances `activeCycles` clock cycles
+   * (default 2), then writes the inactive value.
    */
   reset(
     signal: string,
-    opts?: { activeCycles?: number; activeValue?: number; clock?: string },
+    opts?: { activeCycles?: number },
   ): void {
     this.ensureAlive();
-    const dut = this._dut as Record<string, unknown>;
-    const activeValue = opts?.activeValue ?? 1;
+    const sig = this._layout[signal];
+    if (!sig) {
+      throw new Error(
+        `Unknown port '${signal}'. Available: ${Object.keys(this._layout).join(", ")}`,
+      );
+    }
+    const typeKind = sig.typeKind ?? "";
+    if (!typeKind.startsWith("reset")) {
+      throw new Error(
+        `Port '${signal}' is not a reset signal (type_kind: '${typeKind}').`,
+      );
+    }
+    const isActiveLow = typeKind === "reset_async_low" || typeKind === "reset_sync_low";
+    const activeValue = isActiveLow ? 0 : 1;
+    const inactiveValue = isActiveLow ? 1 : 0;
     const cycles = opts?.activeCycles ?? 2;
 
+    const dut = this._dut as Record<string, unknown>;
     dut[signal] = activeValue;
-    // Step through reset cycles (2 steps per cycle)
     for (let i = 0; i < cycles * 2; i++) {
       this._handle.step();
     }
-    dut[signal] = 0;
+    dut[signal] = inactiveValue;
     this._state.dirty = false;
   }
 
