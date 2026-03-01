@@ -494,11 +494,10 @@ fn type_kind_to_port_type_kind(kind: &veryl_analyzer::ir::TypeKind) -> crate::ir
         TypeKind::Clock | TypeKind::ClockPosedge | TypeKind::ClockNegedge => {
             crate::ir::PortTypeKind::Clock
         }
-        TypeKind::Reset
-        | TypeKind::ResetAsyncHigh
-        | TypeKind::ResetAsyncLow
-        | TypeKind::ResetSyncHigh
-        | TypeKind::ResetSyncLow => crate::ir::PortTypeKind::Reset,
+        TypeKind::Reset | TypeKind::ResetAsyncHigh => crate::ir::PortTypeKind::ResetAsyncHigh,
+        TypeKind::ResetAsyncLow => crate::ir::PortTypeKind::ResetAsyncLow,
+        TypeKind::ResetSyncHigh => crate::ir::PortTypeKind::ResetSyncHigh,
+        TypeKind::ResetSyncLow => crate::ir::PortTypeKind::ResetSyncLow,
         TypeKind::Logic => crate::ir::PortTypeKind::Logic,
         TypeKind::Bit => crate::ir::PortTypeKind::Bit,
         _ => crate::ir::PortTypeKind::Other,

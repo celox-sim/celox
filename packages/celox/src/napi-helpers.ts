@@ -276,19 +276,14 @@ export function buildPortsFromLayout(
   for (const [name, sig] of Object.entries(signals)) {
     const typeKind = sig.typeKind;
     let portType: "clock" | "reset" | "logic" | "bit";
-    switch (typeKind) {
-      case "clock":
-        portType = "clock";
-        break;
-      case "reset":
-        portType = "reset";
-        break;
-      case "bit":
-        portType = "bit";
-        break;
-      default:
-        portType = "logic";
-        break;
+    if (typeKind === "clock") {
+      portType = "clock";
+    } else if (typeKind.startsWith("reset")) {
+      portType = "reset";
+    } else if (typeKind === "bit") {
+      portType = "bit";
+    } else {
+      portType = "logic";
     }
 
     const port: PortInfo = {

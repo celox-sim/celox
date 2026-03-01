@@ -19,6 +19,10 @@ pub enum DomainKind {
 pub enum PortTypeKind {
     Clock,
     Reset,
+    ResetAsyncHigh,
+    ResetAsyncLow,
+    ResetSyncHigh,
+    ResetSyncLow,
     Logic,
     Bit,
     Other,
