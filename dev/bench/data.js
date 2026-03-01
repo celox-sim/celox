@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772407609699,
+  "lastUpdate": 1772407610048,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -1687,6 +1687,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "verilator/testbench_tick_top_n1000_x1000000",
             "value": 154174.732,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "d4c979988f96b48d6ea1891f5ec9a168c6ce7be5",
+          "message": "Update veryl submodule to celox/proto-support branch\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-01T23:17:45Z",
+          "tree_id": "94b8e5e9bc1bc8443314dafd8be4cd0ab874c407",
+          "url": "https://github.com/celox-sim/celox/commit/d4c979988f96b48d6ea1891f5ec9a168c6ce7be5"
+        },
+        "date": 1772407609967,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "value": 5909576.226,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "value": 0.15364,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "value": 154525.967,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "value": 0.15269,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "value": 155592.723,
             "unit": "us"
           }
         ]
