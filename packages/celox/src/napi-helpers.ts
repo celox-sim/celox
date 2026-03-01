@@ -83,6 +83,8 @@ export interface NapiOptions {
   optimize?: boolean;
   falseLoops?: NapiFalseLoop[];
   trueLoops?: NapiTrueLoop[];
+  clockType?: string;
+  resetType?: string;
 }
 
 export interface RawNapiAddon {
@@ -208,6 +210,14 @@ export function buildNapiOpts(options?: SimulatorOptions): NapiOptions | undefin
       to: parseSignalPath(tl.to),
       maxIter: tl.maxIter,
     }));
+    hasOpt = true;
+  }
+  if (options.clockType) {
+    napiOpts.clockType = options.clockType;
+    hasOpt = true;
+  }
+  if (options.resetType) {
+    napiOpts.resetType = options.resetType;
     hasOpt = true;
   }
 

@@ -1,5 +1,5 @@
 use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
-use veryl_metadata::Metadata;
+use veryl_metadata::{ClockType, Metadata, ResetType};
 use veryl_parser::Parser;
 
 use super::Simulator;
@@ -22,6 +22,8 @@ fn analyze(
     trace_opts: &crate::debug::TraceOptions,
     trace_out: Option<&mut crate::debug::CompilationTrace>,
     metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
 ) -> (Result<Program, ParserError>, Vec<AnalyzerError>) {
     symbol_table::clear();
     attribute_table::clear();
@@ -44,7 +46,13 @@ fn analyze(
         .filter(|x| matches!(x, AnalyzerError::UnsupportedByIr { .. }))
         .collect();
     let top = veryl_parser::resource_table::insert_str(top);
-    let build_config = BuildConfig::from(&metadata.build);
+    let mut build_config = BuildConfig::from(&metadata.build);
+    if let Some(ct) = clock_type {
+        build_config.clock_type = ct;
+    }
+    if let Some(rt) = reset_type {
+        build_config.reset_type = rt;
+    }
     let sir = parser::parse(
         &top,
         &ir,
@@ -75,6 +83,8 @@ pub(crate) fn compile_to_sir(
     trace_opts: &crate::debug::TraceOptions,
     trace_out: Option<&mut crate::debug::CompilationTrace>,
     metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
 ) -> Result<Program, ParserError> {
     let (sir, errors) = analyze(
         code,
@@ -86,6 +96,8 @@ pub(crate) fn compile_to_sir(
         trace_opts,
         trace_out,
         metadata,
+        clock_type,
+        reset_type,
     );
     if !errors.is_empty() {
         panic!("Compiler errors found: {:?}", errors);
@@ -134,6 +146,8 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
     options: SimulatorOptions,
     vcd_path: Option<std::path::PathBuf>,
     metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
     _marker: std::marker::PhantomData<Target>,
 }
 
@@ -142,6 +156,18 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Supply project metadata (clock/reset settings, etc.) instead of defaults.
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    /// Override the clock type (posedge/negedge) from metadata or defaults.
+    pub fn clock_type(mut self, clock_type: ClockType) -> Self {
+        self.clock_type = Some(clock_type);
+        self
+    }
+
+    /// Override the reset type (async_high/async_low/sync_high/sync_low) from metadata or defaults.
+    pub fn reset_type(mut self, reset_type: ResetType) -> Self {
+        self.reset_type = Some(reset_type);
         self
     }
 
@@ -266,6 +292,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             options: SimulatorOptions::default(),
             vcd_path: None,
             metadata: None,
+            clock_type: None,
+            reset_type: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -282,6 +310,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.options.trace,
             None,
             self.metadata,
+            self.clock_type,
+            self.reset_type,
         )
         .map_err(SimulatorError::SIRParser)?;
         let backend = JitBackend::new(&program, &self.options, None)?;
@@ -310,6 +340,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.options.trace,
             Some(&mut trace),
             self.metadata,
+            self.clock_type,
+            self.reset_type,
         )
         .map_err(SimulatorError::SIRParser);
 
@@ -342,6 +374,8 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             options: SimulatorOptions::default(),
             vcd_path: None,
             metadata: None,
+            clock_type: None,
+            reset_type: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -359,6 +393,8 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             &self.options.trace,
             None,
             self.metadata,
+            self.clock_type,
+            self.reset_type,
         )
         .map_err(SimulatorError::SIRParser)?;
         let backend = JitBackend::new(&program, &self.options, None)?;

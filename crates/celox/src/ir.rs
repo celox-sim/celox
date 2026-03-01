@@ -18,7 +18,6 @@ pub enum DomainKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PortTypeKind {
     Clock,
-    Reset,
     ResetAsyncHigh,
     ResetAsyncLow,
     ResetSyncHigh,

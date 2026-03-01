@@ -149,10 +149,10 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
 
     const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
 
-    // Reset the counter
-    sim.dut.rst = 1;
-    sim.tick();
+    // Reset the counter (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.tick();
+    sim.dut.rst = 1;
     sim.tick();
     expect(sim.dut.count).toBe(0);
 
@@ -230,10 +230,10 @@ describe("E2E: Simulation.fromSource (time-based)", () => {
     sim.addClock("clk", { period: 10 });
     expect(sim.time()).toBe(0);
 
-    // Reset
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 1;
 
     sim.runUntil(100);
@@ -283,10 +283,10 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
 
     const sim = Simulator.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
 
-    // Reset the counter
-    sim.dut.rst = 1;
-    sim.tick();
+    // Reset the counter (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.tick();
+    sim.dut.rst = 1;
     sim.tick();
     expect(sim.dut.count).toBe(0);
 
@@ -322,10 +322,10 @@ describe("E2E: Simulation.fromProject (time-based)", () => {
     sim.addClock("clk", { period: 10 });
     expect(sim.time()).toBe(0);
 
-    // Reset
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 1;
 
     sim.runUntil(100);
@@ -647,8 +647,8 @@ module InitTest (
     const sigQ = layout.forDut.q;
     const clkEventId = events.clk;
 
-    // 1. Reset: rst=1, d=X
-    view.setUint8(sigRst.offset, 1);
+    // 1. Assert reset (default async_low: rst=0 is active), d=X
+    view.setUint8(sigRst.offset, 0);
     view.setUint8(sigRst.offset + sigRst.byteSize, 0); // rst is defined
 
     view.setUint8(sigD.offset, 0);
@@ -661,8 +661,8 @@ module InitTest (
     expect(vQ1).toBe(0);
     expect(mQ1).toBe(0);
 
-    // 2. Release reset, d = partial X (value=0xA5, mask=0x0F)
-    view.setUint8(sigRst.offset, 0);
+    // 2. Release reset (rst=1 is inactive), d = partial X (value=0xA5, mask=0x0F)
+    view.setUint8(sigRst.offset, 1);
     view.setUint8(sigRst.offset + sigRst.byteSize, 0);
 
     view.setUint8(sigD.offset, 0xA5);
@@ -674,8 +674,8 @@ module InitTest (
     const [, mQ2] = readFourState(buf, sigQ);
     expect(mQ2).toBe(0x0F);
 
-    // 3. Reset again: should clear X
-    view.setUint8(sigRst.offset, 1);
+    // 3. Assert reset again (rst=0): should clear X
+    view.setUint8(sigRst.offset, 0);
     view.setUint8(sigRst.offset + sigRst.byteSize, 0);
 
     raw.tick(clkEventId);
@@ -774,9 +774,10 @@ describe("E2E: 4-state high-level DUT API", () => {
     );
 
     // In 4-state mode, count starts as X. Reset should clear it.
-    sim.dut.rst = 1;
-    sim.tick();
+    // (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.tick();
+    sim.dut.rst = 1;
     sim.tick();
     expect(sim.dut.count).toBe(0);
 
@@ -831,10 +832,10 @@ describe("E2E: 4-state high-level DUT API", () => {
 
     const sim = Simulator.fromSource<FFPorts>(FF_SOURCE, "FF", { fourState: true });
 
-    // Reset to clear initial X
-    sim.dut.rst = 1;
-    sim.tick();
+    // Reset to clear initial X (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.tick();
+    sim.dut.rst = 1;
     expect(sim.dut.q).toBe(0);
 
     // Write a defined value
@@ -896,10 +897,10 @@ describe("E2E: 4-state Simulation (time-based)", () => {
     sim.addClock("clk", { period: 10 });
     expect(sim.time()).toBe(0);
 
-    // Reset to clear initial X on q
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset to clear initial X on q (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     expect(sim.dut.q).toBe(0);
 
     // Drive d with defined value
@@ -928,10 +929,10 @@ describe("E2E: 4-state Simulation (time-based)", () => {
 
     sim.addClock("clk", { period: 10 });
 
-    // Reset
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 1;
 
     sim.runUntil(100);
@@ -980,10 +981,10 @@ describe("E2E: Simulation testbench helpers", () => {
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
-    // Reset
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 1;
 
     const beforeTime = sim.time();
@@ -1006,10 +1007,10 @@ describe("E2E: Simulation testbench helpers", () => {
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
-    // Reset
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 1;
 
     const t = sim.waitUntil(() => sim.dut.count >= 3);
@@ -1029,9 +1030,10 @@ describe("E2E: Simulation testbench helpers", () => {
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 0; // disabled — count won't increase
 
     expect(() =>
@@ -1051,10 +1053,10 @@ describe("E2E: Simulation testbench helpers", () => {
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
-    // Count up a bit
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Count up a bit (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 1;
     sim.runUntil(100);
     expect(sim.dut.count).toBeGreaterThan(0);
@@ -1062,6 +1064,84 @@ describe("E2E: Simulation testbench helpers", () => {
     // Reset using the helper
     sim.reset("rst");
     expect(sim.dut.count).toBe(0);
+
+    sim.dispose();
+  });
+
+  test("reset: explicit async_low resetType activates with 0", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+      resetType: "async_low",
+    });
+    sim.addClock("clk", { period: 10 });
+
+    // With async_low, rst=0 is active, rst=1 is inactive
+    sim.reset("rst");
+
+    sim.dut.en = 1;
+    sim.runUntil(100);
+    expect(sim.dut.count).toBeGreaterThan(0);
+
+    // Reset again using helper, verify it resets the counter
+    sim.reset("rst");
+    expect(sim.dut.count).toBe(0);
+
+    sim.dispose();
+  });
+
+  test("reset: explicit async_high resetType activates with 1", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+      resetType: "async_high",
+    });
+    sim.addClock("clk", { period: 10 });
+
+    // With async_high, rst=1 is active, rst=0 is inactive
+    sim.reset("rst");
+
+    sim.dut.en = 1;
+    sim.runUntil(100);
+    expect(sim.dut.count).toBeGreaterThan(0);
+
+    // Reset again
+    sim.reset("rst");
+    expect(sim.dut.count).toBe(0);
+
+    sim.dispose();
+  });
+
+  test("Simulator.fromSource: resetType option works", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+      resetType: "async_high",
+    });
+
+    // With async_high, assert reset with 1
+    sim.dut.rst = 1;
+    sim.tick();
+    sim.dut.rst = 0;
+    sim.tick();
+    expect(sim.dut.count).toBe(0);
+
+    // Count up
+    sim.dut.en = 1;
+    sim.tick();
+    expect(sim.dut.count).toBe(1);
 
     sim.dispose();
   });
@@ -1076,9 +1156,10 @@ describe("E2E: Simulation testbench helpers", () => {
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 1;
 
     // 100 time units with period 10 = 10 events, should fit in 100 steps
@@ -1098,7 +1179,8 @@ describe("E2E: Simulation testbench helpers", () => {
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
-    sim.dut.rst = 0;
+    // Release reset so counter can count (default async_low: rst=1 is inactive)
+    sim.dut.rst = 1;
     sim.dut.en = 1;
 
     // Very small budget for a long run
@@ -1238,9 +1320,10 @@ describe("E2E: optimize flag", () => {
 
     sim.addClock("clk", { period: 10 });
 
-    sim.dut.rst = 1;
-    sim.runUntil(20);
+    // Reset (default async_low: rst=0 is active)
     sim.dut.rst = 0;
+    sim.runUntil(20);
+    sim.dut.rst = 1;
     sim.dut.en = 1;
     sim.runUntil(100);
 
