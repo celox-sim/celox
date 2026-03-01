@@ -11,6 +11,14 @@ mod error;
 pub use builder::{SimulatorBuilder, SimulatorOptions};
 pub use error::SimulatorError;
 
+/// Hierarchical instance tree with resolved signals.
+#[derive(Debug, Clone)]
+pub struct InstanceHierarchy {
+    pub module_name: String,
+    pub signals: Vec<NamedSignal>,
+    pub children: Vec<(String, Vec<InstanceHierarchy>)>,
+}
+
 /// A named signal with its resolved memory reference and metadata.
 #[derive(Debug, Clone)]
 pub struct NamedSignal {
@@ -236,5 +244,96 @@ impl Simulator {
             self.tick(event)?;
         }
         Ok(())
+    }
+
+    /// Resolves a signal inside a child instance.
+    pub fn child_signal(&self, instance_path: &[(&str, usize)], var: &str) -> SignalRef {
+        let addr = self.program.get_addr(instance_path, &[var]);
+        self.backend.resolve_signal(&addr)
+    }
+
+    /// Returns the full instance hierarchy starting from the top module.
+    pub fn named_hierarchy(&self) -> InstanceHierarchy {
+        self.build_hierarchy(&[])
+    }
+
+    fn build_hierarchy(&self, current_path: &[(veryl_parser::resource_table::StrId, usize)]) -> InstanceHierarchy {
+        let instance_id = self
+            .program
+            .instance_ids
+            .get(&InstancePath(current_path.to_vec()))
+            .expect("instance not found");
+        let module_name_id = &self.program.instance_module[instance_id];
+        let module_name = veryl_parser::resource_table::get_str_value(*module_name_id)
+            .unwrap()
+            .to_string();
+        let module_vars = &self.program.module_variables[module_name_id];
+
+        // Build signals for this instance
+        let mut signals = Vec::new();
+        for (var_path, info) in module_vars {
+            let name = var_path
+                .0
+                .iter()
+                .map(|s| {
+                    veryl_parser::resource_table::get_str_value(*s)
+                        .unwrap()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(".");
+            let addr = crate::ir::AbsoluteAddr {
+                instance_id: *instance_id,
+                var_id: info.id,
+            };
+            let signal = self.backend.resolve_signal(&addr);
+            let associated_clock = self
+                .program
+                .reset_clock_map
+                .get(&addr)
+                .map(|clock_addr| self.program.get_path(clock_addr));
+            signals.push(NamedSignal {
+                name,
+                signal,
+                info: info.clone(),
+                associated_clock,
+            });
+        }
+
+        // Find direct children: instance paths that extend current by exactly 1 segment
+        let current_len = current_path.len();
+        let mut children_map: crate::HashMap<String, Vec<(usize, InstanceHierarchy)>> =
+            crate::HashMap::default();
+
+        for (path, _) in &self.program.instance_ids {
+            if path.0.len() == current_len + 1 && path.0.starts_with(current_path) {
+                let (child_name_id, child_index) = path.0[current_len];
+                let child_name = veryl_parser::resource_table::get_str_value(child_name_id)
+                    .unwrap()
+                    .to_string();
+                let child_hierarchy = self.build_hierarchy(&path.0);
+                children_map
+                    .entry(child_name)
+                    .or_default()
+                    .push((child_index, child_hierarchy));
+            }
+        }
+
+        // Sort children by index within each group
+        let mut children: Vec<(String, Vec<InstanceHierarchy>)> = children_map
+            .into_iter()
+            .map(|(name, mut instances)| {
+                instances.sort_by_key(|(idx, _)| *idx);
+                let sorted = instances.into_iter().map(|(_, h)| h).collect();
+                (name, sorted)
+            })
+            .collect();
+        children.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        InstanceHierarchy {
+            module_name,
+            signals,
+            children,
+        }
     }
 }

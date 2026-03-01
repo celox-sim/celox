@@ -44,7 +44,7 @@ pub use simulator::Simulator;
 pub use simulator::SimulatorBuilder;
 pub use simulator::SimulatorError;
 pub use simulator::SimulatorOptions;
-pub use simulator::{NamedEvent, NamedSignal};
+pub use simulator::{InstanceHierarchy, NamedEvent, NamedSignal};
 pub use celox_macros::veryl_test;
 
 #[cfg(test)]

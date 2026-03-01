@@ -115,6 +115,8 @@ export interface CreateResult<H extends NativeHandle = NativeHandle> {
   readonly events: Record<string, number>;
   /** Native control handle. */
   readonly handle: H;
+  /** Full instance hierarchy (optional — present when NAPI provides it). */
+  readonly hierarchy?: import("./napi-helpers.js").HierarchyNode;
 }
 
 // ---------------------------------------------------------------------------

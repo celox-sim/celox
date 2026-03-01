@@ -18,6 +18,7 @@ import { createDut, readFourState, type DirtyState } from "./dut.js";
 import {
   loadNativeAddon,
   parseNapiLayout,
+  parseHierarchyLayout,
   buildPortsFromLayout,
   wrapDirectSimulatorHandle,
   buildNapiOpts,
@@ -117,6 +118,7 @@ export class Simulator<P = Record<string, unknown>> {
       module.ports,
       result.handle,
       state,
+      result.hierarchy,
     );
 
     return new Simulator<P>(result.handle, dut, result.events, state, result.buffer, result.layout);
@@ -147,6 +149,7 @@ export class Simulator<P = Record<string, unknown>> {
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
+    const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 
     const ports = buildPortsFromLayout(layout.signals, events);
 
@@ -154,7 +157,7 @@ export class Simulator<P = Record<string, unknown>> {
 
     const state: DirtyState = { dirty: false };
     const handle = wrapDirectSimulatorHandle(raw);
-    const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
+    const dut = createDut<P>(buf, layout.forDut, ports, handle, state, hierarchy);
 
     return new Simulator<P>(handle, dut, events, state, buf, layout.forDut);
   }
@@ -181,6 +184,7 @@ export class Simulator<P = Record<string, unknown>> {
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
+    const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 
     const ports = buildPortsFromLayout(layout.signals, events);
 
@@ -188,7 +192,7 @@ export class Simulator<P = Record<string, unknown>> {
 
     const state: DirtyState = { dirty: false };
     const handle = wrapDirectSimulatorHandle(raw);
-    const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
+    const dut = createDut<P>(buf, layout.forDut, ports, handle, state, hierarchy);
 
     return new Simulator<P>(handle, dut, events, state, buf, layout.forDut);
   }

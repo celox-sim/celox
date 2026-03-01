@@ -616,5 +616,125 @@ fn test_hierarchical_concat_then_overlap_dynamic_index_runtime() {
     assert_eq!(sim.get(out_dyn), 0u8.into());
 }
 
+#[test]
+fn test_child_signal_access() {
+    let code = r#"
+        module Sub (
+            i_data: input  logic<8>,
+            o_data: output logic<8>
+        ) {
+            assign o_data = i_data + 8'h01;
+        }
 
+        module Top (
+            top_in:  input  logic<8>,
+            top_out: output logic<8>
+        ) {
+            inst u_sub: Sub (
+                i_data: top_in,
+                o_data: top_out
+            );
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let top_in = sim.signal("top_in");
+
+    // Access child instance signal via child_signal()
+    let child_i_data = sim.child_signal(&[("u_sub", 0)], "i_data");
+    let child_o_data = sim.child_signal(&[("u_sub", 0)], "o_data");
+
+    sim.modify(|io| io.set(top_in, 0x10u8)).unwrap();
+    assert_eq!(sim.get(child_i_data), 0x10u8.into());
+    assert_eq!(sim.get(child_o_data), 0x11u8.into());
+}
+
+#[test]
+fn test_named_hierarchy_structure() {
+    let code = r#"
+        module Leaf (
+            i: input  logic,
+            o: output logic
+        ) {
+            assign o = ~i;
+        }
+
+        module Mid (
+            i: input  logic,
+            o: output logic
+        ) {
+            inst u_leaf: Leaf ( i: i, o: o );
+        }
+
+        module Top (
+            top_i: input  logic,
+            top_o: output logic
+        ) {
+            inst u_mid: Mid ( i: top_i, o: top_o );
+        }
+    "#;
+    let sim = Simulator::builder(code, "Top").build().unwrap();
+    let hierarchy = sim.named_hierarchy();
+
+    // Top-level module
+    assert_eq!(hierarchy.module_name, "Top");
+    assert!(hierarchy.signals.iter().any(|s| s.name == "top_i"));
+    assert!(hierarchy.signals.iter().any(|s| s.name == "top_o"));
+
+    // u_mid child
+    assert_eq!(hierarchy.children.len(), 1);
+    let (mid_name, mid_instances) = &hierarchy.children[0];
+    assert_eq!(mid_name, "u_mid");
+    assert_eq!(mid_instances.len(), 1);
+    assert_eq!(mid_instances[0].module_name, "Mid");
+    assert!(mid_instances[0].signals.iter().any(|s| s.name == "i"));
+    assert!(mid_instances[0].signals.iter().any(|s| s.name == "o"));
+
+    // u_leaf grandchild
+    assert_eq!(mid_instances[0].children.len(), 1);
+    let (leaf_name, leaf_instances) = &mid_instances[0].children[0];
+    assert_eq!(leaf_name, "u_leaf");
+    assert_eq!(leaf_instances.len(), 1);
+    assert_eq!(leaf_instances[0].module_name, "Leaf");
+    assert!(leaf_instances[0].signals.iter().any(|s| s.name == "i"));
+    assert!(leaf_instances[0].signals.iter().any(|s| s.name == "o"));
+    assert!(leaf_instances[0].children.is_empty());
+}
+
+#[test]
+fn test_named_hierarchy_multiple_instances() {
+    let code = r#"
+        module Worker (
+            clk: input clock,
+            i_val: input  logic<8>,
+            o_val: output logic<8>
+        ) {
+            var reg: logic<8>;
+            always_ff { reg = i_val; }
+            assign o_val = reg;
+        }
+
+        module Top (
+            clk:  input clock,
+            in0:  input  logic<8>,
+            in1:  input  logic<8>,
+            out0: output logic<8>,
+            out1: output logic<8>
+        ) {
+            inst u0: Worker ( clk: clk, i_val: in0, o_val: out0 );
+            inst u1: Worker ( clk: clk, i_val: in1, o_val: out1 );
+        }
+    "#;
+    let sim = Simulator::builder(code, "Top").build().unwrap();
+    let hierarchy = sim.named_hierarchy();
+
+    assert_eq!(hierarchy.module_name, "Top");
+    // Two separate children (u0 and u1), each with 1 instance
+    assert_eq!(hierarchy.children.len(), 2);
+
+    for (name, instances) in &hierarchy.children {
+        assert!(name == "u0" || name == "u1");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].module_name, "Worker");
+    }
+}
 

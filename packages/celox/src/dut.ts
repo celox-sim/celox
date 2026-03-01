@@ -13,6 +13,7 @@ import type {
   SignalLayout,
   FourStateValue,
 } from "./types.js";
+import type { HierarchyNode } from "./napi-helpers.js";
 import { isFourStateValue } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -183,11 +184,12 @@ function writeAllX(view: DataView, sig: SignalLayout): void {
 /**
  * Create a DUT accessor object with defineProperty-based getters/setters.
  *
- * @param buffer   SharedArrayBuffer from NAPI create()
- * @param layout   Per-signal byte layout within the buffer
- * @param portDefs Port metadata from the ModuleDefinition
- * @param handle   Native handle (for evalComb calls)
- * @param state    Shared dirty-tracking state
+ * @param buffer    SharedArrayBuffer from NAPI create()
+ * @param layout    Per-signal byte layout within the buffer
+ * @param portDefs  Port metadata from the ModuleDefinition
+ * @param handle    Native handle (for evalComb calls)
+ * @param state     Shared dirty-tracking state
+ * @param hierarchy Optional hierarchy node for child instance access
  */
 export function createDut<P>(
   buffer: ArrayBuffer | SharedArrayBuffer,
@@ -195,6 +197,7 @@ export function createDut<P>(
   portDefs: Record<string, PortInfo>,
   handle: NativeHandle,
   state: DirtyState,
+  hierarchy?: HierarchyNode,
 ): P {
   const view = new DataView(buffer);
   const obj = Object.create(null) as P;
@@ -241,6 +244,91 @@ export function createDut<P>(
 
     // Scalar port — define getter/setter
     defineSignalProperty(obj as object, name, view, sig, port, handle, state);
+  }
+
+  // Attach child instance accessors from hierarchy
+  if (hierarchy) {
+    for (const [childName, instances] of Object.entries(hierarchy.children)) {
+      if (instances.length === 1) {
+        const childDut = createChildDut(buffer, instances[0]!, handle, state);
+        Object.defineProperty(obj, childName, {
+          value: childDut,
+          enumerable: true,
+          configurable: false,
+          writable: false,
+        });
+      } else if (instances.length > 1) {
+        const childDuts = instances.map((inst) =>
+          createChildDut(buffer, inst, handle, state),
+        );
+        Object.defineProperty(obj, childName, {
+          value: childDuts,
+          enumerable: true,
+          configurable: false,
+          writable: false,
+        });
+      }
+    }
+  }
+
+  return obj;
+}
+
+/**
+ * Create a child instance DUT accessor from a HierarchyNode.
+ * Recursively creates accessors for the child's signals and its own children.
+ */
+export function createChildDut(
+  buffer: ArrayBuffer | SharedArrayBuffer,
+  hierarchy: HierarchyNode,
+  handle: NativeHandle,
+  state: DirtyState,
+): object {
+  const view = new DataView(buffer);
+  const obj = Object.create(null);
+
+  // Define signal properties for this child instance
+  for (const [name, port] of Object.entries(hierarchy.ports)) {
+    if (port.type === "clock") continue;
+
+    const sig = hierarchy.forDut[name];
+    if (!sig) continue;
+
+    if (port.arrayDims && port.arrayDims.length > 0) {
+      const arrayObj = createArrayDut(view, sig, port, handle, state);
+      Object.defineProperty(obj, name, {
+        value: arrayObj,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+      continue;
+    }
+
+    defineSignalProperty(obj, name, view, sig, port, handle, state);
+  }
+
+  // Recursively attach children
+  for (const [childName, instances] of Object.entries(hierarchy.children)) {
+    if (instances.length === 1) {
+      const childDut = createChildDut(buffer, instances[0]!, handle, state);
+      Object.defineProperty(obj, childName, {
+        value: childDut,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    } else if (instances.length > 1) {
+      const childDuts = instances.map((inst) =>
+        createChildDut(buffer, inst, handle, state),
+      );
+      Object.defineProperty(obj, childName, {
+        value: childDuts,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
   }
 
   return obj;

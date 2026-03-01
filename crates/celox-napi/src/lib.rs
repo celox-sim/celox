@@ -8,7 +8,7 @@ use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
 
-use layout::{build_event_map, build_signal_layout};
+use layout::{build_event_map, build_hierarchy_node, build_signal_layout};
 
 /// A segment of a hierarchical instance path.
 #[napi(object)]
@@ -227,6 +227,7 @@ pub struct NativeSimulatorHandle {
     sim: Option<celox::Simulator>,
     layout_json: String,
     events_json: String,
+    hierarchy_json: String,
     stable_size: u32,
     total_size: u32,
 }
@@ -244,21 +245,26 @@ impl NativeSimulatorHandle {
 
         let signals = sim.named_signals();
         let events = sim.named_events();
+        let hierarchy = sim.named_hierarchy();
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
         let layout_map = build_signal_layout(&signals, opts.four_state);
         let event_map = build_event_map(&events);
+        let hierarchy_node = build_hierarchy_node(&hierarchy, opts.four_state);
 
         let layout_json = serde_json::to_string(&layout_map)
             .map_err(|e| Error::from_reason(format!("Failed to serialize layout: {}", e)))?;
         let events_json = serde_json::to_string(&event_map)
             .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
+        let hierarchy_json = serde_json::to_string(&hierarchy_node)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
 
         Ok(Self {
             sim: Some(sim),
             layout_json,
             events_json,
+            hierarchy_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
         })
@@ -284,21 +290,26 @@ impl NativeSimulatorHandle {
 
         let signals = sim.named_signals();
         let events = sim.named_events();
+        let hierarchy = sim.named_hierarchy();
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
         let layout_map = build_signal_layout(&signals, opts.four_state);
         let event_map = build_event_map(&events);
+        let hierarchy_node = build_hierarchy_node(&hierarchy, opts.four_state);
 
         let layout_json = serde_json::to_string(&layout_map)
             .map_err(|e| Error::from_reason(format!("Failed to serialize layout: {}", e)))?;
         let events_json = serde_json::to_string(&event_map)
             .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
+        let hierarchy_json = serde_json::to_string(&hierarchy_node)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
 
         Ok(Self {
             sim: Some(sim),
             layout_json,
             events_json,
+            hierarchy_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
         })
@@ -314,6 +325,12 @@ impl NativeSimulatorHandle {
     #[napi(getter)]
     pub fn events_json(&self) -> String {
         self.events_json.clone()
+    }
+
+    /// Returns the instance hierarchy as a JSON string.
+    #[napi(getter)]
+    pub fn hierarchy_json(&self) -> String {
+        self.hierarchy_json.clone()
     }
 
     /// Returns the stable region size in bytes.
@@ -398,6 +415,7 @@ pub struct NativeSimulationHandle {
     sim: Option<celox::Simulation>,
     layout_json: String,
     events_json: String,
+    hierarchy_json: String,
     stable_size: u32,
     total_size: u32,
 }
@@ -415,21 +433,26 @@ impl NativeSimulationHandle {
 
         let signals = sim.named_signals();
         let events = sim.named_events();
+        let hierarchy = sim.named_hierarchy();
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
         let layout_map = build_signal_layout(&signals, opts.four_state);
         let event_map = build_event_map(&events);
+        let hierarchy_node = build_hierarchy_node(&hierarchy, opts.four_state);
 
         let layout_json = serde_json::to_string(&layout_map)
             .map_err(|e| Error::from_reason(format!("Failed to serialize layout: {}", e)))?;
         let events_json = serde_json::to_string(&event_map)
             .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
+        let hierarchy_json = serde_json::to_string(&hierarchy_node)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
 
         Ok(Self {
             sim: Some(sim),
             layout_json,
             events_json,
+            hierarchy_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
         })
@@ -451,21 +474,26 @@ impl NativeSimulationHandle {
 
         let signals = sim.named_signals();
         let events = sim.named_events();
+        let hierarchy = sim.named_hierarchy();
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
 
         let layout_map = build_signal_layout(&signals, opts.four_state);
         let event_map = build_event_map(&events);
+        let hierarchy_node = build_hierarchy_node(&hierarchy, opts.four_state);
 
         let layout_json = serde_json::to_string(&layout_map)
             .map_err(|e| Error::from_reason(format!("Failed to serialize layout: {}", e)))?;
         let events_json = serde_json::to_string(&event_map)
             .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
+        let hierarchy_json = serde_json::to_string(&hierarchy_node)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
 
         Ok(Self {
             sim: Some(sim),
             layout_json,
             events_json,
+            hierarchy_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
         })
@@ -481,6 +509,12 @@ impl NativeSimulationHandle {
     #[napi(getter)]
     pub fn events_json(&self) -> String {
         self.events_json.clone()
+    }
+
+    /// Returns the instance hierarchy as a JSON string.
+    #[napi(getter)]
+    pub fn hierarchy_json(&self) -> String {
+        self.hierarchy_json.clone()
     }
 
     /// Returns the stable region size in bytes.

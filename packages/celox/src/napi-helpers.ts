@@ -29,6 +29,7 @@ import type { NativeCreateSimulationFn } from "./simulation.js";
 export interface RawNapiSimulatorHandle {
   readonly layoutJson: string;
   readonly eventsJson: string;
+  readonly hierarchyJson: string;
   readonly stableSize: number;
   readonly totalSize: number;
   tick(eventId: number): void;
@@ -42,6 +43,7 @@ export interface RawNapiSimulatorHandle {
 export interface RawNapiSimulationHandle {
   readonly layoutJson: string;
   readonly eventsJson: string;
+  readonly hierarchyJson: string;
   readonly stableSize: number;
   readonly totalSize: number;
   addClock(eventId: number, period: number, initialDelay: number): void;
@@ -316,6 +318,78 @@ export function buildPortsFromLayout(
 }
 
 // ---------------------------------------------------------------------------
+// Hierarchy layout
+// ---------------------------------------------------------------------------
+
+export interface HierarchyNode {
+  moduleName: string;
+  signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[] }>;
+  forDut: Record<string, SignalLayout>;
+  ports: Record<string, PortInfo>;
+  children: Record<string, HierarchyNode[]>;
+}
+
+interface RawHierarchyNode {
+  module_name: string;
+  signals: Record<string, RawSignalLayout>;
+  children: Record<string, RawHierarchyNode[]>;
+}
+
+/**
+ * Parse the hierarchy JSON from NAPI into a HierarchyNode tree.
+ * Converts snake_case keys to camelCase and auto-detects ports.
+ */
+export function parseHierarchyLayout(
+  json: string,
+  events: Record<string, number>,
+): HierarchyNode {
+  const raw: RawHierarchyNode = JSON.parse(json);
+  return convertHierarchyNode(raw, events);
+}
+
+function convertHierarchyNode(
+  raw: RawHierarchyNode,
+  events: Record<string, number>,
+): HierarchyNode {
+  const signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[] }> = {};
+  const forDut: Record<string, SignalLayout> = {};
+
+  for (const [name, r] of Object.entries(raw.signals)) {
+    const sl: SignalLayout = {
+      offset: r.offset,
+      width: r.width,
+      byteSize: r.byte_size > 0 ? r.byte_size : Math.ceil(r.width / 8),
+      is4state: r.is_4state,
+      direction: r.direction as "input" | "output" | "inout",
+    };
+    const entry: SignalLayout & { typeKind: string; arrayDims?: number[] } = {
+      ...sl,
+      typeKind: r.type_kind,
+    };
+    if (r.array_dims && r.array_dims.length > 0) {
+      entry.arrayDims = r.array_dims;
+    }
+    signals[name] = entry;
+    forDut[name] = sl;
+  }
+
+  const ports = buildPortsFromLayout(signals, events);
+
+  const children: Record<string, HierarchyNode[]> = {};
+  for (const [name, instances] of Object.entries(raw.children)) {
+    children[name] = instances.map((inst) => convertHierarchyNode(inst, events));
+  }
+
+  return {
+    moduleName: raw.module_name,
+    signals,
+    forDut,
+    ports,
+    children,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Handle wrapping — zero-copy direct operations
 // ---------------------------------------------------------------------------
 
@@ -420,11 +494,12 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 
     const layout = parseLegacyLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
+    const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 
     const buf = raw.sharedMemory().buffer;
     const handle = wrapDirectSimulatorHandle(raw);
 
-    return { buffer: buf, layout, events, handle };
+    return { buffer: buf, layout, events, handle, hierarchy };
   };
 }
 
@@ -443,10 +518,11 @@ export function createSimulationBridge(addon: RawNapiAddon): NativeCreateSimulat
 
     const layout = parseLegacyLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
+    const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 
     const buf = raw.sharedMemory().buffer;
     const handle = wrapDirectSimulationHandle(raw);
 
-    return { buffer: buf, layout, events, handle };
+    return { buffer: buf, layout, events, handle, hierarchy };
   };
 }

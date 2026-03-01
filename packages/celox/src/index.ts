@@ -41,7 +41,7 @@ export { Simulator } from "./simulator.js";
 export { Simulation } from "./simulation.js";
 
 /** @internal */
-export { createDut, readFourState } from "./dut.js";
+export { createDut, createChildDut, readFourState } from "./dut.js";
 /** @internal */
 export type { DirtyState } from "./dut.js";
 
@@ -49,6 +49,7 @@ export type { DirtyState } from "./dut.js";
 export {
   loadNativeAddon,
   parseNapiLayout,
+  parseHierarchyLayout,
   buildPortsFromLayout,
   wrapDirectSimulatorHandle,
   wrapDirectSimulationHandle,
@@ -58,7 +59,7 @@ export {
   buildNapiOpts,
 } from "./napi-helpers.js";
 /** @internal */
-export type { RawNapiAddon, RawNapiSimulatorHandle, RawNapiSimulationHandle } from "./napi-helpers.js";
+export type { HierarchyNode, RawNapiAddon, RawNapiSimulatorHandle, RawNapiSimulationHandle } from "./napi-helpers.js";
 
 // NAPI bridge (backward compat — re-exports from napi-helpers)
 // Consumers that import from "./napi-bridge.js" still work.

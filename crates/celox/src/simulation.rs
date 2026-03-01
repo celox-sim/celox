@@ -3,7 +3,7 @@ use crate::{
     backend::MemoryLayout,
     ir::{DomainKind, SignalRef},
     scheduler::{Scheduler, SimEvent},
-    simulator::{NamedEvent, NamedSignal},
+    simulator::{InstanceHierarchy, NamedEvent, NamedSignal},
 };
 
 /// A timed simulation wrapper around the core logic engine.
@@ -440,6 +440,16 @@ impl Simulation {
     /// Returns all events with their IDs and event references.
     pub fn named_events(&self) -> Vec<NamedEvent> {
         self.simulator.named_events()
+    }
+
+    /// Returns the full instance hierarchy starting from the top module.
+    pub fn named_hierarchy(&self) -> InstanceHierarchy {
+        self.simulator.named_hierarchy()
+    }
+
+    /// Resolves a signal inside a child instance.
+    pub fn child_signal(&self, instance_path: &[(&str, usize)], var: &str) -> SignalRef {
+        self.simulator.child_signal(instance_path, var)
     }
 
     /// Register a clock signal by event ID.
