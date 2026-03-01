@@ -16,30 +16,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bench:
+  # ── Rust benchmarks (Criterion) ──
+  bench-rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # ── Rust benchmarks ──
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
 
       - name: Run Rust benchmarks
         run: cargo bench -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
 
-      # ── Verilator benchmarks ──
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-rust
+          path: rust-output.txt
+
+  # ── Verilator benchmarks (C++ reference) ──
+  bench-verilator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: veryl-lang/setup-verilator@v1
 
       - name: Run Verilator benchmarks
         run: bash scripts/run-verilator-bench.sh | tee verilator-output.txt
 
-      # ── TypeScript benchmarks ──
-      - uses: pnpm/action-setup@v4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-verilator
+          path: verilator-output.txt
 
+  # ── TypeScript benchmarks (Vitest) ──
+  bench-ts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -57,17 +78,35 @@ jobs:
       - name: Run TypeScript benchmarks
         run: pnpm --filter @celox-sim/celox bench --outputJson ts-output.json
 
-      - name: Convert TypeScript benchmark output
-        run: node scripts/convert-bench.mjs packages/celox/ts-output.json ts-converted.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-ts
+          path: packages/celox/ts-output.json
 
-      # ── Convert all outputs to unified µs format ──
+  # ── Convert & publish results ──
+  publish:
+    needs: [bench-rust, bench-verilator, bench-ts]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Convert Rust benchmark output
-        run: node scripts/convert-rust-bench.mjs rust-output.txt rust-converted.json
+        run: node scripts/convert-rust-bench.mjs artifacts/bench-rust/rust-output.txt rust-converted.json
 
       - name: Convert Verilator benchmark output
-        run: node scripts/convert-verilator-bench.mjs verilator-output.txt verilator-converted.json
+        run: node scripts/convert-verilator-bench.mjs artifacts/bench-verilator/verilator-output.txt verilator-converted.json
 
-      # ── Publish results ──
+      - name: Convert TypeScript benchmark output
+        run: node scripts/convert-bench.mjs artifacts/bench-ts/ts-output.json ts-converted.json
+
       - name: Store Rust benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
