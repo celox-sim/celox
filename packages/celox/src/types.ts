@@ -122,6 +122,12 @@ export interface SimulatorOptions {
   fourState?: boolean;
   /** Path to write VCD waveform output. */
   vcd?: string;
+  /** Enable Cranelift optimization passes. */
+  optimize?: boolean;
+  /** False-loop declarations to ignore during compilation. */
+  falseLoops?: LoopBreak[];
+  /** True-loop declarations with convergence limits. */
+  trueLoops?: TrueLoopSpec[];
 }
 
 // ---------------------------------------------------------------------------
@@ -162,4 +168,38 @@ export function isFourStateValue(v: unknown): v is FourStateValue {
     v !== null &&
     (v as FourStateValue).__fourState === true
   );
+}
+
+// ---------------------------------------------------------------------------
+// Simulation timeout error
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown when a simulation helper exceeds its step budget.
+ */
+export class SimulationTimeoutError extends Error {
+  readonly time: number;
+  readonly steps: number;
+
+  constructor(message: string, time: number, steps: number) {
+    super(message);
+    this.name = "SimulationTimeoutError";
+    this.time = time;
+    this.steps = steps;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Loop-break types (for Phase 3c)
+// ---------------------------------------------------------------------------
+
+/** Specifies a false-loop to ignore during compilation. */
+export interface LoopBreak {
+  from: string;
+  to: string;
+}
+
+/** Specifies a true-loop with a convergence iteration limit. */
+export interface TrueLoopSpec extends LoopBreak {
+  maxIter: number;
 }

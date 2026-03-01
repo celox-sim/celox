@@ -8,16 +8,19 @@
 import type {
   CreateResult,
   EventHandle,
+  FourStateValue,
   ModuleDefinition,
   NativeSimulatorHandle,
+  SignalLayout,
   SimulatorOptions,
 } from "./types.js";
-import { createDut, type DirtyState } from "./dut.js";
+import { createDut, readFourState, type DirtyState } from "./dut.js";
 import {
   loadNativeAddon,
   parseNapiLayout,
   buildPortsFromLayout,
   wrapDirectSimulatorHandle,
+  buildNapiOpts,
 } from "./napi-helpers.js";
 
 /**
@@ -54,6 +57,8 @@ export class Simulator<P = Record<string, unknown>> {
   private readonly _events: Record<string, number>;
   private readonly _defaultEventId: number;
   private readonly _state: DirtyState;
+  private readonly _buffer: ArrayBuffer | SharedArrayBuffer;
+  private readonly _layout: Record<string, SignalLayout>;
   private _disposed = false;
 
   private constructor(
@@ -61,11 +66,15 @@ export class Simulator<P = Record<string, unknown>> {
     dut: P,
     events: Record<string, number>,
     state: DirtyState,
+    buffer: ArrayBuffer | SharedArrayBuffer,
+    layout: Record<string, SignalLayout>,
   ) {
     this._handle = handle;
     this._dut = dut;
     this._events = events;
     this._state = state;
+    this._buffer = buffer;
+    this._layout = layout;
     const keys = Object.keys(events);
     this._defaultEventId = keys.length > 0 ? events[keys[0]!]! : -1;
   }
@@ -98,8 +107,8 @@ export class Simulator<P = Record<string, unknown>> {
       );
     }
 
-    const { fourState, vcd } = options ?? {};
-    const result = createFn(module.source, module.name, { fourState, vcd });
+    const { fourState, vcd, optimize, falseLoops, trueLoops } = options ?? {};
+    const result = createFn(module.source, module.name, { fourState, vcd, optimize, falseLoops, trueLoops });
     const state: DirtyState = { dirty: false };
 
     const dut = createDut<P>(
@@ -110,7 +119,7 @@ export class Simulator<P = Record<string, unknown>> {
       state,
     );
 
-    return new Simulator<P>(result.handle, dut, result.events, state);
+    return new Simulator<P>(result.handle, dut, result.events, state, result.buffer, result.layout);
   }
 
   /**
@@ -133,10 +142,8 @@ export class Simulator<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulator<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const napiOpts: Record<string, unknown> = {};
-    if (options?.fourState) napiOpts.fourState = options.fourState;
-    if (options?.vcd) napiOpts.vcd = options.vcd;
-    const raw = new addon.NativeSimulatorHandle(source, top, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
+    const napiOpts = buildNapiOpts(options);
+    const raw = new addon.NativeSimulatorHandle(source, top, napiOpts);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -149,7 +156,7 @@ export class Simulator<P = Record<string, unknown>> {
     const handle = wrapDirectSimulatorHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
 
-    return new Simulator<P>(handle, dut, events, state);
+    return new Simulator<P>(handle, dut, events, state, buf, layout.forDut);
   }
 
   /**
@@ -169,10 +176,8 @@ export class Simulator<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulator<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const napiOpts: Record<string, unknown> = {};
-    if (options?.fourState) napiOpts.fourState = options.fourState;
-    if (options?.vcd) napiOpts.vcd = options.vcd;
-    const raw = addon.NativeSimulatorHandle.fromProject(projectPath, top, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
+    const napiOpts = buildNapiOpts(options);
+    const raw = addon.NativeSimulatorHandle.fromProject(projectPath, top, napiOpts);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -185,7 +190,7 @@ export class Simulator<P = Record<string, unknown>> {
     const handle = wrapDirectSimulatorHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
 
-    return new Simulator<P>(handle, dut, events, state);
+    return new Simulator<P>(handle, dut, events, state, buf, layout.forDut);
   }
 
   /** The DUT accessor object — read/write ports as plain properties. */
@@ -242,6 +247,21 @@ export class Simulator<P = Record<string, unknown>> {
       );
     }
     return { name, id };
+  }
+
+  /**
+   * Read the raw 4-state (value + mask) pair for the named port.
+   */
+  fourState(portName: string): FourStateValue {
+    this.ensureAlive();
+    const sig = this._layout[portName];
+    if (!sig) {
+      throw new Error(
+        `Unknown port '${portName}'. Available: ${Object.keys(this._layout).join(", ")}`,
+      );
+    }
+    const [value, mask] = readFourState(this._buffer, sig);
+    return { __fourState: true, value, mask };
   }
 
   /** Write current signal values to VCD at the given timestamp. */

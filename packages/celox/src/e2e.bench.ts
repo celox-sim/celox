@@ -12,7 +12,7 @@
 import { bench, describe, afterAll } from "vitest";
 import { Simulator } from "./simulator.js";
 import { Simulation } from "./simulation.js";
-import type { ModuleDefinition } from "./types.js";
+import type { ModuleDefinition, SimulationTimeoutError } from "./types.js";
 import {
   loadNativeAddon,
   createSimulatorBridge,
@@ -234,6 +234,169 @@ describe("simulation-time-based", () => {
     () => {
       const base = sim.time();
       sim.runUntil(base + 1_000_000);
+    },
+    { iterations: 3, time: 0 },
+  );
+});
+
+/**
+ * Phase 3b: Testbench helpers benchmarks.
+ *
+ * Compares waitForCycles vs manual step loop, and runUntil with/without
+ * maxSteps guard to measure overhead.
+ */
+describe("testbench-helpers", () => {
+  const COUNTER_CODE = `
+    module Counter (
+        clk: input clock,
+        rst: input reset,
+        en: input logic,
+        count: output logic<8>,
+    ) {
+        var count_r: logic<8>;
+
+        always_ff (clk, rst) {
+            if_reset {
+                count_r = 0;
+            } else if en {
+                count_r = count_r + 1;
+            }
+        }
+
+        always_comb {
+            count = count_r;
+        }
+    }
+  `;
+
+  interface CounterPorts {
+    rst: number;
+    en: number;
+    readonly count: number;
+  }
+
+  // waitForCycles benchmark
+  const simWait = Simulation.fromSource<CounterPorts>(COUNTER_CODE, "Counter");
+  simWait.addClock("clk", { period: 10 });
+  simWait.dut.rst = 1;
+  simWait.runUntil(20);
+  simWait.dut.rst = 0;
+  simWait.dut.en = 1;
+
+  afterAll(() => {
+    simWait.dispose();
+  });
+
+  bench(
+    "waitForCycles_x1000",
+    () => {
+      simWait.waitForCycles("clk", 1000);
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  bench(
+    "manual_step_loop_x2000",
+    () => {
+      for (let i = 0; i < 2000; i++) {
+        simWait.step();
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  // runUntil: fast Rust path vs guarded TS path
+  const simRun = Simulation.fromSource<CounterPorts>(COUNTER_CODE, "Counter");
+  simRun.addClock("clk", { period: 10 });
+  simRun.dut.rst = 1;
+  simRun.runUntil(20);
+  simRun.dut.rst = 0;
+  simRun.dut.en = 1;
+
+  afterAll(() => {
+    simRun.dispose();
+  });
+
+  bench(
+    "runUntil_fast_path_100000",
+    () => {
+      const base = simRun.time();
+      simRun.runUntil(base + 100_000);
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  bench(
+    "runUntil_guarded_100000",
+    () => {
+      const base = simRun.time();
+      simRun.runUntil(base + 100_000, { maxSteps: 1_000_000 });
+    },
+    { iterations: 3, time: 0 },
+  );
+});
+
+/**
+ * Phase 3c: Optimize flag benchmarks.
+ *
+ * Compares build time and tick performance with and without optimization.
+ */
+describe("optimize-flag", () => {
+  bench(
+    "build_without_optimize",
+    () => {
+      const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
+      sim.dispose();
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  bench(
+    "build_with_optimize",
+    () => {
+      const sim = Simulator.fromSource<TopPorts>(CODE, "Top", {
+        optimize: true,
+      });
+      sim.dispose();
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  const simNoOpt = Simulator.fromSource<TopPorts>(CODE, "Top");
+  simNoOpt.dut.rst = 1;
+  simNoOpt.tick();
+  simNoOpt.dut.rst = 0;
+  simNoOpt.tick();
+
+  const simOpt = Simulator.fromSource<TopPorts>(CODE, "Top", {
+    optimize: true,
+  });
+  simOpt.dut.rst = 1;
+  simOpt.tick();
+  simOpt.dut.rst = 0;
+  simOpt.tick();
+
+  afterAll(() => {
+    simNoOpt.dispose();
+    simOpt.dispose();
+  });
+
+  bench(
+    "tick_x10000_without_optimize",
+    () => {
+      for (let i = 0; i < 10_000; i++) {
+        simNoOpt.tick();
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  bench(
+    "tick_x10000_with_optimize",
+    () => {
+      for (let i = 0; i < 10_000; i++) {
+        simOpt.tick();
+      }
     },
     { iterations: 3, time: 0 },
   );

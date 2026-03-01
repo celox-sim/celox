@@ -5,6 +5,7 @@ import type {
   ModuleDefinition,
   NativeSimulationHandle,
 } from "./types.js";
+import { SimulationTimeoutError } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -182,5 +183,122 @@ describe("Simulation", () => {
     expect(() => {
       Simulation.create(TopModule);
     }).toThrow("Native simulator binding not loaded");
+  });
+
+  test("runUntil with maxSteps: fast path when omitted", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    sim.runUntil(100);
+    // Without maxSteps, the Rust fast-path should be used
+    expect(mock.handle.runUntil).toHaveBeenCalledWith(100);
+  });
+
+  test("runUntil with maxSteps: throws SimulationTimeoutError", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    // step mock increments time by 5 each call, so reaching 10000 requires 2000 steps
+    // With maxSteps=10 we'll exhaust before getting there
+    expect(() => sim.runUntil(10000, { maxSteps: 10 })).toThrow(
+      SimulationTimeoutError,
+    );
+  });
+
+  test("runUntil with maxSteps: timeout error has correct properties", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    try {
+      sim.runUntil(10000, { maxSteps: 5 });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(SimulationTimeoutError);
+      const err = e as SimulationTimeoutError;
+      expect(err.steps).toBe(5);
+      expect(err.time).toBeGreaterThan(0);
+    }
+  });
+
+  test("waitUntil: returns time when condition is met", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    sim.dut.d = 42;
+    let callCount = 0;
+    const t = sim.waitUntil(() => {
+      callCount++;
+      return callCount >= 3;
+    });
+
+    expect(t).toBeGreaterThan(0);
+    expect(callCount).toBe(3);
+  });
+
+  test("waitUntil: throws on timeout", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    expect(() =>
+      sim.waitUntil(() => false, { maxSteps: 5 }),
+    ).toThrow(SimulationTimeoutError);
+  });
+
+  test("waitForCycles: advances correct number of steps", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    const t = sim.waitForCycles("clk", 3);
+    // 3 cycles = 6 steps, each step increments by 5 → time = 30
+    expect(t).toBe(30);
+    expect(mock.handle.step).toHaveBeenCalledTimes(6);
+  });
+
+  test("waitForCycles: throws on timeout", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    expect(() =>
+      sim.waitForCycles("clk", 1000, { maxSteps: 3 }),
+    ).toThrow(SimulationTimeoutError);
+  });
+
+  test("reset: asserts and releases reset signal", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    sim.reset("rst");
+    // Default: activeCycles=2 → 4 steps, then rst set to 0
+    expect(mock.handle.step).toHaveBeenCalledTimes(4);
+    // After reset, rst should be 0
+    const view = new DataView(mock.buffer);
+    expect(view.getUint8(0)).toBe(0);
+  });
+
+  test("reset: custom activeCycles and activeValue", () => {
+    const mock = createMockNative();
+    const sim = Simulation.create(TopModule, {
+      __nativeCreate: mock.create,
+    });
+
+    sim.reset("rst", { activeCycles: 3, activeValue: 1 });
+    // 3 cycles → 6 steps
+    expect(mock.handle.step).toHaveBeenCalledTimes(6);
   });
 });

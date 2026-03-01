@@ -13,11 +13,12 @@ import { describe, test, expect, afterEach } from "vitest";
 import { Simulator } from "./simulator.js";
 import { Simulation } from "./simulation.js";
 import { readFourState } from "./dut.js";
-import { X, FourState } from "./types.js";
+import { X, FourState, SimulationTimeoutError } from "./types.js";
 import {
   createSimulatorBridge,
   loadNativeAddon,
   parseNapiLayout,
+  parseSignalPath,
   type RawNapiAddon,
   type RawNapiSimulatorHandle,
 } from "./napi-helpers.js";
@@ -961,5 +962,323 @@ describe("E2E: 4-state Simulation (time-based)", () => {
     expect(sim.dut.y).toBe(155);
 
     sim.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3b: testbench helpers — Simulation API
+// ---------------------------------------------------------------------------
+
+describe("E2E: Simulation testbench helpers", () => {
+  test("waitForCycles: advances correct number of clock cycles", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+    sim.addClock("clk", { period: 10 });
+
+    // Reset
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+    sim.dut.rst = 0;
+    sim.dut.en = 1;
+
+    const beforeTime = sim.time();
+    const afterTime = sim.waitForCycles("clk", 5);
+
+    expect(afterTime).toBeGreaterThan(beforeTime);
+    // Each cycle = 2 steps with period 10, so 5 cycles ≈ 50 time units
+    expect(afterTime - beforeTime).toBe(50);
+
+    sim.dispose();
+  });
+
+  test("waitUntil: waits for condition to be met", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+    sim.addClock("clk", { period: 10 });
+
+    // Reset
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+    sim.dut.rst = 0;
+    sim.dut.en = 1;
+
+    const t = sim.waitUntil(() => sim.dut.count >= 3);
+    expect(sim.dut.count).toBeGreaterThanOrEqual(3);
+    expect(t).toBeGreaterThan(20);
+
+    sim.dispose();
+  });
+
+  test("waitUntil: throws SimulationTimeoutError on timeout", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+    sim.addClock("clk", { period: 10 });
+
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+    sim.dut.rst = 0;
+    sim.dut.en = 0; // disabled — count won't increase
+
+    expect(() =>
+      sim.waitUntil(() => sim.dut.count >= 100, { maxSteps: 20 }),
+    ).toThrow(SimulationTimeoutError);
+
+    sim.dispose();
+  });
+
+  test("reset: asserts and releases reset on counter", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+    sim.addClock("clk", { period: 10 });
+
+    // Count up a bit
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+    sim.dut.rst = 0;
+    sim.dut.en = 1;
+    sim.runUntil(100);
+    expect(sim.dut.count).toBeGreaterThan(0);
+
+    // Reset using the helper
+    sim.reset("rst");
+    expect(sim.dut.count).toBe(0);
+
+    sim.dispose();
+  });
+
+  test("runUntil with maxSteps: succeeds within budget", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+    sim.addClock("clk", { period: 10 });
+
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+    sim.dut.rst = 0;
+    sim.dut.en = 1;
+
+    // 100 time units with period 10 = 10 events, should fit in 100 steps
+    sim.runUntil(120, { maxSteps: 100 });
+    expect(sim.time()).toBe(120);
+
+    sim.dispose();
+  });
+
+  test("runUntil with maxSteps: throws on exceeded budget", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+    sim.addClock("clk", { period: 10 });
+
+    sim.dut.rst = 0;
+    sim.dut.en = 1;
+
+    // Very small budget for a long run
+    expect(() => sim.runUntil(100000, { maxSteps: 5 })).toThrow(
+      SimulationTimeoutError,
+    );
+
+    sim.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3b: fourState() method
+// ---------------------------------------------------------------------------
+
+describe("E2E: fourState() method", () => {
+  test("Simulator.fourState: reads 4-state value and mask", () => {
+    interface Ports {
+      a: number;
+      b: number;
+      readonly y: number;
+    }
+
+    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+      fourState: true,
+    });
+
+    sim.dut.a = 100;
+    sim.dut.b = 55;
+    // Trigger evalComb via output read (Adder4S is purely combinational)
+    expect(sim.dut.y).toBe(155);
+
+    const fs = sim.fourState("y");
+    expect(fs.__fourState).toBe(true);
+    expect(fs.value).toBe(155);
+    expect(fs.mask).toBe(0);
+
+    sim.dispose();
+  });
+
+  test("Simulator.fourState: reads X mask when input is X", () => {
+    interface Ports {
+      a: number;
+      b: number;
+      readonly y: number;
+    }
+
+    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+      fourState: true,
+    });
+
+    (sim.dut as any).a = X;
+    sim.dut.b = 10;
+    // Trigger evalComb via output read
+    sim.dut.y;
+
+    const fs = sim.fourState("y");
+    expect(fs.mask).toBe(0xFF); // all X from arithmetic propagation
+
+    sim.dispose();
+  });
+
+  test("Simulation.fourState: reads 4-state value", () => {
+    interface Ports {
+      a: number;
+      b: number;
+      readonly y: number;
+    }
+
+    const sim = Simulation.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+      fourState: true,
+    });
+
+    sim.dut.a = 50;
+    sim.dut.b = 25;
+    sim.runUntil(0);
+
+    const fs = sim.fourState("y");
+    expect(fs.value).toBe(75);
+    expect(fs.mask).toBe(0);
+
+    sim.dispose();
+  });
+
+  test("fourState: throws for unknown port", () => {
+    interface Ports {
+      a: number;
+      b: number;
+      readonly y: number;
+    }
+
+    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+      fourState: true,
+    });
+
+    expect(() => sim.fourState("nonexistent")).toThrow("Unknown port");
+
+    sim.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3b: optimize flag
+// ---------------------------------------------------------------------------
+
+describe("E2E: optimize flag", () => {
+  test("Simulator.fromSource with optimize: true", () => {
+    interface AdderPorts {
+      rst: number;
+      a: number;
+      b: number;
+      readonly sum: number;
+    }
+
+    const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder", {
+      optimize: true,
+    });
+
+    sim.dut.a = 100;
+    sim.dut.b = 200;
+    sim.tick();
+    expect(sim.dut.sum).toBe(300);
+
+    sim.dispose();
+  });
+
+  test("Simulation.fromSource with optimize: true", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+      optimize: true,
+    });
+
+    sim.addClock("clk", { period: 10 });
+
+    sim.dut.rst = 1;
+    sim.runUntil(20);
+    sim.dut.rst = 0;
+    sim.dut.en = 1;
+    sim.runUntil(100);
+
+    expect(sim.dut.count).toBeGreaterThan(0);
+
+    sim.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseSignalPath unit tests
+// ---------------------------------------------------------------------------
+
+describe("parseSignalPath", () => {
+  test("simple variable path", () => {
+    const result = parseSignalPath("v");
+    expect(result.instancePath).toEqual([]);
+    expect(result.varPath).toEqual(["v"]);
+  });
+
+  test("instance:variable split", () => {
+    const result = parseSignalPath("p2:i");
+    expect(result.instancePath).toEqual([{ name: "p2", index: 0 }]);
+    expect(result.varPath).toEqual(["i"]);
+  });
+
+  test("nested instance with array index", () => {
+    const result = parseSignalPath("a.b[3]:x.y");
+    expect(result.instancePath).toEqual([
+      { name: "a", index: 0 },
+      { name: "b", index: 3 },
+    ]);
+    expect(result.varPath).toEqual(["x", "y"]);
+  });
+
+  test("dotted variable path without instance", () => {
+    const result = parseSignalPath("foo.bar.baz");
+    expect(result.instancePath).toEqual([]);
+    expect(result.varPath).toEqual(["foo", "bar", "baz"]);
   });
 });

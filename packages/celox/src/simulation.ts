@@ -7,16 +7,21 @@
 
 import type {
   CreateResult,
+  EventHandle,
+  FourStateValue,
   ModuleDefinition,
   NativeSimulationHandle,
+  SignalLayout,
   SimulatorOptions,
 } from "./types.js";
-import { createDut, type DirtyState } from "./dut.js";
+import { SimulationTimeoutError } from "./types.js";
+import { createDut, readFourState, type DirtyState } from "./dut.js";
 import {
   loadNativeAddon,
   parseNapiLayout,
   buildPortsFromLayout,
   wrapDirectSimulationHandle,
+  buildNapiOpts,
 } from "./napi-helpers.js";
 
 /**
@@ -49,6 +54,8 @@ export class Simulation<P = Record<string, unknown>> {
   private readonly _dut: P;
   private readonly _events: Record<string, number>;
   private readonly _state: DirtyState;
+  private readonly _buffer: ArrayBuffer | SharedArrayBuffer;
+  private readonly _layout: Record<string, SignalLayout>;
   private _disposed = false;
 
   private constructor(
@@ -56,11 +63,15 @@ export class Simulation<P = Record<string, unknown>> {
     dut: P,
     events: Record<string, number>,
     state: DirtyState,
+    buffer: ArrayBuffer | SharedArrayBuffer,
+    layout: Record<string, SignalLayout>,
   ) {
     this._handle = handle;
     this._dut = dut;
     this._events = events;
     this._state = state;
+    this._buffer = buffer;
+    this._layout = layout;
   }
 
   /**
@@ -91,8 +102,8 @@ export class Simulation<P = Record<string, unknown>> {
       );
     }
 
-    const { fourState, vcd } = options ?? {};
-    const result = createFn(module.source, module.name, { fourState, vcd });
+    const { fourState, vcd, optimize, falseLoops, trueLoops } = options ?? {};
+    const result = createFn(module.source, module.name, { fourState, vcd, optimize, falseLoops, trueLoops });
     const state: DirtyState = { dirty: false };
 
     const dut = createDut<P>(
@@ -103,7 +114,7 @@ export class Simulation<P = Record<string, unknown>> {
       state,
     );
 
-    return new Simulation<P>(result.handle, dut, result.events, state);
+    return new Simulation<P>(result.handle, dut, result.events, state, result.buffer, result.layout);
   }
 
   /**
@@ -124,10 +135,8 @@ export class Simulation<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulation<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const napiOpts: Record<string, unknown> = {};
-    if (options?.fourState) napiOpts.fourState = options.fourState;
-    if (options?.vcd) napiOpts.vcd = options.vcd;
-    const raw = new addon.NativeSimulationHandle(source, top, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
+    const napiOpts = buildNapiOpts(options);
+    const raw = new addon.NativeSimulationHandle(source, top, napiOpts);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -140,7 +149,7 @@ export class Simulation<P = Record<string, unknown>> {
     const handle = wrapDirectSimulationHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
 
-    return new Simulation<P>(handle, dut, events, state);
+    return new Simulation<P>(handle, dut, events, state, buf, layout.forDut);
   }
 
   /**
@@ -161,10 +170,8 @@ export class Simulation<P = Record<string, unknown>> {
     options?: SimulatorOptions & { nativeAddonPath?: string },
   ): Simulation<P> {
     const addon = loadNativeAddon(options?.nativeAddonPath);
-    const napiOpts: Record<string, unknown> = {};
-    if (options?.fourState) napiOpts.fourState = options.fourState;
-    if (options?.vcd) napiOpts.vcd = options.vcd;
-    const raw = addon.NativeSimulationHandle.fromProject(projectPath, top, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
+    const napiOpts = buildNapiOpts(options);
+    const raw = addon.NativeSimulationHandle.fromProject(projectPath, top, napiOpts);
 
     const layout = parseNapiLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -177,7 +184,7 @@ export class Simulation<P = Record<string, unknown>> {
     const handle = wrapDirectSimulationHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state);
 
-    return new Simulation<P>(handle, dut, events, state);
+    return new Simulation<P>(handle, dut, events, state, buf, layout.forDut);
   }
 
   /** The DUT accessor object — read/write ports as plain properties. */
@@ -215,11 +222,33 @@ export class Simulation<P = Record<string, unknown>> {
   /**
    * Run the simulation until the given time.
    * Processes all scheduled events up to and including `endTime`.
-   * evalComb is called internally; dirty is cleared on return.
+   *
+   * When `maxSteps` is provided, steps are counted in TS and a
+   * `SimulationTimeoutError` is thrown if the budget is exhausted before
+   * reaching `endTime`. Without `maxSteps` the fast Rust path is used.
    */
-  runUntil(endTime: number): void {
+  runUntil(endTime: number, opts?: { maxSteps?: number }): void {
     this.ensureAlive();
-    this._handle.runUntil(endTime);
+    if (opts?.maxSteps == null) {
+      this._handle.runUntil(endTime);
+      this._state.dirty = false;
+      return;
+    }
+    const max = opts.maxSteps;
+    let steps = 0;
+    while (this._handle.time() < endTime) {
+      const t = this._handle.step();
+      if (t == null) break;
+      steps++;
+      if (steps >= max) {
+        this._state.dirty = false;
+        throw new SimulationTimeoutError(
+          `runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
+          this._handle.time(),
+          steps,
+        );
+      }
+    }
     this._state.dirty = false;
   }
 
@@ -249,6 +278,108 @@ export class Simulation<P = Record<string, unknown>> {
   nextEventTime(): number | null {
     this.ensureAlive();
     return this._handle.nextEventTime();
+  }
+
+  /**
+   * Step until `condition()` returns true.
+   *
+   * @returns The simulation time when the condition became true.
+   * @throws SimulationTimeoutError if `maxSteps` is exceeded.
+   */
+  waitUntil(
+    condition: () => boolean,
+    opts?: { maxSteps?: number },
+  ): number {
+    this.ensureAlive();
+    const max = opts?.maxSteps ?? 100_000;
+    let steps = 0;
+    while (!condition()) {
+      const t = this._handle.step();
+      this._state.dirty = false;
+      if (t == null) break;
+      steps++;
+      if (steps >= max) {
+        throw new SimulationTimeoutError(
+          `waitUntil: condition not met after ${max} steps at time ${this._handle.time()}`,
+          this._handle.time(),
+          steps,
+        );
+      }
+    }
+    return this._handle.time();
+  }
+
+  /**
+   * Wait for `count` cycles of the given clock event.
+   *
+   * Celox schedules 2 steps per clock cycle (rising + falling edge),
+   * so this steps `count * 2` times.
+   *
+   * @returns The simulation time after the cycles complete.
+   * @throws SimulationTimeoutError if `maxSteps` is exceeded.
+   */
+  waitForCycles(
+    _event: string | EventHandle,
+    count: number,
+    opts?: { maxSteps?: number },
+  ): number {
+    this.ensureAlive();
+    const totalSteps = count * 2;
+    const max = opts?.maxSteps ?? 100_000;
+    let stepped = 0;
+    for (let i = 0; i < totalSteps; i++) {
+      const t = this._handle.step();
+      this._state.dirty = false;
+      if (t == null) break;
+      stepped++;
+      if (stepped >= max) {
+        throw new SimulationTimeoutError(
+          `waitForCycles: exceeded ${max} steps at time ${this._handle.time()}`,
+          this._handle.time(),
+          stepped,
+        );
+      }
+    }
+    return this._handle.time();
+  }
+
+  /**
+   * Assert and release a reset signal.
+   *
+   * Writes `activeValue` (default 1) to the named port, advances
+   * `activeCycles` clock cycles (default 2), then writes 0.
+   */
+  reset(
+    signal: string,
+    opts?: { activeCycles?: number; activeValue?: number; clock?: string },
+  ): void {
+    this.ensureAlive();
+    const dut = this._dut as Record<string, unknown>;
+    const activeValue = opts?.activeValue ?? 1;
+    const cycles = opts?.activeCycles ?? 2;
+
+    dut[signal] = activeValue;
+    // Step through reset cycles (2 steps per cycle)
+    for (let i = 0; i < cycles * 2; i++) {
+      this._handle.step();
+    }
+    dut[signal] = 0;
+    this._state.dirty = false;
+  }
+
+  /**
+   * Read the raw 4-state (value + mask) pair for the named port.
+   */
+  fourState(portName: string): FourStateValue {
+    this.ensureAlive();
+    const sig = this._layout[portName];
+    if (!sig) {
+      throw new Error(
+        `Unknown port '${portName}'. Available: ${Object.keys(this._layout).join(", ")}`,
+      );
+    }
+    const [value, mask] = readFourState(this._buffer, sig);
+    return { __fourState: true, value, mask };
   }
 
   /** Write current signal values to VCD at the given timestamp. */
