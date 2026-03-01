@@ -15,6 +15,8 @@ export type {
   SimulatorOptions,
   EventHandle,
   FourStateValue,
+  LoopBreak,
+  TrueLoopSpec,
 } from "./types.js";
 
 /** @internal */
@@ -28,6 +30,9 @@ export type {
 
 // 4-state helpers
 export { X, FourState, isFourStateValue } from "./types.js";
+
+// Error types
+export { SimulationTimeoutError } from "./types.js";
 
 // Simulator (event-based)
 export { Simulator } from "./simulator.js";
@@ -49,6 +54,8 @@ export {
   wrapDirectSimulationHandle,
   createSimulatorBridge,
   createSimulationBridge,
+  parseSignalPath,
+  buildNapiOpts,
 } from "./napi-helpers.js";
 /** @internal */
 export type { RawNapiAddon, RawNapiSimulatorHandle, RawNapiSimulationHandle } from "./napi-helpers.js";

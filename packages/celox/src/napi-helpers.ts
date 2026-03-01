@@ -11,11 +11,13 @@
 
 import type {
   CreateResult,
+  LoopBreak,
   NativeSimulatorHandle,
   NativeSimulationHandle,
   PortInfo,
   SignalLayout,
   SimulatorOptions,
+  TrueLoopSpec,
 } from "./types.js";
 import type { NativeCreateFn } from "./simulator.js";
 import type { NativeCreateSimulationFn } from "./simulation.js";
@@ -54,9 +56,33 @@ export interface RawNapiSimulationHandle {
   dispose(): void;
 }
 
+export interface NapiFalseLoop {
+  from: NapiSignalPath;
+  to: NapiSignalPath;
+}
+
+export interface NapiTrueLoop {
+  from: NapiSignalPath;
+  to: NapiSignalPath;
+  maxIter: number;
+}
+
+export interface NapiSignalPath {
+  instancePath: NapiInstanceSegment[];
+  varPath: string[];
+}
+
+export interface NapiInstanceSegment {
+  name: string;
+  index: number;
+}
+
 export interface NapiOptions {
   fourState?: boolean;
   vcd?: string;
+  optimize?: boolean;
+  falseLoops?: NapiFalseLoop[];
+  trueLoops?: NapiTrueLoop[];
 }
 
 export interface RawNapiAddon {
@@ -102,6 +128,90 @@ export function loadNativeAddon(addonPath?: string): RawNapiAddon {
       { cause: e },
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Signal path parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a signal path string into instance-path + var-path components.
+ *
+ * Format: `instanceSeg1.instanceSeg2:varSeg1.varSeg2`
+ *   - `:` separates instance path from variable path
+ *   - Without `:`, the whole string is the variable path
+ *   - Instance segments may include `[N]` array indices
+ *
+ * Examples:
+ *   - `"v"` → { instancePath: [], varPath: ["v"] }
+ *   - `"p2:i"` → { instancePath: [{name:"p2",index:0}], varPath: ["i"] }
+ *   - `"a.b[3]:x.y"` → { instancePath: [{name:"a",index:0},{name:"b",index:3}], varPath: ["x","y"] }
+ */
+export function parseSignalPath(path: string): NapiSignalPath {
+  const colonIdx = path.indexOf(":");
+  if (colonIdx < 0) {
+    return { instancePath: [], varPath: path.split(".") };
+  }
+
+  const instPart = path.slice(0, colonIdx);
+  const varPart = path.slice(colonIdx + 1);
+
+  const instancePath: NapiInstanceSegment[] = [];
+  if (instPart.length > 0) {
+    for (const seg of instPart.split(".")) {
+      const bracketIdx = seg.indexOf("[");
+      if (bracketIdx >= 0) {
+        const name = seg.slice(0, bracketIdx);
+        const index = Number.parseInt(seg.slice(bracketIdx + 1, -1), 10);
+        instancePath.push({ name, index });
+      } else {
+        instancePath.push({ name: seg, index: 0 });
+      }
+    }
+  }
+
+  return { instancePath, varPath: varPart.split(".") };
+}
+
+/**
+ * Build NapiOptions from SimulatorOptions.
+ * Returns `undefined` when no options are set (to skip the NAPI options arg).
+ */
+export function buildNapiOpts(options?: SimulatorOptions): NapiOptions | undefined {
+  if (!options) return undefined;
+
+  const napiOpts: NapiOptions = {};
+  let hasOpt = false;
+
+  if (options.fourState) {
+    napiOpts.fourState = options.fourState;
+    hasOpt = true;
+  }
+  if (options.vcd) {
+    napiOpts.vcd = options.vcd;
+    hasOpt = true;
+  }
+  if (options.optimize != null) {
+    napiOpts.optimize = options.optimize;
+    hasOpt = true;
+  }
+  if (options.falseLoops && options.falseLoops.length > 0) {
+    napiOpts.falseLoops = options.falseLoops.map((lb: LoopBreak) => ({
+      from: parseSignalPath(lb.from),
+      to: parseSignalPath(lb.to),
+    }));
+    hasOpt = true;
+  }
+  if (options.trueLoops && options.trueLoops.length > 0) {
+    napiOpts.trueLoops = options.trueLoops.map((tl: TrueLoopSpec) => ({
+      from: parseSignalPath(tl.from),
+      to: parseSignalPath(tl.to),
+      maxIter: tl.maxIter,
+    }));
+    hasOpt = true;
+  }
+
+  return hasOpt ? napiOpts : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,10 +406,8 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
     moduleName: string,
     options: SimulatorOptions,
   ): CreateResult<NativeSimulatorHandle> => {
-    const napiOpts: NapiOptions = {};
-    if (options?.fourState) napiOpts.fourState = options.fourState;
-    if (options?.vcd) napiOpts.vcd = options.vcd;
-    const raw = new addon.NativeSimulatorHandle(source, moduleName, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
+    const napiOpts = buildNapiOpts(options);
+    const raw = new addon.NativeSimulatorHandle(source, moduleName, napiOpts);
 
     const layout = parseLegacyLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -321,10 +429,8 @@ export function createSimulationBridge(addon: RawNapiAddon): NativeCreateSimulat
     moduleName: string,
     options: SimulatorOptions,
   ): CreateResult<NativeSimulationHandle> => {
-    const napiOpts: NapiOptions = {};
-    if (options?.fourState) napiOpts.fourState = options.fourState;
-    if (options?.vcd) napiOpts.vcd = options.vcd;
-    const raw = new addon.NativeSimulationHandle(source, moduleName, Object.keys(napiOpts).length > 0 ? napiOpts : undefined);
+    const napiOpts = buildNapiOpts(options);
+    const raw = new addon.NativeSimulationHandle(source, moduleName, napiOpts);
 
     const layout = parseLegacyLayout(raw.layoutJson);
     const events: Record<string, number> = JSON.parse(raw.eventsJson);

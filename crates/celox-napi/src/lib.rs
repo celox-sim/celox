@@ -10,29 +10,116 @@ use veryl_parser::Parser;
 
 use layout::{build_event_map, build_signal_layout};
 
+/// A segment of a hierarchical instance path.
+#[napi(object)]
+pub struct NapiInstanceSegment {
+    pub name: String,
+    pub index: u32,
+}
+
+/// A signal path consisting of an instance path and a variable path.
+#[napi(object)]
+pub struct NapiSignalPath {
+    pub instance_path: Vec<NapiInstanceSegment>,
+    pub var_path: Vec<String>,
+}
+
+/// A false-loop declaration (combinational loop to ignore).
+#[napi(object)]
+pub struct NapiFalseLoop {
+    pub from: NapiSignalPath,
+    pub to: NapiSignalPath,
+}
+
+/// A true-loop declaration with a convergence iteration limit.
+#[napi(object)]
+pub struct NapiTrueLoop {
+    pub from: NapiSignalPath,
+    pub to: NapiSignalPath,
+    pub max_iter: u32,
+}
+
 /// Options for creating a simulator/simulation handle.
 #[napi(object)]
 pub struct NapiOptions {
     pub four_state: Option<bool>,
     pub vcd: Option<String>,
+    pub optimize: Option<bool>,
+    pub false_loops: Option<Vec<NapiFalseLoop>>,
+    pub true_loops: Option<Vec<NapiTrueLoop>>,
 }
 
 /// Parsed builder options from NapiOptions.
 struct ParsedOptions {
     four_state: bool,
+    optimize: Option<bool>,
     vcd: Option<String>,
+    false_loops: Vec<(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )>,
+    true_loops: Vec<(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )>,
+}
+
+/// Convert a NapiSignalPath to the Rust builder's tuple format.
+fn convert_signal_path(p: &NapiSignalPath) -> (Vec<(String, usize)>, Vec<String>) {
+    let inst: Vec<(String, usize)> = p
+        .instance_path
+        .iter()
+        .map(|seg| (seg.name.clone(), seg.index as usize))
+        .collect();
+    let var_path: Vec<String> = p.var_path.clone();
+    (inst, var_path)
 }
 
 /// Helper to extract the builder config from NapiOptions.
 fn parse_options(options: &Option<NapiOptions>) -> ParsedOptions {
     match options.as_ref() {
-        Some(o) => ParsedOptions {
-            four_state: o.four_state.unwrap_or(false),
-            vcd: o.vcd.clone(),
-        },
+        Some(o) => {
+            let false_loops = o
+                .false_loops
+                .as_ref()
+                .map(|loops| {
+                    loops
+                        .iter()
+                        .map(|fl| (convert_signal_path(&fl.from), convert_signal_path(&fl.to)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let true_loops = o
+                .true_loops
+                .as_ref()
+                .map(|loops| {
+                    loops
+                        .iter()
+                        .map(|tl| {
+                            (
+                                convert_signal_path(&tl.from),
+                                convert_signal_path(&tl.to),
+                                tl.max_iter as usize,
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ParsedOptions {
+                four_state: o.four_state.unwrap_or(false),
+                optimize: o.optimize,
+                vcd: o.vcd.clone(),
+                false_loops,
+                true_loops,
+            }
+        }
         None => ParsedOptions {
             four_state: false,
+            optimize: None,
             vcd: None,
+            false_loops: Vec::new(),
+            true_loops: Vec::new(),
         },
     }
 }
@@ -59,6 +146,27 @@ fn load_project_source(project_path: &str) -> Result<(String, Metadata)> {
     Ok((source, metadata))
 }
 
+/// Apply parsed options to a SimulatorBuilder.
+fn apply_options<'a, T>(
+    mut builder: celox::SimulatorBuilder<'a, T>,
+    opts: &ParsedOptions,
+) -> celox::SimulatorBuilder<'a, T> {
+    builder = builder.four_state(opts.four_state);
+    if let Some(opt) = opts.optimize {
+        builder = builder.optimize(opt);
+    }
+    if let Some(path) = &opts.vcd {
+        builder = builder.vcd(path);
+    }
+    for (from, to) in &opts.false_loops {
+        builder = builder.false_loop(from.clone(), to.clone());
+    }
+    for (from, to, max_iter) in &opts.true_loops {
+        builder = builder.true_loop(from.clone(), to.clone(), *max_iter);
+    }
+    builder
+}
+
 /// Low-level handle wrapping a `celox::Simulator`.
 ///
 /// JS holds this as an opaque class; all operations go through methods.
@@ -77,11 +185,7 @@ impl NativeSimulatorHandle {
     #[napi(constructor)]
     pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
         let opts = parse_options(&options);
-        let mut builder = celox::Simulator::builder(&code, &top)
-            .four_state(opts.four_state);
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(celox::Simulator::builder(&code, &top), &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -118,12 +222,10 @@ impl NativeSimulatorHandle {
         let opts = parse_options(&options);
         let (source, metadata) = load_project_source(&project_path)?;
 
-        let mut builder = celox::Simulator::builder(&source, &top)
-            .with_metadata(metadata)
-            .four_state(opts.four_state);
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(
+            celox::Simulator::builder(&source, &top).with_metadata(metadata),
+            &opts,
+        );
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -254,11 +356,7 @@ impl NativeSimulationHandle {
     #[napi(constructor)]
     pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
         let opts = parse_options(&options);
-        let mut builder = celox::Simulation::builder(&code, &top)
-            .four_state(opts.four_state);
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(celox::Simulation::builder(&code, &top), &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -291,12 +389,10 @@ impl NativeSimulationHandle {
         let opts = parse_options(&options);
         let (source, metadata) = load_project_source(&project_path)?;
 
-        let mut builder = celox::Simulation::builder(&source, &top)
-            .with_metadata(metadata)
-            .four_state(opts.four_state);
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(
+            celox::Simulation::builder(&source, &top).with_metadata(metadata),
+            &opts,
+        );
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
