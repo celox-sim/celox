@@ -66,6 +66,71 @@ describe("Counter", () => {
 - `sim.runUntil(t)` はシミュレーション時刻を `t` まで進めます。
 - `sim.time()` は現在のシミュレーション時刻を返します。
 
+## テストベンチヘルパー
+
+`Simulation` クラスは、よくあるテストベンチパターン向けの便利メソッドを提供します。
+
+### リセットヘルパー
+
+```typescript
+const sim = Simulation.create(Counter);
+sim.addClock("clk", { period: 10 });
+
+// rst=1 を 2 サイクル維持してから 0 に戻す
+sim.reset("rst");
+
+// カスタム: 3 サイクル、アクティブローリセット
+sim.reset("rst_n", { activeCycles: 3, activeValue: 0 });
+```
+
+### 条件待ち
+
+```typescript
+// 条件が満たされるまで待つ (step() でポーリング)
+const t = sim.waitUntil(() => sim.dut.done === 1);
+
+// 指定クロックサイクル数だけ待つ
+const t = sim.waitForCycles("clk", 10);
+```
+
+どちらのメソッドもオプションの `{ maxSteps }` パラメータ（デフォルト: 100,000）を受け取ります。ステップ上限を超えると `SimulationTimeoutError` がスローされます：
+
+```typescript
+import { SimulationTimeoutError } from "@celox-sim/celox";
+
+try {
+  sim.waitUntil(() => sim.dut.done === 1, { maxSteps: 1000 });
+} catch (e) {
+  if (e instanceof SimulationTimeoutError) {
+    console.log(`時刻 ${e.time} で ${e.steps} ステップ後にタイムアウト`);
+  }
+}
+```
+
+### runUntil のタイムアウトガード
+
+`runUntil()` に `{ maxSteps }` を渡すとステップカウントが有効になります。指定しない場合は高速な Rust パスがそのまま使われ、オーバーヘッドはありません：
+
+```typescript
+// 高速 Rust パス (オーバーヘッドなし)
+sim.runUntil(10000);
+
+// ガード付き: 上限を超えると SimulationTimeoutError をスロー
+sim.runUntil(10000, { maxSteps: 500 });
+```
+
+## シミュレータオプション
+
+`Simulator` と `Simulation` の両方で以下のオプションが使えます：
+
+```typescript
+const sim = Simulator.fromSource(source, "Top", {
+  fourState: true,      // 4 値 (X/Z) シミュレーションを有効化
+  vcd: "./dump.vcd",    // VCD 波形出力を書き出す
+  optimize: true,       // Cranelift 最適化パスを有効化
+});
+```
+
 ## 型安全なインポート
 
 Vite プラグインが `.veryl` ファイルの TypeScript 型定義を自動生成します。以下のように書くと:
@@ -86,3 +151,4 @@ pnpm test
 
 - [4 値シミュレーション](./four-state.md) -- テストベンチでの X 値の使い方。
 - [アーキテクチャ](/internals/architecture) -- シミュレーションパイプラインの詳細。
+- [API リファレンス](/api/) -- TypeScript API の完全なドキュメント。

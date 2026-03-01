@@ -66,6 +66,71 @@ describe("Counter", () => {
 - `sim.runUntil(t)` advances simulation time to `t`.
 - `sim.time()` returns the current simulation time.
 
+## Testbench Helpers
+
+The `Simulation` class provides convenience methods for common testbench patterns.
+
+### Reset Helper
+
+```typescript
+const sim = Simulation.create(Counter);
+sim.addClock("clk", { period: 10 });
+
+// Assert rst=1 for 2 cycles, then release to 0
+sim.reset("rst");
+
+// Custom: 3 cycles, active-low reset
+sim.reset("rst_n", { activeCycles: 3, activeValue: 0 });
+```
+
+### Waiting for Conditions
+
+```typescript
+// Wait until a condition is met (polls via step())
+const t = sim.waitUntil(() => sim.dut.done === 1);
+
+// Wait for a specific number of clock cycles
+const t = sim.waitForCycles("clk", 10);
+```
+
+Both methods accept an optional `{ maxSteps }` parameter (default: 100,000). A `SimulationTimeoutError` is thrown if the step budget is exceeded:
+
+```typescript
+import { SimulationTimeoutError } from "@celox-sim/celox";
+
+try {
+  sim.waitUntil(() => sim.dut.done === 1, { maxSteps: 1000 });
+} catch (e) {
+  if (e instanceof SimulationTimeoutError) {
+    console.log(`Timed out at time ${e.time} after ${e.steps} steps`);
+  }
+}
+```
+
+### Timeout Guard for runUntil
+
+Pass `{ maxSteps }` to `runUntil()` to enable step counting. Without it, the fast Rust path is used with no overhead:
+
+```typescript
+// Fast Rust path (no overhead)
+sim.runUntil(10000);
+
+// Guarded: throws SimulationTimeoutError if budget is exceeded
+sim.runUntil(10000, { maxSteps: 500 });
+```
+
+## Simulator Options
+
+Both `Simulator` and `Simulation` accept the following options:
+
+```typescript
+const sim = Simulator.fromSource(source, "Top", {
+  fourState: true,      // Enable 4-state (X/Z) simulation
+  vcd: "./dump.vcd",    // Write VCD waveform output
+  optimize: true,       // Enable Cranelift optimization passes
+});
+```
+
 ## Type-Safe Imports
 
 The Vite plugin automatically generates TypeScript type definitions for your `.veryl` files. When you write:
@@ -86,3 +151,4 @@ pnpm test
 
 - [4-State Simulation](./four-state.md) -- Using X and Z values in testbenches.
 - [Architecture](/internals/architecture) -- The simulation pipeline in detail.
+- [API Reference](/api/) -- Full TypeScript API documentation.

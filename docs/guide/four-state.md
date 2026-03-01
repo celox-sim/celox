@@ -91,25 +91,31 @@ const val = sim.dut.result; // number or bigint — X bits read as 0
 
 ### Reading the Full Value/Mask Pair
 
-To inspect X bits, use `readFourState()`:
+Use the `fourState()` method on `Simulator` or `Simulation` to read the value and X mask together:
 
 ```typescript
-import { readFourState } from "@celox-sim/celox";
+const fs = sim.fourState("result");
 
-const [value, mask] = readFourState(sim.buffer, sim.layout["result"]);
-
-if (mask !== 0) {
-  console.log("Result contains X bits:", mask.toString(2));
+if (fs.mask !== 0) {
+  console.log("Result contains X bits:", fs.mask.toString(2));
 }
+
+// fs.__fourState === true
+// fs.value — the value portion
+// fs.mask  — mask where 1 = X
 ```
 
-The return value is a tuple `[value, mask]` where:
+The returned `FourStateValue` has the following semantics:
 
 | mask bit | value bit | Meaning |
 |----------|-----------|---------|
 | 0 | 0 | `0` |
 | 0 | 1 | `1` |
 | 1 | 0 | `X` |
+
+::: tip
+For low-level access (e.g. custom buffer manipulation), the `readFourState(buffer, layout)` function is also available as an internal API.
+:::
 
 ## Example: Testing X Propagation
 

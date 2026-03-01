@@ -91,25 +91,31 @@ const val = sim.dut.result; // number または bigint — X ビットは 0 と�
 
 ### value/mask ペアの読み出し
 
-X ビットを確認するには `readFourState()` を使います：
+`Simulator` または `Simulation` の `fourState()` メソッドで value と X マスクをまとめて読み出せます：
 
 ```typescript
-import { readFourState } from "@celox-sim/celox";
+const fs = sim.fourState("result");
 
-const [value, mask] = readFourState(sim.buffer, sim.layout["result"]);
-
-if (mask !== 0) {
-  console.log("結果に X ビットが含まれています:", mask.toString(2));
+if (fs.mask !== 0) {
+  console.log("結果に X ビットが含まれています:", fs.mask.toString(2));
 }
+
+// fs.__fourState === true
+// fs.value — value 部分
+// fs.mask  — マスク (1 = X)
 ```
 
-戻り値は `[value, mask]` のタプルで、各ビットの意味は以下の通りです：
+返される `FourStateValue` の各ビットの意味は以下の通りです：
 
 | mask ビット | value ビット | 意味 |
 |----------|-----------|---------|
 | 0 | 0 | `0` |
 | 0 | 1 | `1` |
 | 1 | 0 | `X` |
+
+::: tip
+低レベルアクセス（カスタムバッファ操作など）が必要な場合は、内部 API の `readFourState(buffer, layout)` 関数も利用できます。
+:::
 
 ## 例：X 伝搬のテスト
 
