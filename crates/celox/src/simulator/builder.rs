@@ -4,6 +4,7 @@ use veryl_parser::Parser;
 
 use super::Simulator;
 use crate::{ParserError, SimulatorError, backend::JitBackend, ir::Program, parser};
+use crate::parser::BuildConfig;
 fn analyze(
     code: &str,
     top: &str,
@@ -43,9 +44,11 @@ fn analyze(
         .filter(|x| matches!(x, AnalyzerError::UnsupportedByIr { .. }))
         .collect();
     let top = veryl_parser::resource_table::insert_str(top);
+    let build_config = BuildConfig::from(&metadata.build);
     let sir = parser::parse(
         &top,
         &ir,
+        &build_config,
         optimize,
         ignored_loops,
         true_loops,

@@ -14,8 +14,8 @@ fn test_linear_sorter_basic() {
     let dut_ids = LinearSorter::new(&sim);
     let mut dut = dut_ids.bind(&mut sim);
 
-    // --- 1. Reset Phase ---
-    dut.set_rst(1);
+    // --- 1. Reset Phase (AsyncLow: rst=0 means active) ---
+    dut.set_rst(0);
     dut.set_en(0);
     dut.tick();
 
@@ -24,7 +24,7 @@ fn test_linear_sorter_basic() {
     }
 
     // --- 2. Sorting Phase ---
-    dut.set_rst(0);
+    dut.set_rst(1);
     dut.set_en(1);
 
     // Inputs: [50, 20, 80, 10]

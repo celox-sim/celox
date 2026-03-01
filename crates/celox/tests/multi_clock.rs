@@ -43,9 +43,9 @@ fn test_independent_clock_domains() {
     let qa = sim.signal("qa");
     let qb = sim.signal("qb");
 
-    // Reset both
+    // Reset both (AsyncLow: rst=0 means active)
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(da, 0xAAu8);
         io.set(db, 0xBBu8);
     })
@@ -56,7 +56,7 @@ fn test_independent_clock_domains() {
     assert_eq!(sim.get(qb), 0u8.into());
 
     // Release reset
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
 
     // Only tick clk_a: qa should update, qb should stay 0
     sim.tick(clk_a).unwrap();
@@ -114,15 +114,15 @@ fn test_clock_domain_crossing_pattern() {
     let count_out = sim.signal("count_out");
     let sample_out = sim.signal("sample_out");
 
-    // Reset
-    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    // Reset (AsyncLow: rst=0 means active)
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
     sim.tick(clk_fast).unwrap();
     sim.tick(clk_slow).unwrap();
     assert_eq!(sim.get(count_out), 0u8.into());
     assert_eq!(sim.get(sample_out), 0u8.into());
 
     // Release reset
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
 
     // Tick fast 3 times (counter goes 1→2→3)
     sim.tick(clk_fast).unwrap();
@@ -189,10 +189,10 @@ fn test_separate_resets_per_domain() {
     let qa = sim.signal("qa");
     let qb = sim.signal("qb");
 
-    // Reset only domain A
+    // Reset only domain A (AsyncLow: rst=0 means active)
     sim.modify(|io| {
-        io.set(rst_a, 1u8);
-        io.set(rst_b, 0u8);
+        io.set(rst_a, 0u8);
+        io.set(rst_b, 1u8);
         io.set(da, 0x11u8);
         io.set(db, 0x22u8);
     })
@@ -204,8 +204,8 @@ fn test_separate_resets_per_domain() {
 
     // Release A, assert B
     sim.modify(|io| {
-        io.set(rst_a, 0u8);
-        io.set(rst_b, 1u8);
+        io.set(rst_a, 1u8);
+        io.set(rst_b, 0u8);
     })
     .unwrap();
     sim.tick(clk_a).unwrap();

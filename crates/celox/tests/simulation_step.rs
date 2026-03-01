@@ -25,8 +25,8 @@ fn test_simulation_step() {
     let rst = vsim.signal("rst");
     let cnt = vsim.signal("cnt");
 
-    // Release reset at t=0
-    vsim.modify(|io| io.set::<u8>(rst, 0)).unwrap();
+    // Release reset at t=0 (AsyncLow: rst=1 means inactive)
+    vsim.modify(|io| io.set::<u8>(rst, 1)).unwrap();
 
     // Step 0: clk 0 -> 1 at t=0.
     vsim.step().unwrap();

@@ -749,9 +749,9 @@ fn test_four_state_ff_capture_and_reset() {
     let id_d = sim.signal("d");
     let id_q = sim.signal("q");
 
-    // 1. Reset: q should become 0 with mask=0
+    // 1. Reset: q should become 0 with mask=0 (AsyncLow: rst=0 means active)
     sim.modify(|io: &mut IOContext| {
-        io.set_four_state(id_rst, BigUint::from(1u32), BigUint::from(0u32));
+        io.set_four_state(id_rst, BigUint::from(0u32), BigUint::from(0u32));
         io.set_four_state(id_d, BigUint::from(0u32), BigUint::from(0xFFu32));
         io.set_four_state(id_q, BigUint::from(0u32), BigUint::from(0u32));
     })
@@ -766,9 +766,9 @@ fn test_four_state_ff_capture_and_reset() {
         "After reset, q mask should be 0 (constant reset value)"
     );
 
-    // 2. Normal: d = X → q should capture X
+    // 2. Normal: d = X → q should capture X (deactivate reset: rst=1)
     sim.modify(|io: &mut IOContext| {
-        io.set_four_state(id_rst, BigUint::from(0u32), BigUint::from(0u32));
+        io.set_four_state(id_rst, BigUint::from(1u32), BigUint::from(0u32));
         io.set_four_state(id_d, BigUint::from(0xA5u32), BigUint::from(0x0Fu32));
     })
     .unwrap();
@@ -781,9 +781,9 @@ fn test_four_state_ff_capture_and_reset() {
         "FF should capture X mask from d"
     );
 
-    // 3. Reset again: should clear X
+    // 3. Reset again: should clear X (activate reset: rst=0)
     sim.modify(|io: &mut IOContext| {
-        io.set_four_state(id_rst, BigUint::from(1u32), BigUint::from(0u32));
+        io.set_four_state(id_rst, BigUint::from(0u32), BigUint::from(0u32));
     })
     .unwrap();
     sim.tick(clk).unwrap();
@@ -1877,9 +1877,9 @@ fn test_four_state_ff_conditional_with_x() {
     let id_d = sim.signal("d");
     let id_q = sim.signal("q");
 
-    // Reset first
+    // Reset first (AsyncLow: rst=0 means active)
     sim.modify(|io: &mut IOContext| {
-        io.set_four_state(id_rst, BigUint::from(1u32), BigUint::from(0u32));
+        io.set_four_state(id_rst, BigUint::from(0u32), BigUint::from(0u32));
         io.set_four_state(id_en, BigUint::from(0u32), BigUint::from(0u32));
         io.set_four_state(id_d, BigUint::from(0u32), BigUint::from(0u32));
         io.set_four_state(id_q, BigUint::from(0u32), BigUint::from(0u32));
@@ -1890,9 +1890,9 @@ fn test_four_state_ff_conditional_with_x() {
     assert_eq!(v_q, BigUint::from(0u32));
     assert_eq!(m_q, BigUint::from(0u32), "Reset should clear X");
 
-    // en=1, d has X → q captures X
+    // en=1, d has X → q captures X (deactivate reset: rst=1)
     sim.modify(|io: &mut IOContext| {
-        io.set_four_state(id_rst, BigUint::from(0u32), BigUint::from(0u32));
+        io.set_four_state(id_rst, BigUint::from(1u32), BigUint::from(0u32));
         io.set_four_state(id_en, BigUint::from(1u32), BigUint::from(0u32));
         io.set_four_state(id_d, BigUint::from(0xABu32), BigUint::from(0x0Fu32));
     })
@@ -3271,9 +3271,9 @@ fn test_four_state_ff_sync_reset_with_x() {
     let id_d = sim.signal("d");
     let id_q = sim.signal("q");
 
-    // 1. Async reset to clear state
+    // 1. Async reset to clear state (AsyncLow: rst=0 means active)
     sim.modify(|io: &mut IOContext| {
-        io.set_four_state(id_rst, BigUint::from(1u32), BigUint::from(0u32));
+        io.set_four_state(id_rst, BigUint::from(0u32), BigUint::from(0u32));
         io.set_four_state(id_sync_rst, BigUint::from(0u32), BigUint::from(0u32));
         io.set_four_state(id_d, BigUint::from(0u32), BigUint::from(0u32));
         io.set_four_state(id_q, BigUint::from(0u32), BigUint::from(0u32));
@@ -3284,9 +3284,9 @@ fn test_four_state_ff_sync_reset_with_x() {
     assert_eq!(v_q, BigUint::from(0u32));
     assert_eq!(m_q, BigUint::from(0u32), "Async reset should clear X");
 
-    // 2. Load data with X into q
+    // 2. Load data with X into q (deactivate reset: rst=1)
     sim.modify(|io: &mut IOContext| {
-        io.set_four_state(id_rst, BigUint::from(0u32), BigUint::from(0u32));
+        io.set_four_state(id_rst, BigUint::from(1u32), BigUint::from(0u32));
         io.set_four_state(id_sync_rst, BigUint::from(0u32), BigUint::from(0u32));
         io.set_four_state(id_d, BigUint::from(0xABu32), BigUint::from(0x0Fu32)); // lower nibble X
     })

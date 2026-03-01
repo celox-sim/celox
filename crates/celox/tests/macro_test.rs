@@ -14,13 +14,13 @@ fn test_macro_basic() {
     // Initial state
     assert_eq!(dut.get_b(), 0);
 
-    // After reset
-    dut.set_rst(1);
+    // After reset (AsyncLow: rst=0 means active)
+    dut.set_rst(0);
     dut.tick();
     assert_eq!(dut.get_b(), 0);
 
-    // Input propagating
-    dut.set_rst(0);
+    // Input propagating (deactivate reset)
+    dut.set_rst(1);
     dut.set_a(42);
     dut.tick();
     assert_eq!(dut.get_b(), 42);
@@ -37,6 +37,7 @@ fn test_macro_io_modify() {
     dut.modify(|io| {
         io.set_a(100);
         io.set_c(1);
+        io.set_rst(1); // AsyncLow: rst=1 means inactive
     });
 
     dut.tick();

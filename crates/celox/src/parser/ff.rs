@@ -6,7 +6,7 @@ use crate::ir::{
 };
 use crate::{
     HashMap, HashSet,
-    parser::{ParserError, bitaccess::eval_var_select},
+    parser::{BuildConfig, ParserError, bitaccess::eval_var_select},
 };
 use bit_set::BitSet;
 use num_traits::ToPrimitive;
@@ -37,10 +37,11 @@ pub struct FfParser<'a> {
     dynamic_defined_vars: HashSet<VarId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
+    config: BuildConfig,
 }
 
 impl<'a> FfParser<'a> {
-    pub fn new(module: &'a Module) -> Self {
+    pub fn new(module: &'a Module, config: BuildConfig) -> Self {
         Self {
             module,
             stack: VecDeque::new(),
@@ -48,6 +49,7 @@ impl<'a> FfParser<'a> {
             dynamic_defined_vars: HashSet::default(),
             reset: None,
             function_arg_stack: Vec::new(),
+            config,
         }
     }
 
@@ -325,10 +327,14 @@ impl<'a> FfParser<'a> {
                 .as_ref()
                 .expect("if_reset used without reset signal in FfDeclaration");
             let var = &self.module.variables[&reset.id];
-            let is_low = matches!(
-                var.r#type.kind,
-                TypeKind::ResetAsyncLow | TypeKind::ResetSyncLow
-            );
+            let is_low = match var.r#type.kind {
+                TypeKind::ResetAsyncLow | TypeKind::ResetSyncLow => true,
+                TypeKind::Reset => matches!(
+                    self.config.reset_type,
+                    veryl_metadata::ResetType::AsyncLow | veryl_metadata::ResetType::SyncLow
+                ),
+                _ => false,
+            };
             (reset.id, reset.index.clone(), reset.select.clone(), is_low)
         };
 
@@ -404,10 +410,15 @@ impl<'a> FfParser<'a> {
 
         if let Some(reset) = &decl.reset {
             let var = &self.module.variables[&reset.id];
-            if matches!(
-                var.r#type.kind,
-                TypeKind::ResetAsyncHigh | TypeKind::ResetAsyncLow
-            ) {
+            let is_async = match var.r#type.kind {
+                TypeKind::ResetAsyncHigh | TypeKind::ResetAsyncLow => true,
+                TypeKind::Reset => matches!(
+                    self.config.reset_type,
+                    veryl_metadata::ResetType::AsyncHigh | veryl_metadata::ResetType::AsyncLow
+                ),
+                _ => false,
+            };
+            if is_async {
                 trigger_set.resets.push(reset.id);
             }
         }

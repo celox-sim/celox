@@ -341,7 +341,7 @@ mod tests {
             modules: ir_modules,
         };
         for module in modules.values() {
-            let sim_module = ModuleParser::parse(module, &registry).expect("module parse failed");
+            let sim_module = ModuleParser::parse(module, &registry, &crate::parser::BuildConfig::default()).expect("module parse failed");
             sim_modules.insert(module.name, sim_module);
         }
 

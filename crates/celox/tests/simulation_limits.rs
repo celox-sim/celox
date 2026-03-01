@@ -34,9 +34,11 @@ fn test_can_clock_division() {
     let rst = vsim.signal("rst");
     let cnt = vsim.signal("cnt");
 
-    vsim.modify(|io| io.set::<u8>(rst, 1)).unwrap();
-    vsim.step().unwrap();
+    // AsyncLow: rst=0 means active reset
     vsim.modify(|io| io.set::<u8>(rst, 0)).unwrap();
+    vsim.step().unwrap();
+    // Release reset
+    vsim.modify(|io| io.set::<u8>(rst, 1)).unwrap();
 
     vsim.step().unwrap(); // t=5
     vsim.step().unwrap(); // t=10
@@ -258,15 +260,17 @@ fn test_regular_reset() {
     vsim.add_clock("clk", 10, 5);
 
     let rst = vsim.signal("rst");
+    // Activate reset (AsyncLow: rst=0 means active)
     vsim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
     })
     .unwrap();
     vsim.run_until(7).unwrap(); // after first posedge
     let cnt = vsim.signal("cnt");
     assert_eq!(vsim.get(cnt), 0u8.into());
+    // Deactivate reset
     vsim.modify(|io| {
-        io.set(rst, 0u8);
+        io.set(rst, 1u8);
     })
     .unwrap();
     vsim.run_until(10).unwrap();
@@ -274,18 +278,20 @@ fn test_regular_reset() {
     vsim.run_until(15).unwrap();
     assert_eq!(vsim.get(cnt), 1u8.into());
 
+    // Re-activate reset
     vsim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
     })
     .unwrap();
-    // rst is high but clk hasn't ticked yet, so cnt should still be 1
+    // rst is low but clk hasn't ticked yet, so cnt should still be 1
     assert_eq!(vsim.get(cnt), 1u8.into());
 
     vsim.run_until(25).unwrap(); // after second posedge
     assert_eq!(vsim.get(cnt), 0u8.into());
     vsim.run_until(35).unwrap();
+    // Deactivate reset
     vsim.modify(|io| {
-        io.set(rst, 0u8);
+        io.set(rst, 1u8);
     })
     .unwrap();
     vsim.run_until(45).unwrap(); // after third posedge

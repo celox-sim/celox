@@ -147,12 +147,12 @@ fn test_rapid_tick_counter() {
     let rst = sim.signal("rst");
     let cnt = sim.signal("cnt");
 
-    // Reset
-    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    // Reset (AsyncLow: rst=0 means active)
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
     sim.tick(clk).unwrap();
 
     // Release reset and tick 100 times
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
     for _ in 0..100 {
         sim.tick(clk).unwrap();
     }

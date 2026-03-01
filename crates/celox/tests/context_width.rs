@@ -245,10 +245,10 @@ fn test_ff_width_propagation() {
     let o = sim.signal("o");
     let rst = sim.signal("rst");
     let clk = sim.event("clk");
-    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    sim.modify(|io| io.set(rst, 0u8)).unwrap(); // AsyncLow: active-low reset
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(o), 0u8.into(), "Reset should set o to 0");
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap(); // Deactivate reset
     sim.modify(|io| io.set(i, 2u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(o), 4u8.into(), "i=2, o=2+2=4");

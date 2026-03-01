@@ -3,7 +3,32 @@ use thiserror::Error;
 
 use crate::parser::{module::ModuleParser, registry::ModuleRegistry};
 use veryl_analyzer::ir::{Component, VarPath};
+use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuildConfig {
+    pub clock_type: ClockType,
+    pub reset_type: ResetType,
+}
+
+impl Default for BuildConfig {
+    fn default() -> Self {
+        Self {
+            clock_type: ClockType::PosEdge,
+            reset_type: ResetType::AsyncLow,
+        }
+    }
+}
+
+impl From<&veryl_metadata::Build> for BuildConfig {
+    fn from(build: &veryl_metadata::Build) -> Self {
+        Self {
+            clock_type: build.clock_type,
+            reset_type: build.reset_type,
+        }
+    }
+}
 pub mod bitaccess;
 mod bitslicer;
 pub mod ff;
@@ -42,9 +67,10 @@ pub enum ParserError {
     },
 }
 
-pub fn parse_ir(
-    ir: &veryl_analyzer::ir::Ir,
-) -> Result<(ModuleRegistry<'_>, HashMap<StrId, SimModule>), ParserError> {
+pub fn parse_ir<'a>(
+    ir: &'a veryl_analyzer::ir::Ir,
+    config: &BuildConfig,
+) -> Result<(ModuleRegistry<'a>, HashMap<StrId, SimModule>), ParserError> {
     let mut module_registry = ModuleRegistry {
         modules: HashMap::default(),
     };
@@ -70,7 +96,7 @@ pub fn parse_ir(
     for component in &ir.components {
         match component {
             Component::Module(module) => {
-                let m = ModuleParser::parse(module, &module_registry)?;
+                let m = ModuleParser::parse(module, &module_registry, config)?;
                 modules.insert(m.name, m);
             }
             Component::Interface(_interface) => {
@@ -188,6 +214,7 @@ pub(crate) fn flatten(
     top: &StrId,
     registry: &ModuleRegistry,
     modules: HashMap<StrId, SimModule>,
+    config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -231,6 +258,7 @@ pub(crate) fn flatten(
         &expanded,
         &instance_modules,
         &modules,
+        config,
     );
 
     if let Some(t) = trace.as_deref_mut()
@@ -254,7 +282,7 @@ pub(crate) fn flatten(
             eval_comb: Vec::new(),
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
-            module_variables: module_variables(registry),
+            module_variables: module_variables(registry, config),
             clock_domains: HashMap::default(),
             topological_clocks: Vec::new(),
             cascaded_clocks: BTreeSet::new(),
@@ -326,7 +354,7 @@ pub(crate) fn flatten(
         eval_comb: schduled,
         instance_ids: expanded,
         instance_module: instance_modules,
-        module_variables: module_variables(registry),
+        module_variables: module_variables(registry, config),
         clock_domains,
         topological_clocks,
         cascaded_clocks,
@@ -459,7 +487,10 @@ pub(crate) fn flatten(
 
     Ok(program)
 }
-fn module_variables(registry: &ModuleRegistry) -> HashMap<StrId, HashMap<VarPath, VariableInfo>> {
+fn module_variables(
+    registry: &ModuleRegistry,
+    config: &BuildConfig,
+) -> HashMap<StrId, HashMap<VarPath, VariableInfo>> {
     let mut res = HashMap::default();
     for (name, module) in &registry.modules {
         let mut variables = HashMap::default();
@@ -471,9 +502,9 @@ fn module_variables(registry: &ModuleRegistry) -> HashMap<StrId, HashMap<VarPath
                         * varibale.r#type.total_array().unwrap_or(1),
                     id: *id,
                     is_4state: is_4state_type(&varibale.r#type.kind),
-                    kind: type_kind_to_domain_kind(&varibale.r#type.kind),
+                    kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
                     var_kind: varibale.kind,
-                    type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind),
+                    type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind, config),
                     array_dims: varibale
                         .r#type
                         .array
@@ -488,13 +519,22 @@ fn module_variables(registry: &ModuleRegistry) -> HashMap<StrId, HashMap<VarPath
     res
 }
 
-fn type_kind_to_port_type_kind(kind: &veryl_analyzer::ir::TypeKind) -> crate::ir::PortTypeKind {
+fn type_kind_to_port_type_kind(
+    kind: &veryl_analyzer::ir::TypeKind,
+    config: &BuildConfig,
+) -> crate::ir::PortTypeKind {
     use veryl_analyzer::ir::TypeKind;
     match kind {
         TypeKind::Clock | TypeKind::ClockPosedge | TypeKind::ClockNegedge => {
             crate::ir::PortTypeKind::Clock
         }
-        TypeKind::Reset | TypeKind::ResetAsyncHigh => crate::ir::PortTypeKind::ResetAsyncHigh,
+        TypeKind::Reset => match config.reset_type {
+            ResetType::AsyncHigh => crate::ir::PortTypeKind::ResetAsyncHigh,
+            ResetType::AsyncLow => crate::ir::PortTypeKind::ResetAsyncLow,
+            ResetType::SyncHigh => crate::ir::PortTypeKind::ResetSyncHigh,
+            ResetType::SyncLow => crate::ir::PortTypeKind::ResetSyncLow,
+        },
+        TypeKind::ResetAsyncHigh => crate::ir::PortTypeKind::ResetAsyncHigh,
         TypeKind::ResetAsyncLow => crate::ir::PortTypeKind::ResetAsyncLow,
         TypeKind::ResetSyncHigh => crate::ir::PortTypeKind::ResetSyncHigh,
         TypeKind::ResetSyncLow => crate::ir::PortTypeKind::ResetSyncLow,
@@ -504,11 +544,23 @@ fn type_kind_to_port_type_kind(kind: &veryl_analyzer::ir::TypeKind) -> crate::ir
     }
 }
 
-fn type_kind_to_domain_kind(kind: &veryl_analyzer::ir::TypeKind) -> DomainKind {
+fn type_kind_to_domain_kind(
+    kind: &veryl_analyzer::ir::TypeKind,
+    config: &BuildConfig,
+) -> DomainKind {
     use veryl_analyzer::ir::TypeKind;
     match kind {
-        TypeKind::Clock | TypeKind::ClockPosedge => DomainKind::ClockPosedge,
+        TypeKind::Clock => match config.clock_type {
+            ClockType::PosEdge => DomainKind::ClockPosedge,
+            ClockType::NegEdge => DomainKind::ClockNegedge,
+        },
+        TypeKind::ClockPosedge => DomainKind::ClockPosedge,
         TypeKind::ClockNegedge => DomainKind::ClockNegedge,
+        TypeKind::Reset => match config.reset_type {
+            ResetType::AsyncHigh => DomainKind::ResetAsyncHigh,
+            ResetType::AsyncLow => DomainKind::ResetAsyncLow,
+            ResetType::SyncHigh | ResetType::SyncLow => DomainKind::Other,
+        },
         TypeKind::ResetAsyncHigh => DomainKind::ResetAsyncHigh,
         TypeKind::ResetAsyncLow => DomainKind::ResetAsyncLow,
         _ => DomainKind::Other,
@@ -724,6 +776,7 @@ fn expand(
 pub fn parse(
     top: &StrId,
     ir: &veryl_analyzer::ir::Ir,
+    config: &BuildConfig,
     optimize: bool,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -738,7 +791,7 @@ pub fn parse(
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
 ) -> Result<Program, ParserError> {
-    let (regsitry, sim_modules) = parse_ir(ir)?;
+    let (regsitry, sim_modules) = parse_ir(ir, config)?;
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.analyzer_ir
     {
@@ -748,6 +801,7 @@ pub fn parse(
         top,
         &regsitry,
         sim_modules,
+        config,
         ignored_loops,
         true_loops,
         four_state,
@@ -1114,6 +1168,7 @@ fn analyze_clock_dependencies(
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, StrId>,
     modules: &HashMap<StrId, SimModule>,
+    config: &BuildConfig,
 ) -> (Vec<AbsoluteAddr>, BTreeSet<AbsoluteAddr>) {
     // Build static clock dependency graph & Topo Sort
     let mut clock_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
@@ -1233,7 +1288,7 @@ fn analyze_clock_dependencies(
         let module_name = &instance_modules[id];
         let sim_module = &modules[module_name];
         for (var_id, var) in &sim_module.variables {
-            let kind = type_kind_to_domain_kind(&var.r#type.kind);
+            let kind = type_kind_to_domain_kind(&var.r#type.kind, config);
             let is_trigger = matches!(
                 kind,
                 DomainKind::ClockPosedge

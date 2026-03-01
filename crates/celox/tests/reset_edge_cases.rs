@@ -180,9 +180,9 @@ fn test_shared_reset() {
     let q1 = sim.signal("q1");
     let q2 = sim.signal("q2");
 
-    // Reset both FFs
+    // Reset both FFs (AsyncLow: rst=0 means active)
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(d1, 0xAAu8);
         io.set(d2, 0xBBu8);
     })
@@ -192,7 +192,7 @@ fn test_shared_reset() {
     assert_eq!(sim.get(q2), 0xFFu8.into()); // different reset value
 
     // Release reset
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q1), 0xAAu8.into());
     assert_eq!(sim.get(q2), 0xBBu8.into());
@@ -228,14 +228,14 @@ fn test_nonzero_reset_value() {
     let q = sim.signal("q");
 
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(d, 0x00u8);
     })
     .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0xDEu8.into()); // reset to 0xDE
 
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x00u8.into()); // now captures d=0
 }

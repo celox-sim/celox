@@ -85,9 +85,9 @@ fn test_enum_ff_state_machine() {
     let start = sim.signal("start");
     let state_out = sim.signal("state_out");
 
-    // Reset
+    // Reset (AsyncLow: rst=0 means active)
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(start, 0u8);
     })
     .unwrap();
@@ -95,7 +95,7 @@ fn test_enum_ff_state_machine() {
     assert_eq!(sim.get(state_out), 0u8.into()); // Idle
 
     // Release reset, start = 0 -> stay Idle
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(state_out), 0u8.into()); // Idle
 

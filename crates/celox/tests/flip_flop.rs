@@ -56,17 +56,17 @@ fn test_ff_if_reset_basic() {
     let d = sim.signal("d");
     let q = sim.signal("q");
 
-    // Reset
+    // Reset (AsyncLow: active when rst=0)
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(d, 0xAAu8);
     })
     .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x0u32.into());
 
-    // Normal operation
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    // Normal operation (deactivate reset)
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0xAAu32.into());
 }
@@ -156,14 +156,14 @@ fn test_ff_swap_correctness() {
     let a = sim.signal("a");
     let b = sim.signal("b");
 
-    // Reset to initialize
-    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    // Reset to initialize (AsyncLow: active when rst=0)
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(a), 0xAAu32.into());
     assert_eq!(sim.get(b), 0x55u32.into());
 
-    // Tick to swap
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    // Tick to swap (deactivate reset)
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
 
     assert_eq!(sim.get(a), 0x55u32.into());
@@ -328,13 +328,15 @@ fn test_ff_if_reset_multi_cycle() {
     let rst = sim.signal("rst");
     let q = sim.signal("q");
 
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    // Deactivate reset first (AsyncLow: rst=1 means inactive)
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u32.into());
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 2u32.into());
 
-    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    // Activate reset (AsyncLow: rst=0 means active)
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0u32.into());
 }
@@ -356,10 +358,16 @@ fn test_ff_if_reset_with_nested_if() {
     "#;
     let mut sim = Simulator::builder(code, "Top").build().unwrap();
     let clk = sim.event("clk");
+    let rst = sim.signal("rst");
     let en = sim.signal("en");
     let q = sim.signal("q");
 
-    sim.modify(|io| io.set(en, 1u8)).unwrap();
+    // Deactivate reset (AsyncLow: rst=1 means inactive)
+    sim.modify(|io| {
+        io.set(rst, 1u8);
+        io.set(en, 1u8);
+    })
+    .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u32.into());
 

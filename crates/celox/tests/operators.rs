@@ -490,7 +490,7 @@ fn test_ff_div() {
     let q = sim.signal("q");
 
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(a, 0u16);
         io.set(b, 1u16);
     })
@@ -499,7 +499,7 @@ fn test_ff_div() {
     assert_eq!(sim.get(q), 0u16.into());
 
     sim.modify(|io| {
-        io.set(rst, 0u8);
+        io.set(rst, 1u8);
         io.set(a, 42u16);
         io.set(b, 5u16);
     })
@@ -538,7 +538,7 @@ fn test_ff_rem() {
     let q = sim.signal("q");
 
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(a, 0u16);
         io.set(b, 1u16);
     })
@@ -547,7 +547,7 @@ fn test_ff_rem() {
     assert_eq!(sim.get(q), 0u16.into());
 
     sim.modify(|io| {
-        io.set(rst, 0u8);
+        io.set(rst, 1u8);
         io.set(a, 42u16);
         io.set(b, 5u16);
     })
@@ -624,7 +624,7 @@ fn test_ff_bitxnor() {
     let y = sim.signal("y");
 
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(a, 0u8);
         io.set(b, 0u8);
     })
@@ -633,7 +633,7 @@ fn test_ff_bitxnor() {
     assert_eq!(sim.get(y), 0u8.into());
 
     sim.modify(|io| {
-        io.set(rst, 0u8);
+        io.set(rst, 1u8);
         io.set(a, 0xF0u8);
         io.set(b, 0xFFu8);
     })
@@ -749,7 +749,7 @@ fn test_ff_reduction_nand() {
     let y = sim.signal("y");
 
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(a, 0u8);
     })
     .unwrap();
@@ -757,7 +757,7 @@ fn test_ff_reduction_nand() {
     assert_eq!(sim.get(y), 0u8.into());
 
     sim.modify(|io| {
-        io.set(rst, 0u8);
+        io.set(rst, 1u8);
         io.set(a, 0xFFu8);
     })
     .unwrap();
@@ -833,7 +833,7 @@ fn test_ff_reduction_nor() {
     let y = sim.signal("y");
 
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(a, 0u8);
     })
     .unwrap();
@@ -841,7 +841,7 @@ fn test_ff_reduction_nor() {
     assert_eq!(sim.get(y), 0u8.into());
 
     sim.modify(|io| {
-        io.set(rst, 0u8);
+        io.set(rst, 1u8);
         io.set(a, 0x00u8);
     })
     .unwrap();

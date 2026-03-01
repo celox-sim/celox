@@ -10,7 +10,7 @@ use crate::logic_tree::{
     range_store::RangeStore,
 };
 use crate::parser::{
-    ParserError, bitaccess::eval_var_select, bitslicer::BitSlicer, ff::FfParser,
+    BuildConfig, ParserError, bitaccess::eval_var_select, bitslicer::BitSlicer, ff::FfParser,
     registry::ModuleRegistry,
 };
 use crate::{HashMap, HashSet};
@@ -43,12 +43,13 @@ impl<'a> ModuleParser<'a> {
     pub fn parse(
         module: &'a Module,
         registry: &'a ModuleRegistry,
+        config: &BuildConfig,
     ) -> Result<SimModule, ParserError> {
-        let parser = Self::new(module, registry);
+        let parser = Self::new(module, registry, config);
         parser.parse_inner()
     }
 
-    fn new(module: &'a Module, registry: &'a ModuleRegistry) -> Self {
+    fn new(module: &'a Module, registry: &'a ModuleRegistry, config: &BuildConfig) -> Self {
         Self {
             module,
             slicer: BitSlicer::new(module),
@@ -57,7 +58,7 @@ impl<'a> ModuleParser<'a> {
             comb_blocks: Vec::new(),
             comb_boundaries: HashMap::default(),
             glue_blocks: HashMap::default(),
-            ff_parser: FfParser::new(module),
+            ff_parser: FfParser::new(module, *config),
             arena: SLTNodeArena::new(),
         }
     }

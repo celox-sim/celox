@@ -400,7 +400,7 @@ fn test_wide_ff_mul() {
     let y = sim.signal("y");
 
     sim.modify(|io| {
-        io.set(rst, 1u8);
+        io.set(rst, 0u8);
         io.set(a, 0u128);
         io.set(b, 0u128);
     })
@@ -409,7 +409,7 @@ fn test_wide_ff_mul() {
     assert_eq!(sim.get(y), 0u128.into());
 
     sim.modify(|io| {
-        io.set(rst, 0u8);
+        io.set(rst, 1u8);
         io.set(a, 12345u128);
         io.set(b, 67890u128);
     })

@@ -47,7 +47,7 @@ fn setup_to_flatting(
         if let Component::Module(module) = component {
             // Need to handle potential errors in real code, but unwrap/panic is fine for tests?
             // ModuleParser::parse returns SimModule directly.
-            let m = ModuleParser::parse(module, &module_registry).expect("module parse failed");
+            let m = ModuleParser::parse(module, &module_registry, &crate::parser::BuildConfig::default()).expect("module parse failed");
             modules.insert(m.name, m);
         }
     }
@@ -317,11 +317,13 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
 
     // Use the real parser::parse_ir and flatten, but SKIP optimization to verify structure
     // crate::parser::parse(&top_id, &ir).expect("Failed to parse program")
-    let (registry, sim_modules) = crate::parser::parse_ir(&ir).expect("Failed to parse IR");
+    let build_config = crate::parser::BuildConfig::default();
+    let (registry, sim_modules) = crate::parser::parse_ir(&ir, &build_config).expect("Failed to parse IR");
     crate::parser::flatten(
         &top_id,
         &registry,
         sim_modules,
+        &build_config,
         &[],
         &[],
         false,
