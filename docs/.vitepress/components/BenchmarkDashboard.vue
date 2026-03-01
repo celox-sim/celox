@@ -52,7 +52,7 @@ interface Series {
   /** Unique key: "rust/simulation_tick_..." or "ts/simulation_tick_..." */
   key: string;
   benchName: string;
-  runtime: "rust" | "ts" | "unknown";
+  runtime: "rust" | "ts" | "verilator" | "unknown";
   category: string;
   points: SeriesPoint[];
 }
@@ -101,6 +101,14 @@ const TS_COLORS = [
   "#a3e635",
   "#34d399",
 ];
+const VERILATOR_COLORS = [
+  "#f97316",
+  "#f59e0b",
+  "#fb923c",
+  "#d97706",
+  "#fbbf24",
+  "#ea580c",
+];
 const DASH_PATTERNS = [[], [6, 3], [2, 2], [8, 4, 2, 4], [4, 4]];
 
 // --- State ---
@@ -114,12 +122,13 @@ const selectorOpen = ref(true);
 // --- Helpers ---
 
 function stripPrefix(name: string): string {
-  return name.replace(/^(rust|ts)\//, "");
+  return name.replace(/^(rust|ts|verilator)\//, "");
 }
 
-function runtime(name: string): "rust" | "ts" | "unknown" {
+function runtime(name: string): "rust" | "ts" | "verilator" | "unknown" {
   if (name.startsWith("rust/")) return "rust";
   if (name.startsWith("ts/")) return "ts";
+  if (name.startsWith("verilator/")) return "verilator";
   return "unknown";
 }
 
@@ -144,7 +153,8 @@ function shortDate(epoch: number): string {
 
 /** Human-friendly display label */
 function displayLabel(s: Series): string {
-  const prefix = s.runtime === "rust" ? "Rust" : s.runtime === "ts" ? "TS" : "";
+  const prefixMap: Record<string, string> = { rust: "Rust", ts: "TS", verilator: "Verilator" };
+  const prefix = prefixMap[s.runtime] ?? "";
   return prefix ? `${prefix} / ${s.benchName}` : s.benchName;
 }
 
@@ -289,19 +299,18 @@ const chartData = computed(() => {
   const labels = dates.map((d) => shortDate(d));
 
   // Assign colors: index per runtime
-  const rustIdx = { n: 0 };
-  const tsIdx = { n: 0 };
+  const counters: Record<string, number> = { rust: 0, ts: 0, verilator: 0, unknown: 0 };
+  const palettes: Record<string, string[]> = {
+    rust: RUST_COLORS,
+    ts: TS_COLORS,
+    verilator: VERILATOR_COLORS,
+    unknown: TS_COLORS,
+  };
 
   const datasets = series.map((s) => {
-    let color: string;
-    let idx: number;
-    if (s.runtime === "rust") {
-      idx = rustIdx.n++;
-      color = RUST_COLORS[idx % RUST_COLORS.length];
-    } else {
-      idx = tsIdx.n++;
-      color = TS_COLORS[idx % TS_COLORS.length];
-    }
+    const idx = counters[s.runtime]++;
+    const palette = palettes[s.runtime];
+    const color = palette[idx % palette.length];
 
     const dateToValue = new Map(s.points.map((p) => [p.date, p.value]));
     return {
@@ -449,7 +458,7 @@ watch(
                 <span
                   class="bench-runtime-badge"
                   :class="s.runtime"
-                >{{ s.runtime === "rust" ? "R" : s.runtime === "ts" ? "T" : "?" }}</span>
+                >{{ { rust: "R", ts: "T", verilator: "V" }[s.runtime] ?? "?" }}</span>
                 {{ s.benchName }}
               </label>
             </div>
@@ -596,6 +605,11 @@ watch(
 .bench-runtime-badge.ts {
   background: rgba(34, 197, 94, 0.2);
   color: #4ade80;
+}
+
+.bench-runtime-badge.verilator {
+  background: rgba(249, 115, 22, 0.2);
+  color: #fb923c;
 }
 
 /* --- Chart --- */

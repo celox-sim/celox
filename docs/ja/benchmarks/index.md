@@ -1,6 +1,6 @@
 # ベンチマーク
 
-Celox には Rust コアと TypeScript ランタイムの両方のベンチマークスイートが含まれています。CI は `master` への push ごとにベンチマークを自動実行し、インタラクティブなトレンドダッシュボードを公開します。
+Celox には Rust コア、TypeScript ランタイム、および参照ベースラインとしての Verilator のベンチマークスイートが含まれています。CI は `master` への push ごとにベンチマークを自動実行し、インタラクティブなトレンドダッシュボードを公開します。
 
 ## ダッシュボード
 
@@ -36,7 +36,17 @@ Celox には Rust コアと TypeScript ランタイムの両方のベンチマ�
 | `testbench_array_tick_top_n1000_x1` | 配列 `.at()` アクセス付き単一サイクル |
 | `testbench_array_tick_top_n1000_x1000000` | 配列 `.at()` アクセス付き 100 万サイクル |
 
-Rust と TypeScript のベンチマークは対応しているため、2 つのランタイムの性能を直接比較できます。
+### Verilator（C++ リファレンス）
+
+| ベンチマーク | 説明 |
+|---|---|
+| `simulation_build_top_n1000` | Verilate + C++ コンパイル時間 |
+| `simulation_tick_top_n1000_x1` | 単一クロックティック |
+| `simulation_tick_top_n1000_x1000000` | 100 万ティックのループ |
+| `testbench_tick_top_n1000_x1` | 単一サイクル（ティック + 出力読出） |
+| `testbench_tick_top_n1000_x1000000` | 100 万サイクル（ティック + 出力読出） |
+
+Rust、TypeScript、Verilator のベンチマークは同じ設計を使用しているため、3 つすべての性能を直接比較できます。
 
 ## ローカル実行
 
@@ -53,6 +63,14 @@ pnpm bench
 ```
 
 リリースモードで NAPI アドオンをビルドし、パッケージをビルドした後、Vitest ベンチマークを実行します。
+
+### Verilator
+
+```bash
+bash scripts/run-verilator-bench.sh
+```
+
+`verilator` と C++ ツールチェーンが必要です。
 
 ## CI 環境
 

@@ -31,6 +31,13 @@ jobs:
       - name: Run Rust benchmarks
         run: cargo bench -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
 
+      # ── Verilator benchmarks ──
+      - name: Install Verilator
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq verilator
+
+      - name: Run Verilator benchmarks
+        run: bash scripts/run-verilator-bench.sh | tee verilator-output.txt
+
       # ── TypeScript benchmarks ──
       - uses: pnpm/action-setup@v4
 
@@ -54,9 +61,12 @@ jobs:
       - name: Convert TypeScript benchmark output
         run: node scripts/convert-bench.mjs packages/celox/ts-output.json ts-converted.json
 
-      # ── Convert Rust output to unified µs format ──
+      # ── Convert all outputs to unified µs format ──
       - name: Convert Rust benchmark output
         run: node scripts/convert-rust-bench.mjs rust-output.txt rust-converted.json
+
+      - name: Convert Verilator benchmark output
+        run: node scripts/convert-verilator-bench.mjs verilator-output.txt verilator-converted.json
 
       # ── Publish results ──
       - name: Store Rust benchmark result
@@ -67,6 +77,20 @@ jobs:
           output-file-path: rust-converted.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
+          auto-push: false
+          alert-threshold: "200%"
+          comment-on-alert: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Store Verilator benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Verilator Benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: verilator-converted.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          skip-fetch-gh-pages: true
           auto-push: false
           alert-threshold: "200%"
           comment-on-alert: true

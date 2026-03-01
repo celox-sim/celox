@@ -1,6 +1,6 @@
 # Benchmarks
 
-Celox includes benchmark suites for both the Rust core and the TypeScript runtime. CI runs benchmarks on every push to `master` and publishes an interactive trend dashboard.
+Celox includes benchmark suites for the Rust core, the TypeScript runtime, and Verilator as a reference baseline. CI runs benchmarks on every push to `master` and publishes an interactive trend dashboard.
 
 ## Dashboard
 
@@ -36,7 +36,17 @@ All benchmarks use a counter module (`Top`) with **N=1000** parallel 32-bit coun
 | `testbench_array_tick_top_n1000_x1` | Single cycle with array `.at()` access |
 | `testbench_array_tick_top_n1000_x1000000` | 1M cycles with array `.at()` access |
 
-The Rust and TypeScript benchmarks mirror each other, so you can directly compare the performance of the two runtimes.
+### Verilator (C++ reference)
+
+| Benchmark | Description |
+|---|---|
+| `simulation_build_top_n1000` | Verilate + C++ compile time |
+| `simulation_tick_top_n1000_x1` | Single clock tick |
+| `simulation_tick_top_n1000_x1000000` | 1M ticks in a loop |
+| `testbench_tick_top_n1000_x1` | Single cycle (tick + read output) |
+| `testbench_tick_top_n1000_x1000000` | 1M cycles (tick + read output) |
+
+The Rust, TypeScript, and Verilator benchmarks use the same design, so you can directly compare the performance of all three.
 
 ## Running Locally
 
@@ -53,6 +63,14 @@ pnpm bench
 ```
 
 This builds the NAPI addon in release mode, builds packages, then runs Vitest benchmarks.
+
+### Verilator
+
+```bash
+bash scripts/run-verilator-bench.sh
+```
+
+Requires `verilator` and a C++ toolchain.
 
 ## CI Environment
 
