@@ -32,8 +32,7 @@ jobs:
         run: cargo bench -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
 
       # ── Verilator benchmarks ──
-      - name: Install Verilator
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq verilator
+      - uses: veryl-lang/setup-verilator@v1
 
       - name: Run Verilator benchmarks
         run: bash scripts/run-verilator-bench.sh | tee verilator-output.txt
