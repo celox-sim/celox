@@ -59,5 +59,55 @@ fn test_linear_sorter_basic() {
     }
 }
 
+#[test]
+fn test_linear_sorter_hierarchy() {
+    let depth = 8;
+    let max_val = u16::MAX;
 
+    let sorter_code =
+        fs::read_to_string("tests/macro_project/src/linear_sorter.veryl").unwrap();
+    let wrapper_code =
+        fs::read_to_string("tests/macro_project/src/linear_sorter_wrapper.veryl").unwrap();
+    let code = format!("{sorter_code}\n{wrapper_code}");
 
+    let result = SimulatorBuilder::new(&code, "LinearSorterWrapper").build_with_trace();
+    let mut sim = result.res.unwrap();
+    let dut_ids = LinearSorterWrapper::new(&sim);
+    let mut dut = dut_ids.bind(&mut sim);
+
+    // Reset
+    dut.set_rst(0);
+    dut.set_en(0);
+    dut.tick();
+
+    for i in 0..depth {
+        assert_eq!(dut.get_d_out(i), max_val, "reset: d_out[{i}] should be max");
+    }
+
+    // Sort [50, 20, 80, 10]
+    dut.set_rst(1);
+    dut.set_en(1);
+
+    let inputs = [50u16, 20, 80, 10];
+    let expectations: Vec<Vec<u16>> = vec![
+        vec![50, 65535, 65535, 65535, 65535, 65535, 65535, 65535],
+        vec![20, 50, 65535, 65535, 65535, 65535, 65535, 65535],
+        vec![20, 50, 80, 65535, 65535, 65535, 65535, 65535],
+        vec![10, 20, 50, 80, 65535, 65535, 65535, 65535],
+    ];
+
+    for (time, &val) in inputs.iter().enumerate() {
+        dut.set_d_in(val);
+        dut.tick();
+
+        for i in 0..depth {
+            assert_eq!(
+                dut.get_d_out(i),
+                expectations[time][i],
+                "Mismatch at cycle {} cell {} (through hierarchy)",
+                time + 1,
+                i
+            );
+        }
+    }
+}

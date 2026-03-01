@@ -1,0 +1,18 @@
+module LinearSorterWrapper #(
+    param WIDTH: u32 = 16,
+    param DEPTH: u32 = 8 ,
+) (
+    clk  : input  clock               ,
+    rst  : input  reset               ,
+    en   : input  logic               ,
+    d_in : input  logic<WIDTH>        ,
+    d_out: output logic<WIDTH> [DEPTH],
+) {
+    inst sorter: LinearSorter (
+        clk  ,
+        rst  ,
+        en   ,
+        d_in ,
+        d_out,
+    );
+}

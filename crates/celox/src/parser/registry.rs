@@ -1,5 +1,5 @@
 use crate::ir::RegisterType;
-use crate::parser::{ParserError, resolve_width};
+use crate::parser::{ParserError, resolve_total_width};
 
 use veryl_analyzer::ir::{Module, VarId};
 
@@ -15,7 +15,7 @@ pub fn get_port_type(
         }
     })?;
 
-    let width = resolve_width(module, var)?;
+    let width = resolve_total_width(module, var)?;
     let ty = &var.r#type;
     if ty.is_2state() {
         Ok(RegisterType::Bit {
