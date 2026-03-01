@@ -76,6 +76,7 @@ jobs:
           output-file-path: ts-converted.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
+          skip-fetch-gh-pages: true
           auto-push: true
           alert-threshold: "200%"
           comment-on-alert: true
