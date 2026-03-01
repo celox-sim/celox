@@ -234,12 +234,16 @@ export class Simulator<P = Record<string, unknown>> {
       ticks = 1;
     }
 
+    if (this._state.dirty) {
+      this._handle.evalComb();
+      this._state.dirty = false;
+    }
+
     if (ticks === 1) {
       this._handle.tick(eventId);
     } else if (ticks > 1) {
       this._handle.tickN(eventId, ticks);
     }
-    this._state.dirty = false;
   }
 
   /** Resolve an event name to a handle for use with `tick()`. */
