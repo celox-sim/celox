@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, fmt, hash::Hash};
 use crate::ParserError;
 use crate::context_width::get_context_width;
 use crate::logic_tree::range_store::RangeStore;
+use crate::parser::{resolve_total_width, resolve_width};
 use crate::{
     HashMap, HashSet,
     ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
@@ -532,7 +533,7 @@ pub fn parse_comb(
     // Variables start in an 'unassigned' state (None), representing their initial input values.
     let mut current_store = SymbolicStore::default();
     for (id, var) in &module.variables {
-        let width = var.total_width().unwrap_or(1) * var.r#type.total_array().unwrap_or(1);
+        let width = resolve_total_width(module, var)?;
         current_store.insert(*id, RangeStore::new(None, width));
     }
 
@@ -602,13 +603,13 @@ fn eval_assign(
     stmt: &AssignStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
-    let rhs_expected_width = stmt
+    let rhs_expected_width: usize = stmt
         .dst
         .iter()
         .map(|dst| {
             crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)
         })
-        .sum();
+        .sum::<Result<usize, ParserError>>()?;
     let ((rhs_expr, rhs_sources), rhs_bounds) = if let Expression::ArrayLiteral(items) = &stmt.expr
     {
         eval_array_literal_expression(module, &store, items, Some(rhs_expected_width), arena)?
@@ -622,7 +623,7 @@ fn eval_assign(
         let dst = &stmt.dst[0];
 
         if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
-            let access = eval_var_select(module, dst.id, &dst.index, &dst.select);
+            let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
 
             let b = boundaries.entry(dst.id).or_default();
             b.insert(access.lsb);
@@ -649,7 +650,7 @@ fn eval_assign(
         let mut current_offset = 0;
         for dst in stmt.dst.iter().rev() {
             let part_width =
-                crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select);
+                crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)?;
 
             // Slice the RHS to extract the bits for this destination
             let slice_expr = arena.alloc(SLTNode::Slice {
@@ -658,7 +659,7 @@ fn eval_assign(
             });
 
             if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
-                let access = eval_var_select(module, dst.id, &dst.index, &dst.select);
+                let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
 
                 let b = boundaries.entry(dst.id).or_default();
                 b.insert(access.lsb);
@@ -698,7 +699,7 @@ fn eval_dynamic_assign(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let mut all_sources = rhs_sources;
 
-    let (_, strides, _) = crate::parser::bitaccess::get_dimensions_and_strides(module, dst.id);
+    let (_, strides, _) = crate::parser::bitaccess::get_dimensions_and_strides(module, dst.id)?;
     let mut stride_iter = strides.iter();
     let mut offset_node = arena.alloc(SLTNode::Constant(BigUint::from(0u32), 64, false));
 
@@ -716,9 +717,9 @@ fn eval_dynamic_assign(
     }
 
     let access_width =
-        crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select);
+        crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)?;
     let var = &module.variables[&dst.id];
-    let width = var.total_width().unwrap_or(1) * var.r#type.total_array().unwrap_or(1);
+    let width = resolve_total_width(module, var)?;
 
     let access_full = BitAccess::new(0, width - 1);
     let range_store = store
@@ -807,7 +808,7 @@ fn eval_if(
 
         // Add total width including array elements as the terminator
         let var = &module.variables[id];
-        let var_width = var.total_width().unwrap_or(1) * var.r#type.total_array().unwrap_or(1);
+        let var_width = resolve_total_width(module, var)?;
         let mut lsbs_vec: Vec<usize> = all_lsbs.into_iter().collect();
         lsbs_vec.push(var_width);
 
@@ -1250,7 +1251,7 @@ fn eval_function_call_expression(
                 detail: format!("unknown arg id: {:?}", arg_id),
             });
         };
-        let arg_width = arg_var.total_width().unwrap_or(1);
+        let arg_width = resolve_width(module, arg_var)?;
         local_store.insert(
             *arg_id,
             RangeStore::new(Some((arg_node, sources)), arg_width),
@@ -1657,7 +1658,7 @@ fn eval_factor(
         Factor::Variable(var_id, index, select, _, _) => {
             let is_static_access = crate::parser::bitaccess::is_static_access(index, select);
             if is_static_access {
-                let access = eval_var_select(module, *var_id, index, select);
+                let access = eval_var_select(module, *var_id, index, select)?;
 
                 let mut bounds = BoundaryMap::default();
                 bounds.entry(*var_id).or_default().insert(access.lsb);
@@ -1713,11 +1714,11 @@ fn eval_factor(
                 let mut all_sources = HashSet::default();
 
                 let var = &module.variables[var_id];
-                let width = var.total_width().unwrap_or(1) * var.r#type.total_array().unwrap_or(1);
+                let width = resolve_total_width(module, var)?;
 
                 // 1. Build node for offset calculation (used by both Shr and Input approaches)
                 let (_, strides, _) =
-                    crate::parser::bitaccess::get_dimensions_and_strides(module, *var_id);
+                    crate::parser::bitaccess::get_dimensions_and_strides(module, *var_id)?;
                 let mut stride_iter = strides.iter();
                 let mut offset_node =
                     arena.alloc(SLTNode::Constant(BigUint::from(0u32), 64, false));
@@ -1745,7 +1746,7 @@ fn eval_factor(
                 let is_unmodified = parts.iter().all(|(val, _)| val.is_none());
 
                 let element_width =
-                    crate::parser::bitaccess::get_access_width(module, *var_id, index, select);
+                    crate::parser::bitaccess::get_access_width(module, *var_id, index, select)?;
 
                 let mut extracted_expr = if is_unmodified {
                     // --- Code for the approach of aligning at load time ---
@@ -1826,7 +1827,7 @@ fn eval_factor(
         )),
         Factor::SystemFunctionCall(call, _) => Err(ParserError::UnsupportedCombLowering {
             feature: "system function call in comb expression",
-            detail: format!("{:?}", call),
+            detail: format!("module `{}`: {call}", module.name),
         }),
         Factor::FunctionCall(call, _) => eval_function_call_expression(module, store, call, arena),
         Factor::Anonymous(_) | Factor::Unresolved(_, _) | Factor::Unknown(_) => {

@@ -4,7 +4,7 @@ use crate::ir::{
     SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use crate::parser::{
-    ParserError,
+    ParserError, resolve_dims, resolve_shape_total,
     bitaccess::{eval_var_select, is_static_access},
 };
 use malachite_bigint::BigUint;
@@ -30,15 +30,11 @@ impl<'a> FfParser<'a> {
         let var_type = &variable.r#type;
 
         // 1. Calculate Stride for array dimensions
-        let array_dims: Vec<usize> = var_type
-            .array
-            .as_slice()
-            .iter()
-            .map(|d| d.expect("Array dimension must be known"))
-            .collect();
+        let array_dims: Vec<usize> =
+            resolve_dims(self.module, variable, var_type.array.as_slice(), "array")?;
 
         // Scalar bit width (N in logic<N>)
-        let scalar_bits = var_type.width.total().unwrap_or(1);
+        let scalar_bits = resolve_shape_total(self.module, variable)?;
 
         // Strides: How many bits each array index moves
         let mut strides = vec![0; array_dims.len()];
@@ -198,7 +194,7 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
-        let access = eval_var_select(self.module, var_id, index, select);
+        let access = eval_var_select(self.module, var_id, index, select)?;
         let width = access.msb - access.lsb + 1; // Selected bit width
         let dest_reg = if self.module.variables[&var_id].r#type.signed {
             ir_builder.alloc_bit(width, true)
@@ -209,7 +205,7 @@ impl<'a> FfParser<'a> {
         let offset =
             self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
 
-        let access = eval_var_select(self.module, var_id, index, select);
+        let access = eval_var_select(self.module, var_id, index, select)?;
         let width = access.msb - access.lsb + 1;
 
         ir_builder.emit(SIRInstruction::Load(
@@ -254,7 +250,7 @@ impl<'a> FfParser<'a> {
             sources,
             ir_builder,
         )?;
-        let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select);
+        let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
 
         let target_width = access.msb - access.lsb + 1;
         ir_builder.emit(SIRInstruction::Store(
@@ -578,7 +574,7 @@ impl<'a> FfParser<'a> {
         let rhs_width = ir_builder.register(&rhs_reg).width();
 
         for dst in dsts.iter().rev() {
-            let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select);
+            let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
             let part_width = access.msb - access.lsb + 1;
 
             let final_reg = if current_offset == 0 && part_width == rhs_width {
@@ -643,10 +639,10 @@ impl<'a> FfParser<'a> {
             .dst
             .iter()
             .map(|dst| {
-                let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select);
-                access.msb - access.lsb + 1
+                let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
+                Ok(access.msb - access.lsb + 1)
             })
-            .sum();
+            .sum::<Result<usize, ParserError>>()?;
 
         match &assign_statement.expr {
             Expression::ArrayLiteral(items) => {

@@ -1,4 +1,5 @@
 use crate::BigUint;
+use crate::parser::{ParserError, resolve_dims};
 use num_traits::Zero;
 use veryl_analyzer::ir::{Expression, Factor, Module, VarId, VarIndex, VarSelect, VarSelectOp};
 
@@ -21,19 +22,12 @@ pub fn eval_constexpr(expr: &Expression) -> Option<BigUint> {
         _ => None,
     }
 }
-pub fn eval_var_select(
-    module: &Module,
-    var_id: VarId,
-    index: &VarIndex,
-    select: &VarSelect,
-) -> BitAccess {
+
+fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserError> {
     let variable = &module.variables[&var_id];
     let var_type = &variable.r#type;
 
-    let mut dims = Vec::new();
-    for dim in var_type.array.as_slice() {
-        dims.push(dim.expect("Array dimension must be known"));
-    }
+    let mut dims = resolve_dims(module, variable, var_type.array.as_slice(), "array")?;
     // For enum-typed variables, the width Shape is empty but the actual
     // bit width is encoded in the TypeKind. Use kind.width() as the
     // base scalar width when the explicit width shape is absent.
@@ -44,10 +38,23 @@ pub fn eval_var_select(
             dims.push(kind_width);
         }
     } else {
-        for dim in var_type.width.as_slice() {
-            dims.push(dim.expect("Vector width must be known"));
-        }
+        dims.extend(resolve_dims(
+            module,
+            variable,
+            var_type.width.as_slice(),
+            "width",
+        )?);
     }
+    Ok(dims)
+}
+
+pub fn eval_var_select(
+    module: &Module,
+    var_id: VarId,
+    index: &VarIndex,
+    select: &VarSelect,
+) -> Result<BitAccess, ParserError> {
+    let dims = collect_dims(module, var_id)?;
 
     let mut strides = vec![1; dims.len()];
     let mut current_stride = 1;
@@ -95,7 +102,7 @@ pub fn eval_var_select(
             }
         } else {
             // Encountered dynamic index: return the entire range of this level based on current base_offset
-            return get_slice_fallback(base_offset, i);
+            return Ok(get_slice_fallback(base_offset, i));
         }
     }
 
@@ -105,7 +112,7 @@ pub fn eval_var_select(
             v
         } else {
             // If range width is dynamic, also return the entire level range
-            return get_slice_fallback(base_offset, processed_count);
+            return Ok(get_slice_fallback(base_offset, processed_count));
         };
 
         let weight = strides[processed_count];
@@ -123,14 +130,14 @@ pub fn eval_var_select(
                 (actual_lsb * weight, (actual_msb + 1) * weight - 1)
             }
         };
-        BitAccess::new(base_offset + lsb_rel, base_offset + msb_rel)
+        Ok(BitAccess::new(base_offset + lsb_rel, base_offset + msb_rel))
     } else {
         let width = if processed_count == 0 {
             total_width
         } else {
             strides[processed_count - 1]
         };
-        BitAccess::new(base_offset, base_offset + width - 1)
+        Ok(BitAccess::new(base_offset, base_offset + width - 1))
     }
 }
 pub fn is_static_access(index: &VarIndex, select: &VarSelect) -> bool {
@@ -158,25 +165,8 @@ pub fn is_static_access(index: &VarIndex, select: &VarSelect) -> bool {
 pub fn get_dimensions_and_strides(
     module: &Module,
     var_id: VarId,
-) -> (Vec<usize>, Vec<usize>, usize) {
-    let variable = &module.variables[&var_id];
-    let var_type = &variable.r#type;
-
-    let mut dims = Vec::new();
-    for dim in var_type.array.as_slice() {
-        dims.push(dim.expect("Array dimension must be known"));
-    }
-    if var_type.width.is_empty() {
-        if let Some(kind_width) = var_type.kind.width()
-            && kind_width > 1
-        {
-            dims.push(kind_width);
-        }
-    } else {
-        for dim in var_type.width.as_slice() {
-            dims.push(dim.expect("Vector width must be known"));
-        }
-    }
+) -> Result<(Vec<usize>, Vec<usize>, usize), ParserError> {
+    let dims = collect_dims(module, var_id)?;
 
     let mut strides = vec![1; dims.len()];
     let mut current_stride = 1;
@@ -184,7 +174,7 @@ pub fn get_dimensions_and_strides(
         strides[i] = current_stride;
         current_stride *= dims[i];
     }
-    (dims, strides, current_stride)
+    Ok((dims, strides, current_stride))
 }
 
 pub fn get_access_width(
@@ -192,8 +182,8 @@ pub fn get_access_width(
     var_id: VarId,
     index: &VarIndex,
     select: &VarSelect,
-) -> usize {
-    let (dims, strides, total_width) = get_dimensions_and_strides(module, var_id);
+) -> Result<usize, ParserError> {
+    let (dims, strides, total_width) = get_dimensions_and_strides(module, var_id)?;
     let total_indices = index.0.len() + select.0.len();
 
     let to_u = |e: &Expression| -> Option<usize> {
@@ -232,23 +222,23 @@ pub fn get_access_width(
                 }
                 VarSelectOp::PlusColon | VarSelectOp::MinusColon | VarSelectOp::Step => rhs,
             };
-            elem_width * stride
+            Ok(elem_width * stride)
         } else {
             // Fallback: return full width of the current dimension if width is dynamic (should not happen for +: / -:)
             if effective_idx == 0 {
-                total_width
+                Ok(total_width)
             } else {
-                strides[effective_idx - 1]
+                Ok(strides[effective_idx - 1])
             }
         }
     } else {
         // Simple index access
         if total_indices == 0 {
-            total_width
+            Ok(total_width)
         } else if total_indices <= dims.len() {
-            strides[total_indices - 1]
+            Ok(strides[total_indices - 1])
         } else {
-            1 // Should not happen if index count matches dimensions
+            Ok(1) // Should not happen if index count matches dimensions
         }
     }
 }

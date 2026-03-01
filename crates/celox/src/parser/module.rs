@@ -11,7 +11,7 @@ use crate::logic_tree::{
 };
 use crate::parser::{
     BuildConfig, ParserError, bitaccess::eval_var_select, bitslicer::BitSlicer, ff::FfParser,
-    registry::ModuleRegistry,
+    registry::ModuleRegistry, resolve_total_width,
 };
 use crate::{HashMap, HashSet};
 use veryl_analyzer::ir::{Component, Declaration, InstDeclaration, Module, VarId};
@@ -46,14 +46,18 @@ impl<'a> ModuleParser<'a> {
         registry: &'a ModuleRegistry,
         config: &BuildConfig,
     ) -> Result<SimModule, ParserError> {
-        let parser = Self::new(module, registry, config);
+        let parser = Self::new(module, registry, config)?;
         parser.parse_inner()
     }
 
-    fn new(module: &'a Module, registry: &'a ModuleRegistry, config: &BuildConfig) -> Self {
-        Self {
+    fn new(
+        module: &'a Module,
+        registry: &'a ModuleRegistry,
+        config: &BuildConfig,
+    ) -> Result<Self, ParserError> {
+        Ok(Self {
             module,
-            slicer: BitSlicer::new(module),
+            slicer: BitSlicer::new(module)?,
             registry,
             store: SymbolicStore::default(),
             comb_blocks: Vec::new(),
@@ -62,7 +66,7 @@ impl<'a> ModuleParser<'a> {
             ff_parser: FfParser::new(module, *config),
             arena: SLTNodeArena::new(),
             reset_clock_map: HashMap::default(),
-        }
+        })
     }
 
     fn parse_comb_declaration(
@@ -95,7 +99,7 @@ impl<'a> ModuleParser<'a> {
         // Parent context store
         let mut parent_store = SymbolicStore::default();
         for (id, var) in &self.module.variables {
-            let width = var.total_width().unwrap_or(1) * var.r#type.total_array().unwrap_or(1);
+            let width = resolve_total_width(self.module, var)?;
             let initial_node = self.arena.alloc(SLTNode::Input {
                 variable: *id,
                 index: vec![],
@@ -129,7 +133,7 @@ impl<'a> ModuleParser<'a> {
             let mut current_lsb = 0;
 
             for child_port_id in &input.id {
-                let ty = self.registry.get_port_type(module_name, child_port_id);
+                let ty = self.registry.get_port_type(module_name, child_port_id)?;
                 let width = ty.width();
                 let access = BitAccess::new(current_lsb, current_lsb + width - 1);
                 // Slice the expression
@@ -161,7 +165,7 @@ impl<'a> ModuleParser<'a> {
             // RHS: Concat of Child Ports.
             let mut parts = Vec::new();
             for child_port_id in &output.id {
-                let ty = self.registry.get_port_type(module_name, child_port_id);
+                let ty = self.registry.get_port_type(module_name, child_port_id)?;
                 let width = ty.width();
                 let node = glue_arena.alloc(SLTNode::Input {
                     variable: GlueAddr::Child(*child_port_id),
@@ -186,7 +190,7 @@ impl<'a> ModuleParser<'a> {
             // "Current offset starts at 0" and "dst in dsts.iter().rev()".
             for dst in output.dst.iter().rev() {
                 // Determine width of this part
-                let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select);
+                let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
                 let part_width = access.msb - access.lsb + 1;
 
                 // Extract this part from rhs_node
@@ -212,7 +216,7 @@ impl<'a> ModuleParser<'a> {
                 let mut sources = HashSet::default();
                 for child_port_id in &output.id {
                     // Each child port is a source
-                    let ty = self.registry.get_port_type(module_name, child_port_id);
+                    let ty = self.registry.get_port_type(module_name, child_port_id)?;
                     let width = ty.width();
                     sources.insert(VarAtomBase::new(
                         GlueAddr::Child(*child_port_id),
@@ -288,8 +292,7 @@ impl<'a> ModuleParser<'a> {
             for var_id in FfParser::collect_written_vars(decls) {
                 if seen_var.insert(var_id) {
                     let var = &self.module.variables[&var_id];
-                    let width =
-                        var.total_width().unwrap_or(1) * var.r#type.total_array().unwrap_or(1);
+                    let width = resolve_total_width(self.module, var)?;
                     commits.push(crate::ir::SIRInstruction::Commit(
                         crate::ir::RegionedVarAddr {
                             region: crate::ir::WORKING_REGION,
@@ -343,8 +346,7 @@ impl<'a> ModuleParser<'a> {
             for var_id in FfParser::collect_written_vars(decls) {
                 if seen_seed.insert(var_id) {
                     let var = &self.module.variables[&var_id];
-                    let width =
-                        var.total_width().unwrap_or(1) * var.r#type.total_array().unwrap_or(1);
+                    let width = resolve_total_width(self.module, var)?;
                     seeds.push(crate::ir::SIRInstruction::Commit(
                         crate::ir::RegionedVarAddr {
                             region: crate::ir::STABLE_REGION,

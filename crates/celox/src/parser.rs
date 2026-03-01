@@ -65,6 +65,77 @@ pub enum ParserError {
         feature: &'static str,
         detail: String,
     },
+
+    #[error("Unresolved type width for variable `{variable}` in module `{module}`: \
+             width cannot be determined at compile time (type: {typ})")]
+    UnresolvedWidth {
+        module: String,
+        variable: String,
+        typ: String,
+    },
+}
+
+/// Resolve the total bit width of a variable (width * kind), returning
+/// `ParserError::UnresolvedWidth` when it cannot be determined at compile time.
+pub(crate) fn resolve_width(
+    module: &veryl_analyzer::ir::Module,
+    var: &veryl_analyzer::ir::Variable,
+) -> Result<usize, ParserError> {
+    var.total_width().ok_or_else(|| ParserError::UnresolvedWidth {
+        module: module.name.to_string(),
+        variable: var.path.to_string(),
+        typ: var.r#type.to_string(),
+    })
+}
+
+/// Resolve the total storage size of a variable (total_width * total_array),
+/// returning `ParserError::UnresolvedWidth` when it cannot be determined.
+pub(crate) fn resolve_total_width(
+    module: &veryl_analyzer::ir::Module,
+    var: &veryl_analyzer::ir::Variable,
+) -> Result<usize, ParserError> {
+    let width = var.total_width().ok_or_else(|| ParserError::UnresolvedWidth {
+        module: module.name.to_string(),
+        variable: var.path.to_string(),
+        typ: var.r#type.to_string(),
+    })?;
+    let array = var.r#type.total_array().ok_or_else(|| ParserError::UnresolvedWidth {
+        module: module.name.to_string(),
+        variable: var.path.to_string(),
+        typ: var.r#type.to_string(),
+    })?;
+    Ok(width * array)
+}
+
+/// Resolve `Shape::total()` for the width shape, returning an error when unresolvable.
+pub(crate) fn resolve_shape_total(
+    module: &veryl_analyzer::ir::Module,
+    var: &veryl_analyzer::ir::Variable,
+) -> Result<usize, ParserError> {
+    var.r#type.width.total().ok_or_else(|| ParserError::UnresolvedWidth {
+        module: module.name.to_string(),
+        variable: var.path.to_string(),
+        typ: var.r#type.to_string(),
+    })
+}
+
+/// Resolve each dimension in an array/width shape, returning an error when any is `None`.
+pub(crate) fn resolve_dims(
+    module: &veryl_analyzer::ir::Module,
+    var: &veryl_analyzer::ir::Variable,
+    shape: &[Option<usize>],
+    kind: &str,
+) -> Result<Vec<usize>, ParserError> {
+    shape
+        .iter()
+        .map(|d| {
+            d.ok_or_else(|| ParserError::UnresolvedWidth {
+                module: module.name.to_string(),
+                variable: var.path.to_string(),
+                typ: format!("{} dimension in {}", kind, var.r#type),
+            })
+        })
+        .collect()
 }
 
 pub fn parse_ir<'a>(
@@ -309,7 +380,7 @@ pub(crate) fn flatten(
             eval_comb: Vec::new(),
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
-            module_variables: module_variables(registry, config),
+            module_variables: module_variables(registry, config).unwrap_or_default(),
             clock_domains: HashMap::default(),
             topological_clocks: Vec::new(),
             cascaded_clocks: BTreeSet::new(),
@@ -382,7 +453,7 @@ pub(crate) fn flatten(
         eval_comb: schduled,
         instance_ids: expanded,
         instance_module: instance_modules,
-        module_variables: module_variables(registry, config),
+        module_variables: module_variables(registry, config)?,
         clock_domains,
         topological_clocks,
         cascaded_clocks,
@@ -519,7 +590,7 @@ pub(crate) fn flatten(
 fn module_variables(
     registry: &ModuleRegistry,
     config: &BuildConfig,
-) -> HashMap<StrId, HashMap<VarPath, VariableInfo>> {
+) -> Result<HashMap<StrId, HashMap<VarPath, VariableInfo>>, ParserError> {
     let mut res = HashMap::default();
     for (name, module) in &registry.modules {
         let mut variables = HashMap::default();
@@ -527,8 +598,7 @@ fn module_variables(
             variables.insert(
                 varibale.path.clone(),
                 VariableInfo {
-                    width: varibale.total_width().unwrap()
-                        * varibale.r#type.total_array().unwrap_or(1),
+                    width: resolve_total_width(module, varibale)?,
                     id: *id,
                     is_4state: is_4state_type(&varibale.r#type.kind),
                     kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
@@ -545,7 +615,7 @@ fn module_variables(
         }
         res.insert(*name, variables);
     }
-    res
+    Ok(res)
 }
 
 fn type_kind_to_port_type_kind(

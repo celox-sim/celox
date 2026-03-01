@@ -1,4 +1,4 @@
-use crate::{HashMap, ir::VarAtom, parser::bitaccess::eval_var_select};
+use crate::{HashMap, ir::VarAtom, parser::ParserError, parser::bitaccess::eval_var_select};
 use std::collections::BTreeSet;
 use veryl_analyzer::ir::{
     AssignDestination, AssignStatement, Declaration, Module, Statement, VarId,
@@ -9,12 +9,12 @@ pub struct BitSlicer {
     boundaries: HashMap<VarId, BTreeSet<usize>>,
 }
 
-pub fn new_atom(module: &Module, dst: &AssignDestination) -> VarAtom {
-    let access = eval_var_select(module, dst.id, &dst.index, &dst.select);
-    VarAtom { id: dst.id, access }
+pub fn new_atom(module: &Module, dst: &AssignDestination) -> Result<VarAtom, ParserError> {
+    let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
+    Ok(VarAtom { id: dst.id, access })
 }
 impl BitSlicer {
-    pub fn new(module: &Module) -> Self {
+    pub fn new(module: &Module) -> Result<Self, ParserError> {
         let mut slicer = Self {
             boundaries: HashMap::default(),
         };
@@ -27,43 +27,53 @@ impl BitSlicer {
         }
 
         for decl in &module.declarations {
-            slicer.scan_declaration(module, decl);
+            slicer.scan_declaration(module, decl)?;
         }
 
-        slicer
+        Ok(slicer)
     }
 
     fn add_boundary(&mut self, id: VarId, bit: usize) {
         self.boundaries.entry(id).or_default().insert(bit);
     }
 
-    fn scan_assign(&mut self, module: &Module, assign: &AssignStatement) {
+    fn scan_assign(
+        &mut self,
+        module: &Module,
+        assign: &AssignStatement,
+    ) -> Result<(), ParserError> {
         for dst in &assign.dst {
-            let range = self.calculate_dst_range(module, dst);
+            let range = self.calculate_dst_range(module, dst)?;
             self.add_boundary(dst.id, range.access.lsb); // lsb
             self.add_boundary(dst.id, range.access.msb + 1); // msb + 1
         }
+        Ok(())
     }
 
     pub fn boundaries(&self) -> &HashMap<VarId, BTreeSet<usize>> {
         &self.boundaries
     }
 
-    fn scan_declaration(&mut self, module: &Module, decl: &Declaration) {
+    fn scan_declaration(
+        &mut self,
+        module: &Module,
+        decl: &Declaration,
+    ) -> Result<(), ParserError> {
         if let Declaration::Comb(comb) = decl {
             for stmt in &comb.statements {
                 if let Statement::Assign(assign) = stmt {
-                    self.scan_assign(module, assign);
+                    self.scan_assign(module, assign)?;
                 }
             }
         }
+        Ok(())
     }
 
     fn calculate_dst_range(
         &self,
         module: &Module,
         dst: &veryl_analyzer::ir::AssignDestination,
-    ) -> VarAtom {
+    ) -> Result<VarAtom, ParserError> {
         new_atom(module, dst)
     }
 }
