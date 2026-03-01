@@ -15,10 +15,10 @@ describe("Adder", () => {
   test("adds two numbers", () => {
     const sim = Simulator.create(Adder);
 
-    sim.dut.a = 100;
-    sim.dut.b = 200;
+    sim.dut.a = 100n;
+    sim.dut.b = 200n;
     sim.tick();
-    expect(sim.dut.sum).toBe(300);
+    expect(sim.dut.sum).toBe(300n);
 
     sim.dispose();
   });
@@ -46,15 +46,15 @@ describe("Counter", () => {
     sim.addClock("clk", { period: 10 });
 
     // リセットをアサート
-    sim.dut.rst = 1;
+    sim.dut.rst = 1n;
     sim.runUntil(20);
 
     // リセットを解除してカウントを有効化
-    sim.dut.rst = 0;
-    sim.dut.en = 1;
+    sim.dut.rst = 0n;
+    sim.dut.en = 1n;
     sim.runUntil(100);
 
-    expect(sim.dut.count).toBeGreaterThan(0);
+    expect(sim.dut.count).toBeGreaterThan(0n);
     expect(sim.time()).toBe(100);
 
     sim.dispose();
@@ -89,7 +89,7 @@ sim.reset("rst_n", { activeCycles: 3 });
 
 ```typescript
 // 条件が満たされるまで待つ (step() でポーリング)
-const t = sim.waitUntil(() => sim.dut.done === 1);
+const t = sim.waitUntil(() => sim.dut.done === 1n);
 
 // 指定クロックサイクル数だけ待つ
 const t = sim.waitForCycles("clk", 10);
@@ -101,7 +101,7 @@ const t = sim.waitForCycles("clk", 10);
 import { SimulationTimeoutError } from "@celox-sim/celox";
 
 try {
-  sim.waitUntil(() => sim.dut.done === 1, { maxSteps: 1000 });
+  sim.waitUntil(() => sim.dut.done === 1n, { maxSteps: 1000 });
 } catch (e) {
   if (e instanceof SimulationTimeoutError) {
     console.log(`時刻 ${e.time} で ${e.steps} ステップ後にタイムアウト`);
@@ -143,7 +143,7 @@ Vite プラグインが `.veryl` ファイルの TypeScript 型定義を自動�
 import { Counter } from "../src/Counter.veryl";
 ```
 
-すべてのポートが完全に型付けされ、ポート名の自動補完やコンパイル時チェックが利用でき、シグナル幅に基づいた適切な数値型（`number` または `bigint`）が使用されます。
+すべてのポートが完全に型付けされ、ポート名の自動補完やコンパイル時チェックが利用できます。すべてのシグナルポート値は `bigint` を使用します。
 
 ## テストの実行
 

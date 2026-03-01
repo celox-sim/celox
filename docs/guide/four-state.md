@@ -73,7 +73,7 @@ sim.dut.data_in = FourState(0b0000_0101, 0b1111_0000);
 sim.tick();
 ```
 
-For wide signals (> 53 bits), use `bigint`:
+For wide signals, use `bigint` literals:
 
 ```typescript
 sim.dut.wide_data = FourState(0x1234n, 0xFF00n);
@@ -86,7 +86,7 @@ sim.dut.wide_data = FourState(0x1234n, 0xFF00n);
 Reading a port via `sim.dut.<port>` returns only the **value** portion (mask is not included):
 
 ```typescript
-const val = sim.dut.result; // number or bigint — X bits read as 0
+const val = sim.dut.result; // bigint — X bits read as 0
 ```
 
 ### Reading the Full Value/Mask Pair
@@ -96,7 +96,7 @@ Use the `fourState()` method on `Simulator` or `Simulation` to read the value an
 ```typescript
 const fs = sim.fourState("result");
 
-if (fs.mask !== 0) {
+if (fs.mask !== 0n) {
   console.log("Result contains X bits:", fs.mask.toString(2));
 }
 
@@ -156,7 +156,7 @@ describe("ALU", () => {
     const sim = Simulator.create(ALU, { fourState: true });
 
     sim.dut.a = X;
-    sim.dut.b = 42;
+    sim.dut.b = 42n;
     sim.tick();
 
     // Arithmetic with X produces all-X result
@@ -171,8 +171,8 @@ describe("ALU", () => {
 
     // a = X, but b = 0 — AND should produce known 0
     sim.dut.a = X;
-    sim.dut.b = 0;
-    sim.dut.op = 0; // AND
+    sim.dut.b = 0n;
+    sim.dut.op = 0n; // AND
     sim.tick();
 
     sim.dispose();
@@ -183,7 +183,7 @@ describe("ALU", () => {
 
     // Lower 4 bits known, upper 4 bits X
     sim.dut.a = FourState(0x05, 0xF0);
-    sim.dut.b = 0xFF;
+    sim.dut.b = 0xFFn;
     sim.tick();
 
     sim.dispose();

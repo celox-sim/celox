@@ -5,9 +5,9 @@ expression: "modules[0].dts_content"
 import type { ModuleDefinition } from "@celox-sim/celox";
 
 export interface BitModulePorts {
-  data: number;
-  en: number;
-  readonly result: number;
+  data: bigint;
+  en: bigint;
+  readonly result: bigint;
 }
 
 export declare const BitModule: ModuleDefinition<BitModulePorts>;

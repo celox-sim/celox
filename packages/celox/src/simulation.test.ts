@@ -12,9 +12,9 @@ import { SimulationTimeoutError } from "./types.js";
 // ---------------------------------------------------------------------------
 
 interface TopPorts {
-  rst: number;
-  d: number;
-  readonly q: number;
+  rst: bigint;
+  d: bigint;
+  readonly q: bigint;
 }
 
 const TopModule: ModuleDefinition<TopPorts> = {
@@ -127,11 +127,11 @@ describe("Simulation", () => {
       __nativeCreate: mock.create,
     });
 
-    sim.dut.d = 42;
+    sim.dut.d = 42n;
     sim.runUntil(100);
 
     expect(mock.handle.runUntil).toHaveBeenCalledWith(100);
-    expect(sim.dut.q).toBe(42);
+    expect(sim.dut.q).toBe(42n);
   });
 
   test("step", () => {
@@ -140,11 +140,11 @@ describe("Simulation", () => {
       __nativeCreate: mock.create,
     });
 
-    sim.dut.d = 0xAB;
+    sim.dut.d = 0xABn;
     const t = sim.step();
 
     expect(t).toBe(5);
-    expect(sim.dut.q).toBe(0xAB);
+    expect(sim.dut.q).toBe(0xABn);
   });
 
   test("time", () => {
@@ -240,7 +240,7 @@ describe("Simulation", () => {
       __nativeCreate: mock.create,
     });
 
-    sim.dut.d = 42;
+    sim.dut.d = 42n;
     let callCount = 0;
     const t = sim.waitUntil(() => {
       callCount++;

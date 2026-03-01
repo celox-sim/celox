@@ -5,10 +5,10 @@ expression: "modules[0].dts_content"
 import type { ModuleDefinition } from "@celox-sim/celox";
 
 export interface AdderPorts {
-  a: number;
-  b: number;
-  rst: number;
-  readonly sum: number;
+  a: bigint;
+  b: bigint;
+  rst: bigint;
+  readonly sum: bigint;
 }
 
 export declare const Adder: ModuleDefinition<AdderPorts>;

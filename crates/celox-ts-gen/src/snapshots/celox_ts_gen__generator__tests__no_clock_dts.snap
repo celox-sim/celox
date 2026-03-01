@@ -5,9 +5,9 @@ expression: "modules[0].dts_content"
 import type { ModuleDefinition } from "@celox-sim/celox";
 
 export interface PureAdderPorts {
-  a: number;
-  b: number;
-  readonly sum: number;
+  a: bigint;
+  b: bigint;
+  readonly sum: bigint;
 }
 
 export declare const PureAdder: ModuleDefinition<PureAdderPorts>;

@@ -11,10 +11,10 @@ import type {
 // ---------------------------------------------------------------------------
 
 interface AdderPorts {
-  rst: number;
-  a: number;
-  b: number;
-  readonly sum: number;
+  rst: bigint;
+  a: bigint;
+  b: bigint;
+  readonly sum: bigint;
 }
 
 const AdderModule: ModuleDefinition<AdderPorts> = {
@@ -80,11 +80,11 @@ describe("Simulator", () => {
       __nativeCreate: mock.create,
     });
 
-    sim.dut.a = 100;
-    sim.dut.b = 200;
+    sim.dut.a = 100n;
+    sim.dut.b = 200n;
     sim.tick();
 
-    expect(sim.dut.sum).toBe(300);
+    expect(sim.dut.sum).toBe(300n);
     expect(mock.handle.tick).toHaveBeenCalledTimes(1);
   });
 
@@ -176,7 +176,7 @@ describe("Simulator", () => {
       __nativeCreate: mock.create,
     });
 
-    sim.dut.a = 100;
+    sim.dut.a = 100n;
     sim.tick();
 
     // After tick, reading output should NOT trigger evalComb

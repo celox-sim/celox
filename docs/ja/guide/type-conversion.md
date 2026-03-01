@@ -4,18 +4,14 @@
 
 ## 変換テーブル
 
-| Veryl の型 | ビット幅 | TS の型 | 4 値 | 備考 |
-|---|---|---|---|---|
-| `clock` | 1 | *（ポートから除外）* | yes | `addClock()` / `tick()` でイベントとして扱われる |
-| `reset` | 1 | `number` | yes | |
-| `logic<N>` (N &le; 53) | N | `number` | yes | |
-| `logic<N>` (N &gt; 53) | N | `bigint` | yes | |
-| `bit<N>` (N &le; 53) | N | `number` | no | 2 値のみ |
-| `bit<N>` (N &gt; 53) | N | `bigint` | no | 2 値のみ |
+| Veryl の型 | TS の型 | 4 値 | 備考 |
+|---|---|---|---|
+| `clock` | *（ポートから除外）* | yes | `addClock()` / `tick()` でイベントとして扱われる |
+| `reset` | `bigint` | yes | |
+| `logic<N>` | `bigint` | yes | |
+| `bit<N>` | `bigint` | no | 2 値のみ |
 
-## 53 ビット閾値
-
-JavaScript の `number` は IEEE 754 倍精度浮動小数点数で、2<sup>53</sup> &minus; 1（`Number.MAX_SAFE_INTEGER`）までの整数を正確に表現できます。53 ビットを超えるシグナルには、暗黙的な精度損失を避けるために `bigint` が使用されます。
+すべてのシグナルポート値はビット幅に関わらず `bigint` を使用します。これにより、すべてのシグナルで一貫した型が保証され、シグナル幅の変更時に型が変わることがなくなります。
 
 ## 方向とミュータビリティ
 
@@ -41,7 +37,7 @@ JavaScript の `number` は IEEE 754 倍精度浮動小数点数で、2<sup>53</
 ```ts
 interface CounterPorts {
   readonly cnt: {
-    at(i: number): number;
+    at(i: number): bigint;
     readonly length: number;
   };
 }
@@ -52,8 +48,8 @@ interface CounterPorts {
 ```ts
 interface MyPorts {
   data: {
-    at(i: number): number;
-    set(i: number, value: number): void;
+    at(i: number): bigint;
+    set(i: number, value: bigint): void;
     readonly length: number;
   };
 }

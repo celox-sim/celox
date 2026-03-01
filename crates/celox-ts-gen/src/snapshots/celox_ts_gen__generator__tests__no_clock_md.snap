@@ -8,6 +8,6 @@ expression: "modules[0].md_content"
 
 | Port | Direction | Type | Width | TS Type | 4-State |
 |------|-----------|------|-------|---------|--------|
-| a | input | logic | 8 | `number` | yes |
-| b | input | logic | 8 | `number` | yes |
-| sum | output | logic | 9 | `number` (readonly) | yes |
+| a | input | logic | 8 | `bigint` | yes |
+| b | input | logic | 8 | `bigint` | yes |
+| sum | output | logic | 9 | `bigint` (readonly) | yes |

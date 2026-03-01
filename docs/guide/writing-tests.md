@@ -15,10 +15,10 @@ describe("Adder", () => {
   test("adds two numbers", () => {
     const sim = Simulator.create(Adder);
 
-    sim.dut.a = 100;
-    sim.dut.b = 200;
+    sim.dut.a = 100n;
+    sim.dut.b = 200n;
     sim.tick();
-    expect(sim.dut.sum).toBe(300);
+    expect(sim.dut.sum).toBe(300n);
 
     sim.dispose();
   });
@@ -46,15 +46,15 @@ describe("Counter", () => {
     sim.addClock("clk", { period: 10 });
 
     // Assert reset
-    sim.dut.rst = 1;
+    sim.dut.rst = 1n;
     sim.runUntil(20);
 
     // Release reset and enable counting
-    sim.dut.rst = 0;
-    sim.dut.en = 1;
+    sim.dut.rst = 0n;
+    sim.dut.en = 1n;
     sim.runUntil(100);
 
-    expect(sim.dut.count).toBeGreaterThan(0);
+    expect(sim.dut.count).toBeGreaterThan(0n);
     expect(sim.time()).toBe(100);
 
     sim.dispose();
@@ -89,7 +89,7 @@ sim.reset("rst_n", { activeCycles: 3 });
 
 ```typescript
 // Wait until a condition is met (polls via step())
-const t = sim.waitUntil(() => sim.dut.done === 1);
+const t = sim.waitUntil(() => sim.dut.done === 1n);
 
 // Wait for a specific number of clock cycles
 const t = sim.waitForCycles("clk", 10);
@@ -101,7 +101,7 @@ Both methods accept an optional `{ maxSteps }` parameter (default: 100,000). A `
 import { SimulationTimeoutError } from "@celox-sim/celox";
 
 try {
-  sim.waitUntil(() => sim.dut.done === 1, { maxSteps: 1000 });
+  sim.waitUntil(() => sim.dut.done === 1n, { maxSteps: 1000 });
 } catch (e) {
   if (e instanceof SimulationTimeoutError) {
     console.log(`Timed out at time ${e.time} after ${e.steps} steps`);
@@ -143,7 +143,7 @@ The Vite plugin automatically generates TypeScript type definitions for your `.v
 import { Counter } from "../src/Counter.veryl";
 ```
 
-All ports are fully typed -- you get autocompletion and compile-time checks for port names, and the correct numeric type (`number` or `bigint`) based on signal width.
+All ports are fully typed -- you get autocompletion and compile-time checks for port names. All signal port values use `bigint`.
 
 ## Running Tests
 

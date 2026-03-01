@@ -41,11 +41,11 @@ describe("createDut — scalar ports", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
-    dut.a = 42;
+    dut.a = 42n;
     expect(state.dirty).toBe(true);
-    expect(dut.a).toBe(42);
+    expect(dut.a).toBe(42n);
     // Reading an input doesn't trigger evalComb
     expect(handle.evalComb).not.toHaveBeenCalled();
   });
@@ -61,10 +61,10 @@ describe("createDut — scalar ports", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
-    dut.a = 0xABCD;
-    expect(dut.a).toBe(0xABCD);
+    dut.a = 0xABCDn;
+    expect(dut.a).toBe(0xABCDn);
   });
 
   test("write and read 32-bit input", () => {
@@ -78,13 +78,13 @@ describe("createDut — scalar ports", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
-    dut.a = 0xDEAD_BEEF;
-    expect(dut.a).toBe(0xDEAD_BEEF);
+    dut.a = 0xDEAD_BEEFn;
+    expect(dut.a).toBe(0xDEAD_BEEFn);
   });
 
-  test("write and read 48-bit value (fits in number)", () => {
+  test("write and read 48-bit value", () => {
     const buffer = makeBuffer(64);
     const layout: Record<string, SignalLayout> = {
       a: { offset: 0, width: 48, byteSize: 8, is4state: false, direction: "input" },
@@ -95,9 +95,9 @@ describe("createDut — scalar ports", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
-    const val = 0x1234_5678_9ABC;
+    const val = 0x1234_5678_9ABCn;
     dut.a = val;
     expect(dut.a).toBe(val);
   });
@@ -131,10 +131,10 @@ describe("createDut — scalar ports", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
-    dut.a = 0xFF; // Only lower 4 bits should be stored
-    expect(dut.a).toBe(0x0F);
+    dut.a = 0xFFn; // Only lower 4 bits should be stored
+    expect(dut.a).toBe(0x0Fn);
   });
 });
 
@@ -156,12 +156,12 @@ describe("createDut — dirty tracking", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number; readonly sum: number }>(
+    const dut = createDut<{ a: bigint; readonly sum: bigint }>(
       buffer, layout, ports, handle, state,
     );
 
     // Write input → dirty
-    dut.a = 100;
+    dut.a = 100n;
     expect(state.dirty).toBe(true);
 
     // Read output → evalComb should be called
@@ -181,7 +181,7 @@ describe("createDut — dirty tracking", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ readonly sum: number }>(
+    const dut = createDut<{ readonly sum: bigint }>(
       buffer, layout, ports, handle, state,
     );
 
@@ -200,7 +200,7 @@ describe("createDut — dirty tracking", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: true };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
     void dut.a;
     expect(handle.evalComb).not.toHaveBeenCalled();
@@ -217,10 +217,10 @@ describe("createDut — dirty tracking", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ sum: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ sum: bigint }>(buffer, layout, ports, handle, state);
 
     expect(() => {
-      dut.sum = 42;
+      dut.sum = 42n;
     }).toThrow("Cannot write to output port 'sum'");
   });
 });
@@ -243,7 +243,7 @@ describe("createDut — clock ports", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
     expect(Object.keys(dut as object)).toEqual(["a"]);
     expect((dut as any).clk).toBeUndefined();
@@ -281,20 +281,20 @@ describe("createDut — multiple signals", () => {
 
     const state: DirtyState = { dirty: false };
     const dut = createDut<{
-      rst: number;
-      a: number;
-      b: number;
-      readonly sum: number;
+      rst: bigint;
+      a: bigint;
+      b: bigint;
+      readonly sum: bigint;
     }>(buffer, layout, ports, handle, state);
 
-    dut.a = 100;
-    dut.b = 200;
+    dut.a = 100n;
+    dut.b = 200n;
     // sum read triggers evalComb
-    expect(dut.sum).toBe(300);
+    expect(dut.sum).toBe(300n);
     expect(handle.evalComb).toHaveBeenCalledTimes(1);
 
     // second read without changes → no evalComb
-    expect(dut.sum).toBe(300);
+    expect(dut.sum).toBe(300n);
     expect(handle.evalComb).toHaveBeenCalledTimes(1);
   });
 });
@@ -316,13 +316,13 @@ describe("createDut — 4-state", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
     (dut as any).a = X;
     // Value should be 0, mask should be 0xFF
     const [value, mask] = readFourState(buffer, layout.a);
-    expect(value).toBe(0);
-    expect(mask).toBe(0xFF);
+    expect(value).toBe(0n);
+    expect(mask).toBe(0xFFn);
   });
 
   test("write FourState to a 4-state signal", () => {
@@ -336,12 +336,12 @@ describe("createDut — 4-state", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
     (dut as any).a = FourState(0b1010, 0b0100);
     const [value, mask] = readFourState(buffer, layout.a);
-    expect(value).toBe(0b1010);
-    expect(mask).toBe(0b0100);
+    expect(value).toBe(0b1010n);
+    expect(mask).toBe(0b0100n);
   });
 
   test("writing X to non-4-state signal throws", () => {
@@ -355,7 +355,7 @@ describe("createDut — 4-state", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
     expect(() => {
       (dut as any).a = X;
@@ -373,7 +373,7 @@ describe("createDut — 4-state", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
     expect(() => {
       (dut as any).a = FourState(0xA5, 0x0F);
@@ -391,18 +391,18 @@ describe("createDut — 4-state", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
     // First write X
     (dut as any).a = X;
     const [, maskBefore] = readFourState(buffer, layout.a);
-    expect(maskBefore).toBe(0xFF);
+    expect(maskBefore).toBe(0xFFn);
 
     // Then write a defined value — mask should clear
-    dut.a = 42;
+    dut.a = 42n;
     const [value, maskAfter] = readFourState(buffer, layout.a);
-    expect(value).toBe(42);
-    expect(maskAfter).toBe(0);
+    expect(value).toBe(42n);
+    expect(maskAfter).toBe(0n);
   });
 
   test("reading 4-state output returns value part only", () => {
@@ -417,14 +417,14 @@ describe("createDut — 4-state", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ readonly y: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ readonly y: bigint }>(buffer, layout, ports, handle, state);
 
     // Set value=0xAB, mask=0x0F (lower 4 bits are X)
     view.setUint8(0, 0xAB);
     view.setUint8(1, 0x0F);
 
     // DUT getter returns the value part
-    expect(dut.y).toBe(0xAB);
+    expect(dut.y).toBe(0xABn);
   });
 
   test("write X sets dirty flag", () => {
@@ -438,7 +438,7 @@ describe("createDut — 4-state", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ a: number }>(buffer, layout, ports, handle, state);
+    const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
 
     (dut as any).a = X;
     expect(state.dirty).toBe(true);
@@ -462,20 +462,20 @@ describe("createDut — array ports", () => {
     const handle = mockHandle();
     const state: DirtyState = { dirty: false };
 
-    const dut = createDut<{ data: number[] }>(
+    const dut = createDut<{ data: { at(i: number): bigint; set(i: number, v: bigint): void; length: number } }>(
       buffer, layout, ports, handle, state,
     );
 
-    (dut.data as any)[0] = 0xAA;
-    (dut.data as any)[1] = 0xBB;
-    (dut.data as any)[2] = 0xCC;
-    (dut.data as any)[3] = 0xDD;
+    dut.data.set(0, 0xAAn);
+    dut.data.set(1, 0xBBn);
+    dut.data.set(2, 0xCCn);
+    dut.data.set(3, 0xDDn);
 
-    expect((dut.data as any)[0]).toBe(0xAA);
-    expect((dut.data as any)[1]).toBe(0xBB);
-    expect((dut.data as any)[2]).toBe(0xCC);
-    expect((dut.data as any)[3]).toBe(0xDD);
-    expect((dut.data as any).length).toBe(4);
+    expect(dut.data.at(0)).toBe(0xAAn);
+    expect(dut.data.at(1)).toBe(0xBBn);
+    expect(dut.data.at(2)).toBe(0xCCn);
+    expect(dut.data.at(3)).toBe(0xDDn);
+    expect(dut.data.length).toBe(4);
   });
 });
 
@@ -515,20 +515,20 @@ describe("createDut — interface ports", () => {
     const state: DirtyState = { dirty: false };
     const dut = createDut<{
       bus: {
-        addr: number;
-        data: number;
-        valid: number;
-        readonly ready: number;
+        addr: bigint;
+        data: bigint;
+        valid: bigint;
+        readonly ready: bigint;
       };
     }>(buffer, layout, ports, handle, state);
 
-    dut.bus.addr = 0x1000;
-    dut.bus.data = 0xFF;
-    dut.bus.valid = 1;
+    dut.bus.addr = 0x1000n;
+    dut.bus.data = 0xFFn;
+    dut.bus.valid = 1n;
 
-    expect(dut.bus.addr).toBe(0x1000);
-    expect(dut.bus.data).toBe(0xFF);
-    expect(dut.bus.ready).toBe(1);
+    expect(dut.bus.addr).toBe(0x1000n);
+    expect(dut.bus.data).toBe(0xFFn);
+    expect(dut.bus.ready).toBe(1n);
     expect(handle.evalComb).toHaveBeenCalledTimes(1);
   });
 });

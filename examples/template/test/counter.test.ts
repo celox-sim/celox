@@ -11,18 +11,18 @@ describe("Counter", () => {
     expect(sim.time()).toBe(0);
 
     // Assert reset (active-low: 0 = asserted)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
 
     // Release reset and enable counting
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
 
     // Run for a while and verify count increments
     sim.runUntil(100);
 
     const count = sim.dut.count;
-    expect(count).toBeGreaterThan(0);
+    expect(count).toBeGreaterThan(0n);
     expect(sim.time()).toBe(100);
 
     sim.dispose();

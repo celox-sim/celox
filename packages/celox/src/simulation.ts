@@ -381,8 +381,8 @@ export class Simulation<P = Record<string, unknown>> {
       );
     }
     const isActiveLow = typeKind === "reset_async_low" || typeKind === "reset_sync_low";
-    const activeValue = isActiveLow ? 0 : 1;
-    const inactiveValue = isActiveLow ? 1 : 0;
+    const activeValue = isActiveLow ? 0n : 1n;
+    const inactiveValue = isActiveLow ? 1n : 0n;
 
     const dut = this._dut as Record<string, unknown>;
     dut[signal] = activeValue;

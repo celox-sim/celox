@@ -4,18 +4,14 @@ This page describes how Veryl types are mapped to TypeScript types when `celox-t
 
 ## Conversion Table
 
-| Veryl Type | Width | TS Type | 4-State | Notes |
-|---|---|---|---|---|
-| `clock` | 1 | *(excluded from ports)* | yes | Becomes an event via `addClock()` / `tick()` |
-| `reset` | 1 | `number` | yes | |
-| `logic<N>` (N &le; 53) | N | `number` | yes | |
-| `logic<N>` (N &gt; 53) | N | `bigint` | yes | |
-| `bit<N>` (N &le; 53) | N | `number` | no | 2-state only |
-| `bit<N>` (N &gt; 53) | N | `bigint` | no | 2-state only |
+| Veryl Type | TS Type | 4-State | Notes |
+|---|---|---|---|
+| `clock` | *(excluded from ports)* | yes | Becomes an event via `addClock()` / `tick()` |
+| `reset` | `bigint` | yes | |
+| `logic<N>` | `bigint` | yes | |
+| `bit<N>` | `bigint` | no | 2-state only |
 
-## 53-bit Threshold
-
-JavaScript `number` is an IEEE 754 double-precision float that can represent integers exactly up to 2<sup>53</sup> &minus; 1 (`Number.MAX_SAFE_INTEGER`). Signals wider than 53 bits use `bigint` to avoid silent precision loss.
+All signal port values use `bigint` regardless of width. This ensures a consistent type across all signals and avoids type changes when signal widths are modified.
 
 ## Direction and Mutability
 
@@ -41,7 +37,7 @@ Array ports (e.g., `output logic<32>[4]`) are represented as an object with inde
 ```ts
 interface CounterPorts {
   readonly cnt: {
-    at(i: number): number;
+    at(i: number): bigint;
     readonly length: number;
   };
 }
@@ -52,8 +48,8 @@ For input array ports, a `set(i, value)` method is also generated:
 ```ts
 interface MyPorts {
   data: {
-    at(i: number): number;
-    set(i: number, value: number): void;
+    at(i: number): bigint;
+    set(i: number, value: bigint): void;
     readonly length: number;
   };
 }

@@ -73,7 +73,7 @@ sim.dut.data_in = FourState(0b0000_0101, 0b1111_0000);
 sim.tick();
 ```
 
-幅の広いシグナル（53 ビット超）には `bigint` を使います：
+幅の広いシグナルには `bigint` リテラルを使います：
 
 ```typescript
 sim.dut.wide_data = FourState(0x1234n, 0xFF00n);
@@ -86,7 +86,7 @@ sim.dut.wide_data = FourState(0x1234n, 0xFF00n);
 `sim.dut.<ポート名>` で読み出すと **value 部分のみ**が返されます（マスクは含まれません）：
 
 ```typescript
-const val = sim.dut.result; // number または bigint — X ビットは 0 として読まれる
+const val = sim.dut.result; // bigint — X ビットは 0 として読まれる
 ```
 
 ### value/mask ペアの読み出し
@@ -96,7 +96,7 @@ const val = sim.dut.result; // number または bigint — X ビットは 0 と�
 ```typescript
 const fs = sim.fourState("result");
 
-if (fs.mask !== 0) {
+if (fs.mask !== 0n) {
   console.log("結果に X ビットが含まれています:", fs.mask.toString(2));
 }
 
@@ -156,7 +156,7 @@ describe("ALU", () => {
     const sim = Simulator.create(ALU, { fourState: true });
 
     sim.dut.a = X;
-    sim.dut.b = 42;
+    sim.dut.b = 42n;
     sim.tick();
 
     // X を含む算術演算は結果が全て X になる
@@ -171,8 +171,8 @@ describe("ALU", () => {
 
     // a = X だが b = 0 — AND の結果は既知の 0 になる
     sim.dut.a = X;
-    sim.dut.b = 0;
-    sim.dut.op = 0; // AND
+    sim.dut.b = 0n;
+    sim.dut.op = 0n; // AND
     sim.tick();
 
     sim.dispose();
@@ -183,7 +183,7 @@ describe("ALU", () => {
 
     // 下位 4 ビットは既知、上位 4 ビットは X
     sim.dut.a = FourState(0x05, 0xF0);
-    sim.dut.b = 0xFF;
+    sim.dut.b = 0xFFn;
     sim.tick();
 
     sim.dispose();

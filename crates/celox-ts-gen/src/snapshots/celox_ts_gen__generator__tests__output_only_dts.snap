@@ -5,7 +5,7 @@ expression: "modules[0].dts_content"
 import type { ModuleDefinition } from "@celox-sim/celox";
 
 export interface ConstGenPorts {
-  readonly val: number;
+  readonly val: bigint;
 }
 
 export declare const ConstGen: ModuleDefinition<ConstGenPorts>;

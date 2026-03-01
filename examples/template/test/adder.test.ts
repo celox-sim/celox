@@ -6,10 +6,10 @@ describe("Adder", () => {
   test("adds two numbers", () => {
     const sim = Simulator.create(Adder);
 
-    sim.dut.a = 100;
-    sim.dut.b = 200;
+    sim.dut.a = 100n;
+    sim.dut.b = 200n;
     sim.tick();
-    expect(sim.dut.sum).toBe(300);
+    expect(sim.dut.sum).toBe(300n);
 
     sim.dispose();
   });
@@ -17,10 +17,10 @@ describe("Adder", () => {
   test("handles overflow into 17th bit", () => {
     const sim = Simulator.create(Adder);
 
-    sim.dut.a = 0xffff;
-    sim.dut.b = 1;
+    sim.dut.a = 0xffffn;
+    sim.dut.b = 1n;
     sim.tick();
-    expect(sim.dut.sum).toBe(0x10000);
+    expect(sim.dut.sum).toBe(0x10000n);
 
     sim.dispose();
   });

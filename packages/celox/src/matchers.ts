@@ -70,7 +70,7 @@ function isFourStateRef(v: unknown): v is FourStateRef {
 // Matcher implementations
 // ---------------------------------------------------------------------------
 
-function getMask(received: unknown): number | bigint {
+function getMask(received: unknown): bigint {
   if (!isFourStateRef(received)) {
     throw new TypeError(
       "toBeX/toBeAllX/toBeNotX matchers require a FourStateRef. " +
@@ -84,7 +84,7 @@ function getMask(received: unknown): number | bigint {
 const customMatchers = {
   toBeX(received: unknown) {
     const mask = getMask(received);
-    const pass = mask !== 0 && mask !== 0n;
+    const pass = mask !== 0n;
     return {
       pass,
       message: () =>
@@ -100,10 +100,7 @@ const customMatchers = {
     }
     const [, mask] = readFourState(received.buffer, received.layout);
     const width = received.layout.width;
-    const allOnes =
-      width <= 53
-        ? (width === 53 ? Number.MAX_SAFE_INTEGER : (1 << width) - 1)
-        : (1n << BigInt(width)) - 1n;
+    const allOnes = (1n << BigInt(width)) - 1n;
     const pass = mask === allOnes;
     return {
       pass,
@@ -116,7 +113,7 @@ const customMatchers = {
 
   toBeNotX(received: unknown) {
     const mask = getMask(received);
-    const pass = mask === 0 || mask === 0n;
+    const pass = mask === 0n;
     return {
       pass,
       message: () =>

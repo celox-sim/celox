@@ -5,8 +5,8 @@ expression: "modules[0].dts_content"
 import type { ModuleDefinition } from "@celox-sim/celox";
 
 export interface CounterPorts {
-  readonly cnt: { at(i: number): number; readonly length: number };
-  rst: number;
+  readonly cnt: { at(i: number): bigint; readonly length: number };
+  rst: bigint;
 }
 
 export declare const Counter: ModuleDefinition<CounterPorts>;

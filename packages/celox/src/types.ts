@@ -160,8 +160,8 @@ export const X = Symbol.for("veryl:X");
 /** A 4-state value with explicit bit-level mask. */
 export interface FourStateValue {
   readonly __fourState: true;
-  readonly value: number | bigint;
-  readonly mask: number | bigint;
+  readonly value: bigint;
+  readonly mask: bigint;
 }
 
 /** Construct a 4-state value. Mask bits set to 1 indicate X. */
@@ -169,7 +169,7 @@ export function FourState(
   value: number | bigint,
   mask: number | bigint,
 ): FourStateValue {
-  return { __fourState: true, value, mask };
+  return { __fourState: true, value: BigInt(value), mask: BigInt(mask) };
 }
 
 export function isFourStateValue(v: unknown): v is FourStateValue {

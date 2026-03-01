@@ -97,117 +97,117 @@ module Mux4 (
 describe("E2E: Simulator.fromSource (event-based)", () => {
   test("combinational adder: a + b = sum", () => {
     interface AdderPorts {
-      rst: number;
-      a: number;
-      b: number;
-      readonly sum: number;
+      rst: bigint;
+      a: bigint;
+      b: bigint;
+      readonly sum: bigint;
     }
 
     const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
 
-    sim.dut.a = 100;
-    sim.dut.b = 200;
+    sim.dut.a = 100n;
+    sim.dut.b = 200n;
     sim.tick();
-    expect(sim.dut.sum).toBe(300);
+    expect(sim.dut.sum).toBe(300n);
 
-    sim.dut.a = 0xFFFF;
-    sim.dut.b = 1;
+    sim.dut.a = 0xFFFFn;
+    sim.dut.b = 1n;
     sim.tick();
-    expect(sim.dut.sum).toBe(0x10000);
+    expect(sim.dut.sum).toBe(0x10000n);
 
-    sim.dut.a = 0;
-    sim.dut.b = 0;
+    sim.dut.a = 0n;
+    sim.dut.b = 0n;
     sim.tick();
-    expect(sim.dut.sum).toBe(0);
+    expect(sim.dut.sum).toBe(0n);
 
     sim.dispose();
   });
 
   test("combinational adder: lazy evalComb on output read", () => {
     interface AdderPorts {
-      rst: number;
-      a: number;
-      b: number;
-      readonly sum: number;
+      rst: bigint;
+      a: bigint;
+      b: bigint;
+      readonly sum: bigint;
     }
 
     const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
 
-    sim.dut.a = 42;
-    sim.dut.b = 58;
-    expect(sim.dut.sum).toBe(100);
+    sim.dut.a = 42n;
+    sim.dut.b = 58n;
+    expect(sim.dut.sum).toBe(100n);
 
     sim.dispose();
   });
 
   test("sequential counter: counts on clock edges", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
 
     // Reset the counter (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.tick();
-    sim.dut.rst = 1;
+    sim.dut.rst = 1n;
     sim.tick();
-    expect(sim.dut.count).toBe(0);
+    expect(sim.dut.count).toBe(0n);
 
     // Enable counting
-    sim.dut.en = 1;
+    sim.dut.en = 1n;
     sim.tick();
-    expect(sim.dut.count).toBe(1);
+    expect(sim.dut.count).toBe(1n);
 
     sim.tick();
-    expect(sim.dut.count).toBe(2);
+    expect(sim.dut.count).toBe(2n);
 
     sim.tick();
-    expect(sim.dut.count).toBe(3);
+    expect(sim.dut.count).toBe(3n);
 
     // Disable counting
-    sim.dut.en = 0;
+    sim.dut.en = 0n;
     sim.tick();
-    expect(sim.dut.count).toBe(3);
+    expect(sim.dut.count).toBe(3n);
 
     // Re-enable
-    sim.dut.en = 1;
+    sim.dut.en = 1n;
     sim.tick(5);
-    expect(sim.dut.count).toBe(8);
+    expect(sim.dut.count).toBe(8n);
 
     sim.dispose();
   });
 
   test("combinational multiplexer", () => {
     interface Mux4Ports {
-      sel: number;
-      d0: number;
-      d1: number;
-      d2: number;
-      d3: number;
-      readonly y: number;
+      sel: bigint;
+      d0: bigint;
+      d1: bigint;
+      d2: bigint;
+      d3: bigint;
+      readonly y: bigint;
     }
 
     const sim = Simulator.fromSource<Mux4Ports>(MULTIPLEXER_SOURCE, "Mux4");
 
-    sim.dut.d0 = 0xAA;
-    sim.dut.d1 = 0xBB;
-    sim.dut.d2 = 0xCC;
-    sim.dut.d3 = 0xDD;
+    sim.dut.d0 = 0xAAn;
+    sim.dut.d1 = 0xBBn;
+    sim.dut.d2 = 0xCCn;
+    sim.dut.d3 = 0xDDn;
 
-    sim.dut.sel = 0;
-    expect(sim.dut.y).toBe(0xAA);
+    sim.dut.sel = 0n;
+    expect(sim.dut.y).toBe(0xAAn);
 
-    sim.dut.sel = 1;
-    expect(sim.dut.y).toBe(0xBB);
+    sim.dut.sel = 1n;
+    expect(sim.dut.y).toBe(0xBBn);
 
-    sim.dut.sel = 2;
-    expect(sim.dut.y).toBe(0xCC);
+    sim.dut.sel = 2n;
+    expect(sim.dut.y).toBe(0xCCn);
 
-    sim.dut.sel = 3;
-    expect(sim.dut.y).toBe(0xDD);
+    sim.dut.sel = 3n;
+    expect(sim.dut.y).toBe(0xDDn);
 
     sim.dispose();
   });
@@ -220,9 +220,9 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
 describe("E2E: Simulation.fromSource (time-based)", () => {
   test("counter with timed clock: step-by-step", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
@@ -231,15 +231,15 @@ describe("E2E: Simulation.fromSource (time-based)", () => {
     expect(sim.time()).toBe(0);
 
     // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
 
     sim.runUntil(100);
 
     const count = sim.dut.count;
-    expect(count).toBeGreaterThan(0);
+    expect(count).toBeGreaterThan(0n);
     expect(sim.time()).toBe(100);
 
     sim.dispose();
@@ -253,53 +253,53 @@ describe("E2E: Simulation.fromSource (time-based)", () => {
 describe("E2E: Simulator.fromProject (event-based)", () => {
   test("combinational adder from project directory", () => {
     interface AdderPorts {
-      rst: number;
-      a: number;
-      b: number;
-      readonly sum: number;
+      rst: bigint;
+      a: bigint;
+      b: bigint;
+      readonly sum: bigint;
     }
 
     const sim = Simulator.fromProject<AdderPorts>(ADDER_PROJECT, "Adder");
 
-    sim.dut.a = 100;
-    sim.dut.b = 200;
+    sim.dut.a = 100n;
+    sim.dut.b = 200n;
     sim.tick();
-    expect(sim.dut.sum).toBe(300);
+    expect(sim.dut.sum).toBe(300n);
 
-    sim.dut.a = 0xFFFF;
-    sim.dut.b = 1;
+    sim.dut.a = 0xFFFFn;
+    sim.dut.b = 1n;
     sim.tick();
-    expect(sim.dut.sum).toBe(0x10000);
+    expect(sim.dut.sum).toBe(0x10000n);
 
     sim.dispose();
   });
 
   test("sequential counter from project directory", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulator.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
 
     // Reset the counter (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.tick();
-    sim.dut.rst = 1;
+    sim.dut.rst = 1n;
     sim.tick();
-    expect(sim.dut.count).toBe(0);
+    expect(sim.dut.count).toBe(0n);
 
     // Enable counting
-    sim.dut.en = 1;
+    sim.dut.en = 1n;
     sim.tick();
-    expect(sim.dut.count).toBe(1);
+    expect(sim.dut.count).toBe(1n);
 
     sim.tick();
-    expect(sim.dut.count).toBe(2);
+    expect(sim.dut.count).toBe(2n);
 
     sim.tick();
-    expect(sim.dut.count).toBe(3);
+    expect(sim.dut.count).toBe(3n);
 
     sim.dispose();
   });
@@ -312,9 +312,9 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
 describe("E2E: Simulation.fromProject (time-based)", () => {
   test("counter with timed clock from project directory", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
@@ -323,15 +323,15 @@ describe("E2E: Simulation.fromProject (time-based)", () => {
     expect(sim.time()).toBe(0);
 
     // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
 
     sim.runUntil(100);
 
     const count = sim.dut.count;
-    expect(count).toBeGreaterThan(0);
+    expect(count).toBeGreaterThan(0n);
     expect(sim.time()).toBe(100);
 
     sim.dispose();
@@ -345,10 +345,10 @@ describe("E2E: Simulation.fromProject (time-based)", () => {
 describe("E2E: Simulator.create (backward compat)", () => {
   test("combinational adder via Simulator.create()", () => {
     interface AdderPorts {
-      rst: number;
-      a: number;
-      b: number;
-      readonly sum: number;
+      rst: bigint;
+      a: bigint;
+      b: bigint;
+      readonly sum: bigint;
     }
 
     const addon = loadNativeAddon();
@@ -371,10 +371,10 @@ describe("E2E: Simulator.create (backward compat)", () => {
       { __nativeCreate: nativeCreateSimulator },
     );
 
-    sim.dut.a = 100;
-    sim.dut.b = 200;
+    sim.dut.a = 100n;
+    sim.dut.b = 200n;
     sim.tick();
-    expect(sim.dut.sum).toBe(300);
+    expect(sim.dut.sum).toBe(300n);
 
     sim.dispose();
   });
@@ -463,8 +463,8 @@ module InitTest (
 
     // logic port should have mask=0xFF (all X)
     const [valA, maskA] = readFourState(buf, layout.forDut.a);
-    expect(valA).toBe(0);
-    expect(maskA).toBe(0xFF);
+    expect(valA).toBe(0n);
+    expect(maskA).toBe(0xFFn);
 
     // bit port should have mask=0 (defined)
     // bit is not 4-state, so no mask — reading its value should be 0
@@ -473,8 +473,8 @@ module InitTest (
 
   test("writing X clears value and sets mask", () => {
     interface Ports {
-      a: number;
-      readonly y_and: number;
+      a: bigint;
+      readonly y_and: bigint;
     }
 
     const sim = Simulator.fromSource<Ports>(AND_OR_SOURCE, "AndOr", { fourState: true });
@@ -513,13 +513,13 @@ module InitTest (
 
     // 0 & X = 0 (mask should be 0 — dominant zero)
     const [vAnd, mAnd] = readFourState(buf, sigYAnd);
-    expect(vAnd).toBe(0);
-    expect(mAnd).toBe(0);
+    expect(vAnd).toBe(0n);
+    expect(mAnd).toBe(0n);
 
     // 0 | X = X (mask should be 1)
     const [vOr, mOr] = readFourState(buf, sigYOr);
-    expect(vOr).toBe(0);
-    expect(mOr).toBe(1);
+    expect(vOr).toBe(0n);
+    expect(mOr).toBe(1n);
   });
 
   test("OR: 1 | X = 1 (dominant one)", () => {
@@ -544,8 +544,8 @@ module InitTest (
 
     // 1 | X = 1 (mask should be 0 — dominant one)
     const [vOr, mOr] = readFourState(buf, sigYOr);
-    expect(vOr).toBe(1);
-    expect(mOr).toBe(0);
+    expect(vOr).toBe(1n);
+    expect(mOr).toBe(0n);
   });
 
   test("logic-to-bit assignment strips X mask", () => {
@@ -583,8 +583,8 @@ module InitTest (
 
     // y_logic_from_bit should be 0xAA with mask=0
     const [vLogic, mLogic] = readFourState(buf, sigYLogicFromBit);
-    expect(vLogic).toBe(0xAA);
-    expect(mLogic).toBe(0);
+    expect(vLogic).toBe(0xAAn);
+    expect(mLogic).toBe(0n);
   });
 
   test("arithmetic with X produces all-X output", () => {
@@ -608,7 +608,7 @@ module InitTest (
 
     // a + X = all-X
     const [, mY] = readFourState(buf, sigY);
-    expect(mY).toBe(0xFF);
+    expect(mY).toBe(0xFFn);
   });
 
   test("defined inputs in 4-state mode behave like 2-state", () => {
@@ -631,8 +631,8 @@ module InitTest (
     raw.evalComb();
 
     const [vY, mY] = readFourState(buf, sigY);
-    expect(vY).toBe(155);
-    expect(mY).toBe(0);
+    expect(vY).toBe(155n);
+    expect(mY).toBe(0n);
   });
 
   test("FF captures X from input, reset clears X", () => {
@@ -658,8 +658,8 @@ module InitTest (
 
     // After reset, q should be 0 with mask=0
     const [vQ1, mQ1] = readFourState(buf, sigQ);
-    expect(vQ1).toBe(0);
-    expect(mQ1).toBe(0);
+    expect(vQ1).toBe(0n);
+    expect(mQ1).toBe(0n);
 
     // 2. Release reset (rst=1 is inactive), d = partial X (value=0xA5, mask=0x0F)
     view.setUint8(sigRst.offset, 1);
@@ -672,7 +672,7 @@ module InitTest (
 
     // FF should capture X mask from d
     const [, mQ2] = readFourState(buf, sigQ);
-    expect(mQ2).toBe(0x0F);
+    expect(mQ2).toBe(0x0Fn);
 
     // 3. Assert reset again (rst=0): should clear X
     view.setUint8(sigRst.offset, 0);
@@ -681,8 +681,8 @@ module InitTest (
     raw.tick(clkEventId);
 
     const [vQ3, mQ3] = readFourState(buf, sigQ);
-    expect(vQ3).toBe(0);
-    expect(mQ3).toBe(0);
+    expect(vQ3).toBe(0n);
+    expect(mQ3).toBe(0n);
   });
 
   test("FourState write through DUT sets value and mask", () => {
@@ -699,8 +699,8 @@ module InitTest (
     view.setUint8(sigA.offset + sigA.byteSize, 0x0F);
 
     const [vA, mA] = readFourState(buf, sigA);
-    expect(vA).toBe(0xA5);
-    expect(mA).toBe(0x0F);
+    expect(vA).toBe(0xA5n);
+    expect(mA).toBe(0x0Fn);
   });
 
   test("setting defined value clears X mask", () => {
@@ -716,42 +716,42 @@ module InitTest (
     view.setUint8(sigA.offset + sigA.byteSize, 0xFF);
 
     const [, mBefore] = readFourState(buf, sigA);
-    expect(mBefore).toBe(0xFF);
+    expect(mBefore).toBe(0xFFn);
 
     // Write a defined value (clear mask)
     view.setUint8(sigA.offset, 42);
     view.setUint8(sigA.offset + sigA.byteSize, 0);
 
     const [vAfter, mAfter] = readFourState(buf, sigA);
-    expect(vAfter).toBe(42);
-    expect(mAfter).toBe(0);
+    expect(vAfter).toBe(42n);
+    expect(mAfter).toBe(0n);
   });
 
   test("4-state through DUT high-level API (fromSource with fourState)", () => {
     interface Ports {
-      a: number;
-      b: number;
-      readonly y: number;
+      a: bigint;
+      b: bigint;
+      readonly y: bigint;
     }
 
     const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
 
     // Write defined values — should behave like 2-state
-    sim.dut.a = 100;
-    sim.dut.b = 55;
-    expect(sim.dut.y).toBe(155);
+    sim.dut.a = 100n;
+    sim.dut.b = 55n;
+    expect(sim.dut.y).toBe(155n);
 
     // Write X to a — output should propagate X (value reads as 0)
     (sim.dut as any).a = X;
     // After writing X, the value part of 'y' is implementation-defined
     // but the read should not throw
     const _yVal = sim.dut.y;
-    expect(typeof _yVal).toBe("number");
+    expect(typeof _yVal).toBe("bigint");
 
     // Write FourState with partial X
     (sim.dut as any).a = FourState(0xA0, 0x0F);
     const _yVal2 = sim.dut.y;
-    expect(typeof _yVal2).toBe("number");
+    expect(typeof _yVal2).toBe("bigint");
 
     sim.dispose();
   });
@@ -764,9 +764,9 @@ module InitTest (
 describe("E2E: 4-state high-level DUT API", () => {
   test("counter in 4-state mode: reset clears X, counting works", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulator.fromSource<CounterPorts>(
@@ -775,22 +775,22 @@ describe("E2E: 4-state high-level DUT API", () => {
 
     // In 4-state mode, count starts as X. Reset should clear it.
     // (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.tick();
-    sim.dut.rst = 1;
+    sim.dut.rst = 1n;
     sim.tick();
-    expect(sim.dut.count).toBe(0);
+    expect(sim.dut.count).toBe(0n);
 
     // Enable counting — should work exactly like 2-state
-    sim.dut.en = 1;
+    sim.dut.en = 1n;
     sim.tick();
-    expect(sim.dut.count).toBe(1);
+    expect(sim.dut.count).toBe(1n);
 
     sim.tick();
-    expect(sim.dut.count).toBe(2);
+    expect(sim.dut.count).toBe(2n);
 
     sim.tick();
-    expect(sim.dut.count).toBe(3);
+    expect(sim.dut.count).toBe(3n);
 
     sim.dispose();
   });
@@ -817,64 +817,64 @@ describe("E2E: 4-state high-level DUT API", () => {
     raw.evalComb();
 
     // With X selector, output should be all-X
-    const [, mY] = readFourState(buf, sigY);
-    expect(mY).toBe(0xFF);
+    const [, mY2] = readFourState(buf, sigY);
+    expect(mY2).toBe(0xFFn);
 
     raw.dispose();
   });
 
   test("FF via DUT API: write X input, tick, read output", () => {
     interface FFPorts {
-      rst: number;
-      d: number;
-      readonly q: number;
+      rst: bigint;
+      d: bigint;
+      readonly q: bigint;
     }
 
     const sim = Simulator.fromSource<FFPorts>(FF_SOURCE, "FF", { fourState: true });
 
     // Reset to clear initial X (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.tick();
-    sim.dut.rst = 1;
-    expect(sim.dut.q).toBe(0);
+    sim.dut.rst = 1n;
+    expect(sim.dut.q).toBe(0n);
 
     // Write a defined value
-    sim.dut.d = 0x42;
+    sim.dut.d = 0x42n;
     sim.tick();
-    expect(sim.dut.q).toBe(0x42);
+    expect(sim.dut.q).toBe(0x42n);
 
-    // Write X to d, tick — q should capture it (value read still returns a number)
+    // Write X to d, tick — q should capture it (value read still returns a bigint)
     (sim.dut as any).d = X;
     sim.tick();
-    expect(typeof sim.dut.q).toBe("number");
+    expect(typeof sim.dut.q).toBe("bigint");
 
     // Write defined value again — q should recover
-    sim.dut.d = 0x99;
+    sim.dut.d = 0x99n;
     sim.tick();
-    expect(sim.dut.q).toBe(0x99);
+    expect(sim.dut.q).toBe(0x99n);
 
     sim.dispose();
   });
 
   test("X to defined transition: adder recovers from X", () => {
     interface Ports {
-      a: number;
-      b: number;
-      readonly y: number;
+      a: bigint;
+      b: bigint;
+      readonly y: bigint;
     }
 
     const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
 
     // Start with X
     (sim.dut as any).a = X;
-    sim.dut.b = 10;
+    sim.dut.b = 10n;
     // Output has X — just verify it doesn't crash
-    expect(typeof sim.dut.y).toBe("number");
+    expect(typeof sim.dut.y).toBe("bigint");
 
     // Clear X by writing defined values
-    sim.dut.a = 20;
-    sim.dut.b = 30;
-    expect(sim.dut.y).toBe(50);
+    sim.dut.a = 20n;
+    sim.dut.b = 30n;
+    expect(sim.dut.y).toBe(50n);
 
     sim.dispose();
   });
@@ -887,9 +887,9 @@ describe("E2E: 4-state high-level DUT API", () => {
 describe("E2E: 4-state Simulation (time-based)", () => {
   test("FF with clock-driven 4-state: reset clears X, captures defined values", () => {
     interface FFPorts {
-      rst: number;
-      d: number;
-      readonly q: number;
+      rst: bigint;
+      d: bigint;
+      readonly q: bigint;
     }
 
     const sim = Simulation.fromSource<FFPorts>(FF_SOURCE, "FF", { fourState: true });
@@ -898,29 +898,29 @@ describe("E2E: 4-state Simulation (time-based)", () => {
     expect(sim.time()).toBe(0);
 
     // Reset to clear initial X on q (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    expect(sim.dut.q).toBe(0);
+    sim.dut.rst = 1n;
+    expect(sim.dut.q).toBe(0n);
 
     // Drive d with defined value
-    sim.dut.d = 0x55;
+    sim.dut.d = 0x55n;
     sim.runUntil(40);
-    expect(sim.dut.q).toBe(0x55);
+    expect(sim.dut.q).toBe(0x55n);
 
     // Drive d with different value
-    sim.dut.d = 0xAA;
+    sim.dut.d = 0xAAn;
     sim.runUntil(60);
-    expect(sim.dut.q).toBe(0xAA);
+    expect(sim.dut.q).toBe(0xAAn);
 
     sim.dispose();
   });
 
   test("counter in 4-state time-based mode", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(
@@ -930,15 +930,15 @@ describe("E2E: 4-state Simulation (time-based)", () => {
     sim.addClock("clk", { period: 10 });
 
     // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
 
     sim.runUntil(100);
 
     const count = sim.dut.count;
-    expect(count).toBeGreaterThan(0);
+    expect(count).toBeGreaterThan(0n);
     expect(sim.time()).toBe(100);
 
     sim.dispose();
@@ -946,9 +946,9 @@ describe("E2E: 4-state Simulation (time-based)", () => {
 
   test("4-state combinational in time-based simulation", () => {
     interface Ports {
-      a: number;
-      b: number;
-      readonly y: number;
+      a: bigint;
+      b: bigint;
+      readonly y: bigint;
     }
 
     const sim = Simulation.fromSource<Ports>(
@@ -956,11 +956,11 @@ describe("E2E: 4-state Simulation (time-based)", () => {
     );
 
     // No clock needed for pure combinational — just set values and read
-    sim.dut.a = 100;
-    sim.dut.b = 55;
+    sim.dut.a = 100n;
+    sim.dut.b = 55n;
     // runUntil(0) to force eval
     sim.runUntil(0);
-    expect(sim.dut.y).toBe(155);
+    expect(sim.dut.y).toBe(155n);
 
     sim.dispose();
   });
@@ -973,19 +973,19 @@ describe("E2E: 4-state Simulation (time-based)", () => {
 describe("E2E: Simulation testbench helpers", () => {
   test("waitForCycles: advances correct number of clock cycles", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
     // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
 
     const beforeTime = sim.time();
     const afterTime = sim.waitForCycles("clk", 5);
@@ -999,22 +999,22 @@ describe("E2E: Simulation testbench helpers", () => {
 
   test("waitUntil: waits for condition to be met", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
     // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
 
-    const t = sim.waitUntil(() => sim.dut.count >= 3);
-    expect(sim.dut.count).toBeGreaterThanOrEqual(3);
+    const t = sim.waitUntil(() => sim.dut.count >= 3n);
+    expect(sim.dut.count).toBeGreaterThanOrEqual(3n);
     expect(t).toBeGreaterThan(20);
 
     sim.dispose();
@@ -1022,22 +1022,22 @@ describe("E2E: Simulation testbench helpers", () => {
 
   test("waitUntil: throws SimulationTimeoutError on timeout", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
     // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 0; // disabled — count won't increase
+    sim.dut.rst = 1n;
+    sim.dut.en = 0n; // disabled — count won't increase
 
     expect(() =>
-      sim.waitUntil(() => sim.dut.count >= 100, { maxSteps: 20 }),
+      sim.waitUntil(() => sim.dut.count >= 100n, { maxSteps: 20 }),
     ).toThrow(SimulationTimeoutError);
 
     sim.dispose();
@@ -1045,34 +1045,34 @@ describe("E2E: Simulation testbench helpers", () => {
 
   test("reset: asserts and releases reset on counter", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
     // Count up a bit (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
     sim.runUntil(100);
-    expect(sim.dut.count).toBeGreaterThan(0);
+    expect(sim.dut.count).toBeGreaterThan(0n);
 
     // Reset using the helper
     sim.reset("rst");
-    expect(sim.dut.count).toBe(0);
+    expect(sim.dut.count).toBe(0n);
 
     sim.dispose();
   });
 
   test("reset: explicit async_low resetType activates with 0", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
@@ -1083,22 +1083,22 @@ describe("E2E: Simulation testbench helpers", () => {
     // With async_low, rst=0 is active, rst=1 is inactive
     sim.reset("rst");
 
-    sim.dut.en = 1;
+    sim.dut.en = 1n;
     sim.runUntil(100);
-    expect(sim.dut.count).toBeGreaterThan(0);
+    expect(sim.dut.count).toBeGreaterThan(0n);
 
     // Reset again using helper, verify it resets the counter
     sim.reset("rst");
-    expect(sim.dut.count).toBe(0);
+    expect(sim.dut.count).toBe(0n);
 
     sim.dispose();
   });
 
   test("reset: explicit async_high resetType activates with 1", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
@@ -1109,22 +1109,22 @@ describe("E2E: Simulation testbench helpers", () => {
     // With async_high, rst=1 is active, rst=0 is inactive
     sim.reset("rst");
 
-    sim.dut.en = 1;
+    sim.dut.en = 1n;
     sim.runUntil(100);
-    expect(sim.dut.count).toBeGreaterThan(0);
+    expect(sim.dut.count).toBeGreaterThan(0n);
 
     // Reset again
     sim.reset("rst");
-    expect(sim.dut.count).toBe(0);
+    expect(sim.dut.count).toBe(0n);
 
     sim.dispose();
   });
 
   test("Simulator.fromSource: resetType option works", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
@@ -1132,35 +1132,35 @@ describe("E2E: Simulation testbench helpers", () => {
     });
 
     // With async_high, assert reset with 1
-    sim.dut.rst = 1;
+    sim.dut.rst = 1n;
     sim.tick();
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.tick();
-    expect(sim.dut.count).toBe(0);
+    expect(sim.dut.count).toBe(0n);
 
     // Count up
-    sim.dut.en = 1;
+    sim.dut.en = 1n;
     sim.tick();
-    expect(sim.dut.count).toBe(1);
+    expect(sim.dut.count).toBe(1n);
 
     sim.dispose();
   });
 
   test("runUntil with maxSteps: succeeds within budget", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
     // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
 
     // 100 time units with period 10 = 10 events, should fit in 100 steps
     sim.runUntil(120, { maxSteps: 100 });
@@ -1171,17 +1171,17 @@ describe("E2E: Simulation testbench helpers", () => {
 
   test("runUntil with maxSteps: throws on exceeded budget", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
     sim.addClock("clk", { period: 10 });
 
     // Release reset so counter can count (default async_low: rst=1 is inactive)
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
 
     // Very small budget for a long run
     expect(() => sim.runUntil(100000, { maxSteps: 5 })).toThrow(
@@ -1199,33 +1199,33 @@ describe("E2E: Simulation testbench helpers", () => {
 describe("E2E: fourState() method", () => {
   test("Simulator.fourState: reads 4-state value and mask", () => {
     interface Ports {
-      a: number;
-      b: number;
-      readonly y: number;
+      a: bigint;
+      b: bigint;
+      readonly y: bigint;
     }
 
     const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
       fourState: true,
     });
 
-    sim.dut.a = 100;
-    sim.dut.b = 55;
+    sim.dut.a = 100n;
+    sim.dut.b = 55n;
     // Trigger evalComb via output read (Adder4S is purely combinational)
-    expect(sim.dut.y).toBe(155);
+    expect(sim.dut.y).toBe(155n);
 
     const fs = sim.fourState("y");
     expect(fs.__fourState).toBe(true);
-    expect(fs.value).toBe(155);
-    expect(fs.mask).toBe(0);
+    expect(fs.value).toBe(155n);
+    expect(fs.mask).toBe(0n);
 
     sim.dispose();
   });
 
   test("Simulator.fourState: reads X mask when input is X", () => {
     interface Ports {
-      a: number;
-      b: number;
-      readonly y: number;
+      a: bigint;
+      b: bigint;
+      readonly y: bigint;
     }
 
     const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
@@ -1233,43 +1233,43 @@ describe("E2E: fourState() method", () => {
     });
 
     (sim.dut as any).a = X;
-    sim.dut.b = 10;
+    sim.dut.b = 10n;
     // Trigger evalComb via output read
     sim.dut.y;
 
     const fs = sim.fourState("y");
-    expect(fs.mask).toBe(0xFF); // all X from arithmetic propagation
+    expect(fs.mask).toBe(0xFFn); // all X from arithmetic propagation
 
     sim.dispose();
   });
 
   test("Simulation.fourState: reads 4-state value", () => {
     interface Ports {
-      a: number;
-      b: number;
-      readonly y: number;
+      a: bigint;
+      b: bigint;
+      readonly y: bigint;
     }
 
     const sim = Simulation.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
       fourState: true,
     });
 
-    sim.dut.a = 50;
-    sim.dut.b = 25;
+    sim.dut.a = 50n;
+    sim.dut.b = 25n;
     sim.runUntil(0);
 
     const fs = sim.fourState("y");
-    expect(fs.value).toBe(75);
-    expect(fs.mask).toBe(0);
+    expect(fs.value).toBe(75n);
+    expect(fs.mask).toBe(0n);
 
     sim.dispose();
   });
 
   test("fourState: throws for unknown port", () => {
     interface Ports {
-      a: number;
-      b: number;
-      readonly y: number;
+      a: bigint;
+      b: bigint;
+      readonly y: bigint;
     }
 
     const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
@@ -1289,29 +1289,29 @@ describe("E2E: fourState() method", () => {
 describe("E2E: optimize flag", () => {
   test("Simulator.fromSource with optimize: true", () => {
     interface AdderPorts {
-      rst: number;
-      a: number;
-      b: number;
-      readonly sum: number;
+      rst: bigint;
+      a: bigint;
+      b: bigint;
+      readonly sum: bigint;
     }
 
     const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder", {
       optimize: true,
     });
 
-    sim.dut.a = 100;
-    sim.dut.b = 200;
+    sim.dut.a = 100n;
+    sim.dut.b = 200n;
     sim.tick();
-    expect(sim.dut.sum).toBe(300);
+    expect(sim.dut.sum).toBe(300n);
 
     sim.dispose();
   });
 
   test("Simulation.fromSource with optimize: true", () => {
     interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
+      rst: bigint;
+      en: bigint;
+      readonly count: bigint;
     }
 
     const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
@@ -1321,13 +1321,13 @@ describe("E2E: optimize flag", () => {
     sim.addClock("clk", { period: 10 });
 
     // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.runUntil(20);
-    sim.dut.rst = 1;
-    sim.dut.en = 1;
+    sim.dut.rst = 1n;
+    sim.dut.en = 1n;
     sim.runUntil(100);
 
-    expect(sim.dut.count).toBeGreaterThan(0);
+    expect(sim.dut.count).toBeGreaterThan(0n);
 
     sim.dispose();
   });

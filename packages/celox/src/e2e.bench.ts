@@ -39,8 +39,8 @@ const CODE = `
 `;
 
 interface TopPorts {
-  rst: number;
-  readonly cnt: { at(i: number): number; readonly length: number };
+  rst: bigint;
+  readonly cnt: { at(i: number): bigint; readonly length: number };
 }
 
 describe("simulation", () => {
@@ -56,9 +56,9 @@ describe("simulation", () => {
   const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
 
   // Reset sequence
-  sim.dut.rst = 1;
+  sim.dut.rst = 1n;
   sim.tick();
-  sim.dut.rst = 0;
+  sim.dut.rst = 0n;
   sim.tick();
 
   afterAll(() => {
@@ -81,7 +81,7 @@ describe("simulation", () => {
 
   // Testbench pattern: write input + tick + read back
   bench("testbench_tick_top_n1000_x1", () => {
-    sim.dut.rst = 0;
+    sim.dut.rst = 0n;
     sim.tick();
     // biome-ignore lint: read to measure full testbench cycle
     sim.dut.rst;
@@ -91,7 +91,7 @@ describe("simulation", () => {
     "testbench_tick_top_n1000_x1000000",
     () => {
       for (let i = 0; i < 1_000_000; i++) {
-        sim.dut.rst = 0;
+        sim.dut.rst = 0n;
         sim.tick();
         // biome-ignore lint: read to measure full testbench cycle
         sim.dut.rst;
@@ -116,9 +116,9 @@ describe("simulation", () => {
   const simArr = Simulator.create<TopPorts>(TopModule, {
     __nativeCreate: createSimulatorBridge(addon),
   });
-  simArr.dut.rst = 1;
+  simArr.dut.rst = 1n;
   simArr.tick();
-  simArr.dut.rst = 0;
+  simArr.dut.rst = 0n;
   simArr.tick();
 
   afterAll(() => {
@@ -126,7 +126,7 @@ describe("simulation", () => {
   });
 
   bench("testbench_array_tick_top_n1000_x1", () => {
-    simArr.dut.rst = 0;
+    simArr.dut.rst = 0n;
     simArr.tick();
     // biome-ignore lint: read array element to measure .at() overhead
     simArr.dut.cnt.at(0);
@@ -136,7 +136,7 @@ describe("simulation", () => {
     "testbench_array_tick_top_n1000_x1000000",
     () => {
       for (let i = 0; i < 1_000_000; i++) {
-        simArr.dut.rst = 0;
+        simArr.dut.rst = 0n;
         simArr.tick();
         // biome-ignore lint: read array element to measure .at() overhead
         simArr.dut.cnt.at(0);
@@ -155,9 +155,9 @@ describe("simulation", () => {
 describe("overhead", () => {
   // Simulator.tick — same as Rust simulator_tick_x10000
   const simTick = Simulator.fromSource<TopPorts>(CODE, "Top");
-  simTick.dut.rst = 1;
+  simTick.dut.rst = 1n;
   simTick.tick();
-  simTick.dut.rst = 0;
+  simTick.dut.rst = 0n;
   simTick.tick();
 
   afterAll(() => {
@@ -270,18 +270,18 @@ describe("testbench-helpers", () => {
   `;
 
   interface CounterPorts {
-    rst: number;
-    en: number;
-    readonly count: number;
+    rst: bigint;
+    en: bigint;
+    readonly count: bigint;
   }
 
   // waitForCycles benchmark
   const simWait = Simulation.fromSource<CounterPorts>(COUNTER_CODE, "Counter");
   simWait.addClock("clk", { period: 10 });
-  simWait.dut.rst = 1;
+  simWait.dut.rst = 1n;
   simWait.runUntil(20);
-  simWait.dut.rst = 0;
-  simWait.dut.en = 1;
+  simWait.dut.rst = 0n;
+  simWait.dut.en = 1n;
 
   afterAll(() => {
     simWait.dispose();
@@ -308,10 +308,10 @@ describe("testbench-helpers", () => {
   // runUntil: fast Rust path vs guarded TS path
   const simRun = Simulation.fromSource<CounterPorts>(COUNTER_CODE, "Counter");
   simRun.addClock("clk", { period: 10 });
-  simRun.dut.rst = 1;
+  simRun.dut.rst = 1n;
   simRun.runUntil(20);
-  simRun.dut.rst = 0;
-  simRun.dut.en = 1;
+  simRun.dut.rst = 0n;
+  simRun.dut.en = 1n;
 
   afterAll(() => {
     simRun.dispose();
@@ -363,17 +363,17 @@ describe("optimize-flag", () => {
   );
 
   const simNoOpt = Simulator.fromSource<TopPorts>(CODE, "Top");
-  simNoOpt.dut.rst = 1;
+  simNoOpt.dut.rst = 1n;
   simNoOpt.tick();
-  simNoOpt.dut.rst = 0;
+  simNoOpt.dut.rst = 0n;
   simNoOpt.tick();
 
   const simOpt = Simulator.fromSource<TopPorts>(CODE, "Top", {
     optimize: true,
   });
-  simOpt.dut.rst = 1;
+  simOpt.dut.rst = 1n;
   simOpt.tick();
-  simOpt.dut.rst = 0;
+  simOpt.dut.rst = 0n;
   simOpt.tick();
 
   afterAll(() => {

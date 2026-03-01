@@ -116,27 +116,27 @@ function writeBigInt(
   }
 }
 
-/** Read a signal value from the DataView. Returns number or bigint. */
+/** Read a signal value from the DataView. Always returns bigint. */
 function readSignal(
   view: DataView,
   sig: SignalLayout,
-): number | bigint {
+): bigint {
   if (sig.width <= 53) {
-    return readNumber(view, sig.offset, sig.width);
+    return BigInt(readNumber(view, sig.offset, sig.width));
   }
   return readBigInt(view, sig.offset, sig.byteSize);
 }
 
-/** Write a signal value to the DataView. Accepts number or bigint. */
+/** Write a signal value to the DataView. Accepts bigint (number accepted for compat). */
 function writeSignal(
   view: DataView,
   sig: SignalLayout,
-  value: number | bigint,
+  value: bigint | number,
 ): void {
-  if (sig.width <= 53 && typeof value === "number") {
-    writeNumber(view, sig.offset, sig.width, value);
+  const bigVal = typeof value === "bigint" ? value : BigInt(value);
+  if (sig.width <= 53) {
+    writeNumber(view, sig.offset, sig.width, Number(bigVal));
   } else {
-    const bigVal = typeof value === "bigint" ? value : BigInt(value);
     writeBigInt(view, sig.offset, sig.byteSize, bigVal);
   }
 }
@@ -162,11 +162,8 @@ function writeFourState(
 /** Write all-X mask for a signal. */
 function writeAllX(view: DataView, sig: SignalLayout): void {
   // Value = 0, mask = all 1s
-  writeSignal(view, sig, sig.width <= 53 ? 0 : 0n);
-  const allOnes =
-    sig.width <= 53
-      ? (sig.width === 53 ? Number.MAX_SAFE_INTEGER : (1 << sig.width) - 1)
-      : (1n << BigInt(sig.width)) - 1n;
+  writeSignal(view, sig, 0n);
+  const allOnes = (1n << BigInt(sig.width)) - 1n;
   const maskLayout: SignalLayout = {
     offset: sig.offset + sig.byteSize,
     width: sig.width,
@@ -348,7 +345,7 @@ function defineSignalProperty(
   const isInput = port?.direction === "input";
 
   Object.defineProperty(target, name, {
-    get(): number | bigint {
+    get(): bigint {
       // Output reads: lazy evalComb if dirty
       if (state.dirty && !isInput) {
         handle.evalComb();
@@ -357,7 +354,7 @@ function defineSignalProperty(
       return readSignal(view, sig);
     },
 
-    set(value: number | bigint | symbol | FourStateValue) {
+    set(value: bigint | number | symbol | FourStateValue) {
       if (isOutput) {
         throw new Error(`Cannot write to output port '${name}'`);
       }
@@ -373,7 +370,8 @@ function defineSignalProperty(
         }
         writeFourState(view, sig, value);
       } else {
-        writeSignal(view, sig, value as number | bigint);
+        const bigVal = typeof value === "bigint" ? value : BigInt(value as number);
+        writeSignal(view, sig, bigVal);
         // Clear mask when writing a defined value to a 4-state signal
         if (sig.is4state) {
           const maskLayout: SignalLayout = {
@@ -383,7 +381,7 @@ function defineSignalProperty(
             is4state: false,
             direction: sig.direction,
           };
-          writeSignal(view, maskLayout, sig.width <= 53 ? 0 : 0n);
+          writeSignal(view, maskLayout, 0n);
         }
       }
 
@@ -460,19 +458,19 @@ function createArrayDut(
   return {
     length: totalElements,
 
-    at(i: number): number | bigint {
+    at(i: number): bigint {
       if (state.dirty && !isInput) {
         handle.evalComb();
         state.dirty = false;
       }
       const offset = baseOffset + i * elementByteSize;
       if (elementWidth <= 53) {
-        return readNumber(view, offset, elementWidth);
+        return BigInt(readNumber(view, offset, elementWidth));
       }
       return readBigInt(view, offset, elementByteSize);
     },
 
-    set(i: number, value: number | bigint | symbol | FourStateValue): void {
+    set(i: number, value: bigint | number | symbol | FourStateValue): void {
       if (isOutput) {
         throw new Error("Cannot write to output array port");
       }
@@ -495,13 +493,20 @@ function createArrayDut(
           is4state, direction: baseSig.direction,
         };
         writeFourState(view, elemSig, value);
-      } else if (elementWidth <= 53 && typeof value === "number") {
-        writeNumber(view, offset, elementWidth, value);
-        if (is4state) writeNumber(view, offset + elementByteSize, elementWidth, 0);
       } else {
         const bigVal = typeof value === "bigint" ? value : BigInt(value as number);
-        writeBigInt(view, offset, elementByteSize, bigVal);
-        if (is4state) writeBigInt(view, offset + elementByteSize, elementByteSize, 0n);
+        const elemSig: SignalLayout = {
+          offset, width: elementWidth, byteSize: elementByteSize,
+          is4state, direction: baseSig.direction,
+        };
+        writeSignal(view, elemSig, bigVal);
+        if (is4state) {
+          const maskSig: SignalLayout = {
+            offset: offset + elementByteSize, width: elementWidth,
+            byteSize: elementByteSize, is4state: false, direction: baseSig.direction,
+          };
+          writeSignal(view, maskSig, 0n);
+        }
       }
       state.dirty = true;
     },
@@ -519,7 +524,7 @@ function createArrayDut(
 export function readFourState(
   buffer: ArrayBuffer | SharedArrayBuffer,
   sig: SignalLayout,
-): [value: number | bigint, mask: number | bigint] {
+): [value: bigint, mask: bigint] {
   if (!sig.is4state) {
     throw new Error("Signal is not 4-state");
   }

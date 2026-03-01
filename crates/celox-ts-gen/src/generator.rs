@@ -203,12 +203,8 @@ fn is_4state_type(kind: &TypeKind) -> bool {
     )
 }
 
-fn ts_type_for_width(width: usize) -> &'static str {
-    if width <= 53 {
-        "number"
-    } else {
-        "bigint"
-    }
+fn ts_type_for_width(_width: usize) -> &'static str {
+    "bigint"
 }
 
 fn type_info_str(info: TypeInfo) -> &'static str {

@@ -171,9 +171,8 @@ A3 (CLI統合)                │                          ▼
 | Veryl 型 | TS 型 | 理由 |
 |----------|-------|------|
 | `clock` | (DUT 非公開) | `sim.tick()` 経由で操作 |
-| `reset` | `number` | 0 or 1 |
-| `logic<1>`..`logic<53>` | `number` | JS 安全整数範囲内 |
-| `logic<54>`.. | `bigint` | BigInt 必須 |
+| `reset` | `bigint` | 0n or 1n |
+| `logic<N>` | `bigint` | 幅に関わらず統一 |
 | `logic<W>[N]` | 配列型 (A2) | |
 | interface port | ネストオブジェクト (A2) | |
 
@@ -196,10 +195,10 @@ module Adder (
 import type { ModuleDefinition } from "@veryl-lang/simulator";
 
 export interface AdderPorts {
-  rst: number;
-  a: number;
-  b: number;
-  readonly sum: number;
+  rst: bigint;
+  a: bigint;
+  b: bigint;
+  readonly sum: bigint;
 }
 
 export declare const Adder: ModuleDefinition<AdderPorts>;
@@ -230,7 +229,7 @@ exports.Adder = {
 
 - **インターフェース**: ネストした型を生成 (`dut.bus.addr`)
 - **配列**: `number[]` / `bigint[]` 型を生成 (`dut.data[0]`)
-- **Wide 値** (≥54bit): `bigint` 型を生成
+- **Wide 値**: すべて `bigint` 型を生成（幅に関わらず統一）
 
 ### A3: CLI 統合
 
