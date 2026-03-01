@@ -180,6 +180,41 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
     sim.dispose();
   });
 
+  test("always_comb evaluated before FF on tick (no prior output read)", () => {
+    interface CounterPorts {
+      rst: number;
+      en: number;
+      readonly count: number;
+    }
+
+    const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+
+    // Reset (default async_low: rst=0 is active)
+    sim.dut.rst = 0;
+    sim.tick();
+    sim.dut.rst = 1;
+    sim.tick();
+
+    // Write input and tick WITHOUT reading any output first.
+    // This catches the stale-comb bug where always_ff reads stale
+    // combinational values because eval_comb was skipped before FF.
+    sim.dut.en = 1;
+    sim.tick();
+    expect(Number(sim.dut.count)).toBe(1);
+
+    // Again: set input, tick, verify — no intermediate reads
+    sim.dut.en = 1;
+    sim.tick();
+    expect(Number(sim.dut.count)).toBe(2);
+
+    // Disable, tick, verify
+    sim.dut.en = 0;
+    sim.tick();
+    expect(Number(sim.dut.count)).toBe(2);
+
+    sim.dispose();
+  });
+
   test("combinational multiplexer", () => {
     interface Mux4Ports {
       sel: number;
