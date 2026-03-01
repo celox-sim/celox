@@ -1,3 +1,4 @@
 [submodule "deps/veryl"]
 	path = deps/veryl
 	url = https://github.com/tignear/veryl.git
+	branch = celox/proto-support
