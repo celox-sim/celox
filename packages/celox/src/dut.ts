@@ -439,6 +439,61 @@ function createNestedDut(
 // Array port accessor
 // ---------------------------------------------------------------------------
 
+/**
+ * Read a single element from a bit-packed byte region.
+ *
+ * The JIT stores array elements contiguously at the bit level:
+ * element i occupies bits [i*W .. (i+1)*W - 1] starting at baseOffset.
+ * Used when elementWidth < 8 (sub-byte elements).
+ */
+function readBitPackedElement(
+  view: DataView,
+  baseOffset: number,
+  elementWidth: number,
+  i: number,
+): number {
+  const bitStart = i * elementWidth;
+  const byteStart = baseOffset + (bitStart >> 3);
+  const bitShift = bitStart & 7;
+  const mask = (1 << elementWidth) - 1;
+  if (bitShift + elementWidth <= 8) {
+    return (view.getUint8(byteStart) >> bitShift) & mask;
+  }
+  // Spans two bytes
+  const lo = view.getUint8(byteStart);
+  const hi = view.getUint8(byteStart + 1);
+  return ((lo | (hi << 8)) >> bitShift) & mask;
+}
+
+/**
+ * Write a single element into a bit-packed byte region (read-modify-write).
+ *
+ * Used when elementWidth < 8 (sub-byte elements).
+ */
+function writeBitPackedElement(
+  view: DataView,
+  baseOffset: number,
+  elementWidth: number,
+  i: number,
+  value: number,
+): void {
+  const bitStart = i * elementWidth;
+  const byteStart = baseOffset + (bitStart >> 3);
+  const bitShift = bitStart & 7;
+  const mask = (1 << elementWidth) - 1;
+  const maskedValue = value & mask;
+
+  const lo = view.getUint8(byteStart);
+  view.setUint8(byteStart, (lo & ~((mask << bitShift) & 0xff)) | ((maskedValue << bitShift) & 0xff));
+
+  if (bitShift + elementWidth > 8) {
+    const bitsInLo = 8 - bitShift;
+    const hi = view.getUint8(byteStart + 1);
+    const hiMask = mask >> bitsInLo;
+    view.setUint8(byteStart + 1, (hi & ~hiMask) | (maskedValue >> bitsInLo));
+  }
+}
+
 function createArrayDut(
   view: DataView,
   baseSig: SignalLayout,
@@ -448,12 +503,60 @@ function createArrayDut(
 ): object {
   const dims = port.arrayDims!;
   const elementWidth = port.width;
-  const elementByteSize = Math.ceil(elementWidth / 8);
   const totalElements = dims.reduce((a, b) => a * b, 1);
   const isOutput = port.direction === "output";
   const isInput = port.direction === "input";
   const baseOffset = baseSig.offset;
   const is4state = baseSig.is4state;
+
+  if (elementWidth < 8) {
+    // Sub-byte elements: the JIT stores them bit-packed.
+    // Element i occupies bits [i*W .. (i+1)*W - 1] starting at baseOffset.
+    // For 4-state signals the mask region starts immediately after the value bytes.
+    const totalValueBytes = Math.ceil(totalElements * elementWidth / 8);
+    const maskBase = baseOffset + totalValueBytes;
+
+    return {
+      length: totalElements,
+
+      at(i: number): bigint {
+        if (state.dirty && !isInput) {
+          handle.evalComb();
+          state.dirty = false;
+        }
+        return BigInt(readBitPackedElement(view, baseOffset, elementWidth, i));
+      },
+
+      set(i: number, value: bigint | number | symbol | FourStateValue): void {
+        if (isOutput) {
+          throw new Error("Cannot write to output array port");
+        }
+        if (value === Symbol.for("veryl:X")) {
+          if (!is4state) {
+            throw new Error("Array port is not 4-state; cannot assign X");
+          }
+          writeBitPackedElement(view, baseOffset, elementWidth, i, 0);
+          writeBitPackedElement(view, maskBase, elementWidth, i, (1 << elementWidth) - 1);
+        } else if (isFourStateValue(value)) {
+          if (!is4state) {
+            throw new Error("Array port is not 4-state; cannot assign FourState");
+          }
+          writeBitPackedElement(view, baseOffset, elementWidth, i, Number(value.value));
+          writeBitPackedElement(view, maskBase, elementWidth, i, Number(value.mask));
+        } else {
+          const bigVal = typeof value === "bigint" ? value : BigInt(value as number);
+          writeBitPackedElement(view, baseOffset, elementWidth, i, Number(bigVal));
+          if (is4state) {
+            writeBitPackedElement(view, maskBase, elementWidth, i, 0);
+          }
+        }
+        state.dirty = true;
+      },
+    };
+  }
+
+  // elementWidth >= 8: byte-aligned stride.
+  const elementByteSize = Math.ceil(elementWidth / 8);
 
   return {
     length: totalElements,

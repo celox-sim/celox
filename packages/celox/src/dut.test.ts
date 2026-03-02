@@ -477,6 +477,92 @@ describe("createDut — array ports", () => {
     expect(dut.data.at(3)).toBe(0xDDn);
     expect(dut.data.length).toBe(4);
   });
+
+  test("1-bit elements (logic [N]): bit-packed read/write", () => {
+    // logic[4]: 4 elements of 1 bit each = 1 byte total in native memory
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      push: { offset: 0, width: 1, byteSize: 1, is4state: false, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      push: { direction: "input", type: "logic", width: 1, arrayDims: [4] },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ push: { at(i: number): bigint; set(i: number, v: bigint): void; length: number } }>(
+      buffer, layout, ports, handle, state,
+    );
+
+    dut.push.set(0, 1n);
+    dut.push.set(1, 1n);
+    dut.push.set(2, 0n);
+    dut.push.set(3, 1n);
+
+    expect(dut.push.at(0)).toBe(1n);
+    expect(dut.push.at(1)).toBe(1n);
+    expect(dut.push.at(2)).toBe(0n);
+    expect(dut.push.at(3)).toBe(1n);
+    expect(dut.push.length).toBe(4);
+
+    // Verify native layout: all 4 elements packed in byte 0
+    const view = new DataView(buffer);
+    expect(view.getUint8(0)).toBe(0b1011); // bits 0,1,3 set = 0x0B
+    expect(view.getUint8(1)).toBe(0);      // no overflow into byte 1
+  });
+
+  test("1-bit elements: writes don't corrupt adjacent elements", () => {
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      bits: { offset: 0, width: 1, byteSize: 1, is4state: false, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      bits: { direction: "input", type: "logic", width: 1, arrayDims: [8] },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ bits: { at(i: number): bigint; set(i: number, v: bigint): void } }>(
+      buffer, layout, ports, handle, state,
+    );
+
+    // Set element 0; verify element 1 unaffected
+    dut.bits.set(0, 1n);
+    expect(dut.bits.at(0)).toBe(1n);
+    dut.bits.set(1, 1n);
+    expect(dut.bits.at(0)).toBe(1n);  // element 0 must not be corrupted
+    expect(dut.bits.at(1)).toBe(1n);
+
+    // Clear element 0; element 1 must remain set
+    dut.bits.set(0, 0n);
+    expect(dut.bits.at(0)).toBe(0n);
+    expect(dut.bits.at(1)).toBe(1n);
+  });
+
+  test("1-bit elements: 8 elements span exactly one byte", () => {
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      bits: { offset: 2, width: 1, byteSize: 1, is4state: false, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      bits: { direction: "input", type: "logic", width: 1, arrayDims: [8] },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ bits: { at(i: number): bigint; set(i: number, v: bigint): void } }>(
+      buffer, layout, ports, handle, state,
+    );
+
+    // Set all 8 bits
+    for (let i = 0; i < 8; i++) dut.bits.set(i, 1n);
+    const view = new DataView(buffer);
+    expect(view.getUint8(2)).toBe(0xff);
+
+    // Clear alternating bits
+    for (let i = 0; i < 8; i += 2) dut.bits.set(i, 0n);
+    expect(view.getUint8(2)).toBe(0b10101010);
+  });
 });
 
 // ---------------------------------------------------------------------------

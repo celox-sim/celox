@@ -1696,3 +1696,92 @@ describe("E2E: celox.toml test sources", () => {
     expect(names).toContain("Reg");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bug fix: 1-bit unpacked array port (logic [N])
+// ---------------------------------------------------------------------------
+
+const ARRAY_1BIT_SOURCE = `
+module ArrayPassThrough (
+    clk: input  clock,
+    rst: input  reset,
+    en:  input  logic [4],
+    y0:  output logic,
+    y1:  output logic,
+    y2:  output logic,
+    y3:  output logic,
+) {
+    always_comb {
+        y0 = en[0];
+        y1 = en[1];
+        y2 = en[2];
+        y3 = en[3];
+    }
+}
+`;
+
+describe("E2E: 1-bit unpacked array port (logic [N])", () => {
+  test("each element is independently visible in hardware (issue #6)", () => {
+    interface Ports {
+      rst: bigint;
+      en: { at(i: number): bigint; set(i: number, v: bigint): void; length: number };
+      readonly y0: bigint;
+      readonly y1: bigint;
+      readonly y2: bigint;
+      readonly y3: bigint;
+    }
+
+    const sim = Simulator.fromSource<Ports>(ARRAY_1BIT_SOURCE, "ArrayPassThrough");
+
+    // Default: all inputs 0
+    sim.tick();
+    expect(sim.dut.y0).toBe(0n);
+    expect(sim.dut.y1).toBe(0n);
+    expect(sim.dut.y2).toBe(0n);
+    expect(sim.dut.y3).toBe(0n);
+
+    // Set element 0 only
+    sim.dut.en.set(0, 1n);
+    sim.tick();
+    expect(sim.dut.y0).toBe(1n);
+    expect(sim.dut.y1).toBe(0n);
+    expect(sim.dut.y2).toBe(0n);
+    expect(sim.dut.y3).toBe(0n);
+
+    // Set element 1 (was silently ignored before the fix)
+    sim.dut.en.set(0, 0n);
+    sim.dut.en.set(1, 1n);
+    sim.tick();
+    expect(sim.dut.y0).toBe(0n);
+    expect(sim.dut.y1).toBe(1n);
+    expect(sim.dut.y2).toBe(0n);
+    expect(sim.dut.y3).toBe(0n);
+
+    // Set elements 2 and 3
+    sim.dut.en.set(1, 0n);
+    sim.dut.en.set(2, 1n);
+    sim.dut.en.set(3, 1n);
+    sim.tick();
+    expect(sim.dut.y0).toBe(0n);
+    expect(sim.dut.y1).toBe(0n);
+    expect(sim.dut.y2).toBe(1n);
+    expect(sim.dut.y3).toBe(1n);
+
+    sim.dispose();
+  });
+
+  test("length property is correct", () => {
+    interface Ports {
+      rst: bigint;
+      en: { at(i: number): bigint; set(i: number, v: bigint): void; length: number };
+      readonly y0: bigint;
+      readonly y1: bigint;
+      readonly y2: bigint;
+      readonly y3: bigint;
+    }
+
+    const sim = Simulator.fromSource<Ports>(ARRAY_1BIT_SOURCE, "ArrayPassThrough");
+    expect(sim.dut.en.length).toBe(4);
+    sim.dispose();
+  });
+});
