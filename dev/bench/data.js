@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772462570755,
+  "lastUpdate": 1772462571229,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -2831,6 +2831,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "verilator/testbench_tick_top_n1000_x1000000",
             "value": 340288.346,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "72bb0b5ec3580ffe82f31885e027622bdc414ee1",
+          "message": "Add guide pages for parameter overrides, hierarchy, combinational loops, and VCD\n\n- Add parameter-overrides, hierarchy, combinational-loops, vcd guides (EN + JA)\n- Update sidebar: add new pages, remove benchmarks from guide sidebar\n- Fix bigint literals (100 -> 100n) in getting-started examples\n- Replace tick()-on-combinational Adder with Reg example in writing-tests\n- Add factory method comparison (create / fromProject / fromSource)\n- Fix incorrect claims: false loop \"2-pass\", bit-level path narrowing",
+          "timestamp": "2026-03-02T14:33:29Z",
+          "tree_id": "79d68beb2ab22e161734abc7dc5fe80811ce1f62",
+          "url": "https://github.com/celox-sim/celox/commit/72bb0b5ec3580ffe82f31885e027622bdc414ee1"
+        },
+        "date": 1772462571097,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "value": 15723393.223,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "value": 0.34014,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "value": 355408.978,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "value": 0.36174,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "value": 342056.13,
             "unit": "us"
           }
         ]
