@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772465141015,
+  "lastUpdate": 1772465141502,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -2673,6 +2673,177 @@ window.BENCHMARK_DATA = {
             "name": "ts/tick_x10000_with_optimize",
             "value": 3.6749219999959073,
             "range": "± 2.3%",
+            "unit": "ms",
+            "extra": "3 samples"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "da3ea46e7c586cb30a9038e06e2a7f135d26cbeb",
+          "message": "Add celox.toml support for test-only Veryl source directories\n\nIntroduces an optional celox.toml alongside Veryl.toml:\n\n  [test]\n  sources = [\"test_veryl\"]\n\nDirectories listed under [test].sources are included when running\nsimulations via fromProject and when generating TypeScript type stubs\nvia genTs. Missing directories are silently skipped.",
+          "timestamp": "2026-03-02T15:16:04Z",
+          "tree_id": "bcb88e005893d2d76f425c17cf26761d0bb00369",
+          "url": "https://github.com/celox-sim/celox/commit/da3ea46e7c586cb30a9038e06e2a7f135d26cbeb"
+        },
+        "date": 1772465141263,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ts/simulation_build_top_n1000",
+            "value": 789.0714709999993,
+            "range": "± 0.9%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_tick_top_n1000_x1",
+            "value": 0.0005299106210961013,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "943556 samples"
+          },
+          {
+            "name": "ts/simulation_tick_top_n1000_x1000000",
+            "value": 382.4764779999993,
+            "range": "± 1.4%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_tick_top_n1000_x1",
+            "value": 0.0008657470443411445,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "577536 samples"
+          },
+          {
+            "name": "ts/testbench_tick_top_n1000_x1000000",
+            "value": 705.9546433333333,
+            "range": "± 0.2%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_array_tick_top_n1000_x1",
+            "value": 0.0008421514675350397,
+            "range": "± 0.2%",
+            "unit": "ms",
+            "extra": "593718 samples"
+          },
+          {
+            "name": "ts/testbench_array_tick_top_n1000_x1000000",
+            "value": 686.5537223333353,
+            "range": "± 1.6%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulator_tick_x10000",
+            "value": 3.8426036666666428,
+            "range": "± 0.7%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_step_x20000",
+            "value": 13.619855000002039,
+            "range": "± 2.1%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_build_top_n1000",
+            "value": 788.206558333334,
+            "range": "± 3.4%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_step_x1",
+            "value": 0.000817635673393868,
+            "range": "± 0.2%",
+            "unit": "ms",
+            "extra": "611520 samples"
+          },
+          {
+            "name": "ts/simulation_time_step_x1000000",
+            "value": 677.666756999999,
+            "range": "± 0.4%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_runUntil_1000000",
+            "value": 102.48236700000173,
+            "range": "± 0.2%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/waitForCycles_x1000",
+            "value": 0.795899999999771,
+            "range": "± 25.7%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/manual_step_loop_x2000",
+            "value": 0.7734806666630902,
+            "range": "± 5.6%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/runUntil_fast_path_100000",
+            "value": 4.317906666665901,
+            "range": "± 1.4%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/runUntil_guarded_100000",
+            "value": 9.126412666667116,
+            "range": "± 1.7%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/build_without_optimize",
+            "value": 794.0255516666657,
+            "range": "± 4.1%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/build_with_optimize",
+            "value": 793.2997076666726,
+            "range": "± 1.7%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/tick_x10000_without_optimize",
+            "value": 3.7114239999985634,
+            "range": "± 0.5%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/tick_x10000_with_optimize",
+            "value": 3.8056836666704235,
+            "range": "± 0.6%",
             "unit": "ms",
             "extra": "3 samples"
           }
