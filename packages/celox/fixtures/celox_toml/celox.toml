@@ -1,2 +1,5 @@
 [test]
 sources = ["test_veryl"]
+
+[simulation]
+max_steps = 20

@@ -212,6 +212,8 @@ fn append_extra_source(mut source: String, extra: &Option<String>) -> String {
 struct CeloxConfig {
     #[serde(default)]
     test: CeloxTestConfig,
+    #[serde(default)]
+    simulation: CeloxSimulationConfig,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -220,6 +222,13 @@ struct CeloxTestConfig {
     /// files are included when running simulations and generating type stubs.
     #[serde(default)]
     sources: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CeloxSimulationConfig {
+    /// Default maximum steps for `waitUntil` / `waitForCycles`.
+    /// Overridden by the per-call `maxSteps` option.
+    max_steps: Option<u32>,
 }
 
 /// Load `celox.toml` from the given project root (same directory as `Veryl.toml`).
@@ -280,8 +289,9 @@ fn walkdir(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
 /// Load a Veryl project's source files and metadata from a directory.
 ///
 /// Searches upward from `project_path` for `Veryl.toml`, gathers all `.veryl`
-/// source files, and returns the concatenated source along with the project metadata.
-fn load_project_source(project_path: &str) -> Result<(String, Metadata)> {
+/// source files, and returns the concatenated source, project metadata, and
+/// the parsed `celox.toml` configuration.
+fn load_project_source(project_path: &str) -> Result<(String, Metadata, CeloxConfig)> {
     let toml_path = Metadata::search_from(project_path)
         .map_err(|e| Error::from_reason(format!("Could not find Veryl.toml: {e}")))?;
     let mut metadata = Metadata::load(&toml_path)
@@ -299,7 +309,7 @@ fn load_project_source(project_path: &str) -> Result<(String, Metadata)> {
     let project_root = toml_path.parent().unwrap_or(&toml_path);
     let celox_cfg = load_celox_config(project_root)?;
     append_test_sources(&mut source, project_root, &celox_cfg)?;
-    Ok((source, metadata))
+    Ok((source, metadata, celox_cfg))
 }
 
 /// Apply parsed options to a SimulatorBuilder.
@@ -392,7 +402,7 @@ impl NativeSimulatorHandle {
     #[napi(factory)]
     pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
         let opts = parse_options(&options)?;
-        let (source, metadata) = load_project_source(&project_path)?;
+        let (source, metadata, _celox_cfg) = load_project_source(&project_path)?;
         let source = append_extra_source(source, &opts.extra_source);
 
         let builder = apply_options(
@@ -533,6 +543,9 @@ pub struct NativeSimulationHandle {
     hierarchy_json: String,
     stable_size: u32,
     total_size: u32,
+    /// Default `maxSteps` for `waitUntil` / `waitForCycles`, sourced from
+    /// `[simulation] max_steps` in `celox.toml`. `None` when not set.
+    default_max_steps: Option<u32>,
 }
 
 #[napi]
@@ -571,6 +584,7 @@ impl NativeSimulationHandle {
             hierarchy_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
+            default_max_steps: None,
         })
     }
 
@@ -578,7 +592,7 @@ impl NativeSimulationHandle {
     #[napi(factory)]
     pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
         let opts = parse_options(&options)?;
-        let (source, metadata) = load_project_source(&project_path)?;
+        let (source, metadata, celox_cfg) = load_project_source(&project_path)?;
         let source = append_extra_source(source, &opts.extra_source);
 
         let builder = apply_options(
@@ -613,6 +627,7 @@ impl NativeSimulationHandle {
             hierarchy_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
+            default_max_steps: celox_cfg.simulation.max_steps,
         })
     }
 
@@ -644,6 +659,13 @@ impl NativeSimulationHandle {
     #[napi(getter)]
     pub fn total_size(&self) -> u32 {
         self.total_size
+    }
+
+    /// Returns the default `maxSteps` from `[simulation] max_steps` in `celox.toml`,
+    /// or `null` if not configured.
+    #[napi(getter)]
+    pub fn default_max_steps(&self) -> Option<u32> {
+        self.default_max_steps
     }
 
     /// Register a clock by event ID.

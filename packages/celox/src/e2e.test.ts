@@ -1695,4 +1695,29 @@ describe("E2E: celox.toml test sources", () => {
     expect(names).toContain("Adder");
     expect(names).toContain("Reg");
   });
+
+  test("[simulation] max_steps from celox.toml is used as waitUntil default", () => {
+    // celox.toml sets [simulation] max_steps = 20; waitUntil should honour it
+    // when no per-call maxSteps is provided.
+    const sim = Simulation.fromProject(CELOX_TOML_PROJECT, "Reg");
+    sim.addClock("clk", { period: 10 });
+    expect(() => sim.waitUntil(() => false)).toThrow(SimulationTimeoutError);
+    const err = (() => {
+      try { sim.waitUntil(() => false); } catch (e) { return e; }
+    })() as SimulationTimeoutError;
+    expect(err.steps).toBe(20);
+    sim.dispose();
+  });
+
+  test("[simulation] max_steps per-call override takes precedence over celox.toml", () => {
+    const sim = Simulation.fromProject(CELOX_TOML_PROJECT, "Reg");
+    sim.addClock("clk", { period: 10 });
+    // Per-call maxSteps=5 is lower than the toml default of 20
+    expect(() => sim.waitUntil(() => false, { maxSteps: 5 })).toThrow(SimulationTimeoutError);
+    const err = (() => {
+      try { sim.waitUntil(() => false, { maxSteps: 5 }); } catch (e) { return e; }
+    })() as SimulationTimeoutError;
+    expect(err.steps).toBe(5);
+    sim.dispose();
+  });
 });

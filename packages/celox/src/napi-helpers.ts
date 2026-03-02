@@ -46,6 +46,7 @@ export interface RawNapiSimulationHandle {
   readonly hierarchyJson: string;
   readonly stableSize: number;
   readonly totalSize: number;
+  readonly defaultMaxSteps: number | null;
   addClock(eventId: number, period: number, initialDelay: number): void;
   schedule(eventId: number, time: number, value: number): void;
   runUntil(endTime: number): void;

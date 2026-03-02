@@ -27,11 +27,22 @@ my-project/
 ```toml
 [test]
 sources = ["test_veryl"]
+
+[simulation]
+max_steps = 100000
 ```
+
+### `[test]`
 
 | Key | Type | Description |
 |---|---|---|
 | `test.sources` | `string[]` | Directories (relative to `celox.toml`) whose `.veryl` files are included in simulation and type generation. |
+
+### `[simulation]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `simulation.max_steps` | `integer` | 100,000 | Default step budget for `waitUntil` and `waitForCycles`. A `SimulationTimeoutError` is thrown if the condition is not met within this many steps. Overridden per-call via `{ maxSteps }`. |
 
 ## Example
 
@@ -48,11 +59,14 @@ reset_type = "async_low"
 sources    = ["src"]
 ```
 
-**`celox.toml`** — additionally loads `test_veryl/` for simulation:
+**`celox.toml`** — additionally loads `test_veryl/` for simulation and sets a project-wide step budget:
 
 ```toml
 [test]
 sources = ["test_veryl"]
+
+[simulation]
+max_steps = 50000
 ```
 
 **`test_veryl/Reg.veryl`** — a test-only module:
@@ -98,6 +112,7 @@ The Vite plugin picks up `test_veryl/` automatically and generates type definiti
 
 ## Behavior
 
-- If `celox.toml` does not exist, Celox uses only the sources listed in `Veryl.toml`.
+- If `celox.toml` does not exist, Celox uses only the sources listed in `Veryl.toml` and falls back to built-in defaults for all simulation settings.
 - All test source directories are merged with the project sources at simulation time. Modules from both are available in the same namespace.
 - The Vite plugin regenerates types for test sources on hot reload, just like for production sources.
+- `[simulation]` settings apply to every `Simulation.fromProject` / `Simulation.create` call within the project. A per-call `{ maxSteps }` option always takes precedence over the `celox.toml` value.

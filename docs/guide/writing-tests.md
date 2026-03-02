@@ -124,7 +124,7 @@ const t = sim.waitUntil(() => sim.dut.done === 1n);
 const t = sim.waitForCycles("clk", 10);
 ```
 
-Both methods accept an optional `{ maxSteps }` parameter (default: 100,000). A `SimulationTimeoutError` is thrown if the step budget is exceeded:
+Both methods accept an optional `{ maxSteps }` parameter. The default step budget is 100,000, but can be changed project-wide via [`[simulation] max_steps` in `celox.toml`](./celox-toml.md#simulation). A `SimulationTimeoutError` is thrown if the step budget is exceeded:
 
 ```typescript
 import { SimulationTimeoutError } from "@celox-sim/celox";

@@ -124,7 +124,7 @@ const t = sim.waitUntil(() => sim.dut.done === 1n);
 const t = sim.waitForCycles("clk", 10);
 ```
 
-どちらのメソッドもオプションの `{ maxSteps }` パラメータ（デフォルト: 100,000）を受け取ります。ステップ上限を超えると `SimulationTimeoutError` がスローされます：
+どちらのメソッドもオプションの `{ maxSteps }` パラメータを受け取ります。デフォルトのステップ上限は 100,000 ですが、[`celox.toml` の `[simulation] max_steps`](./celox-toml.md#simulation) でプロジェクト全体に設定できます。ステップ上限を超えると `SimulationTimeoutError` がスローされます：
 
 ```typescript
 import { SimulationTimeoutError } from "@celox-sim/celox";

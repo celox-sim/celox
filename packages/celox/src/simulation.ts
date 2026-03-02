@@ -57,6 +57,7 @@ export class Simulation<P = Record<string, unknown>> {
   private readonly _buffer: ArrayBuffer | SharedArrayBuffer;
   private readonly _layout: Record<string, SignalLayout & { typeKind?: string; associatedClock?: string }>;
   private readonly _clocks = new Map<string, { period: number; eventId: number }>();
+  private readonly _defaultMaxSteps: number | undefined;
   private _disposed = false;
 
   private constructor(
@@ -66,6 +67,7 @@ export class Simulation<P = Record<string, unknown>> {
     state: DirtyState,
     buffer: ArrayBuffer | SharedArrayBuffer,
     layout: Record<string, SignalLayout & { typeKind?: string; associatedClock?: string }>,
+    defaultMaxSteps?: number,
   ) {
     this._handle = handle;
     this._dut = dut;
@@ -73,6 +75,7 @@ export class Simulation<P = Record<string, unknown>> {
     this._state = state;
     this._buffer = buffer;
     this._layout = layout;
+    this._defaultMaxSteps = defaultMaxSteps;
   }
 
   /**
@@ -185,12 +188,13 @@ export class Simulation<P = Record<string, unknown>> {
     const ports = buildPortsFromLayout(layout.signals, events);
 
     const buf = raw.sharedMemory().buffer;
+    const defaultMaxSteps = raw.defaultMaxSteps ?? undefined;
 
     const state: DirtyState = { dirty: false };
     const handle = wrapDirectSimulationHandle(raw);
     const dut = createDut<P>(buf, layout.forDut, ports, handle, state, hierarchy);
 
-    return new Simulation<P>(handle, dut, events, state, buf, layout.signals);
+    return new Simulation<P>(handle, dut, events, state, buf, layout.signals, defaultMaxSteps);
   }
 
   /** The DUT accessor object — read/write ports as plain properties. */
@@ -298,7 +302,7 @@ export class Simulation<P = Record<string, unknown>> {
     opts?: { maxSteps?: number },
   ): number {
     this.ensureAlive();
-    const max = opts?.maxSteps ?? 100_000;
+    const max = opts?.maxSteps ?? this._defaultMaxSteps ?? 100_000;
     let steps = 0;
     while (!condition()) {
       const t = this._handle.step();

@@ -27,11 +27,22 @@ my-project/
 ```toml
 [test]
 sources = ["test_veryl"]
+
+[simulation]
+max_steps = 100000
 ```
+
+### `[test]`
 
 | キー | 型 | 説明 |
 |---|---|---|
 | `test.sources` | `string[]` | シミュレーションと型生成に含める `.veryl` ファイルが存在するディレクトリ（`celox.toml` からの相対パス）。 |
+
+### `[simulation]`
+
+| キー | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `simulation.max_steps` | `integer` | 100,000 | `waitUntil` と `waitForCycles` のデフォルトステップ上限。この回数以内に条件が満たされない場合、`SimulationTimeoutError` がスローされます。呼び出し時に `{ maxSteps }` を指定するとこの値を上書きできます。 |
 
 ## 例
 
@@ -48,11 +59,14 @@ reset_type = "async_low"
 sources    = ["src"]
 ```
 
-**`celox.toml`** — シミュレーション時に `test_veryl/` も追加で読み込む：
+**`celox.toml`** — シミュレーション時に `test_veryl/` も追加で読み込み、プロジェクト全体のステップ上限を設定する：
 
 ```toml
 [test]
 sources = ["test_veryl"]
+
+[simulation]
+max_steps = 50000
 ```
 
 **`test_veryl/Reg.veryl`** — テスト専用モジュール：
@@ -98,6 +112,7 @@ Vite プラグインは `test_veryl/` を自動的に検出し、そこで宣言
 
 ## 動作
 
-- `celox.toml` が存在しない場合、Celox は `Veryl.toml` に記載されたソースのみを使用します。
+- `celox.toml` が存在しない場合、Celox は `Veryl.toml` に記載されたソースのみを使用し、シミュレーション設定はすべてビルトインのデフォルト値にフォールバックします。
 - すべてのテストソースディレクトリはシミュレーション時にプロジェクトソースと統合されます。両方のモジュールが同じ名前空間で利用できます。
 - Vite プラグインは本番ソースと同様に、ホットリロード時にテストソースの型も再生成します。
+- `[simulation]` の設定は、プロジェクト内の `Simulation.fromProject` / `Simulation.create` 呼び出しすべてに適用されます。呼び出し時に `{ maxSteps }` を指定すると、常に `celox.toml` の値より優先されます。
