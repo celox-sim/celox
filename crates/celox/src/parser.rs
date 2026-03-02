@@ -74,6 +74,12 @@ pub enum ParserError {
         variable: String,
         typ: String,
     },
+
+    #[error("Top module `{name}` not found in IR")]
+    TopNotFound { name: String },
+
+    #[error("Top module `{name}` is generic and cannot be used as a top-level module")]
+    GenericTop { name: String },
 }
 
 /// Resolve the total bit width of a variable (width * kind), returning
@@ -184,7 +190,14 @@ pub fn parse_ir<'a>(
     // Allocate root
     let root_id = ModuleId(next_id);
     next_id += 1;
-    let root_ir = name_to_ir[top];
+    let root_ir = name_to_ir.get(top).ok_or_else(|| ParserError::TopNotFound {
+        name: resource_table::get_str_value(*top).unwrap_or_default(),
+    })?;
+    if generic_names.contains(top) {
+        return Err(ParserError::GenericTop {
+            name: resource_table::get_str_value(*top).unwrap_or_default(),
+        });
+    }
     name_to_id.insert(*top, root_id);
     module_names.insert(root_id, *top);
     module_ir.insert(root_id, root_ir);
