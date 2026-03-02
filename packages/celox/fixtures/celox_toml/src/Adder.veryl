@@ -1,0 +1,11 @@
+module Adder (
+    clk: input clock,
+    rst: input reset,
+    a: input logic<16>,
+    b: input logic<16>,
+    sum: output logic<17>,
+) {
+    always_comb {
+        sum = a + b;
+    }
+}

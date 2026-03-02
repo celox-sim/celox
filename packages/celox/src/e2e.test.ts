@@ -27,6 +27,7 @@ import {
 const FIXTURES_DIR = path.resolve(import.meta.dirname ?? __dirname, "../fixtures");
 const ADDER_PROJECT = path.join(FIXTURES_DIR, "adder");
 const COUNTER_PROJECT = path.join(FIXTURES_DIR, "counter_project");
+const CELOX_TOML_PROJECT = path.join(FIXTURES_DIR, "celox_toml");
 
 // ---------------------------------------------------------------------------
 // Test Veryl sources
@@ -1652,5 +1653,46 @@ describe("E2E: parameter override — DUT correctness", () => {
     sim.runUntil(0);
     expect(sim.dut.b).toBe(0xFEDCn);
     sim.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// celox.toml: test-only source directories
+// ---------------------------------------------------------------------------
+
+describe("E2E: celox.toml test sources", () => {
+  test("fromProject loads test-only module declared in celox.toml", () => {
+    interface RegPorts {
+      rst: bigint;
+      d: bigint;
+      readonly q: bigint;
+    }
+
+    // `Reg` lives in test_veryl/ — not in Veryl.toml sources — but celox.toml
+    // declares test_veryl/ as an additional test source directory.
+    const sim = Simulator.fromProject<RegPorts>(CELOX_TOML_PROJECT, "Reg");
+
+    // Deassert async_low reset (rst=0 is active; rst=1 is normal operation)
+    sim.dut.rst = 1n;
+    sim.dut.d = 0xABn;
+    sim.tick();
+    expect(sim.dut.q).toBe(0xABn);
+
+    sim.dut.d = 0xCDn;
+    expect(sim.dut.q).toBe(0xABn); // not yet clocked
+    sim.tick();
+    expect(sim.dut.q).toBe(0xCDn);
+
+    sim.dispose();
+  });
+
+  test("genTs includes test-only module declared in celox.toml", () => {
+    const addon = loadNativeAddon();
+    const json = addon.genTs(CELOX_TOML_PROJECT);
+    const output = JSON.parse(json) as { modules: Array<{ moduleName: string }> };
+    const names = output.modules.map((m) => m.moduleName);
+    // Both the regular source (Adder) and the test-only source (Reg) must appear
+    expect(names).toContain("Adder");
+    expect(names).toContain("Reg");
   });
 });

@@ -1,0 +1,15 @@
+/// Test-only module: simple D flip-flop available only via celox.toml test sources.
+module Reg (
+    clk: input  clock,
+    rst: input  reset,
+    d:   input  logic<8>,
+    q:   output logic<8>,
+) {
+    always_ff (clk, rst) {
+        if_reset {
+            q = 0;
+        } else {
+            q = d;
+        }
+    }
+}

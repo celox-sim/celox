@@ -7,6 +7,7 @@ use napi_derive::napi;
 use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
+use veryl_path::PathSet;
 
 use layout::{build_event_map, build_hierarchy_node, build_signal_layout};
 
@@ -206,6 +207,76 @@ fn append_extra_source(mut source: String, extra: &Option<String>) -> String {
     source
 }
 
+/// Configuration loaded from an optional `celox.toml` in the project root.
+#[derive(serde::Deserialize, Default)]
+struct CeloxConfig {
+    #[serde(default)]
+    test: CeloxTestConfig,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CeloxTestConfig {
+    /// Additional source directories (relative to `celox.toml`) whose `.veryl`
+    /// files are included when running simulations and generating type stubs.
+    #[serde(default)]
+    sources: Vec<String>,
+}
+
+/// Load `celox.toml` from the given project root (same directory as `Veryl.toml`).
+/// Returns `None` if the file does not exist.
+fn load_celox_config(project_root: &std::path::Path) -> Result<CeloxConfig> {
+    let path = project_root.join("celox.toml");
+    if !path.exists() {
+        return Ok(CeloxConfig::default());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| Error::from_reason(format!("Failed to read celox.toml: {e}")))?;
+    toml::from_str(&content)
+        .map_err(|e| Error::from_reason(format!("Failed to parse celox.toml: {e}")))
+}
+
+/// Collect all `.veryl` files from the extra test source directories declared in
+/// `celox.toml` and append their contents to `source`.
+fn append_test_sources(
+    source: &mut String,
+    project_root: &std::path::Path,
+    config: &CeloxConfig,
+) -> Result<()> {
+    for dir in &config.test.sources {
+        let dir_path = project_root.join(dir);
+        if !dir_path.exists() {
+            continue;
+        }
+        let entries = walkdir(&dir_path)?;
+        for entry in entries {
+            let content = std::fs::read_to_string(&entry)
+                .map_err(|e| Error::from_reason(format!("{}: {e}", entry.display())))?;
+            source.push_str(&content);
+            source.push('\n');
+        }
+    }
+    Ok(())
+}
+
+/// Recursively collect `.veryl` files under `dir`, sorted for determinism.
+fn walkdir(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    let read = std::fs::read_dir(dir)
+        .map_err(|e| Error::from_reason(format!("Cannot read directory {}: {e}", dir.display())))?;
+    for entry in read {
+        let entry = entry
+            .map_err(|e| Error::from_reason(format!("Directory entry error: {e}")))?;
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(walkdir(&path)?);
+        } else if path.extension().is_some_and(|ext| ext == "veryl") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 /// Load a Veryl project's source files and metadata from a directory.
 ///
 /// Searches upward from `project_path` for `Veryl.toml`, gathers all `.veryl`
@@ -225,6 +296,9 @@ fn load_project_source(project_path: &str) -> Result<(String, Metadata)> {
         source.push_str(&content);
         source.push('\n');
     }
+    let project_root = toml_path.parent().unwrap_or(&toml_path);
+    let celox_cfg = load_celox_config(project_root)?;
+    append_test_sources(&mut source, project_root, &celox_cfg)?;
     Ok((source, metadata))
 }
 
@@ -697,9 +771,29 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         .to_string_lossy()
         .to_string();
 
-    let paths = metadata
+    let mut paths = metadata
         .paths::<std::path::PathBuf>(&[], true, true)
         .map_err(|e| Error::from_reason(format!("Failed to gather sources: {e}")))?;
+
+    // Append test-only sources declared in celox.toml
+    let project_root = toml_path.parent().unwrap_or(&toml_path).to_path_buf();
+    let celox_cfg = load_celox_config(&project_root)?;
+    let prj_name = metadata.project.name.clone();
+    for dir in &celox_cfg.test.sources {
+        let dir_path = project_root.join(dir);
+        if !dir_path.exists() {
+            continue;
+        }
+        for src in walkdir(&dir_path)? {
+            paths.push(PathSet {
+                prj: prj_name.clone(),
+                src: src.clone(),
+                dst: src.with_extension("sv"),
+                map: src.with_extension("map"),
+            });
+        }
+    }
+
     if paths.is_empty() {
         return Err(Error::from_reason("No Veryl source files found"));
     }

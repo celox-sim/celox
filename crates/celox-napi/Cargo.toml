@@ -18,8 +18,10 @@ celox-ts-gen      = { version = "0.18.0", path = "../celox-ts-gen" }
 veryl-analyzer    = { workspace = true }
 veryl-metadata    = { workspace = true }
 veryl-parser      = { workspace = true }
+veryl-path        = { workspace = true }
 serde             = { workspace = true }
 serde_json        = { workspace = true }
+toml              = { workspace = true }
 
 [build-dependencies]
 napi-build = "2"
