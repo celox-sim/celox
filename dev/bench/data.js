@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772472322223,
+  "lastUpdate": 1772472322687,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -3403,6 +3403,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "verilator/testbench_tick_top_n1000_x1000000",
             "value": 314360.469,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6e9c7785592164679176dbd284d3eba787b72074",
+          "message": "Merge pull request #2 from celox-sim/claude/param-override\n\nSupport static partial assignments in function body lowering",
+          "timestamp": "2026-03-03T02:16:28+09:00",
+          "tree_id": "91cfd658fa24ffecfd621c3fdc2d9f9ec8a89557",
+          "url": "https://github.com/celox-sim/celox/commit/6e9c7785592164679176dbd284d3eba787b72074"
+        },
+        "date": 1772472322546,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "value": 6390258.269,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "value": 0.3405,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "value": 354101.647,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "value": 0.36219,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "value": 340405.84,
             "unit": "us"
           }
         ]
