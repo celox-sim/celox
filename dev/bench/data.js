@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772459353716,
+  "lastUpdate": 1772459354172,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -2545,6 +2545,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "verilator/testbench_tick_top_n1000_x1000000",
             "value": 175597.441,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "5cf87d6c995c9925c0897c39a5b5be78514e352f",
+          "message": "Fix benchmark asymmetries: full-cycle tick and consistent testbench workload\n\n- Verilator tick() was a half-cycle toggle; now does a full cycle\n  (low→eval→high→eval) so 1M ticks = 1M posedges on both sides\n- testbench benchmarks now do tick + read cnt0 (output) on both sides,\n  dropping the spurious rst=0 write (rst is already 0 after reset)\n- Add cnt0 output port (assign cnt0 = cnt[0]) to both Top.sv and the\n  Veryl CODE string so both sides read the same 32-bit output signal",
+          "timestamp": "2026-03-02T13:40:05Z",
+          "tree_id": "9816a41cb5161d798455fe909d61392ac9e72755",
+          "url": "https://github.com/celox-sim/celox/commit/5cf87d6c995c9925c0897c39a5b5be78514e352f"
+        },
+        "date": 1772459354044,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "value": 11629992.296,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "value": 0.34019,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "value": 359378.815,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "value": 0.36236,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "value": 340288.346,
             "unit": "us"
           }
         ]
