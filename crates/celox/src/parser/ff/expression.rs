@@ -787,8 +787,12 @@ impl<'a> FfParser<'a> {
             }
             Factor::Value(comptime, _token_range) => {
                 let v = comptime.get_value().unwrap();
+                let mask_xz = v.mask_xz().into_owned();
+                let payload = v.payload().into_owned();
+                // Veryl→Celox encoding: celox_value = payload ^ mask_xz
+                let celox_value = &payload ^ &mask_xz;
                 self.op_constant(
-                    SIRValue::new(v.payload().into_owned()),
+                    SIRValue::new_four_state(celox_value, mask_xz),
                     v.width(),
                     ir_builder,
                 );

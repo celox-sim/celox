@@ -472,6 +472,6 @@ fn collect_glue_sources_with_window(
             collect_glue_sources_with_window(*then_expr, None, arena, set);
             collect_glue_sources_with_window(*else_expr, None, arena, set);
         }
-        SLTNode::Constant(_, _, _) => {}
+        SLTNode::Constant(_, _, _, _) => {}
     }
 }

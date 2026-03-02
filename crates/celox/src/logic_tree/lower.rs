@@ -116,9 +116,12 @@ impl SLTToSIRLowerer {
                 }
             }
 
-            SLTNode::Constant(val, width, _signed) => {
+            SLTNode::Constant(val, mask, width, _signed) => {
                 let reg = builder.alloc_bit(*width, false);
-                builder.emit(SIRInstruction::Imm(reg, SIRValue::new(val.clone())));
+                builder.emit(SIRInstruction::Imm(
+                    reg,
+                    SIRValue::new_four_state(val.clone(), mask.clone()),
+                ));
                 reg
             }
 

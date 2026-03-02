@@ -513,10 +513,10 @@ fn check_ff_unary_4s(
 #[test_case("|",  "logic<8>", "logic<8>", 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00 ; "4s or 1 or X is 1")]
 #[test_case("|",  "logic<8>", "logic<8>", 0x00, 0x00, 0x00, 0xFF, 0x00, 0xFF ; "4s or 0 or X is X")]
 #[test_case("|",  "logic<8>", "logic<8>", 0xA5, 0x00, 0x5A, 0x00, 0xFF, 0x00 ; "4s or defined")]
-// IEEE: XOR mask = l_m|r_m. Value at X positions must be 0.
-#[test_case("^",  "logic<8>", "logic<8>", 0x55, 0x00, 0x00, 0xFF, 0x00, 0xFF ; "4s xor with X")]
+// IEEE: XOR mask = l_m|r_m. Value at X positions is actual computation result.
+#[test_case("^",  "logic<8>", "logic<8>", 0x55, 0x00, 0xFF, 0xFF, 0xAA, 0xFF ; "4s xor with X")]
 #[test_case("^",  "logic<8>", "logic<8>", 0x55, 0x00, 0xAA, 0x00, 0xFF, 0x00 ; "4s xor defined")]
-#[test_case("~^", "logic<8>", "logic<8>", 0xF0, 0x00, 0x00, 0xFF, 0x00, 0xFF ; "4s xnor with X")]
+#[test_case("~^", "logic<8>", "logic<8>", 0xF0, 0x00, 0xFF, 0xFF, 0xF0, 0xFF ; "4s xnor with X")]
 #[test_case("~^", "logic<8>", "logic<8>", 0xF0, 0x00, 0xFF, 0x00, 0xF0, 0x00 ; "4s xnor defined")]
 fn comb_bitwise_4s(
     op: &str,
@@ -533,13 +533,13 @@ fn comb_bitwise_4s(
 }
 
 // ===================================================================
-// 4-state: Arithmetic — comb  (any X → all X, value zeroed)
+// 4-state: Arithmetic — comb  (any X → all X, value is computation result)
 // ===================================================================
 
-#[test_case("+",  "logic<8>", "logic<8>", 10, 0x00, 0, 0x01, 0x00, 0xFF ; "4s add X input")]
-#[test_case("+",  "logic<8>", "logic<8>", 10, 0x00, 5, 0x00, 15,   0x00 ; "4s add defined")]
-#[test_case("-",  "logic<8>", "logic<8>", 10, 0x00, 0, 0x01, 0x00, 0xFF ; "4s sub X input")]
-#[test_case("*",  "logic<8>", "logic<8>",  7, 0x00, 0, 0x01, 0x00, 0xFF ; "4s mul X input")]
+#[test_case("+",  "logic<8>", "logic<8>", 10, 0x00, 1, 0x01, 11, 0xFF ; "4s add X input")]
+#[test_case("+",  "logic<8>", "logic<8>", 10, 0x00, 5, 0x00, 15, 0x00 ; "4s add defined")]
+#[test_case("-",  "logic<8>", "logic<8>", 10, 0x00, 1, 0x01,  9, 0xFF ; "4s sub X input")]
+#[test_case("*",  "logic<8>", "logic<8>",  7, 0x00, 1, 0x01,  7, 0xFF ; "4s mul X input")]
 fn comb_arith_4s(
     op: &str,
     in_ty: &str,
@@ -579,9 +579,10 @@ fn comb_compare_4s(
 // 4-state: Shift — comb  (X in amount → all X)
 // ===================================================================
 
-// IEEE 1800: X in shift amount → result is all-X (value=0, mask=all-ones)
-#[test_case("<<", "logic<8>", "logic<8>", 0x01, 0x00, 0, 0xFF, 0x00, 0xFF ; "4s shl X amount")]
-#[test_case(">>", "logic<8>", "logic<8>", 0xFF, 0x00, 0, 0xFF, 0x00, 0xFF ; "4s shr X amount")]
+// IEEE 1800: X in shift amount → result is all-X; value is actual computation result
+// Cranelift masks shift amount by (width-1), so 0xFF & 7 = 7
+#[test_case("<<", "logic<8>", "logic<8>", 0x01, 0x00, 0xFF, 0xFF, 0x80, 0xFF ; "4s shl X amount")]
+#[test_case(">>", "logic<8>", "logic<8>", 0xFF, 0x00, 0xFF, 0xFF, 0x01, 0xFF ; "4s shr X amount")]
 fn comb_shift_4s(
     op: &str,
     in_ty: &str,
@@ -602,8 +603,8 @@ fn comb_shift_4s(
 // Reduction / LogicNot: any X → all X (conservative)
 // ===================================================================
 
-// IEEE: value bits at X positions must be 0. ~0xA5=0x5A, masked by ~0x0F → 0x50
-#[test_case("~",  "logic<8>", "logic<8>", 0xA5, 0x0F, 0x50, 0x0F ; "4s bitnot partial X")]
+// ~0xA5=0x5A, mask 0x0F preserved (no normalization: value at X positions is computation result)
+#[test_case("~",  "logic<8>", "logic<8>", 0xA5, 0x0F, 0x5A, 0x0F ; "4s bitnot partial X")]
 #[test_case("~",  "logic<8>", "logic<8>", 0xFF, 0x00, 0x00, 0x00 ; "4s bitnot defined")]
 #[test_case("!",  "logic<8>", "logic",    0x55, 0x01, 0x00, 0x01 ; "4s lognot X input")]
 fn comb_unary_4s(
@@ -622,15 +623,15 @@ fn comb_unary_4s(
 // 4-state: Reduction — comb  (any X → all X conservative)
 // ===================================================================
 
-#[test_case("&",  "logic<8>", "logic", 0xFF, 0x01, 0x00, 0x01 ; "4s red and X")]
+#[test_case("&",  "logic<8>", "logic", 0xFF, 0x01, 0x01, 0x01 ; "4s red and X")]
 #[test_case("&",  "logic<8>", "logic", 0xFF, 0x00, 0x01, 0x00 ; "4s red and defined")]
 #[test_case("|",  "logic<8>", "logic", 0x01, 0x02, 0x01, 0x00 ; "4s red or dominant")]
 #[test_case("|",  "logic<8>", "logic", 0x00, 0x02, 0x00, 0x01 ; "4s red or X")]
 #[test_case("^",  "logic<8>", "logic", 0x03, 0x01, 0x00, 0x01 ; "4s red xor X")]
 #[test_case("^",  "logic<8>", "logic", 0x03, 0x00, 0x00, 0x00 ; "4s red xor defined")]
 #[test_case("~&", "logic<8>", "logic", 0xFF, 0x01, 0x00, 0x01 ; "4s red nand X")]
-#[test_case("~|", "logic<8>", "logic", 0x00, 0x01, 0x00, 0x01 ; "4s red nor X")]
-#[test_case("~^", "logic<8>", "logic", 0x03, 0x01, 0x00, 0x01 ; "4s red xnor X")]
+#[test_case("~|", "logic<8>", "logic", 0x01, 0x01, 0x00, 0x01 ; "4s red nor X")]
+#[test_case("~^", "logic<8>", "logic", 0x03, 0x01, 0x01, 0x01 ; "4s red xnor X")]
 #[test_case("~^", "logic<8>", "logic", 0x03, 0x00, 0x01, 0x00 ; "4s red xnor defined")]
 fn comb_reduction_4s(
     op: &str,
@@ -651,7 +652,7 @@ fn comb_reduction_4s(
 #[test_case("&",  "logic<8>", "logic<8>", 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00 ; "4s ff and 0 X")]
 #[test_case("|",  "logic<8>", "logic<8>", 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00 ; "4s ff or 1 X")]
 #[test_case("+",  "logic<8>", "logic<8>",   10, 0x00,    5, 0x00,   15, 0x00 ; "4s ff add defined")]
-#[test_case("+",  "logic<8>", "logic<8>",   10, 0x00,    0, 0x01, 0x00, 0xFF ; "4s ff add X")]
+#[test_case("+",  "logic<8>", "logic<8>",   10, 0x00,    1, 0x01,   11, 0xFF ; "4s ff add X")]
 fn ff_binary_4s(
     op: &str,
     in_ty: &str,
@@ -666,11 +667,11 @@ fn ff_binary_4s(
     check_ff_binary_4s(op, in_ty, out_ty, a_v, a_m, b_v, b_m, e_v, e_m);
 }
 
-// IEEE: ~0xA5=0x5A, mask=0x0F → value at X positions zeroed → 0x50
-#[test_case("~",  "logic<8>", "logic<8>", 0xA5, 0x0F, 0x50, 0x0F ; "4s ff bitnot partial X")]
+// ~0xA5=0x5A, mask=0x0F → value preserved (no normalization) → 0x5A
+#[test_case("~",  "logic<8>", "logic<8>", 0xA5, 0x0F, 0x5A, 0x0F ; "4s ff bitnot partial X")]
 #[test_case("^",  "logic<8>", "logic",    0x03, 0x01, 0x00, 0x01 ; "4s ff red xor X")]
 #[test_case("~^", "logic<8>", "logic",    0x03, 0x00, 0x01, 0x00 ; "4s ff red xnor defined")]
-#[test_case("~^", "logic<8>", "logic",    0x03, 0x01, 0x00, 0x01 ; "4s ff red xnor X")]
+#[test_case("~^", "logic<8>", "logic",    0x03, 0x01, 0x01, 0x01 ; "4s ff red xnor X")]
 fn ff_unary_4s(
     op: &str,
     in_ty: &str,
@@ -760,18 +761,20 @@ fn check_wide_comb_unary_4s(
 }
 
 // ===================================================================
-// Wide 4-state: XOR — value at X positions must be 0 (IEEE)
+// Wide 4-state: XOR — value at X positions is computation result (no normalization)
 // ===================================================================
 
 #[test]
 fn wide_4s_xor_with_x() {
-    // 128-bit: a is defined, b is all-X → result all-X, value must be 0
+    // 128-bit: a is defined, b is all-X (v=all-1s, m=all-1s) → result all-X
     let a_val = BigUint::from(0xDEAD_BEEF_CAFE_BABEu64) << 64 | BigUint::from(0x1234_5678_9ABC_DEF0u64);
     let a_mask = BigUint::from(0u64);
-    let b_val = BigUint::from(0u64);
-    let b_mask = (BigUint::from(1u64) << 128) - BigUint::from(1u64); // all-ones 128-bit
-    let exp_val = BigUint::from(0u64); // IEEE: value=0 when mask=all-X
-    let exp_mask = (BigUint::from(1u64) << 128) - BigUint::from(1u64);
+    let all_ones_128: BigUint = (BigUint::from(1u64) << 128) - BigUint::from(1u64);
+    let b_val = all_ones_128.clone(); // X encoding: v=1
+    let b_mask = all_ones_128.clone();
+    // XOR: a ^ all_ones = ~a (bitwise complement)
+    let exp_val = &a_val ^ &b_val;
+    let exp_mask = all_ones_128;
     check_wide_comb_binary_4s("^", 128, &a_val, &a_mask, &b_val, &b_mask, &exp_val, &exp_mask);
 }
 
@@ -788,35 +791,34 @@ fn wide_4s_xor_defined() {
 }
 
 // ===================================================================
-// Wide 4-state: BitNot — value at X positions must be 0 (IEEE)
+// Wide 4-state: BitNot — value at X positions is computation result (no normalization)
 // ===================================================================
 
 #[test]
 fn wide_4s_bitnot_partial_x() {
     // 128-bit: lower 64 bits are X, upper 64 bits defined as 0xFF..FF
     // ~(0xFFFF..., mask=0x0000...FFFF...) →
-    //   value: ~0xFFFF... = 0x0000... for upper, X for lower → 0x0000... (lower zeroed by IEEE)
+    //   value: ~0xFFFF... = 0x0000... for upper, ~0xAAAA... for lower
     //   mask: 0x0000...FFFF...
     let a_val = (BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64) << 64) | BigUint::from(0xAAAA_BBBB_CCCC_DDDDu64);
     let a_mask = BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64); // lower 64 bits are X
-    // ~a: upper 64 bits → 0x0000..., lower 64 bits → ~0xAAAA... but masked to X
-    // IEEE: value at X positions = 0
-    let exp_val = BigUint::from(0u64); // upper ~0xFFFF = 0x0000, lower is X → 0
+    // ~a: upper 64 bits → 0x0000..., lower 64 bits → ~0xAAAA_BBBB_CCCC_DDDD = 0x5555_4444_3333_2222
+    let exp_val = BigUint::from(0x5555_4444_3333_2222u64); // no normalization
     let exp_mask = BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64);
     check_wide_comb_unary_4s("~", 128, &a_val, &a_mask, &exp_val, &exp_mask);
 }
 
 // ===================================================================
-// Wide 4-state: Arithmetic — any X → all X, value=0 (IEEE)
+// Wide 4-state: Arithmetic — any X → all X, value is computation result
 // ===================================================================
 
 #[test]
 fn wide_4s_add_x() {
     let a_val = BigUint::from(1u64) << 100;
     let a_mask = BigUint::from(0u64);
-    let b_val = BigUint::from(0u64);
-    let b_mask = BigUint::from(1u64); // bit 0 is X
-    let exp_val = BigUint::from(0u64);
+    let b_val = BigUint::from(1u64); // X at bit 0: v=1, m=1
+    let b_mask = BigUint::from(1u64);
+    let exp_val = &a_val + &b_val; // actual computation result
     let exp_mask = (BigUint::from(1u64) << 128) - BigUint::from(1u64);
     check_wide_comb_binary_4s("+", 128, &a_val, &a_mask, &b_val, &b_mask, &exp_val, &exp_mask);
 }
@@ -866,8 +868,8 @@ fn concat_4s_partial_x() {
     let (v, m) = sim.get_four_state(sig_o);
     // mask: upper 8 = 0x00, lower 8 = 0xFF → 0x00FF
     assert_eq!(m, BigUint::from(0x00FFu64), "concat 4s: mask mismatch");
-    // IEEE: value at X positions = 0 → upper 0xAB, lower 0x00 → 0xAB00
-    assert_eq!(v, BigUint::from(0xAB00u64), "concat 4s: value mismatch");
+    // Value at X positions preserved → upper 0xAB, lower 0xCD → 0xABCD
+    assert_eq!(v, BigUint::from(0xABCDu64), "concat 4s: value mismatch");
 }
 
 #[test]
@@ -895,7 +897,8 @@ fn wide_concat_4s_partial_x() {
 
     let (v, m) = sim.get_four_state(sig_o);
     let exp_mask = BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64); // lower 64 bits X
-    let exp_val = BigUint::from(0xCAFE_BABE_DEAD_BEEFu64) << 64; // upper defined, lower 0
+    // Value at X positions preserved: upper=0xCAFE..., lower=0x1234...
+    let exp_val = (BigUint::from(0xCAFE_BABE_DEAD_BEEFu64) << 64) | BigUint::from(0x1234_5678_9ABC_DEF0u64);
     assert_eq!(m, exp_mask, "wide concat 4s: mask mismatch");
     assert_eq!(v, exp_val, "wide concat 4s: value mismatch");
 }

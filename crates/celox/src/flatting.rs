@@ -252,7 +252,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             collect_inputs_with_window(*then_expr, None, arena, set);
             collect_inputs_with_window(*else_expr, None, arena, set);
         }
-        SLTNode::Constant(_, _, _) => {}
+        SLTNode::Constant(_, _, _, _) => {}
     }
 }
 fn convert_logic_path<A: Hash + Eq + Clone, B: Hash + Eq + Clone>(

@@ -118,7 +118,7 @@ impl<A> SLTNode<A> {
                 }
                 Ok(())
             }
-            SLTNode::Constant(val, _width, _signed) => {
+            SLTNode::Constant(val, _mask, _width, _signed) => {
                 write!(f, "{}", val)
             }
             SLTNode::Binary(lhs, op, rhs) => {
@@ -223,7 +223,7 @@ pub enum SLTNode<A> {
         index: Vec<SLTIndex>,
         access: BitAccess,
     },
-    Constant(BigUint, usize, bool),
+    Constant(BigUint, BigUint, usize, bool),
     Binary(NodeId, BinaryOp, NodeId),
     Unary(UnaryOp, NodeId),
     Mux {
@@ -282,8 +282,8 @@ impl<A> SLTNode<A> {
             }
 
             // Leaf: Constants remain unchanged
-            SLTNode::Constant(val, width, signed) => {
-                SLTNode::Constant(val.clone(), *width, *signed)
+            SLTNode::Constant(val, mask, width, signed) => {
+                SLTNode::Constant(val.clone(), mask.clone(), *width, *signed)
             }
 
             // Recursive cases
@@ -427,7 +427,7 @@ impl<A: fmt::Debug> SLTNode<A> {
                 write!(f, "[{}:{}]", access.lsb, access.msb)?;
                 write!(f, ")")
             }
-            SLTNode::Constant(val, width, _signed) => {
+            SLTNode::Constant(val, _mask, width, _signed) => {
                 write!(f, "{}Const({:#x}, {}bits)", indent, val, width)
             }
             SLTNode::Binary(lhs, op, rhs) => {
@@ -701,7 +701,7 @@ fn eval_dynamic_assign(
 
     let (_, strides, _) = crate::parser::bitaccess::get_dimensions_and_strides(module, dst.id)?;
     let mut stride_iter = strides.iter();
-    let mut offset_node = arena.alloc(SLTNode::Constant(BigUint::from(0u32), 64, false));
+    let mut offset_node = arena.alloc(SLTNode::Constant(BigUint::from(0u32), BigUint::from(0u32), 64, false));
 
     let mut index_exprs = dst.index.0.clone();
     index_exprs.extend(dst.select.0.clone());
@@ -711,7 +711,7 @@ fn eval_dynamic_assign(
         all_sources.extend(sources);
 
         let stride = stride_iter.next().copied().unwrap_or(1);
-        let stride_node = arena.alloc(SLTNode::Constant(BigUint::from(stride), 64, false));
+        let stride_node = arena.alloc(SLTNode::Constant(BigUint::from(stride), BigUint::from(0u32), 64, false));
         let term = arena.alloc(SLTNode::Binary(expr, BinaryOp::Mul, stride_node));
         offset_node = arena.alloc(SLTNode::Binary(offset_node, BinaryOp::Add, term));
     }
@@ -741,7 +741,7 @@ fn eval_dynamic_assign(
     // Compute the bitmask to isolate the target range: mask = !(( (1<<access_width) - 1 ) << offset)
     let mask_base = (BigUint::from(1u32) << access_width) - BigUint::from(1u32);
     // Ensure width consistency; using the full variable width for safety.
-    let mask_constant = arena.alloc(SLTNode::Constant(mask_base, width, false));
+    let mask_constant = arena.alloc(SLTNode::Constant(mask_base, BigUint::from(0u32), width, false));
 
     let mask_shifted = arena.alloc(SLTNode::Binary(mask_constant, BinaryOp::Shl, offset_node));
     let mask_node = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, mask_shifted));
@@ -750,7 +750,7 @@ fn eval_dynamic_assign(
     let rhs_width = get_width(rhs_expr, arena);
     let rhs_widened = if rhs_width < width {
         let padding = width - rhs_width;
-        let zero = arena.alloc(SLTNode::Constant(BigUint::from(0u32), padding, false));
+        let zero = arena.alloc(SLTNode::Constant(BigUint::from(0u32), BigUint::from(0u32), padding, false));
         // Concatenate zero padding to match variable width: {padding'b0, rhs_expr}
         arena.alloc(SLTNode::Concat(vec![
             (zero, padding),
@@ -781,7 +781,7 @@ fn eval_if(
     boundaries.extend(cond_bounds);
 
     // Constant folding: if condition is a constant, inline the appropriate side
-    if let SLTNode::Constant(val, _, _) = arena.get(cond_expr) {
+    if let SLTNode::Constant(val, _, _, _) = arena.get(cond_expr) {
         let side = if *val != BigUint::from(0u32) {
             &stmt.true_side
         } else {
@@ -920,7 +920,7 @@ fn combine_parts<A: Clone + PartialEq + Eq + Hash>(
 ) -> (NodeId, HashSet<VarAtomBase<A>>) {
     if parts.is_empty() {
         return (
-            arena.alloc(SLTNode::Constant(BigUint::from(0u32), 0, false)),
+            arena.alloc(SLTNode::Constant(BigUint::from(0u32), BigUint::from(0u32), 0, false)),
             HashSet::default(),
         );
     }
@@ -1413,6 +1413,7 @@ pub fn eval_expression(
                         // ゼロ拡張: 0をpad
                         let zero = arena.alloc(SLTNode::Constant(
                             BigUint::from(0u8),
+                            BigUint::from(0u32),
                             pad_width,
                             false,
                         ));
@@ -1444,7 +1445,7 @@ pub fn eval_expression(
                 };
                 let lhs_width = get_width(l_expr, arena);
                 let result_node = if exp == 0 {
-                    arena.alloc(SLTNode::Constant(BigUint::from(1u8), lhs_width, false))
+                    arena.alloc(SLTNode::Constant(BigUint::from(1u8), BigUint::from(0u32), lhs_width, false))
                 } else {
                     let mut acc = l_expr;
                     for _ in 1..exp {
@@ -1524,7 +1525,7 @@ pub fn eval_expression(
                     {
                         let width = context_width.unwrap();
                         let zero =
-                            arena.alloc(SLTNode::Constant(BigUint::from(0u8), width - 1, false));
+                            arena.alloc(SLTNode::Constant(BigUint::from(0u8), BigUint::from(0u32), width - 1, false));
                         arena.alloc(SLTNode::Concat(vec![(zero, width - 1), (res, 1)]))
                     } else if matches!(
                         op,
@@ -1544,6 +1545,7 @@ pub fn eval_expression(
                         } else if res_width < width {
                             let zero = arena.alloc(SLTNode::Constant(
                                 BigUint::from(0u8),
+                                BigUint::from(0u32),
                                 res_width - 1,
                                 false,
                             ));
@@ -1672,7 +1674,7 @@ pub fn eval_expression(
                     });
                 } else if part_width < member_width {
                     let pad_width = member_width - part_width;
-                    let pad = arena.alloc(SLTNode::Constant(BigUint::from(0u8), pad_width, false));
+                    let pad = arena.alloc(SLTNode::Constant(BigUint::from(0u8), BigUint::from(0u32), pad_width, false));
                     part_expr = arena.alloc(SLTNode::Concat(vec![
                         (pad, pad_width),
                         (part_expr, part_width),
@@ -1739,6 +1741,7 @@ fn eval_factor(
                             // ゼロ拡張: 0をpad
                             let zero = arena.alloc(SLTNode::Constant(
                                 BigUint::from(0u8),
+                                BigUint::from(0u32),
                                 pad_width,
                                 false,
                             ));
@@ -1767,7 +1770,7 @@ fn eval_factor(
                     crate::parser::bitaccess::get_dimensions_and_strides(module, *var_id)?;
                 let mut stride_iter = strides.iter();
                 let mut offset_node =
-                    arena.alloc(SLTNode::Constant(BigUint::from(0u32), 64, false));
+                    arena.alloc(SLTNode::Constant(BigUint::from(0u32), BigUint::from(0u32), 64, false));
 
                 let mut index_exprs = index.0.clone();
                 index_exprs.extend(select.0.clone());
@@ -1780,7 +1783,7 @@ fn eval_factor(
                     dynamic_indices.push(SLTIndex { node: expr, stride });
 
                     let stride_node =
-                        arena.alloc(SLTNode::Constant(BigUint::from(stride), 64, false));
+                        arena.alloc(SLTNode::Constant(BigUint::from(stride), BigUint::from(0u32), 64, false));
                     let term = arena.alloc(SLTNode::Binary(expr, BinaryOp::Mul, stride_node));
                     offset_node = arena.alloc(SLTNode::Binary(offset_node, BinaryOp::Add, term));
                 }
@@ -1840,6 +1843,7 @@ fn eval_factor(
                             // ゼロ拡張: 0をpad
                             let zero = arena.alloc(SLTNode::Constant(
                                 BigUint::from(0u8),
+                                BigUint::from(0u32),
                                 pad_width,
                                 false,
                             ));
@@ -1860,17 +1864,25 @@ fn eval_factor(
                 Ok(((extracted_expr, all_sources), all_bounds))
             }
         }
-        Factor::Value(v, _) => Ok((
-            (
-                arena.alloc(SLTNode::Constant(
-                    v.get_value().unwrap().payload().into_owned(),
-                    v.get_value().unwrap().width(),
-                    v.get_value().unwrap().signed(),
-                )),
-                HashSet::default(),
-            ),
-            BoundaryMap::default(),
-        )),
+        Factor::Value(v, _) => {
+            let val = v.get_value().unwrap();
+            let mask_xz = val.mask_xz().into_owned();
+            let payload = val.payload().into_owned();
+            // Veryl→Celox encoding: celox_value = payload ^ mask_xz
+            let celox_value = &payload ^ &mask_xz;
+            Ok((
+                (
+                    arena.alloc(SLTNode::Constant(
+                        celox_value,
+                        mask_xz,
+                        val.width(),
+                        val.signed(),
+                    )),
+                    HashSet::default(),
+                ),
+                BoundaryMap::default(),
+            ))
+        }
         Factor::SystemFunctionCall(call, _) => Err(ParserError::UnsupportedCombLowering {
             feature: "system function call in comb expression",
             detail: format!("module `{}`: {call}", module.name),
@@ -1887,7 +1899,7 @@ fn eval_factor(
 pub fn get_width<A>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
     match arena.get(expr) {
         SLTNode::Input { access, .. } => access.msb - access.lsb + 1,
-        SLTNode::Constant(_, width, _) => *width,
+        SLTNode::Constant(_, _, width, _) => *width,
         SLTNode::Binary(lhs, op, rhs) => match op {
             BinaryOp::Eq
             | BinaryOp::Ne
@@ -1934,7 +1946,7 @@ fn merge_boundaries(mut base: BoundaryMap<VarId>, other: BoundaryMap<VarId>) -> 
 fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
     match arena.get(expr) {
         SLTNode::Input { variable: id, .. } => module.variables[id].r#type.signed,
-        SLTNode::Constant(_, _, signed) => *signed,
+        SLTNode::Constant(_, _, _, signed) => *signed,
         SLTNode::Binary(lhs, _, _) => is_signed(module, *lhs, arena),
         SLTNode::Unary(UnaryOp::Minus, _) => true,
         SLTNode::Unary(_, inner) => is_signed(module, *inner, arena),
@@ -2351,23 +2363,23 @@ mod tests {
     fn test_slt_display() {
         let mut arena = SLTNodeArena::<i32>::new();
         // Test simple constant
-        let _const_node = arena.alloc(SLTNode::Constant(BigUint::from(42u32), 8, false));
+        let _const_node = arena.alloc(SLTNode::Constant(BigUint::from(42u32), BigUint::from(0u32), 8, false));
         // fmt_display is not easily callable here without a Formatter, but we can check if it compiles or use a dummy formatter
         // Actually, let's just use a custom wrapper with Display if needed, but for now let's just fix the test to compile.
 
         // Test unary operation
-        let inner = arena.alloc(SLTNode::Constant(BigUint::from(5u32), 4, false));
+        let inner = arena.alloc(SLTNode::Constant(BigUint::from(5u32), BigUint::from(0u32), 4, false));
         let _unary_node = arena.alloc(SLTNode::Unary(UnaryOp::Minus, inner));
 
         // Test binary operation
-        let lhs = arena.alloc(SLTNode::Constant(BigUint::from(1u32), 8, false));
-        let rhs = arena.alloc(SLTNode::Constant(BigUint::from(2u32), 8, false));
+        let lhs = arena.alloc(SLTNode::Constant(BigUint::from(1u32), BigUint::from(0u32), 8, false));
+        let rhs = arena.alloc(SLTNode::Constant(BigUint::from(2u32), BigUint::from(0u32), 8, false));
         let _binary_node = arena.alloc(SLTNode::Binary(lhs, BinaryOp::Add, rhs));
 
         // Test Mux
-        let cond = arena.alloc(SLTNode::Constant(BigUint::from(1u32), 1, false));
-        let then_expr = arena.alloc(SLTNode::Constant(BigUint::from(10u32), 8, false));
-        let else_expr = arena.alloc(SLTNode::Constant(BigUint::from(20u32), 8, false));
+        let cond = arena.alloc(SLTNode::Constant(BigUint::from(1u32), BigUint::from(0u32), 1, false));
+        let then_expr = arena.alloc(SLTNode::Constant(BigUint::from(10u32), BigUint::from(0u32), 8, false));
+        let else_expr = arena.alloc(SLTNode::Constant(BigUint::from(20u32), BigUint::from(0u32), 8, false));
         let _mux_node = arena.alloc(SLTNode::Mux {
             cond,
             then_expr,
@@ -2377,18 +2389,18 @@ mod tests {
         // Test Concat
         let parts = vec![
             (
-                arena.alloc(SLTNode::Constant(BigUint::from(1u32), 4, false)),
+                arena.alloc(SLTNode::Constant(BigUint::from(1u32), BigUint::from(0u32), 4, false)),
                 4,
             ),
             (
-                arena.alloc(SLTNode::Constant(BigUint::from(2u32), 4, false)),
+                arena.alloc(SLTNode::Constant(BigUint::from(2u32), BigUint::from(0u32), 4, false)),
                 4,
             ),
         ];
         let _concat_node = arena.alloc(SLTNode::Concat(parts));
 
         // Test Slice
-        let expr = arena.alloc(SLTNode::Constant(BigUint::from(255u32), 8, false));
+        let expr = arena.alloc(SLTNode::Constant(BigUint::from(255u32), BigUint::from(0u32), 8, false));
         let _slice_node = arena.alloc(SLTNode::Slice {
             expr,
             access: BitAccess::new(2, 5),
@@ -2399,12 +2411,12 @@ mod tests {
     fn test_slt_display_complex() {
         let mut arena = SLTNodeArena::<i32>::new();
         // Display complex nested expression: (a + b) * (c - d)
-        let a = arena.alloc(SLTNode::Constant(BigUint::from(1u32), 32, false));
-        let b = arena.alloc(SLTNode::Constant(BigUint::from(2u32), 32, false));
+        let a = arena.alloc(SLTNode::Constant(BigUint::from(1u32), BigUint::from(0u32), 32, false));
+        let b = arena.alloc(SLTNode::Constant(BigUint::from(2u32), BigUint::from(0u32), 32, false));
         let add_expr = arena.alloc(SLTNode::Binary(a, BinaryOp::Add, b));
 
-        let c = arena.alloc(SLTNode::Constant(BigUint::from(3u32), 32, false));
-        let d = arena.alloc(SLTNode::Constant(BigUint::from(4u32), 32, false));
+        let c = arena.alloc(SLTNode::Constant(BigUint::from(3u32), BigUint::from(0u32), 32, false));
+        let d = arena.alloc(SLTNode::Constant(BigUint::from(4u32), BigUint::from(0u32), 32, false));
         let sub_expr = arena.alloc(SLTNode::Binary(c, BinaryOp::Sub, d));
 
         let _mul_node = arena.alloc(SLTNode::Binary(add_expr, BinaryOp::Mul, sub_expr));

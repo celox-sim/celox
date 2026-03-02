@@ -189,7 +189,7 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             ));
             set
         }
-        crate::logic_tree::SLTNode::Constant(_, _, _) => HashSet::default(),
+        crate::logic_tree::SLTNode::Constant(_, _, _, _) => HashSet::default(),
     };
 
     for &addr in &deps {

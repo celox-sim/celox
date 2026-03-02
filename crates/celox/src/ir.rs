@@ -686,18 +686,30 @@ impl fmt::Display for UnaryOp {
 
 pub struct SIRValue {
     pub payload: BigUint,
+    pub mask: BigUint,
 }
 impl SIRValue {
     pub fn new(payload: impl Into<BigUint>) -> Self {
         Self {
             payload: payload.into(),
+            mask: BigUint::from(0u32),
+        }
+    }
+    pub fn new_four_state(payload: impl Into<BigUint>, mask: impl Into<BigUint>) -> Self {
+        Self {
+            payload: payload.into(),
+            mask: mask.into(),
         }
     }
 }
 
 impl fmt::Display for SIRValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SIRValue({:#x})", self.payload)
+        if self.mask == BigUint::from(0u32) {
+            write!(f, "SIRValue({:#x})", self.payload)
+        } else {
+            write!(f, "SIRValue({:#x}, mask={:#x})", self.payload, self.mask)
+        }
     }
 }
 

@@ -40,12 +40,15 @@ impl SIRTranslator {
 
         if self.options.four_state {
             let mut cl_masks = Vec::with_capacity(num_chunks);
+            let mask_digits = val.mask.to_u64_digits();
             if width <= 64 {
                 let ty = get_cl_type(width);
-                cl_masks.push(state.builder.ins().iconst(ty, 0));
+                let raw_m = mask_digits.first().copied().unwrap_or(0);
+                cl_masks.push(state.builder.ins().iconst(ty, raw_m as i64));
             } else {
-                for _ in 0..num_chunks {
-                    cl_masks.push(state.builder.ins().iconst(types::I64, 0));
+                for i in 0..num_chunks {
+                    let d = mask_digits.get(i).copied().unwrap_or(0);
+                    cl_masks.push(state.builder.ins().iconst(types::I64, d as i64));
                 }
             }
             state.regs.insert(
@@ -170,13 +173,10 @@ impl SIRTranslator {
 
             if self.options.four_state {
                 let val_m = cast_type(state.builder, dst_chunks_m[0], ty);
-                // IEEE 1800 normalization: v &= ~m
-                let not_m = state.builder.ins().bnot(val_m);
-                let safe_v = state.builder.ins().band(val_v, not_m);
                 state.regs.insert(
                     *dst,
                     TransValue::FourState {
-                        values: vec![safe_v],
+                        values: vec![val_v],
                         masks: vec![val_m],
                     },
                 );
@@ -184,19 +184,10 @@ impl SIRTranslator {
                 state.regs.insert(*dst, TransValue::TwoState(vec![val_v]));
             }
         } else if self.options.four_state {
-            // IEEE 1800 normalization: v &= ~m per chunk
-            let safe_chunks_v: Vec<Value> = dst_chunks_v
-                .iter()
-                .zip(dst_chunks_m.iter())
-                .map(|(&v, &m)| {
-                    let not_m = state.builder.ins().bnot(m);
-                    state.builder.ins().band(v, not_m)
-                })
-                .collect();
             state.regs.insert(
                 *dst,
                 TransValue::FourState {
-                    values: safe_chunks_v,
+                    values: dst_chunks_v,
                     masks: dst_chunks_m,
                 },
             );
@@ -465,11 +456,15 @@ impl SIRTranslator {
                     BinaryOp::LogicOr => {
                         // IEEE 1800: 1 is dominant for || (1 || x = 1)
                         let zero = state.builder.ins().iconst(common_ty, 0);
-                        // Definite true: at least one definite-1 bit (v != 0, since normalized)
+                        // Definite true: v & ~m extracts only definite-1 bits
+                        let not_l_m = state.builder.ins().bnot(l_m);
+                        let l_definite_v = state.builder.ins().band(l, not_l_m);
+                        let not_r_m = state.builder.ins().bnot(r_m);
+                        let r_definite_v = state.builder.ins().band(r, not_r_m);
                         let l_def_true =
-                            state.builder.ins().icmp(IntCC::NotEqual, l, zero);
+                            state.builder.ins().icmp(IntCC::NotEqual, l_definite_v, zero);
                         let r_def_true =
-                            state.builder.ins().icmp(IntCC::NotEqual, r, zero);
+                            state.builder.ins().icmp(IntCC::NotEqual, r_definite_v, zero);
                         let either_def_true =
                             state.builder.ins().bor(l_def_true, r_def_true);
 
@@ -497,12 +492,7 @@ impl SIRTranslator {
                     }
                 };
 
-                // IEEE 1800 normalization: value bits at X positions must be 0.
-                // v &= ~m is safe for all ops: Bit regs have mask=0 so v is unchanged.
-                let not_m = state.builder.ins().bnot(res_m);
-                let safe_res_v = state.builder.ins().band(res_v, not_m);
-
-                let final_res_v = cast_type(state.builder, safe_res_v, dst_ty);
+                let final_res_v = cast_type(state.builder, res_v, dst_ty);
                 let final_res_m = cast_type(state.builder, res_m, dst_ty);
                 state.regs.insert(
                     *dst,
@@ -781,15 +771,37 @@ impl SIRTranslator {
                             state.builder.ins().bor(l_def_false, r_def_false)
                         } else {
                             // 1 is dominant: check if either operand is definite true
-                            // definite true = v != 0 (since normalized, v != 0 means definite 1)
+                            // definite true = (v & ~m) != 0 — only definite-1 bits count
+                            let mut l_definite_or =
+                                state.builder.ins().iconst(types::I64, 0);
+                            let mut r_definite_or =
+                                state.builder.ins().iconst(types::I64, 0);
+                            for i in 0..num_chunks {
+                                let lv =
+                                    get_chunk_as_i64(state.builder, &l_chunks, i);
+                                let lm =
+                                    get_chunk_as_i64(state.builder, &l_masks, i);
+                                let rv =
+                                    get_chunk_as_i64(state.builder, &r_chunks, i);
+                                let rm =
+                                    get_chunk_as_i64(state.builder, &r_masks, i);
+                                let not_lm = state.builder.ins().bnot(lm);
+                                let l_def = state.builder.ins().band(lv, not_lm);
+                                let not_rm = state.builder.ins().bnot(rm);
+                                let r_def = state.builder.ins().band(rv, not_rm);
+                                l_definite_or =
+                                    state.builder.ins().bor(l_definite_or, l_def);
+                                r_definite_or =
+                                    state.builder.ins().bor(r_definite_or, r_def);
+                            }
                             let l_def_true = state
                                 .builder
                                 .ins()
-                                .icmp(IntCC::NotEqual, l_val_or, zero);
+                                .icmp(IntCC::NotEqual, l_definite_or, zero);
                             let r_def_true = state
                                 .builder
                                 .ins()
-                                .icmp(IntCC::NotEqual, r_val_or, zero);
+                                .icmp(IntCC::NotEqual, r_definite_or, zero);
                             state.builder.ins().bor(l_def_true, r_def_true)
                         };
 
@@ -831,20 +843,10 @@ impl SIRTranslator {
                         state.builder.ins().band(res_masks[last_idx], width_mask);
                 }
 
-                // IEEE 1800 normalization: v &= ~m per chunk
-                let safe_chunks: Vec<Value> = res_chunks
-                    .iter()
-                    .zip(res_masks.iter())
-                    .map(|(&v, &m)| {
-                        let not_m = state.builder.ins().bnot(m);
-                        state.builder.ins().band(v, not_m)
-                    })
-                    .collect();
-
                 state.regs.insert(
                     *dst,
                     TransValue::FourState {
-                        values: safe_chunks,
+                        values: res_chunks,
                         masks: res_masks,
                     },
                 );
@@ -977,13 +979,10 @@ impl SIRTranslator {
                     }
                 };
 
-                // IEEE 1800 normalization: v &= ~m
-                let not_m = state.builder.ins().bnot(res_m);
-                let safe_res_v = state.builder.ins().band(res_v, not_m);
                 let final_res_v = if common_ty.bits() > dst_ty.bits() {
-                    state.builder.ins().ireduce(dst_ty, safe_res_v)
+                    state.builder.ins().ireduce(dst_ty, res_v)
                 } else {
-                    safe_res_v
+                    res_v
                 };
                 let final_res_m = if common_ty.bits() > dst_ty.bits() {
                     state.builder.ins().ireduce(dst_ty, res_m)
@@ -1154,20 +1153,10 @@ impl SIRTranslator {
                         state.builder.ins().band(res_masks[last_idx], width_mask);
                 }
 
-                // IEEE 1800 normalization: v &= ~m per chunk
-                let safe_chunks: Vec<Value> = res_chunks
-                    .iter()
-                    .zip(res_masks.iter())
-                    .map(|(&v, &m)| {
-                        let not_m = state.builder.ins().bnot(m);
-                        state.builder.ins().band(v, not_m)
-                    })
-                    .collect();
-
                 state.regs.insert(
                     *dst,
                     TransValue::FourState {
-                        values: safe_chunks,
+                        values: res_chunks,
                         masks: res_masks,
                     },
                 );

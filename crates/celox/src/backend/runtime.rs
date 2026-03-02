@@ -274,8 +274,11 @@ impl JitBackend {
                 if is_4state {
                     let allocated_size = super::get_byte_size(width);
                     unsafe {
-                        let mask_ptr =
-                            (backend.memory.as_mut_ptr() as *mut u8).add(offset + allocated_size);
+                        let base_ptr =
+                            (backend.memory.as_mut_ptr() as *mut u8).add(offset);
+                        // X = (v=1, m=1): fill both value and mask with 0xFF
+                        std::ptr::write_bytes(base_ptr, 0xFF, allocated_size);
+                        let mask_ptr = base_ptr.add(allocated_size);
                         std::ptr::write_bytes(mask_ptr, 0xFF, allocated_size);
                     }
                 }
@@ -292,8 +295,11 @@ impl JitBackend {
                 if is_4state {
                     let allocated_size = super::get_byte_size(width);
                     unsafe {
-                        let mask_ptr =
-                            (backend.memory.as_mut_ptr() as *mut u8).add(offset + allocated_size);
+                        let base_ptr =
+                            (backend.memory.as_mut_ptr() as *mut u8).add(offset);
+                        // X = (v=1, m=1): fill both value and mask with 0xFF
+                        std::ptr::write_bytes(base_ptr, 0xFF, allocated_size);
+                        let mask_ptr = base_ptr.add(allocated_size);
                         std::ptr::write_bytes(mask_ptr, 0xFF, allocated_size);
                     }
                 }
