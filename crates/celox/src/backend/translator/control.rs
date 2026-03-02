@@ -8,7 +8,7 @@ use super::core::cast_type;
 /// Collect the Cranelift types of all parameters declared on a block.
 /// This is used to ensure block-call arguments are cast to the exact
 /// types the target block expects, avoiding Cranelift verifier errors
-/// such as "arg vN has type i8, expected i32".
+/// such as "arg vN has type i8, expected i16" or "expected i32".
 fn collect_block_param_types(state: &TranslationState, cl_block: Block) -> Vec<Type> {
     let dfg = &state.builder.func.dfg;
     dfg.block_params(cl_block)
@@ -32,6 +32,11 @@ impl SIRTranslator {
                 // Block params use one Cranelift param per SIR param in 2-state mode,
                 // and two (value + mask) in 4-state mode.
                 let param_types = collect_block_param_types(state, target_cl_block);
+                debug_assert_eq!(
+                    param_types.len(),
+                    if self.options.four_state { params.len() * 2 } else { params.len() },
+                    "SIR Jump arg count does not match target block param count"
+                );
 
                 let mut cl_args: Vec<BlockArg> = Vec::new();
                 for (i, reg) in params.iter().enumerate() {
@@ -62,6 +67,16 @@ impl SIRTranslator {
 
                 let t_param_types = collect_block_param_types(state, block_map[t_id]);
                 let f_param_types = collect_block_param_types(state, block_map[f_id]);
+                debug_assert_eq!(
+                    t_param_types.len(),
+                    if self.options.four_state { t_args.len() * 2 } else { t_args.len() },
+                    "SIR Branch true-arg count does not match target block param count"
+                );
+                debug_assert_eq!(
+                    f_param_types.len(),
+                    if self.options.four_state { f_args.len() * 2 } else { f_args.len() },
+                    "SIR Branch false-arg count does not match target block param count"
+                );
 
                 let mut cl_t_args: Vec<BlockArg> = Vec::new();
                 for (i, reg) in t_args.iter().enumerate() {
@@ -106,8 +121,8 @@ impl SIRTranslator {
                 if let Some(next_block) = next_unit_entry {
                     state.builder.ins().jump(next_block, &[]);
                 } else {
-                    let suucess = state.builder.ins().iconst(types::I64, 0);
-                    state.builder.ins().return_(&[suucess]);
+                    let success = state.builder.ins().iconst(types::I64, 0);
+                    state.builder.ins().return_(&[success]);
                 }
             }
             crate::ir::SIRTerminator::Error(code) => {
