@@ -780,6 +780,19 @@ fn eval_if(
         eval_expression(module, &initial_store, &stmt.cond, arena, None)?;
     boundaries.extend(cond_bounds);
 
+    // Constant folding: if condition is a constant, inline the appropriate side
+    if let SLTNode::Constant(val, _, _) = arena.get(cond_expr) {
+        let side = if *val != BigUint::from(0u32) {
+            &stmt.true_side
+        } else {
+            &stmt.false_side
+        };
+        return side.iter().try_fold(
+            (initial_store, boundaries),
+            |(s, b), step| eval_statement(module, s, b, step, arena),
+        );
+    }
+
     // Evaluate Then and Else paths independently
     let (then_store, b_then) = stmt.true_side.iter().try_fold(
         (initial_store.clone(), boundaries.clone()),

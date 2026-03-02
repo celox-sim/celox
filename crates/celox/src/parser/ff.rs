@@ -166,6 +166,19 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
+        // Constant folding: if condition is compile-time constant, inline the appropriate side
+        if let Some(const_val) = self.get_constant_value(&stmt.cond) {
+            let side = if const_val != 0 {
+                &stmt.true_side
+            } else {
+                &stmt.false_side
+            };
+            for s in side {
+                self.parse_statement(s, targets, domain, convert, sources, ir_builder)?;
+            }
+            return Ok(());
+        }
+
         // 1. Evaluate condition expression
         self.parse_expression(
             &stmt.cond, targets, domain, convert, sources, ir_builder, None,
