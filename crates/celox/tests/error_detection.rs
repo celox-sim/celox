@@ -412,3 +412,44 @@ fn test_sv_module_instance_returns_unsupported_parser_error() {
         Ok(_) => panic!("expected UnsupportedSimulatorParser for $sv module, got Ok"),
     }
 }
+
+#[test]
+fn test_top_not_found_returns_error() {
+    let code = r#"
+        module Foo (a: input logic, b: output logic) {
+            assign b = a;
+        }
+    "#;
+
+    let result = Simulator::builder(code, "NonExistentTop").build();
+
+    match result {
+        Err(SimulatorError::SIRParser(ParserError::TopNotFound { name })) => {
+            assert_eq!(name, "NonExistentTop");
+        }
+        Err(e) => panic!("expected TopNotFound, got {e:?}"),
+        Ok(_) => panic!("expected TopNotFound, got Ok"),
+    }
+}
+
+#[test]
+fn test_generic_top_returns_error() {
+    let code = r#"
+        module GenericPass::<T: type> (
+            a: input  T,
+            b: output T,
+        ) {
+            assign b = a;
+        }
+    "#;
+
+    let result = Simulator::builder(code, "GenericPass").build();
+
+    match result {
+        Err(SimulatorError::SIRParser(ParserError::GenericTop { name })) => {
+            assert_eq!(name, "GenericPass");
+        }
+        Err(e) => panic!("expected GenericTop, got {e:?}"),
+        Ok(_) => panic!("expected GenericTop, got Ok"),
+    }
+}
