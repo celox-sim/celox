@@ -79,6 +79,11 @@ export interface NapiInstanceSegment {
   index: number;
 }
 
+export interface NapiParamOverride {
+  name: string;
+  value: number;
+}
+
 export interface NapiOptions {
   fourState?: boolean;
   vcd?: string;
@@ -88,6 +93,7 @@ export interface NapiOptions {
   clockType?: string;
   resetType?: string;
   extraSource?: string;
+  parameters?: NapiParamOverride[];
 }
 
 export interface RawNapiAddon {
@@ -225,6 +231,13 @@ export function buildNapiOpts(options?: SimulatorOptions): NapiOptions | undefin
   }
   if (options.extraSource) {
     napiOpts.extraSource = options.extraSource;
+    hasOpt = true;
+  }
+  if (options.parameters && options.parameters.length > 0) {
+    napiOpts.parameters = options.parameters.map((p) => ({
+      name: p.name,
+      value: typeof p.value === "bigint" ? Number(p.value) : p.value,
+    }));
     hasOpt = true;
   }
 

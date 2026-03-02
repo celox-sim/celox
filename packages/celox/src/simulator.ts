@@ -108,14 +108,19 @@ export class Simulator<P = Record<string, unknown>> {
       );
     }
 
-    const { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType } = options ?? {};
-    const result = createFn(module.source, module.name, { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType });
+    const { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType, parameters } = options ?? {};
+    const result = createFn(module.source, module.name, { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType, parameters });
     const state: DirtyState = { dirty: false };
 
+    // Always prefer NAPI-derived ports (from hierarchy) over module.ports.
+    // module.ports has widths/arrayDims baked at generation time, which become
+    // stale when parameters are overridden. hierarchy.ports reflects the actual
+    // compiled layout, consistent with fromSource()/fromProject().
+    const portDefs = result.hierarchy?.ports ?? module.ports;
     const dut = createDut<P>(
       result.buffer,
       result.layout,
-      module.ports,
+      portDefs,
       result.handle,
       state,
       result.hierarchy,

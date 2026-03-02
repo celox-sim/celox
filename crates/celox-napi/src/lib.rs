@@ -39,6 +39,13 @@ pub struct NapiTrueLoop {
     pub max_iter: u32,
 }
 
+/// A parameter override for a top-level module parameter.
+#[napi(object)]
+pub struct NapiParamOverride {
+    pub name: String,
+    pub value: i64,
+}
+
 /// Options for creating a simulator/simulation handle.
 #[napi(object)]
 pub struct NapiOptions {
@@ -53,6 +60,8 @@ pub struct NapiOptions {
     pub reset_type: Option<String>,
     /// Additional Veryl source to append to the main source code.
     pub extra_source: Option<String>,
+    /// Parameter overrides for the top-level module.
+    pub parameters: Option<Vec<NapiParamOverride>>,
 }
 
 /// Parsed builder options from NapiOptions.
@@ -72,6 +81,7 @@ struct ParsedOptions {
     clock_type: Option<celox::ClockType>,
     reset_type: Option<celox::ResetType>,
     extra_source: Option<String>,
+    parameters: Vec<(String, u64)>,
 }
 
 /// Convert a NapiSignalPath to the Rust builder's tuple format.
@@ -151,6 +161,16 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                 .as_deref()
                 .map(parse_reset_type)
                 .transpose()?;
+            let parameters = o
+                .parameters
+                .as_ref()
+                .map(|params| {
+                    params
+                        .iter()
+                        .map(|p| (p.name.clone(), p.value as u64))
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(ParsedOptions {
                 four_state: o.four_state.unwrap_or(false),
                 optimize: o.optimize,
@@ -160,6 +180,7 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                 clock_type,
                 reset_type,
                 extra_source: o.extra_source.clone(),
+                parameters,
             })
         }
         None => Ok(ParsedOptions {
@@ -171,6 +192,7 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
             clock_type: None,
             reset_type: None,
             extra_source: None,
+            parameters: Vec::new(),
         }),
     }
 }
@@ -229,6 +251,9 @@ fn apply_options<'a, T>(
     }
     if let Some(rt) = opts.reset_type {
         builder = builder.reset_type(rt);
+    }
+    for (name, value) in &opts.parameters {
+        builder = builder.param(name, *value);
     }
     builder
 }

@@ -103,14 +103,16 @@ export class Simulation<P = Record<string, unknown>> {
       );
     }
 
-    const { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType } = options ?? {};
-    const result = createFn(module.source, module.name, { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType });
+    const { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType, parameters } = options ?? {};
+    const result = createFn(module.source, module.name, { fourState, vcd, optimize, falseLoops, trueLoops, clockType, resetType, parameters });
     const state: DirtyState = { dirty: false };
 
+    // Always prefer NAPI-derived ports over module.ports (see simulator.ts).
+    const portDefs = result.hierarchy?.ports ?? module.ports;
     const dut = createDut<P>(
       result.buffer,
       result.layout,
-      module.ports,
+      portDefs,
       result.handle,
       state,
       result.hierarchy,

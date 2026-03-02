@@ -1,6 +1,9 @@
 use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
+use veryl_analyzer::ir::{Comptime, Expression, VarPath};
+use veryl_analyzer::value::Value;
 use veryl_metadata::{ClockType, Metadata, ResetType};
 use veryl_parser::Parser;
+use veryl_parser::resource_table;
 
 use super::Simulator;
 use crate::{ParserError, SimulatorError, backend::JitBackend, ir::Program, parser};
@@ -24,6 +27,7 @@ fn analyze(
     metadata: Option<Metadata>,
     clock_type: Option<ClockType>,
     reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
 ) -> (Result<Program, ParserError>, Vec<AnalyzerError>) {
     symbol_table::clear();
     attribute_table::clear();
@@ -32,6 +36,20 @@ fn analyze(
     let parser = Parser::parse(code, &"").unwrap();
     let analyzer = Analyzer::new(&metadata);
     let mut context = Context::default();
+
+    if !param_overrides.is_empty() {
+        let mut override_map = fxhash::FxHashMap::default();
+        let token = veryl_parser::token_range::TokenRange::default();
+        for (name, value) in param_overrides {
+            let name_id = resource_table::insert_str(name);
+            let path = VarPath::new(name_id);
+            let val = Value::new(*value, 64, false);
+            let comptime = Comptime::create_value(val.clone(), token);
+            let expr = Expression::create_value(val, token);
+            override_map.insert(path, (comptime, expr));
+        }
+        context.push_override(override_map);
+    }
 
     let mut ir = Ir::default();
 
@@ -85,6 +103,7 @@ pub(crate) fn compile_to_sir(
     metadata: Option<Metadata>,
     clock_type: Option<ClockType>,
     reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
 ) -> Result<Program, ParserError> {
     let (sir, errors) = analyze(
         code,
@@ -98,6 +117,7 @@ pub(crate) fn compile_to_sir(
         metadata,
         clock_type,
         reset_type,
+        param_overrides,
     );
     if !errors.is_empty() {
         panic!("Compiler errors found: {:?}", errors);
@@ -148,6 +168,7 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
     metadata: Option<Metadata>,
     clock_type: Option<ClockType>,
     reset_type: Option<ResetType>,
+    param_overrides: Vec<(String, u64)>,
     _marker: std::marker::PhantomData<Target>,
 }
 
@@ -168,6 +189,16 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Override the reset type (async_high/async_low/sync_high/sync_low) from metadata or defaults.
     pub fn reset_type(mut self, reset_type: ResetType) -> Self {
         self.reset_type = Some(reset_type);
+        self
+    }
+
+    /// Override a top-level module parameter value.
+    ///
+    /// The value is injected into the Veryl analyzer's `Context` before
+    /// analysis pass 2, so all downstream elaboration sees the overridden
+    /// constant.
+    pub fn param(mut self, name: &str, value: u64) -> Self {
+        self.param_overrides.push((name.to_string(), value));
         self
     }
 
@@ -294,6 +325,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             metadata: None,
             clock_type: None,
             reset_type: None,
+            param_overrides: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -312,6 +344,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.metadata,
             self.clock_type,
             self.reset_type,
+            &self.param_overrides,
         )
         .map_err(SimulatorError::SIRParser)?;
         let backend = JitBackend::new(&program, &self.options, None)?;
@@ -342,6 +375,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.metadata,
             self.clock_type,
             self.reset_type,
+            &self.param_overrides,
         )
         .map_err(SimulatorError::SIRParser);
 
@@ -376,6 +410,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             metadata: None,
             clock_type: None,
             reset_type: None,
+            param_overrides: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -395,6 +430,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             self.metadata,
             self.clock_type,
             self.reset_type,
+            &self.param_overrides,
         )
         .map_err(SimulatorError::SIRParser)?;
         let backend = JitBackend::new(&program, &self.options, None)?;

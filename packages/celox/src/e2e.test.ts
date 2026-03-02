@@ -1430,6 +1430,55 @@ module Top (
 }
 `;
 
+// ---------------------------------------------------------------------------
+// Parameter override: DUT correctness tests
+// ---------------------------------------------------------------------------
+
+const PARAM_WIDTH_SOURCE = `
+module ParamWidth #(
+    param WIDTH: u32 = 8,
+)(
+    a: input  logic<WIDTH>,
+    b: output logic<WIDTH>,
+) {
+    assign b = a;
+}
+`;
+
+const PARAM_OFFSET_SOURCE = `
+module ParamOffset #(
+    param OFFSET: u32 = 10,
+)(
+    a: input  logic<32>,
+    b: output logic<32>,
+) {
+    assign b = a + OFFSET;
+}
+`;
+
+const PARAM_CHILD_SOURCE = `
+module Child #(
+    param WIDTH: u32 = 8,
+)(
+    i_data: input  logic<WIDTH>,
+    o_data: output logic<WIDTH>,
+) {
+    assign o_data = i_data;
+}
+
+module ParamChild #(
+    param WIDTH: u32 = 8,
+)(
+    a: input  logic<WIDTH>,
+    b: output logic<WIDTH>,
+) {
+    inst u_child: Child #(WIDTH: WIDTH) (
+        i_data: a,
+        o_data: b,
+    );
+}
+`;
+
 describe("E2E: child instance DUT access", () => {
   test("Simulator: read child instance ports via dut.u_sub", () => {
     const sim = Simulator.fromSource(HIERARCHY_SOURCE, "Top");
@@ -1468,6 +1517,140 @@ describe("E2E: child instance DUT access", () => {
     sim.runUntil(60);
     expect((sim.dut as any).u_sub.o_data).toBe(0xFFn);
 
+    sim.dispose();
+  });
+});
+
+describe("E2E: parameter override — DUT correctness", () => {
+  test("scalar width override: WIDTH 8→16 via fromSource", () => {
+    interface Ports {
+      a: bigint;
+      readonly b: bigint;
+    }
+
+    // Default WIDTH=8 (purely combinational — read output to trigger evalComb)
+    const sim8 = Simulator.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth");
+    sim8.dut.a = 0xABn;
+    expect(sim8.dut.b).toBe(0xABn);
+    // Writing a 16-bit value to an 8-bit port should truncate
+    sim8.dut.a = 0xABCDn;
+    expect(sim8.dut.b).toBe(0xCDn); // truncated to 8 bits
+    sim8.dispose();
+
+    // Override WIDTH=16 — DUT should handle 16-bit values
+    const sim16 = Simulator.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth", {
+      parameters: [{ name: "WIDTH", value: 16 }],
+    });
+    sim16.dut.a = 0xABCDn;
+    expect(sim16.dut.b).toBe(0xABCDn); // full 16-bit value preserved
+    sim16.dispose();
+  });
+
+  test("scalar width override: WIDTH 8→32 via fromSource", () => {
+    interface Ports {
+      a: bigint;
+      readonly b: bigint;
+    }
+
+    const sim = Simulator.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth", {
+      parameters: [{ name: "WIDTH", value: 32 }],
+    });
+    sim.dut.a = 0xDEAD_BEEFn;
+    expect(sim.dut.b).toBe(0xDEAD_BEEFn);
+    sim.dispose();
+  });
+
+  test("param value reflected in logic via fromSource", () => {
+    interface Ports {
+      a: bigint;
+      readonly b: bigint;
+    }
+
+    // Default OFFSET=10
+    const sim10 = Simulator.fromSource<Ports>(PARAM_OFFSET_SOURCE, "ParamOffset");
+    sim10.dut.a = 5n;
+    expect(sim10.dut.b).toBe(15n);
+    sim10.dispose();
+
+    // Override OFFSET=100
+    const sim100 = Simulator.fromSource<Ports>(PARAM_OFFSET_SOURCE, "ParamOffset", {
+      parameters: [{ name: "OFFSET", value: 100 }],
+    });
+    sim100.dut.a = 5n;
+    expect(sim100.dut.b).toBe(105n);
+    sim100.dispose();
+  });
+
+  test("child module param propagation via fromSource", () => {
+    interface Ports {
+      a: bigint;
+      readonly b: bigint;
+    }
+
+    // Default WIDTH=8
+    const sim8 = Simulator.fromSource<Ports>(PARAM_CHILD_SOURCE, "ParamChild");
+    sim8.dut.a = 0xABn;
+    expect(sim8.dut.b).toBe(0xABn);
+    sim8.dispose();
+
+    // Override WIDTH=16 — child also gets 16-bit ports
+    const sim16 = Simulator.fromSource<Ports>(PARAM_CHILD_SOURCE, "ParamChild", {
+      parameters: [{ name: "WIDTH", value: 16 }],
+    });
+    sim16.dut.a = 0xABCDn;
+    expect(sim16.dut.b).toBe(0xABCDn);
+    sim16.dispose();
+  });
+
+  test("Simulator.create() with stale ModuleDefinition + param override", () => {
+    // This is the most dangerous case: ModuleDefinition has width=8 (stale),
+    // but we override WIDTH=16. The DUT must use runtime-derived ports
+    // from hierarchy, not the stale module.ports.
+    interface Ports {
+      a: bigint;
+      readonly b: bigint;
+    }
+
+    const addon = loadNativeAddon();
+    const nativeCreate = createSimulatorBridge(addon);
+
+    const sim = Simulator.create<Ports>(
+      {
+        __celox_module: true,
+        name: "ParamWidth",
+        source: PARAM_WIDTH_SOURCE,
+        ports: {
+          // STALE: these say width=8, but we'll override to 16
+          a: { direction: "input", type: "logic", width: 8 },
+          b: { direction: "output", type: "logic", width: 8 },
+        },
+        events: [],
+      },
+      {
+        __nativeCreate: nativeCreate,
+        parameters: [{ name: "WIDTH", value: 16 }],
+      },
+    );
+
+    // If DUT used stale ports (width=8), this would truncate or corrupt
+    sim.dut.a = 0xABCDn;
+    expect(sim.dut.b).toBe(0xABCDn); // full 16-bit value preserved
+    sim.dispose();
+  });
+
+  test("Simulation.fromSource with param override", () => {
+    interface Ports {
+      a: bigint;
+      readonly b: bigint;
+    }
+
+    const sim = Simulation.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth", {
+      parameters: [{ name: "WIDTH", value: 16 }],
+    });
+
+    sim.dut.a = 0xFEDCn;
+    sim.runUntil(0);
+    expect(sim.dut.b).toBe(0xFEDCn);
     sim.dispose();
   });
 });

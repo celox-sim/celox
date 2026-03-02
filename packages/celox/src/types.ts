@@ -140,6 +140,14 @@ export interface SimulatorOptions {
   resetType?: "async_high" | "async_low" | "sync_high" | "sync_low";
   /** Additional Veryl source to append to the main source code. */
   extraSource?: string;
+  /** Top-level module parameter overrides. */
+  parameters?: ParamOverride[];
+}
+
+/** A parameter override for a top-level module parameter. */
+export interface ParamOverride {
+  name: string;
+  value: number | bigint;
 }
 
 // ---------------------------------------------------------------------------

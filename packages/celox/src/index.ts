@@ -13,6 +13,7 @@ export type {
   ModuleDefinition,
   PortInfo,
   SimulatorOptions,
+  ParamOverride,
   EventHandle,
   FourStateValue,
   LoopBreak,
