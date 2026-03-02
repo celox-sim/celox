@@ -95,5 +95,27 @@ fn test_array_literal_nested_default_multidim_assignment() {
     assert_eq!(sim.get(o11), 0xAAu8.into());
 }
 
-
+#[test]
+fn test_array_literal_single_element_fills_param_sized_array() {
+    // '{val} with a single element (no `default:` keyword) should fill all positions
+    // when applied to a param-sized array, matching SV assignment-pattern semantics.
+    let code = r#"
+        module Top #(param N: u32 = 3) (
+            i_clk: input clock,
+            i_rst: input reset,
+            o0: output logic<8>,
+        ) {
+            var arr: logic<8> [N];
+            assign o0 = arr[0];
+            always_ff (i_clk, i_rst) {
+                if_reset {
+                    arr = '{0};
+                } else {
+                    arr[0] = 8'hAB;
+                }
+            }
+        }
+    "#;
+    Simulator::builder(code, "Top").build().unwrap();
+}
 
