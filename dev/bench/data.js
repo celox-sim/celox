@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772465141502,
+  "lastUpdate": 1772472322223,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -791,6 +791,72 @@ window.BENCHMARK_DATA = {
             "name": "rust/testbench_tick_top_n1000_x1000000",
             "value": 183861.703,
             "range": "± 147.137 us",
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6e9c7785592164679176dbd284d3eba787b72074",
+          "message": "Merge pull request #2 from celox-sim/claude/param-override\n\nSupport static partial assignments in function body lowering",
+          "timestamp": "2026-03-03T02:16:28+09:00",
+          "tree_id": "91cfd658fa24ffecfd621c3fdc2d9f9ec8a89557",
+          "url": "https://github.com/celox-sim/celox/commit/6e9c7785592164679176dbd284d3eba787b72074"
+        },
+        "date": 1772472321183,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "rust/simulator_tick_x10000",
+            "value": 1592.148,
+            "range": "± 34.769 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_step_x20000",
+            "value": 9877.877,
+            "range": "± 35.336 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_top_n1000",
+            "value": 763972.259,
+            "range": "± 9761.406 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1",
+            "value": 0.158,
+            "range": "± 0.002 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1000000",
+            "value": 159468.323,
+            "range": "± 2834.050 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1",
+            "value": 0.319,
+            "range": "± 0.008 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1000000",
+            "value": 323365.096,
+            "range": "± 1508.555 us",
             "unit": "us"
           }
         ]
