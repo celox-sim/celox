@@ -2,7 +2,7 @@ use crate::HashMap;
 use crate::flatting;
 use crate::ir::{AbsoluteAddr, InstanceId, InstancePath, ModuleId};
 use crate::logic_tree::SLTNodeArena;
-use crate::parser::module::{ModuleParser, resolve_module_name};
+use crate::parser::module::ModuleParser;
 use veryl_analyzer::{
     Analyzer, Context,
     ir::{Component, Declaration, Ir, VarId},
@@ -50,7 +50,11 @@ fn setup_to_flatting(
         let inst_ids: Vec<ModuleId> = module.declarations.iter()
             .filter_map(|d| match d {
                 Declaration::Inst(inst) => {
-                    let child_name = resolve_module_name(&inst.component);
+                    let child_name = match &inst.component {
+                        Component::Module(m) => m.name,
+                        Component::SystemVerilog(sv) => sv.name,
+                        Component::Interface(_) => unreachable!(),
+                    };
                     Some(name_to_id[&child_name])
                 }
                 _ => None,

@@ -303,7 +303,7 @@ fn convert_glue_block(
 mod tests {
     use super::*;
     use crate::ir::ModuleId;
-    use crate::parser::module::{ModuleParser, resolve_module_name};
+    use crate::parser::module::ModuleParser;
     use veryl_analyzer::{
         self, Analyzer, Context, attribute_table,
         ir::{Component, Declaration, Ir, VarPath},
@@ -347,7 +347,11 @@ mod tests {
             let inst_ids: Vec<ModuleId> = module.declarations.iter()
                 .filter_map(|d| match d {
                     Declaration::Inst(inst) => {
-                        let child_name = resolve_module_name(&inst.component);
+                        let child_name = match &inst.component {
+                            Component::Module(m) => m.name,
+                            Component::SystemVerilog(sv) => sv.name,
+                            Component::Interface(_) => unreachable!(),
+                        };
                         Some(name_to_id[&child_name])
                     }
                     _ => None,

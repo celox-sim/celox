@@ -31,16 +31,6 @@ pub struct ModuleParser<'a> {
     reset_clock_map: HashMap<VarId, VarId>,
 }
 
-pub(crate) fn resolve_module_name(component: &Component) -> StrId {
-    match component {
-        Component::Module(module) => module.name,
-        Component::Interface(_) => {
-            unreachable!("Interface component must be eliminated before resolve_module_name")
-        }
-        Component::SystemVerilog(system_verilog) => system_verilog.name,
-    }
-}
-
 impl<'a> ModuleParser<'a> {
     pub fn parse(
         module: &'a Module,
