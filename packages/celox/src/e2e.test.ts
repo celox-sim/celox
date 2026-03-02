@@ -1400,3 +1400,74 @@ describe("parseSignalPath", () => {
     expect(result.varPath).toEqual(["foo", "bar", "baz"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Child instance DUT access
+// ---------------------------------------------------------------------------
+
+const HIERARCHY_SOURCE = `
+module Sub (
+    clk: input clock,
+    i_data: input logic<8>,
+    o_data: output logic<8>,
+) {
+    always_comb {
+        o_data = i_data;
+    }
+}
+
+module Top (
+    clk: input clock,
+    rst: input reset,
+    top_in: input logic<8>,
+    top_out: output logic<8>,
+) {
+    inst u_sub: Sub (
+        clk,
+        i_data: top_in,
+        o_data: top_out,
+    );
+}
+`;
+
+describe("E2E: child instance DUT access", () => {
+  test("Simulator: read child instance ports via dut.u_sub", () => {
+    const sim = Simulator.fromSource(HIERARCHY_SOURCE, "Top");
+
+    sim.dut.top_in = 0xABn;
+    sim.tick();
+    expect(sim.dut.top_out).toBe(0xABn);
+
+    // Read the same value through the child instance accessor
+    expect((sim.dut as any).u_sub.o_data).toBe(0xABn);
+    expect((sim.dut as any).u_sub.i_data).toBe(0xABn);
+
+    // Change top-level input and verify child reflects it
+    sim.dut.top_in = 0x42n;
+    sim.tick();
+    expect((sim.dut as any).u_sub.i_data).toBe(0x42n);
+    expect((sim.dut as any).u_sub.o_data).toBe(0x42n);
+
+    sim.dispose();
+  });
+
+  test("Simulation: read child instance ports via dut.u_sub", () => {
+    const sim = Simulation.fromSource(HIERARCHY_SOURCE, "Top");
+    sim.addClock("clk", { period: 10 });
+
+    sim.dut.rst = 0n;
+    sim.runUntil(20);
+    sim.dut.rst = 1n;
+
+    sim.dut.top_in = 0x55n;
+    sim.runUntil(40);
+    expect((sim.dut as any).u_sub.o_data).toBe(0x55n);
+    expect((sim.dut as any).u_sub.i_data).toBe(0x55n);
+
+    sim.dut.top_in = 0xFFn;
+    sim.runUntil(60);
+    expect((sim.dut as any).u_sub.o_data).toBe(0xFFn);
+
+    sim.dispose();
+  });
+});
