@@ -1,3 +1,5 @@
 mod generator;
 
-pub use generator::{GeneratedModule, JsonModuleEntry, JsonOutput, JsonPortInfo, generate_all};
+pub use generator::{
+    GeneratedModule, JsonInstanceInfo, JsonModuleEntry, JsonOutput, JsonPortInfo, generate_all,
+};

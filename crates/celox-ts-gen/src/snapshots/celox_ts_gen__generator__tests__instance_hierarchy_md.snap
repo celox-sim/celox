@@ -1,0 +1,19 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: top.md_content
+---
+# Top
+
+## Ports
+
+| Port | Direction | Type | Width | TS Type | 4-State |
+|------|-----------|------|-------|---------|--------|
+| rst | input | reset | 1 | `bigint` | yes |
+| top_in | input | logic | 8 | `bigint` | yes |
+| top_out | output | logic | 8 | `bigint` (readonly) | yes |
+
+## Events
+
+| Event | Port |
+|-------|------|
+| clk | clk |

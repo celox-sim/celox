@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
-use veryl_analyzer::ir::{Component, Ir, TypeKind, VarKind};
+use veryl_analyzer::ir::{Component, Declaration, Ir, Module, TypeKind, VarKind};
 use veryl_parser::resource_table;
 
 /// A generated TypeScript module definition (`.d.ts` + `.js` + `.md` content).
@@ -12,6 +12,7 @@ pub struct GeneratedModule {
     pub md_content: String,
     pub ports: HashMap<String, JsonPortInfo>,
     pub events: Vec<String>,
+    pub instances: Vec<JsonInstanceInfo>,
 }
 
 /// JSON-serializable port information for `--json` output.
@@ -45,6 +46,148 @@ pub struct JsonModuleEntry {
     pub md_content: String,
     pub ports: HashMap<String, JsonPortInfo>,
     pub events: Vec<String>,
+    pub instances: Vec<JsonInstanceInfo>,
+}
+
+/// JSON-serializable instance information for `--json` output.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonInstanceInfo {
+    pub name: String,
+    pub module_name: String,
+    pub ports: HashMap<String, JsonPortInfo>,
+    pub instances: Vec<JsonInstanceInfo>,
+}
+
+/// Extract port information from a module.
+fn extract_ports(module: &Module) -> Vec<PortInfo> {
+    let mut ports = Vec::new();
+
+    for (var_path, var_id) in &module.ports {
+        let variable = &module.variables[var_id];
+
+        let name = var_path
+            .0
+            .iter()
+            .map(|s| resource_table::get_str_value(*s).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(".");
+
+        let is_hierarchical = var_path.0.len() > 1;
+
+        let element_width = variable.total_width().unwrap_or(1);
+
+        let array_dims: Option<Vec<usize>> = {
+            let dims: Vec<usize> = variable
+                .r#type
+                .array
+                .iter()
+                .filter_map(|d| *d)
+                .collect();
+            if dims.is_empty() { None } else { Some(dims) }
+        };
+
+        let total_width = element_width
+            * variable.r#type.total_array().unwrap_or(1);
+
+        let type_info = classify_type(&variable.r#type.kind);
+        let direction = match variable.kind {
+            VarKind::Input => "input",
+            VarKind::Output => "output",
+            VarKind::Inout => "inout",
+            _ => continue,
+        };
+
+        let is_4state = is_4state_type(&variable.r#type.kind);
+
+        ports.push(PortInfo {
+            name,
+            direction,
+            type_info,
+            width: if array_dims.is_some() { element_width } else { total_width },
+            is_4state,
+            is_output: variable.kind == VarKind::Output,
+            is_hierarchical,
+            array_dims,
+        });
+    }
+
+    // Sort ports for deterministic output
+    ports.sort_by(|a, b| a.name.cmp(&b.name));
+    ports
+}
+
+/// Instance info collected from module declarations.
+struct InstanceInfo {
+    name: String,
+    module_name: String,
+    ports: Vec<PortInfo>,
+    children: Vec<InstanceInfo>,
+}
+
+/// Extract instance information from a module's declarations.
+fn extract_instances(module: &Module) -> Vec<InstanceInfo> {
+    let mut instances = Vec::new();
+
+    for decl in &module.declarations {
+        let Declaration::Inst(inst) = decl else {
+            continue;
+        };
+        let Component::Module(sub_module) = &inst.component else {
+            continue;
+        };
+
+        let inst_name = resource_table::get_str_value(inst.name)
+            .unwrap_or_else(|| "unknown".to_string());
+        let sub_module_name = resource_table::get_str_value(sub_module.name)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let ports = extract_ports(sub_module);
+        let children = extract_instances(sub_module);
+
+        instances.push(InstanceInfo {
+            name: inst_name,
+            module_name: sub_module_name,
+            ports,
+            children,
+        });
+    }
+
+    // Sort instances for deterministic output
+    instances.sort_by(|a, b| a.name.cmp(&b.name));
+    instances
+}
+
+/// Convert ports to JSON-serializable format.
+fn ports_to_json(ports: &[PortInfo]) -> HashMap<String, JsonPortInfo> {
+    ports
+        .iter()
+        .map(|p| {
+            (
+                p.name.clone(),
+                JsonPortInfo {
+                    direction: p.direction,
+                    r#type: type_info_str(p.type_info),
+                    width: p.width,
+                    is4state: p.is_4state,
+                    array_dims: p.array_dims.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Convert instance info to JSON-serializable format.
+fn instances_to_json(instances: &[InstanceInfo]) -> Vec<JsonInstanceInfo> {
+    instances
+        .iter()
+        .map(|inst| JsonInstanceInfo {
+            name: inst.name.clone(),
+            module_name: inst.module_name.clone(),
+            ports: ports_to_json(&inst.ports),
+            instances: instances_to_json(&inst.children),
+        })
+        .collect()
 }
 
 /// Generate TypeScript type definitions and JS metadata for all modules in the IR.
@@ -59,85 +202,22 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
         let module_name = resource_table::get_str_value(module.name)
             .unwrap_or_else(|| "unknown".to_string());
 
-        let mut ports = Vec::new();
+        let ports = extract_ports(module);
+        let instances = extract_instances(module);
 
-        for (var_path, var_id) in &module.ports {
-            let variable = &module.variables[var_id];
-
-            let name = var_path
-                .0
-                .iter()
-                .map(|s| resource_table::get_str_value(*s).unwrap_or_default())
-                .collect::<Vec<_>>()
-                .join(".");
-
-            let is_hierarchical = var_path.0.len() > 1;
-
-            let element_width = variable.total_width().unwrap_or(1);
-
-            let array_dims: Option<Vec<usize>> = {
-                let dims: Vec<usize> = variable
-                    .r#type
-                    .array
-                    .iter()
-                    .filter_map(|d| *d)
-                    .collect();
-                if dims.is_empty() { None } else { Some(dims) }
-            };
-
-            let total_width = element_width
-                * variable.r#type.total_array().unwrap_or(1);
-
-            let type_info = classify_type(&variable.r#type.kind);
-            let direction = match variable.kind {
-                VarKind::Input => "input",
-                VarKind::Output => "output",
-                VarKind::Inout => "inout",
-                _ => continue,
-            };
-
-            let is_4state = is_4state_type(&variable.r#type.kind);
-
-            ports.push(PortInfo {
-                name,
-                direction,
-                type_info,
-                width: if array_dims.is_some() { element_width } else { total_width },
-                is_4state,
-                is_output: variable.kind == VarKind::Output,
-                is_hierarchical,
-                array_dims,
-            });
-        }
-
-        // Sort ports for deterministic output
-        ports.sort_by(|a, b| a.name.cmp(&b.name));
-
-        let dts_content = generate_dts(&module_name, &ports);
+        let dts_content = generate_dts(&module_name, &ports, &instances);
         let js_content = generate_js(&module_name, &ports);
         let md_content = generate_md(&module_name, &ports);
 
-        let json_ports: HashMap<String, JsonPortInfo> = ports
-            .iter()
-            .map(|p| {
-                (
-                    p.name.clone(),
-                    JsonPortInfo {
-                        direction: p.direction,
-                        r#type: type_info_str(p.type_info),
-                        width: p.width,
-                        is4state: p.is_4state,
-                        array_dims: p.array_dims.clone(),
-                    },
-                )
-            })
-            .collect();
+        let json_ports = ports_to_json(&ports);
 
         let events: Vec<String> = ports
             .iter()
             .filter(|p| p.type_info == TypeInfo::Clock)
             .map(|p| p.name.clone())
             .collect();
+
+        let json_instances = instances_to_json(&instances);
 
         result.push(GeneratedModule {
             module_name,
@@ -146,6 +226,7 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
             md_content,
             ports: json_ports,
             events,
+            instances: json_instances,
         });
     }
 
@@ -217,13 +298,28 @@ fn type_info_str(info: TypeInfo) -> &'static str {
     }
 }
 
-fn generate_dts(module_name: &str, ports: &[PortInfo]) -> String {
+fn generate_dts(module_name: &str, ports: &[PortInfo], instances: &[InstanceInfo]) -> String {
     let mut out = String::new();
 
     out.push_str("import type { ModuleDefinition } from \"@celox-sim/celox\";\n\n");
 
     // Ports interface — exclude clock ports (they go to events)
     out.push_str(&format!("export interface {}Ports {{\n", module_name));
+    write_dts_port_members(&mut out, ports, "  ");
+    write_dts_instance_members(&mut out, instances, "  ");
+    out.push_str("}\n\n");
+
+    // Module definition export
+    out.push_str(&format!(
+        "export declare const {}: ModuleDefinition<{}Ports>;\n",
+        module_name, module_name
+    ));
+
+    out
+}
+
+/// Write port members to a DTS interface body at the given indentation level.
+fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
     for port in ports {
         if port.type_info == TypeInfo::Clock {
             continue;
@@ -237,22 +333,24 @@ fn generate_dts(module_name: &str, ports: &[PortInfo]) -> String {
                 format!(" set(i: number, value: {}): void;", ts_type)
             };
             out.push_str(&format!(
-                "  {}{}: {{ at(i: number): {};{} readonly length: number }};\n",
-                readonly, port.name, ts_type, set_method,
+                "{}{}{}: {{ at(i: number): {};{} readonly length: number }};\n",
+                indent, readonly, port.name, ts_type, set_method,
             ));
         } else {
-            out.push_str(&format!("  {}{}: {};\n", readonly, port.name, ts_type));
+            out.push_str(&format!("{}{}{}: {};\n", indent, readonly, port.name, ts_type));
         }
     }
-    out.push_str("}\n\n");
+}
 
-    // Module definition export
-    out.push_str(&format!(
-        "export declare const {}: ModuleDefinition<{}Ports>;\n",
-        module_name, module_name
-    ));
-
-    out
+/// Write instance members as inline object types in a DTS interface body.
+fn write_dts_instance_members(out: &mut String, instances: &[InstanceInfo], indent: &str) {
+    for inst in instances {
+        let child_indent = format!("{}  ", indent);
+        out.push_str(&format!("{}readonly {}: {{\n", indent, inst.name));
+        write_dts_port_members(out, &inst.ports, &child_indent);
+        write_dts_instance_members(out, &inst.children, &child_indent);
+        out.push_str(&format!("{}}};\n", indent));
+    }
 }
 
 fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
@@ -521,5 +619,44 @@ module Counter #(
         let cnt_port = &modules[0].ports["cnt"];
         assert_eq!(cnt_port.width, 32);
         assert_eq!(cnt_port.array_dims, Some(vec![4]));
+    }
+
+    #[test]
+    fn test_instance_hierarchy() {
+        let code = r#"
+module Sub (
+    clk: input clock,
+    i_data: input logic<8>,
+    o_data: output logic<8>,
+) {
+    always_comb {
+        o_data = i_data;
+    }
+}
+
+module Top (
+    clk: input clock,
+    rst: input reset,
+    top_in: input logic<8>,
+    top_out: output logic<8>,
+) {
+    inst u_sub: Sub (
+        clk,
+        i_data: top_in,
+        o_data: top_out,
+    );
+}
+"#;
+        let modules = generate_from_source(code);
+        let top = modules.iter().find(|m| m.module_name == "Top").unwrap();
+        assert_snapshot!("instance_hierarchy_dts", top.dts_content);
+        assert_snapshot!("instance_hierarchy_js", top.js_content);
+        assert_snapshot!("instance_hierarchy_md", top.md_content);
+
+        // Verify instance info
+        assert_eq!(top.instances.len(), 1);
+        assert_eq!(top.instances[0].name, "u_sub");
+        assert!(top.instances[0].ports.contains_key("i_data"));
+        assert!(top.instances[0].ports.contains_key("o_data"));
     }
 }

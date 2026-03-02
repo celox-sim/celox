@@ -734,6 +734,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
                 md_content: m.md_content,
                 ports: m.ports,
                 events: m.events,
+                instances: m.instances,
             });
         }
     }
