@@ -3,8 +3,9 @@
  * Convert Verilator benchmark output to github-action-benchmark
  * `customSmallerIsBetter` format with µs units.
  *
- * Input format (one line per benchmark):
- *   BENCH <name> <nanoseconds>
+ * Input format:
+ *   BENCH <name> <nanoseconds>          ← build time lines
+ *   { ... Google Benchmark JSON ... }   ← runtime benchmark blocks
  *
  * Usage: node scripts/convert-verilator-bench.mjs <input.txt> <output.json>
  */
@@ -21,21 +22,57 @@ if (!inputPath || !outputPath) {
 }
 
 const raw = readFileSync(inputPath, "utf8");
-
 const results = [];
 
-const re = /^BENCH\s+(\S+)\s+([\d.]+)/gm;
-let match;
-while ((match = re.exec(raw)) !== null) {
-  const name = match[1];
-  const ns = parseFloat(match[2]);
-  const us = ns / 1000;
-
+// ── Parse BENCH lines (build times) ──
+const benchRe = /^BENCH\s+(\S+)\s+([\d.]+)/gm;
+let m;
+while ((m = benchRe.exec(raw)) !== null) {
   results.push({
-    name: `verilator/${name}`,
+    name: `verilator/${m[1]}`,
     unit: "us",
-    value: us,
+    value: parseFloat(m[2]) / 1000,
   });
+}
+
+// ── Parse Google Benchmark JSON blocks ──
+// Each binary emits one JSON object; collect all lines between outermost { }
+let depth = 0;
+let jsonLines = [];
+let inJson = false;
+
+for (const line of raw.split("\n")) {
+  if (!inJson && line.trimStart().startsWith("{")) {
+    inJson = true;
+    depth = 0;
+  }
+  if (inJson) {
+    jsonLines.push(line);
+    for (const ch of line) {
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+    }
+    if (depth === 0) {
+      try {
+        const obj = JSON.parse(jsonLines.join("\n"));
+        for (const bm of obj.benchmarks ?? []) {
+          // Skip aggregate rows (mean/median/stddev) when repetitions are used
+          if (bm.run_type === "aggregate") continue;
+          const timeNs = bm.real_time; // already in time_unit=ns
+          const cleanName = bm.name.split("/")[0]; // strip /iterations:N/manual_time etc.
+          results.push({
+            name: `verilator/${cleanName}`,
+            unit: "us",
+            value: timeNs / 1000,
+          });
+        }
+      } catch (_) {
+        // ignore malformed JSON
+      }
+      jsonLines = [];
+      inJson = false;
+    }
+  }
 }
 
 writeFileSync(outputPath, JSON.stringify(results, null, 2));

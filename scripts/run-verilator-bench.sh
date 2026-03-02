@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build and run Verilator benchmarks.
-# Outputs BENCH lines to stdout (build time + tick/eval benchmarks).
+# Outputs: BENCH lines (build time) followed by Google Benchmark JSON blocks.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,13 +15,14 @@ run_bench() {
     local t0; t0=$(date +%s%N)
     (
         cd "$work"
-        verilator --cc -O3 --exe "$cpp" "$sv" --top-module "$top" -CFLAGS "-O3"
+        verilator --cc -O3 --exe "$cpp" "$sv" --top-module "$top" \
+            -CFLAGS "-O3" -LDFLAGS "-lbenchmark -lpthread"
         make -C obj_dir -f "V${top}.mk" -j"$(nproc)" OPT_FAST="-O3" >/dev/null 2>&1
     )
     local t1; t1=$(date +%s%N)
 
     echo "BENCH $build_name $((t1 - t0))"
-    "$work/obj_dir/V${top}"
+    "$work/obj_dir/V${top}" --benchmark_format=json --benchmark_color=false 2>/dev/null
     rm -rf "$work"
 }
 

@@ -35,7 +35,7 @@ module linear_sec_encoder #(
             always_comb begin
                 pbit = 1'b0;
                 for (int k = 0; k < K; k++) begin
-                    if (((k + 1) >> p) & 1)
+                    if ((((k + 1) >> p) & 1) != 0)
                         pbit ^= d[k];
                 end
             end
@@ -77,7 +77,7 @@ module linear_sec_decoder #(
             always_comb begin
                 errors[p] = 1'b0;
                 for (int idx = 1; idx <= K; idx++) begin
-                    if ((idx >> p) & 1)
+                    if (((idx >> p) & 1) != 0)
                         errors[p] ^= codeword[idx];
                 end
             end

@@ -1,125 +1,88 @@
 /**
  * Verilator benchmark harness – mirrors the Celox Criterion benchmarks.
- *
- * Output format (one line per benchmark):
- *   BENCH <name> <nanoseconds>
+ * Uses Google Benchmark for timing.
  */
 
+#include <benchmark/benchmark.h>
 #include "VTop.h"
 #include "verilated.h"
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
-
-using Clock = std::chrono::high_resolution_clock;
 
 static void reset(VTop *top) {
     top->rst = 1;
-    top->clk = 0;
-    top->eval();
-    top->clk = 1;
-    top->eval();
+    top->clk = 0; top->eval();
+    top->clk = 1; top->eval();
     top->rst = 0;
-    top->clk = 0;
-    top->eval();
+    top->clk = 0; top->eval();
 }
 
-// One full clock cycle: falling edge then rising edge (posedge fires always_ff).
-// After reset clk=0, so each call produces exactly one posedge.
 static inline void tick(VTop *top) {
-    top->clk = 0;
-    top->eval();
-    top->clk = 1;
-    top->eval();
+    top->clk = 0; top->eval();
+    top->clk = 1; top->eval();
 }
 
-int main(int argc, char **argv) {
-    Verilated::commandArgs(argc, argv);
-
-    // --- simulation_tick_top_n1000_x1 ---
-    {
-        VTop *top = new VTop;
-        reset(top);
-
-        // Warm up
-        for (int i = 0; i < 10000; i++)
-            tick(top);
-
-        const int ITERS = 100000;
-        auto start = Clock::now();
-        for (int i = 0; i < ITERS; i++)
-            tick(top);
-        auto end = Clock::now();
-
-        double ns =
-            std::chrono::duration<double, std::nano>(end - start).count() /
-            ITERS;
-        std::printf("BENCH simulation_tick_top_n1000_x1 %.2f\n", ns);
-        delete top;
-    }
-
-    // --- simulation_tick_top_n1000_x1000000 ---
-    {
-        VTop *top = new VTop;
-        reset(top);
-
-        const int TICKS = 1000000;
-        auto start = Clock::now();
-        for (int i = 0; i < TICKS; i++)
-            tick(top);
-        auto end = Clock::now();
-
-        double ns =
-            std::chrono::duration<double, std::nano>(end - start).count();
-        std::printf("BENCH simulation_tick_top_n1000_x1000000 %.2f\n", ns);
-        delete top;
-    }
-
-    // --- testbench_tick_top_n1000_x1 (tick + read output) ---
-    {
-        VTop *top = new VTop;
-        reset(top);
-
-        for (int i = 0; i < 10000; i++)
-            tick(top);
-
-        volatile uint32_t sink = 0;
-        const int ITERS = 100000;
-        auto start = Clock::now();
-        for (int i = 0; i < ITERS; i++) {
-            tick(top);
-            sink = top->cnt0;
-        }
-        auto end = Clock::now();
-
-        double ns =
-            std::chrono::duration<double, std::nano>(end - start).count() /
-            ITERS;
-        std::printf("BENCH testbench_tick_top_n1000_x1 %.2f\n", ns);
-        (void)sink;
-        delete top;
-    }
-
-    // --- testbench_tick_top_n1000_x1000000 (tick + read output) ---
-    {
-        VTop *top = new VTop;
-        reset(top);
-
-        volatile uint32_t sink = 0;
-        const int TICKS = 1000000;
-        auto start = Clock::now();
-        for (int i = 0; i < TICKS; i++) {
-            tick(top);
-            sink = top->cnt0;
-        }
-        auto end = Clock::now();
-
-        double ns =
-            std::chrono::duration<double, std::nano>(end - start).count();
-        std::printf("BENCH testbench_tick_top_n1000_x1000000 %.2f\n", ns);
-        (void)sink;
-        delete top;
-    }
-
-    return 0;
+// --- simulation_tick_top_n1000_x1 ---
+static void BM_simulation_tick_x1(benchmark::State &state) {
+    VTop top;
+    reset(&top);
+    for (int i = 0; i < 10000; i++) tick(&top);  // warm up
+    for (auto _ : state)
+        tick(&top);
 }
+BENCHMARK(BM_simulation_tick_x1)
+    ->Name("simulation_tick_top_n1000_x1")
+    ->Unit(benchmark::kNanosecond);
+
+// --- simulation_tick_top_n1000_x1000000 ---
+static void BM_simulation_tick_x1000000(benchmark::State &state) {
+    VTop top;
+    reset(&top);
+    for (auto _ : state) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < 1000000; i++) tick(&top);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+    }
+}
+BENCHMARK(BM_simulation_tick_x1000000)
+    ->Name("simulation_tick_top_n1000_x1000000")
+    ->UseManualTime()->Iterations(3)
+    ->Unit(benchmark::kNanosecond);
+
+// --- testbench_tick_top_n1000_x1 ---
+static void BM_testbench_tick_x1(benchmark::State &state) {
+    VTop top;
+    reset(&top);
+    for (int i = 0; i < 10000; i++) tick(&top);  // warm up
+    for (auto _ : state) {
+        tick(&top);
+        benchmark::DoNotOptimize(top.cnt0);
+    }
+}
+BENCHMARK(BM_testbench_tick_x1)
+    ->Name("testbench_tick_top_n1000_x1")
+    ->Unit(benchmark::kNanosecond);
+
+// --- testbench_tick_top_n1000_x1000000 ---
+static void BM_testbench_tick_x1000000(benchmark::State &state) {
+    VTop top;
+    reset(&top);
+    for (auto _ : state) {
+        volatile uint32_t sink = 0;
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < 1000000; i++) {
+            tick(&top);
+            sink = top.cnt0;
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        (void)sink;
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+    }
+}
+BENCHMARK(BM_testbench_tick_x1000000)
+    ->Name("testbench_tick_top_n1000_x1000000")
+    ->UseManualTime()->Iterations(3)
+    ->Unit(benchmark::kNanosecond);
+
+BENCHMARK_MAIN();
