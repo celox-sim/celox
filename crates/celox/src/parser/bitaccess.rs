@@ -1,7 +1,11 @@
 use crate::BigUint;
 use crate::parser::{ParserError, resolve_dims};
 use num_traits::Zero;
-use veryl_analyzer::ir::{Expression, Factor, Module, VarId, VarIndex, VarSelect, VarSelectOp};
+use veryl_analyzer::ir::{
+    AssignDestination, Expression, Factor, Module, Op, VarId, VarIndex, VarSelect, VarSelectOp,
+};
+use veryl_analyzer::value::Value;
+use veryl_parser::token_range::TokenRange;
 
 use crate::ir::BitAccess;
 
@@ -241,4 +245,64 @@ pub fn get_access_width(
             Ok(1) // Should not happen if index count matches dimensions
         }
     }
+}
+
+/// Build a read-modify-write expression for a static partial assignment.
+///
+/// For `dst[lsb..=msb] = rhs`, produces:
+///   `(old_value & ~(mask << lsb)) | (rhs << lsb)`
+/// where `mask = (1 << access_width) - 1`.
+///
+/// `old_value` is the current whole-variable expression from the symbolic state.
+pub fn build_partial_assign_expr(
+    module: &Module,
+    dst: &AssignDestination,
+    rhs: Expression,
+    old_value: Expression,
+) -> Result<Expression, ParserError> {
+    let bit_access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
+    let (_, _, total_width) = get_dimensions_and_strides(module, dst.id)?;
+
+    let lsb = bit_access.lsb;
+    let access_width = bit_access.msb - bit_access.lsb + 1;
+
+    // If the partial assignment covers the entire variable, just return rhs directly.
+    if lsb == 0 && access_width == total_width {
+        return Ok(rhs);
+    }
+
+    let token = TokenRange::default();
+
+    // mask = (1 << access_width) - 1  (all-ones of access_width bits)
+    let mask_big = (BigUint::from(1u64) << access_width) - BigUint::from(1u64);
+    let mask_expr = Expression::create_value(Value::new_biguint(mask_big, total_width, false), token);
+
+    // Build: shifted_mask = mask << lsb  (skip shift when lsb == 0)
+    let shifted_mask = if lsb == 0 {
+        mask_expr
+    } else {
+        let lsb_expr = Expression::create_value(Value::new(lsb as u64, total_width, false), token);
+        Expression::Binary(Box::new(mask_expr), Op::LogicShiftL, Box::new(lsb_expr))
+    };
+
+    // Build: ~shifted_mask
+    let inv_mask = Expression::Unary(Op::BitNot, Box::new(shifted_mask));
+
+    // Build: old_value & ~shifted_mask  (clear the target bits)
+    let cleared = Expression::Binary(Box::new(old_value), Op::BitAnd, Box::new(inv_mask));
+
+    // Build: rhs << lsb  (skip shift when lsb == 0)
+    let shifted_rhs = if lsb == 0 {
+        rhs
+    } else {
+        let lsb_expr = Expression::create_value(Value::new(lsb as u64, total_width, false), token);
+        Expression::Binary(Box::new(rhs), Op::LogicShiftL, Box::new(lsb_expr))
+    };
+
+    // Build: (old_value & ~shifted_mask) | (rhs << lsb)
+    Ok(Expression::Binary(
+        Box::new(cleared),
+        Op::BitOr,
+        Box::new(shifted_rhs),
+    ))
 }

@@ -7,13 +7,13 @@ use crate::parser::{resolve_total_width, resolve_width};
 use crate::{
     HashMap, HashSet,
     ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
-    parser::bitaccess::{eval_constexpr, eval_var_select},
+    parser::bitaccess::{build_partial_assign_expr, eval_constexpr, eval_var_select, is_static_access},
 };
 use malachite_bigint::BigUint;
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, IfStatement, Module,
-    Op, Statement, ValueVariant, VarId,
+    Op, Statement, ValueVariant, VarId, VarIndex, VarSelect,
 };
 
 // SymbolicStore: Maps variable IDs to their current symbolic representation.
@@ -1048,6 +1048,7 @@ fn eval_array_literal_expression(
 }
 
 fn extract_function_return_expr(
+    module: &Module,
     body: &veryl_analyzer::ir::FunctionBody,
     ret_id: VarId,
 ) -> Result<Expression, ParserError> {
@@ -1120,6 +1121,7 @@ fn extract_function_return_expr(
     }
 
     fn resolve_return_expr(
+        module: &Module,
         statements: &[Statement],
         ret_id: VarId,
         defs: &HashMap<VarId, Expression>,
@@ -1144,35 +1146,55 @@ fn extract_function_return_expr(
                 let is_whole_var =
                     dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
 
-                if !is_whole_var {
-                    return Err(ParserError::UnsupportedCombLowering {
-                        feature: "function body non-whole assignment",
-                        detail: format!("{stmt}"),
-                    });
-                }
-
                 let rhs = substitute_expr(&assign.expr, defs);
 
-                if dst.id == ret_id {
-                    // Assignment to return variable corresponds to `return` and terminates
-                    // this path.
-                    return Ok(Some(rhs));
-                }
+                if is_whole_var {
+                    if dst.id == ret_id {
+                        // Assignment to return variable corresponds to `return` and terminates
+                        // this path.
+                        return Ok(Some(rhs));
+                    }
 
-                let mut next_defs = defs.clone();
-                next_defs.insert(dst.id, rhs);
-                resolve_return_expr(rest, ret_id, &next_defs)
+                    let mut next_defs = defs.clone();
+                    next_defs.insert(dst.id, rhs);
+                    resolve_return_expr(module, rest, ret_id, &next_defs)
+                } else if is_static_access(&dst.index, &dst.select) {
+                    let old_value = defs
+                        .get(&dst.id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Expression::Term(Box::new(Factor::Variable(
+                                dst.id,
+                                VarIndex::default(),
+                                VarSelect::default(),
+                                dst.comptime.clone(),
+                                dst.token,
+                            )))
+                        });
+                    let merged =
+                        build_partial_assign_expr(module, dst, rhs, old_value)?;
+
+                    // Partial write does NOT terminate the path.
+                    let mut next_defs = defs.clone();
+                    next_defs.insert(dst.id, merged);
+                    resolve_return_expr(module, rest, ret_id, &next_defs)
+                } else {
+                    Err(ParserError::UnsupportedCombLowering {
+                        feature: "function body non-whole assignment (dynamic index)",
+                        detail: format!("{stmt}"),
+                    })
+                }
             }
             Statement::If(if_stmt) => {
                 let cond = substitute_expr(&if_stmt.cond, defs);
 
                 let mut then_stmts = if_stmt.true_side.clone();
                 then_stmts.extend_from_slice(rest);
-                let then_expr = resolve_return_expr(&then_stmts, ret_id, defs)?;
+                let then_expr = resolve_return_expr(module, &then_stmts, ret_id, defs)?;
 
                 let mut else_stmts = if_stmt.false_side.clone();
                 else_stmts.extend_from_slice(rest);
-                let else_expr = resolve_return_expr(&else_stmts, ret_id, defs)?;
+                let else_expr = resolve_return_expr(module, &else_stmts, ret_id, defs)?;
 
                 match (then_expr, else_expr) {
                     (Some(then_expr), Some(else_expr)) => Ok(Some(Expression::Ternary(
@@ -1183,7 +1205,7 @@ fn extract_function_return_expr(
                     _ => Ok(None),
                 }
             }
-            Statement::Null => resolve_return_expr(rest, ret_id, defs),
+            Statement::Null => resolve_return_expr(module, rest, ret_id, defs),
             Statement::IfReset(_)
             | Statement::SystemFunctionCall(_)
             | Statement::FunctionCall(_) => Err(ParserError::UnsupportedCombLowering {
@@ -1193,7 +1215,7 @@ fn extract_function_return_expr(
         }
     }
 
-    resolve_return_expr(&body.statements, ret_id, &HashMap::default())?.ok_or_else(|| {
+    resolve_return_expr(module, &body.statements, ret_id, &HashMap::default())?.ok_or_else(|| {
         ParserError::UnsupportedCombLowering {
             feature: "function return expression",
             detail: format!("function return var id: {:?}", ret_id),
@@ -1239,7 +1261,7 @@ fn eval_function_call_expression(
         });
     };
 
-    let ret_expr = extract_function_return_expr(&function_body, ret_id)?;
+    let ret_expr = extract_function_return_expr(module, &function_body, ret_id)?;
 
     let mut local_store = store.clone();
     let mut arg_sources = HashSet::default();

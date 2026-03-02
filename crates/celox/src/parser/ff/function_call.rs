@@ -2,9 +2,14 @@ use super::{Domain, FfParser};
 use crate::{
     HashMap,
     ir::{SIRBuilder, VarAtomBase},
-    parser::ParserError,
+    parser::{
+        ParserError,
+        bitaccess::{build_partial_assign_expr, is_static_access},
+    },
 };
-use veryl_analyzer::ir::{ArrayLiteralItem, Expression, Factor, Statement, VarId};
+use veryl_analyzer::ir::{
+    ArrayLiteralItem, Expression, Factor, Statement, VarId, VarIndex, VarSelect,
+};
 
 impl<'a> FfParser<'a> {
     fn apply_function_call_to_state(
@@ -56,16 +61,33 @@ impl<'a> FfParser<'a> {
             let dst = &dsts[0];
             let is_whole_var =
                 dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-            if !is_whole_var {
-                return Err(ParserError::UnsupportedFFLowering {
-                    feature: "function body call output non-whole assignment",
-                    detail: format!("{call}"),
-                });
-            }
 
             let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
             let expr = Self::substitute_function_expr(&expr, &next);
-            next.insert(dst.id, expr);
+
+            if is_whole_var {
+                next.insert(dst.id, expr);
+            } else if is_static_access(&dst.index, &dst.select) {
+                let old_value = next
+                    .get(&dst.id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Expression::Term(Box::new(Factor::Variable(
+                            dst.id,
+                            VarIndex::default(),
+                            VarSelect::default(),
+                            dst.comptime.clone(),
+                            dst.token,
+                        )))
+                    });
+                let merged = build_partial_assign_expr(self.module, dst, expr, old_value)?;
+                next.insert(dst.id, merged);
+            } else {
+                return Err(ParserError::UnsupportedFFLowering {
+                    feature: "function body call output non-whole assignment (dynamic index)",
+                    detail: format!("{call}"),
+                });
+            }
         }
 
         Ok(next)
@@ -197,16 +219,33 @@ impl<'a> FfParser<'a> {
                     let is_whole_var =
                         dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
 
-                    if !is_whole_var {
+                    let mut next = state.clone();
+                    let rhs = substitute(&assign.expr, &next);
+
+                    if is_whole_var {
+                        next.insert(dst.id, rhs);
+                    } else if is_static_access(&dst.index, &dst.select) {
+                        let old_value = next
+                            .get(&dst.id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                Expression::Term(Box::new(Factor::Variable(
+                                    dst.id,
+                                    VarIndex::default(),
+                                    VarSelect::default(),
+                                    dst.comptime.clone(),
+                                    dst.token,
+                                )))
+                            });
+                        let merged =
+                            build_partial_assign_expr(parser.module, dst, rhs, old_value)?;
+                        next.insert(dst.id, merged);
+                    } else {
                         return Err(ParserError::UnsupportedFFLowering {
-                            feature: "function body non-whole assignment",
+                            feature: "function body non-whole assignment (dynamic index)",
                             detail: format!("{stmt}"),
                         });
                     }
-
-                    let mut next = state.clone();
-                    let rhs = substitute(&assign.expr, &next);
-                    next.insert(dst.id, rhs);
                     Ok(next)
                 }
                 Statement::If(if_stmt) => {
@@ -289,24 +328,45 @@ impl<'a> FfParser<'a> {
                     let is_whole_var =
                         dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
 
-                    if !is_whole_var {
-                        return Err(ParserError::UnsupportedFFLowering {
-                            feature: "function body non-whole assignment",
-                            detail: format!("{stmt}"),
-                        });
-                    }
-
                     let rhs = substitute(&assign.expr, defs);
 
-                    if dst.id == ret_id {
-                        // Assignment to return variable corresponds to `return` and terminates
-                        // this path.
-                        return Ok(Some(rhs));
-                    }
+                    if is_whole_var {
+                        if dst.id == ret_id {
+                            // Assignment to return variable corresponds to `return` and terminates
+                            // this path.
+                            return Ok(Some(rhs));
+                        }
 
-                    let mut next_defs = defs.clone();
-                    next_defs.insert(dst.id, rhs);
-                    resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
+                        let mut next_defs = defs.clone();
+                        next_defs.insert(dst.id, rhs);
+                        resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
+                    } else if is_static_access(&dst.index, &dst.select) {
+                        let old_value = defs
+                            .get(&dst.id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                Expression::Term(Box::new(Factor::Variable(
+                                    dst.id,
+                                    VarIndex::default(),
+                                    VarSelect::default(),
+                                    dst.comptime.clone(),
+                                    dst.token,
+                                )))
+                            });
+                        let merged =
+                            build_partial_assign_expr(parser.module, dst, rhs, old_value)?;
+
+                        // Partial write to return var does NOT terminate the path —
+                        // additional writes may fill in other bits.
+                        let mut next_defs = defs.clone();
+                        next_defs.insert(dst.id, merged);
+                        resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
+                    } else {
+                        Err(ParserError::UnsupportedFFLowering {
+                            feature: "function body non-whole assignment (dynamic index)",
+                            detail: format!("{stmt}"),
+                        })
+                    }
                 }
                 Statement::If(if_stmt) => {
                     let cond = substitute(&if_stmt.cond, defs);
