@@ -866,13 +866,13 @@ impl<'a> FfParser<'a> {
         }
 
         let (lhs_context_width, rhs_context_width) = if matches!(op, Op::As) {
-            // `as` cast: LHS inherits target width from RHS type, RHS is type metadata
+            // `as` cast: LHS inherits target width from RHS type/numeric, RHS is metadata
             let target_width = if let Expression::Term(f) = right {
                 if let Factor::Value(v, _) = f.as_ref() {
-                    if let ValueVariant::Type(ty) = &v.value {
-                        ty.total_width()
-                    } else {
-                        None
+                    match &v.value {
+                        ValueVariant::Type(ty) => ty.total_width(),
+                        ValueVariant::Numeric(n) => n.to_usize(),
+                        _ => None,
                     }
                 } else {
                     None

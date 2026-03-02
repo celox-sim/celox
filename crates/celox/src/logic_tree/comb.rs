@@ -1292,13 +1292,13 @@ pub fn eval_expression(
         Expression::Term(factor) => eval_factor(module, store, factor, arena, context_width),
         Expression::Binary(lhs, op, rhs) => {
             let (lhs_context_width, rhs_context_width) = if matches!(op, Op::As) {
-                // `as` cast: LHS inherits target width from RHS type, RHS is type metadata
+                // `as` cast: LHS inherits target width from RHS type/numeric, RHS is metadata
                 let target_width = if let Expression::Term(f) = rhs.as_ref() {
                     if let Factor::Value(v, _) = f.as_ref() {
-                        if let ValueVariant::Type(ty) = &v.value {
-                            ty.total_width()
-                        } else {
-                            None
+                        match &v.value {
+                            ValueVariant::Type(ty) => ty.total_width(),
+                            ValueVariant::Numeric(n) => n.to_usize(),
+                            _ => None,
                         }
                     } else {
                         None
@@ -1341,10 +1341,10 @@ pub fn eval_expression(
                 let ((l_expr, l_sources), l_bounds) =
                     eval_expression(module, store, lhs, arena, lhs_context_width)?;
 
-                // For RHS, if it's a type, we don't evaluate it as an expression to avoid panics.
+                // For RHS, if it's a type or numeric width, we don't evaluate it as an expression.
                 let r_bounds = if let Expression::Term(f) = rhs.as_ref() {
                     if let Factor::Value(v, _) = f.as_ref() {
-                        if matches!(v.value, ValueVariant::Type(_)) {
+                        if matches!(v.value, ValueVariant::Type(_) | ValueVariant::Numeric(_)) {
                             BoundaryMap::default()
                         } else {
                             eval_expression(module, store, rhs, arena, rhs_context_width)?.1
@@ -1356,42 +1356,53 @@ pub fn eval_expression(
                     eval_expression(module, store, rhs, arena, rhs_context_width)?.1
                 };
 
-                // Extract signedness and width from RHS type if possible
-                let mut result_node = l_expr;
-                if let Expression::Term(f) = rhs.as_ref() {
-                    if let Factor::Value(v, _) = f.as_ref() {
-                        if let ValueVariant::Type(ty) = &v.value {
-                            let expr_width = get_width(result_node, arena);
-                            let target_width = ty.total_width().unwrap_or(expr_width);
+                // Extract signedness and width from RHS type/numeric
+                let (target_width, target_signed) = match rhs.as_ref() {
+                    Expression::Term(f) => match f.as_ref() {
+                        Factor::Value(v, _) => match &v.value {
+                            ValueVariant::Type(ty) => (ty.total_width(), ty.signed),
+                            ValueVariant::Numeric(n) => (n.to_usize(), false),
+                            _ => (None, false),
+                        },
+                        _ => (None, false),
+                    },
+                    _ => (None, false),
+                };
+                let Some(target_width) = target_width else {
+                    return Err(ParserError::UnsupportedCombLowering {
+                        feature: "as cast target",
+                        detail: format!("{:?}", rhs),
+                    });
+                };
 
-                            if expr_width < target_width {
-                                let pad_width = target_width - expr_width;
-                                let pad = if ty.signed || is_signed(module, result_node, arena) {
-                                    // 符号拡張: MSBをpad
-                                    let msb_slice = arena.alloc(SLTNode::Slice {
-                                        expr: result_node,
-                                        access: BitAccess::new(expr_width - 1, expr_width - 1),
-                                    });
-                                    (msb_slice, pad_width)
-                                } else {
-                                    // ゼロ拡張: 0をpad
-                                    let zero = arena.alloc(SLTNode::Constant(
-                                        BigUint::from(0u8),
-                                        pad_width,
-                                        false,
-                                    ));
-                                    (zero, pad_width)
-                                };
-                                result_node = arena
-                                    .alloc(SLTNode::Concat(vec![pad, (result_node, expr_width)]));
-                            } else if expr_width > target_width {
-                                result_node = arena.alloc(SLTNode::Slice {
-                                    expr: result_node,
-                                    access: BitAccess::new(0, target_width - 1),
-                                });
-                            }
-                        }
-                    }
+                let mut result_node = l_expr;
+                let expr_width = get_width(result_node, arena);
+
+                if expr_width < target_width {
+                    let pad_width = target_width - expr_width;
+                    let pad = if target_signed || is_signed(module, result_node, arena) {
+                        // 符号拡張: MSBをpad
+                        let msb_slice = arena.alloc(SLTNode::Slice {
+                            expr: result_node,
+                            access: BitAccess::new(expr_width - 1, expr_width - 1),
+                        });
+                        (msb_slice, pad_width)
+                    } else {
+                        // ゼロ拡張: 0をpad
+                        let zero = arena.alloc(SLTNode::Constant(
+                            BigUint::from(0u8),
+                            pad_width,
+                            false,
+                        ));
+                        (zero, pad_width)
+                    };
+                    result_node =
+                        arena.alloc(SLTNode::Concat(vec![pad, (result_node, expr_width)]));
+                } else if expr_width > target_width {
+                    result_node = arena.alloc(SLTNode::Slice {
+                        expr: result_node,
+                        access: BitAccess::new(0, target_width - 1),
+                    });
                 }
                 return Ok((
                     (result_node, l_sources),
@@ -1925,11 +1936,11 @@ fn cast_target_signed(expr: &Expression) -> Option<bool> {
     let Factor::Value(comptime, _) = factor.as_ref() else {
         return None;
     };
-    let ValueVariant::Type(ty) = &comptime.value else {
-        return None;
-    };
-
-    Some(ty.signed)
+    match &comptime.value {
+        ValueVariant::Type(ty) => Some(ty.signed),
+        ValueVariant::Numeric(_) => Some(false),
+        _ => None,
+    }
 }
 
 pub fn convert_binary_op(op: &Op, use_signed: bool) -> BinaryOp {

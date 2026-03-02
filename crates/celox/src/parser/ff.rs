@@ -70,14 +70,20 @@ impl<'a> FfParser<'a> {
         let Factor::Value(comptime, _) = factor.as_ref() else {
             return None;
         };
-        let ValueVariant::Type(ty) = &comptime.value else {
-            return None;
-        };
-
-        let width = ty.total_width()?;
-        let signed = ty.signed;
-        let is_2state = ty.is_2state();
-        Some((width, signed, is_2state))
+        match &comptime.value {
+            ValueVariant::Type(ty) => {
+                let width = ty.total_width()?;
+                let signed = ty.signed;
+                let is_2state = ty.is_2state();
+                Some((width, signed, is_2state))
+            }
+            ValueVariant::Numeric(v) => {
+                let width = v.to_usize()?;
+                // Numeric width cast is unsigned, 2-state (bit)
+                Some((width, false, true))
+            }
+            _ => None,
+        }
     }
 
     fn get_expression_width(&self, expr: &Expression) -> usize {

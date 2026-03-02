@@ -1,4 +1,4 @@
-use veryl_analyzer::ir::{ArrayLiteralItem, Expression, Factor, Op};
+use veryl_analyzer::ir::{ArrayLiteralItem, Expression, Factor, Op, ValueVariant};
 
 /// Calculate the context width for a given expression and parent context.
 pub fn get_context_width(expr: &Expression, parent_width: Option<usize>) -> Option<usize> {
@@ -165,10 +165,16 @@ pub fn get_expr_width(expr: &Expression) -> Option<usize> {
 
 fn get_factor_width(factor: &Factor) -> Option<usize> {
     match factor {
-        Factor::Value(comp, _) | Factor::Variable(_, _, _, comp, _) => comp
-            .r#type
-            .total_width()
-            .map(|w| comp.r#type.array.total().unwrap_or(1) * w),
+        Factor::Value(comp, _) | Factor::Variable(_, _, _, comp, _) => {
+            if let ValueVariant::Numeric(v) = &comp.value {
+                if comp.r#type.total_width().is_none() {
+                    return v.to_usize();
+                }
+            }
+            comp.r#type
+                .total_width()
+                .map(|w| comp.r#type.array.total().unwrap_or(1) * w)
+        }
         Factor::FunctionCall(call, _) => call.ret.as_ref().and_then(|x| {
             x.r#type
                 .total_width()
