@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772458176971,
+  "lastUpdate": 1772458177344,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -2259,6 +2259,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "verilator/testbench_tick_top_n1000_x1000000",
             "value": 170317.685,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "91db8c8d004befc3193a74df8fb769c726fba464",
+          "message": "Support numeric ValueVariant in Op::As width cast\n\nThe upstream veryl analyzer now represents numeric width casts\n(e.g. `x as 128`) as ValueVariant::Numeric instead of ValueVariant::Type.\nHandle both variants in context_width, ff parser, and comb evaluator.\n\nAlso return errors instead of silently ignoring unrecognized cast targets.",
+          "timestamp": "2026-03-02T13:19:08Z",
+          "tree_id": "f3576d1cccc7d4ce1b5d213fba1d015d580e9e49",
+          "url": "https://github.com/celox-sim/celox/commit/91db8c8d004befc3193a74df8fb769c726fba464"
+        },
+        "date": 1772458177222,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "value": 13079021.099,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "value": 0.17642,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "value": 189983.978,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "value": 0.19853,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "value": 175597.441,
             "unit": "us"
           }
         ]
