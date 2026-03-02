@@ -332,6 +332,52 @@ fn test_wide_comb_logic_and_or() {
     assert_eq!(sim.get(y_or_w), 1u128.into());
 }
 
+/// Regression: wide operand (65-bit, 2 chunks) `&&`/`||` a narrow 1-bit operand.
+///
+/// Before the fix, `reduce_to_bool` in `emit_wide_logic_andor` passed raw I8
+/// chunks to a `bor.i64` accumulator, producing a Cranelift verifier error.
+#[test]
+fn test_wide_logic_or_with_narrow_operand() {
+    let code = r#"
+        module Top (
+            a: input  logic<65>,
+            b: input  logic,
+            o_or:  output logic,
+            o_and: output logic,
+        ) {
+            assign o_or  = a || b;
+            assign o_and = a && b;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let a     = sim.signal("a");
+    let b     = sim.signal("b");
+    let o_or  = sim.signal("o_or");
+    let o_and = sim.signal("o_and");
+
+    // a=0, b=0 → both 0
+    sim.set(b, 0u8);
+    sim.set_wide(a, 0u8.into());
+    assert_eq!(sim.get(o_or),  0u8.into());
+    assert_eq!(sim.get(o_and), 0u8.into());
+
+    // a=0, b=1 → or=1, and=0
+    sim.set(b, 1u8);
+    assert_eq!(sim.get(o_or),  1u8.into());
+    assert_eq!(sim.get(o_and), 0u8.into());
+
+    // a=nonzero (bit 64 set), b=0 → or=1, and=0
+    sim.set(b, 0u8);
+    sim.set_wide(a, BigUint::from(1u64) << 64);
+    assert_eq!(sim.get(o_or),  1u8.into());
+    assert_eq!(sim.get(o_and), 0u8.into());
+
+    // a=nonzero, b=1 → both 1
+    sim.set(b, 1u8);
+    assert_eq!(sim.get(o_or),  1u8.into());
+    assert_eq!(sim.get(o_and), 1u8.into());
+}
+
 // ============================================================
 // Wide (128-bit) multiplication
 // ============================================================

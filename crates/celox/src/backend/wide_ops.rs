@@ -92,7 +92,8 @@ pub fn emit_wide_logic_andor(
 ) -> Vec<Value> {
     let reduce_to_bool = |b: &mut FunctionBuilder, chunks: &[Value]| -> Value {
         let mut accumulated = b.ins().iconst(types::I64, 0);
-        for &chunk in chunks {
+        for i in 0..num_chunks {
+            let chunk = get_chunk_as_i64(b, chunks, i);
             accumulated = b.ins().bor(accumulated, chunk);
         }
         b.ins().icmp_imm(IntCC::NotEqual, accumulated, 0)

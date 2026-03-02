@@ -81,7 +81,7 @@ impl JitEngine {
         let isa = self.module.isa();
         let mut ctrl_plane = cranelift::codegen::control::ControlPlane::default();
         ctx.optimize(isa, &mut ctrl_plane)
-            .map_err(|e| format!("Optimization failed: {e}"))?;
+            .map_err(|e| format!("Optimization failed: {e:#?}"))?;
 
         if let Some(out) = post_clif_out.as_mut() {
             out.push_str(&format!("{}\n", ctx.func.display()));
