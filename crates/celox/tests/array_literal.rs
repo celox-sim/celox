@@ -104,8 +104,47 @@ fn test_array_literal_single_element_fills_param_sized_array() {
             i_clk: input clock,
             i_rst: input reset,
             o0: output logic<8>,
+            o1: output logic<8>,
+            o2: output logic<8>,
         ) {
             var arr: logic<8> [N];
+            assign o0 = arr[0];
+            assign o1 = arr[1];
+            assign o2 = arr[2];
+            always_ff (i_clk, i_rst) {
+                if_reset {
+                    arr = '{0};
+                } else {
+                    arr[0] = 8'hAB;
+                }
+            }
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("i_clk");
+    let i_rst = sim.signal("i_rst");
+    let o0 = sim.signal("o0");
+    let o1 = sim.signal("o1");
+    let o2 = sim.signal("o2");
+
+    // Reset: all elements should be 0
+    sim.modify(|io| io.set(i_rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o0), 0u8.into());
+    assert_eq!(sim.get(o1), 0u8.into());
+    assert_eq!(sim.get(o2), 0u8.into());
+}
+
+#[test]
+fn test_array_literal_single_element_size_one_array() {
+    // '{val} on a 1-element array should still assign that one element correctly.
+    let code = r#"
+        module Top (
+            i_clk: input clock,
+            i_rst: input reset,
+            o0: output logic<8>,
+        ) {
+            var arr: logic<8> [1];
             assign o0 = arr[0];
             always_ff (i_clk, i_rst) {
                 if_reset {
@@ -116,6 +155,47 @@ fn test_array_literal_single_element_fills_param_sized_array() {
             }
         }
     "#;
-    Simulator::builder(code, "Top").build().unwrap();
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("i_clk");
+    let i_rst = sim.signal("i_rst");
+    let o0 = sim.signal("o0");
+
+    sim.modify(|io| io.set(i_rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o0), 0u8.into());
+
+    sim.modify(|io| io.set(i_rst, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o0), 0xABu8.into());
 }
 
+
+#[test]
+fn test_array_literal_single_element_fills_2d_array() {
+    // '{0} on a 2D param-sized array should also fill all elements.
+    let code = r#"
+        module Top #(param N: u32 = 2, param M: u32 = 3) (
+            i_clk: input clock,
+            i_rst: input reset,
+            o: output logic<8>,
+        ) {
+            var arr: logic<8> [N, M];
+            assign o = arr[1][2];
+            always_ff (i_clk, i_rst) {
+                if_reset {
+                    arr = '{0};
+                } else {
+                    arr[0][0] = 8'hAB;
+                }
+            }
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("i_clk");
+    let i_rst = sim.signal("i_rst");
+    let o = sim.signal("o");
+
+    sim.modify(|io| io.set(i_rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o), 0u8.into());
+}
