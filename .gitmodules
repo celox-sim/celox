@@ -2,3 +2,6 @@
 	path = deps/veryl
 	url = https://github.com/tignear/veryl.git
 	branch = celox/proto-support
+[submodule "examples/template"]
+	path = examples/template
+	url = https://github.com/celox-sim/celox-template.git
