@@ -1784,4 +1784,50 @@ describe("E2E: 1-bit unpacked array port (logic [N])", () => {
     expect(sim.dut.en.length).toBe(4);
     sim.dispose();
   });
+
+  test("4-state mode: X written to element i propagates only to output yi (verifies maskBase layout)", () => {
+    // This test validates that the maskBase = baseOffset + totalValueBytes assumption
+    // matches the actual JIT memory layout when fourState: true is used.
+    interface Ports {
+      rst: bigint;
+      en: { at(i: number): bigint; set(i: number, v: unknown): void; length: number };
+      readonly y0: bigint;
+      readonly y1: bigint;
+      readonly y2: bigint;
+      readonly y3: bigint;
+    }
+
+    const sim = Simulator.fromSource<Ports>(ARRAY_1BIT_SOURCE, "ArrayPassThrough", { fourState: true });
+
+    // Start with all defined zeros
+    for (let i = 0; i < 4; i++) sim.dut.en.set(i, 0n);
+    sim.tick();
+
+    // Set element 1 to X; only y1 should become X
+    sim.dut.en.set(1, X);
+    sim.tick();
+
+    expect(sim.fourState("y1").mask).not.toBe(0n);  // y1 = X
+    expect(sim.fourState("y0").mask).toBe(0n);       // y0 defined
+    expect(sim.fourState("y2").mask).toBe(0n);       // y2 defined
+    expect(sim.fourState("y3").mask).toBe(0n);       // y3 defined
+
+    // Set element 2 to X; y2 becomes X, y1 remains X
+    sim.dut.en.set(2, X);
+    sim.tick();
+
+    expect(sim.fourState("y1").mask).not.toBe(0n);
+    expect(sim.fourState("y2").mask).not.toBe(0n);
+    expect(sim.fourState("y0").mask).toBe(0n);
+    expect(sim.fourState("y3").mask).toBe(0n);
+
+    // Clear element 1 to defined 0; y1 becomes defined again
+    sim.dut.en.set(1, 0n);
+    sim.tick();
+
+    expect(sim.fourState("y1").mask).toBe(0n);
+    expect(sim.fourState("y2").mask).not.toBe(0n);
+
+    sim.dispose();
+  });
 });

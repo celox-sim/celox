@@ -563,6 +563,107 @@ describe("createDut — array ports", () => {
     for (let i = 0; i < 8; i += 2) dut.bits.set(i, 0n);
     expect(view.getUint8(2)).toBe(0b10101010);
   });
+
+  test("elementWidth=3: elements spanning byte boundaries read/write correctly", () => {
+    // logic<3>[6]: 6 × 3 = 18 bits = 3 bytes
+    // Element 2: bitStart=6, spans bytes 0→1  ← cross-byte write/read path
+    // Element 5: bitStart=15, spans bytes 1→2 ← cross-byte write/read path
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      data: { offset: 0, width: 3, byteSize: 1, is4state: false, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      data: { direction: "input", type: "logic", width: 3, arrayDims: [6] },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ data: { at(i: number): bigint; set(i: number, v: bigint): void; length: number } }>(
+      buffer, layout, ports, handle, state,
+    );
+
+    // Set all 6 elements to distinct values 1..6
+    for (let i = 0; i < 6; i++) dut.data.set(i, BigInt(i + 1));
+    for (let i = 0; i < 6; i++) expect(dut.data.at(i)).toBe(BigInt(i + 1));
+
+    // Overwrite the two cross-byte elements and verify neighbours are unaffected
+    dut.data.set(2, 0b101n);  // bitStart=6, crosses byte 0→1
+    expect(dut.data.at(2)).toBe(5n);
+    expect(dut.data.at(1)).toBe(2n);  // neighbour below
+    expect(dut.data.at(3)).toBe(4n);  // neighbour above
+
+    dut.data.set(5, 0b110n);  // bitStart=15, crosses byte 1→2
+    expect(dut.data.at(5)).toBe(6n);
+    expect(dut.data.at(4)).toBe(5n);  // neighbour below
+  });
+
+  test("1-bit 4-state: X writes value=0 and mask=1 at correct byte offset", () => {
+    // logic[8] with 4-state: value in byte 0 (bits 0-7 = elements 0-7),
+    // mask in byte 1 (bits 0-7 = masks for elements 0-7).
+    // totalValueBytes = ceil(8*1/8) = 1, so maskBase = offset + 1.
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      bits: { offset: 0, width: 1, byteSize: 1, is4state: true, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      bits: { direction: "input", type: "logic", width: 1, arrayDims: [8], is4state: true },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ bits: { at(i: number): bigint; set(i: number, v: unknown): void } }>(
+      buffer, layout, ports, handle, state,
+    );
+
+    const view = new DataView(buffer);
+
+    // Assign X to element 3: value bit 3 → 0, mask bit 3 → 1
+    dut.bits.set(3, X);
+    expect(view.getUint8(0) & 0b00001000).toBe(0);           // value: bit 3 = 0
+    expect(view.getUint8(1) & 0b00001000).toBe(0b00001000);  // mask:  bit 3 = 1
+
+    // Write a defined 1 to element 3: value bit 3 → 1, mask bit 3 → 0
+    dut.bits.set(3, 1n);
+    expect(view.getUint8(0) & 0b00001000).toBe(0b00001000);  // value: bit 3 = 1
+    expect(view.getUint8(1) & 0b00001000).toBe(0);           // mask:  bit 3 cleared
+
+    // Setting elements 0 and 7 to X should only affect those mask bits
+    dut.bits.set(0, X);
+    dut.bits.set(7, X);
+    expect(view.getUint8(1)).toBe(0b10000001);  // mask: bits 0 and 7 set
+  });
+
+  test("3-bit 4-state: mask region starts at ceil(totalBits/8) bytes after value", () => {
+    // logic<3>[5]: 5 × 3 = 15 bits → totalValueBytes = ceil(15/8) = 2
+    // value occupies bytes 0-1, mask occupies bytes 2-3; maskBase = offset + 2
+    const buffer = makeBuffer(64);
+    const layout: Record<string, SignalLayout> = {
+      data: { offset: 0, width: 3, byteSize: 1, is4state: true, direction: "input" },
+    };
+    const ports: Record<string, PortInfo> = {
+      data: { direction: "input", type: "logic", width: 3, arrayDims: [5], is4state: true },
+    };
+    const handle = mockHandle();
+    const state: DirtyState = { dirty: false };
+
+    const dut = createDut<{ data: { set(i: number, v: unknown): void } }>(
+      buffer, layout, ports, handle, state,
+    );
+
+    const view = new DataView(buffer);
+
+    // Assign X to element 0 (bitStart=0, no cross-byte): value bits 0-2 = 0, mask bits 0-2 = 0b111
+    dut.data.set(0, X);
+    expect(view.getUint8(0) & 0b111).toBe(0);    // value byte 0: bits 0-2 cleared
+    expect(view.getUint8(2) & 0b111).toBe(0b111); // mask byte 2: bits 0-2 set
+    expect(view.getUint8(1)).toBe(0);              // value byte 1: untouched
+    expect(view.getUint8(3)).toBe(0);              // mask byte 3: untouched
+
+    // Write a defined value to element 0, verify mask cleared
+    dut.data.set(0, 0b110n);
+    expect(view.getUint8(0) & 0b111).toBe(0b110);  // value bits 0-2 = 6
+    expect(view.getUint8(2) & 0b111).toBe(0);       // mask bits 0-2 cleared
+  });
 });
 
 // ---------------------------------------------------------------------------
