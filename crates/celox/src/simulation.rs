@@ -447,6 +447,11 @@ impl Simulation {
         self.simulator.named_hierarchy()
     }
 
+    /// Returns all signals for the instance at the given hierarchical path.
+    pub fn instance_signals(&self, instance_path: &[(&str, usize)]) -> Vec<NamedSignal> {
+        self.simulator.instance_signals(instance_path)
+    }
+
     /// Resolves a signal inside a child instance.
     pub fn child_signal(&self, instance_path: &[(&str, usize)], var: &str) -> SignalRef {
         self.simulator.child_signal(instance_path, var)

@@ -738,3 +738,147 @@ fn test_named_hierarchy_multiple_instances() {
     }
 }
 
+#[test]
+fn test_instance_signals_child() {
+    let code = r#"
+        module Sub (
+            i_data: input  logic<8>,
+            o_data: output logic<8>
+        ) {
+            assign o_data = i_data + 8'h01;
+        }
+
+        module Top (
+            top_in:  input  logic<8>,
+            top_out: output logic<8>
+        ) {
+            inst u_sub: Sub (
+                i_data: top_in,
+                o_data: top_out
+            );
+        }
+    "#;
+    let sim = Simulator::builder(code, "Top").build().unwrap();
+
+    let child_signals = sim.instance_signals(&[("u_sub", 0)]);
+    assert!(!child_signals.is_empty());
+
+    let names: Vec<&str> = child_signals.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"i_data"), "expected i_data in {:?}", names);
+    assert!(names.contains(&"o_data"), "expected o_data in {:?}", names);
+}
+
+#[test]
+fn test_instance_signals_deep_hierarchy() {
+    let code = r#"
+        module Leaf (
+            i: input  logic<8>,
+            o: output logic<8>
+        ) {
+            assign o = i + 8'h01;
+        }
+
+        module Mid (
+            i: input  logic<8>,
+            o: output logic<8>
+        ) {
+            inst u_leaf: Leaf ( i: i, o: o );
+        }
+
+        module Top (
+            top_i: input  logic<8>,
+            top_o: output logic<8>
+        ) {
+            inst u_mid: Mid ( i: top_i, o: top_o );
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+
+    // Get signals of the deeply nested leaf instance
+    let leaf_signals = sim.instance_signals(&[("u_mid", 0), ("u_leaf", 0)]);
+    assert!(!leaf_signals.is_empty());
+
+    let names: Vec<&str> = leaf_signals.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"i"), "expected i in {:?}", names);
+    assert!(names.contains(&"o"), "expected o in {:?}", names);
+
+    // Verify we can read values through the resolved SignalRefs
+    let top_i = sim.signal("top_i");
+    sim.modify(|io| io.set(top_i, 0x42u8)).unwrap();
+
+    let leaf_o = leaf_signals.iter().find(|s| s.name == "o").unwrap();
+    assert_eq!(sim.get(leaf_o.signal), 0x43u8.into());
+}
+
+#[test]
+fn test_instance_signals_multiple_instances() {
+    let code = r#"
+        module Worker (
+            i_val: input  logic<8>,
+            o_val: output logic<8>
+        ) {
+            assign o_val = i_val + 8'h01;
+        }
+
+        module Top (
+            in0:  input  logic<8>,
+            in1:  input  logic<8>,
+            out0: output logic<8>,
+            out1: output logic<8>
+        ) {
+            inst u0: Worker ( i_val: in0, o_val: out0 );
+            inst u1: Worker ( i_val: in1, o_val: out1 );
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+
+    let signals_u0 = sim.instance_signals(&[("u0", 0)]);
+    let signals_u1 = sim.instance_signals(&[("u1", 0)]);
+
+    assert!(!signals_u0.is_empty());
+    assert!(!signals_u1.is_empty());
+
+    // Both instances should have the same signal names
+    let names_u0: Vec<&str> = signals_u0.iter().map(|s| s.name.as_str()).collect();
+    let names_u1: Vec<&str> = signals_u1.iter().map(|s| s.name.as_str()).collect();
+    assert!(names_u0.contains(&"o_val"));
+    assert!(names_u1.contains(&"o_val"));
+
+    // But they should have different SignalRefs (different memory locations)
+    let o_val_u0 = signals_u0.iter().find(|s| s.name == "o_val").unwrap();
+    let o_val_u1 = signals_u1.iter().find(|s| s.name == "o_val").unwrap();
+    assert_ne!(o_val_u0.signal, o_val_u1.signal);
+
+    // Verify they read independently
+    let in0 = sim.signal("in0");
+    let in1 = sim.signal("in1");
+    sim.modify(|io| {
+        io.set(in0, 10u8);
+        io.set(in1, 20u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(o_val_u0.signal), 11u8.into());
+    assert_eq!(sim.get(o_val_u1.signal), 21u8.into());
+}
+
+#[test]
+fn test_instance_signals_nonexistent_path() {
+    let code = r#"
+        module Top (
+            i: input  logic,
+            o: output logic
+        ) {
+            assign o = i;
+        }
+    "#;
+    let sim = Simulator::builder(code, "Top").build().unwrap();
+
+    // Non-existent instance path should return empty Vec
+    let signals = sim.instance_signals(&[("nonexistent", 0)]);
+    assert!(signals.is_empty());
+
+    // Deep non-existent path
+    let signals = sim.instance_signals(&[("a", 0), ("b", 0), ("c", 0)]);
+    assert!(signals.is_empty());
+}
+

@@ -176,7 +176,27 @@ impl Simulator {
             .instance_ids
             .get(&InstancePath(vec![]))
             .expect("top-level instance not found");
-        let module_id = &self.program.instance_module[top_instance_id];
+        self.build_signals_for_instance(*top_instance_id)
+    }
+
+    /// Returns all signals for the instance at the given hierarchical path.
+    ///
+    /// The path is specified as a slice of `(instance_name, index)` pairs.
+    /// Returns an empty `Vec` if the path does not exist.
+    pub fn instance_signals(&self, instance_path: &[(&str, usize)]) -> Vec<NamedSignal> {
+        let path_str_ids: Vec<_> = instance_path
+            .iter()
+            .map(|(name, idx)| (veryl_parser::resource_table::insert_str(name), *idx))
+            .collect();
+        match self.program.instance_ids.get(&InstancePath(path_str_ids)) {
+            Some(&instance_id) => self.build_signals_for_instance(instance_id),
+            None => Vec::new(),
+        }
+    }
+
+    /// Builds the list of named signals for a given instance.
+    fn build_signals_for_instance(&self, instance_id: crate::ir::InstanceId) -> Vec<NamedSignal> {
+        let module_id = &self.program.instance_module[&instance_id];
         let module_vars = &self.program.module_variables[module_id];
 
         let mut result = Vec::new();
@@ -192,7 +212,7 @@ impl Simulator {
                 .collect::<Vec<_>>()
                 .join(".");
             let addr = crate::ir::AbsoluteAddr {
-                instance_id: *top_instance_id,
+                instance_id,
                 var_id: info.id,
             };
             let signal = self.backend.resolve_signal(&addr);
@@ -268,38 +288,8 @@ impl Simulator {
             .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{}", module_id));
-        let module_vars = &self.program.module_variables[module_id];
 
-        // Build signals for this instance
-        let mut signals = Vec::new();
-        for (var_path, info) in module_vars {
-            let name = var_path
-                .0
-                .iter()
-                .map(|s| {
-                    veryl_parser::resource_table::get_str_value(*s)
-                        .unwrap()
-                        .to_string()
-                })
-                .collect::<Vec<_>>()
-                .join(".");
-            let addr = crate::ir::AbsoluteAddr {
-                instance_id: *instance_id,
-                var_id: info.id,
-            };
-            let signal = self.backend.resolve_signal(&addr);
-            let associated_clock = self
-                .program
-                .reset_clock_map
-                .get(&addr)
-                .map(|clock_addr| self.program.get_path(clock_addr));
-            signals.push(NamedSignal {
-                name,
-                signal,
-                info: info.clone(),
-                associated_clock,
-            });
-        }
+        let signals = self.build_signals_for_instance(*instance_id);
 
         // Find direct children: instance paths that extend current by exactly 1 segment
         let current_len = current_path.len();
