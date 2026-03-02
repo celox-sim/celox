@@ -274,17 +274,8 @@ pub fn build_partial_assign_expr(
     let token = TokenRange::default();
 
     // mask = (1 << access_width) - 1  (all-ones of access_width bits)
-    let mask_val = if access_width >= 64 {
-        // For large widths, compute via BigUint
-        let big = BigUint::from(1u64) << access_width;
-        let big = big - BigUint::from(1u64);
-        let digits = big.to_u64_digits();
-        let v = digits.first().copied().unwrap_or(0);
-        v
-    } else {
-        (1u64 << access_width) - 1
-    };
-    let mask_expr = Expression::create_value(Value::new(mask_val, total_width, false), token);
+    let mask_big = (BigUint::from(1u64) << access_width) - BigUint::from(1u64);
+    let mask_expr = Expression::create_value(Value::new_biguint(mask_big, total_width, false), token);
 
     // Build: shifted_mask = mask << lsb  (skip shift when lsb == 0)
     let shifted_mask = if lsb == 0 {
