@@ -1,0 +1,15 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: top.dts_content
+---
+import type { ModuleDefinition } from "@celox-sim/celox";
+
+export interface TopPorts {
+  readonly out: bigint;
+  bus: {
+    data: bigint;
+    valid: bigint;
+  };
+}
+
+export declare const Top: ModuleDefinition<TopPorts>;

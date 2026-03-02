@@ -288,6 +288,25 @@ export function createChildDut(
   for (const [name, port] of Object.entries(hierarchy.ports)) {
     if (port.type === "clock") continue;
 
+    // Handle nested interface port
+    if (port.interface) {
+      const nestedObj = createNestedDut(
+        view,
+        hierarchy.forDut,
+        port.interface,
+        name,
+        handle,
+        state,
+      );
+      Object.defineProperty(obj, name, {
+        value: nestedObj,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+      continue;
+    }
+
     const sig = hierarchy.forDut[name];
     if (!sig) continue;
 

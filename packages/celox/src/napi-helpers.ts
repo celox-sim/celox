@@ -301,12 +301,17 @@ export function parseNapiLayout(json: string): {
 /**
  * Build PortInfo records from the NAPI layout signals.
  * This auto-detects port metadata so users don't need to hand-write ModuleDefinition.
+ *
+ * Hierarchical signal names (e.g. "bus.data", "bus.valid" from an interface port)
+ * are grouped into a nested PortInfo with an `interface` map so that createDut can
+ * expose them as `dut.bus.data` and `dut.bus.valid`.
  */
 export function buildPortsFromLayout(
   signals: Record<string, SignalLayout & { typeKind: string; arrayDims?: number[] }>,
   _events: Record<string, number>,
 ): Record<string, PortInfo> {
-  const ports: Record<string, PortInfo> = {};
+  // Step 1: Build flat PortInfo for every signal name
+  const flat: Record<string, PortInfo> = {};
 
   for (const [name, sig] of Object.entries(signals)) {
     const typeKind = sig.typeKind;
@@ -330,7 +335,36 @@ export function buildPortsFromLayout(
     if (sig.arrayDims && sig.arrayDims.length > 0) {
       (port as { arrayDims: readonly number[] }).arrayDims = sig.arrayDims;
     }
-    ports[name] = port;
+    flat[name] = port;
+  }
+
+  // Step 2: Group hierarchical signals (e.g. "bus.data") into nested PortInfo.
+  // Veryl interface ports are exactly one level deep, so "bus.data" → parent "bus",
+  // member "data". The parent entry receives an `interface` map of its members;
+  // the flat layout keys are kept as-is so createNestedDut can look them up.
+  const ports: Record<string, PortInfo> = {};
+  const ifMaps = new Map<string, Record<string, PortInfo>>();
+
+  for (const [name, port] of Object.entries(flat)) {
+    const dotIdx = name.indexOf(".");
+    if (dotIdx < 0) {
+      ports[name] = port;
+      continue;
+    }
+    // Hierarchical signal: first segment is the interface port name
+    const parentName = name.slice(0, dotIdx);
+    const memberName = name.slice(dotIdx + 1);
+    if (!ifMaps.has(parentName)) {
+      const ifMap: Record<string, PortInfo> = {};
+      ifMaps.set(parentName, ifMap);
+      ports[parentName] = {
+        direction: "inout",
+        type: "logic",
+        width: 0,
+        interface: ifMap,
+      };
+    }
+    ifMaps.get(parentName)![memberName] = port;
   }
 
   return ports;

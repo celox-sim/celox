@@ -1,0 +1,13 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: top.md_content
+---
+# Top
+
+## Ports
+
+| Port | Direction | Type | Width | TS Type | 4-State |
+|------|-----------|------|-------|---------|--------|
+| bus.data | input | logic | 8 | `bigint` | yes |
+| bus.valid | input | logic | 1 | `bigint` | yes |
+| out | output | logic | 8 | `bigint` (readonly) | yes |

@@ -25,6 +25,9 @@ pub struct JsonPortInfo {
     pub is4state: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub array_dims: Option<Vec<usize>>,
+    /// Nested members for interface ports (e.g. `bus.data` grouped under `bus`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<HashMap<String, JsonPortInfo>>,
 }
 
 /// Top-level JSON output for `celox-gen-ts --json`.
@@ -159,22 +162,49 @@ fn extract_instances(module: &Module) -> Vec<InstanceInfo> {
 }
 
 /// Convert ports to JSON-serializable format.
+///
+/// Hierarchical ports (var_path length > 1, e.g. `bus.data`) are grouped
+/// under a synthetic parent entry with an `interface` map so that the
+/// TypeScript DUT can expose them as `dut.bus.data`.
 fn ports_to_json(ports: &[PortInfo]) -> HashMap<String, JsonPortInfo> {
-    ports
-        .iter()
-        .map(|p| {
-            (
-                p.name.clone(),
-                JsonPortInfo {
-                    direction: p.direction,
-                    r#type: type_info_str(p.type_info),
-                    width: p.width,
-                    is4state: p.is_4state,
-                    array_dims: p.array_dims.clone(),
-                },
-            )
-        })
-        .collect()
+    let mut result: HashMap<String, JsonPortInfo> = HashMap::new();
+    // Accumulate interface members for each parent name separately so we can
+    // insert the parent entry once at the end.
+    let mut iface_maps: HashMap<String, HashMap<String, JsonPortInfo>> = HashMap::new();
+
+    for p in ports {
+        let json = JsonPortInfo {
+            direction: p.direction,
+            r#type: type_info_str(p.type_info),
+            width: p.width,
+            is4state: p.is_4state,
+            array_dims: p.array_dims.clone(),
+            interface: None,
+        };
+        if p.is_hierarchical {
+            if let Some(dot) = p.name.find('.') {
+                let parent = p.name[..dot].to_string();
+                let member = p.name[dot + 1..].to_string();
+                iface_maps.entry(parent).or_default().insert(member, json);
+            }
+        } else {
+            result.insert(p.name.clone(), json);
+        }
+    }
+
+    // Build synthetic parent entries for every interface group
+    for (parent_name, iface_map) in iface_maps {
+        result.insert(parent_name, JsonPortInfo {
+            direction: "inout",
+            r#type: "logic",
+            width: 0,
+            is4state: false,
+            array_dims: None,
+            interface: Some(iface_map),
+        });
+    }
+
+    result
 }
 
 /// Convert instance info to JSON-serializable format.
@@ -319,11 +349,32 @@ fn generate_dts(module_name: &str, ports: &[PortInfo], instances: &[InstanceInfo
 }
 
 /// Write port members to a DTS interface body at the given indentation level.
+///
+/// Hierarchical ports (e.g. `bus.data`, `bus.valid`) are grouped into a nested
+/// object type `bus: { data: bigint; valid: bigint; }` instead of emitting the
+/// dot-qualified name directly (which would be a TypeScript syntax error).
 fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
+    use std::collections::BTreeMap;
+
+    // Separate scalar ports from hierarchical ones and group the latter by parent
+    let mut scalar: Vec<&PortInfo> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<&PortInfo>> = BTreeMap::new();
+
     for port in ports {
         if port.type_info == TypeInfo::Clock {
             continue;
         }
+        if port.is_hierarchical {
+            if let Some(dot) = port.name.find('.') {
+                groups.entry(port.name[..dot].to_string()).or_default().push(port);
+                continue;
+            }
+        }
+        scalar.push(port);
+    }
+
+    // Emit scalar ports
+    for port in scalar {
         let ts_type = ts_type_for_width(port.width);
         let readonly = if port.is_output { "readonly " } else { "" };
         if port.array_dims.is_some() {
@@ -339,6 +390,19 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
         } else {
             out.push_str(&format!("{}{}{}: {};\n", indent, readonly, port.name, ts_type));
         }
+    }
+
+    // Emit interface port groups as nested object types
+    let child_indent = format!("{}  ", indent);
+    for (parent_name, members) in groups {
+        out.push_str(&format!("{}{}: {{\n", indent, parent_name));
+        for member in members {
+            let member_name = &member.name[member.name.find('.').unwrap() + 1..];
+            let ts_type = ts_type_for_width(member.width);
+            let readonly = if member.is_output { "readonly " } else { "" };
+            out.push_str(&format!("{}{}{}: {};\n", child_indent, readonly, member_name, ts_type));
+        }
+        out.push_str(&format!("{}}};\n", indent));
     }
 }
 
@@ -365,16 +429,26 @@ fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
         module_name
     ));
 
-    // Ports object
-    out.push_str("  ports: {\n");
+    // Ports object — hierarchical ports (e.g. "bus.data") are grouped into a
+    // nested { interface: { ... } } entry so that the TS DUT can expose them
+    // as dut.bus.data rather than the raw "bus.data" flat key.
+    use std::collections::BTreeMap;
+    let mut scalar_ports: Vec<&PortInfo> = Vec::new();
+    let mut iface_groups: BTreeMap<String, Vec<&PortInfo>> = BTreeMap::new();
     for port in ports {
+        if port.is_hierarchical {
+            if let Some(dot) = port.name.find('.') {
+                iface_groups.entry(port.name[..dot].to_string()).or_default().push(port);
+                continue;
+            }
+        }
+        scalar_ports.push(port);
+    }
+
+    out.push_str("  ports: {\n");
+    for port in scalar_ports {
         let type_str = type_info_str(port.type_info);
         let four_state_str = if port.is_4state { ", is4state: true" } else { "" };
-        let hierarchical_str = if port.is_hierarchical {
-            ", hierarchical: true"
-        } else {
-            ""
-        };
         let array_dims_str = match &port.array_dims {
             Some(dims) => {
                 let dims_str = dims
@@ -387,9 +461,22 @@ fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
             None => String::new(),
         };
         out.push_str(&format!(
-            "    {}: {{ direction: \"{}\", type: \"{}\", width: {}{}{}{} }},\n",
-            port.name, port.direction, type_str, port.width, four_state_str, hierarchical_str, array_dims_str
+            "    {}: {{ direction: \"{}\", type: \"{}\", width: {}{}{} }},\n",
+            port.name, port.direction, type_str, port.width, four_state_str, array_dims_str
         ));
+    }
+    for (parent_name, members) in iface_groups {
+        out.push_str(&format!("    {}: {{ direction: \"inout\", type: \"logic\", width: 0, interface: {{\n", parent_name));
+        for member in members {
+            let member_name = &member.name[member.name.find('.').unwrap() + 1..];
+            let type_str = type_info_str(member.type_info);
+            let four_state_str = if member.is_4state { ", is4state: true" } else { "" };
+            out.push_str(&format!(
+                "      {}: {{ direction: \"{}\", type: \"{}\", width: {}{} }},\n",
+                member_name, member.direction, type_str, member.width, four_state_str
+            ));
+        }
+        out.push_str("    } },\n");
     }
     out.push_str("  },\n");
 
@@ -658,5 +745,57 @@ module Top (
         assert_eq!(top.instances[0].name, "u_sub");
         assert!(top.instances[0].ports.contains_key("i_data"));
         assert!(top.instances[0].ports.contains_key("o_data"));
+    }
+
+    /// Interface port: a module that takes a modport as a top-level port.
+    /// The generated DTS must emit a nested object type (not "bus.data: bigint"),
+    /// and the generated JS must emit a nested `interface` object.
+    #[test]
+    fn test_interface_port() {
+        let code = r#"
+interface Bus {
+    var data:  logic<8>;
+    var valid: logic;
+    modport producer {
+        data:  output,
+        valid: output,
+    }
+    modport consumer {
+        data:  input,
+        valid: input,
+    }
+}
+
+module Top (
+    bus: modport Bus::consumer,
+    out: output logic<8>,
+) {
+    assign out = bus.data;
+}
+"#;
+        let modules = generate_from_source(code);
+        let top = modules.iter().find(|m| m.module_name == "Top").unwrap();
+
+        assert_snapshot!("interface_port_dts", top.dts_content);
+        assert_snapshot!("interface_port_js", top.js_content);
+        assert_snapshot!("interface_port_md", top.md_content);
+
+        // The DTS must NOT contain "bus.data" as a raw key (would be a syntax error)
+        assert!(!top.dts_content.contains("bus.data:"), "DTS must not have dot-separated port name");
+        // The DTS must have a nested `bus` object type
+        assert!(top.dts_content.contains("bus:"), "DTS must have 'bus' as top-level port name");
+
+        // The JS ports object must have a nested `interface` key for `bus`
+        let bus_port = top.ports.get("bus").expect("ports map must have 'bus' key");
+        assert!(bus_port.interface.is_some(), "JsonPortInfo for 'bus' must have interface");
+        let iface = bus_port.interface.as_ref().unwrap();
+        assert!(iface.contains_key("data"), "interface must contain 'data'");
+        assert!(iface.contains_key("valid"), "interface must contain 'valid'");
+        assert_eq!(iface["data"].direction, "input");
+        assert_eq!(iface["valid"].direction, "input");
+        assert_eq!(iface["data"].width, 8);
+
+        // Flat ports must NOT contain "bus.data"
+        assert!(!top.ports.contains_key("bus.data"), "ports map must not have flat 'bus.data' key");
     }
 }

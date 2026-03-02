@@ -1721,3 +1721,165 @@ describe("E2E: celox.toml test sources", () => {
     sim.dispose();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Interface port DUT accessor tests
+// ---------------------------------------------------------------------------
+
+// A module whose top-level port is a modport interface.
+// After Veryl expansion "sig.data" and "sig.valid" become individual ports.
+// buildPortsFromLayout must group them into a nested PortInfo so that the
+// DUT exposes them as dut.sig.data / dut.sig.valid.
+const INTERFACE_PORT_SOURCE = `
+interface Signal {
+    var data:  logic<8>;
+    var valid: logic;
+    modport src {
+        data:  output,
+        valid: output,
+    }
+    modport dst {
+        data:  input,
+        valid: input,
+    }
+}
+
+module Top (
+    sig: modport Signal::dst,
+    out: output logic<8>,
+) {
+    assign out = sig.data;
+}
+`;
+
+// A module that uses two instances connected via an interface so we can verify
+// that the hierarchy DUT also exposes nested accessors correctly.
+const INTERFACE_HIERARCHY_SOURCE = `
+interface Bus {
+    var data:  logic<8>;
+    var valid: logic;
+    modport producer {
+        data:  output,
+        valid: output,
+    }
+    modport consumer {
+        data:  input,
+        valid: input,
+    }
+}
+
+module Producer (
+    bus: modport Bus::producer,
+    val: input logic<8>,
+) {
+    assign bus.data  = val;
+    assign bus.valid = 1'b1;
+}
+
+module Consumer (
+    bus:  modport Bus::consumer,
+    out:  output logic<8>,
+    got:  output logic,
+) {
+    assign out = bus.data;
+    assign got = bus.valid;
+}
+
+module Top (
+    val: input  logic<8>,
+    out: output logic<8>,
+    got: output logic,
+) {
+    inst b:   Bus;
+    inst p:   Producer (bus: b, val: val);
+    inst c:   Consumer (bus: b, out: out, got: got);
+}
+`;
+
+describe("E2E: interface port DUT accessor", () => {
+  test("top-level interface port members accessible as nested dut properties", () => {
+    interface TopPorts {
+      sig: { data: bigint; valid: bigint };
+      readonly out: bigint;
+    }
+
+    const sim = Simulator.fromSource<TopPorts>(INTERFACE_PORT_SOURCE, "Top");
+
+    sim.dut.sig.data = 0x42n;
+    expect(sim.dut.out).toBe(0x42n);
+
+    sim.dut.sig.data = 0xFFn;
+    expect(sim.dut.out).toBe(0xFFn);
+
+    sim.dut.sig.data = 0x00n;
+    expect(sim.dut.out).toBe(0x00n);
+
+    sim.dispose();
+  });
+
+  test("writing to interface output member throws", () => {
+    // bus.data / bus.valid are outputs of Top — writing should throw.
+    const PRODUCER_ONLY = `
+interface Bus {
+    var data:  logic<8>;
+    var valid: logic;
+    modport src {
+        data:  output,
+        valid: output,
+    }
+}
+module Top (
+    bus: modport Bus::src,
+    val: input logic<8>,
+) {
+    assign bus.data  = val;
+    assign bus.valid = 1'b1;
+}
+`;
+    const sim = Simulator.fromSource(PRODUCER_ONLY, "Top");
+
+    expect(() => {
+      (sim.dut as any).bus.data = 0n;
+    }).toThrow("Cannot write to output port 'data'");
+
+    sim.dispose();
+  });
+
+  test("interface port propagates through sub-module instances", () => {
+    interface TopPorts {
+      val: bigint;
+      readonly out: bigint;
+      readonly got: bigint;
+    }
+
+    const sim = Simulator.fromSource<TopPorts>(INTERFACE_HIERARCHY_SOURCE, "Top");
+
+    sim.dut.val = 0xABn;
+    expect(sim.dut.out).toBe(0xABn);
+    expect(sim.dut.got).toBe(1n);
+
+    sim.dut.val = 0x00n;
+    expect(sim.dut.out).toBe(0x00n);
+
+    sim.dispose();
+  });
+
+  test("multiple interface port members are independently accessible", () => {
+    interface TopPorts {
+      sig: { data: bigint; valid: bigint };
+      readonly out: bigint;
+    }
+
+    const sim = Simulator.fromSource<TopPorts>(INTERFACE_PORT_SOURCE, "Top");
+
+    sim.dut.sig.data = 0x77n;
+    sim.dut.sig.valid = 1n;
+    expect(sim.dut.out).toBe(0x77n);
+
+    sim.dut.sig.data = 0x33n;
+    sim.dut.sig.valid = 0n;
+    expect(sim.dut.out).toBe(0x33n);
+
+    sim.dispose();
+  });
+});
