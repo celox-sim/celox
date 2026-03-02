@@ -55,6 +55,78 @@ const CODE: &str = r#"
     }
     "#;
 
+// std::countones W=64: recursive combinational popcount tree
+// CLOGW = $clog2(64) + 1 = 7 bits
+const COUNTONES_SRC: &str = concat!(
+    include_str!("../../../deps/veryl/crates/std/veryl/src/countones/countones.veryl"),
+    r#"
+module Top (
+    i_data: input  logic<64>,
+    o_ones: output logic<7>,
+) {
+    inst u: countones #(W: 64) (
+        i_data,
+        o_ones,
+    );
+}
+"#
+);
+
+// std::counter WIDTH=32: compare against the N=1000 inline counter above
+const STD_COUNTER_SRC: &str = concat!(
+    include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
+    r#"
+module Top (
+    clk    : input  clock,
+    rst    : input  reset,
+    i_up   : input  logic,
+    o_count: output logic<32>,
+) {
+    inst u: counter #(WIDTH: 32) (
+        i_clk       : clk,
+        i_rst       : rst,
+        i_clear     : 1'b0,
+        i_set       : 1'b0,
+        i_set_value : 32'b0,
+        i_up,
+        i_down      : 1'b0,
+        o_count,
+        o_count_next: _,
+        o_wrap_around: _,
+    );
+}
+"#
+);
+
+// std::gray_counter WIDTH=32: sequential Gray-encoded counter
+// Exercises counter + gray_encoder together
+const GRAY_COUNTER_SRC: &str = concat!(
+    include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
+    include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_encoder.veryl"),
+    include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_counter.veryl"),
+    r#"
+module Top (
+    clk    : input  clock,
+    rst    : input  reset,
+    i_up   : input  logic,
+    o_count: output logic<32>,
+) {
+    inst u: gray_counter #(WIDTH: 32) (
+        i_clk       : clk,
+        i_rst       : rst,
+        i_clear     : 1'b0,
+        i_set       : 1'b0,
+        i_set_value : 32'b0,
+        i_up,
+        i_down      : 1'b0,
+        o_count,
+        o_count_next: _,
+        o_wrap_around: _,
+    );
+}
+"#
+);
+
 fn benchmark_counter(c: &mut Criterion) {
     c.bench_function("simulation_build_top_n1000", |b| {
         b.iter(|| {
@@ -148,5 +220,140 @@ fn benchmark_linear_sec(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, benchmark_counter, benchmark_linear_sec);
+fn benchmark_countones(c: &mut Criterion) {
+    c.bench_function("simulation_build_countones_w64", |b| {
+        b.iter(|| {
+            let _sim = Simulator::builder(COUNTONES_SRC, "Top").build().unwrap();
+        })
+    });
+
+    let mut sim = Simulator::builder(COUNTONES_SRC, "Top").build().unwrap();
+    let i_data = sim.signal("i_data");
+    let o_ones = sim.signal("o_ones");
+
+    c.bench_function("simulation_eval_countones_w64_x1", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            sim.modify(|io| io.set(i_data, input)).unwrap();
+            std::hint::black_box(sim.get(o_ones));
+            input = input.wrapping_add(1);
+        })
+    });
+
+    c.bench_function("simulation_eval_countones_w64_x1000000", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.modify(|io| io.set(i_data, input)).unwrap();
+                std::hint::black_box(sim.get(o_ones));
+                input = input.wrapping_add(1);
+            }
+        })
+    });
+}
+
+fn benchmark_std_counter(c: &mut Criterion) {
+    c.bench_function("simulation_build_std_counter_w32", |b| {
+        b.iter(|| {
+            let _sim = Simulator::builder(STD_COUNTER_SRC, "Top").build().unwrap();
+        })
+    });
+
+    let mut sim = Simulator::builder(STD_COUNTER_SRC, "Top").build().unwrap();
+    let clk     = sim.event("clk");
+    let rst     = sim.signal("rst");
+    let i_up    = sim.signal("i_up");
+    let o_count = sim.signal("o_count");
+
+    sim.modify(|io| {
+        io.set(rst, 1u8);
+        io.set(i_up, 0u8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(i_up, 1u8);
+    }).unwrap();
+
+    c.bench_function("simulation_tick_std_counter_w32_x1", |b| {
+        b.iter(|| {
+            sim.tick(clk).unwrap();
+        })
+    });
+
+    c.bench_function("simulation_tick_std_counter_w32_x1000000", |b| {
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.tick(clk).unwrap();
+            }
+        })
+    });
+
+    // Testbench pattern: tick + read count
+    c.bench_function("testbench_tick_std_counter_w32_x1000000", |b| {
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.tick(clk).unwrap();
+                std::hint::black_box(sim.get(o_count));
+            }
+        })
+    });
+}
+
+fn benchmark_gray_counter(c: &mut Criterion) {
+    c.bench_function("simulation_build_gray_counter_w32", |b| {
+        b.iter(|| {
+            let _sim = Simulator::builder(GRAY_COUNTER_SRC, "Top").build().unwrap();
+        })
+    });
+
+    let mut sim = Simulator::builder(GRAY_COUNTER_SRC, "Top").build().unwrap();
+    let clk     = sim.event("clk");
+    let rst     = sim.signal("rst");
+    let i_up    = sim.signal("i_up");
+    let o_count = sim.signal("o_count");
+
+    sim.modify(|io| {
+        io.set(rst, 1u8);
+        io.set(i_up, 0u8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(i_up, 1u8);
+    }).unwrap();
+
+    c.bench_function("simulation_tick_gray_counter_w32_x1", |b| {
+        b.iter(|| {
+            sim.tick(clk).unwrap();
+        })
+    });
+
+    c.bench_function("simulation_tick_gray_counter_w32_x1000000", |b| {
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.tick(clk).unwrap();
+            }
+        })
+    });
+
+    // Testbench pattern: tick + read Gray-encoded count
+    c.bench_function("testbench_tick_gray_counter_w32_x1000000", |b| {
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.tick(clk).unwrap();
+                std::hint::black_box(sim.get(o_count));
+            }
+        })
+    });
+}
+
+criterion_group!(
+    benches,
+    benchmark_counter,
+    benchmark_linear_sec,
+    benchmark_countones,
+    benchmark_std_counter,
+    benchmark_gray_counter,
+);
 criterion_main!(benches);
