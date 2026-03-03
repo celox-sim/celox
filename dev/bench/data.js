@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772472323201,
+  "lastUpdate": 1772557783491,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -857,6 +857,162 @@ window.BENCHMARK_DATA = {
             "name": "rust/testbench_tick_top_n1000_x1000000",
             "value": 323365.096,
             "range": "± 1508.555 us",
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "a359d77652f39e1e2e47dfcf357839eb9e196e6b",
+          "message": "Fix bench CI: install libbenchmark-dev and propagate script failures\n\nThe bench-verilator job was missing the Google Benchmark library\n(libbenchmark-dev), causing the make step to fail at link time.\nThe failure was silently swallowed because the outer shell only\nchecked tee's exit code. Add the missing apt package and set\npipefail so script errors are properly surfaced.",
+          "timestamp": "2026-03-03T16:53:40Z",
+          "tree_id": "7557fa99486060c5f48906812f9b1fc126389d21",
+          "url": "https://github.com/celox-sim/celox/commit/a359d77652f39e1e2e47dfcf357839eb9e196e6b"
+        },
+        "date": 1772557777552,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "rust/simulator_tick_x10000",
+            "value": 1593.691,
+            "range": "± 32.432 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_step_x20000",
+            "value": 9876.919,
+            "range": "± 28.509 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_top_n1000",
+            "value": 768112.799,
+            "range": "± 6679.023 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1",
+            "value": 0.309,
+            "range": "± 0.002 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1000000",
+            "value": 310038.683,
+            "range": "± 872.774 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1",
+            "value": 0.329,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1000000",
+            "value": 329789.204,
+            "range": "± 513.004 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_linear_sec_p6",
+            "value": 162836.692,
+            "range": "± 1377.757 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_linear_sec_p6_x1",
+            "value": 0.791,
+            "range": "± 0.002 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_linear_sec_p6_x1000000",
+            "value": 798824.469,
+            "range": "± 1373.340 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_eval_linear_sec_p6_x1000000",
+            "value": 795531.551,
+            "range": "± 1200.030 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_countones_w64",
+            "value": 104881.856,
+            "range": "± 1167.643 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_countones_w64_x1",
+            "value": 0.427,
+            "range": "± 0.002 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_countones_w64_x1000000",
+            "value": 429419.248,
+            "range": "± 562.213 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_std_counter_w32",
+            "value": 7995.745,
+            "range": "± 103.442 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_std_counter_w32_x1",
+            "value": 0.009,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_std_counter_w32_x1000000",
+            "value": 9881.656,
+            "range": "± 30.713 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_std_counter_w32_x1000000",
+            "value": 32775.837,
+            "range": "± 69.764 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_gray_counter_w32",
+            "value": 11496,
+            "range": "± 74.027 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_gray_counter_w32_x1",
+            "value": 0.01,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_gray_counter_w32_x1000000",
+            "value": 10748.567,
+            "range": "± 129.171 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_gray_counter_w32_x1000000",
+            "value": 37098.288,
+            "range": "± 62.714 us",
             "unit": "us"
           }
         ]
