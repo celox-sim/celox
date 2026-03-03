@@ -9,6 +9,9 @@
  *   4. Simulator::tick vs Simulation::step overhead
  */
 
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { bench, describe, afterAll } from "vitest";
 import { Simulator } from "./simulator.js";
 import { Simulation } from "./simulation.js";
@@ -17,6 +20,12 @@ import {
   loadNativeAddon,
   createSimulatorBridge,
 } from "./napi-helpers.js";
+
+const __benchDir = dirname(fileURLToPath(import.meta.url));
+const VERYL_STD = resolve(__benchDir, "../../../deps/veryl/crates/std/veryl/src");
+function readVeryl(...parts: string[]): string {
+  return readFileSync(resolve(VERYL_STD, ...parts), "utf8");
+}
 
 const CODE = `
     module Top #(
@@ -396,6 +405,306 @@ describe("optimize-flag", () => {
     () => {
       for (let i = 0; i < 10_000; i++) {
         simOpt.tick();
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+});
+
+// ────────────────────────────────────────────────────────────
+// Stdlib benchmarks — mirrors crates/celox/benches/simulation.rs
+// ────────────────────────────────────────────────────────────
+
+// --- Linear SEC (P=6): Hamming encoder/decoder, combinational ---
+
+const LINEAR_SEC_SRC =
+  readVeryl("coding/linear_sec_encoder.veryl") +
+  readVeryl("coding/linear_sec_decoder.veryl") +
+  `
+module Top #(
+    param P: u32 = 6,
+    const K: u32 = (1 << P) - 1,
+    const N: u32 = K - P,
+)(
+    i_word     : input  logic<N>,
+    o_codeword : output logic<K>,
+    o_word     : output logic<N>,
+    o_corrected: output logic,
+) {
+    inst u_enc: linear_sec_encoder #(P: P) (i_word, o_codeword);
+    inst u_dec: linear_sec_decoder #(P: P) (
+        i_codeword: o_codeword,
+        o_word,
+        o_corrected,
+    );
+}
+`;
+
+interface LinearSecPorts {
+  i_word: bigint;
+  readonly o_codeword: bigint;
+  readonly o_word: bigint;
+  readonly o_corrected: bigint;
+}
+
+describe("stdlib-linear-sec", () => {
+  bench(
+    "simulation_build_linear_sec_p6",
+    () => {
+      const sim = Simulator.fromSource<LinearSecPorts>(LINEAR_SEC_SRC, "Top");
+      sim.dispose();
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  const sim = Simulator.fromSource<LinearSecPorts>(LINEAR_SEC_SRC, "Top");
+
+  afterAll(() => {
+    sim.dispose();
+  });
+
+  bench("simulation_eval_linear_sec_p6_x1", () => {
+    sim.dut.i_word = BigInt(Math.floor(Math.random() * 0x1ffffffffffffff));
+    // biome-ignore lint: read to measure eval
+    sim.dut.o_word;
+  });
+
+  bench(
+    "simulation_eval_linear_sec_p6_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.dut.i_word = BigInt(i);
+        // biome-ignore lint: read to measure eval
+        sim.dut.o_word;
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  bench(
+    "testbench_eval_linear_sec_p6_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.dut.i_word = BigInt(i);
+        // biome-ignore lint: read corrected flag
+        sim.dut.o_corrected;
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+});
+
+// --- Countones (W=64): recursive combinational popcount tree ---
+
+const COUNTONES_SRC =
+  readVeryl("countones/countones.veryl") +
+  `
+module Top (
+    i_data: input  logic<64>,
+    o_ones: output logic<7>,
+) {
+    inst u: countones #(W: 64) (i_data, o_ones);
+}
+`;
+
+interface CountonesPorts {
+  i_data: bigint;
+  readonly o_ones: bigint;
+}
+
+describe("stdlib-countones", () => {
+  bench(
+    "simulation_build_countones_w64",
+    () => {
+      const sim = Simulator.fromSource<CountonesPorts>(COUNTONES_SRC, "Top");
+      sim.dispose();
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  const sim = Simulator.fromSource<CountonesPorts>(COUNTONES_SRC, "Top");
+
+  afterAll(() => {
+    sim.dispose();
+  });
+
+  bench("simulation_eval_countones_w64_x1", () => {
+    sim.dut.i_data = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+    // biome-ignore lint: read to measure eval
+    sim.dut.o_ones;
+  });
+
+  bench(
+    "simulation_eval_countones_w64_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.dut.i_data = BigInt(i);
+        // biome-ignore lint: read to measure eval
+        sim.dut.o_ones;
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+});
+
+// --- std::counter (WIDTH=32): sequential up-counter ---
+
+const STD_COUNTER_SRC =
+  readVeryl("counter/counter.veryl") +
+  `
+module Top (
+    clk    : input  clock,
+    rst    : input  reset,
+    i_up   : input  logic,
+    o_count: output logic<32>,
+) {
+    inst u: counter #(WIDTH: 32) (
+        i_clk       : clk,
+        i_rst       : rst,
+        i_clear     : 1'b0,
+        i_set       : 1'b0,
+        i_set_value : 32'b0,
+        i_up,
+        i_down      : 1'b0,
+        o_count,
+        o_count_next: _,
+        o_wrap_around: _,
+    );
+}
+`;
+
+interface StdCounterPorts {
+  rst: bigint;
+  i_up: bigint;
+  readonly o_count: bigint;
+}
+
+describe("stdlib-counter", () => {
+  bench(
+    "simulation_build_std_counter_w32",
+    () => {
+      const sim = Simulator.fromSource<StdCounterPorts>(STD_COUNTER_SRC, "Top");
+      sim.dispose();
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  const sim = Simulator.fromSource<StdCounterPorts>(STD_COUNTER_SRC, "Top");
+  sim.dut.rst = 1n;
+  sim.dut.i_up = 0n;
+  sim.tick();
+  sim.dut.rst = 0n;
+  sim.dut.i_up = 1n;
+  sim.tick();
+
+  afterAll(() => {
+    sim.dispose();
+  });
+
+  bench("simulation_tick_std_counter_w32_x1", () => {
+    sim.tick();
+  });
+
+  bench(
+    "simulation_tick_std_counter_w32_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.tick();
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  bench(
+    "testbench_tick_std_counter_w32_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.tick();
+        // biome-ignore lint: read to measure testbench cycle
+        sim.dut.o_count;
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+});
+
+// --- std::gray_counter (WIDTH=32): Gray-encoded sequential counter ---
+
+const GRAY_COUNTER_SRC =
+  readVeryl("counter/counter.veryl") +
+  readVeryl("gray/gray_encoder.veryl") +
+  readVeryl("gray/gray_counter.veryl") +
+  `
+module Top (
+    clk    : input  clock,
+    rst    : input  reset,
+    i_up   : input  logic,
+    o_count: output logic<32>,
+) {
+    inst u: gray_counter #(WIDTH: 32) (
+        i_clk       : clk,
+        i_rst       : rst,
+        i_clear     : 1'b0,
+        i_set       : 1'b0,
+        i_set_value : 32'b0,
+        i_up,
+        i_down      : 1'b0,
+        o_count,
+        o_count_next: _,
+        o_wrap_around: _,
+    );
+}
+`;
+
+interface GrayCounterPorts {
+  rst: bigint;
+  i_up: bigint;
+  readonly o_count: bigint;
+}
+
+describe("stdlib-gray-counter", () => {
+  bench(
+    "simulation_build_gray_counter_w32",
+    () => {
+      const sim = Simulator.fromSource<GrayCounterPorts>(GRAY_COUNTER_SRC, "Top");
+      sim.dispose();
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  const sim = Simulator.fromSource<GrayCounterPorts>(GRAY_COUNTER_SRC, "Top");
+  sim.dut.rst = 1n;
+  sim.dut.i_up = 0n;
+  sim.tick();
+  sim.dut.rst = 0n;
+  sim.dut.i_up = 1n;
+  sim.tick();
+
+  afterAll(() => {
+    sim.dispose();
+  });
+
+  bench("simulation_tick_gray_counter_w32_x1", () => {
+    sim.tick();
+  });
+
+  bench(
+    "simulation_tick_gray_counter_w32_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.tick();
+      }
+    },
+    { iterations: 3, time: 0 },
+  );
+
+  bench(
+    "testbench_tick_gray_counter_w32_x1000000",
+    () => {
+      for (let i = 0; i < 1_000_000; i++) {
+        sim.tick();
+        // biome-ignore lint: read to measure testbench cycle
+        sim.dut.o_count;
       }
     },
     { iterations: 3, time: 0 },

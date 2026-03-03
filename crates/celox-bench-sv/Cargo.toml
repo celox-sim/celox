@@ -1,0 +1,13 @@
+[package]
+name        = "celox-bench-sv"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+description = "Generate SystemVerilog from Veryl stdlib for Verilator benchmarks"
+publish     = false
+
+[dependencies]
+veryl-analyzer = { workspace = true }
+veryl-emitter  = { workspace = true }
+veryl-metadata = { workspace = true }
+veryl-parser   = { workspace = true }

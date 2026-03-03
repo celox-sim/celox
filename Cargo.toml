@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/celox",
+    "crates/celox-bench-sv",
     "crates/celox-macros",
     "crates/celox-napi",
     "crates/celox-ts-gen",
@@ -21,6 +22,7 @@ description = "Celox HDL Simulator"
 [workspace.dependencies]
 # Veryl dependencies via submodule path
 veryl-analyzer = { path = "deps/veryl/crates/analyzer" }
+veryl-emitter  = { path = "deps/veryl/crates/emitter" }
 veryl-metadata = { path = "deps/veryl/crates/metadata" }
 veryl-parser   = { path = "deps/veryl/crates/parser", default-features = false }
 veryl-path     = { path = "deps/veryl/crates/path" }

@@ -238,10 +238,12 @@ function formatChartTitle(benchName: string): string {
   s = s.replace(/^simulation_time_build/, "Time build");
   s = s.replace(/^simulation_time_tick/, "Time tick");
   s = s.replace(/^simulation_build/, "Build");
+  s = s.replace(/^simulation_eval/, "Eval");
   s = s.replace(/^simulation_tick/, "Tick");
   s = s.replace(/^simulation_step/, "Step");
   s = s.replace(/^simulator_tick/, "Simulator tick");
   s = s.replace(/^testbench_array_tick/, "Testbench (array) tick");
+  s = s.replace(/^testbench_eval/, "Testbench eval");
   s = s.replace(/^testbench_tick/, "Testbench tick");
   s = s.replace(/^manual_step/, "Manual step");
   s = s.replace(/^waitForCycles/, "waitForCycles");
