@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772562002814,
+  "lastUpdate": 1772562003370,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -3564,6 +3564,177 @@ window.BENCHMARK_DATA = {
             "name": "ts/tick_x10000_with_optimize",
             "value": 4.0916469999986775,
             "range": "± 0.0%",
+            "unit": "ms",
+            "extra": "3 samples"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "0f0c6ec79d1978cac82e3e3d187a1e3a2160ea0f",
+          "message": "Rebase veryl submodule onto upstream master and adapt to IR API changes\n\n- Update deps/veryl to upstream/master (10b3d0d0)\n- Add Box<Comptime> field to Expression variant patterns and constructors\n- Remove TokenRange from Factor::Variable/Value/FunctionCall patterns\n- Migrate FunctionCall.ret to FunctionCall.comptime\n- Guard eval_constexpr with is_const/evaluated checks to prevent\n  non-constant variables (now carrying Numeric Comptime) from being\n  treated as compile-time constants",
+          "timestamp": "2026-03-03T18:04:03Z",
+          "tree_id": "2f9bec6e79b3772a6749a12e3b33bcc493186ca6",
+          "url": "https://github.com/celox-sim/celox/commit/0f0c6ec79d1978cac82e3e3d187a1e3a2160ea0f"
+        },
+        "date": 1772562003196,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ts/simulation_build_top_n1000",
+            "value": 768.9239150000006,
+            "range": "± 0.8%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_tick_top_n1000_x1",
+            "value": 0.0005438934110600172,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "919298 samples"
+          },
+          {
+            "name": "ts/simulation_tick_top_n1000_x1000000",
+            "value": 404.20215266666736,
+            "range": "± 0.0%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_tick_top_n1000_x1",
+            "value": 0.0008862932847405247,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "564148 samples"
+          },
+          {
+            "name": "ts/testbench_tick_top_n1000_x1000000",
+            "value": 723.5537263333341,
+            "range": "± 0.4%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_array_tick_top_n1000_x1",
+            "value": 0.0008744305728755969,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "571801 samples"
+          },
+          {
+            "name": "ts/testbench_array_tick_top_n1000_x1000000",
+            "value": 712.2683509999964,
+            "range": "± 3.9%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulator_tick_x10000",
+            "value": 4.349402333335699,
+            "range": "± 2.4%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_step_x20000",
+            "value": 13.626845666665758,
+            "range": "± 1.5%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_build_top_n1000",
+            "value": 780.1909470000004,
+            "range": "± 4.6%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_step_x1",
+            "value": 0.0008333641516859779,
+            "range": "± 0.2%",
+            "unit": "ms",
+            "extra": "599978 samples"
+          },
+          {
+            "name": "ts/simulation_time_step_x1000000",
+            "value": 673.5640836666668,
+            "range": "± 0.2%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_runUntil_1000000",
+            "value": 102.39227400000043,
+            "range": "± 0.8%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/waitForCycles_x1000",
+            "value": 0.8651603333322176,
+            "range": "± 73.6%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/manual_step_loop_x2000",
+            "value": 0.7208396666659004,
+            "range": "± 3.9%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/runUntil_fast_path_100000",
+            "value": 4.271553333329696,
+            "range": "± 1.4%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/runUntil_guarded_100000",
+            "value": 8.97778533333379,
+            "range": "± 1.9%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/build_without_optimize",
+            "value": 775.2809549999996,
+            "range": "± 4.0%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/build_with_optimize",
+            "value": 776.7564433333367,
+            "range": "± 0.5%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/tick_x10000_without_optimize",
+            "value": 4.348608000005091,
+            "range": "± 0.8%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/tick_x10000_with_optimize",
+            "value": 4.029598999996476,
+            "range": "± 0.5%",
             "unit": "ms",
             "extra": "3 samples"
           }
