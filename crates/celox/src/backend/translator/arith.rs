@@ -211,8 +211,8 @@ impl SIRTranslator {
             // --- 64-bit or less: Cranelift Native Type Operation ---
             let common_ty = get_cl_type(common_logical_width);
             let l_is_signed = state.register_map[lhs].is_signed() || matches!(op, BinaryOp::Sar);
-            let l_val = state.regs[lhs].values()[0];
-            let r_val = state.regs[rhs].values()[0];
+            let l_val = state.regs[lhs].first_value(state.builder);
+            let r_val = state.regs[rhs].first_value(state.builder);
 
             let l = promote_to_physical(state, l_val, l_width, l_is_signed, common_ty);
             let r = promote_to_physical(state, r_val, r_width, false, common_ty);
@@ -303,12 +303,10 @@ impl SIRTranslator {
 
             if self.options.four_state {
                 let l_m_val = state.regs[lhs]
-                    .masks()
-                    .map(|m| m[0])
+                    .first_mask(state.builder)
                     .unwrap_or_else(|| state.builder.ins().iconst(common_ty, 0));
                 let r_m_val = state.regs[rhs]
-                    .masks()
-                    .map(|m| m[0])
+                    .first_mask(state.builder)
                     .unwrap_or_else(|| state.builder.ins().iconst(common_ty, 0));
                 let l_m = promote_to_physical(state, l_m_val, l_width, l_is_signed, common_ty);
                 let r_m = promote_to_physical(state, r_m_val, r_width, false, common_ty);
@@ -513,8 +511,27 @@ impl SIRTranslator {
 
             if is_shift && num_chunks >= MEM_SHIFT_THRESHOLD {
                 // === Memory-backed shift path (O(n)) ===
-                let l_mb = state.regs[lhs].to_mem_backed(state.builder);
-                let l_addr = l_mb.addr();
+                // Allocate source slot sized to num_chunks (common_logical_width)
+                // and zero-pad beyond the actual source length to avoid OOB reads.
+                let src_chunks = state.regs[lhs].load_value_chunks(state.builder);
+                let (_, l_addr) = alloc_stack_slot(state.builder, num_chunks);
+                for (i, &v) in src_chunks.iter().enumerate() {
+                    state.builder.ins().store(
+                        MemFlags::new(),
+                        v,
+                        l_addr,
+                        (i * 8) as i32,
+                    );
+                }
+                let zero_pad = state.builder.ins().iconst(types::I64, 0);
+                for i in src_chunks.len()..num_chunks {
+                    state.builder.ins().store(
+                        MemFlags::new(),
+                        zero_pad,
+                        l_addr,
+                        (i * 8) as i32,
+                    );
+                }
                 let r_chunks = state.regs[rhs].load_value_chunks(state.builder);
 
                 // Allocate destination slot (large enough for full computation)
@@ -567,12 +584,21 @@ impl SIRTranslator {
                     let shift_has_x =
                         state.builder.ins().icmp(IntCC::NotEqual, r_any_x, zero);
 
-                    // Spill LHS masks to stack slot
+                    // Spill LHS masks to stack slot (zero-pad beyond actual length)
                     let (_, l_mask_addr) = alloc_stack_slot(state.builder, num_chunks);
                     for (i, &m) in l_masks.iter().enumerate() {
                         state.builder.ins().store(
                             MemFlags::new(),
                             m,
+                            l_mask_addr,
+                            (i * 8) as i32,
+                        );
+                    }
+                    let zero_mask_pad = state.builder.ins().iconst(types::I64, 0);
+                    for i in l_masks.len()..num_chunks {
+                        state.builder.ins().store(
+                            MemFlags::new(),
+                            zero_mask_pad,
                             l_mask_addr,
                             (i * 8) as i32,
                         );
@@ -626,7 +652,7 @@ impl SIRTranslator {
 
                 // Only keep MemBacked if the destination is still wide enough.
                 // Narrow destinations must be materialized as TwoState/FourState
-                // so that subsequent narrow paths can access .values()[0].
+                // so that subsequent narrow paths can access first_value().
                 if final_num_chunks >= MEM_SHIFT_THRESHOLD {
                     state.regs.insert(
                         *dst,
@@ -648,8 +674,6 @@ impl SIRTranslator {
                             )
                         })
                         .collect();
-                    // Truncate to final width
-                    res_chunks.truncate(final_num_chunks);
 
                     if self.options.four_state {
                         let res_masks: Vec<Value> = if let Some(ma) = mask_addr {
@@ -1054,7 +1078,7 @@ impl SIRTranslator {
 
         if common_logical_width <= 64 {
             // --- 64-bit or less: Single-word Operation ---
-            let r_val = state.regs[rhs].values()[0];
+            let r_val = state.regs[rhs].first_value(state.builder);
             let common_ty = get_cl_type(common_logical_width);
 
             let r_is_signed = state.register_map[rhs].is_signed() || matches!(op, UnaryOp::Minus);
@@ -1103,8 +1127,7 @@ impl SIRTranslator {
 
             if self.options.four_state {
                 let r_m_val = state.regs[rhs]
-                    .masks()
-                    .map(|m| m[0])
+                    .first_mask(state.builder)
                     .unwrap_or_else(|| state.builder.ins().iconst(common_ty, 0));
                 let r_m = promote_to_physical(state, r_m_val, r_width, r_is_signed, common_ty);
 

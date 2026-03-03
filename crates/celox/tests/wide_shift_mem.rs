@@ -710,3 +710,130 @@ fn test_256bit_shift_right_cross_chunk() {
         "256-bit shr of cross-chunk value by 8 failed"
     );
 }
+
+// ============================================================
+// Narrow source, wide destination (OOB regression)
+// ============================================================
+
+/// Regression test: when lhs is narrower than dst, the memory-backed source
+/// slot must be zero-padded to num_chunks (= common_logical_width / 64).
+/// Without padding, load_or_default reads uninitialised memory beyond the
+/// source slot, producing garbage in the upper chunks.
+#[test]
+fn test_narrow_source_wide_dest_shift_left() {
+    // dst is 512-bit (8 chunks), lhs is 256-bit (4 chunks).
+    // common_logical_width = max(512, 256, 64) = 512 → num_chunks = 8.
+    // Source slot must be 8 chunks with chunks 4..7 zeroed.
+    let code = r#"
+        module Top (
+            a:   input  logic<256>,
+            amt: input  logic<10>,
+            o:   output logic<512>
+        ) {
+            assign o = (a as 512) << amt;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let a = sim.signal("a");
+    let amt = sim.signal("amt");
+    let o = sim.signal("o");
+
+    let mask_512: BigUint = (BigUint::from(1u64) << 512) - 1u64;
+
+    // Shift by 0: upper chunks should be zero, not garbage
+    let val = BigUint::from(0xDEAD_BEEF_CAFE_BABEu64);
+    sim.modify(|io| {
+        io.set_wide(a, val.clone());
+        io.set(amt, 0u16);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get(o),
+        val.clone(),
+        "Narrow→wide shl by 0: upper bits should be zero"
+    );
+
+    // Shift by 256: value should move into the upper half cleanly
+    sim.modify(|io| io.set(amt, 256u16)).unwrap();
+    let expected = (&val << 256usize) & &mask_512;
+    assert_eq!(
+        sim.get(o),
+        expected,
+        "Narrow→wide shl by 256 failed"
+    );
+
+    // Shift by 300: crosses into upper chunks
+    sim.modify(|io| io.set(amt, 300u16)).unwrap();
+    let expected = (&val << 300usize) & &mask_512;
+    assert_eq!(
+        sim.get(o),
+        expected,
+        "Narrow→wide shl by 300 failed"
+    );
+}
+
+#[test]
+fn test_narrow_source_wide_dest_shift_right() {
+    // dst is 512-bit, lhs is 256-bit (cast up).
+    // Right-shifting should see zeros in the upper chunks, not garbage.
+    let code = r#"
+        module Top (
+            a:   input  logic<256>,
+            amt: input  logic<10>,
+            o:   output logic<512>
+        ) {
+            assign o = (a as 512) >> amt;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let a = sim.signal("a");
+    let amt = sim.signal("amt");
+    let o = sim.signal("o");
+
+    // All 256 bits set, shift right by 1: upper 256 bits should remain zero
+    let val: BigUint = (BigUint::from(1u64) << 256) - 1u64;
+    sim.modify(|io| {
+        io.set_wide(a, val.clone());
+        io.set(amt, 1u16);
+    })
+    .unwrap();
+    let expected = &val >> 1usize;
+    assert_eq!(
+        sim.get(o),
+        expected,
+        "Narrow→wide shr by 1: upper bits should stay zero"
+    );
+}
+
+#[test]
+fn test_narrow_source_wide_dest_sar() {
+    // 512-bit signed sar where source is a wide input.
+    // The source slot for the 512-bit operand must be fully initialised.
+    let code = r#"
+        module Top (
+            a:   input  signed logic<512>,
+            amt: input  logic<10>,
+            o:   output signed logic<512>
+        ) {
+            assign o = a >>> amt;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let a = sim.signal("a");
+    let amt = sim.signal("amt");
+    let o = sim.signal("o");
+
+    // Positive value (fits in lower 256 bits, upper 256 bits are 0):
+    // sar should zero-fill, not produce garbage from uninitialised memory.
+    let val = BigUint::from(0x1234_5678_9ABC_DEF0u64);
+    sim.modify(|io| {
+        io.set_wide(a, val.clone());
+        io.set(amt, 4u16);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get(o),
+        &val >> 4usize,
+        "512-bit sar of small positive value should zero-fill"
+    );
+}

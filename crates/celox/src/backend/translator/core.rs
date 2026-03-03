@@ -89,29 +89,6 @@ pub enum TransValue {
 }
 
 impl TransValue {
-    /// Returns the value chunks as a slice. Panics on `MemBacked` — use
-    /// `load_value_chunks` instead for code that may encounter `MemBacked` values.
-    pub fn values(&self) -> &[Value] {
-        match self {
-            TransValue::TwoState(v) => v,
-            TransValue::FourState { values, .. } => values,
-            TransValue::MemBacked { .. } => {
-                panic!("TransValue::values() called on MemBacked; use load_value_chunks() instead")
-            }
-        }
-    }
-    /// Returns the mask chunks as a slice. Panics on `MemBacked` — use
-    /// `load_mask_chunks` instead for code that may encounter `MemBacked` values.
-    pub fn masks(&self) -> Option<&[Value]> {
-        match self {
-            TransValue::TwoState(_) => None,
-            TransValue::FourState { masks, .. } => Some(masks),
-            TransValue::MemBacked { .. } => {
-                panic!("TransValue::masks() called on MemBacked; use load_mask_chunks() instead")
-            }
-        }
-    }
-
     /// Load all value chunks as registers. Works for all variants.
     pub fn load_value_chunks(&self, builder: &mut FunctionBuilder) -> Vec<Value> {
         match self {
@@ -147,57 +124,6 @@ impl TransValue {
                     })
                     .collect()
             }),
-        }
-    }
-
-    /// Spill register-backed value to a new stack slot, returning `MemBacked`.
-    /// If already `MemBacked`, returns a clone.
-    pub fn to_mem_backed(&self, builder: &mut FunctionBuilder) -> TransValue {
-        match self {
-            TransValue::MemBacked { .. } => self.clone(),
-            _ => {
-                let chunks = self.load_value_chunks(builder);
-                let num_chunks = chunks.len();
-                let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    (num_chunks * 8) as u32,
-                    3,
-                ));
-                let addr = builder.ins().stack_addr(types::I64, slot, 0);
-                for (i, &val) in chunks.iter().enumerate() {
-                    builder
-                        .ins()
-                        .store(MemFlags::new(), val, addr, (i * 8) as i32);
-                }
-                let mask_addr = self.load_mask_chunks(builder).map(|masks| {
-                    let mask_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        (num_chunks * 8) as u32,
-                        3,
-                    ));
-                    let ma = builder.ins().stack_addr(types::I64, mask_slot, 0);
-                    for (i, &m) in masks.iter().enumerate() {
-                        builder
-                            .ins()
-                            .store(MemFlags::new(), m, ma, (i * 8) as i32);
-                    }
-                    ma
-                });
-                TransValue::MemBacked {
-                    addr,
-                    num_chunks,
-                    mask_addr,
-                }
-            }
-        }
-    }
-
-    /// Get the stack slot address for a MemBacked value.
-    /// Panics if not MemBacked.
-    pub fn addr(&self) -> Value {
-        match self {
-            TransValue::MemBacked { addr, .. } => *addr,
-            _ => panic!("TransValue::addr() called on non-MemBacked"),
         }
     }
 
