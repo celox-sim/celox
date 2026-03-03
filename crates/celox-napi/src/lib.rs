@@ -845,12 +845,12 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         parsers.push((path.clone(), parser));
     }
 
-    let post_pass1_errors: Vec<_> = Analyzer::analyze_post_pass1()
+    let errors: Vec<_> = Analyzer::analyze_post_pass1()
         .into_iter()
         .filter(|e| !matches!(e, AnalyzerError::UnknownMember { .. }))
         .collect();
-    if !post_pass1_errors.is_empty() {
-        let msgs: Vec<String> = post_pass1_errors.iter().map(|e| format!("{e}")).collect();
+    if !errors.is_empty() {
+        let msgs: Vec<String> = errors.into_iter().map(|e| format!("{e}")).collect();
         return Err(Error::from_reason(format!(
             "Errors in post-pass 1 analysis: {}",
             msgs.join("; ")

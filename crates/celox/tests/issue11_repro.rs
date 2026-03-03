@@ -1,9 +1,13 @@
-/// Regression test for issue #11:
-/// `pub module` wrapper causes "PKG doesn't have member lt" when proto package has no `lt`.
+/// Correctness test for the `pub module` + generic module + `<:` pattern (issue #11).
 ///
-/// When a `pub module` wraps a generic module parameterized with a proto package,
-/// and the generic module uses the `<:` operator on `PKG::Item` typed variables,
-/// the simulator should compile and run without error even if `ItemProto` has no `lt` member.
+/// A `pub module` wrapper over a generic module that uses `<:` on `PKG::Item` variables
+/// must compile and simulate correctly. The veryl analyzer emits a spurious
+/// `UnknownMember { member: "lt" }` error during `analyze_post_pass1` for this pattern,
+/// but it is harmless — the IR uses `Op::Less` directly.
+///
+/// Note: `Simulator::builder` already discards non-`UnsupportedByIr` analyzer errors, so
+/// this test exercises simulation correctness. The `gen_ts` NAPI path (Vite plugin) is
+/// where the actual bug manifested; it required the same `UnknownMember` filter.
 use celox::Simulator;
 
 const CODE: &str = r#"
