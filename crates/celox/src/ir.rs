@@ -63,12 +63,25 @@ pub struct TriggerSet<A> {
     pub clock: A,
     pub resets: Vec<A>,
 }
+/// Compilation plan for eval_comb when the CLIF instruction count exceeds
+/// Cranelift's limit. Mutually exclusive strategies.
+#[derive(Debug, Clone)]
+pub enum EvalCombPlan {
+    /// EU-boundary / single-block splitting with live regs in tail-call args.
+    TailCallChunks(Vec<crate::optimizer::coalescing::TailCallChunk>),
+    /// Memory-spilled multi-block splitting with scratch memory.
+    MemorySpilled(crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan),
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    /// Tail-call chain compilation plan, populated by the optimizer when the
+    /// estimated CLIF instruction count exceeds Cranelift's limit.
+    pub eval_comb_plan: Option<EvalCombPlan>,
     pub instance_ids: HashMap<InstancePath, InstanceId>,
     pub instance_module: HashMap<InstanceId, ModuleId>,
     pub module_variables: HashMap<ModuleId, HashMap<VarPath, VariableInfo>>,

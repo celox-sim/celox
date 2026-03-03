@@ -1,13 +1,74 @@
+use cranelift::codegen::ir::{BlockArg, FuncRef};
 use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
 
 use crate::{
     HashMap, SimulatorOptions,
-    ir::{AbsoluteAddr, RegionedAbsoluteAddr, RegisterId, RegisterType, SIRInstruction, STABLE_REGION},
+    ir::{AbsoluteAddr, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType, SIRInstruction, STABLE_REGION},
+    optimizer::coalescing::TailCallChunk,
+    optimizer::coalescing::pass_tail_call_split::{SpilledChunk, SpillSlot},
 };
 
 use super::MemoryLayout;
 
+/// Pre-load trigger signal values at function entry for register-based
+/// edge detection. Only needed when `emit_triggers` is enabled (Simulation mode).
+///
+/// Scans the given blocks for Store/Commit instructions with triggers,
+/// loads their current values from memory, and returns the old-value map.
+fn preload_trigger_old_values<'a>(
+    blocks: impl Iterator<Item = &'a crate::ir::BasicBlock<RegionedAbsoluteAddr>>,
+    builder: &mut FunctionBuilder,
+    mem_ptr: Value,
+    layout: &MemoryLayout,
+    emit_triggers: bool,
+) -> HashMap<(AbsoluteAddr, u32), Value> {
+    if !emit_triggers {
+        return HashMap::default();
+    }
+
+    let mut trigger_addrs: std::collections::HashSet<(AbsoluteAddr, u32)> =
+        std::collections::HashSet::new();
+    for block in blocks {
+        for inst in &block.instructions {
+            match inst {
+                SIRInstruction::Store(addr, _, _, _, triggers) if !triggers.is_empty() => {
+                    trigger_addrs.insert((addr.absolute_addr(), addr.region));
+                }
+                SIRInstruction::Commit(_, dst, _, _, triggers) if !triggers.is_empty() => {
+                    trigger_addrs.insert((dst.absolute_addr(), dst.region));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut old_values: HashMap<(AbsoluteAddr, u32), Value> = HashMap::default();
+    for (abs, region) in trigger_addrs {
+        let width = layout.widths[&abs];
+        debug_assert!(
+            width <= 64,
+            "Trigger signal wider than 64 bits is not supported"
+        );
+        let cl_type = get_cl_type(width);
+        let base_offset = if region == STABLE_REGION {
+            layout.offsets[&abs]
+        } else {
+            layout.working_base_offset + layout.working_offsets[&abs]
+        };
+        let addr_val = builder.ins().iadd_imm(mem_ptr, base_offset as i64);
+        let raw_val = builder.ins().load(cl_type, MemFlags::new(), addr_val, 0);
+        let val = if cl_type == types::I64 {
+            raw_val
+        } else {
+            builder.ins().uextend(types::I64, raw_val)
+        };
+        old_values.insert((abs, region), val);
+    }
+    old_values
+}
+
+#[derive(Clone)]
 pub enum TransValue {
     TwoState(Vec<Value>),
     FourState {
@@ -139,6 +200,8 @@ pub(crate) fn get_chunk_as_i64(builder: &mut FunctionBuilder, chunks: &[Value], 
     }
 }
 
+use super::control::collect_block_param_types;
+
 impl SIRTranslator {
     fn translate_instruction(
         &self,
@@ -202,57 +265,13 @@ impl SIRTranslator {
             return;
         }
 
-        // Pre-load trigger signal values at function entry for register-based
-        // edge detection. Only needed when emit_triggers is enabled (Simulation mode).
-        let trigger_old_values = if !self.options.emit_triggers {
-            HashMap::default()
-        } else {
-            let mut trigger_addrs: std::collections::HashSet<(AbsoluteAddr, u32)> =
-                std::collections::HashSet::new();
-            for unit in units {
-                for block in unit.blocks.values() {
-                    for inst in &block.instructions {
-                        match inst {
-                            SIRInstruction::Store(addr, _, _, _, triggers)
-                                if !triggers.is_empty() =>
-                            {
-                                trigger_addrs.insert((addr.absolute_addr(), addr.region));
-                            }
-                            SIRInstruction::Commit(_, dst, _, _, triggers)
-                                if !triggers.is_empty() =>
-                            {
-                                trigger_addrs.insert((dst.absolute_addr(), dst.region));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            let mut old_values: HashMap<(AbsoluteAddr, u32), Value> = HashMap::default();
-            for (abs, region) in trigger_addrs {
-                let width = self.layout.widths[&abs];
-                debug_assert!(
-                    width <= 64,
-                    "Trigger signal wider than 64 bits is not supported"
-                );
-                let cl_type = get_cl_type(width);
-                let base_offset = if region == STABLE_REGION {
-                    self.layout.offsets[&abs]
-                } else {
-                    self.layout.working_base_offset + self.layout.working_offsets[&abs]
-                };
-                let addr_val = builder.ins().iadd_imm(mem_ptr, base_offset as i64);
-                let raw_val = builder.ins().load(cl_type, MemFlags::new(), addr_val, 0);
-                let val = if cl_type == types::I64 {
-                    raw_val
-                } else {
-                    builder.ins().uextend(types::I64, raw_val)
-                };
-                old_values.insert((abs, region), val);
-            }
-            old_values
-        };
+        let trigger_old_values = preload_trigger_old_values(
+            units.iter().flat_map(|u| u.blocks.values()),
+            &mut builder,
+            mem_ptr,
+            &self.layout,
+            self.options.emit_triggers,
+        );
 
         builder.ins().jump(unit_entry_blocks[0], &[]);
         // 2. Translate each ExecutionUnit in order
@@ -340,4 +359,691 @@ impl SIRTranslator {
         builder.seal_all_blocks();
         builder.finalize();
     }
+
+    /// Translate a single chunk of a tail-call chain.
+    ///
+    /// - `chunk`: the chunk being compiled
+    /// - `next_chunk_func_ref`: if this is not the last chunk, the FuncRef to tail-call into
+    /// - `next_chunk`: if this is not the last chunk, provides the next chunk's incoming live regs
+    ///   so we know which registers to pass as arguments
+    pub fn translate_chunk(
+        &self,
+        chunk: &TailCallChunk,
+        next_chunk_func_ref: Option<FuncRef>,
+        mut builder: FunctionBuilder,
+    ) {
+        let master_entry = builder.create_block();
+        builder.append_block_params_for_function_params(master_entry);
+        builder.switch_to_block(master_entry);
+
+        let units = &chunk.units;
+        if units.is_empty() {
+            let r = builder.ins().iconst(types::I64, 0);
+            builder.ins().return_(&[r]);
+            builder.seal_all_blocks();
+            builder.finalize();
+            return;
+        }
+
+        // Multi-EU chunks must not carry incoming live regs — RegisterIds are
+        // EU-scoped, so cross-EU register forwarding is not meaningful.
+        debug_assert!(
+            units.len() <= 1 || chunk.incoming_live_regs.is_empty(),
+            "Multi-EU chunk with incoming live regs is not supported"
+        );
+
+        // Extract mem_ptr from param 0
+        let params = builder.block_params(master_entry);
+        let mem_ptr = params[0];
+
+        // Extract incoming live regs from params 1..N
+        let mut incoming_reg_values: HashMap<RegisterId, TransValue> = HashMap::default();
+        let mut param_idx = 1;
+        for (reg_id, reg_ty) in &chunk.incoming_live_regs {
+            let width = reg_ty.width();
+            let nc = width.div_ceil(64).max(1);
+            if self.options.four_state {
+                let mut values = Vec::with_capacity(nc);
+                let mut masks = Vec::with_capacity(nc);
+                for _ in 0..nc {
+                    values.push(params[param_idx]);
+                    param_idx += 1;
+                    masks.push(params[param_idx]);
+                    param_idx += 1;
+                }
+                incoming_reg_values.insert(
+                    *reg_id,
+                    TransValue::FourState { values, masks },
+                );
+            } else {
+                let mut values = Vec::with_capacity(nc);
+                for _ in 0..nc {
+                    values.push(params[param_idx]);
+                    param_idx += 1;
+                }
+                incoming_reg_values.insert(*reg_id, TransValue::TwoState(values));
+            }
+        }
+
+        let trigger_old_values = preload_trigger_old_values(
+            units.iter().flat_map(|u| u.blocks.values()),
+            &mut builder,
+            mem_ptr,
+            &self.layout,
+            self.options.emit_triggers,
+        );
+
+        // Create unit entry blocks
+        let mut unit_entry_blocks = Vec::new();
+        for _ in units {
+            unit_entry_blocks.push(builder.create_block());
+        }
+
+        builder.ins().jump(unit_entry_blocks[0], &[]);
+
+        // Translate each EU, same as translate_units but with tail-call awareness
+        for (i, unit) in units.iter().enumerate() {
+            let unit_entry = unit_entry_blocks[i];
+            let next_unit_entry = if i + 1 < units.len() {
+                Some(unit_entry_blocks[i + 1])
+            } else {
+                None
+            };
+
+            let is_last_unit = i + 1 == units.len();
+
+            // Build the tail-call info for the last EU's Return terminator
+            let tail_call_info = if is_last_unit {
+                next_chunk_func_ref.map(|func_ref| TailCallInfo {
+                    func_ref,
+                    mem_ptr,
+                    outgoing_live_regs: chunk.outgoing_live_regs.clone(),
+                })
+            } else {
+                None
+            };
+
+            let mut state = TranslationState {
+                builder: &mut builder,
+                regs: HashMap::default(),
+                mem_ptr,
+                register_map: &unit.register_map,
+                trigger_old_values: trigger_old_values.clone(),
+            };
+
+            // Seed incoming live regs into the first EU's register state
+            if i == 0 {
+                for (reg_id, trans_val) in &incoming_reg_values {
+                    state.regs.insert(*reg_id, trans_val.clone());
+                }
+            }
+
+            let mut block_map = HashMap::default();
+            for (id, block) in &unit.blocks {
+                let cl_bb = if id == &unit.entry_block_id {
+                    unit_entry
+                } else {
+                    state.builder.create_block()
+                };
+                for &param_reg in &block.params {
+                    let width = unit.register_map[&param_reg].width();
+                    let ty = get_cl_type(width);
+                    state.builder.append_block_param(cl_bb, ty);
+                    if self.options.four_state {
+                        state.builder.append_block_param(cl_bb, ty);
+                    }
+                }
+                block_map.insert(*id, cl_bb);
+            }
+
+            let mut block_ids: Vec<_> = unit.blocks.keys().collect();
+            block_ids.sort();
+
+            for id in &block_ids {
+                let cl_block = block_map[id];
+                state.builder.switch_to_block(cl_block);
+                let cl_params = state.builder.block_params(cl_block);
+                let sir_block = &unit.blocks[id];
+
+                for (j, &sir_param_reg) in sir_block.params.iter().enumerate() {
+                    let tval = if self.options.four_state {
+                        let val = cl_params[j * 2];
+                        let mask = cl_params[j * 2 + 1];
+                        TransValue::FourState {
+                            values: vec![val],
+                            masks: vec![mask],
+                        }
+                    } else {
+                        let val = cl_params[j];
+                        TransValue::TwoState(vec![val])
+                    };
+                    state.regs.insert(sir_param_reg, tval);
+                }
+
+                for inst in &sir_block.instructions {
+                    self.translate_instruction(&mut state, inst);
+                }
+
+                // For the last block of the last EU, use tail-call-aware terminator
+                let use_tail_call = is_last_unit
+                    && tail_call_info.is_some()
+                    && matches!(sir_block.terminator, crate::ir::SIRTerminator::Return);
+
+                if use_tail_call {
+                    let info = tail_call_info.as_ref().unwrap();
+                    self.emit_tail_call(&mut state, info);
+                } else {
+                    self.translate_terminator(
+                        &mut state,
+                        &sir_block.terminator,
+                        &block_map,
+                        next_unit_entry,
+                    );
+                }
+            }
+        }
+
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
+
+}
+
+impl SIRTranslator {
+    /// Translate a single memory-spilled chunk.
+    ///
+    /// Each chunk is compiled as a separate function with signature `(mem_ptr) -> i64`.
+    /// At entry, incoming live registers are loaded from scratch memory.
+    /// At cross-chunk edges, outgoing registers are stored to scratch and a tail-call
+    /// is emitted to the target chunk function.
+    ///
+    /// - `chunk`: the spilled chunk being compiled
+    /// - `chunk_func_refs`: FuncRef for each chunk (indexed by chunk index)
+    /// - `scratch_base_offset`: byte offset of the scratch region within unified memory
+    pub fn translate_spilled_chunk(
+        &self,
+        chunk: &SpilledChunk,
+        chunk_func_refs: &[FuncRef],
+        scratch_base_offset: usize,
+        mut builder: FunctionBuilder,
+    ) {
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+
+        let mem_ptr = builder.block_params(entry)[0];
+
+        // Load incoming spills from scratch memory
+        let mut spill_reg_values: HashMap<RegisterId, TransValue> = HashMap::default();
+        for slot in &chunk.incoming_spills {
+            let width = slot.reg_ty.width();
+            let nc = width.div_ceil(64).max(1);
+
+            if nc == 1 {
+                let cl_ty = get_cl_type(width);
+                let addr = builder.ins().iadd_imm(
+                    mem_ptr,
+                    (scratch_base_offset + slot.scratch_byte_offset) as i64,
+                );
+                let val = builder.ins().load(cl_ty, MemFlags::new(), addr, 0);
+                if self.options.four_state {
+                    let mask_addr = builder.ins().iadd_imm(
+                        mem_ptr,
+                        (scratch_base_offset + slot.scratch_byte_offset + 8) as i64,
+                    );
+                    let mask = builder.ins().load(cl_ty, MemFlags::new(), mask_addr, 0);
+                    spill_reg_values.insert(
+                        slot.reg_id,
+                        TransValue::FourState {
+                            values: vec![val],
+                            masks: vec![mask],
+                        },
+                    );
+                } else {
+                    spill_reg_values.insert(slot.reg_id, TransValue::TwoState(vec![val]));
+                }
+            } else {
+                // Wide register: load nc i64 chunks
+                let mut values = Vec::with_capacity(nc);
+                for i in 0..nc {
+                    let off = scratch_base_offset + slot.scratch_byte_offset + i * 8;
+                    let addr = builder.ins().iadd_imm(mem_ptr, off as i64);
+                    let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
+                    values.push(val);
+                }
+                if self.options.four_state {
+                    let mut masks = Vec::with_capacity(nc);
+                    for i in 0..nc {
+                        let off = scratch_base_offset + slot.scratch_byte_offset + (nc + i) * 8;
+                        let addr = builder.ins().iadd_imm(mem_ptr, off as i64);
+                        let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
+                        masks.push(val);
+                    }
+                    spill_reg_values.insert(
+                        slot.reg_id,
+                        TransValue::FourState { values, masks },
+                    );
+                } else {
+                    spill_reg_values.insert(slot.reg_id, TransValue::TwoState(values));
+                }
+            }
+        }
+
+        let trigger_old_values = preload_trigger_old_values(
+            chunk.eu.blocks.values(),
+            &mut builder,
+            mem_ptr,
+            &self.layout,
+            self.options.emit_triggers,
+        );
+
+        // Create block map for this chunk's EU
+        let eu = &chunk.eu;
+        let unit_entry = builder.create_block();
+        let mut block_map: HashMap<BlockId, Block> = HashMap::default();
+
+        // First pass: create all blocks
+        for (id, block) in &eu.blocks {
+            let cl_bb = if *id == eu.entry_block_id {
+                unit_entry
+            } else {
+                builder.create_block()
+            };
+            for &param_reg in &block.params {
+                let width = eu.register_map[&param_reg].width();
+                let ty = get_cl_type(width);
+                builder.append_block_param(cl_bb, ty);
+                if self.options.four_state {
+                    builder.append_block_param(cl_bb, ty);
+                }
+            }
+            block_map.insert(*id, cl_bb);
+        }
+
+        // Jump from entry to the EU's entry block, passing spill values
+        // for any block params the entry block expects.
+        let entry_sir_block = &eu.blocks[&eu.entry_block_id];
+        let mut entry_args: Vec<BlockArg> = Vec::new();
+        for &param_reg in &entry_sir_block.params {
+            if let Some(tv) = spill_reg_values.get(&param_reg) {
+                match tv {
+                    TransValue::TwoState(vals) => entry_args.push(BlockArg::Value(vals[0])),
+                    TransValue::FourState { values, masks } => {
+                        entry_args.push(BlockArg::Value(values[0]));
+                        entry_args.push(BlockArg::Value(masks[0]));
+                    }
+                }
+            } else {
+                let width = eu.register_map[&param_reg].width();
+                let ty = get_cl_type(width);
+                let zero = builder.ins().iconst(ty, 0);
+                entry_args.push(BlockArg::Value(zero));
+                if self.options.four_state {
+                    entry_args.push(BlockArg::Value(zero));
+                }
+            }
+        }
+        builder.ins().jump(unit_entry, &entry_args);
+
+        // Derive cross-chunk targets from the edge map
+        let cross_chunk_targets: HashMap<BlockId, usize> = chunk
+            .cross_chunk_edges
+            .iter()
+            .map(|(&bid, edge)| (bid, edge.target_chunk_index))
+            .collect();
+        let cross_chunk_edges = &chunk.cross_chunk_edges;
+
+        // Topological sort within the chunk so definitions precede uses.
+        // (BlockId order worked for the original EU but not after partition_with_single_entry
+        //  which can place high-numbered entry blocks before low-numbered successors.)
+        let block_ids = crate::optimizer::coalescing::pass_tail_call_split::topological_sort_blocks(
+            &eu.blocks,
+            eu.entry_block_id,
+        );
+
+        // Create state ONCE for the entire chunk — SIR uses a flat register
+        // space per EU, not strict SSA block params.
+        let mut state = TranslationState {
+            builder: &mut builder,
+            regs: HashMap::default(),
+            mem_ptr,
+            register_map: &eu.register_map,
+            trigger_old_values: trigger_old_values.clone(),
+        };
+
+        // Seed spill values (available in all blocks via dominating entry)
+        for (reg_id, trans_val) in &spill_reg_values {
+            state.regs.insert(*reg_id, trans_val.clone());
+        }
+
+        for id in &block_ids {
+            let cl_block = block_map[id];
+            state.builder.switch_to_block(cl_block);
+            let cl_params: Vec<Value> = state.builder.block_params(cl_block).to_vec();
+            let sir_block = &eu.blocks[id];
+
+            // Map block params
+            for (i, &sir_param_reg) in sir_block.params.iter().enumerate() {
+                let tval = if self.options.four_state {
+                    let val = cl_params[i * 2];
+                    let mask = cl_params[i * 2 + 1];
+                    TransValue::FourState {
+                        values: vec![val],
+                        masks: vec![mask],
+                    }
+                } else {
+                    let val = cl_params[i];
+                    TransValue::TwoState(vec![val])
+                };
+                state.regs.insert(sir_param_reg, tval);
+            }
+
+            // Translate instructions
+            for inst in &sir_block.instructions {
+                self.translate_instruction(&mut state, inst);
+            }
+
+            // Translate terminator with cross-chunk awareness
+            self.translate_spilled_terminator(
+                &mut state,
+                &sir_block.terminator,
+                &block_map,
+                &cross_chunk_targets,
+                cross_chunk_edges,
+                chunk_func_refs,
+                &chunk.outgoing_spills,
+                scratch_base_offset,
+            );
+        }
+
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
+
+    /// Translate a terminator for a spilled chunk. Local targets use normal
+    /// jump/branch. Cross-chunk targets spill registers and tail-call.
+    fn translate_spilled_terminator(
+        &self,
+        state: &mut TranslationState,
+        term: &crate::ir::SIRTerminator,
+        block_map: &HashMap<BlockId, Block>,
+        cross_chunk_targets: &HashMap<BlockId, usize>,
+        cross_chunk_edges: &HashMap<BlockId, crate::optimizer::coalescing::pass_tail_call_split::CrossChunkEdge>,
+        chunk_func_refs: &[FuncRef],
+        outgoing_spills: &[SpillSlot],
+        scratch_base_offset: usize,
+    ) {
+        match term {
+            crate::ir::SIRTerminator::Jump(target, params) => {
+                if let Some(&chunk_idx) = cross_chunk_targets.get(target) {
+                    // Cross-chunk: spill + tail-call
+                    self.emit_spill_and_tail_call(
+                        state,
+                        outgoing_spills,
+                        scratch_base_offset,
+                        chunk_func_refs[chunk_idx],
+                        // Also spill the jump args into the target block's param scratch slots
+                        cross_chunk_edges.get(target),
+                        params,
+                    );
+                } else {
+                    // Local jump — delegate to normal terminator translation
+                    self.translate_terminator(state, term, block_map, None);
+                }
+            }
+            crate::ir::SIRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } => {
+                let t_cross = cross_chunk_targets.get(&true_block.0);
+                let f_cross = cross_chunk_targets.get(&false_block.0);
+
+                match (t_cross, f_cross) {
+                    (None, None) => {
+                        // Both local — delegate to normal terminator translation
+                        self.translate_terminator(state, term, block_map, None);
+                    }
+                    (Some(&t_chunk), Some(&f_chunk)) => {
+                        // Both cross-chunk: emit a brif to two trampoline blocks
+                        let condition = state.regs[cond].values()[0];
+                        let true_trampoline = state.builder.create_block();
+                        let false_trampoline = state.builder.create_block();
+
+                        state.builder.ins().brif(
+                            condition,
+                            true_trampoline,
+                            &[],
+                            false_trampoline,
+                            &[],
+                        );
+
+                        state.builder.switch_to_block(true_trampoline);
+                        self.emit_spill_and_tail_call(
+                            state,
+                            outgoing_spills,
+                            scratch_base_offset,
+                            chunk_func_refs[t_chunk],
+                            cross_chunk_edges.get(&true_block.0),
+                            &true_block.1,
+                        );
+
+                        state.builder.switch_to_block(false_trampoline);
+                        self.emit_spill_and_tail_call(
+                            state,
+                            outgoing_spills,
+                            scratch_base_offset,
+                            chunk_func_refs[f_chunk],
+                            cross_chunk_edges.get(&false_block.0),
+                            &false_block.1,
+                        );
+                    }
+                    (Some(&t_chunk), None) => {
+                        // True is cross-chunk, false is local
+                        let condition = state.regs[cond].values()[0];
+                        let true_trampoline = state.builder.create_block();
+                        let f_target = block_map[&false_block.0];
+                        let cl_f_args = self.build_local_block_args(state, f_target, &false_block.1);
+
+                        state.builder.ins().brif(
+                            condition,
+                            true_trampoline,
+                            &[],
+                            f_target,
+                            &cl_f_args,
+                        );
+
+                        state.builder.switch_to_block(true_trampoline);
+                        self.emit_spill_and_tail_call(
+                            state,
+                            outgoing_spills,
+                            scratch_base_offset,
+                            chunk_func_refs[t_chunk],
+                            cross_chunk_edges.get(&true_block.0),
+                            &true_block.1,
+                        );
+                    }
+                    (None, Some(&f_chunk)) => {
+                        // True is local, false is cross-chunk
+                        let condition = state.regs[cond].values()[0];
+                        let false_trampoline = state.builder.create_block();
+                        let t_target = block_map[&true_block.0];
+                        let cl_t_args = self.build_local_block_args(state, t_target, &true_block.1);
+
+                        state.builder.ins().brif(
+                            condition,
+                            t_target,
+                            &cl_t_args,
+                            false_trampoline,
+                            &[],
+                        );
+
+                        state.builder.switch_to_block(false_trampoline);
+                        self.emit_spill_and_tail_call(
+                            state,
+                            outgoing_spills,
+                            scratch_base_offset,
+                            chunk_func_refs[f_chunk],
+                            cross_chunk_edges.get(&false_block.0),
+                            &false_block.1,
+                        );
+                    }
+                }
+            }
+            crate::ir::SIRTerminator::Return => {
+                let success = state.builder.ins().iconst(types::I64, 0);
+                state.builder.ins().return_(&[success]);
+            }
+            crate::ir::SIRTerminator::Error(code) => {
+                let error = state.builder.ins().iconst(types::I64, *code);
+                state.builder.ins().return_(&[error]);
+            }
+        }
+    }
+
+    /// Store outgoing spills to scratch memory and emit a tail call to the target chunk.
+    fn emit_spill_and_tail_call(
+        &self,
+        state: &mut TranslationState,
+        outgoing_spills: &[SpillSlot],
+        scratch_base_offset: usize,
+        target_func_ref: FuncRef,
+        cross_chunk_edge: Option<&crate::optimizer::coalescing::pass_tail_call_split::CrossChunkEdge>,
+        jump_args: &[RegisterId],
+    ) {
+        // 1. Store outgoing live registers to scratch
+        for slot in outgoing_spills {
+            if let Some(trans_val) = state.regs.get(&slot.reg_id) {
+                let values = trans_val.values();
+                for (i, &val) in values.iter().enumerate() {
+                    let off = scratch_base_offset + slot.scratch_byte_offset + i * 8;
+                    let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                    let val_i64 = cast_type(state.builder, val, types::I64);
+                    state.builder.ins().store(MemFlags::new(), val_i64, addr, 0);
+                }
+                if self.options.four_state {
+                    if let Some(masks) = trans_val.masks() {
+                        let nc = values.len();
+                        for (i, &mask) in masks.iter().enumerate() {
+                            let off = scratch_base_offset + slot.scratch_byte_offset + (nc + i) * 8;
+                            let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                            let mask_i64 = cast_type(state.builder, mask, types::I64);
+                            state.builder.ins().store(MemFlags::new(), mask_i64, addr, 0);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Store jump args into the target block's param scratch slots
+        if let Some(edge) = cross_chunk_edge {
+            for (i, &arg_reg) in jump_args.iter().enumerate() {
+                if i < edge.param_scratch_offsets.len() {
+                    let (_param_reg, scratch_off) = edge.param_scratch_offsets[i];
+                    if let Some(trans_val) = state.regs.get(&arg_reg) {
+                        let values = trans_val.values();
+                        for (j, &val) in values.iter().enumerate() {
+                            let off = scratch_base_offset + scratch_off + j * 8;
+                            let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                            let val_i64 = cast_type(state.builder, val, types::I64);
+                            state.builder.ins().store(MemFlags::new(), val_i64, addr, 0);
+                        }
+                        if self.options.four_state {
+                            if let Some(masks) = trans_val.masks() {
+                                let nc = values.len();
+                                for (j, &mask) in masks.iter().enumerate() {
+                                    let off = scratch_base_offset + scratch_off + (nc + j) * 8;
+                                    let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                                    let mask_i64 = cast_type(state.builder, mask, types::I64);
+                                    state.builder.ins().store(MemFlags::new(), mask_i64, addr, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Tail-call to target chunk
+        state.builder.ins().return_call(target_func_ref, &[state.mem_ptr]);
+    }
+
+    /// Build block-call arguments for a local (non-cross-chunk) branch target.
+    /// Collects values from state.regs and casts them to match the target block's
+    /// declared parameter types.
+    fn build_local_block_args(
+        &self,
+        state: &mut TranslationState,
+        target: Block,
+        args: &[RegisterId],
+    ) -> Vec<BlockArg> {
+        let param_types = collect_block_param_types(state, target);
+        let mut cl_args: Vec<BlockArg> = Vec::new();
+        for (i, reg) in args.iter().enumerate() {
+            let val = state.regs[reg].values()[0];
+            let val_idx = if self.options.four_state { i * 2 } else { i };
+            let cast_val = cast_type(state.builder, val, param_types[val_idx]);
+            cl_args.push(BlockArg::Value(cast_val));
+            if self.options.four_state {
+                let mask = state.regs[reg]
+                    .masks()
+                    .map(|m| m[0])
+                    .unwrap_or_else(|| state.builder.ins().iconst(types::I8, 0));
+                let cast_mask = cast_type(state.builder, mask, param_types[i * 2 + 1]);
+                cl_args.push(BlockArg::Value(cast_mask));
+            }
+        }
+        cl_args
+    }
+
+    /// Emit a tail call to the next chunk function.
+    fn emit_tail_call(&self, state: &mut TranslationState, info: &TailCallInfo) {
+        let mut args: Vec<Value> = vec![info.mem_ptr];
+        for (reg_id, reg_ty) in &info.outgoing_live_regs {
+            let width = reg_ty.width();
+            let nc = width.div_ceil(64).max(1);
+            // When nc==1, the signature uses get_cl_type(width) which may be I8/I16/I32.
+            // When nc>1, each chunk is I64.
+            let expected_ty = if nc == 1 { get_cl_type(width) } else { types::I64 };
+            if let Some(trans_val) = state.regs.get(reg_id) {
+                let values = trans_val.values();
+                if self.options.four_state {
+                    let masks_opt = trans_val.masks();
+                    for i in 0..nc {
+                        let val = values.get(i).copied().unwrap_or_else(|| {
+                            state.builder.ins().iconst(expected_ty, 0)
+                        });
+                        args.push(cast_type(state.builder, val, expected_ty));
+                        let mask = masks_opt
+                            .and_then(|m| m.get(i).copied())
+                            .unwrap_or_else(|| state.builder.ins().iconst(expected_ty, 0));
+                        args.push(cast_type(state.builder, mask, expected_ty));
+                    }
+                } else {
+                    for i in 0..nc {
+                        let val = values.get(i).copied().unwrap_or_else(|| {
+                            state.builder.ins().iconst(expected_ty, 0)
+                        });
+                        args.push(cast_type(state.builder, val, expected_ty));
+                    }
+                }
+            } else {
+                // Register not in scope — use zeros
+                for _ in 0..nc {
+                    args.push(state.builder.ins().iconst(expected_ty, 0));
+                    if self.options.four_state {
+                        args.push(state.builder.ins().iconst(expected_ty, 0));
+                    }
+                }
+            }
+        }
+        state.builder.ins().return_call(info.func_ref, &args);
+    }
+}
+
+/// Information needed to emit a tail call to the next chunk.
+pub struct TailCallInfo {
+    pub func_ref: FuncRef,
+    pub mem_ptr: Value,
+    pub outgoing_live_regs: Vec<(RegisterId, RegisterType)>,
 }

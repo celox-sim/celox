@@ -471,6 +471,7 @@ pub(crate) fn flatten(
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             eval_comb: Vec::new(),
+            eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
             module_variables: module_variables(module_ir, config).unwrap_or_default(),
@@ -545,6 +546,7 @@ pub(crate) fn flatten(
         eval_only_ffs,
         apply_ffs,
         eval_comb: schduled,
+        eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
         module_variables: module_variables(module_ir, config)?,
@@ -1011,7 +1013,11 @@ pub fn parse(
     }
 
     if optimize {
-        crate::optimizer::optimize(&mut program);
+        crate::optimizer::optimize(&mut program, four_state);
+    } else {
+        // Even without optimization, run tail-call splitting to avoid
+        // exceeding Cranelift's 24-bit instruction index limit.
+        crate::optimizer::split_if_needed(&mut program, four_state);
     }
 
     if let Some(t) = trace

@@ -9,7 +9,7 @@ use super::core::cast_type;
 /// This is used to ensure block-call arguments are cast to the exact
 /// types the target block expects, avoiding Cranelift verifier errors
 /// such as "arg vN has type i8, expected i16" or "expected i32".
-fn collect_block_param_types(state: &TranslationState, cl_block: Block) -> Vec<Type> {
+pub(super) fn collect_block_param_types(state: &TranslationState, cl_block: Block) -> Vec<Type> {
     let dfg = &state.builder.func.dfg;
     dfg.block_params(cl_block)
         .iter()

@@ -90,8 +90,19 @@ impl JitBackend {
             (None, None, None)
         };
 
-        // Batch compile eval_comb
-        let res = engine.compile_units(&sir.eval_comb, pre_clif_ptr, post_clif_ptr, native_ptr);
+        // Batch compile eval_comb — use chunked compilation if the optimizer
+        // determined that the combined CLIF would exceed Cranelift's instruction limit.
+        let res = match &sir.eval_comb_plan {
+            Some(crate::ir::EvalCombPlan::MemorySpilled(plan)) => {
+                engine.compile_spilled_chunks(plan, pre_clif_ptr, post_clif_ptr, native_ptr)
+            }
+            Some(crate::ir::EvalCombPlan::TailCallChunks(chunks)) => {
+                engine.compile_chunks(chunks, pre_clif_ptr, post_clif_ptr, native_ptr)
+            }
+            None => {
+                engine.compile_units(&sir.eval_comb, pre_clif_ptr, post_clif_ptr, native_ptr)
+            }
+        };
 
         if let Some(t) = trace.as_deref_mut() {
             if options.trace.pre_optimized_clif {

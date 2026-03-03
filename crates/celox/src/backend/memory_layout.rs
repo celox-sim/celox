@@ -21,10 +21,19 @@ pub struct MemoryLayout {
     /// Bitset of triggered domain IDs.
     pub triggered_bits_offset: usize,
     pub triggered_bits_total_size: usize,
+
+    /// Scratch region for spilling inter-chunk registers.
+    /// Located after triggered bits. Zero if no spilling needed.
+    pub scratch_base_offset: usize,
+    pub scratch_size: usize,
 }
 
 impl MemoryLayout {
     pub fn build(program: &Program, options: &SimulatorOptions) -> Self {
+        let scratch_bytes = match &program.eval_comb_plan {
+            Some(crate::ir::EvalCombPlan::MemorySpilled(plan)) => plan.scratch_bytes,
+            _ => 0,
+        };
         let mut stable_vars_to_layout = Vec::new();
 
         for (instance_id, module_id) in &program.instance_module {
@@ -98,7 +107,8 @@ impl MemoryLayout {
         let triggered_bits_offset = (working_base_offset + working_current_offset + 7) & !7;
         let triggered_bits_total_size = (num_potential_triggers + 7) / 8;
 
-        let merged_total_size = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
+        let scratch_base_offset = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
+        let merged_total_size = (scratch_base_offset + scratch_bytes + 7) & !7;
 
         Self {
             offsets,
@@ -110,6 +120,8 @@ impl MemoryLayout {
             merged_total_size,
             triggered_bits_offset,
             triggered_bits_total_size,
+            scratch_base_offset,
+            scratch_size: scratch_bytes,
         }
     }
 }

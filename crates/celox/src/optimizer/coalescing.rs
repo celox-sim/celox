@@ -3,6 +3,7 @@ use crate::optimizer::{PassOptions, ProgramPass};
 
 mod block_opt;
 mod commit_ops;
+pub mod cost_model;
 mod dead_working_stores;
 mod pass_commit_sinking;
 mod pass_eliminate_dead_working_stores;
@@ -12,7 +13,10 @@ mod pass_manager;
 mod pass_optimize_blocks;
 mod pass_reschedule;
 mod pass_split_wide_commits;
+pub(crate) mod pass_tail_call_split;
 mod shared;
+
+pub use pass_tail_call_split::TailCallChunk;
 
 use pass_commit_sinking::CommitSinkingPass;
 use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
@@ -31,12 +35,15 @@ impl ProgramPass for CoalescingPass {
     }
 
     fn run(&self, program: &mut Program, options: &PassOptions) {
-        optimize_with_options(program, options.max_inflight_loads);
+        optimize_with_options(program, options.max_inflight_loads, options.four_state);
     }
 }
 
-fn optimize_with_options(program: &mut Program, max_inflight_loads: usize) {
-    let options = PassOptions { max_inflight_loads };
+fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_state: bool) {
+    let options = PassOptions {
+        max_inflight_loads,
+        four_state,
+    };
 
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let mut ff_passes = ExecutionUnitPassManager::new();
@@ -90,18 +97,15 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize) {
         comb_passes.run(eu, &options);
     }
 
-    // Support combinational blocks (LogicPath)
-    // module.comb_blocks contains LogicPath<VarId>.
-    // We need to modify LogicPath to access instructions if we want to optimize them.
-    // However, logic paths are complex trees, not linear blocks until flatted/lowered?
-    // Wait, SimModule already went through lowering?
-    // LogicPath structure:
-    // pub struct LogicPath<A> {
-    //    pub target: LogicTarget<A>,
-    //    pub terms: Vec<LogicTerm<A>>,
-    // }
-    // LogicTerm contains ExecutionUnit or similar?
-    // Let's check LogicPath definition. Actually SimModule.comb_blocks uses LogicPath<VarId>.
-    // LogicPath has `AST` like structure? No, it has `terms`.
-    // Let's look at `ir.rs`.
+    // 5. Tail-call chain splitting for eval_comb.
+    // When the estimated CLIF instruction count exceeds Cranelift's limit,
+    // split into a chain of smaller functions connected by tail calls.
+    //
+    // Try EU-boundary / single-block splitting first (zero live-reg cost).
+    // Fall back to memory-spilled multi-block splitting if needed.
+    if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state) {
+        program.eval_comb_plan = Some(crate::ir::EvalCombPlan::TailCallChunks(chunks));
+    } else if let Some(plan) = pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state) {
+        program.eval_comb_plan = Some(crate::ir::EvalCombPlan::MemorySpilled(plan));
+    }
 }
