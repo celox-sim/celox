@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
+use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
 use veryl_path::PathSet;
@@ -845,9 +845,12 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         parsers.push((path.clone(), parser));
     }
 
-    let errors = Analyzer::analyze_post_pass1();
-    if !errors.is_empty() {
-        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+    let post_pass1_errors: Vec<_> = Analyzer::analyze_post_pass1()
+        .into_iter()
+        .filter(|e| !matches!(e, AnalyzerError::UnknownMember { .. }))
+        .collect();
+    if !post_pass1_errors.is_empty() {
+        let msgs: Vec<String> = post_pass1_errors.iter().map(|e| format!("{e}")).collect();
         return Err(Error::from_reason(format!(
             "Errors in post-pass 1 analysis: {}",
             msgs.join("; ")
