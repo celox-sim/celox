@@ -127,7 +127,10 @@ impl SIRTranslator {
             }
             SIROffset::Dynamic(reg) => {
                 let total_bit_offset =
-                    cast_type(state.builder, state.regs[reg].values()[0], types::I64);
+                    {
+                    let v = state.regs[reg].first_value(state.builder);
+                    cast_type(state.builder, v, types::I64)
+                };
                 (
                     state.builder.ins().ushr_imm(total_bit_offset, 3),
                     state.builder.ins().band_imm(total_bit_offset, 7),
@@ -246,7 +249,10 @@ impl SIRTranslator {
             }
             SIROffset::Dynamic(reg) => {
                 let total_bit_offset =
-                    cast_type(state.builder, state.regs[reg].values()[0], types::I64);
+                    {
+                    let v = state.regs[reg].first_value(state.builder);
+                    cast_type(state.builder, v, types::I64)
+                };
                 (
                     state.builder.ins().ushr_imm(total_bit_offset, 3),
                     state.builder.ins().band_imm(total_bit_offset, 7),
@@ -262,11 +268,11 @@ impl SIRTranslator {
         let final_addr = state.builder.ins().iadd(final_addr, byte_offset_val);
 
         // 3. Dispatch functions based on physical width
-        let v_chunks = state.regs[src_reg].values().to_vec();
+        let v_chunks = state.regs[src_reg].load_value_chunks(state.builder);
         let m_chunks = if self.options.four_state {
-            match state.regs[src_reg].masks() {
-                Some(m) => m.to_vec(),
-                None => {
+            state.regs[src_reg]
+                .load_mask_chunks(state.builder)
+                .unwrap_or_else(|| {
                     // Source register is TwoState (e.g. from block params before full 4-state support)
                     // Generate zero masks for each value chunk
                     let s_phys_ty = get_cl_type(s_phys_width);
@@ -274,8 +280,7 @@ impl SIRTranslator {
                         .iter()
                         .map(|_| state.builder.ins().iconst(s_phys_ty, 0))
                         .collect()
-                }
-            }
+                })
         } else {
             vec![]
         };
@@ -481,7 +486,10 @@ impl SIRTranslator {
             }
             SIROffset::Dynamic(reg) => {
                 let total_bit_offset =
-                    cast_type(state.builder, state.regs[reg].values()[0], types::I64);
+                    {
+                    let v = state.regs[reg].first_value(state.builder);
+                    cast_type(state.builder, v, types::I64)
+                };
                 (
                     state.builder.ins().ushr_imm(total_bit_offset, 3),
                     state.builder.ins().band_imm(total_bit_offset, 7),
@@ -1030,7 +1038,10 @@ impl SIRTranslator {
             }
             SIROffset::Dynamic(reg) => {
                 let total_bit_offset =
-                    cast_type(state.builder, state.regs[reg].values()[0], types::I64);
+                    {
+                    let v = state.regs[reg].first_value(state.builder);
+                    cast_type(state.builder, v, types::I64)
+                };
                 let shifted = state.builder.ins().ushr(pre_loaded, total_bit_offset);
                 let mask_val = state.builder.ins().iconst(types::I64, mask as i64);
                 state.builder.ins().band(shifted, mask_val)
@@ -1064,7 +1075,10 @@ impl SIRTranslator {
             }
             SIROffset::Dynamic(reg) => {
                 let total_bit_offset =
-                    cast_type(state.builder, state.regs[reg].values()[0], types::I64);
+                    {
+                    let v = state.regs[reg].first_value(state.builder);
+                    cast_type(state.builder, v, types::I64)
+                };
                 (
                     state.builder.ins().ushr_imm(total_bit_offset, 3),
                     state.builder.ins().band_imm(total_bit_offset, 7),

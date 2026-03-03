@@ -442,6 +442,138 @@ pub(crate) fn emit_wide_sar(
     res
 }
 
+// ─────────────────────────────────────────────────────────
+//  Memory-backed wide shift/sar (O(n) CLIF instructions)
+// ─────────────────────────────────────────────────────────
+
+/// Load a chunk from memory if index is in bounds, otherwise return `default`.
+/// O(1) CLIF instructions per call (constant, independent of num_chunks).
+fn load_or_default(
+    builder: &mut FunctionBuilder,
+    base: Value,
+    idx: Value,
+    num_chunks_val: Value,
+    default: Value,
+) -> Value {
+    let zero = builder.ins().iconst(types::I64, 0);
+    let in_bounds = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, idx, num_chunks_val);
+    let safe_idx = builder.ins().select(in_bounds, idx, zero);
+    let byte_off = builder.ins().ishl_imm(safe_idx, 3);
+    let addr = builder.ins().iadd(base, byte_off);
+    let loaded = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
+    builder.ins().select(in_bounds, loaded, default)
+}
+
+/// Memory-backed wide logical shift (Shl / Shr).
+///
+/// Reads source chunks from `l_addr` using dynamic memory indexing (O(1) per chunk),
+/// writes result chunks to `dst_addr`. Total: O(n) CLIF instructions.
+pub fn emit_wide_shift_mem(
+    builder: &mut FunctionBuilder,
+    op: &BinaryOp,
+    l_addr: Value,
+    r_chunks: &[Value],
+    dst_addr: Value,
+    num_chunks: usize,
+) {
+    let shift_amt_raw = r_chunks[0];
+    let shift_amt_total = cast_type(builder, shift_amt_raw, types::I64);
+    let bit_shift = builder.ins().band_imm(shift_amt_total, 63);
+    let word_offset_val = builder.ins().ushr_imm(shift_amt_total, 6);
+    let sixty_four = builder.ins().iconst(types::I64, 64);
+    let inv_bit_shift = builder.ins().isub(sixty_four, bit_shift);
+    let has_bit_shift = builder.ins().icmp_imm(IntCC::NotEqual, bit_shift, 0);
+    let num_chunks_val = builder.ins().iconst(types::I64, num_chunks as i64);
+    let zero = builder.ins().iconst(types::I64, 0);
+
+    for i in 0..num_chunks {
+        let (idx_cur, idx_nxt) = if matches!(op, BinaryOp::Shr) {
+            let base = builder.ins().iadd_imm(word_offset_val, i as i64);
+            let next = builder.ins().iadd_imm(base, 1);
+            (base, next)
+        } else {
+            let base = builder.ins().irsub_imm(word_offset_val, i as i64);
+            let prev = builder.ins().iadd_imm(base, -1);
+            (base, prev)
+        };
+
+        let cur_word = load_or_default(builder, l_addr, idx_cur, num_chunks_val, zero);
+        let nxt_word = load_or_default(builder, l_addr, idx_nxt, num_chunks_val, zero);
+
+        let chunk_res = if matches!(op, BinaryOp::Shr) {
+            let low = builder.ins().ushr(cur_word, bit_shift);
+            let high = builder.ins().ishl(nxt_word, inv_bit_shift);
+            let zero_val = builder.ins().iconst(types::I64, 0);
+            let high_part = builder.ins().select(has_bit_shift, high, zero_val);
+            builder.ins().bor(low, high_part)
+        } else {
+            let high = builder.ins().ishl(cur_word, bit_shift);
+            let low = builder.ins().ushr(nxt_word, inv_bit_shift);
+            let zero_val = builder.ins().iconst(types::I64, 0);
+            let low_part = builder.ins().select(has_bit_shift, low, zero_val);
+            builder.ins().bor(high, low_part)
+        };
+        builder
+            .ins()
+            .store(MemFlags::new(), chunk_res, dst_addr, (i * 8) as i32);
+    }
+}
+
+/// Memory-backed wide arithmetic right shift (Sar).
+///
+/// Same as `emit_wide_shift_mem` but uses `sign_fill` as the out-of-bounds default.
+pub fn emit_wide_sar_mem(
+    builder: &mut FunctionBuilder,
+    l_addr: Value,
+    r_chunks: &[Value],
+    dst_addr: Value,
+    num_chunks: usize,
+    l_width: usize,
+) {
+    let shift_amt_raw = r_chunks[0];
+    let shift_amt_total = cast_type(builder, shift_amt_raw, types::I64);
+    let bit_shift = builder.ins().band_imm(shift_amt_total, 63);
+    let word_offset_val = builder.ins().ushr_imm(shift_amt_total, 6);
+    let sixty_four = builder.ins().iconst(types::I64, 64);
+    let inv_bit_shift = builder.ins().isub(sixty_four, bit_shift);
+    let has_bit_shift = builder.ins().icmp_imm(IntCC::NotEqual, bit_shift, 0);
+    let num_chunks_val = builder.ins().iconst(types::I64, num_chunks as i64);
+
+    // Calculate sign fill based on the logical MSB of the operand
+    let msb_bit_idx = (l_width - 1) % 64;
+    let msb_chunk_offset = ((l_width - 1) / 64) * 8;
+    let msb_chunk = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        l_addr,
+        msb_chunk_offset as i32,
+    );
+    let sign_bit = builder.ins().ushr_imm(msb_chunk, msb_bit_idx as i64);
+    let is_negative = builder.ins().band_imm(sign_bit, 1);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let all_ones = builder.ins().iconst(types::I64, -1);
+    let sign_fill = builder.ins().select(is_negative, all_ones, zero);
+
+    for i in 0..num_chunks {
+        let idx_cur = builder.ins().iadd_imm(word_offset_val, i as i64);
+        let idx_nxt = builder.ins().iadd_imm(idx_cur, 1);
+
+        let cur_word = load_or_default(builder, l_addr, idx_cur, num_chunks_val, sign_fill);
+        let nxt_word = load_or_default(builder, l_addr, idx_nxt, num_chunks_val, sign_fill);
+
+        let low = builder.ins().ushr(cur_word, bit_shift);
+        let high = builder.ins().ishl(nxt_word, inv_bit_shift);
+        let zero_val = builder.ins().iconst(types::I64, 0);
+        let high_part = builder.ins().select(has_bit_shift, high, zero_val);
+        let chunk_res = builder.ins().bor(low, high_part);
+        builder
+            .ins()
+            .store(MemFlags::new(), chunk_res, dst_addr, (i * 8) as i32);
+    }
+}
+
 fn emit_wide_signed_cmp(
     builder: &mut FunctionBuilder,
     op: &BinaryOp,

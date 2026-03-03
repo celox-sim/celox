@@ -1,7 +1,7 @@
 use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
 
-use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type};
+use super::core::{MEM_SHIFT_THRESHOLD, TransValue, alloc_stack_slot, cast_type, get_chunk_as_i64, get_cl_type};
 use super::{SIRTranslator, TranslationState, wide_ops};
 use crate::backend::translator::core::promote_to_physical;
 use crate::ir::{BinaryOp, RegisterId, SIRValue, UnaryOp};
@@ -87,19 +87,16 @@ impl SIRTranslator {
 
         for arg_reg in args.iter().rev() {
             let arg_width = state.register_map[arg_reg].width();
-            let arg_chunks_v = state.regs[arg_reg].values();
-            let arg_masks_owned;
-            let arg_chunks_m = if self.options.four_state {
-                match state.regs[arg_reg].masks() {
-                    Some(m) => m,
-                    None => {
+            let arg_chunks_v = state.regs[arg_reg].load_value_chunks(state.builder);
+            let arg_chunks_m: Vec<Value> = if self.options.four_state {
+                state.regs[arg_reg]
+                    .load_mask_chunks(state.builder)
+                    .unwrap_or_else(|| {
                         let ty = get_cl_type(arg_width);
-                        arg_masks_owned = vec![state.builder.ins().iconst(ty, 0)];
-                        &arg_masks_owned
-                    }
-                }
+                        vec![state.builder.ins().iconst(ty, 0)]
+                    })
             } else {
-                &[]
+                vec![]
             };
 
             // Since args can be > 64 bits, we iterate arg chunks.
@@ -110,9 +107,9 @@ impl SIRTranslator {
             };
 
             for i in 0..arg_num_chunks {
-                let chunk_val_v = get_chunk_as_i64(state.builder, arg_chunks_v, i);
+                let chunk_val_v = get_chunk_as_i64(state.builder, &arg_chunks_v, i);
                 let chunk_val_m = if self.options.four_state {
-                    get_chunk_as_i64(state.builder, arg_chunks_m, i)
+                    get_chunk_as_i64(state.builder, &arg_chunks_m, i)
                 } else {
                     state.builder.ins().iconst(types::I64, 0)
                 };
@@ -214,8 +211,8 @@ impl SIRTranslator {
             // --- 64-bit or less: Cranelift Native Type Operation ---
             let common_ty = get_cl_type(common_logical_width);
             let l_is_signed = state.register_map[lhs].is_signed() || matches!(op, BinaryOp::Sar);
-            let l_val = state.regs[lhs].values()[0];
-            let r_val = state.regs[rhs].values()[0];
+            let l_val = state.regs[lhs].first_value(state.builder);
+            let r_val = state.regs[rhs].first_value(state.builder);
 
             let l = promote_to_physical(state, l_val, l_width, l_is_signed, common_ty);
             let r = promote_to_physical(state, r_val, r_width, false, common_ty);
@@ -306,12 +303,10 @@ impl SIRTranslator {
 
             if self.options.four_state {
                 let l_m_val = state.regs[lhs]
-                    .masks()
-                    .map(|m| m[0])
+                    .first_mask(state.builder)
                     .unwrap_or_else(|| state.builder.ins().iconst(common_ty, 0));
                 let r_m_val = state.regs[rhs]
-                    .masks()
-                    .map(|m| m[0])
+                    .first_mask(state.builder)
                     .unwrap_or_else(|| state.builder.ins().iconst(common_ty, 0));
                 let l_m = promote_to_physical(state, l_m_val, l_width, l_is_signed, common_ty);
                 let r_m = promote_to_physical(state, r_m_val, r_width, false, common_ty);
@@ -510,115 +505,325 @@ impl SIRTranslator {
         } else {
             // --- Over 64-bit: Multi-word (i64) Operation ---
             let num_chunks = common_logical_width.div_ceil(64);
-
-            let l_chunks = state.regs[lhs].values().to_vec();
-            let r_chunks = state.regs[rhs].values().to_vec();
-
-            let mut res_chunks = if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
-                wide_ops::emit_wide_logic_andor(state.builder, op, &l_chunks, &r_chunks, num_chunks)
-            } else {
-                wide_ops::emit_wide_binary(
-                    state.builder,
-                    op,
-                    &l_chunks,
-                    &r_chunks,
-                    num_chunks,
-                    l_width,
-                )
-            };
-
             let final_num_chunks = d_width.div_ceil(64);
-            res_chunks.truncate(final_num_chunks);
-            while res_chunks.len() < final_num_chunks {
-                res_chunks.push(state.builder.ins().iconst(types::I64, 0));
-            }
 
-            if self.options.four_state {
-                // Get or generate zero masks for each operand
-                let l_masks: Vec<Value> = match state.regs[lhs].masks() {
-                    Some(m) => m.to_vec(),
-                    None => (0..num_chunks)
-                        .map(|_| state.builder.ins().iconst(types::I64, 0))
-                        .collect(),
-                };
-                let r_masks: Vec<Value> = match state.regs[rhs].masks() {
-                    Some(m) => m.to_vec(),
-                    None => (0..num_chunks)
-                        .map(|_| state.builder.ins().iconst(types::I64, 0))
-                        .collect(),
-                };
+            let is_shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar);
 
-                let mut res_masks = match op {
-                    // Bitwise ops: precise mask computation per chunk
-                    BinaryOp::And => (0..num_chunks)
-                        .map(|i| {
-                            let lm = get_chunk_as_i64(state.builder, &l_masks, i);
-                            let rm = get_chunk_as_i64(state.builder, &r_masks, i);
-                            let lv = get_chunk_as_i64(state.builder, &l_chunks, i);
-                            let rv = get_chunk_as_i64(state.builder, &r_chunks, i);
+            if is_shift && num_chunks >= MEM_SHIFT_THRESHOLD {
+                // === Memory-backed shift path (O(n)) ===
+                // Allocate source slot sized to num_chunks (common_logical_width)
+                // and zero-pad beyond the actual source length to avoid OOB reads.
+                let src_chunks = state.regs[lhs].load_value_chunks(state.builder);
+                let (_, l_addr) = alloc_stack_slot(state.builder, num_chunks);
+                for (i, &v) in src_chunks.iter().enumerate() {
+                    state.builder.ins().store(
+                        MemFlags::new(),
+                        v,
+                        l_addr,
+                        (i * 8) as i32,
+                    );
+                }
+                let zero_pad = state.builder.ins().iconst(types::I64, 0);
+                for i in src_chunks.len()..num_chunks {
+                    state.builder.ins().store(
+                        MemFlags::new(),
+                        zero_pad,
+                        l_addr,
+                        (i * 8) as i32,
+                    );
+                }
+                let r_chunks = state.regs[rhs].load_value_chunks(state.builder);
 
-                            let m1 = state.builder.ins().band(lm, rm);
-                            let m2 = state.builder.ins().band(lm, rv);
-                            let m3 = state.builder.ins().band(rm, lv);
-                            let mt = state.builder.ins().bor(m1, m2);
-                            state.builder.ins().bor(mt, m3)
-                        })
-                        .collect(),
-                    BinaryOp::Or => (0..num_chunks)
-                        .map(|i| {
-                            let lm = get_chunk_as_i64(state.builder, &l_masks, i);
-                            let rm = get_chunk_as_i64(state.builder, &r_masks, i);
-                            let lv = get_chunk_as_i64(state.builder, &l_chunks, i);
-                            let rv = get_chunk_as_i64(state.builder, &r_chunks, i);
+                // Allocate destination slot (large enough for full computation)
+                let (_, dst_addr) = alloc_stack_slot(state.builder, num_chunks);
 
-                            let m1 = state.builder.ins().band(lm, rm);
-                            let m2 = state.builder.ins().band_not(lm, rv);
-                            let m3 = state.builder.ins().band_not(rm, lv);
-                            let mt = state.builder.ins().bor(m1, m2);
-                            state.builder.ins().bor(mt, m3)
-                        })
-                        .collect(),
-                    BinaryOp::Xor => (0..num_chunks)
-                        .map(|i| {
-                            let lm = get_chunk_as_i64(state.builder, &l_masks, i);
-                            let rm = get_chunk_as_i64(state.builder, &r_masks, i);
-                            state.builder.ins().bor(lm, rm)
-                        })
-                        .collect(),
-                    BinaryOp::Shr | BinaryOp::Shl | BinaryOp::Sar => {
-                        // If shift amount (rhs) has ANY X, result is all-X.
-                        let mut r_any_x = state.builder.ins().iconst(types::I64, 0);
-                        for m in &r_masks {
-                            let m_i64 = cast_type(state.builder, *m, types::I64);
-                            r_any_x = state.builder.ins().bor(r_any_x, m_i64);
-                        }
-                        let zero = state.builder.ins().iconst(types::I64, 0);
-                        let shift_has_x = state.builder.ins().icmp(IntCC::NotEqual, r_any_x, zero);
+                if matches!(op, BinaryOp::Sar) {
+                    wide_ops::emit_wide_sar_mem(
+                        state.builder,
+                        l_addr,
+                        &r_chunks,
+                        dst_addr,
+                        num_chunks,
+                        l_width,
+                    );
+                } else {
+                    wide_ops::emit_wide_shift_mem(
+                        state.builder,
+                        op,
+                        l_addr,
+                        &r_chunks,
+                        dst_addr,
+                        num_chunks,
+                    );
+                }
 
-                        let shifted_masks = if matches!(op, BinaryOp::Sar) {
-                            wide_ops::emit_wide_sar(
-                                state.builder,
-                                &l_masks,
-                                &r_chunks,
-                                num_chunks,
-                                l_width,
-                            )
-                        } else {
-                            wide_ops::emit_wide_shift(
-                                state.builder,
-                                op,
-                                &l_masks,
-                                &r_chunks,
-                                num_chunks,
-                            )
-                        };
+                let mask_addr = if self.options.four_state {
+                    // Get masks for both operands
+                    let l_masks: Vec<Value> = state.regs[lhs]
+                        .load_mask_chunks(state.builder)
+                        .unwrap_or_else(|| {
+                            (0..num_chunks)
+                                .map(|_| state.builder.ins().iconst(types::I64, 0))
+                                .collect()
+                        });
+                    let r_masks: Vec<Value> = state.regs[rhs]
+                        .load_mask_chunks(state.builder)
+                        .unwrap_or_else(|| {
+                            (0..num_chunks)
+                                .map(|_| state.builder.ins().iconst(types::I64, 0))
+                                .collect()
+                        });
 
-                        let all_ones = state.builder.ins().iconst(types::I64, -1i64);
-                        shifted_masks
-                            .into_iter()
-                            .map(|m| state.builder.ins().select(shift_has_x, all_ones, m))
-                            .collect()
+                    // Check if shift amount has any X
+                    let mut r_any_x = state.builder.ins().iconst(types::I64, 0);
+                    for m in &r_masks {
+                        let m_i64 = cast_type(state.builder, *m, types::I64);
+                        r_any_x = state.builder.ins().bor(r_any_x, m_i64);
                     }
+                    let zero = state.builder.ins().iconst(types::I64, 0);
+                    let shift_has_x =
+                        state.builder.ins().icmp(IntCC::NotEqual, r_any_x, zero);
+
+                    // Spill LHS masks to stack slot (zero-pad beyond actual length)
+                    let (_, l_mask_addr) = alloc_stack_slot(state.builder, num_chunks);
+                    for (i, &m) in l_masks.iter().enumerate() {
+                        state.builder.ins().store(
+                            MemFlags::new(),
+                            m,
+                            l_mask_addr,
+                            (i * 8) as i32,
+                        );
+                    }
+                    let zero_mask_pad = state.builder.ins().iconst(types::I64, 0);
+                    for i in l_masks.len()..num_chunks {
+                        state.builder.ins().store(
+                            MemFlags::new(),
+                            zero_mask_pad,
+                            l_mask_addr,
+                            (i * 8) as i32,
+                        );
+                    }
+
+                    // Shift masks using memory-backed path
+                    let (_, mask_dst_addr) = alloc_stack_slot(state.builder, num_chunks);
+                    if matches!(op, BinaryOp::Sar) {
+                        wide_ops::emit_wide_sar_mem(
+                            state.builder,
+                            l_mask_addr,
+                            &r_chunks,
+                            mask_dst_addr,
+                            num_chunks,
+                            l_width,
+                        );
+                    } else {
+                        wide_ops::emit_wide_shift_mem(
+                            state.builder,
+                            op,
+                            l_mask_addr,
+                            &r_chunks,
+                            mask_dst_addr,
+                            num_chunks,
+                        );
+                    }
+
+                    // If shift amount has X, override all mask chunks to all-ones
+                    let all_ones = state.builder.ins().iconst(types::I64, -1i64);
+                    for i in 0..num_chunks {
+                        let m = state.builder.ins().load(
+                            types::I64,
+                            MemFlags::new(),
+                            mask_dst_addr,
+                            (i * 8) as i32,
+                        );
+                        let selected =
+                            state.builder.ins().select(shift_has_x, all_ones, m);
+                        state.builder.ins().store(
+                            MemFlags::new(),
+                            selected,
+                            mask_dst_addr,
+                            (i * 8) as i32,
+                        );
+                    }
+
+                    Some(mask_dst_addr)
+                } else {
+                    None
+                };
+
+                // Only keep MemBacked if the destination is still wide enough.
+                // Narrow destinations must be materialized as TwoState/FourState
+                // so that subsequent narrow paths can access first_value().
+                if final_num_chunks >= MEM_SHIFT_THRESHOLD {
+                    state.regs.insert(
+                        *dst,
+                        TransValue::MemBacked {
+                            addr: dst_addr,
+                            num_chunks: final_num_chunks,
+                            mask_addr,
+                        },
+                    );
+                } else {
+                    // Load result chunks from stack slot
+                    let mut res_chunks: Vec<Value> = (0..final_num_chunks)
+                        .map(|i| {
+                            state.builder.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                dst_addr,
+                                (i * 8) as i32,
+                            )
+                        })
+                        .collect();
+
+                    if self.options.four_state {
+                        let res_masks: Vec<Value> = if let Some(ma) = mask_addr {
+                            (0..final_num_chunks)
+                                .map(|i| {
+                                    state.builder.ins().load(
+                                        types::I64,
+                                        MemFlags::new(),
+                                        ma,
+                                        (i * 8) as i32,
+                                    )
+                                })
+                                .collect()
+                        } else {
+                            (0..final_num_chunks)
+                                .map(|_| state.builder.ins().iconst(types::I64, 0))
+                                .collect()
+                        };
+                        state.regs.insert(
+                            *dst,
+                            TransValue::FourState {
+                                values: res_chunks,
+                                masks: res_masks,
+                            },
+                        );
+                    } else {
+                        state.regs.insert(*dst, TransValue::TwoState(res_chunks));
+                    }
+                }
+            } else {
+                // === Register-based path (existing) ===
+                let l_chunks = state.regs[lhs].load_value_chunks(state.builder);
+                let r_chunks = state.regs[rhs].load_value_chunks(state.builder);
+
+                let mut res_chunks =
+                    if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+                        wide_ops::emit_wide_logic_andor(
+                            state.builder,
+                            op,
+                            &l_chunks,
+                            &r_chunks,
+                            num_chunks,
+                        )
+                    } else {
+                        wide_ops::emit_wide_binary(
+                            state.builder,
+                            op,
+                            &l_chunks,
+                            &r_chunks,
+                            num_chunks,
+                            l_width,
+                        )
+                    };
+
+                res_chunks.truncate(final_num_chunks);
+                while res_chunks.len() < final_num_chunks {
+                    res_chunks.push(state.builder.ins().iconst(types::I64, 0));
+                }
+
+                if self.options.four_state {
+                    // Get or generate zero masks for each operand
+                    let l_masks: Vec<Value> = state.regs[lhs]
+                        .load_mask_chunks(state.builder)
+                        .unwrap_or_else(|| {
+                            (0..num_chunks)
+                                .map(|_| state.builder.ins().iconst(types::I64, 0))
+                                .collect()
+                        });
+                    let r_masks: Vec<Value> = state.regs[rhs]
+                        .load_mask_chunks(state.builder)
+                        .unwrap_or_else(|| {
+                            (0..num_chunks)
+                                .map(|_| state.builder.ins().iconst(types::I64, 0))
+                                .collect()
+                        });
+
+                    let mut res_masks = match op {
+                        // Bitwise ops: precise mask computation per chunk
+                        BinaryOp::And => (0..num_chunks)
+                            .map(|i| {
+                                let lm = get_chunk_as_i64(state.builder, &l_masks, i);
+                                let rm = get_chunk_as_i64(state.builder, &r_masks, i);
+                                let lv = get_chunk_as_i64(state.builder, &l_chunks, i);
+                                let rv = get_chunk_as_i64(state.builder, &r_chunks, i);
+
+                                let m1 = state.builder.ins().band(lm, rm);
+                                let m2 = state.builder.ins().band(lm, rv);
+                                let m3 = state.builder.ins().band(rm, lv);
+                                let mt = state.builder.ins().bor(m1, m2);
+                                state.builder.ins().bor(mt, m3)
+                            })
+                            .collect(),
+                        BinaryOp::Or => (0..num_chunks)
+                            .map(|i| {
+                                let lm = get_chunk_as_i64(state.builder, &l_masks, i);
+                                let rm = get_chunk_as_i64(state.builder, &r_masks, i);
+                                let lv = get_chunk_as_i64(state.builder, &l_chunks, i);
+                                let rv = get_chunk_as_i64(state.builder, &r_chunks, i);
+
+                                let m1 = state.builder.ins().band(lm, rm);
+                                let m2 = state.builder.ins().band_not(lm, rv);
+                                let m3 = state.builder.ins().band_not(rm, lv);
+                                let mt = state.builder.ins().bor(m1, m2);
+                                state.builder.ins().bor(mt, m3)
+                            })
+                            .collect(),
+                        BinaryOp::Xor => (0..num_chunks)
+                            .map(|i| {
+                                let lm = get_chunk_as_i64(state.builder, &l_masks, i);
+                                let rm = get_chunk_as_i64(state.builder, &r_masks, i);
+                                state.builder.ins().bor(lm, rm)
+                            })
+                            .collect(),
+                        BinaryOp::Shr | BinaryOp::Shl | BinaryOp::Sar => {
+                            // If shift amount (rhs) has ANY X, result is all-X.
+                            let mut r_any_x = state.builder.ins().iconst(types::I64, 0);
+                            for m in &r_masks {
+                                let m_i64 = cast_type(state.builder, *m, types::I64);
+                                r_any_x = state.builder.ins().bor(r_any_x, m_i64);
+                            }
+                            let zero = state.builder.ins().iconst(types::I64, 0);
+                            let shift_has_x =
+                                state.builder.ins().icmp(IntCC::NotEqual, r_any_x, zero);
+
+                            let shifted_masks = if matches!(op, BinaryOp::Sar) {
+                                wide_ops::emit_wide_sar(
+                                    state.builder,
+                                    &l_masks,
+                                    &r_chunks,
+                                    num_chunks,
+                                    l_width,
+                                )
+                            } else {
+                                wide_ops::emit_wide_shift(
+                                    state.builder,
+                                    op,
+                                    &l_masks,
+                                    &r_chunks,
+                                    num_chunks,
+                                )
+                            };
+
+                            let all_ones = state.builder.ins().iconst(types::I64, -1i64);
+                            shifted_masks
+                                .into_iter()
+                                .map(|m| {
+                                    state.builder.ins().select(shift_has_x, all_ones, m)
+                                })
+                                .collect()
+                        }
                     BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
                         // IEEE 1800 ==?/!=?: RHS X/Z bits are wildcards (don't care).
                         // Compare only at positions where both LHS is definite and RHS is non-wildcard.
@@ -853,6 +1058,7 @@ impl SIRTranslator {
             } else {
                 state.regs.insert(*dst, TransValue::TwoState(res_chunks));
             }
+            }
         }
     }
 
@@ -872,7 +1078,7 @@ impl SIRTranslator {
 
         if common_logical_width <= 64 {
             // --- 64-bit or less: Single-word Operation ---
-            let r_val = state.regs[rhs].values()[0];
+            let r_val = state.regs[rhs].first_value(state.builder);
             let common_ty = get_cl_type(common_logical_width);
 
             let r_is_signed = state.register_map[rhs].is_signed() || matches!(op, UnaryOp::Minus);
@@ -921,8 +1127,7 @@ impl SIRTranslator {
 
             if self.options.four_state {
                 let r_m_val = state.regs[rhs]
-                    .masks()
-                    .map(|m| m[0])
+                    .first_mask(state.builder)
                     .unwrap_or_else(|| state.builder.ins().iconst(common_ty, 0));
                 let r_m = promote_to_physical(state, r_m_val, r_width, r_is_signed, common_ty);
 
@@ -1009,7 +1214,7 @@ impl SIRTranslator {
         } else {
             // --- Over 64-bit: Multi-word Operation ---
             let num_chunks = common_logical_width.div_ceil(64);
-            let r_chunks = state.regs[rhs].values().to_vec();
+            let r_chunks = state.regs[rhs].load_value_chunks(state.builder);
 
             let mut res_chunks = wide_ops::emit_wide_unary(
                 state.builder,
@@ -1026,12 +1231,13 @@ impl SIRTranslator {
             }
 
             if self.options.four_state {
-                let r_masks: Vec<Value> = match state.regs[rhs].masks() {
-                    Some(m) => m.to_vec(),
-                    None => (0..num_chunks)
-                        .map(|_| state.builder.ins().iconst(types::I64, 0))
-                        .collect(),
-                };
+                let r_masks: Vec<Value> = state.regs[rhs]
+                    .load_mask_chunks(state.builder)
+                    .unwrap_or_else(|| {
+                        (0..num_chunks)
+                            .map(|_| state.builder.ins().iconst(types::I64, 0))
+                            .collect()
+                    });
 
                 let mut res_masks = match op {
                     // Bitwise ops: mask is preserved per-chunk

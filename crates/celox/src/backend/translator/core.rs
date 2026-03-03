@@ -1,4 +1,4 @@
-use cranelift::codegen::ir::{BlockArg, FuncRef};
+use cranelift::codegen::ir::{BlockArg, FuncRef, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
 
@@ -68,6 +68,10 @@ fn preload_trigger_old_values<'a>(
     old_values
 }
 
+/// Minimum number of 64-bit chunks to use memory-backed shift/sar.
+/// Below this, the O(n²) select-chain is cheaper at runtime.
+pub const MEM_SHIFT_THRESHOLD: usize = 4; // 256-bit+
+
 #[derive(Clone)]
 pub enum TransValue {
     TwoState(Vec<Value>),
@@ -75,22 +79,96 @@ pub enum TransValue {
         values: Vec<Value>,
         masks: Vec<Value>,
     },
+    /// Memory-backed wide value stored in a Cranelift stack slot.
+    /// Used for wide shift/sar results to avoid O(n²) instruction scaling.
+    MemBacked {
+        addr: Value,
+        num_chunks: usize,
+        mask_addr: Option<Value>,
+    },
 }
 
 impl TransValue {
-    pub fn values(&self) -> &[Value] {
+    /// Load all value chunks as registers. Works for all variants.
+    pub fn load_value_chunks(&self, builder: &mut FunctionBuilder) -> Vec<Value> {
         match self {
-            TransValue::TwoState(v) => v,
-            TransValue::FourState { values, .. } => values,
+            TransValue::TwoState(v) => v.clone(),
+            TransValue::FourState { values, .. } => values.clone(),
+            TransValue::MemBacked {
+                addr, num_chunks, ..
+            } => (0..*num_chunks)
+                .map(|i| {
+                    builder
+                        .ins()
+                        .load(types::I64, MemFlags::new(), *addr, (i * 8) as i32)
+                })
+                .collect(),
         }
     }
-    pub fn masks(&self) -> Option<&[Value]> {
+
+    /// Load mask chunks as registers. Works for all variants.
+    pub fn load_mask_chunks(&self, builder: &mut FunctionBuilder) -> Option<Vec<Value>> {
         match self {
             TransValue::TwoState(_) => None,
-            TransValue::FourState { masks, .. } => Some(masks),
+            TransValue::FourState { masks, .. } => Some(masks.clone()),
+            TransValue::MemBacked {
+                mask_addr,
+                num_chunks,
+                ..
+            } => mask_addr.map(|ma| {
+                (0..*num_chunks)
+                    .map(|i| {
+                        builder
+                            .ins()
+                            .load(types::I64, MemFlags::new(), ma, (i * 8) as i32)
+                    })
+                    .collect()
+            }),
         }
     }
+
+    /// Get the first value chunk. For MemBacked, loads from memory.
+    /// Use this instead of `values()[0]` when the value might be MemBacked.
+    pub fn first_value(&self, builder: &mut FunctionBuilder) -> Value {
+        match self {
+            TransValue::TwoState(v) => v[0],
+            TransValue::FourState { values, .. } => values[0],
+            TransValue::MemBacked { addr, .. } => {
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), *addr, 0)
+            }
+        }
+    }
+
+    /// Get the first mask chunk. For MemBacked, loads from memory.
+    /// Use this instead of `masks().map(|m| m[0])` when the value might be MemBacked.
+    pub fn first_mask(&self, builder: &mut FunctionBuilder) -> Option<Value> {
+        match self {
+            TransValue::TwoState(_) => None,
+            TransValue::FourState { masks, .. } => Some(masks[0]),
+            TransValue::MemBacked { mask_addr, .. } => mask_addr.map(|ma| {
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), ma, 0)
+            }),
+        }
+    }
+
 }
+
+/// Create a new stack slot for `num_chunks` i64 values and return the base address.
+pub fn alloc_stack_slot(builder: &mut FunctionBuilder, num_chunks: usize) -> (StackSlot, Value) {
+    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (num_chunks * 8) as u32,
+        3,
+    ));
+    let addr = builder.ins().stack_addr(types::I64, slot, 0);
+    (slot, addr)
+}
+
+use cranelift::codegen::ir::StackSlot;
 
 pub struct SIRTranslator {
     pub layout: MemoryLayout,
@@ -672,6 +750,10 @@ impl SIRTranslator {
                         entry_args.push(BlockArg::Value(values[0]));
                         entry_args.push(BlockArg::Value(masks[0]));
                     }
+                    TransValue::MemBacked { .. } => {
+                        // Spill values are loaded from scratch — never MemBacked
+                        unreachable!("spill_reg_values should never contain MemBacked")
+                    }
                 }
             } else {
                 let width = eu.register_map[&param_reg].width();
@@ -806,7 +888,7 @@ impl SIRTranslator {
                     }
                     (Some(&t_chunk), Some(&f_chunk)) => {
                         // Both cross-chunk: emit a brif to two trampoline blocks
-                        let condition = state.regs[cond].values()[0];
+                        let condition = state.regs[cond].first_value(state.builder);
                         let true_trampoline = state.builder.create_block();
                         let false_trampoline = state.builder.create_block();
 
@@ -840,7 +922,7 @@ impl SIRTranslator {
                     }
                     (Some(&t_chunk), None) => {
                         // True is cross-chunk, false is local
-                        let condition = state.regs[cond].values()[0];
+                        let condition = state.regs[cond].first_value(state.builder);
                         let true_trampoline = state.builder.create_block();
                         let f_target = block_map[&false_block.0];
                         let cl_f_args = self.build_local_block_args(state, f_target, &false_block.1);
@@ -865,7 +947,7 @@ impl SIRTranslator {
                     }
                     (None, Some(&f_chunk)) => {
                         // True is local, false is cross-chunk
-                        let condition = state.regs[cond].values()[0];
+                        let condition = state.regs[cond].first_value(state.builder);
                         let false_trampoline = state.builder.create_block();
                         let t_target = block_map[&true_block.0];
                         let cl_t_args = self.build_local_block_args(state, t_target, &true_block.1);
@@ -913,8 +995,8 @@ impl SIRTranslator {
     ) {
         // 1. Store outgoing live registers to scratch
         for slot in outgoing_spills {
-            if let Some(trans_val) = state.regs.get(&slot.reg_id) {
-                let values = trans_val.values();
+            if let Some(trans_val) = state.regs.get(&slot.reg_id).cloned() {
+                let values = trans_val.load_value_chunks(state.builder);
                 for (i, &val) in values.iter().enumerate() {
                     let off = scratch_base_offset + slot.scratch_byte_offset + i * 8;
                     let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
@@ -922,7 +1004,7 @@ impl SIRTranslator {
                     state.builder.ins().store(MemFlags::new(), val_i64, addr, 0);
                 }
                 if self.options.four_state {
-                    if let Some(masks) = trans_val.masks() {
+                    if let Some(masks) = trans_val.load_mask_chunks(state.builder) {
                         let nc = values.len();
                         for (i, &mask) in masks.iter().enumerate() {
                             let off = scratch_base_offset + slot.scratch_byte_offset + (nc + i) * 8;
@@ -940,8 +1022,8 @@ impl SIRTranslator {
             for (i, &arg_reg) in jump_args.iter().enumerate() {
                 if i < edge.param_scratch_offsets.len() {
                     let (_param_reg, scratch_off) = edge.param_scratch_offsets[i];
-                    if let Some(trans_val) = state.regs.get(&arg_reg) {
-                        let values = trans_val.values();
+                    if let Some(trans_val) = state.regs.get(&arg_reg).cloned() {
+                        let values = trans_val.load_value_chunks(state.builder);
                         for (j, &val) in values.iter().enumerate() {
                             let off = scratch_base_offset + scratch_off + j * 8;
                             let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
@@ -949,7 +1031,7 @@ impl SIRTranslator {
                             state.builder.ins().store(MemFlags::new(), val_i64, addr, 0);
                         }
                         if self.options.four_state {
-                            if let Some(masks) = trans_val.masks() {
+                            if let Some(masks) = trans_val.load_mask_chunks(state.builder) {
                                 let nc = values.len();
                                 for (j, &mask) in masks.iter().enumerate() {
                                     let off = scratch_base_offset + scratch_off + (nc + j) * 8;
@@ -980,14 +1062,13 @@ impl SIRTranslator {
         let param_types = collect_block_param_types(state, target);
         let mut cl_args: Vec<BlockArg> = Vec::new();
         for (i, reg) in args.iter().enumerate() {
-            let val = state.regs[reg].values()[0];
+            let val = state.regs[reg].first_value(state.builder);
             let val_idx = if self.options.four_state { i * 2 } else { i };
             let cast_val = cast_type(state.builder, val, param_types[val_idx]);
             cl_args.push(BlockArg::Value(cast_val));
             if self.options.four_state {
                 let mask = state.regs[reg]
-                    .masks()
-                    .map(|m| m[0])
+                    .first_mask(state.builder)
                     .unwrap_or_else(|| state.builder.ins().iconst(types::I8, 0));
                 let cast_mask = cast_type(state.builder, mask, param_types[i * 2 + 1]);
                 cl_args.push(BlockArg::Value(cast_mask));
@@ -1005,16 +1086,17 @@ impl SIRTranslator {
             // When nc==1, the signature uses get_cl_type(width) which may be I8/I16/I32.
             // When nc>1, each chunk is I64.
             let expected_ty = if nc == 1 { get_cl_type(width) } else { types::I64 };
-            if let Some(trans_val) = state.regs.get(reg_id) {
-                let values = trans_val.values();
+            if let Some(trans_val) = state.regs.get(reg_id).cloned() {
+                let values = trans_val.load_value_chunks(state.builder);
                 if self.options.four_state {
-                    let masks_opt = trans_val.masks();
+                    let masks_opt = trans_val.load_mask_chunks(state.builder);
                     for i in 0..nc {
                         let val = values.get(i).copied().unwrap_or_else(|| {
                             state.builder.ins().iconst(expected_ty, 0)
                         });
                         args.push(cast_type(state.builder, val, expected_ty));
                         let mask = masks_opt
+                            .as_ref()
                             .and_then(|m| m.get(i).copied())
                             .unwrap_or_else(|| state.builder.ins().iconst(expected_ty, 0));
                         args.push(cast_type(state.builder, mask, expected_ty));

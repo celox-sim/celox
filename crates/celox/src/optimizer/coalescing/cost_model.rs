@@ -1,4 +1,5 @@
 use crate::HashMap;
+use crate::backend::MEM_SHIFT_THRESHOLD;
 use crate::ir::*;
 
 /// Safety margin: 50% of Cranelift's ~16M instruction index limit.
@@ -59,9 +60,16 @@ pub fn estimate_clif_cost(
                     BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => nc,
                     // Add/Sub: carry chain, ~5 per chunk
                     BinaryOp::Add | BinaryOp::Sub => 5 * nc,
-                    // Shl/Shr/Sar: QUADRATIC — each dest chunk scans all source chunks
-                    // via icmp_imm + select pairs. Actual: ~5*nc² + 7*nc + 5
-                    BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 5 * nc * nc + 7 * nc + 5,
+                    // Shl/Shr/Sar: memory-backed O(n) above threshold, else O(n²)
+                    BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
+                        if nc >= MEM_SHIFT_THRESHOLD {
+                            // Memory-backed: load_or_default ~6 insts, combine ~4, per chunk
+                            10 * nc + 20
+                        } else {
+                            // Register-based: select-chain O(n²)
+                            5 * nc * nc + 7 * nc + 5
+                        }
+                    }
                     // Mul: schoolbook O(n²), ~5*nc² + 5*nc
                     BinaryOp::Mul => 5 * nc * nc + 5 * nc,
                     // Div/Rem: trial division O(n²), ~640*nc² + 384*nc
@@ -207,9 +215,9 @@ mod tests {
     }
 
     #[test]
-    fn test_shift_quadratic_cost() {
+    fn test_shift_linear_cost_above_threshold() {
         let mut register_map = HashMap::default();
-        // 4096-bit register → 64 chunks
+        // 4096-bit register → 64 chunks (above MEM_SHIFT_THRESHOLD)
         register_map.insert(RegisterId(0), RegisterType::Bit { width: 4096, signed: false });
         register_map.insert(RegisterId(1), RegisterType::Bit { width: 4096, signed: false });
         register_map.insert(RegisterId(2), RegisterType::Bit { width: 64, signed: false });
@@ -217,8 +225,24 @@ mod tests {
         let inst: SIRInstruction<RegionedAbsoluteAddr> =
             SIRInstruction::Binary(RegisterId(0), RegisterId(1), BinaryOp::Shl, RegisterId(2));
         let cost = estimate_clif_cost(&inst, &register_map, false);
-        // 5*64² + 7*64 + 5 = 20480 + 448 + 5 = 20933
-        assert!(cost > 20_000, "Shift cost for 4096-bit should be >20K, got {cost}");
+        // Memory-backed: 10*64 + 20 = 660 (linear, not quadratic)
+        assert!(cost < 1_000, "Shift cost for 4096-bit should be linear (<1K), got {cost}");
+        assert!(cost > 500, "Shift cost for 4096-bit should be >500, got {cost}");
+    }
+
+    #[test]
+    fn test_shift_quadratic_cost_below_threshold() {
+        let mut register_map = HashMap::default();
+        // 128-bit register → 2 chunks (below MEM_SHIFT_THRESHOLD)
+        register_map.insert(RegisterId(0), RegisterType::Bit { width: 128, signed: false });
+        register_map.insert(RegisterId(1), RegisterType::Bit { width: 128, signed: false });
+        register_map.insert(RegisterId(2), RegisterType::Bit { width: 64, signed: false });
+
+        let inst: SIRInstruction<RegionedAbsoluteAddr> =
+            SIRInstruction::Binary(RegisterId(0), RegisterId(1), BinaryOp::Shl, RegisterId(2));
+        let cost = estimate_clif_cost(&inst, &register_map, false);
+        // Register-based: 5*2² + 7*2 + 5 = 20 + 14 + 5 = 39
+        assert!(cost > 30, "Shift cost for 128-bit should be >30, got {cost}");
     }
 
     #[test]
@@ -233,7 +257,7 @@ mod tests {
         let inst: SIRInstruction<RegionedAbsoluteAddr> =
             SIRInstruction::Binary(RegisterId(0), RegisterId(1), BinaryOp::Shr, RegisterId(2));
         let cost = estimate_clif_cost(&inst, &register_map, false);
-        // Should use 4096-bit (64 chunks) cost, not 1-bit cost
-        assert!(cost > 10_000, "Shr with 4096-bit operands should be expensive, got {cost}");
+        // Memory-backed linear cost, but should still be non-trivial
+        assert!(cost > 100, "Shr with 4096-bit operands should be >100, got {cost}");
     }
 }
