@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772571515682,
+  "lastUpdate": 1772571516261,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -4571,6 +4571,75 @@ window.BENCHMARK_DATA = {
           {
             "name": "verilator/testbench_eval_linear_sec_p6_x1000000",
             "value": 37201.595,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "e743cbc7e8b0ffc86ba7eda6fa854313fe5ff267",
+          "message": "Rewrite benchmark dashboard with tab-based layout and mini-chart grid\n\nReplace the flat checkbox list + single shared chart with a tab-based UI\n(Counter, Std Library, API, Optimize) and a responsive 2-column grid of\nmini-charts. Each card groups the same operation across runtimes (max 3\nlines: Rust/TS/Verilator) with clickable Chart.js legends. Tabs use\npriority-based matching (API > Optimize > Stdlib > Counter) and sub-group\nsections for Std Library and API tabs.",
+          "timestamp": "2026-03-03T20:42:12Z",
+          "tree_id": "8a36ba14fc102b953283d48e8eca7c0650b2b4a2",
+          "url": "https://github.com/celox-sim/celox/commit/e743cbc7e8b0ffc86ba7eda6fa854313fe5ff267"
+        },
+        "date": 1772571516091,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "value": 10625440.652,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_linear_sec_p6",
+            "value": 1240968.339,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "value": 0.3405603645611292,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "value": 340911.50033333333,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "value": 0.34197907614334394,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "value": 352917.54699999996,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_linear_sec_p6_x1",
+            "value": 0.03569561272669057,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_linear_sec_p6_x1000000",
+            "value": 35393.20133333334,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_eval_linear_sec_p6_x1000000",
+            "value": 36257.43233333334,
             "unit": "us"
           }
         ]
