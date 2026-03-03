@@ -47,9 +47,7 @@ pub module SorterU16 (
 "#;
 
 #[test]
-fn test_pub_module_wrapper_no_lt_member() {
-    // Should compile SorterU16 (the pub module wrapper) without throwing
-    // "PKG doesn't have member lt"
+fn test_pub_module_wrapping_generic_proto_module() {
     let mut sim = Simulator::builder(CODE, "SorterU16")
         .build()
         .expect("SorterU16 should compile without error");
