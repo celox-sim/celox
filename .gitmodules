@@ -1,7 +1,7 @@
 [submodule "deps/veryl"]
 	path = deps/veryl
 	url = https://github.com/tignear/veryl.git
-	branch = fix/single-element-array-literal-fill
+	branch = for-celox
 [submodule "examples/template"]
 	path = examples/template
 	url = https://github.com/celox-sim/celox-template.git
