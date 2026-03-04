@@ -1454,15 +1454,15 @@ impl<'a> FfParser<'a> {
         context_width: Option<usize>,
     ) -> Result<(), ParserError> {
         // Short-circuit: compile-time constant compound expression → emit constant value.
-        // context_width is not applied here, consistent with Factor::Value handling —
-        // the parent expression node is responsible for width adjustment.
+        // Unlike the SLT path (comb.rs), the SIR path requires the register width to
+        // match context_width because emit_multi_dst_assign assumes rhs_width >= part_width.
         if !matches!(expr, Expression::Term(_)) {
             let ct = expr.comptime();
             if ct.is_const {
                 if let Some((celox_value, mask_xz, width, _)) = celox_value_from_comptime(ct) {
                     self.op_constant(
                         SIRValue::new_four_state(celox_value, mask_xz),
-                        width,
+                        context_width.unwrap_or(width),
                         ir_builder,
                     );
                     return Ok(());

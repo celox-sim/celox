@@ -1782,13 +1782,12 @@ fn eval_factor(
                         celox_value, mask_xz, width, signed,
                     ));
                     if let Some(target_width) = context_width {
-                        let expr_width = width;
-                        if expr_width < target_width {
-                            let pad_width = target_width - expr_width;
+                        if width < target_width {
+                            let pad_width = target_width - width;
                             let pad = if signed {
                                 let msb_slice = arena.alloc(SLTNode::Slice {
                                     expr,
-                                    access: BitAccess::new(expr_width - 1, expr_width - 1),
+                                    access: BitAccess::new(width - 1, width - 1),
                                 });
                                 (msb_slice, pad_width)
                             } else {
@@ -1800,8 +1799,8 @@ fn eval_factor(
                                 ));
                                 (zero, pad_width)
                             };
-                            expr = arena.alloc(SLTNode::Concat(vec![pad, (expr, expr_width)]));
-                        } else if expr_width > target_width {
+                            expr = arena.alloc(SLTNode::Concat(vec![pad, (expr, width)]));
+                        } else if width > target_width {
                             expr = arena.alloc(SLTNode::Slice {
                                 expr,
                                 access: BitAccess::new(0, target_width - 1),
