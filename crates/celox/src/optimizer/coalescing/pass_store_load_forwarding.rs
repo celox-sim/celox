@@ -60,7 +60,13 @@ fn forward_and_simplify(instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAd
                         store_end <= k.bit_offset || existing_end <= *off
                     }
                 });
-                known_stores.insert(key, StoreEntry { src: *src, width: *width });
+                known_stores.insert(
+                    key,
+                    StoreEntry {
+                        src: *src,
+                        width: *width,
+                    },
+                );
             }
             SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _) => {
                 // Conservatively invalidate all entries for this addr
@@ -103,7 +109,9 @@ fn forward_and_simplify(instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAd
                     (BinaryOp::And, _, Some(mask)) => {
                         // Check if mask is (1 << width) - 1 for some width
                         // If the mask covers the full width of lhs, it's identity
-                        if mask == u64::MAX || (mask > 0 && mask.count_ones() == mask.trailing_ones()) {
+                        if mask == u64::MAX
+                            || (mask > 0 && mask.count_ones() == mask.trailing_ones())
+                        {
                             // Only alias if mask covers all bits — we can't easily
                             // know the bit width of lhs here, so only handle the
                             // common case where the And itself produces a result

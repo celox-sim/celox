@@ -1,5 +1,5 @@
-use crate::ir::*;
 use crate::HashSet;
+use crate::ir::*;
 
 /// Remove stores from `eval_comb` whose target addresses are not live.
 ///
@@ -31,12 +31,7 @@ pub(crate) fn eliminate_dead_stores(
                 .values()
                 .flat_map(|units| units.iter()),
         )
-        .chain(
-            program
-                .apply_ffs
-                .values()
-                .flat_map(|units| units.iter()),
-        );
+        .chain(program.apply_ffs.values().flat_map(|units| units.iter()));
 
     for eu in all_eus {
         for block in eu.blocks.values() {

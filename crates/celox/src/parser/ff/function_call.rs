@@ -275,22 +275,18 @@ impl<'a> FfParser<'a> {
                     Ok(merge_branch_state(&cond, then_state, else_state))
                 }
                 Statement::Null => Ok(state.clone()),
-                Statement::IfReset(ir) => {
-                    Err(ParserError::unsupported(
-                        LoweringPhase::FfLowering,
-                        "function body control flow",
-                        format!("{stmt}"),
-                        Some(&ir.token),
-                    ))
-                }
-                Statement::SystemFunctionCall(sc) => {
-                    Err(ParserError::unsupported(
-                        LoweringPhase::FfLowering,
-                        "function body control flow",
-                        format!("{stmt}"),
-                        Some(&sc.comptime.token),
-                    ))
-                }
+                Statement::IfReset(ir) => Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&ir.token),
+                )),
+                Statement::SystemFunctionCall(sc) => Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&sc.comptime.token),
+                )),
                 Statement::FunctionCall(call) => parser.apply_function_call_to_state(call, state),
             }
         }
@@ -311,15 +307,14 @@ impl<'a> FfParser<'a> {
         let state = build_state_from_statements(self, &body.statements, defs, &|expr, defs| {
             Self::substitute_function_expr(expr, defs)
         })?;
-        state
-            .get(&target_id)
-            .cloned()
-            .ok_or_else(|| ParserError::unsupported(
+        state.get(&target_id).cloned().ok_or_else(|| {
+            ParserError::unsupported(
                 LoweringPhase::FfLowering,
                 "function return expression",
                 format!("function target var id: {:?}", target_id),
                 None,
-            ))
+            )
+        })
     }
 
     pub(super) fn extract_function_return_expr(
@@ -417,22 +412,18 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Statement::Null => resolve_return_expr(parser, rest, ret_id, defs, substitute),
-                Statement::IfReset(ir) => {
-                    Err(ParserError::unsupported(
-                        LoweringPhase::FfLowering,
-                        "function body control flow",
-                        format!("{stmt}"),
-                        Some(&ir.token),
-                    ))
-                }
-                Statement::SystemFunctionCall(sc) => {
-                    Err(ParserError::unsupported(
-                        LoweringPhase::FfLowering,
-                        "function body control flow",
-                        format!("{stmt}"),
-                        Some(&sc.comptime.token),
-                    ))
-                }
+                Statement::IfReset(ir) => Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&ir.token),
+                )),
+                Statement::SystemFunctionCall(sc) => Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&sc.comptime.token),
+                )),
                 Statement::FunctionCall(call) => {
                     let next_defs = parser.apply_function_call_to_state(call, defs)?;
                     resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
@@ -447,12 +438,14 @@ impl<'a> FfParser<'a> {
             &HashMap::default(),
             &|expr, defs| Self::substitute_function_expr(expr, defs),
         )?
-        .ok_or_else(|| ParserError::unsupported(
-            LoweringPhase::FfLowering,
-            "function return expression",
-            format!("function call to id {:?}", ret_id),
-            None,
-        ))
+        .ok_or_else(|| {
+            ParserError::unsupported(
+                LoweringPhase::FfLowering,
+                "function return expression",
+                format!("function call to id {:?}", ret_id),
+                None,
+            )
+        })
     }
 
     pub(super) fn parse_function_call_expr<A>(

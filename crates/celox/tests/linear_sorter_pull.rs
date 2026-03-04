@@ -173,7 +173,11 @@ fn test_sorter_push_pop_empty() {
     sim.modify(|io| io.set(push, 0u8)).unwrap();
     sim.tick(clk).unwrap(); // settle
     assert_eq!(sim.get(empty), 0u32.into(), "Not empty after push");
-    assert_eq!(sim.get(d_out), 100u32.into(), "d_out should be 100 (minimum)");
+    assert_eq!(
+        sim.get(d_out),
+        100u32.into(),
+        "d_out should be 100 (minimum)"
+    );
 
     // Push value 50 (smaller, becomes new min)
     sim.modify(|io| {
@@ -184,14 +188,22 @@ fn test_sorter_push_pop_empty() {
     sim.tick(clk).unwrap();
     sim.modify(|io| io.set(push, 0u8)).unwrap();
     sim.tick(clk).unwrap(); // settle
-    assert_eq!(sim.get(d_out), 50u32.into(), "d_out should be 50 (new minimum)");
+    assert_eq!(
+        sim.get(d_out),
+        50u32.into(),
+        "d_out should be 50 (new minimum)"
+    );
 
     // Pop (removes minimum = 50)
     sim.modify(|io| io.set(pop, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     sim.modify(|io| io.set(pop, 0u8)).unwrap();
     sim.tick(clk).unwrap(); // settle
-    assert_eq!(sim.get(d_out), 100u32.into(), "d_out should be 100 after popping 50");
+    assert_eq!(
+        sim.get(d_out),
+        100u32.into(),
+        "d_out should be 100 after popping 50"
+    );
     assert_eq!(sim.get(empty), 0u32.into(), "Not empty, still has 100");
 
     // Pop again (removes 100, now empty)

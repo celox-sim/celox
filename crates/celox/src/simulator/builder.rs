@@ -69,7 +69,12 @@ fn analyze(
     let mut ir = Ir::default();
 
     for parsed in &parsers {
-        errors.append(&mut analyzer.analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir)));
+        errors.append(&mut analyzer.analyze_pass2(
+            "prj",
+            &parsed.veryl,
+            &mut context,
+            Some(&mut ir),
+        ));
     }
     errors.append(&mut Analyzer::analyze_post_pass2());
 
@@ -411,7 +416,11 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         )?;
         let mut program = program;
         if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(&mut program, &self.live_signals, self.options.dead_store_policy);
+            run_dead_store_elimination(
+                &mut program,
+                &self.live_signals,
+                self.options.dead_store_policy,
+            );
         }
         let backend = JitBackend::new(&program, &self.options, None)?;
 
@@ -446,7 +455,11 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
         let sim_res = program_res.and_then(|mut program| {
             if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(&mut program, &self.live_signals, self.options.dead_store_policy);
+                run_dead_store_elimination(
+                    &mut program,
+                    &self.live_signals,
+                    self.options.dead_store_policy,
+                );
             }
             let backend = JitBackend::new(&program, &self.options, Some(&mut trace))?;
 
@@ -519,7 +532,11 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             &self.param_overrides,
         )?;
         if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(&mut program, &self.live_signals, self.options.dead_store_policy);
+            run_dead_store_elimination(
+                &mut program,
+                &self.live_signals,
+                self.options.dead_store_policy,
+            );
         }
         let backend = JitBackend::new(&program, &self.options, None)?;
 

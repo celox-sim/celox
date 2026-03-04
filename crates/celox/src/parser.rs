@@ -147,11 +147,14 @@ impl ParserError {
 impl miette::Diagnostic for ParserError {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         match self {
-            ParserError::Unsupported { phase, .. } => Some(Box::new(format!("unsupported_{}", match phase {
-                LoweringPhase::FfLowering => "ff_lowering",
-                LoweringPhase::CombLowering => "comb_lowering",
-                LoweringPhase::SimulatorParser => "simulator_parser",
-            }))),
+            ParserError::Unsupported { phase, .. } => Some(Box::new(format!(
+                "unsupported_{}",
+                match phase {
+                    LoweringPhase::FfLowering => "ff_lowering",
+                    LoweringPhase::CombLowering => "comb_lowering",
+                    LoweringPhase::SimulatorParser => "simulator_parser",
+                }
+            ))),
             ParserError::UnresolvedWidth { .. } => Some(Box::new("unresolved_width")),
             ParserError::Scheduler(_) => Some(Box::new("scheduler")),
             ParserError::TopNotFound { .. } => Some(Box::new("top_not_found")),
@@ -165,8 +168,12 @@ impl miette::Diagnostic for ParserError {
 
     fn source_code(&self) -> Option<&dyn miette::SourceCode> {
         let loc = match self {
-            ParserError::Unsupported { source_location, .. }
-            | ParserError::UnresolvedWidth { source_location, .. } => source_location.as_ref(),
+            ParserError::Unsupported {
+                source_location, ..
+            }
+            | ParserError::UnresolvedWidth {
+                source_location, ..
+            } => source_location.as_ref(),
             _ => None,
         };
         loc.map(|l| &l.source as &dyn miette::SourceCode)
@@ -174,8 +181,12 @@ impl miette::Diagnostic for ParserError {
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
         let loc = match self {
-            ParserError::Unsupported { source_location, .. }
-            | ParserError::UnresolvedWidth { source_location, .. } => source_location.as_ref(),
+            ParserError::Unsupported {
+                source_location, ..
+            }
+            | ParserError::UnresolvedWidth {
+                source_location, ..
+            } => source_location.as_ref(),
             _ => None,
         };
         loc.map(|l| {

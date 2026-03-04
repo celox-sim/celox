@@ -60,8 +60,16 @@ fn test_nba_separate_blocks_swap() {
 
     // Tick again — should swap back
     sim.tick(clk).unwrap();
-    assert_eq!(sim.get(a), 0xAAu32.into(), "r1 should be 0xAA after 2nd swap");
-    assert_eq!(sim.get(b), 0x55u32.into(), "r2 should be 0x55 after 2nd swap");
+    assert_eq!(
+        sim.get(a),
+        0xAAu32.into(),
+        "r1 should be 0xAA after 2nd swap"
+    );
+    assert_eq!(
+        sim.get(b),
+        0x55u32.into(),
+        "r2 should be 0x55 after 2nd swap"
+    );
 }
 
 /// Test pipeline pattern across 3 separate always_ff blocks.
@@ -95,7 +103,11 @@ fn test_nba_separate_blocks_pipeline() {
 
     // Tick 3: q=0x42
     sim.tick(clk).unwrap();
-    assert_eq!(sim.get(q), 0x42u32.into(), "q should be 0x42 after 3rd tick");
+    assert_eq!(
+        sim.get(q),
+        0x42u32.into(),
+        "q should be 0x42 after 3rd tick"
+    );
 }
 
 /// Test that the order of always_ff blocks in source code does not matter.
@@ -130,5 +142,9 @@ fn test_nba_separate_blocks_pipeline_reversed() {
 
     // Tick 3: q=0x42
     sim.tick(clk).unwrap();
-    assert_eq!(sim.get(q), 0x42u32.into(), "q should be 0x42 after 3rd tick");
+    assert_eq!(
+        sim.get(q),
+        0x42u32.into(),
+        "q should be 0x42 after 3rd tick"
+    );
 }

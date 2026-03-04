@@ -64,7 +64,10 @@ pub(super) fn collect_all_used_registers(
     used
 }
 
-fn collect_used_regs_into(inst: &SIRInstruction<RegionedAbsoluteAddr>, out: &mut HashSet<RegisterId>) {
+fn collect_used_regs_into(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    out: &mut HashSet<RegisterId>,
+) {
     match inst {
         SIRInstruction::Imm(_, _) => {}
         SIRInstruction::Binary(_, lhs, _, rhs) => {

@@ -763,10 +763,7 @@ impl<'a> FfParser<'a> {
                         return Err(ParserError::unsupported(
                             LoweringPhase::FfLowering,
                             "function argument indexed access",
-                            format!(
-                                "chained range access is unsupported: var_id={:?}",
-                                var_id
-                            ),
+                            format!("chained range access is unsupported: var_id={:?}", var_id),
                             Some(&factor.token_range()),
                         ));
                     }

@@ -1689,12 +1689,14 @@ pub fn eval_expression(
 
                 let rep_count = if let Some(rep_expr) = repeat {
                     let v = eval_constexpr(rep_expr);
-                    v.ok_or_else(|| ParserError::unsupported(
-                        LoweringPhase::CombLowering,
-                        "concatenation non-constant repeat",
-                        format!("{:?}", rep_expr),
-                        Some(&rep_expr.token_range()),
-                    ))?
+                    v.ok_or_else(|| {
+                        ParserError::unsupported(
+                            LoweringPhase::CombLowering,
+                            "concatenation non-constant repeat",
+                            format!("{:?}", rep_expr),
+                            Some(&rep_expr.token_range()),
+                        )
+                    })?
                     .iter_u64_digits()
                     .next()
                     .unwrap()
@@ -1827,10 +1829,7 @@ fn eval_factor(
         Factor::Variable(var_id, index, select, comptime) => {
             // Compile-time constant (e.g. genvar inside generate block): emit a
             // constant node directly instead of loading from memory.
-            if comptime.is_const
-                && index.0.is_empty()
-                && select.0.is_empty()
-                && select.1.is_none()
+            if comptime.is_const && index.0.is_empty() && select.0.is_empty() && select.1.is_none()
             {
                 if let Ok(val) = comptime.get_value() {
                     let mask_xz = val.mask_xz().into_owned();
@@ -1838,9 +1837,8 @@ fn eval_factor(
                     let celox_value = &payload ^ &mask_xz;
                     let width = val.width();
                     let signed = val.signed();
-                    let mut expr = arena.alloc(SLTNode::Constant(
-                        celox_value, mask_xz, width, signed,
-                    ));
+                    let mut expr =
+                        arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
                     if let Some(target_width) = context_width {
                         let expr_width = width;
                         if expr_width < target_width {
@@ -1868,10 +1866,7 @@ fn eval_factor(
                             });
                         }
                     }
-                    return Ok((
-                        (expr, HashSet::default()),
-                        BoundaryMap::default(),
-                    ));
+                    return Ok(((expr, HashSet::default()), BoundaryMap::default()));
                 }
             }
 
