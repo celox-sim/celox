@@ -40,6 +40,48 @@ const sim = Simulator.fromSource(SOURCE, "Top", {
 
 `from` と `to` にはサイクルに関係するシグナル名を指定します。Celox は SCC ブロックをサイクルの構造的な深さから算出した回数だけ実行して、実行順序によらずすべての値が正しく伝搬するようにします。
 
+## 本物のフィードバックループ（`trueLoops`）
+
+本物の組み合わせフィードバックパスです。出力が入力に戻り、安定状態（固定点）に達するまで反復が必要です。
+
+ループは `assign` 文でクロスビット参照を使って記述します。Veryl の analyzer は同一ビットの自己参照（例: `assign t = ~t`）を拒否しますが、クロスビットの `assign` は通ります：
+
+```veryl
+module Top (
+    i: input  logic<2>,
+    o: output logic<2>,
+) {
+    var v: logic<2>;
+    assign v[0] = v[1] ^ i[0];
+    assign v[1] = v[0] ^ i[1];
+    assign o = v;
+}
+```
+
+`trueLoops` でサイクルを宣言し、十分な `maxIter` を指定します：
+
+```typescript
+const sim = Simulator.fromSource(SOURCE, "Top", {
+  trueLoops: [
+    { from: "v", to: "v", maxIter: 10 },
+  ],
+});
+```
+
+`maxIter` 回以内に収束しない場合、シミュレーションは実行時に `DetectedTrueLoop` エラーをスローします。
+
+::: warning
+永遠に収束しないループは `maxIter` の値によらず常に実行時エラーになります。これは組み合わせ発振であり、有効なハードウェア状態ではありません。
+:::
+
+## `falseLoops` と `trueLoops` の使い分け
+
+| | `falseLoops` | `trueLoops` |
+|---|---|---|
+| 実行時に実際にループするか | しない（パスが排他的） | する（出力が入力にフィードバック） |
+| 反復の動作 | 構造的な深さ N 回のスタティックアンロール | 収束または `maxIter` まで反復 |
+| 実行時エラーの可能性 | なし | 収束しない場合にあり |
+
 ## シグナルパスの書き方
 
 `from` と `to` にはシグナルパス文字列を指定します：
