@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772580734712,
+  "lastUpdate": 1772605529759,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -1637,6 +1637,210 @@ window.BENCHMARK_DATA = {
             "name": "rust/testbench_tick_gray_counter_w32_x1000000",
             "value": 35580.018,
             "range": "± 90.915 us",
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "tignear+m@gmail.com",
+            "name": "tignear",
+            "username": "tignear"
+          },
+          "distinct": true,
+          "id": "db6aada5f195701837eaa84b1f84c6795f42eada",
+          "message": "Optimize SIR codegen: bit-extract peephole, shift-by-0 elim, store coalescing fix\n\nThree optimizations targeting eval_comb JIT performance:\n\n1. Shift-by-0 elimination (codegen): Track Imm constants in TranslationState\n   and skip Shr/Shl/Sar when shift amount is 0, emitting identity instead.\n\n2. BitExtractPeepholePass (optimizer): Replace Load(N)+Shr(K)+And((1<<W)-1)\n   chains with a single narrow Load(W, offset=base+K).\n\n3. Store coalescing fix (optimizer): Run store coalescing twice in\n   optimize_block — before and after eliminate_redundant_loads — so that\n   stores unblocked by load elimination can still be coalesced.\n\nLinear SEC P=6 results: SIR instructions -70%, stores -88%, ~7.6% faster.",
+          "timestamp": "2026-03-04T06:01:52Z",
+          "tree_id": "c43771cad3a187cc15c4450c8b1ba0f9e142819a",
+          "url": "https://github.com/celox-sim/celox/commit/db6aada5f195701837eaa84b1f84c6795f42eada"
+        },
+        "date": 1772605527937,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "rust/simulator_tick_x10000",
+            "value": 1591.386,
+            "range": "± 37.437 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_step_x20000",
+            "value": 9761.87,
+            "range": "± 30.296 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_top_n1000",
+            "value": 763857.753,
+            "range": "± 10306.427 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1",
+            "value": 0.158,
+            "range": "± 0.001 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1000000",
+            "value": 159435.276,
+            "range": "± 1326.292 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1",
+            "value": 0.257,
+            "range": "± 0.003 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1000000",
+            "value": 263216.708,
+            "range": "± 1983.718 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_linear_sec_p6",
+            "value": 164065.763,
+            "range": "± 1331.197 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_linear_sec_p6_x1",
+            "value": 0.949,
+            "range": "± 0.016 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_linear_sec_p6_x1000000",
+            "value": 953493.153,
+            "range": "± 3141.785 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_eval_linear_sec_p6_x1000000",
+            "value": 952645.548,
+            "range": "± 3624.259 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_eval_comb_linear_sec_p6",
+            "value": 0.889,
+            "range": "± 0.042 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_eval_comb_linear_sec_p6_x1000000",
+            "value": 890302.787,
+            "range": "± 2270.707 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_raw_io_eval_linear_sec_p6",
+            "value": 0.882,
+            "range": "± 0.015 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_raw_io_eval_linear_sec_p6_x1000000",
+            "value": 883081.311,
+            "range": "± 5697.135 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_set_eval_linear_sec_p6",
+            "value": 0.912,
+            "range": "± 0.003 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_set_eval_linear_sec_p6_x1000000",
+            "value": 899001.343,
+            "range": "± 4940.817 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_set_eval_get_as_linear_sec_p6",
+            "value": 0.896,
+            "range": "± 0.025 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_set_eval_get_as_linear_sec_p6_x1000000",
+            "value": 896696.529,
+            "range": "± 5021.227 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_countones_w64",
+            "value": 62567.032,
+            "range": "± 1435.994 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_countones_w64_x1",
+            "value": 0.737,
+            "range": "± 0.001 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_countones_w64_x1000000",
+            "value": 741766.676,
+            "range": "± 2923.172 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_std_counter_w32",
+            "value": 7836.404,
+            "range": "± 224.251 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_std_counter_w32_x1",
+            "value": 0.008,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_std_counter_w32_x1000000",
+            "value": 8720.332,
+            "range": "± 254.950 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_std_counter_w32_x1000000",
+            "value": 31117.469,
+            "range": "± 1159.967 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_gray_counter_w32",
+            "value": 11083.591,
+            "range": "± 80.874 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_gray_counter_w32_x1",
+            "value": 0.012,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_gray_counter_w32_x1000000",
+            "value": 12248.208,
+            "range": "± 226.175 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_gray_counter_w32_x1000000",
+            "value": 34604.18,
+            "range": "± 655.624 us",
             "unit": "us"
           }
         ]
