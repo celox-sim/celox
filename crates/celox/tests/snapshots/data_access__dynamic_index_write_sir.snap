@@ -82,47 +82,37 @@ Execution Unit 0:
     r31 = Load(addr=i (region=0), offset=0, bits=2)
     r38 = Load(addr=val (region=0), offset=0, bits=8)
     r0 = SIRValue(0x1)
-    r1 = SIRValue(0x0)
-    r2 = r0 Shr r1
     r3 = SIRValue(0xff)
-    r4 = r2 And r3
+    r4 = r0 And r3
     r5 = SIRValue(0x2)
-    r6 = SIRValue(0x0)
-    r7 = r5 Shr r6
     r8 = SIRValue(0xff)
-    r9 = r7 And r8
+    r9 = r5 And r8
     r10 = SIRValue(0x8)
     r11 = r9 Shl r10
     r12 = r4 Or r11
     r13 = SIRValue(0x3)
-    r14 = SIRValue(0x0)
-    r15 = r13 Shr r14
     r16 = SIRValue(0xff)
-    r17 = r15 And r16
+    r17 = r13 And r16
     r18 = SIRValue(0x10)
     r19 = r17 Shl r18
     r20 = r12 Or r19
     r21 = SIRValue(0x4)
-    r22 = SIRValue(0x0)
-    r23 = r21 Shr r22
     r24 = SIRValue(0xff)
-    r25 = r23 And r24
+    r25 = r21 And r24
     r26 = SIRValue(0x18)
     r27 = r25 Shl r26
     r28 = r20 Or r27
     r29 = SIRValue(0xff)
-    r30 = SIRValue(0x0)
     r32 = SIRValue(0x8)
     r33 = r31 Mul r32
-    r34 = r30 Add r33
-    r35 = r29 Shl r34
+    r35 = r29 Shl r33
     r36 = BitNot r35
     r37 = r28 And r36
     r39 = SIRValue(0x0)
     r40 = SIRValue(0x8)
     r41 = r39 Shl r40
     r42 = r38 Or r41
-    r43 = r42 Shl r34
+    r43 = r42 Shl r33
     r44 = r37 Or r43
     r45 = SIRValue(0x18)
     r46 = r44 Shr r45
@@ -134,15 +124,15 @@ Execution Unit 0:
     r51 = SIRValue(0xff)
     r52 = r50 And r51
     Store(addr=a (region=0), offset=16, bits=8, src_reg = 52)
-    Store(addr=o (region=0), offset=0, bits=8, src_reg = 52)
+    r56 = SIRValue(0xff)
+    r57 = r52 And r56
+    Store(addr=o (region=0), offset=0, bits=8, src_reg = 57)
     r58 = SIRValue(0x8)
     r59 = r44 Shr r58
     r60 = SIRValue(0xff)
     r61 = r59 And r60
     Store(addr=a (region=0), offset=8, bits=8, src_reg = 61)
-    r62 = SIRValue(0x0)
-    r63 = r44 Shr r62
     r64 = SIRValue(0xff)
-    r65 = r63 And r64
+    r65 = r44 And r64
     Store(addr=a (region=0), offset=0, bits=8, src_reg = 65)
     Return

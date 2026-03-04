@@ -1,18 +1,7 @@
-use super::shared::replace_reg_in_terminator;
+use super::shared::{def_reg, replace_reg_in_terminator};
 use crate::ir::*;
 use crate::{HashMap, HashSet};
 use malachite_bigint::BigUint;
-
-fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(dst, _)
-        | SIRInstruction::Binary(dst, _, _, _)
-        | SIRInstruction::Unary(dst, _, _)
-        | SIRInstruction::Load(dst, _, _, _)
-        | SIRInstruction::Concat(dst, _) => Some(*dst),
-        SIRInstruction::Store(_, _, _, _, _) | SIRInstruction::Commit(_, _, _, _, _) => None,
-    }
-}
 
 fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
     match inst {

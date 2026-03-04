@@ -1,4 +1,5 @@
 use super::pass_manager::ExecutionUnitPass;
+use super::shared::sir_value_to_u64;
 use crate::HashMap;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
@@ -14,19 +15,6 @@ impl ExecutionUnitPass for BitExtractPeepholePass {
         for block in eu.blocks.values_mut() {
             optimize_bit_extracts(&mut block.instructions, &mut eu.register_map);
         }
-    }
-}
-
-/// Try to extract a u64 value from a SIRValue that represents a 2-state constant.
-fn sir_value_to_u64(val: &SIRValue) -> Option<u64> {
-    if !val.mask.to_u64_digits().is_empty() {
-        return None; // 4-state value
-    }
-    let digits = val.payload.to_u64_digits();
-    match digits.len() {
-        0 => Some(0),
-        1 => Some(digits[0]),
-        _ => None,
     }
 }
 

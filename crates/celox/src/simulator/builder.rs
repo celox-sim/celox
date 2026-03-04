@@ -119,6 +119,16 @@ pub(crate) fn compile_to_sir(
     }
     sir.map_err(SimulatorError::SIRParser)
 }
+/// Controls which stores the dead store elimination pass preserves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeadStorePolicy {
+    /// Keep all stores (no dead store elimination). Default for user-facing builds.
+    #[default]
+    Off,
+    /// Eliminate stores except those to top-module ports and those loaded by EUs.
+    PreserveTopPorts,
+}
+
 #[derive(Debug, Clone)]
 pub struct SimulatorOptions {
     pub four_state: bool,
@@ -127,6 +137,8 @@ pub struct SimulatorOptions {
     /// When true, JIT-compiled functions emit trigger detection code for
     /// edge-based event discovery. Only needed by [`crate::Simulation`].
     pub emit_triggers: bool,
+    /// Dead store elimination policy.
+    pub dead_store_policy: DeadStorePolicy,
 }
 
 impl Default for SimulatorOptions {
@@ -136,6 +148,7 @@ impl Default for SimulatorOptions {
             optimize: true,
             trace: Default::default(),
             emit_triggers: false,
+            dead_store_policy: DeadStorePolicy::Off,
         }
     }
 }
@@ -164,6 +177,7 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
     clock_type: Option<ClockType>,
     reset_type: Option<ResetType>,
     param_overrides: Vec<(String, u64)>,
+    live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
     _marker: std::marker::PhantomData<Target>,
 }
 
@@ -212,6 +226,25 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Enable or disable SIRT optimization passes.
     pub fn optimize(mut self, enable: bool) -> Self {
         self.options.optimize = enable;
+        self
+    }
+
+    /// Set the dead store elimination policy.
+    pub fn dead_store_policy(mut self, policy: DeadStorePolicy) -> Self {
+        self.options.dead_store_policy = policy;
+        self
+    }
+
+    /// Mark a signal as externally observable (live) for dead store elimination.
+    ///
+    /// When dead store elimination is enabled, stores to this signal will be
+    /// preserved even if no execution unit loads from it.
+    pub fn live_signal(
+        mut self,
+        instance_path: Vec<(String, usize)>,
+        var_path: Vec<String>,
+    ) -> Self {
+        self.live_signals.push((instance_path, var_path));
         self
     }
 
@@ -321,6 +354,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             clock_type: None,
             reset_type: None,
             param_overrides: Vec::new(),
+            live_signals: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -341,6 +375,10 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.reset_type,
             &self.param_overrides,
         )?;
+        let mut program = program;
+        if self.options.dead_store_policy != DeadStorePolicy::Off {
+            run_dead_store_elimination(&mut program, &self.live_signals, self.options.dead_store_policy);
+        }
         let backend = JitBackend::new(&program, &self.options, None)?;
 
         let mut sim = Simulator::with_backend_and_program(backend, program);
@@ -372,7 +410,10 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.param_overrides,
         );
 
-        let sim_res = program_res.and_then(|program| {
+        let sim_res = program_res.and_then(|mut program| {
+            if self.options.dead_store_policy != DeadStorePolicy::Off {
+                run_dead_store_elimination(&mut program, &self.live_signals, self.options.dead_store_policy);
+            }
             let backend = JitBackend::new(&program, &self.options, Some(&mut trace))?;
 
             let mut sim = Simulator::with_backend_and_program(backend, program);
@@ -404,6 +445,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             clock_type: None,
             reset_type: None,
             param_overrides: Vec::new(),
+            live_signals: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -411,7 +453,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     /// Compiles the Veryl source and constructs the timed simulation wrapper.
     pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
         self.options.emit_triggers = true;
-        let program = compile_to_sir(
+        let mut program = compile_to_sir(
             self.code,
             self.top,
             &self.ignored_loops,
@@ -425,6 +467,9 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             self.reset_type,
             &self.param_overrides,
         )?;
+        if self.options.dead_store_policy != DeadStorePolicy::Off {
+            run_dead_store_elimination(&mut program, &self.live_signals, self.options.dead_store_policy);
+        }
         let backend = JitBackend::new(&program, &self.options, None)?;
 
         let mut sim = Simulator::with_backend_and_program(backend, program);
@@ -436,4 +481,47 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         sim.modify(|_| {}).map_err(SimulatorError::Runtime)?;
         Ok(crate::Simulation::new(sim))
     }
+}
+
+/// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
+fn run_dead_store_elimination(
+    program: &mut Program,
+    live_signals: &[(Vec<(String, usize)>, Vec<String>)],
+    policy: DeadStorePolicy,
+) {
+    use crate::HashSet;
+    use crate::ir::{AbsoluteAddr, InstancePath};
+    let mut externally_live = HashSet::default();
+
+    // User-specified live signals
+    for (inst_path, var_path) in live_signals {
+        let inst_refs: Vec<(&str, usize)> =
+            inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();
+        let var_refs: Vec<&str> = var_path.iter().map(|s| s.as_str()).collect();
+        let addr = program.get_addr(&inst_refs, &var_refs);
+        externally_live.insert(addr);
+    }
+
+    // PreserveTopPorts: auto-collect top module port addresses
+    if policy == DeadStorePolicy::PreserveTopPorts {
+        if let Some(&top_instance_id) = program.instance_ids.get(&InstancePath(vec![])) {
+            if let Some(&top_module_id) = program.instance_module.get(&top_instance_id) {
+                if let Some(top_vars) = program.module_variables.get(&top_module_id) {
+                    for info in top_vars.values() {
+                        if info.var_kind.is_port() {
+                            externally_live.insert(AbsoluteAddr {
+                                instance_id: top_instance_id,
+                                var_id: info.id,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    crate::optimizer::coalescing::pass_dead_store_elimination::eliminate_dead_stores(
+        program,
+        &externally_live,
+    );
 }

@@ -56,10 +56,8 @@ Execution Unit 0:
     r3 = Load(addr=i (region=0), offset=1, bits=1)
     Jump(b3 [r3])
   b3:
-    r4 = SIRValue(0x0)
-    r5 = r1 Shr r4
     r6 = SIRValue(0x1)
-    r7 = r5 And r6
+    r7 = r1 And r6
     Store(addr=v (region=0), offset=1, bits=1, src_reg = 7)
     Branch(r0 ? b4 : b5)
   b4:
@@ -69,10 +67,8 @@ Execution Unit 0:
     r10 = Load(addr=v (region=0), offset=1, bits=1)
     Jump(b6 [r10])
   b6:
-    r11 = SIRValue(0x0)
-    r12 = r8 Shr r11
     r13 = SIRValue(0x1)
-    r14 = r12 And r13
+    r14 = r8 And r13
     Store(addr=v (region=0), offset=0, bits=1, src_reg = 14)
     Branch(r0 ? b7 : b8)
   b7:
@@ -82,10 +78,8 @@ Execution Unit 0:
     r17 = Load(addr=i (region=0), offset=1, bits=1)
     Jump(b9 [r17])
   b9:
-    r18 = SIRValue(0x0)
-    r19 = r15 Shr r18
     r20 = SIRValue(0x1)
-    r21 = r19 And r20
+    r21 = r15 And r20
     Store(addr=v (region=0), offset=1, bits=1, src_reg = 21)
     Branch(r0 ? b10 : b11)
   b10:
@@ -95,11 +89,11 @@ Execution Unit 0:
     r24 = Load(addr=v (region=0), offset=1, bits=1)
     Jump(b12 [r24])
   b12:
-    r25 = SIRValue(0x0)
-    r26 = r22 Shr r25
     r27 = SIRValue(0x1)
-    r28 = r26 And r27
+    r28 = r22 And r27
     Store(addr=v (region=0), offset=0, bits=1, src_reg = 28)
     r29 = Load(addr=v (region=0), offset=0, bits=2)
-    Store(addr=o (region=0), offset=0, bits=2, src_reg = 29)
+    r32 = SIRValue(0x3)
+    r33 = r29 And r32
+    Store(addr=o (region=0), offset=0, bits=2, src_reg = 33)
     Return

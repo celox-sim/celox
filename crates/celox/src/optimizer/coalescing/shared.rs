@@ -1,8 +1,116 @@
 use crate::HashMap;
+use crate::HashSet;
 use crate::ir::*;
 
 fn next_register_id(register_map: &HashMap<RegisterId, RegisterType>) -> RegisterId {
     RegisterId(register_map.keys().map(|r| r.0).max().unwrap_or(0) + 1)
+}
+
+/// Returns `Some(RegisterId)` for instructions that define a register.
+pub(super) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
+    match inst {
+        SIRInstruction::Imm(dst, _)
+        | SIRInstruction::Binary(dst, _, _, _)
+        | SIRInstruction::Unary(dst, _, _)
+        | SIRInstruction::Load(dst, _, _, _)
+        | SIRInstruction::Concat(dst, _) => Some(*dst),
+        SIRInstruction::Store(_, _, _, _, _) | SIRInstruction::Commit(_, _, _, _, _) => None,
+    }
+}
+
+/// Try to extract a u64 value from a SIRValue that represents a 2-state constant.
+pub(super) fn sir_value_to_u64(val: &SIRValue) -> Option<u64> {
+    if !val.mask.to_u64_digits().is_empty() {
+        return None; // 4-state value
+    }
+    let digits = val.payload.to_u64_digits();
+    match digits.len() {
+        0 => Some(0),
+        1 => Some(digits[0]),
+        _ => None,
+    }
+}
+
+/// Resolve transitive aliases: if A→B and B→C, produce A→C.
+pub(super) fn resolve_transitive_aliases(
+    aliases: &HashMap<RegisterId, RegisterId>,
+) -> HashMap<RegisterId, RegisterId> {
+    let mut resolved = HashMap::default();
+    for (&from, &to) in aliases {
+        let mut target = to;
+        while let Some(&next) = aliases.get(&target) {
+            if next == target {
+                break;
+            }
+            target = next;
+        }
+        resolved.insert(from, target);
+    }
+    resolved
+}
+
+/// Collect all registers that are used (read) anywhere in an execution unit,
+/// including instruction operands and terminators.
+pub(super) fn collect_all_used_registers(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashSet<RegisterId> {
+    let mut used = HashSet::default();
+    for block in eu.blocks.values() {
+        for inst in &block.instructions {
+            collect_used_regs_into(inst, &mut used);
+        }
+        collect_terminator_used_regs(&block.terminator, &mut used);
+    }
+    used
+}
+
+fn collect_used_regs_into(inst: &SIRInstruction<RegionedAbsoluteAddr>, out: &mut HashSet<RegisterId>) {
+    match inst {
+        SIRInstruction::Imm(_, _) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            out.insert(*lhs);
+            out.insert(*rhs);
+        }
+        SIRInstruction::Unary(_, _, src) => {
+            out.insert(*src);
+        }
+        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
+            out.insert(*off);
+        }
+        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+            out.insert(*off);
+            out.insert(*src);
+        }
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+            out.insert(*src);
+        }
+        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
+            out.insert(*off);
+        }
+        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
+        SIRInstruction::Concat(_, args) => {
+            out.extend(args.iter().copied());
+        }
+    }
+}
+
+fn collect_terminator_used_regs(term: &SIRTerminator, out: &mut HashSet<RegisterId>) {
+    match term {
+        SIRTerminator::Jump(_, args) => {
+            out.extend(args.iter().copied());
+        }
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            out.insert(*cond);
+            out.extend(true_block.1.iter().copied());
+            out.extend(false_block.1.iter().copied());
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
 }
 
 fn replace_reg_in_instruction<A>(inst: &mut SIRInstruction<A>, from: RegisterId, to: RegisterId) {

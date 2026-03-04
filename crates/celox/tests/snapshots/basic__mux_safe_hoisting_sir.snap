@@ -1,6 +1,5 @@
 ---
 source: crates/celox/tests/basic.rs
-assertion_line: 190
 expression: output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -46,25 +45,19 @@ Execution Unit 0:
     r3 = Load(addr=b (region=0), offset=0, bits=32)
     Jump(b3 [r3])
   b3:
-    r4 = SIRValue(0x0)
-    r5 = r1 Shr r4
     r6 = SIRValue(0xffffffff)
-    r7 = r5 And r6
+    r7 = r1 And r6
     Store(addr=m (region=0), offset=0, bits=32, src_reg = 7)
     r9 = SIRValue(0x1)
     r10 = r7 Add r9
     r11 = SIRValue(0x2)
     r12 = r10 Or r11
-    r13 = SIRValue(0x0)
-    r14 = r12 Shr r13
     r15 = SIRValue(0xffffffff)
-    r16 = r14 And r15
+    r16 = r12 And r15
     Store(addr=y (region=0), offset=0, bits=32, src_reg = 16)
     r17 = SIRValue(0x1)
     r18 = r10 And r17
-    r19 = SIRValue(0x0)
-    r20 = r18 Shr r19
     r21 = SIRValue(0xffffffff)
-    r22 = r20 And r21
+    r22 = r18 And r21
     Store(addr=x (region=0), offset=0, bits=32, src_reg = 22)
     Return

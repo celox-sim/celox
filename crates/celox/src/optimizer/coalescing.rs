@@ -7,6 +7,7 @@ pub mod cost_model;
 mod dead_working_stores;
 mod pass_bit_extract_peephole;
 mod pass_commit_sinking;
+pub(crate) mod pass_dead_store_elimination;
 mod pass_eliminate_dead_working_stores;
 mod pass_hoist_common_branch_loads;
 mod pass_inline_commit_forwarding;
@@ -14,6 +15,7 @@ mod pass_manager;
 mod pass_optimize_blocks;
 mod pass_reschedule;
 mod pass_split_wide_commits;
+mod pass_store_load_forwarding;
 pub(crate) mod pass_tail_call_split;
 mod shared;
 
@@ -28,6 +30,7 @@ use pass_manager::ExecutionUnitPassManager;
 use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_reschedule::ReschedulePass;
 use pass_split_wide_commits::SplitWideCommitsPass;
+use pass_store_load_forwarding::StoreLoadForwardingPass;
 
 pub struct CoalescingPass;
 
@@ -49,6 +52,7 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
 
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let mut ff_passes = ExecutionUnitPassManager::new();
+    ff_passes.add_pass(StoreLoadForwardingPass);
     ff_passes.add_pass(HoistCommonBranchLoadsPass);
     ff_passes.add_pass(BitExtractPeepholePass);
     ff_passes.add_pass(OptimizeBlocksPass);
@@ -67,6 +71,7 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
     // 2. Logic-Only Cache (Split Path Phase 1):
     // MUST NOT use EliminateDeadWorkingStoresPass because the Commits are in Phase 2.
     let mut eval_only_passes = ExecutionUnitPassManager::new();
+    eval_only_passes.add_pass(StoreLoadForwardingPass);
     eval_only_passes.add_pass(HoistCommonBranchLoadsPass);
     eval_only_passes.add_pass(BitExtractPeepholePass);
     eval_only_passes.add_pass(OptimizeBlocksPass);
@@ -80,6 +85,7 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
 
     // 3. Commit-Only Cache (Split Path Phase 2):
     let mut apply_passes = ExecutionUnitPassManager::new();
+    apply_passes.add_pass(StoreLoadForwardingPass);
     apply_passes.add_pass(HoistCommonBranchLoadsPass);
     apply_passes.add_pass(BitExtractPeepholePass);
     apply_passes.add_pass(OptimizeBlocksPass); // Still useful for loading from working memory
@@ -95,6 +101,7 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
 
     // 4. Combinational Blocks:
     let mut comb_passes = ExecutionUnitPassManager::new();
+    comb_passes.add_pass(StoreLoadForwardingPass);
     comb_passes.add_pass(HoistCommonBranchLoadsPass);
     comb_passes.add_pass(BitExtractPeepholePass);
     comb_passes.add_pass(OptimizeBlocksPass);
