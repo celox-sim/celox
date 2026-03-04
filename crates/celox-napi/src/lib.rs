@@ -63,6 +63,8 @@ pub struct NapiOptions {
     pub extra_source: Option<String>,
     /// Parameter overrides for the top-level module.
     pub parameters: Option<Vec<NapiParamOverride>>,
+    /// Dead store elimination policy: "off", "preserve_top_ports", or "preserve_all_ports".
+    pub dead_store_policy: Option<String>,
 }
 
 /// Parsed builder options from NapiOptions.
@@ -83,6 +85,7 @@ struct ParsedOptions {
     reset_type: Option<celox::ResetType>,
     extra_source: Option<String>,
     parameters: Vec<(String, u64)>,
+    dead_store_policy: celox::DeadStorePolicy,
 }
 
 /// Convert a NapiSignalPath to the Rust builder's tuple format.
@@ -117,6 +120,19 @@ fn parse_reset_type(s: &str) -> Result<celox::ResetType> {
         "sync_low" => Ok(celox::ResetType::SyncLow),
         _ => Err(Error::from_reason(format!(
             "Invalid reset_type '{}'. Expected 'async_high', 'async_low', 'sync_high', or 'sync_low'.",
+            s
+        ))),
+    }
+}
+
+/// Parse a dead store policy string into DeadStorePolicy.
+fn parse_dead_store_policy(s: &str) -> Result<celox::DeadStorePolicy> {
+    match s {
+        "off" => Ok(celox::DeadStorePolicy::Off),
+        "preserve_top_ports" => Ok(celox::DeadStorePolicy::PreserveTopPorts),
+        "preserve_all_ports" => Ok(celox::DeadStorePolicy::PreserveAllPorts),
+        _ => Err(Error::from_reason(format!(
+            "Invalid dead_store_policy '{}'. Expected 'off', 'preserve_top_ports', or 'preserve_all_ports'.",
             s
         ))),
     }
@@ -164,6 +180,12 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let dead_store_policy = o
+                .dead_store_policy
+                .as_deref()
+                .map(parse_dead_store_policy)
+                .transpose()?
+                .unwrap_or(celox::DeadStorePolicy::Off);
             Ok(ParsedOptions {
                 four_state: o.four_state.unwrap_or(false),
                 optimize: o.optimize,
@@ -174,6 +196,7 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                 reset_type,
                 extra_source: o.extra_source.clone(),
                 parameters,
+                dead_store_policy,
             })
         }
         None => Ok(ParsedOptions {
@@ -186,6 +209,7 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
             reset_type: None,
             extra_source: None,
             parameters: Vec::new(),
+            dead_store_policy: celox::DeadStorePolicy::Off,
         }),
     }
 }
@@ -330,6 +354,7 @@ fn apply_options<'a, T>(
     for (name, value) in &opts.parameters {
         builder = builder.param(name, *value);
     }
+    builder = builder.dead_store_policy(opts.dead_store_policy);
     builder
 }
 

@@ -25,6 +25,8 @@ export interface ModuleDefinition<Ports = Record<string, unknown>> {
 	readonly events: string[];
 	/** Absolute path to the Veryl project directory (set by Vite plugin). */
 	readonly projectPath?: string;
+	/** Default options baked in by the Vite plugin (e.g. via `?dse=` query). */
+	readonly defaultOptions?: SimulatorOptions;
 	/** Phantom field — never set at runtime. Carries the `Ports` type. */
 	readonly __ports?: Ports;
 }
@@ -142,6 +144,8 @@ export interface SimulatorOptions {
 	extraSource?: string;
 	/** Top-level module parameter overrides. */
 	parameters?: ParamOverride[];
+	/** Dead store elimination policy. Default: "off". */
+	deadStorePolicy?: "off" | "preserveTopPorts" | "preserveAllPorts";
 }
 
 /** A parameter override for a top-level module parameter. */

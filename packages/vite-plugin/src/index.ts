@@ -50,32 +50,46 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		},
 
 		resolveId(source, importer) {
-			if (!source.endsWith(".veryl")) return;
+			// Split off query string (e.g. "?dse=preserveAllPorts")
+			const [rawPath, queryStr] = source.split("?", 2);
+			if (!rawPath!.endsWith(".veryl")) return;
 
 			// Resolve to absolute path
 			let absPath: string;
-			if (isAbsolute(source)) {
-				absPath = source;
+			if (isAbsolute(rawPath!)) {
+				absPath = rawPath!;
 			} else if (importer) {
-				absPath = resolve(dirname(importer), source);
+				absPath = resolve(dirname(importer), rawPath!);
 			} else {
-				absPath = resolve(source);
+				absPath = resolve(rawPath!);
 			}
 
 			// Only handle .veryl files that exist
 			if (!existsSync(absPath)) return;
 
-			return VERYL_PREFIX + absPath;
+			// Preserve query string in virtual ID
+			return VERYL_PREFIX + absPath + (queryStr ? `?${queryStr}` : "");
 		},
 
 		load(id) {
 			if (!id.startsWith(VERYL_PREFIX)) return;
 
-			const absPath = id.slice(VERYL_PREFIX.length);
+			const rest = id.slice(VERYL_PREFIX.length);
+			const [absPath, queryStr] = rest.split("?", 2);
+			const params = new URLSearchParams(queryStr ?? "");
+
+			// Parse ?dse= query parameter
+			let dsePolicy: string | undefined;
+			if (params.has("dse")) {
+				const raw = params.get("dse");
+				// ?dse (no value) defaults to "preserveAllPorts" (safe side)
+				dsePolicy = raw || "preserveAllPorts";
+			}
+
 			const data = cache.get();
 
 			// Find the relative source file path
-			const relPath = makeRelative(absPath, projectRoot);
+			const relPath = makeRelative(absPath!, projectRoot);
 			const moduleNames = data.fileModules[relPath];
 
 			if (!moduleNames || moduleNames.length === 0) {
@@ -83,12 +97,16 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				return "export {};";
 			}
 
+			const defaultOptions = dsePolicy
+				? { deadStorePolicy: dsePolicy }
+				: undefined;
+
 			// Build ESM exports for each module in this file
 			const exports = moduleNames
 				.map((name) => {
 					const mod = data.modules.find((m) => m.moduleName === name);
 					if (!mod) return "";
-					return generateEsmExport(mod, data.projectPath);
+					return generateEsmExport(mod, data.projectPath, defaultOptions);
 				})
 				.filter((s) => s.length > 0)
 				.join("\n\n");
@@ -153,7 +171,11 @@ function makeRelative(absPath: string, base: string): string {
 /**
  * Generate an ESM export for a single module.
  */
-function generateEsmExport(mod: GenTsModule, projectPath: string): string {
+function generateEsmExport(
+	mod: GenTsModule,
+	projectPath: string,
+	defaultOptions?: Record<string, unknown>,
+): string {
 	const portsJson = JSON.stringify(mod.ports, null, 2)
 		.split("\n")
 		.map((line, i) => (i === 0 ? line : `  ${line}`))
@@ -161,12 +183,16 @@ function generateEsmExport(mod: GenTsModule, projectPath: string): string {
 
 	const eventsJson = JSON.stringify(mod.events);
 
+	const defaultOptsLine = defaultOptions
+		? `\n  defaultOptions: ${JSON.stringify(defaultOptions)},`
+		: "";
+
 	return `export const ${mod.moduleName} = {
   __celox_module: true,
   name: ${JSON.stringify(mod.moduleName)},
   source: "",
   projectPath: ${JSON.stringify(projectPath)},
   ports: ${portsJson},
-  events: ${eventsJson},
+  events: ${eventsJson},${defaultOptsLine}
 };`;
 }

@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from "node:fs";
+import { type Dirent, readdirSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 import { runGenTs } from "./generator.js";
 import type { GenTsJsonOutput } from "./types.js";
@@ -41,7 +41,7 @@ export class GenTsCache {
 	}
 
 	private walkVerylFiles(dir: string, cb: (mtimeMs: number) => void): void {
-		let entries: ReturnType<typeof readdirSync> | undefined;
+		let entries: Dirent<string>[] | undefined;
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
 		} catch {

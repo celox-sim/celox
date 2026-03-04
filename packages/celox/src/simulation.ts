@@ -9,6 +9,7 @@ import { createDut, type DirtyState, readFourState } from "./dut.js";
 import {
 	buildNapiOpts,
 	buildPortsFromLayout,
+	filterHierarchyForDse,
 	loadNativeAddon,
 	parseHierarchyLayout,
 	parseNapiLayout,
@@ -102,16 +103,18 @@ export class Simulation<P = Record<string, unknown>> {
 			__nativeCreate?: NativeCreateSimulationFn;
 		},
 	): Simulation<P> {
+		const merged = { ...module.defaultOptions, ...options };
+
 		// When the module was produced by the Vite plugin, delegate to fromProject()
-		if (module.projectPath && !options?.__nativeCreate) {
+		if (module.projectPath && !merged?.__nativeCreate) {
 			return Simulation.fromProject<P>(
 				module.projectPath,
 				module.name,
-				options,
+				merged,
 			);
 		}
 
-		const createFn = options?.__nativeCreate ?? _nativeCreate;
+		const createFn = merged?.__nativeCreate ?? _nativeCreate;
 		if (!createFn) {
 			throw new Error(
 				"Native simulator binding not loaded. " +
@@ -128,7 +131,8 @@ export class Simulation<P = Record<string, unknown>> {
 			clockType,
 			resetType,
 			parameters,
-		} = options ?? {};
+			deadStorePolicy,
+		} = merged ?? {};
 		const result = createFn(module.source, module.name, {
 			fourState,
 			vcd,
@@ -138,18 +142,22 @@ export class Simulation<P = Record<string, unknown>> {
 			clockType,
 			resetType,
 			parameters,
+			deadStorePolicy,
 		});
 		const state: DirtyState = { dirty: false };
 
 		// Always prefer NAPI-derived ports over module.ports (see simulator.ts).
-		const portDefs = result.hierarchy?.ports ?? module.ports;
+		const hierarchy = result.hierarchy
+			? filterHierarchyForDse(result.hierarchy, deadStorePolicy)
+			: undefined;
+		const portDefs = hierarchy?.ports ?? module.ports;
 		const dut = createDut<P>(
 			result.buffer,
 			result.layout,
 			portDefs,
 			result.handle,
 			state,
-			result.hierarchy,
+			hierarchy,
 		);
 
 		return new Simulation<P>(
@@ -185,9 +193,10 @@ export class Simulation<P = Record<string, unknown>> {
 
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+		const hierarchy = filterHierarchyForDse(rawHierarchy, options?.deadStorePolicy);
 
-		const ports = buildPortsFromLayout(layout.signals, events);
+		const ports = buildPortsFromLayout(hierarchy.signals, events);
 
 		const buf = raw.sharedMemory().buffer;
 
@@ -232,9 +241,10 @@ export class Simulation<P = Record<string, unknown>> {
 
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+		const hierarchy = filterHierarchyForDse(rawHierarchy, options?.deadStorePolicy);
 
-		const ports = buildPortsFromLayout(layout.signals, events);
+		const ports = buildPortsFromLayout(hierarchy.signals, events);
 
 		const buf = raw.sharedMemory().buffer;
 		const defaultMaxSteps = raw.defaultMaxSteps ?? undefined;

@@ -95,6 +95,7 @@ export interface NapiOptions {
 	resetType?: string;
 	extraSource?: string;
 	parameters?: NapiParamOverride[];
+	deadStorePolicy?: string;
 }
 
 export interface RawNapiAddon {
@@ -257,6 +258,14 @@ export function buildNapiOpts(
 			name: p.name,
 			value: typeof p.value === "bigint" ? Number(p.value) : p.value,
 		}));
+		hasOpt = true;
+	}
+	if (options.deadStorePolicy && options.deadStorePolicy !== "off") {
+		const map: Record<string, string> = {
+			preserveTopPorts: "preserve_top_ports",
+			preserveAllPorts: "preserve_all_ports",
+		};
+		napiOpts.deadStorePolicy = map[options.deadStorePolicy] ?? options.deadStorePolicy;
 		hasOpt = true;
 	}
 
@@ -487,6 +496,23 @@ function convertHierarchyNode(
 		ports,
 		children,
 	};
+}
+
+/**
+ * Filter a hierarchy tree based on the dead store elimination policy.
+ *
+ * - `"off"` / undefined → full hierarchy (no filtering)
+ * - `"preserveTopPorts"` → strip children (only top-module ports survive DSE)
+ * - `"preserveAllPorts"` → hierarchy intact (all instance ports survive DSE)
+ */
+export function filterHierarchyForDse(
+	hierarchy: HierarchyNode,
+	policy?: "off" | "preserveTopPorts" | "preserveAllPorts",
+): HierarchyNode {
+	if (!policy || policy === "off") return hierarchy;
+	if (policy === "preserveTopPorts") return { ...hierarchy, children: {} };
+	// "preserveAllPorts" — hierarchy intact, Rust-side ensures only ports survive
+	return hierarchy;
 }
 
 // ---------------------------------------------------------------------------

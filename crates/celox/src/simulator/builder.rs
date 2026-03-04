@@ -127,6 +127,8 @@ pub enum DeadStorePolicy {
     Off,
     /// Eliminate stores except those to top-module ports and those loaded by EUs.
     PreserveTopPorts,
+    /// Eliminate stores except those to ports of *all* instances and those loaded by EUs.
+    PreserveAllPorts,
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +516,22 @@ fn run_dead_store_elimination(
                                 var_id: info.id,
                             });
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // PreserveAllPorts: collect port addresses from every instance
+    if policy == DeadStorePolicy::PreserveAllPorts {
+        for (&instance_id, &module_id) in &program.instance_module {
+            if let Some(vars) = program.module_variables.get(&module_id) {
+                for info in vars.values() {
+                    if info.var_kind.is_port() {
+                        externally_live.insert(AbsoluteAddr {
+                            instance_id,
+                            var_id: info.id,
+                        });
                     }
                 }
             }
