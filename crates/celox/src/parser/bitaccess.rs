@@ -10,6 +10,14 @@ use veryl_parser::token_range::TokenRange;
 
 use crate::ir::BitAccess;
 
+/// Extract a compile-time constant value in Celox encoding (payload ^ mask_xz).
+pub fn celox_value_from_comptime(comptime: &Comptime) -> Option<(BigUint, BigUint, usize, bool)> {
+    let val = comptime.get_value().ok()?;
+    let mask_xz = val.mask_xz().into_owned();
+    let payload = val.payload().into_owned();
+    Some((&payload ^ &mask_xz, mask_xz, val.width(), val.signed()))
+}
+
 pub fn eval_constexpr(expr: &Expression) -> Option<BigUint> {
     let comptime = expr.comptime();
     // `evaluated` is only trusted for Factor::Value (literals); for variables and
