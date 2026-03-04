@@ -161,6 +161,7 @@ const sim = Simulator.fromSource(source, "Top", {
   optimize: true,       // Cranelift 最適化パスを有効化
   clockType: "posedge", // クロック極性 (デフォルト: "posedge")
   resetType: "async_low", // リセットタイプ (デフォルト: "async_low")
+  deadStorePolicy: "preserveAllPorts", // デッドストア除去ポリシー
   parameters: [         // トップレベルパラメータのオーバーライド
     { name: "WIDTH", value: 16 },
   ],
@@ -216,5 +217,6 @@ const sim = Simulator.fromSource(SOURCE, "Adder", {
 
 - [4 値シミュレーション](./four-state.md) -- テストベンチでの X 値の使い方。
 - [パラメータオーバーライド](./parameter-overrides.md) -- シミュレーション時にモジュールパラメータを上書きする方法。
+- [デッドストア除去](./dead-store-elimination.md) -- DSE によるシミュレーションの高速化。
 - [アーキテクチャ](/internals/architecture) -- シミュレーションパイプラインの詳細。
 - [API リファレンス](/api/) -- TypeScript API の完全なドキュメント。

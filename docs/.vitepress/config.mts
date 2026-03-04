@@ -51,6 +51,10 @@ export default defineConfig({
                   link: "/ja/guide/hierarchy",
                 },
                 {
+                  text: "デッドストア除去",
+                  link: "/ja/guide/dead-store-elimination",
+                },
+                {
                   text: "組み合わせループ",
                   link: "/ja/guide/combinational-loops",
                 },
@@ -101,6 +105,7 @@ export default defineConfig({
             { text: "4-State Simulation", link: "/guide/four-state" },
             { text: "Parameter Overrides", link: "/guide/parameter-overrides" },
             { text: "Child Instance Access", link: "/guide/hierarchy" },
+            { text: "Dead Store Elimination", link: "/guide/dead-store-elimination" },
             { text: "Combinational Loops", link: "/guide/combinational-loops" },
             { text: "VCD Waveform Output", link: "/guide/vcd" },
             { text: "Type Conversion", link: "/guide/type-conversion" },

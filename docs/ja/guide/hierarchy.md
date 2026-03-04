@@ -101,7 +101,17 @@ expect(sim.dut.u_sub.o_data).toBe(0xABn);
 sim.dut.u_mid.u_inner.some_port
 ```
 
+## DSE と子インスタンス
+
+[デッドストア除去](./dead-store-elimination.md)が有効な場合、子インスタンスアクセサが利用できないことがあります：
+
+- `deadStorePolicy: "preserveTopPorts"` — 子インスタンスは DUT から除外され、`sim.dut.u_sub` は `undefined` になります。
+- `deadStorePolicy: "preserveAllPorts"` — すべてのインスタンスのポートが保持され、子アクセサは通常通り動作します。
+
+DSE を有効にしつつサブインスタンスの信号を観測する場合は `"preserveAllPorts"` を使ってください。
+
 ## 関連資料
 
+- [デッドストア除去](./dead-store-elimination.md) -- DSE ポリシーと子アクセスへの影響。
 - [テストの書き方](./writing-tests.md) -- Simulator・Simulation のパターン。
 - [型変換](./type-conversion.md) -- Veryl の型と TypeScript の型のマッピング。

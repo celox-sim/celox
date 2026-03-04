@@ -161,6 +161,7 @@ const sim = Simulator.fromSource(source, "Top", {
   optimize: true,       // Enable Cranelift optimization passes
   clockType: "posedge", // Clock polarity (default: "posedge")
   resetType: "async_low", // Reset type (default: "async_low")
+  deadStorePolicy: "preserveAllPorts", // Dead store elimination policy
   parameters: [         // Top-level parameter overrides
     { name: "WIDTH", value: 16 },
   ],
@@ -216,5 +217,6 @@ const sim = Simulator.fromSource(SOURCE, "Adder", {
 
 - [4-State Simulation](./four-state.md) -- Using X values in testbenches.
 - [Parameter Overrides](./parameter-overrides.md) -- Overriding module parameters at simulation time.
+- [Dead Store Elimination](./dead-store-elimination.md) -- Speeding up simulation with DSE.
 - [Architecture](/internals/architecture) -- The simulation pipeline in detail.
 - [API Reference](/api/) -- Full TypeScript API documentation.

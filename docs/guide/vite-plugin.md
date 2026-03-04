@@ -85,7 +85,25 @@ Add `.celox/` to your `.gitignore`:
 .celox/
 ```
 
-## Options
+## Query Parameters
+
+### `?dse=` — Dead Store Elimination
+
+Append `?dse=` to the import path to enable [Dead Store Elimination](./dead-store-elimination.md) for the imported module:
+
+```typescript
+import { Top } from "../src/Top.veryl?dse=preserveAllPorts";
+```
+
+| Value | Behavior |
+|---|---|
+| `?dse=preserveTopPorts` | Only top-module ports survive DSE |
+| `?dse=preserveAllPorts` | Ports of all instances survive DSE |
+| `?dse` (no value) | Defaults to `preserveAllPorts` |
+
+The policy is embedded in the `ModuleDefinition` as `defaultOptions.deadStorePolicy` and automatically applied when `Simulator.create()` or `Simulation.create()` is called. Caller-supplied options override the default.
+
+## Plugin Options
 
 | Option | Type | Default | Description |
 |---|---|---|---|

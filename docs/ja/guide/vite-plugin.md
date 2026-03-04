@@ -85,7 +85,25 @@ my-project/
 .celox/
 ```
 
-## オプション
+## クエリパラメータ
+
+### `?dse=` — デッドストア除去
+
+インポートパスに `?dse=` を付けると、インポートされるモジュールの[デッドストア除去](./dead-store-elimination.md)が有効になります：
+
+```typescript
+import { Top } from "../src/Top.veryl?dse=preserveAllPorts";
+```
+
+| 値 | 動作 |
+|---|---|
+| `?dse=preserveTopPorts` | トップモジュールのポートのみ DSE で保持 |
+| `?dse=preserveAllPorts` | すべてのインスタンスのポートを DSE で保持 |
+| `?dse`（値なし） | `preserveAllPorts` がデフォルト |
+
+ポリシーは `ModuleDefinition` の `defaultOptions.deadStorePolicy` に埋め込まれ、`Simulator.create()` や `Simulation.create()` の呼び出し時に自動適用されます。呼び出し側のオプションがデフォルトをオーバーライドします。
+
+## プラグインオプション
 
 | オプション | 型 | デフォルト | 説明 |
 |---|---|---|---|

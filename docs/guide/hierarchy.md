@@ -101,7 +101,17 @@ Child accessors are recursive — deeply nested instances work the same way:
 sim.dut.u_mid.u_inner.some_port
 ```
 
+## DSE and Child Instances
+
+When [Dead Store Elimination](./dead-store-elimination.md) is enabled, child instance accessors may not be available:
+
+- `deadStorePolicy: "preserveTopPorts"` — child instances are stripped from the DUT; `sim.dut.u_sub` will be `undefined`.
+- `deadStorePolicy: "preserveAllPorts"` — all instance ports are preserved; child accessors work normally.
+
+If you need to observe sub-instance signals with DSE enabled, use `"preserveAllPorts"`.
+
 ## Further Reading
 
+- [Dead Store Elimination](./dead-store-elimination.md) -- DSE policies and their impact on child access.
 - [Writing Tests](./writing-tests.md) -- Simulator and Simulation patterns.
 - [Type Conversion](./type-conversion.md) -- How Veryl types map to TypeScript.
