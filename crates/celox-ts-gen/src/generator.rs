@@ -286,6 +286,12 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
         let module_name =
             resource_table::get_str_value(module.name).unwrap_or_else(|| "unknown".to_string());
 
+        // Skip generic modules (e.g. "Sorter::<ItemU16>") — they cannot be
+        // instantiated directly from TypeScript.
+        if module_name.contains("::") {
+            continue;
+        }
+
         let ports = extract_ports(module);
         let instances = extract_instances(module);
 
