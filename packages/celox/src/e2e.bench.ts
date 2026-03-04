@@ -114,7 +114,7 @@ describe("simulation", () => {
 	const TopModule: ModuleDefinition<TopPorts> = {
 		__celox_module: true,
 		name: "Top",
-		source: CODE,
+		sources: [{ path: "bench.veryl", content: CODE }],
 		ports: {
 			clk: { direction: "input", type: "clock", width: 1 },
 			rst: { direction: "input", type: "reset", width: 1 },
