@@ -8,7 +8,7 @@ use malachite_bigint::BigUint;
 mod builder;
 mod error;
 
-pub use builder::{SimulatorBuilder, SimulatorOptions};
+pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
 pub use error::SimulatorError;
 
 /// Hierarchical instance tree with resolved signals.

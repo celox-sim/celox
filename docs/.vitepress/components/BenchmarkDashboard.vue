@@ -51,7 +51,7 @@ interface SeriesPoint {
 interface Series {
   key: string;
   benchName: string;
-  runtime: "rust" | "ts" | "verilator" | "unknown";
+  runtime: "rust" | "rust-dse" | "ts" | "verilator" | "unknown";
   points: SeriesPoint[];
 }
 
@@ -169,6 +169,7 @@ function classifySeries(benchName: string): string {
 
 const RUNTIME_COLORS: Record<string, string> = {
   rust: "#3b82f6",
+  "rust-dse": "#a855f7",
   ts: "#22c55e",
   verilator: "#f97316",
   unknown: "#9ca3af",
@@ -176,6 +177,7 @@ const RUNTIME_COLORS: Record<string, string> = {
 
 const RUNTIME_LABELS: Record<string, string> = {
   rust: "Rust",
+  "rust-dse": "Rust(DSE)",
   ts: "TS",
   verilator: "Verilator",
   unknown: "Unknown",
@@ -191,10 +193,11 @@ const activeTab = ref("counter");
 // --- Helpers ---
 
 function stripPrefix(name: string): string {
-  return name.replace(/^(rust|ts|verilator)\//, "");
+  return name.replace(/^(rust-dse|rust|ts|verilator)\//, "");
 }
 
-function runtime(name: string): "rust" | "ts" | "verilator" | "unknown" {
+function runtime(name: string): "rust" | "rust-dse" | "ts" | "verilator" | "unknown" {
+  if (name.startsWith("rust-dse/")) return "rust-dse";
   if (name.startsWith("rust/")) return "rust";
   if (name.startsWith("ts/")) return "ts";
   if (name.startsWith("verilator/")) return "verilator";

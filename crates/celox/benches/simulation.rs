@@ -1,4 +1,4 @@
-use celox::Simulator;
+use celox::{DeadStorePolicy, Simulator};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 // P=6: K=63-bit codeword, N=57-bit data
@@ -360,6 +360,82 @@ fn benchmark_countones(c: &mut Criterion) {
     });
 }
 
+fn benchmark_countones_dse(c: &mut Criterion) {
+    c.bench_function("dse_build_countones_w64", |b| {
+        b.iter(|| {
+            let _sim = Simulator::builder(COUNTONES_SRC, "Top")
+                .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+                .build()
+                .unwrap();
+        })
+    });
+
+    let mut sim = Simulator::builder(COUNTONES_SRC, "Top")
+        .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+        .build()
+        .unwrap();
+    let i_data = sim.signal("i_data");
+    let o_ones = sim.signal("o_ones");
+
+    c.bench_function("dse_eval_countones_w64_x1", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            sim.modify(|io| io.set(i_data, input)).unwrap();
+            std::hint::black_box(sim.get(o_ones));
+            input = input.wrapping_add(1);
+        })
+    });
+
+    c.bench_function("dse_eval_countones_w64_x1000000", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.modify(|io| io.set(i_data, input)).unwrap();
+                std::hint::black_box(sim.get(o_ones));
+                input = input.wrapping_add(1);
+            }
+        })
+    });
+}
+
+fn benchmark_linear_sec_dse(c: &mut Criterion) {
+    c.bench_function("dse_build_linear_sec_p6", |b| {
+        b.iter(|| {
+            let _sim = Simulator::builder(LINEAR_SEC_SRC, "Top")
+                .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+                .build()
+                .unwrap();
+        })
+    });
+
+    let mut sim = Simulator::builder(LINEAR_SEC_SRC, "Top")
+        .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+        .build()
+        .unwrap();
+    let i_word = sim.signal("i_word");
+    let o_word = sim.signal("o_word");
+
+    c.bench_function("dse_eval_linear_sec_p6_x1", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            sim.modify(|io| io.set(i_word, input)).unwrap();
+            std::hint::black_box(sim.get(o_word));
+            input = input.wrapping_add(1);
+        })
+    });
+
+    c.bench_function("dse_eval_linear_sec_p6_x1000000", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.modify(|io| io.set(i_word, input)).unwrap();
+                std::hint::black_box(sim.get(o_word));
+                input = input.wrapping_add(1);
+            }
+        })
+    });
+}
+
 fn benchmark_std_counter(c: &mut Criterion) {
     c.bench_function("simulation_build_std_counter_w32", |b| {
         b.iter(|| {
@@ -468,5 +544,7 @@ criterion_group!(
     benchmark_countones,
     benchmark_std_counter,
     benchmark_gray_counter,
+    benchmark_countones_dse,
+    benchmark_linear_sec_dse,
 );
 criterion_main!(benches);

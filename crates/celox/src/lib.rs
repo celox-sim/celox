@@ -44,6 +44,7 @@ pub use simulator::Simulator;
 pub use simulator::SimulatorBuilder;
 pub use simulator::SimulatorError;
 pub use simulator::SimulatorOptions;
+pub use simulator::DeadStorePolicy;
 pub use simulator::{InstanceHierarchy, NamedEvent, NamedSignal};
 pub use veryl_metadata::{ClockType, ResetType};
 
