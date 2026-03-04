@@ -333,8 +333,14 @@ fn load_project_sources(
 }
 
 /// Format analyzer warnings as a JSON array of strings.
+///
+/// Uses `render_diagnostic` to include source location and span information,
+/// matching the format used for error messages.
 fn format_warnings_json(warnings: &[veryl_analyzer::AnalyzerError]) -> String {
-    let msgs: Vec<String> = warnings.iter().map(|w| format!("{w}")).collect();
+    let msgs: Vec<String> = warnings
+        .iter()
+        .map(|w| celox::render_diagnostic(w))
+        .collect();
     serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -926,7 +932,10 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         let results = analyzer.analyze_pass1(&path.prj, &parser.veryl);
         let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
         if !real_errors.is_empty() {
-            let msgs: Vec<String> = real_errors.iter().map(|e| format!("{e}")).collect();
+            let msgs: Vec<String> = real_errors
+                .iter()
+                .map(|e| celox::render_diagnostic(*e))
+                .collect();
             return Err(Error::from_reason(format!(
                 "Errors in analysis pass 1: {}",
                 msgs.join("; ")
@@ -940,7 +949,10 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     let results = Analyzer::analyze_post_pass1();
     let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
     if !real_errors.is_empty() {
-        let msgs: Vec<String> = real_errors.iter().map(|e| format!("{e}")).collect();
+        let msgs: Vec<String> = real_errors
+            .iter()
+            .map(|e| celox::render_diagnostic(*e))
+            .collect();
         return Err(Error::from_reason(format!(
             "Errors in post-pass 1 analysis: {}",
             msgs.join("; ")
@@ -983,7 +995,10 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         );
         let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
         if !real_errors.is_empty() {
-            let msgs: Vec<String> = real_errors.iter().map(|e| format!("{e}")).collect();
+            let msgs: Vec<String> = real_errors
+                .iter()
+                .map(|e| celox::render_diagnostic(*e))
+                .collect();
             return Err(Error::from_reason(format!(
                 "Errors in analysis pass 2: {}",
                 msgs.join("; ")
@@ -1015,7 +1030,10 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     let results = Analyzer::analyze_post_pass2();
     let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
     if !real_errors.is_empty() {
-        let msgs: Vec<String> = real_errors.iter().map(|e| format!("{e}")).collect();
+        let msgs: Vec<String> = real_errors
+            .iter()
+            .map(|e| celox::render_diagnostic(*e))
+            .collect();
         return Err(Error::from_reason(format!(
             "Errors in post-pass 2 analysis: {}",
             msgs.join("; ")
@@ -1026,7 +1044,10 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     // Sort for deterministic output
     all_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));
 
-    let warning_msgs: Vec<String> = all_warnings.iter().map(|w| format!("{w}")).collect();
+    let warning_msgs: Vec<String> = all_warnings
+        .iter()
+        .map(|w| celox::render_diagnostic(w))
+        .collect();
 
     let output = JsonOutput {
         project_path: base_path,

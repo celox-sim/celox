@@ -89,7 +89,13 @@ fn test_combinational_loop_in_single_block() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    assert_analyzer_or_sir(result, |_| {});
+    assert_analyzer_or_sir(result, |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("CombinationalLoop") || msg.contains("unassign"),
+            "Expected loop or unassign error, got: {e:?}"
+        );
+    });
 }
 
 #[test]
@@ -105,7 +111,13 @@ fn test_dynamic_index_bit_disparity_bullying() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    assert_analyzer_or_sir(result, |_| {});
+    assert_analyzer_or_sir(result, |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("CombinationalLoop") || msg.contains("MultipleDriver"),
+            "Expected loop or multiple-driver error, got: {e:?}"
+        );
+    });
 }
 
 #[test]
@@ -142,7 +154,13 @@ fn test_dynamic_access_self_loop_is_err() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    assert_analyzer_or_sir(result, |_| {});
+    assert_analyzer_or_sir(result, |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("CombinationalLoop") || msg.contains("MultipleDriver"),
+            "Expected loop or multiple-driver error, got: {e:?}"
+        );
+    });
 }
 
 #[test]
@@ -161,7 +179,13 @@ fn test_if_without_else_latch_loop() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    assert_analyzer_or_sir(result, |_| {});
+    assert_analyzer_or_sir(result, |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("CombinationalLoop") || msg.contains("unassign"),
+            "Expected loop or unassign error, got: {e:?}"
+        );
+    });
 }
 
 #[test]

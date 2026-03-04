@@ -642,7 +642,7 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 		const buf = raw.sharedMemory().buffer;
 		const handle = wrapDirectSimulatorHandle(raw);
 
-		const warnings: string[] = JSON.parse(raw.warningsJson);
+		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
 		return { buffer: buf, layout, events, handle, hierarchy, warnings };
 	};
@@ -677,7 +677,7 @@ export function createSimulationBridge(
 
 		const buf = raw.sharedMemory().buffer;
 		const handle = wrapDirectSimulationHandle(raw);
-		const warnings: string[] = JSON.parse(raw.warningsJson);
+		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
 		return { buffer: buf, layout, events, handle, hierarchy, warnings };
 	};

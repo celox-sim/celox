@@ -2,4 +2,6 @@
 source: crates/celox/tests/error_readability.rs
 expression: err
 ---
-Combinational loop detected: y[0]
+scheduler
+
+  × Combinational loop detected: y[0]

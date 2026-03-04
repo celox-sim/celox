@@ -219,7 +219,7 @@ export class Simulation<P = Record<string, unknown>> {
 			hierarchy,
 		);
 
-		const warnings: string[] = JSON.parse(raw.warningsJson);
+		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
 		return new Simulation<P>(handle, dut, events, state, buf, layout.signals, warnings);
 	}
@@ -273,7 +273,7 @@ export class Simulation<P = Record<string, unknown>> {
 			hierarchy,
 		);
 
-		const warnings: string[] = JSON.parse(raw.warningsJson);
+		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
 		return new Simulation<P>(
 			handle,
