@@ -108,11 +108,7 @@ export class Simulation<P = Record<string, unknown>> {
 
 		// When the module was produced by the Vite plugin, delegate to fromProject()
 		if (module.projectPath && !merged?.__nativeCreate) {
-			return Simulation.fromProject<P>(
-				module.projectPath,
-				module.name,
-				merged,
-			);
+			return Simulation.fromProject<P>(module.projectPath, module.name, merged);
 		}
 
 		const createFn = merged?.__nativeCreate ?? _nativeCreate;
@@ -199,7 +195,10 @@ export class Simulation<P = Record<string, unknown>> {
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
-		const hierarchy = filterHierarchyForDse(rawHierarchy, options?.deadStorePolicy);
+		const hierarchy = filterHierarchyForDse(
+			rawHierarchy,
+			options?.deadStorePolicy,
+		);
 
 		const ports = buildPortsFromLayout(hierarchy.signals, events);
 
@@ -247,7 +246,10 @@ export class Simulation<P = Record<string, unknown>> {
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
-		const hierarchy = filterHierarchyForDse(rawHierarchy, options?.deadStorePolicy);
+		const hierarchy = filterHierarchyForDse(
+			rawHierarchy,
+			options?.deadStorePolicy,
+		);
 
 		const ports = buildPortsFromLayout(hierarchy.signals, events);
 

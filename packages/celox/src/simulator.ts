@@ -193,7 +193,10 @@ export class Simulator<P = Record<string, unknown>> {
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
-		const hierarchy = filterHierarchyForDse(rawHierarchy, options?.deadStorePolicy);
+		const hierarchy = filterHierarchyForDse(
+			rawHierarchy,
+			options?.deadStorePolicy,
+		);
 
 		const ports = buildPortsFromLayout(hierarchy.signals, events);
 
@@ -240,7 +243,10 @@ export class Simulator<P = Record<string, unknown>> {
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
-		const hierarchy = filterHierarchyForDse(rawHierarchy, options?.deadStorePolicy);
+		const hierarchy = filterHierarchyForDse(
+			rawHierarchy,
+			options?.deadStorePolicy,
+		);
 
 		const ports = buildPortsFromLayout(hierarchy.signals, events);
 

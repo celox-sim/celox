@@ -271,7 +271,8 @@ export function buildNapiOpts(
 			preserveTopPorts: "preserve_top_ports",
 			preserveAllPorts: "preserve_all_ports",
 		};
-		napiOpts.deadStorePolicy = map[options.deadStorePolicy] ?? options.deadStorePolicy;
+		napiOpts.deadStorePolicy =
+			map[options.deadStorePolicy] ?? options.deadStorePolicy;
 		hasOpt = true;
 	}
 
@@ -626,7 +627,11 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 			content: s.content,
 			path: s.path,
 		}));
-		const raw = new addon.NativeSimulatorHandle(napiSources, moduleName, napiOpts);
+		const raw = new addon.NativeSimulatorHandle(
+			napiSources,
+			moduleName,
+			napiOpts,
+		);
 
 		const layout = parseLegacyLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -656,7 +661,11 @@ export function createSimulationBridge(
 			content: s.content,
 			path: s.path,
 		}));
-		const raw = new addon.NativeSimulationHandle(napiSources, moduleName, napiOpts);
+		const raw = new addon.NativeSimulationHandle(
+			napiSources,
+			moduleName,
+			napiOpts,
+		);
 
 		const layout = parseLegacyLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);

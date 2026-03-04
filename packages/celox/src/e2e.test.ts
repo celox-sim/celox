@@ -499,9 +499,13 @@ module InitTest (
     b: input bit<8>,
 ) {}
 `;
-		raw = new addon.NativeSimulatorHandle([{ content: source, path: "" }], "InitTest", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: source, path: "" }],
+			"InitTest",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 
@@ -536,9 +540,13 @@ module InitTest (
 	});
 
 	test("AND: 0 & X = 0 (dominant zero)", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: AND_OR_SOURCE, path: "" }], "AndOr", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: AND_OR_SOURCE, path: "" }],
+			"AndOr",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -571,9 +579,13 @@ module InitTest (
 	});
 
 	test("OR: 1 | X = 1 (dominant one)", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: AND_OR_SOURCE, path: "" }], "AndOr", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: AND_OR_SOURCE, path: "" }],
+			"AndOr",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -599,9 +611,13 @@ module InitTest (
 	});
 
 	test("logic-to-bit assignment strips X mask", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: LOGIC_BIT_MIX_SOURCE, path: "" }], "LogicBitMix", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: LOGIC_BIT_MIX_SOURCE, path: "" }],
+			"LogicBitMix",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -620,9 +636,13 @@ module InitTest (
 	});
 
 	test("bit-to-logic assignment has no X", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: LOGIC_BIT_MIX_SOURCE, path: "" }], "LogicBitMix", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: LOGIC_BIT_MIX_SOURCE, path: "" }],
+			"LogicBitMix",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -642,9 +662,13 @@ module InitTest (
 	});
 
 	test("arithmetic with X produces all-X output", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: ADDER_4STATE_SOURCE, path: "" }], "Adder4S", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: ADDER_4STATE_SOURCE, path: "" }],
+			"Adder4S",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -668,9 +692,13 @@ module InitTest (
 	});
 
 	test("defined inputs in 4-state mode behave like 2-state", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: ADDER_4STATE_SOURCE, path: "" }], "Adder4S", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: ADDER_4STATE_SOURCE, path: "" }],
+			"Adder4S",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -694,7 +722,11 @@ module InitTest (
 	});
 
 	test("FF captures X from input, reset clears X", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: FF_SOURCE, path: "" }], "FF", { fourState: true });
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: FF_SOURCE, path: "" }],
+			"FF",
+			{ fourState: true },
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -744,9 +776,13 @@ module InitTest (
 	});
 
 	test("FourState write through DUT sets value and mask", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: ADDER_4STATE_SOURCE, path: "" }], "Adder4S", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: ADDER_4STATE_SOURCE, path: "" }],
+			"Adder4S",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -764,9 +800,13 @@ module InitTest (
 	});
 
 	test("setting defined value clears X mask", () => {
-		raw = new addon.NativeSimulatorHandle([{ content: ADDER_4STATE_SOURCE, path: "" }], "Adder4S", {
-			fourState: true,
-		});
+		raw = new addon.NativeSimulatorHandle(
+			[{ content: ADDER_4STATE_SOURCE, path: "" }],
+			"Adder4S",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -866,9 +906,13 @@ describe("E2E: 4-state high-level DUT API", () => {
 
 	test("multiplexer with X selector produces X output", () => {
 		const addon = loadNativeAddon();
-		const raw = new addon.NativeSimulatorHandle([{ content: MULTIPLEXER_SOURCE, path: "" }], "Mux4", {
-			fourState: true,
-		});
+		const raw = new addon.NativeSimulatorHandle(
+			[{ content: MULTIPLEXER_SOURCE, path: "" }],
+			"Mux4",
+			{
+				fourState: true,
+			},
+		);
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);

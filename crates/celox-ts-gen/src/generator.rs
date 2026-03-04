@@ -138,11 +138,7 @@ fn extract_ports(module: &Module) -> Vec<PortInfo> {
 
         let array_dims: Option<Vec<usize>> = {
             let dims: Vec<usize> = variable.r#type.array.iter().filter_map(|d| *d).collect();
-            if dims.is_empty() {
-                None
-            } else {
-                Some(dims)
-            }
+            if dims.is_empty() { None } else { Some(dims) }
         };
 
         let total_width = element_width * variable.r#type.total_array().unwrap_or(1);

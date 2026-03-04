@@ -222,10 +222,7 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
 }
 
 /// Append extra source as a separate file entry if provided.
-fn append_extra_source(
-    sources: &mut Vec<(String, std::path::PathBuf)>,
-    extra: &Option<String>,
-) {
+fn append_extra_source(sources: &mut Vec<(String, std::path::PathBuf)>, extra: &Option<String>) {
     if let Some(extra) = extra {
         sources.push((extra.clone(), std::path::PathBuf::from("<extra>")));
     }
@@ -398,10 +395,7 @@ impl NativeSimulatorHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let builder = apply_options(
-            celox::Simulator::from_sources(source_refs, &top),
-            &opts,
-        );
+        let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -614,10 +608,7 @@ impl NativeSimulationHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let builder = apply_options(
-            celox::Simulation::from_sources(source_refs, &top),
-            &opts,
-        );
+        let builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
