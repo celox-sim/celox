@@ -27,7 +27,7 @@ impl ExecutionUnitPass for StoreLoadForwardingPass {
 
 /// Per-block store-load forwarding + algebraic simplification.
 /// Marks forwarded loads as dead by turning them into identity aliases.
-fn forward_and_simplify(instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>) {
+fn forward_and_simplify(instructions: &mut [SIRInstruction<RegionedAbsoluteAddr>]) {
     // Track latest stored register for each (addr, bit_offset, width)
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     struct StoreKey {
