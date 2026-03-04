@@ -150,6 +150,11 @@ impl Simulation {
         }
     }
 
+    /// Returns analyzer warnings emitted during compilation.
+    pub fn warnings(&self) -> &[veryl_analyzer::AnalyzerError] {
+        self.simulator.warnings()
+    }
+
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
         self.simulator.dump(timestamp);

@@ -62,6 +62,7 @@ export class Simulator<P = Record<string, unknown>> {
 	private readonly _state: DirtyState;
 	private readonly _buffer: ArrayBuffer | SharedArrayBuffer;
 	private readonly _layout: Record<string, SignalLayout>;
+	private readonly _warnings: readonly string[];
 	private _disposed = false;
 
 	private constructor(
@@ -71,6 +72,7 @@ export class Simulator<P = Record<string, unknown>> {
 		state: DirtyState,
 		buffer: ArrayBuffer | SharedArrayBuffer,
 		layout: Record<string, SignalLayout>,
+		warnings: string[],
 	) {
 		this._handle = handle;
 		this._dut = dut;
@@ -78,6 +80,7 @@ export class Simulator<P = Record<string, unknown>> {
 		this._state = state;
 		this._buffer = buffer;
 		this._layout = layout;
+		this._warnings = warnings;
 		const keys = Object.keys(events);
 		this._defaultEventId = keys.length > 0 ? events[keys[0]!]! : -1;
 	}
@@ -160,6 +163,7 @@ export class Simulator<P = Record<string, unknown>> {
 			state,
 			result.buffer,
 			result.layout,
+			result.warnings ?? [],
 		);
 	}
 
@@ -213,7 +217,9 @@ export class Simulator<P = Record<string, unknown>> {
 			hierarchy,
 		);
 
-		return new Simulator<P>(handle, dut, events, state, buf, layout.forDut);
+		const warnings: string[] = JSON.parse(raw.warningsJson);
+
+		return new Simulator<P>(handle, dut, events, state, buf, layout.forDut, warnings);
 	}
 
 	/**
@@ -263,12 +269,19 @@ export class Simulator<P = Record<string, unknown>> {
 			hierarchy,
 		);
 
-		return new Simulator<P>(handle, dut, events, state, buf, layout.forDut);
+		const warnings: string[] = JSON.parse(raw.warningsJson);
+
+		return new Simulator<P>(handle, dut, events, state, buf, layout.forDut, warnings);
 	}
 
 	/** The DUT accessor object — read/write ports as plain properties. */
 	get dut(): P {
 		return this._dut;
+	}
+
+	/** Analyzer warnings emitted during compilation. */
+	get warnings(): readonly string[] {
+		return this._warnings;
 	}
 
 	/**

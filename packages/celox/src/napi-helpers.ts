@@ -31,6 +31,7 @@ export interface RawNapiSimulatorHandle {
 	readonly layoutJson: string;
 	readonly eventsJson: string;
 	readonly hierarchyJson: string;
+	readonly warningsJson: string;
 	readonly stableSize: number;
 	readonly totalSize: number;
 	tick(eventId: number): void;
@@ -45,6 +46,7 @@ export interface RawNapiSimulationHandle {
 	readonly layoutJson: string;
 	readonly eventsJson: string;
 	readonly hierarchyJson: string;
+	readonly warningsJson: string;
 	readonly stableSize: number;
 	readonly totalSize: number;
 	readonly defaultMaxSteps: number | null;
@@ -640,7 +642,9 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 		const buf = raw.sharedMemory().buffer;
 		const handle = wrapDirectSimulatorHandle(raw);
 
-		return { buffer: buf, layout, events, handle, hierarchy };
+		const warnings: string[] = JSON.parse(raw.warningsJson);
+
+		return { buffer: buf, layout, events, handle, hierarchy, warnings };
 	};
 }
 
@@ -673,7 +677,8 @@ export function createSimulationBridge(
 
 		const buf = raw.sharedMemory().buffer;
 		const handle = wrapDirectSimulationHandle(raw);
+		const warnings: string[] = JSON.parse(raw.warningsJson);
 
-		return { buffer: buf, layout, events, handle, hierarchy };
+		return { buffer: buf, layout, events, handle, hierarchy, warnings };
 	};
 }

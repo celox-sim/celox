@@ -47,6 +47,7 @@ pub struct Simulator {
     pub(crate) program: Program,
     pub(crate) vcd_writer: Option<crate::vcd::VcdWriter>,
     pub(crate) dirty: bool,
+    pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
 }
 
 impl std::fmt::Debug for Simulator {
@@ -67,13 +68,23 @@ impl Simulator {
         SimulatorBuilder::<Simulator>::from_sources(sources, top)
     }
 
-    pub(crate) fn with_backend_and_program(backend: JitBackend, program: Program) -> Self {
+    pub(crate) fn with_backend_and_program(
+        backend: JitBackend,
+        program: Program,
+        warnings: Vec<veryl_analyzer::AnalyzerError>,
+    ) -> Self {
         Self {
             backend,
             program,
             vcd_writer: None,
             dirty: false,
+            warnings,
         }
+    }
+
+    /// Returns analyzer warnings emitted during compilation.
+    pub fn warnings(&self) -> &[veryl_analyzer::AnalyzerError] {
+        &self.warnings
     }
 
     /// Captures the current state of all signals and writes them to the VCD file.

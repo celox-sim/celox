@@ -66,6 +66,7 @@ export class Simulation<P = Record<string, unknown>> {
 		{ period: number; eventId: number }
 	>();
 	private readonly _defaultMaxSteps: number | undefined;
+	private readonly _warnings: readonly string[];
 	private _disposed = false;
 
 	private constructor(
@@ -78,6 +79,7 @@ export class Simulation<P = Record<string, unknown>> {
 			string,
 			SignalLayout & { typeKind?: string; associatedClock?: string }
 		>,
+		warnings: string[],
 		defaultMaxSteps?: number,
 	) {
 		this._handle = handle;
@@ -86,6 +88,7 @@ export class Simulation<P = Record<string, unknown>> {
 		this._state = state;
 		this._buffer = buffer;
 		this._layout = layout;
+		this._warnings = warnings;
 		this._defaultMaxSteps = defaultMaxSteps;
 	}
 
@@ -164,6 +167,7 @@ export class Simulation<P = Record<string, unknown>> {
 			state,
 			result.buffer,
 			result.layout,
+			result.warnings ?? [],
 		);
 	}
 
@@ -215,7 +219,9 @@ export class Simulation<P = Record<string, unknown>> {
 			hierarchy,
 		);
 
-		return new Simulation<P>(handle, dut, events, state, buf, layout.signals);
+		const warnings: string[] = JSON.parse(raw.warningsJson);
+
+		return new Simulation<P>(handle, dut, events, state, buf, layout.signals, warnings);
 	}
 
 	/**
@@ -267,6 +273,8 @@ export class Simulation<P = Record<string, unknown>> {
 			hierarchy,
 		);
 
+		const warnings: string[] = JSON.parse(raw.warningsJson);
+
 		return new Simulation<P>(
 			handle,
 			dut,
@@ -274,6 +282,7 @@ export class Simulation<P = Record<string, unknown>> {
 			state,
 			buf,
 			layout.signals,
+			warnings,
 			defaultMaxSteps,
 		);
 	}
@@ -281,6 +290,11 @@ export class Simulation<P = Record<string, unknown>> {
 	/** The DUT accessor object — read/write ports as plain properties. */
 	get dut(): P {
 		return this._dut;
+	}
+
+	/** Analyzer warnings emitted during compilation. */
+	get warnings(): readonly string[] {
+		return this._warnings;
 	}
 
 	/**

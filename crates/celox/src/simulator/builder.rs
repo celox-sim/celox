@@ -119,7 +119,7 @@ pub(crate) fn compile_to_sir(
     clock_type: Option<ClockType>,
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
-) -> Result<Program, SimulatorError> {
+) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
     let (sir, errors) = analyze(
         sources,
         top,
@@ -134,10 +134,12 @@ pub(crate) fn compile_to_sir(
         reset_type,
         param_overrides,
     );
-    if !errors.is_empty() {
-        return Err(SimulatorError::Analyzer(errors));
+    let (real_errors, warnings): (Vec<_>, Vec<_>) =
+        errors.into_iter().partition(|e| e.is_error());
+    if !real_errors.is_empty() {
+        return Err(SimulatorError::Analyzer(real_errors));
     }
-    sir.map_err(SimulatorError::SIRParser)
+    sir.map(|p| (p, warnings)).map_err(SimulatorError::SIRParser)
 }
 /// Controls which stores the dead store elimination pass preserves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -400,7 +402,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
     /// Compiles the Veryl source and constructs the core logic simulator.
     pub fn build(self) -> Result<Simulator, SimulatorError> {
-        let program = compile_to_sir(
+        let (mut program, warnings) = compile_to_sir(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -414,7 +416,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.reset_type,
             &self.param_overrides,
         )?;
-        let mut program = program;
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             run_dead_store_elimination(
                 &mut program,
@@ -424,7 +425,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         }
         let backend = JitBackend::new(&program, &self.options, None)?;
 
-        let mut sim = Simulator::with_backend_and_program(backend, program);
+        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         if let Some(path) = self.vcd_path {
             let vcd_writer = crate::vcd::VcdWriter::new(path, &sim.program)
                 .map_err(|_| SimulatorError::Runtime(crate::RuntimeErrorCode::InternalError))?;
@@ -453,7 +454,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.param_overrides,
         );
 
-        let sim_res = program_res.and_then(|mut program| {
+        let sim_res = program_res.and_then(|(mut program, warnings)| {
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 run_dead_store_elimination(
                     &mut program,
@@ -463,7 +464,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             }
             let backend = JitBackend::new(&program, &self.options, Some(&mut trace))?;
 
-            let mut sim = Simulator::with_backend_and_program(backend, program);
+            let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
             sim.modify(|_| {}).map_err(SimulatorError::Runtime)?;
             Ok(sim)
         });
@@ -517,7 +518,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     /// Compiles the Veryl source and constructs the timed simulation wrapper.
     pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
         self.options.emit_triggers = true;
-        let mut program = compile_to_sir(
+        let (mut program, warnings) = compile_to_sir(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -540,7 +541,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         }
         let backend = JitBackend::new(&program, &self.options, None)?;
 
-        let mut sim = Simulator::with_backend_and_program(backend, program);
+        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         if let Some(path) = self.vcd_path {
             let vcd_writer = crate::vcd::VcdWriter::new(path, &sim.program)
                 .map_err(|_| SimulatorError::Runtime(crate::RuntimeErrorCode::InternalError))?;

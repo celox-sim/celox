@@ -125,6 +125,8 @@ export interface CreateResult<H extends NativeHandle = NativeHandle> {
 	readonly handle: H;
 	/** Full instance hierarchy (optional — present when NAPI provides it). */
 	readonly hierarchy?: import("./napi-helpers.js").HierarchyNode;
+	/** Analyzer warnings emitted during compilation. */
+	readonly warnings?: string[];
 }
 
 // ---------------------------------------------------------------------------

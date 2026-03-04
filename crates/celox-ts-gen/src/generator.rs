@@ -37,6 +37,8 @@ pub struct JsonOutput {
     pub project_path: String,
     pub modules: Vec<JsonModuleEntry>,
     pub file_modules: HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Per-module entry in JSON output.

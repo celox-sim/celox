@@ -332,6 +332,12 @@ fn load_project_sources(
     Ok((sources, metadata, celox_cfg))
 }
 
+/// Format analyzer warnings as a JSON array of strings.
+fn format_warnings_json(warnings: &[veryl_analyzer::AnalyzerError]) -> String {
+    let msgs: Vec<String> = warnings.iter().map(|w| format!("{w}")).collect();
+    serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string())
+}
+
 /// Apply parsed options to a SimulatorBuilder.
 fn apply_options<'a, T>(
     mut builder: celox::SimulatorBuilder<'a, T>,
@@ -372,6 +378,7 @@ pub struct NativeSimulatorHandle {
     layout_json: String,
     events_json: String,
     hierarchy_json: String,
+    warnings_json: String,
     stable_size: u32,
     total_size: u32,
 }
@@ -400,6 +407,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
+        let warnings_json = format_warnings_json(sim.warnings());
         let signals = sim.named_signals();
         let events = sim.named_events();
         let hierarchy = sim.named_hierarchy();
@@ -422,6 +430,7 @@ impl NativeSimulatorHandle {
             layout_json,
             events_json,
             hierarchy_json,
+            warnings_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
         })
@@ -454,6 +463,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
+        let warnings_json = format_warnings_json(sim.warnings());
         let signals = sim.named_signals();
         let events = sim.named_events();
         let hierarchy = sim.named_hierarchy();
@@ -476,6 +486,7 @@ impl NativeSimulatorHandle {
             layout_json,
             events_json,
             hierarchy_json,
+            warnings_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
         })
@@ -497,6 +508,12 @@ impl NativeSimulatorHandle {
     #[napi(getter)]
     pub fn hierarchy_json(&self) -> String {
         self.hierarchy_json.clone()
+    }
+
+    /// Returns analyzer warnings as a JSON array of strings.
+    #[napi(getter)]
+    pub fn warnings_json(&self) -> String {
+        self.warnings_json.clone()
     }
 
     /// Returns the stable region size in bytes.
@@ -582,6 +599,7 @@ pub struct NativeSimulationHandle {
     layout_json: String,
     events_json: String,
     hierarchy_json: String,
+    warnings_json: String,
     stable_size: u32,
     total_size: u32,
     /// Default `maxSteps` for `waitUntil` / `waitForCycles`, sourced from
@@ -613,6 +631,7 @@ impl NativeSimulationHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
+        let warnings_json = format_warnings_json(sim.warnings());
         let signals = sim.named_signals();
         let events = sim.named_events();
         let hierarchy = sim.named_hierarchy();
@@ -635,6 +654,7 @@ impl NativeSimulationHandle {
             layout_json,
             events_json,
             hierarchy_json,
+            warnings_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
             default_max_steps: None,
@@ -664,6 +684,7 @@ impl NativeSimulationHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
+        let warnings_json = format_warnings_json(sim.warnings());
         let signals = sim.named_signals();
         let events = sim.named_events();
         let hierarchy = sim.named_hierarchy();
@@ -686,6 +707,7 @@ impl NativeSimulationHandle {
             layout_json,
             events_json,
             hierarchy_json,
+            warnings_json,
             stable_size: stable_size as u32,
             total_size: total_size as u32,
             default_max_steps: celox_cfg.simulation.max_steps,
@@ -708,6 +730,12 @@ impl NativeSimulationHandle {
     #[napi(getter)]
     pub fn hierarchy_json(&self) -> String {
         self.hierarchy_json.clone()
+    }
+
+    /// Returns analyzer warnings as a JSON array of strings.
+    #[napi(getter)]
+    pub fn warnings_json(&self) -> String {
+        self.warnings_json.clone()
     }
 
     /// Returns the stable region size in bytes.
@@ -887,6 +915,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
 
     let analyzer = Analyzer::new(&metadata);
     let mut parsers = Vec::new();
+    let mut all_warnings = Vec::new();
 
     for path in &paths {
         let input = std::fs::read_to_string(&path.src)
@@ -894,26 +923,30 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         let parser = Parser::parse(&input, &path.src)
             .map_err(|e| Error::from_reason(format!("Parse error: {e}")))?;
 
-        let errors = analyzer.analyze_pass1(&path.prj, &parser.veryl);
-        if !errors.is_empty() {
-            let msgs: Vec<String> = errors.iter().map(|e| celox::render_diagnostic(e)).collect();
+        let results = analyzer.analyze_pass1(&path.prj, &parser.veryl);
+        let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
+        if !real_errors.is_empty() {
+            let msgs: Vec<String> = real_errors.iter().map(|e| format!("{e}")).collect();
             return Err(Error::from_reason(format!(
                 "Errors in analysis pass 1: {}",
                 msgs.join("; ")
             )));
         }
+        all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
 
         parsers.push((path.clone(), parser));
     }
 
-    let errors = Analyzer::analyze_post_pass1();
-    if !errors.is_empty() {
-        let msgs: Vec<String> = errors.iter().map(|e| celox::render_diagnostic(e)).collect();
+    let results = Analyzer::analyze_post_pass1();
+    let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
+    if !real_errors.is_empty() {
+        let msgs: Vec<String> = real_errors.iter().map(|e| format!("{e}")).collect();
         return Err(Error::from_reason(format!(
             "Errors in post-pass 1 analysis: {}",
             msgs.join("; ")
         )));
     }
+    all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
 
     // Pass 2: per-file IR → generate
 
@@ -942,19 +975,21 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     for (i, (path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let errors = analyzer.analyze_pass2(
+        let results = analyzer.analyze_pass2(
             &path.prj,
             &parser.veryl,
             &mut analyzer_context,
             Some(&mut ir),
         );
-        if !errors.is_empty() {
-            let msgs: Vec<String> = errors.iter().map(|e| celox::render_diagnostic(e)).collect();
+        let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
+        if !real_errors.is_empty() {
+            let msgs: Vec<String> = real_errors.iter().map(|e| format!("{e}")).collect();
             return Err(Error::from_reason(format!(
                 "Errors in analysis pass 2: {}",
                 msgs.join("; ")
             )));
         }
+        all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
 
         let modules = generate_all(&ir, &source_file_refs);
         let source_file = all_source_files[i].clone();
@@ -977,22 +1012,27 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         }
     }
 
-    let errors = Analyzer::analyze_post_pass2();
-    if !errors.is_empty() {
-        let msgs: Vec<String> = errors.iter().map(|e| celox::render_diagnostic(e)).collect();
+    let results = Analyzer::analyze_post_pass2();
+    let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
+    if !real_errors.is_empty() {
+        let msgs: Vec<String> = real_errors.iter().map(|e| format!("{e}")).collect();
         return Err(Error::from_reason(format!(
             "Errors in post-pass 2 analysis: {}",
             msgs.join("; ")
         )));
     }
+    all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
 
     // Sort for deterministic output
     all_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+
+    let warning_msgs: Vec<String> = all_warnings.iter().map(|w| format!("{w}")).collect();
 
     let output = JsonOutput {
         project_path: base_path,
         modules: all_modules,
         file_modules,
+        warnings: warning_msgs,
     };
 
     serde_json::to_string(&output)
