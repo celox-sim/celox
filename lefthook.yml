@@ -1,0 +1,9 @@
+pre-push:
+  parallel: true
+  commands:
+    cargo-fmt:
+      run: cargo fmt --all -- --check
+    cargo-clippy:
+      run: cargo clippy -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets
+    biome:
+      run: pnpm run lint
