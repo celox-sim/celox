@@ -1,3 +1,5 @@
+use crate::parser::bitaccess::eval_constexpr;
+use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{ArrayLiteralItem, Expression, Factor, Op, ValueVariant};
 
 /// Calculate the context width for a given expression and parent context.
@@ -115,15 +117,7 @@ pub fn get_expr_width(expr: &Expression) -> Option<usize> {
             for (sub, rep) in exprs {
                 let w = get_expr_width(sub)?;
                 let count = if let Some(rep_expr) = rep {
-                    if let Expression::Term(f) = rep_expr {
-                        if let Factor::Value(v) = f.as_ref() {
-                            v.get_value().ok().and_then(|val| val.to_usize())?
-                        } else {
-                            return None;
-                        }
-                    } else {
-                        return None;
-                    }
+                    eval_constexpr(rep_expr).and_then(|v| v.to_usize())?
                 } else {
                     1
                 };
@@ -138,15 +132,7 @@ pub fn get_expr_width(expr: &Expression) -> Option<usize> {
                     ArrayLiteralItem::Value(expr, rep) => {
                         let w = get_expr_width(expr)?;
                         let count = if let Some(rep_expr) = rep {
-                            if let Expression::Term(f) = rep_expr {
-                                if let Factor::Value(v) = f.as_ref() {
-                                    v.get_value().ok().and_then(|val| val.to_usize())?
-                                } else {
-                                    return None;
-                                }
-                            } else {
-                                return None;
-                            }
+                            eval_constexpr(rep_expr).and_then(|v| v.to_usize())?
                         } else {
                             1
                         };

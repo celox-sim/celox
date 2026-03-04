@@ -8,7 +8,8 @@ use crate::{
     HashMap, HashSet,
     ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
     parser::bitaccess::{
-        build_partial_assign_expr, eval_constexpr, eval_var_select, is_static_access,
+        build_partial_assign_expr, celox_value_from_comptime, eval_constexpr, eval_var_select,
+        is_static_access,
     },
 };
 use malachite_bigint::BigUint;
@@ -1407,6 +1408,21 @@ pub fn eval_expression(
     arena: &mut SLTNodeArena<VarId>,
     context_width: Option<usize>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    // Short-circuit: compile-time constant compound expression → emit Constant node.
+    // context_width is not applied here, consistent with Factor::Value handling —
+    // the parent expression node is responsible for width adjustment.
+    if !matches!(expr, Expression::Term(_)) {
+        let ct = expr.comptime();
+        if ct.is_const {
+            if let Some((celox_value, mask_xz, width, signed)) =
+                celox_value_from_comptime(ct)
+            {
+                let expr = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
+                return Ok(((expr, HashSet::default()), BoundaryMap::default()));
+            }
+        }
+    }
+
     match expr {
         Expression::Term(factor) => eval_factor(module, store, factor, arena, context_width),
         Expression::Binary(lhs, op, rhs, _) => {
@@ -1829,24 +1845,24 @@ fn eval_factor(
         Factor::Variable(var_id, index, select, comptime) => {
             // Compile-time constant (e.g. genvar inside generate block): emit a
             // constant node directly instead of loading from memory.
-            if comptime.is_const && index.0.is_empty() && select.0.is_empty() && select.1.is_none()
+            if comptime.is_const
+                && index.0.is_empty()
+                && select.0.is_empty()
+                && select.1.is_none()
             {
-                if let Ok(val) = comptime.get_value() {
-                    let mask_xz = val.mask_xz().into_owned();
-                    let payload = val.payload().into_owned();
-                    let celox_value = &payload ^ &mask_xz;
-                    let width = val.width();
-                    let signed = val.signed();
-                    let mut expr =
-                        arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
+                if let Some((celox_value, mask_xz, width, signed)) =
+                    celox_value_from_comptime(comptime)
+                {
+                    let mut expr = arena.alloc(SLTNode::Constant(
+                        celox_value, mask_xz, width, signed,
+                    ));
                     if let Some(target_width) = context_width {
-                        let expr_width = width;
-                        if expr_width < target_width {
-                            let pad_width = target_width - expr_width;
+                        if width < target_width {
+                            let pad_width = target_width - width;
                             let pad = if signed {
                                 let msb_slice = arena.alloc(SLTNode::Slice {
                                     expr,
-                                    access: BitAccess::new(expr_width - 1, expr_width - 1),
+                                    access: BitAccess::new(width - 1, width - 1),
                                 });
                                 (msb_slice, pad_width)
                             } else {
@@ -1858,15 +1874,18 @@ fn eval_factor(
                                 ));
                                 (zero, pad_width)
                             };
-                            expr = arena.alloc(SLTNode::Concat(vec![pad, (expr, expr_width)]));
-                        } else if expr_width > target_width {
+                            expr = arena.alloc(SLTNode::Concat(vec![pad, (expr, width)]));
+                        } else if width > target_width {
                             expr = arena.alloc(SLTNode::Slice {
                                 expr,
                                 access: BitAccess::new(0, target_width - 1),
                             });
                         }
                     }
-                    return Ok(((expr, HashSet::default()), BoundaryMap::default()));
+                    return Ok((
+                        (expr, HashSet::default()),
+                        BoundaryMap::default(),
+                    ));
                 }
             }
 
@@ -2039,19 +2058,11 @@ fn eval_factor(
             }
         }
         Factor::Value(v) => {
-            let val = v.get_value().unwrap();
-            let mask_xz = val.mask_xz().into_owned();
-            let payload = val.payload().into_owned();
-            // Veryl→Celox encoding: celox_value = payload ^ mask_xz
-            let celox_value = &payload ^ &mask_xz;
+            let (celox_value, mask_xz, width, signed) = celox_value_from_comptime(v)
+                .expect("Factor::Value should always have a numeric value");
             Ok((
                 (
-                    arena.alloc(SLTNode::Constant(
-                        celox_value,
-                        mask_xz,
-                        val.width(),
-                        val.signed(),
-                    )),
+                    arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed)),
                     HashSet::default(),
                 ),
                 BoundaryMap::default(),

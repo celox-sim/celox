@@ -6,7 +6,7 @@ use crate::ir::{
 };
 use crate::{
     HashMap, HashSet,
-    parser::{BuildConfig, LoweringPhase, ParserError, bitaccess::eval_var_select},
+    parser::{BuildConfig, LoweringPhase, ParserError, bitaccess::{eval_constexpr, eval_var_select}},
 };
 use bit_set::BitSet;
 use num_traits::ToPrimitive;
@@ -54,13 +54,7 @@ impl<'a> FfParser<'a> {
     }
 
     fn get_constant_value(&self, expr: &Expression) -> Option<u64> {
-        if let Expression::Term(factor) = expr
-            && let Factor::Value(comptime) = factor.as_ref()
-            && let Ok(val) = comptime.get_value()
-        {
-            return val.payload().to_u64();
-        }
-        None
+        eval_constexpr(expr)?.to_u64()
     }
 
     fn get_cast_target_info(&self, expr: &Expression) -> Option<(usize, bool, bool)> {

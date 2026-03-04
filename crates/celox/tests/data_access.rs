@@ -272,14 +272,8 @@ fn test_genvar_const_in_generate() {
     let val = sim.get(o);
     assert_eq!(val.clone() & BigUint::from(0xFFu32), 10u32.into()); // o[0] = 10
     assert_eq!((val.clone() >> 8u32) & BigUint::from(0xFFu32), 11u32.into()); // o[1] = 11
-    assert_eq!(
-        (val.clone() >> 16u32) & BigUint::from(0xFFu32),
-        12u32.into()
-    ); // o[2] = 12
-    assert_eq!(
-        (val.clone() >> 24u32) & BigUint::from(0xFFu32),
-        13u32.into()
-    ); // o[3] = 13
+    assert_eq!((val.clone() >> 16u32) & BigUint::from(0xFFu32), 12u32.into()); // o[2] = 12
+    assert_eq!((val.clone() >> 24u32) & BigUint::from(0xFFu32), 13u32.into()); // o[3] = 13
 }
 
 #[test]

@@ -5,7 +5,7 @@ use crate::ir::{
 };
 use crate::parser::{
     LoweringPhase, ParserError,
-    bitaccess::{eval_var_select, is_static_access},
+    bitaccess::{celox_value_from_comptime, eval_var_select, is_static_access},
     resolve_dims, resolve_shape_total,
 };
 use malachite_bigint::BigUint;
@@ -791,14 +791,11 @@ impl<'a> FfParser<'a> {
                 }
             }
             Factor::Value(comptime) => {
-                let v = comptime.get_value().unwrap();
-                let mask_xz = v.mask_xz().into_owned();
-                let payload = v.payload().into_owned();
-                // Veryl→Celox encoding: celox_value = payload ^ mask_xz
-                let celox_value = &payload ^ &mask_xz;
+                let (celox_value, mask_xz, width, _) = celox_value_from_comptime(comptime)
+                    .expect("Factor::Value should always have a numeric value");
                 self.op_constant(
                     SIRValue::new_four_state(celox_value, mask_xz),
-                    v.width(),
+                    width,
                     ir_builder,
                 );
             }
@@ -1479,6 +1476,23 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context_width: Option<usize>,
     ) -> Result<(), ParserError> {
+        // Short-circuit: compile-time constant compound expression → emit constant value.
+        // Unlike the SLT path (comb.rs), the SIR path requires the register width to
+        // match context_width because emit_multi_dst_assign assumes rhs_width >= part_width.
+        if !matches!(expr, Expression::Term(_)) {
+            let ct = expr.comptime();
+            if ct.is_const {
+                if let Some((celox_value, mask_xz, width, _)) = celox_value_from_comptime(ct) {
+                    self.op_constant(
+                        SIRValue::new_four_state(celox_value, mask_xz),
+                        context_width.unwrap_or(width),
+                        ir_builder,
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         match expr {
             Expression::Term(factor) => {
                 self.parse_factor(
