@@ -38,6 +38,21 @@ The `deps/veryl/` directory contains a fork of Veryl (`tignear/veryl`). The work
 - `default-features = false` is set on `veryl-parser` to suppress parser regeneration during builds.
 - After updating the submodule, run `cargo test` to verify compatibility.
 
+### Analyzer API
+
+The Veryl analyzer pass functions (`analyze_pass1`, `analyze_post_pass1`, `analyze_pass2`, `analyze_post_pass2`) return `Vec<AnalyzerError>`. All 4 passes must be called and their errors checked. `SimulatorError::Analyzer` wraps these errors.
+
+### Writing Veryl in Tests
+
+The analyzer enforces strict checks. When writing Veryl source in integration tests:
+
+- **Clock domain annotations**: Multi-clock designs require `'a`/`'b` (or `'_` for single-clock) on all ports and vars. Cross-domain access needs `unsafe (cdc) { ... }`.
+- **Logical operators on multi-bit**: `a && b` / `a || b` / `!a` are rejected for operands wider than 1 bit. Use reduction: `(|a) && (|b)`, `!(|a)`.
+- **logic → bit assignment**: Requires explicit cast `as u8`.
+- **SV keywords as identifiers**: Forbidden (e.g. `reg`). Use alternatives like `r_val`.
+- **Clock from logic**: A `var` of type `logic` cannot be used as a clock. Use an external `clock` input or `let gated: '_ clock = clk_input & en;` (first operand must be clock-typed).
+- **Self-referential assign**: `assign v = f(v);` is rejected as `UnassignVariable`. Use `always_comb` with `if`/`else` branches if possible, or redesign the circuit.
+
 ## Rust Edition
 
 This project uses Rust **edition 2024**.
