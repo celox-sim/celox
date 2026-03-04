@@ -1,0 +1,15 @@
+---
+source: crates/celox/tests/error_readability.rs
+expression: err
+---
+call_non_function (https://doc.veryl-lang.org/book/07_appendix/02_semantic_error.html#call_non_function)
+
+  × Calling non-function symbol "a" which has kind "input port"
+   ╭─[:6:24]
+ 5 │         ) {
+ 6 │             assign y = a();
+   ·                        ─┬─
+   ·                         ╰── Error location
+ 7 │         }
+   ╰────
+  help: remove call to non-function symbol

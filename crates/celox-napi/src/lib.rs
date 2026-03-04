@@ -905,7 +905,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
 
         let errors = analyzer.analyze_pass1(&path.prj, &parser.veryl);
         if !errors.is_empty() {
-            let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+            let msgs: Vec<String> = errors.iter().map(|e| celox::render_diagnostic(e)).collect();
             return Err(Error::from_reason(format!(
                 "Errors in analysis pass 1: {}",
                 msgs.join("; ")
@@ -917,7 +917,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
 
     let errors = Analyzer::analyze_post_pass1();
     if !errors.is_empty() {
-        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        let msgs: Vec<String> = errors.iter().map(|e| celox::render_diagnostic(e)).collect();
         return Err(Error::from_reason(format!(
             "Errors in post-pass 1 analysis: {}",
             msgs.join("; ")
@@ -958,7 +958,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
             Some(&mut ir),
         );
         if !errors.is_empty() {
-            let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+            let msgs: Vec<String> = errors.iter().map(|e| celox::render_diagnostic(e)).collect();
             return Err(Error::from_reason(format!(
                 "Errors in analysis pass 2: {}",
                 msgs.join("; ")
@@ -988,7 +988,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
 
     let errors = Analyzer::analyze_post_pass2();
     if !errors.is_empty() {
-        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        let msgs: Vec<String> = errors.iter().map(|e| celox::render_diagnostic(e)).collect();
         return Err(Error::from_reason(format!(
             "Errors in post-pass 2 analysis: {}",
             msgs.join("; ")

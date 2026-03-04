@@ -1,0 +1,27 @@
+---
+source: crates/celox/tests/error_readability.rs
+expression: err
+---
+unassign_variable (https://doc.veryl-lang.org/book/07_appendix/02_semantic_error.html#unassign_variable)
+
+  ⚠ "x" is unassigned
+   ╭─[:7:20]
+ 6 │         ) {
+ 7 │             assign x = ~x & a;
+   ·                    ┬
+   ·                    ╰── Error location
+ 8 │             assign y = ~y & a;
+   ╰────
+  help: 
+
+unassign_variable (https://doc.veryl-lang.org/book/07_appendix/02_semantic_error.html#unassign_variable)
+
+  ⚠ "y" is unassigned
+   ╭─[:8:20]
+ 7 │             assign x = ~x & a;
+ 8 │             assign y = ~y & a;
+   ·                    ┬
+   ·                    ╰── Error location
+ 9 │         }
+   ╰────
+  help:
