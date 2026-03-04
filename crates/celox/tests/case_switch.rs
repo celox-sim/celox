@@ -234,6 +234,3 @@ fn test_case_block_body() {
     assert_eq!(sim.get(o1), 0x55u8.into());
     assert_eq!(sim.get(o2), 0xAAu8.into());
 }
-
-
-

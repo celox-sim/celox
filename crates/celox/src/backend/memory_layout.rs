@@ -105,7 +105,7 @@ impl MemoryLayout {
         // Triggered bits region (1 bit per event canonical ID)
         let num_potential_triggers = program.num_events();
         let triggered_bits_offset = (working_base_offset + working_current_offset + 7) & !7;
-        let triggered_bits_total_size = (num_potential_triggers + 7) / 8;
+        let triggered_bits_total_size = num_potential_triggers.div_ceil(8);
 
         let scratch_base_offset = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
         let merged_total_size = (scratch_base_offset + scratch_bytes + 7) & !7;
@@ -140,4 +140,3 @@ fn get_alignment(width: usize) -> usize {
         8
     }
 }
-

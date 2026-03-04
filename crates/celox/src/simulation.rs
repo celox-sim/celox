@@ -99,7 +99,7 @@ impl Simulation {
             };
             num_events
         ];
-        for id in 0..num_events {
+        for (id, info) in event_info.iter_mut().enumerate() {
             let addr = simulator.backend.id_to_addr[id];
             let canonical = simulator
                 .program
@@ -115,7 +115,7 @@ impl Simulation {
             let apply_event = simulator.backend.resolve_apply_event(&canonical);
 
             if let Some(canonical_ev) = eval_ff_event {
-                event_info[id] = EventInfo {
+                *info = EventInfo {
                     canonical_id: canonical_ev.id,
                     is_cascaded,
                     eval_ff_event,
@@ -272,11 +272,7 @@ impl Simulation {
 
                 if can_use_eval_apply {
                     // Peek at the single triggered ID
-                    let mut single_id = 0;
-                    for id in marked_bits.iter() {
-                        single_id = id;
-                        break;
-                    }
+                    let single_id = marked_bits.iter().next().unwrap();
                     let info = self.event_info[single_id];
                     // Check if this clock domain is an internal cascading target
                     if info.is_cascaded {

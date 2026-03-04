@@ -8,59 +8,59 @@
  * @packageDocumentation
  */
 
-// Core types
-export type {
-  ModuleDefinition,
-  PortInfo,
-  SimulatorOptions,
-  ParamOverride,
-  EventHandle,
-  FourStateValue,
-  LoopBreak,
-  TrueLoopSpec,
-} from "./types.js";
-
-/** @internal */
-export type {
-  SignalLayout,
-  CreateResult,
-  NativeHandle,
-  NativeSimulatorHandle,
-  NativeSimulationHandle,
-} from "./types.js";
-
-// 4-state helpers
-export { X, FourState, isFourStateValue } from "./types.js";
-
-// Error types
-export { SimulationTimeoutError } from "./types.js";
-
-// Simulator (event-based)
-export { Simulator } from "./simulator.js";
-
-// Simulation (time-based)
-export { Simulation } from "./simulation.js";
-
-/** @internal */
-export { createDut, createChildDut, readFourState } from "./dut.js";
 /** @internal */
 export type { DirtyState } from "./dut.js";
-
 /** @internal */
-export {
-  loadNativeAddon,
-  parseNapiLayout,
-  parseHierarchyLayout,
-  buildPortsFromLayout,
-  wrapDirectSimulatorHandle,
-  wrapDirectSimulationHandle,
-  createSimulatorBridge,
-  createSimulationBridge,
-  parseSignalPath,
-  buildNapiOpts,
+export { createChildDut, createDut, readFourState } from "./dut.js";
+/** @internal */
+export type {
+	HierarchyNode,
+	RawNapiAddon,
+	RawNapiSimulationHandle,
+	RawNapiSimulatorHandle,
 } from "./napi-helpers.js";
 /** @internal */
-export type { HierarchyNode, RawNapiAddon, RawNapiSimulatorHandle, RawNapiSimulationHandle } from "./napi-helpers.js";
+export {
+	buildNapiOpts,
+	buildPortsFromLayout,
+	createSimulationBridge,
+	createSimulatorBridge,
+	loadNativeAddon,
+	parseHierarchyLayout,
+	parseNapiLayout,
+	parseSignalPath,
+	wrapDirectSimulationHandle,
+	wrapDirectSimulatorHandle,
+} from "./napi-helpers.js";
+// Simulation (time-based)
+export { Simulation } from "./simulation.js";
+// Simulator (event-based)
+export { Simulator } from "./simulator.js";
+// Core types
+/** @internal */
+export type {
+	CreateResult,
+	EventHandle,
+	FourStateValue,
+	LoopBreak,
+	ModuleDefinition,
+	NativeHandle,
+	NativeSimulationHandle,
+	NativeSimulatorHandle,
+	ParamOverride,
+	PortInfo,
+	SignalLayout,
+	SimulatorOptions,
+	TrueLoopSpec,
+} from "./types.js";
+// 4-state helpers
+// Error types
+export {
+	FourState,
+	isFourStateValue,
+	SimulationTimeoutError,
+	X,
+} from "./types.js";
 
 // NAPI bridge (backward compat — re-exports from napi-helpers)
 // Consumers that import from "./napi-bridge.js" still work.

@@ -22,7 +22,11 @@ fn test_converging_true_loop_with_assign() {
         )
         .build();
 
-    assert!(result.is_ok(), "true_loop should allow the cycle: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "true_loop should allow the cycle: {:?}",
+        result.err()
+    );
     let mut sim = result.unwrap();
 
     let i_port = sim.signal("i");

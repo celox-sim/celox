@@ -69,17 +69,14 @@ impl<'a> FfParser<'a> {
             if is_whole_var {
                 next.insert(dst.id, expr);
             } else if is_static_access(&dst.index, &dst.select) {
-                let old_value = next
-                    .get(&dst.id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        Expression::Term(Box::new(Factor::Variable(
-                            dst.id,
-                            VarIndex::default(),
-                            VarSelect::default(),
-                            dst.comptime.clone(),
-                        )))
-                    });
+                let old_value = next.get(&dst.id).cloned().unwrap_or_else(|| {
+                    Expression::Term(Box::new(Factor::Variable(
+                        dst.id,
+                        VarIndex::default(),
+                        VarSelect::default(),
+                        dst.comptime.clone(),
+                    )))
+                });
                 let merged = build_partial_assign_expr(self.module, dst, expr, old_value)?;
                 next.insert(dst.id, merged);
             } else {
@@ -233,19 +230,15 @@ impl<'a> FfParser<'a> {
                     if is_whole_var {
                         next.insert(dst.id, rhs);
                     } else if is_static_access(&dst.index, &dst.select) {
-                        let old_value = next
-                            .get(&dst.id)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                Expression::Term(Box::new(Factor::Variable(
-                                    dst.id,
-                                    VarIndex::default(),
-                                    VarSelect::default(),
-                                    dst.comptime.clone(),
-                                )))
-                            });
-                        let merged =
-                            build_partial_assign_expr(parser.module, dst, rhs, old_value)?;
+                        let old_value = next.get(&dst.id).cloned().unwrap_or_else(|| {
+                            Expression::Term(Box::new(Factor::Variable(
+                                dst.id,
+                                VarIndex::default(),
+                                VarSelect::default(),
+                                dst.comptime.clone(),
+                            )))
+                        });
+                        let merged = build_partial_assign_expr(parser.module, dst, rhs, old_value)?;
                         next.insert(dst.id, merged);
                     } else {
                         return Err(ParserError::UnsupportedFFLowering {
@@ -348,19 +341,15 @@ impl<'a> FfParser<'a> {
                         next_defs.insert(dst.id, rhs);
                         resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
                     } else if is_static_access(&dst.index, &dst.select) {
-                        let old_value = defs
-                            .get(&dst.id)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                Expression::Term(Box::new(Factor::Variable(
-                                    dst.id,
-                                    VarIndex::default(),
-                                    VarSelect::default(),
-                                    dst.comptime.clone(),
-                                )))
-                            });
-                        let merged =
-                            build_partial_assign_expr(parser.module, dst, rhs, old_value)?;
+                        let old_value = defs.get(&dst.id).cloned().unwrap_or_else(|| {
+                            Expression::Term(Box::new(Factor::Variable(
+                                dst.id,
+                                VarIndex::default(),
+                                VarSelect::default(),
+                                dst.comptime.clone(),
+                            )))
+                        });
+                        let merged = build_partial_assign_expr(parser.module, dst, rhs, old_value)?;
 
                         // Partial write to return var does NOT terminate the path —
                         // additional writes may fill in other bits.

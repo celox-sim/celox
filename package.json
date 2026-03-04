@@ -10,6 +10,9 @@
     "test:rust": "cargo test",
     "test:js": "pnpm run build:napi && pnpm run build && pnpm --filter=\"!@celox-sim/celox-napi\" -r test",
     "docs:api": "typedoc",
+    "lint": "biome check packages/",
+    "lint:fix": "biome check --write packages/",
+    "format": "biome format --write packages/",
     "docs:dev": "vitepress dev docs",
     "docs:build": "pnpm run docs:api && vitepress build docs",
     "docs:preview": "vitepress preview docs"
@@ -25,6 +28,7 @@
     ]
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.5",
     "chart.js": "^4.4.0",
     "typedoc": "^0.28.0",
     "typedoc-plugin-markdown": "^4.4.0",

@@ -170,36 +170,34 @@ impl Program {
     pub fn collect_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
         let mut addrs = std::collections::HashSet::new();
 
-        let scan_units = |units: &HashMap<
-            AbsoluteAddr,
-            Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-        >,
-                          addrs: &mut std::collections::HashSet<AbsoluteAddr>| {
-            for eu_list in units.values() {
-                for eu in eu_list {
-                    for block in eu.blocks.values() {
-                        for inst in &block.instructions {
-                            match inst {
-                                SIRInstruction::Store(addr, _, _, _, _)
-                                    if addr.region == WORKING_REGION =>
-                                {
-                                    addrs.insert(addr.absolute_addr());
-                                }
-                                SIRInstruction::Commit(src, dst, _, _, _) => {
-                                    if src.region == WORKING_REGION {
-                                        addrs.insert(src.absolute_addr());
+        let scan_units =
+            |units: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+             addrs: &mut std::collections::HashSet<AbsoluteAddr>| {
+                for eu_list in units.values() {
+                    for eu in eu_list {
+                        for block in eu.blocks.values() {
+                            for inst in &block.instructions {
+                                match inst {
+                                    SIRInstruction::Store(addr, _, _, _, _)
+                                        if addr.region == WORKING_REGION =>
+                                    {
+                                        addrs.insert(addr.absolute_addr());
                                     }
-                                    if dst.region == WORKING_REGION {
-                                        addrs.insert(dst.absolute_addr());
+                                    SIRInstruction::Commit(src, dst, _, _, _) => {
+                                        if src.region == WORKING_REGION {
+                                            addrs.insert(src.absolute_addr());
+                                        }
+                                        if dst.region == WORKING_REGION {
+                                            addrs.insert(dst.absolute_addr());
+                                        }
                                     }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                     }
                 }
-            }
-        };
+            };
 
         scan_units(&self.eval_apply_ffs, &mut addrs);
         scan_units(&self.eval_only_ffs, &mut addrs);
@@ -207,7 +205,6 @@ impl Program {
 
         addrs
     }
-
 }
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct BitAccess {

@@ -305,14 +305,20 @@ impl Simulator {
         self.build_hierarchy(&[])
     }
 
-    fn build_hierarchy(&self, current_path: &[(veryl_parser::resource_table::StrId, usize)]) -> InstanceHierarchy {
+    fn build_hierarchy(
+        &self,
+        current_path: &[(veryl_parser::resource_table::StrId, usize)],
+    ) -> InstanceHierarchy {
         let instance_id = self
             .program
             .instance_ids
             .get(&InstancePath(current_path.to_vec()))
             .expect("instance not found");
         let module_id = &self.program.instance_module[instance_id];
-        let module_name = self.program.module_names.get(module_id)
+        let module_name = self
+            .program
+            .module_names
+            .get(module_id)
             .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{}", module_id));
@@ -324,7 +330,7 @@ impl Simulator {
         let mut children_map: crate::HashMap<String, Vec<(usize, InstanceHierarchy)>> =
             crate::HashMap::default();
 
-        for (path, _) in &self.program.instance_ids {
+        for path in self.program.instance_ids.keys() {
             if path.0.len() == current_len + 1 && path.0.starts_with(current_path) {
                 let (child_name_id, child_index) = path.0[current_len];
                 let child_name = veryl_parser::resource_table::get_str_value(child_name_id)

@@ -31,7 +31,10 @@ fn test_try_new_comb_loop() {
     let result = Simulator::builder(code, "Top").build();
     let err = result.expect_err("Expected error for combinational loop");
     assert!(
-        matches!(err, SimulatorError::Analyzer(_) | SimulatorError::SIRParser(_)),
+        matches!(
+            err,
+            SimulatorError::Analyzer(_) | SimulatorError::SIRParser(_)
+        ),
         "Expected Analyzer or SIRParser error, got: {err:?}"
     );
 }

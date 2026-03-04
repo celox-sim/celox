@@ -266,11 +266,7 @@ fn test_256bit_arithmetic_shift_right() {
         io.set(amt, 1u16);
     })
     .unwrap();
-    assert_eq!(
-        sim.get(o),
-        neg_one,
-        "256-bit sar of -2 by 1 should be -1"
-    );
+    assert_eq!(sim.get(o), neg_one, "256-bit sar of -2 by 1 should be -1");
 }
 
 // ============================================================
@@ -303,11 +299,7 @@ fn test_512bit_shift_left() {
         })
         .unwrap();
         let expected = &one << shift as usize;
-        assert_eq!(
-            sim.get(o),
-            expected,
-            "512-bit shl of 1 by {shift} failed"
-        );
+        assert_eq!(sim.get(o), expected, "512-bit shl of 1 by {shift} failed");
     }
 }
 
@@ -336,11 +328,7 @@ fn test_512bit_shift_right() {
         })
         .unwrap();
         let expected = &msb >> shift as usize;
-        assert_eq!(
-            sim.get(o),
-            expected,
-            "512-bit shr of MSB by {shift} failed"
-        );
+        assert_eq!(sim.get(o), expected, "512-bit shr of MSB by {shift} failed");
     }
 }
 
@@ -547,11 +535,7 @@ fn test_1024bit_shift_left() {
         })
         .unwrap();
         let expected = (&one << shift as usize) & &mask;
-        assert_eq!(
-            sim.get(o),
-            expected,
-            "1024-bit shl of 1 by {shift} failed"
-        );
+        assert_eq!(sim.get(o), expected, "1024-bit shl of 1 by {shift} failed");
     }
 }
 
@@ -642,11 +626,7 @@ fn test_256bit_all_ones_shift_left_one() {
     sim.modify(|io| io.set_wide(a, all_ones.clone())).unwrap();
     // (all_ones << 1) & mask = all_ones - 1 (MSB lost, LSB becomes 0)
     let expected = (&all_ones << 1usize) & &mask;
-    assert_eq!(
-        sim.get(o),
-        expected,
-        "256-bit shl of all-ones by 1 failed"
-    );
+    assert_eq!(sim.get(o), expected, "256-bit shl of all-ones by 1 failed");
 }
 
 #[test]
@@ -756,20 +736,12 @@ fn test_narrow_source_wide_dest_shift_left() {
     // Shift by 256: value should move into the upper half cleanly
     sim.modify(|io| io.set(amt, 256u16)).unwrap();
     let expected = (&val << 256usize) & &mask_512;
-    assert_eq!(
-        sim.get(o),
-        expected,
-        "Narrow→wide shl by 256 failed"
-    );
+    assert_eq!(sim.get(o), expected, "Narrow→wide shl by 256 failed");
 
     // Shift by 300: crosses into upper chunks
     sim.modify(|io| io.set(amt, 300u16)).unwrap();
     let expected = (&val << 300usize) & &mask_512;
-    assert_eq!(
-        sim.get(o),
-        expected,
-        "Narrow→wide shl by 300 failed"
-    );
+    assert_eq!(sim.get(o), expected, "Narrow→wide shl by 300 failed");
 }
 
 #[test]

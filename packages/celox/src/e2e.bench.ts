@@ -10,21 +10,21 @@
  */
 
 import { readFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { bench, describe, afterAll } from "vitest";
-import { Simulator } from "./simulator.js";
+import { afterAll, bench, describe } from "vitest";
+import { createSimulatorBridge, loadNativeAddon } from "./napi-helpers.js";
 import { Simulation } from "./simulation.js";
-import type { ModuleDefinition, SimulationTimeoutError } from "./types.js";
-import {
-  loadNativeAddon,
-  createSimulatorBridge,
-} from "./napi-helpers.js";
+import { Simulator } from "./simulator.js";
+import type { ModuleDefinition } from "./types.js";
 
 const __benchDir = dirname(fileURLToPath(import.meta.url));
-const VERYL_STD = resolve(__benchDir, "../../../deps/veryl/crates/std/veryl/src");
+const VERYL_STD = resolve(
+	__benchDir,
+	"../../../deps/veryl/crates/std/veryl/src",
+);
 function readVeryl(...parts: string[]): string {
-  return readFileSync(resolve(VERYL_STD, ...parts), "utf8");
+	return readFileSync(resolve(VERYL_STD, ...parts), "utf8");
 }
 
 const CODE = `
@@ -48,111 +48,111 @@ const CODE = `
 `;
 
 interface TopPorts {
-  rst: bigint;
-  readonly cnt: { at(i: number): bigint; readonly length: number };
+	rst: bigint;
+	readonly cnt: { at(i: number): bigint; readonly length: number };
 }
 
 describe("simulation", () => {
-  bench(
-    "simulation_build_top_n1000",
-    () => {
-      const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
-      sim.dispose();
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_build_top_n1000",
+		() => {
+			const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
+			sim.dispose();
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
+	const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
 
-  // Reset sequence
-  sim.dut.rst = 1n;
-  sim.tick();
-  sim.dut.rst = 0n;
-  sim.tick();
+	// Reset sequence
+	sim.dut.rst = 1n;
+	sim.tick();
+	sim.dut.rst = 0n;
+	sim.tick();
 
-  afterAll(() => {
-    sim.dispose();
-  });
+	afterAll(() => {
+		sim.dispose();
+	});
 
-  bench("simulation_tick_top_n1000_x1", () => {
-    sim.tick();
-  });
+	bench("simulation_tick_top_n1000_x1", () => {
+		sim.tick();
+	});
 
-  bench(
-    "simulation_tick_top_n1000_x1000000",
-    () => {
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.tick();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_tick_top_n1000_x1000000",
+		() => {
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.tick();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  // Testbench pattern: write input + tick + read back
-  bench("testbench_tick_top_n1000_x1", () => {
-    sim.dut.rst = 0n;
-    sim.tick();
-    // biome-ignore lint: read to measure full testbench cycle
-    sim.dut.rst;
-  });
+	// Testbench pattern: write input + tick + read back
+	bench("testbench_tick_top_n1000_x1", () => {
+		sim.dut.rst = 0n;
+		sim.tick();
+		//read to measure full testbench cycle
+		sim.dut.rst;
+	});
 
-  bench(
-    "testbench_tick_top_n1000_x1000000",
-    () => {
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.dut.rst = 0n;
-        sim.tick();
-        // biome-ignore lint: read to measure full testbench cycle
-        sim.dut.rst;
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"testbench_tick_top_n1000_x1000000",
+		() => {
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.dut.rst = 0n;
+				sim.tick();
+				//read to measure full testbench cycle
+				sim.dut.rst;
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  // Array access via .at() — use ModuleDefinition with arrayDims
-  const addon = loadNativeAddon();
-  const TopModule: ModuleDefinition<TopPorts> = {
-    __celox_module: true,
-    name: "Top",
-    source: CODE,
-    ports: {
-      clk: { direction: "input", type: "clock", width: 1 },
-      rst: { direction: "input", type: "reset", width: 1 },
-      cnt: { direction: "output", type: "logic", width: 32, arrayDims: [1000] },
-    },
-    events: ["clk"],
-  };
-  const simArr = Simulator.create<TopPorts>(TopModule, {
-    __nativeCreate: createSimulatorBridge(addon),
-  });
-  simArr.dut.rst = 1n;
-  simArr.tick();
-  simArr.dut.rst = 0n;
-  simArr.tick();
+	// Array access via .at() — use ModuleDefinition with arrayDims
+	const addon = loadNativeAddon();
+	const TopModule: ModuleDefinition<TopPorts> = {
+		__celox_module: true,
+		name: "Top",
+		source: CODE,
+		ports: {
+			clk: { direction: "input", type: "clock", width: 1 },
+			rst: { direction: "input", type: "reset", width: 1 },
+			cnt: { direction: "output", type: "logic", width: 32, arrayDims: [1000] },
+		},
+		events: ["clk"],
+	};
+	const simArr = Simulator.create<TopPorts>(TopModule, {
+		__nativeCreate: createSimulatorBridge(addon),
+	});
+	simArr.dut.rst = 1n;
+	simArr.tick();
+	simArr.dut.rst = 0n;
+	simArr.tick();
 
-  afterAll(() => {
-    simArr.dispose();
-  });
+	afterAll(() => {
+		simArr.dispose();
+	});
 
-  bench("testbench_array_tick_top_n1000_x1", () => {
-    simArr.dut.rst = 0n;
-    simArr.tick();
-    // biome-ignore lint: read array element to measure .at() overhead
-    simArr.dut.cnt.at(0);
-  });
+	bench("testbench_array_tick_top_n1000_x1", () => {
+		simArr.dut.rst = 0n;
+		simArr.tick();
+		//read array element to measure .at() overhead
+		simArr.dut.cnt.at(0);
+	});
 
-  bench(
-    "testbench_array_tick_top_n1000_x1000000",
-    () => {
-      for (let i = 0; i < 1_000_000; i++) {
-        simArr.dut.rst = 0n;
-        simArr.tick();
-        // biome-ignore lint: read array element to measure .at() overhead
-        simArr.dut.cnt.at(0);
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"testbench_array_tick_top_n1000_x1000000",
+		() => {
+			for (let i = 0; i < 1_000_000; i++) {
+				simArr.dut.rst = 0n;
+				simArr.tick();
+				//read array element to measure .at() overhead
+				simArr.dut.cnt.at(0);
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 });
 
 /**
@@ -162,45 +162,45 @@ describe("simulation", () => {
  * scheduling overhead of the time-based API.
  */
 describe("overhead", () => {
-  // Simulator.tick — same as Rust simulator_tick_x10000
-  const simTick = Simulator.fromSource<TopPorts>(CODE, "Top");
-  simTick.dut.rst = 1n;
-  simTick.tick();
-  simTick.dut.rst = 0n;
-  simTick.tick();
+	// Simulator.tick — same as Rust simulator_tick_x10000
+	const simTick = Simulator.fromSource<TopPorts>(CODE, "Top");
+	simTick.dut.rst = 1n;
+	simTick.tick();
+	simTick.dut.rst = 0n;
+	simTick.tick();
 
-  afterAll(() => {
-    simTick.dispose();
-  });
+	afterAll(() => {
+		simTick.dispose();
+	});
 
-  bench(
-    "simulator_tick_x10000",
-    () => {
-      for (let i = 0; i < 10_000; i++) {
-        simTick.tick();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulator_tick_x10000",
+		() => {
+			for (let i = 0; i < 10_000; i++) {
+				simTick.tick();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  // Simulation.step — same as Rust simulation_step_x20000
-  const simStep = Simulation.fromSource<TopPorts>(CODE, "Top");
-  simStep.addClock("clk", { period: 10 });
+	// Simulation.step — same as Rust simulation_step_x20000
+	const simStep = Simulation.fromSource<TopPorts>(CODE, "Top");
+	simStep.addClock("clk", { period: 10 });
 
-  afterAll(() => {
-    simStep.dispose();
-  });
+	afterAll(() => {
+		simStep.dispose();
+	});
 
-  bench(
-    "simulation_step_x20000",
-    () => {
-      // 20000 steps = 10000 cycles (rising + falling)
-      for (let i = 0; i < 20_000; i++) {
-        simStep.step();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_step_x20000",
+		() => {
+			// 20000 steps = 10000 cycles (rising + falling)
+			for (let i = 0; i < 20_000; i++) {
+				simStep.step();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 });
 
 /**
@@ -208,44 +208,44 @@ describe("overhead", () => {
  * above but uses the Simulation API instead of Simulator.
  */
 describe("simulation-time-based", () => {
-  bench(
-    "simulation_time_build_top_n1000",
-    () => {
-      const sim = Simulation.fromSource<TopPorts>(CODE, "Top");
-      sim.dispose();
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_time_build_top_n1000",
+		() => {
+			const sim = Simulation.fromSource<TopPorts>(CODE, "Top");
+			sim.dispose();
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  const sim = Simulation.fromSource<TopPorts>(CODE, "Top");
-  sim.addClock("clk", { period: 10 });
+	const sim = Simulation.fromSource<TopPorts>(CODE, "Top");
+	sim.addClock("clk", { period: 10 });
 
-  afterAll(() => {
-    sim.dispose();
-  });
+	afterAll(() => {
+		sim.dispose();
+	});
 
-  bench("simulation_time_step_x1", () => {
-    sim.step();
-  });
+	bench("simulation_time_step_x1", () => {
+		sim.step();
+	});
 
-  bench(
-    "simulation_time_step_x1000000",
-    () => {
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.step();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_time_step_x1000000",
+		() => {
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.step();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  bench(
-    "simulation_time_runUntil_1000000",
-    () => {
-      const base = sim.time();
-      sim.runUntil(base + 1_000_000);
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_time_runUntil_1000000",
+		() => {
+			const base = sim.time();
+			sim.runUntil(base + 1_000_000);
+		},
+		{ iterations: 3, time: 0 },
+	);
 });
 
 /**
@@ -255,7 +255,7 @@ describe("simulation-time-based", () => {
  * maxSteps guard to measure overhead.
  */
 describe("testbench-helpers", () => {
-  const COUNTER_CODE = `
+	const COUNTER_CODE = `
     module Counter (
         clk: input clock,
         rst: input reset,
@@ -278,71 +278,71 @@ describe("testbench-helpers", () => {
     }
   `;
 
-  interface CounterPorts {
-    rst: bigint;
-    en: bigint;
-    readonly count: bigint;
-  }
+	interface CounterPorts {
+		rst: bigint;
+		en: bigint;
+		readonly count: bigint;
+	}
 
-  // waitForCycles benchmark
-  const simWait = Simulation.fromSource<CounterPorts>(COUNTER_CODE, "Counter");
-  simWait.addClock("clk", { period: 10 });
-  simWait.dut.rst = 1n;
-  simWait.runUntil(20);
-  simWait.dut.rst = 0n;
-  simWait.dut.en = 1n;
+	// waitForCycles benchmark
+	const simWait = Simulation.fromSource<CounterPorts>(COUNTER_CODE, "Counter");
+	simWait.addClock("clk", { period: 10 });
+	simWait.dut.rst = 1n;
+	simWait.runUntil(20);
+	simWait.dut.rst = 0n;
+	simWait.dut.en = 1n;
 
-  afterAll(() => {
-    simWait.dispose();
-  });
+	afterAll(() => {
+		simWait.dispose();
+	});
 
-  bench(
-    "waitForCycles_x1000",
-    () => {
-      simWait.waitForCycles("clk", 1000);
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"waitForCycles_x1000",
+		() => {
+			simWait.waitForCycles("clk", 1000);
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  bench(
-    "manual_step_loop_x2000",
-    () => {
-      for (let i = 0; i < 2000; i++) {
-        simWait.step();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"manual_step_loop_x2000",
+		() => {
+			for (let i = 0; i < 2000; i++) {
+				simWait.step();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  // runUntil: fast Rust path vs guarded TS path
-  const simRun = Simulation.fromSource<CounterPorts>(COUNTER_CODE, "Counter");
-  simRun.addClock("clk", { period: 10 });
-  simRun.dut.rst = 1n;
-  simRun.runUntil(20);
-  simRun.dut.rst = 0n;
-  simRun.dut.en = 1n;
+	// runUntil: fast Rust path vs guarded TS path
+	const simRun = Simulation.fromSource<CounterPorts>(COUNTER_CODE, "Counter");
+	simRun.addClock("clk", { period: 10 });
+	simRun.dut.rst = 1n;
+	simRun.runUntil(20);
+	simRun.dut.rst = 0n;
+	simRun.dut.en = 1n;
 
-  afterAll(() => {
-    simRun.dispose();
-  });
+	afterAll(() => {
+		simRun.dispose();
+	});
 
-  bench(
-    "runUntil_fast_path_100000",
-    () => {
-      const base = simRun.time();
-      simRun.runUntil(base + 100_000);
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"runUntil_fast_path_100000",
+		() => {
+			const base = simRun.time();
+			simRun.runUntil(base + 100_000);
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  bench(
-    "runUntil_guarded_100000",
-    () => {
-      const base = simRun.time();
-      simRun.runUntil(base + 100_000, { maxSteps: 1_000_000 });
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"runUntil_guarded_100000",
+		() => {
+			const base = simRun.time();
+			simRun.runUntil(base + 100_000, { maxSteps: 1_000_000 });
+		},
+		{ iterations: 3, time: 0 },
+	);
 });
 
 /**
@@ -351,64 +351,64 @@ describe("testbench-helpers", () => {
  * Compares build time and tick performance with and without optimization.
  */
 describe("optimize-flag", () => {
-  bench(
-    "build_without_optimize",
-    () => {
-      const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
-      sim.dispose();
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"build_without_optimize",
+		() => {
+			const sim = Simulator.fromSource<TopPorts>(CODE, "Top");
+			sim.dispose();
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  bench(
-    "build_with_optimize",
-    () => {
-      const sim = Simulator.fromSource<TopPorts>(CODE, "Top", {
-        optimize: true,
-      });
-      sim.dispose();
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"build_with_optimize",
+		() => {
+			const sim = Simulator.fromSource<TopPorts>(CODE, "Top", {
+				optimize: true,
+			});
+			sim.dispose();
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  const simNoOpt = Simulator.fromSource<TopPorts>(CODE, "Top");
-  simNoOpt.dut.rst = 1n;
-  simNoOpt.tick();
-  simNoOpt.dut.rst = 0n;
-  simNoOpt.tick();
+	const simNoOpt = Simulator.fromSource<TopPorts>(CODE, "Top");
+	simNoOpt.dut.rst = 1n;
+	simNoOpt.tick();
+	simNoOpt.dut.rst = 0n;
+	simNoOpt.tick();
 
-  const simOpt = Simulator.fromSource<TopPorts>(CODE, "Top", {
-    optimize: true,
-  });
-  simOpt.dut.rst = 1n;
-  simOpt.tick();
-  simOpt.dut.rst = 0n;
-  simOpt.tick();
+	const simOpt = Simulator.fromSource<TopPorts>(CODE, "Top", {
+		optimize: true,
+	});
+	simOpt.dut.rst = 1n;
+	simOpt.tick();
+	simOpt.dut.rst = 0n;
+	simOpt.tick();
 
-  afterAll(() => {
-    simNoOpt.dispose();
-    simOpt.dispose();
-  });
+	afterAll(() => {
+		simNoOpt.dispose();
+		simOpt.dispose();
+	});
 
-  bench(
-    "tick_x10000_without_optimize",
-    () => {
-      for (let i = 0; i < 10_000; i++) {
-        simNoOpt.tick();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"tick_x10000_without_optimize",
+		() => {
+			for (let i = 0; i < 10_000; i++) {
+				simNoOpt.tick();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  bench(
-    "tick_x10000_with_optimize",
-    () => {
-      for (let i = 0; i < 10_000; i++) {
-        simOpt.tick();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"tick_x10000_with_optimize",
+		() => {
+			for (let i = 0; i < 10_000; i++) {
+				simOpt.tick();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 });
 
 // ────────────────────────────────────────────────────────────
@@ -418,9 +418,9 @@ describe("optimize-flag", () => {
 // --- Linear SEC (P=6): Hamming encoder/decoder, combinational ---
 
 const LINEAR_SEC_SRC =
-  readVeryl("coding/linear_sec_encoder.veryl") +
-  readVeryl("coding/linear_sec_decoder.veryl") +
-  `
+	readVeryl("coding/linear_sec_encoder.veryl") +
+	readVeryl("coding/linear_sec_decoder.veryl") +
+	`
 module Top #(
     param P: u32 = 6,
     const K: u32 = (1 << P) - 1,
@@ -441,67 +441,67 @@ module Top #(
 `;
 
 interface LinearSecPorts {
-  i_word: bigint;
-  readonly o_codeword: bigint;
-  readonly o_word: bigint;
-  readonly o_corrected: bigint;
+	i_word: bigint;
+	readonly o_codeword: bigint;
+	readonly o_word: bigint;
+	readonly o_corrected: bigint;
 }
 
 describe("stdlib-linear-sec", () => {
-  bench(
-    "simulation_build_linear_sec_p6",
-    () => {
-      const sim = Simulator.fromSource<LinearSecPorts>(LINEAR_SEC_SRC, "Top");
-      sim.dispose();
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_build_linear_sec_p6",
+		() => {
+			const sim = Simulator.fromSource<LinearSecPorts>(LINEAR_SEC_SRC, "Top");
+			sim.dispose();
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  const sim = Simulator.fromSource<LinearSecPorts>(LINEAR_SEC_SRC, "Top");
+	const sim = Simulator.fromSource<LinearSecPorts>(LINEAR_SEC_SRC, "Top");
 
-  afterAll(() => {
-    sim.dispose();
-  });
+	afterAll(() => {
+		sim.dispose();
+	});
 
-  let linearSecInput = 0n;
-  bench("simulation_eval_linear_sec_p6_x1", () => {
-    sim.dut.i_word = linearSecInput++;
-    // biome-ignore lint: read to measure eval
-    sim.dut.o_word;
-  });
+	let linearSecInput = 0n;
+	bench("simulation_eval_linear_sec_p6_x1", () => {
+		sim.dut.i_word = linearSecInput++;
+		//read to measure eval
+		sim.dut.o_word;
+	});
 
-  bench(
-    "simulation_eval_linear_sec_p6_x1000000",
-    () => {
-      let input = 0n;
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.dut.i_word = input++;
-        // biome-ignore lint: read to measure eval
-        sim.dut.o_word;
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_eval_linear_sec_p6_x1000000",
+		() => {
+			let input = 0n;
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.dut.i_word = input++;
+				//read to measure eval
+				sim.dut.o_word;
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  bench(
-    "testbench_eval_linear_sec_p6_x1000000",
-    () => {
-      let input = 0n;
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.dut.i_word = input++;
-        // biome-ignore lint: read corrected flag
-        sim.dut.o_corrected;
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"testbench_eval_linear_sec_p6_x1000000",
+		() => {
+			let input = 0n;
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.dut.i_word = input++;
+				//read corrected flag
+				sim.dut.o_corrected;
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 });
 
 // --- Countones (W=64): recursive combinational popcount tree ---
 
 const COUNTONES_SRC =
-  readVeryl("countones/countones.veryl") +
-  `
+	readVeryl("countones/countones.veryl") +
+	`
 module Top (
     i_data: input  logic<64>,
     o_ones: output logic<7>,
@@ -511,52 +511,52 @@ module Top (
 `;
 
 interface CountonesPorts {
-  i_data: bigint;
-  readonly o_ones: bigint;
+	i_data: bigint;
+	readonly o_ones: bigint;
 }
 
 describe("stdlib-countones", () => {
-  bench(
-    "simulation_build_countones_w64",
-    () => {
-      const sim = Simulator.fromSource<CountonesPorts>(COUNTONES_SRC, "Top");
-      sim.dispose();
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_build_countones_w64",
+		() => {
+			const sim = Simulator.fromSource<CountonesPorts>(COUNTONES_SRC, "Top");
+			sim.dispose();
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  const sim = Simulator.fromSource<CountonesPorts>(COUNTONES_SRC, "Top");
+	const sim = Simulator.fromSource<CountonesPorts>(COUNTONES_SRC, "Top");
 
-  afterAll(() => {
-    sim.dispose();
-  });
+	afterAll(() => {
+		sim.dispose();
+	});
 
-  let countonesInput = 0n;
-  bench("simulation_eval_countones_w64_x1", () => {
-    sim.dut.i_data = countonesInput++;
-    // biome-ignore lint: read to measure eval
-    sim.dut.o_ones;
-  });
+	let countonesInput = 0n;
+	bench("simulation_eval_countones_w64_x1", () => {
+		sim.dut.i_data = countonesInput++;
+		//read to measure eval
+		sim.dut.o_ones;
+	});
 
-  bench(
-    "simulation_eval_countones_w64_x1000000",
-    () => {
-      let input = 0n;
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.dut.i_data = input++;
-        // biome-ignore lint: read to measure eval
-        sim.dut.o_ones;
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_eval_countones_w64_x1000000",
+		() => {
+			let input = 0n;
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.dut.i_data = input++;
+				//read to measure eval
+				sim.dut.o_ones;
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 });
 
 // --- std::counter (WIDTH=32): sequential up-counter ---
 
 const STD_COUNTER_SRC =
-  readVeryl("counter/counter.veryl") +
-  `
+	readVeryl("counter/counter.veryl") +
+	`
 module Top (
     clk    : input  clock,
     rst    : input  reset,
@@ -579,67 +579,67 @@ module Top (
 `;
 
 interface StdCounterPorts {
-  rst: bigint;
-  i_up: bigint;
-  readonly o_count: bigint;
+	rst: bigint;
+	i_up: bigint;
+	readonly o_count: bigint;
 }
 
 describe("stdlib-counter", () => {
-  bench(
-    "simulation_build_std_counter_w32",
-    () => {
-      const sim = Simulator.fromSource<StdCounterPorts>(STD_COUNTER_SRC, "Top");
-      sim.dispose();
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_build_std_counter_w32",
+		() => {
+			const sim = Simulator.fromSource<StdCounterPorts>(STD_COUNTER_SRC, "Top");
+			sim.dispose();
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  const sim = Simulator.fromSource<StdCounterPorts>(STD_COUNTER_SRC, "Top");
-  sim.dut.rst = 1n;
-  sim.dut.i_up = 0n;
-  sim.tick();
-  sim.dut.rst = 0n;
-  sim.dut.i_up = 1n;
-  sim.tick();
+	const sim = Simulator.fromSource<StdCounterPorts>(STD_COUNTER_SRC, "Top");
+	sim.dut.rst = 1n;
+	sim.dut.i_up = 0n;
+	sim.tick();
+	sim.dut.rst = 0n;
+	sim.dut.i_up = 1n;
+	sim.tick();
 
-  afterAll(() => {
-    sim.dispose();
-  });
+	afterAll(() => {
+		sim.dispose();
+	});
 
-  bench("simulation_tick_std_counter_w32_x1", () => {
-    sim.tick();
-  });
+	bench("simulation_tick_std_counter_w32_x1", () => {
+		sim.tick();
+	});
 
-  bench(
-    "simulation_tick_std_counter_w32_x1000000",
-    () => {
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.tick();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_tick_std_counter_w32_x1000000",
+		() => {
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.tick();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  bench(
-    "testbench_tick_std_counter_w32_x1000000",
-    () => {
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.tick();
-        // biome-ignore lint: read to measure testbench cycle
-        sim.dut.o_count;
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"testbench_tick_std_counter_w32_x1000000",
+		() => {
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.tick();
+				//read to measure testbench cycle
+				sim.dut.o_count;
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 });
 
 // --- std::gray_counter (WIDTH=32): Gray-encoded sequential counter ---
 
 const GRAY_COUNTER_SRC =
-  readVeryl("counter/counter.veryl") +
-  readVeryl("gray/gray_encoder.veryl") +
-  readVeryl("gray/gray_counter.veryl") +
-  `
+	readVeryl("counter/counter.veryl") +
+	readVeryl("gray/gray_encoder.veryl") +
+	readVeryl("gray/gray_counter.veryl") +
+	`
 module Top (
     clk    : input  clock,
     rst    : input  reset,
@@ -662,56 +662,59 @@ module Top (
 `;
 
 interface GrayCounterPorts {
-  rst: bigint;
-  i_up: bigint;
-  readonly o_count: bigint;
+	rst: bigint;
+	i_up: bigint;
+	readonly o_count: bigint;
 }
 
 describe("stdlib-gray-counter", () => {
-  bench(
-    "simulation_build_gray_counter_w32",
-    () => {
-      const sim = Simulator.fromSource<GrayCounterPorts>(GRAY_COUNTER_SRC, "Top");
-      sim.dispose();
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_build_gray_counter_w32",
+		() => {
+			const sim = Simulator.fromSource<GrayCounterPorts>(
+				GRAY_COUNTER_SRC,
+				"Top",
+			);
+			sim.dispose();
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  const sim = Simulator.fromSource<GrayCounterPorts>(GRAY_COUNTER_SRC, "Top");
-  sim.dut.rst = 1n;
-  sim.dut.i_up = 0n;
-  sim.tick();
-  sim.dut.rst = 0n;
-  sim.dut.i_up = 1n;
-  sim.tick();
+	const sim = Simulator.fromSource<GrayCounterPorts>(GRAY_COUNTER_SRC, "Top");
+	sim.dut.rst = 1n;
+	sim.dut.i_up = 0n;
+	sim.tick();
+	sim.dut.rst = 0n;
+	sim.dut.i_up = 1n;
+	sim.tick();
 
-  afterAll(() => {
-    sim.dispose();
-  });
+	afterAll(() => {
+		sim.dispose();
+	});
 
-  bench("simulation_tick_gray_counter_w32_x1", () => {
-    sim.tick();
-  });
+	bench("simulation_tick_gray_counter_w32_x1", () => {
+		sim.tick();
+	});
 
-  bench(
-    "simulation_tick_gray_counter_w32_x1000000",
-    () => {
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.tick();
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"simulation_tick_gray_counter_w32_x1000000",
+		() => {
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.tick();
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 
-  bench(
-    "testbench_tick_gray_counter_w32_x1000000",
-    () => {
-      for (let i = 0; i < 1_000_000; i++) {
-        sim.tick();
-        // biome-ignore lint: read to measure testbench cycle
-        sim.dut.o_count;
-      }
-    },
-    { iterations: 3, time: 0 },
-  );
+	bench(
+		"testbench_tick_gray_counter_w32_x1000000",
+		() => {
+			for (let i = 0; i < 1_000_000; i++) {
+				sim.tick();
+				//read to measure testbench cycle
+				sim.dut.o_count;
+			}
+		},
+		{ iterations: 3, time: 0 },
+	);
 });

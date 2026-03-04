@@ -39,10 +39,10 @@ use crate::ir::{
     AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, ModuleId, Program,
     RegionedAbsoluteAddr, STABLE_REGION, SimModule, VariableInfo,
 };
-use veryl_analyzer::ir::Declaration;
 use crate::logic_tree::{LogicPath, SLTNodeArena};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
+use veryl_analyzer::ir::Declaration;
 
 #[derive(Error, Debug)]
 pub enum ParserError {
@@ -67,8 +67,10 @@ pub enum ParserError {
         detail: String,
     },
 
-    #[error("Unresolved type width for variable `{variable}` in module `{module}`: \
-             width cannot be determined at compile time (type: {typ})")]
+    #[error(
+        "Unresolved type width for variable `{variable}` in module `{module}`: \
+             width cannot be determined at compile time (type: {typ})"
+    )]
     UnresolvedWidth {
         module: String,
         variable: String,
@@ -88,11 +90,12 @@ pub(crate) fn resolve_width(
     module: &veryl_analyzer::ir::Module,
     var: &veryl_analyzer::ir::Variable,
 ) -> Result<usize, ParserError> {
-    var.total_width().ok_or_else(|| ParserError::UnresolvedWidth {
-        module: module.name.to_string(),
-        variable: var.path.to_string(),
-        typ: var.r#type.to_string(),
-    })
+    var.total_width()
+        .ok_or_else(|| ParserError::UnresolvedWidth {
+            module: module.name.to_string(),
+            variable: var.path.to_string(),
+            typ: var.r#type.to_string(),
+        })
 }
 
 /// Resolve the total storage size of a variable (total_width * total_array),
@@ -101,16 +104,21 @@ pub(crate) fn resolve_total_width(
     module: &veryl_analyzer::ir::Module,
     var: &veryl_analyzer::ir::Variable,
 ) -> Result<usize, ParserError> {
-    let width = var.total_width().ok_or_else(|| ParserError::UnresolvedWidth {
-        module: module.name.to_string(),
-        variable: var.path.to_string(),
-        typ: var.r#type.to_string(),
-    })?;
-    let array = var.r#type.total_array().ok_or_else(|| ParserError::UnresolvedWidth {
-        module: module.name.to_string(),
-        variable: var.path.to_string(),
-        typ: var.r#type.to_string(),
-    })?;
+    let width = var
+        .total_width()
+        .ok_or_else(|| ParserError::UnresolvedWidth {
+            module: module.name.to_string(),
+            variable: var.path.to_string(),
+            typ: var.r#type.to_string(),
+        })?;
+    let array = var
+        .r#type
+        .total_array()
+        .ok_or_else(|| ParserError::UnresolvedWidth {
+            module: module.name.to_string(),
+            variable: var.path.to_string(),
+            typ: var.r#type.to_string(),
+        })?;
     Ok(width * array)
 }
 
@@ -119,11 +127,14 @@ pub(crate) fn resolve_shape_total(
     module: &veryl_analyzer::ir::Module,
     var: &veryl_analyzer::ir::Variable,
 ) -> Result<usize, ParserError> {
-    var.r#type.width.total().ok_or_else(|| ParserError::UnresolvedWidth {
-        module: module.name.to_string(),
-        variable: var.path.to_string(),
-        typ: var.r#type.to_string(),
-    })
+    var.r#type
+        .width
+        .total()
+        .ok_or_else(|| ParserError::UnresolvedWidth {
+            module: module.name.to_string(),
+            variable: var.path.to_string(),
+            typ: var.r#type.to_string(),
+        })
 }
 
 /// Resolve each dimension in an array/width shape, returning an error when any is `None`.
@@ -190,9 +201,11 @@ pub fn parse_ir<'a>(
     // Allocate root
     let root_id = ModuleId(next_id);
     next_id += 1;
-    let root_ir = name_to_ir.get(top).ok_or_else(|| ParserError::TopNotFound {
-        name: resource_table::get_str_value(*top).unwrap_or_default(),
-    })?;
+    let root_ir = name_to_ir
+        .get(top)
+        .ok_or_else(|| ParserError::TopNotFound {
+            name: resource_table::get_str_value(*top).unwrap_or_default(),
+        })?;
     if generic_names.contains(top) {
         return Err(ParserError::GenericTop {
             name: resource_table::get_str_value(*top).unwrap_or_default(),
@@ -416,7 +429,7 @@ pub(crate) fn flatten(
 
     // Build reset -> clock mapping with AbsoluteAddr
     let mut reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr> = HashMap::default();
-    for (_path, id) in &expanded {
+    for id in expanded.values() {
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
         for (reset_var_id, clock_var_id) in &sim_module.reset_clock_map {
@@ -701,12 +714,7 @@ fn module_variables(
                     kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
                     var_kind: varibale.kind,
                     type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind, config),
-                    array_dims: varibale
-                        .r#type
-                        .array
-                        .iter()
-                        .filter_map(|d| *d)
-                        .collect(),
+                    array_dims: varibale.r#type.array.iter().filter_map(|d| *d).collect(),
                 },
             );
         }
@@ -1074,11 +1082,11 @@ fn unify_clock_domains(
             // Only unify direct aliases, not complex logic like gated clocks
             if logic_path.sources.len() == 1 {
                 let expr_node = sim_module.arena.get(logic_path.expr);
-                let is_alias = match expr_node {
+                let is_alias = matches!(
+                    expr_node,
                     crate::logic_tree::SLTNode::Input { .. }
-                    | crate::logic_tree::SLTNode::Slice { .. } => true,
-                    _ => false,
-                };
+                        | crate::logic_tree::SLTNode::Slice { .. }
+                );
                 if is_alias {
                     let target_abs = AbsoluteAddr {
                         instance_id: *id,
@@ -1381,7 +1389,7 @@ fn analyze_clock_dependencies(
     for (domain_clock, eus) in &*eval_apply_ffs {
         unique_clocks.insert(*domain_clock);
         for eu in eus {
-            for (_, bb) in &eu.blocks {
+            for bb in eu.blocks.values() {
                 for inst in &bb.instructions {
                     if let crate::ir::SIRInstruction::Store(target_addr, ..) = inst {
                         // Direct sequential dependency: the target is driven by this clock

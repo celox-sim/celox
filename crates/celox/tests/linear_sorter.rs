@@ -1,5 +1,5 @@
-use std::{fs, u16};
 use celox::{SimulatorBuilder, veryl_test};
+use std::fs;
 
 veryl_test!("tests/macro_project");
 
@@ -28,7 +28,7 @@ fn test_linear_sorter_basic() {
     dut.set_en(1);
 
     // Inputs: [50, 20, 80, 10]
-    let inputs = vec![50, 20, 80, 10];
+    let inputs = [50, 20, 80, 10];
 
     // Expectations for d_out[0..DEPTH] after each tick
     let expectations: Vec<Vec<u16>> = vec![
@@ -46,11 +46,11 @@ fn test_linear_sorter_basic() {
         dut.set_d_in(val);
         dut.tick(); // FF values update here
 
-        for i in 0..depth {
+        for (i, &expected) in expectations[time].iter().enumerate() {
             let current_out = dut.get_d_out(i);
             assert_eq!(
                 current_out,
-                expectations[time][i],
+                expected,
                 "Mismatch at cycle {} at cell {}",
                 time + 1,
                 i
@@ -64,8 +64,7 @@ fn test_linear_sorter_hierarchy() {
     let depth = 8;
     let max_val = u16::MAX;
 
-    let sorter_code =
-        fs::read_to_string("tests/macro_project/src/linear_sorter.veryl").unwrap();
+    let sorter_code = fs::read_to_string("tests/macro_project/src/linear_sorter.veryl").unwrap();
     let wrapper_code =
         fs::read_to_string("tests/macro_project/src/linear_sorter_wrapper.veryl").unwrap();
     let code = format!("{sorter_code}\n{wrapper_code}");
@@ -100,10 +99,10 @@ fn test_linear_sorter_hierarchy() {
         dut.set_d_in(val);
         dut.tick();
 
-        for i in 0..depth {
+        for (i, &expected) in expectations[time].iter().enumerate() {
             assert_eq!(
                 dut.get_d_out(i),
-                expectations[time][i],
+                expected,
                 "Mismatch at cycle {} cell {} (through hierarchy)",
                 time + 1,
                 i

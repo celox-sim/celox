@@ -81,17 +81,11 @@ fn extract_ports(module: &Module) -> Vec<PortInfo> {
         let element_width = variable.total_width().unwrap_or(1);
 
         let array_dims: Option<Vec<usize>> = {
-            let dims: Vec<usize> = variable
-                .r#type
-                .array
-                .iter()
-                .filter_map(|d| *d)
-                .collect();
+            let dims: Vec<usize> = variable.r#type.array.iter().filter_map(|d| *d).collect();
             if dims.is_empty() { None } else { Some(dims) }
         };
 
-        let total_width = element_width
-            * variable.r#type.total_array().unwrap_or(1);
+        let total_width = element_width * variable.r#type.total_array().unwrap_or(1);
 
         let type_info = classify_type(&variable.r#type.kind);
         let direction = match variable.kind {
@@ -107,7 +101,11 @@ fn extract_ports(module: &Module) -> Vec<PortInfo> {
             name,
             direction,
             type_info,
-            width: if array_dims.is_some() { element_width } else { total_width },
+            width: if array_dims.is_some() {
+                element_width
+            } else {
+                total_width
+            },
             is_4state,
             is_output: variable.kind == VarKind::Output,
             is_hierarchical,
@@ -140,10 +138,10 @@ fn extract_instances(module: &Module) -> Vec<InstanceInfo> {
             continue;
         };
 
-        let inst_name = resource_table::get_str_value(inst.name)
-            .unwrap_or_else(|| "unknown".to_string());
-        let sub_module_name = resource_table::get_str_value(sub_module.name)
-            .unwrap_or_else(|| "unknown".to_string());
+        let inst_name =
+            resource_table::get_str_value(inst.name).unwrap_or_else(|| "unknown".to_string());
+        let sub_module_name =
+            resource_table::get_str_value(sub_module.name).unwrap_or_else(|| "unknown".to_string());
 
         let ports = extract_ports(sub_module);
         let children = extract_instances(sub_module);
@@ -194,14 +192,17 @@ fn ports_to_json(ports: &[PortInfo]) -> HashMap<String, JsonPortInfo> {
 
     // Build synthetic parent entries for every interface group
     for (parent_name, iface_map) in iface_maps {
-        result.insert(parent_name, JsonPortInfo {
-            direction: "inout",
-            r#type: "logic",
-            width: 0,
-            is4state: false,
-            array_dims: None,
-            interface: Some(iface_map),
-        });
+        result.insert(
+            parent_name,
+            JsonPortInfo {
+                direction: "inout",
+                r#type: "logic",
+                width: 0,
+                is4state: false,
+                array_dims: None,
+                interface: Some(iface_map),
+            },
+        );
     }
 
     result
@@ -229,8 +230,8 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
             continue;
         };
 
-        let module_name = resource_table::get_str_value(module.name)
-            .unwrap_or_else(|| "unknown".to_string());
+        let module_name =
+            resource_table::get_str_value(module.name).unwrap_or_else(|| "unknown".to_string());
 
         let ports = extract_ports(module);
         let instances = extract_instances(module);
@@ -364,11 +365,14 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
         if port.type_info == TypeInfo::Clock {
             continue;
         }
-        if port.is_hierarchical {
-            if let Some(dot) = port.name.find('.') {
-                groups.entry(port.name[..dot].to_string()).or_default().push(port);
-                continue;
-            }
+        if port.is_hierarchical
+            && let Some(dot) = port.name.find('.')
+        {
+            groups
+                .entry(port.name[..dot].to_string())
+                .or_default()
+                .push(port);
+            continue;
         }
         scalar.push(port);
     }
@@ -388,7 +392,10 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
                 indent, readonly, port.name, ts_type, set_method,
             ));
         } else {
-            out.push_str(&format!("{}{}{}: {};\n", indent, readonly, port.name, ts_type));
+            out.push_str(&format!(
+                "{}{}{}: {};\n",
+                indent, readonly, port.name, ts_type
+            ));
         }
     }
 
@@ -411,7 +418,10 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
                     child_indent, readonly, member_name, ts_type, set_method,
                 ));
             } else {
-                out.push_str(&format!("{}{}{}: {};\n", child_indent, readonly, member_name, ts_type));
+                out.push_str(&format!(
+                    "{}{}{}: {};\n",
+                    child_indent, readonly, member_name, ts_type
+                ));
             }
         }
         out.push_str(&format!("{}}};\n", indent));
@@ -448,11 +458,14 @@ fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
     let mut scalar_ports: Vec<&PortInfo> = Vec::new();
     let mut iface_groups: BTreeMap<String, Vec<&PortInfo>> = BTreeMap::new();
     for port in ports {
-        if port.is_hierarchical {
-            if let Some(dot) = port.name.find('.') {
-                iface_groups.entry(port.name[..dot].to_string()).or_default().push(port);
-                continue;
-            }
+        if port.is_hierarchical
+            && let Some(dot) = port.name.find('.')
+        {
+            iface_groups
+                .entry(port.name[..dot].to_string())
+                .or_default()
+                .push(port);
+            continue;
         }
         scalar_ports.push(port);
     }
@@ -460,7 +473,11 @@ fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
     out.push_str("  ports: {\n");
     for port in scalar_ports {
         let type_str = type_info_str(port.type_info);
-        let four_state_str = if port.is_4state { ", is4state: true" } else { "" };
+        let four_state_str = if port.is_4state {
+            ", is4state: true"
+        } else {
+            ""
+        };
         let array_dims_str = match &port.array_dims {
             Some(dims) => {
                 let dims_str = dims
@@ -478,11 +495,18 @@ fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
         ));
     }
     for (parent_name, members) in iface_groups {
-        out.push_str(&format!("    {}: {{ direction: \"inout\", type: \"logic\", width: 0, interface: {{\n", parent_name));
+        out.push_str(&format!(
+            "    {}: {{ direction: \"inout\", type: \"logic\", width: 0, interface: {{\n",
+            parent_name
+        ));
         for member in members {
             let member_name = &member.name[member.name.find('.').unwrap() + 1..];
             let type_str = type_info_str(member.type_info);
-            let four_state_str = if member.is_4state { ", is4state: true" } else { "" };
+            let four_state_str = if member.is_4state {
+                ", is4state: true"
+            } else {
+                ""
+            };
             let array_dims_str = match &member.array_dims {
                 Some(dims) => {
                     let dims_str = dims
@@ -496,7 +520,12 @@ fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
             };
             out.push_str(&format!(
                 "      {}: {{ direction: \"{}\", type: \"{}\", width: {}{}{} }},\n",
-                member_name, member.direction, type_str, member.width, four_state_str, array_dims_str
+                member_name,
+                member.direction,
+                type_str,
+                member.width,
+                four_state_str,
+                array_dims_str
             ));
         }
         out.push_str("    } },\n");
@@ -808,22 +837,37 @@ module Top (
         assert_snapshot!("interface_port_md", top.md_content);
 
         // The DTS must NOT contain "bus.data" as a raw key (would be a syntax error)
-        assert!(!top.dts_content.contains("bus.data:"), "DTS must not have dot-separated port name");
+        assert!(
+            !top.dts_content.contains("bus.data:"),
+            "DTS must not have dot-separated port name"
+        );
         // The DTS must have a nested `bus` object type
-        assert!(top.dts_content.contains("bus:"), "DTS must have 'bus' as top-level port name");
+        assert!(
+            top.dts_content.contains("bus:"),
+            "DTS must have 'bus' as top-level port name"
+        );
 
         // The JS ports object must have a nested `interface` key for `bus`
         let bus_port = top.ports.get("bus").expect("ports map must have 'bus' key");
-        assert!(bus_port.interface.is_some(), "JsonPortInfo for 'bus' must have interface");
+        assert!(
+            bus_port.interface.is_some(),
+            "JsonPortInfo for 'bus' must have interface"
+        );
         let iface = bus_port.interface.as_ref().unwrap();
         assert!(iface.contains_key("data"), "interface must contain 'data'");
-        assert!(iface.contains_key("valid"), "interface must contain 'valid'");
+        assert!(
+            iface.contains_key("valid"),
+            "interface must contain 'valid'"
+        );
         assert_eq!(iface["data"].direction, "input");
         assert_eq!(iface["valid"].direction, "input");
         assert_eq!(iface["data"].width, 8);
 
         // Flat ports must NOT contain "bus.data"
-        assert!(!top.ports.contains_key("bus.data"), "ports map must not have flat 'bus.data' key");
+        assert!(
+            !top.ports.contains_key("bus.data"),
+            "ports map must not have flat 'bus.data' key"
+        );
     }
 
     /// Interface array port: a module with `bus: modport Bus::consumer [2]`.
@@ -858,16 +902,25 @@ module Top (
 
         // The bus parent port must exist with an interface map
         let bus_port = top.ports.get("bus").expect("ports map must have 'bus' key");
-        assert!(bus_port.interface.is_some(), "JsonPortInfo for 'bus' must have interface");
+        assert!(
+            bus_port.interface.is_some(),
+            "JsonPortInfo for 'bus' must have interface"
+        );
         let iface = bus_port.interface.as_ref().unwrap();
 
         // Each member must have arrayDims
         assert!(iface.contains_key("data"), "interface must contain 'data'");
-        assert!(iface.contains_key("valid"), "interface must contain 'valid'");
+        assert!(
+            iface.contains_key("valid"),
+            "interface must contain 'valid'"
+        );
         assert_eq!(iface["data"].array_dims, Some(vec![2]));
         assert_eq!(iface["valid"].array_dims, Some(vec![2]));
 
         // DTS must contain array accessor pattern, not plain scalar type
-        assert!(top.dts_content.contains("at(i: number)"), "DTS must contain array accessor");
+        assert!(
+            top.dts_content.contains("at(i: number)"),
+            "DTS must contain array accessor"
+        );
     }
 }

@@ -175,7 +175,9 @@ fn get_factor_width(factor: &Factor) -> Option<usize> {
                 .total_width()
                 .map(|w| comp.r#type.array.total().unwrap_or(1) * w)
         }
-        Factor::FunctionCall(call) => call.comptime.r#type
+        Factor::FunctionCall(call) => call
+            .comptime
+            .r#type
             .total_width()
             .map(|w| call.comptime.r#type.array.total().unwrap_or(1) * w),
         _ => None,

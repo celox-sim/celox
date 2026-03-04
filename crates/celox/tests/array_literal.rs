@@ -170,7 +170,6 @@ fn test_array_literal_single_element_size_one_array() {
     assert_eq!(sim.get(o0), 0xABu8.into());
 }
 
-
 #[test]
 #[ignore = "blocked by upstream Veryl IR: UnsupportedByIr at conv/utils.rs:231"]
 fn test_array_literal_single_element_fills_2d_array() {

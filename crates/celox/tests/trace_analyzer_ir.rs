@@ -18,6 +18,3 @@ fn test_trace_analyzer_ir() {
     assert!(analyzer_ir.contains("module Top"));
     assert!(analyzer_ir.contains("let var0(a): logic<32>"));
 }
-
-
-

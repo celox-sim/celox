@@ -881,4 +881,3 @@ fn test_instance_signals_nonexistent_path() {
     let signals = sim.instance_signals(&[("a", 0), ("b", 0), ("c", 0)]);
     assert!(signals.is_empty());
 }
-

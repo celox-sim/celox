@@ -231,11 +231,25 @@ fn test_parametric_interface_array() {
     let sim = Simulator::builder(code, "Top").build().unwrap();
     let signals = sim.named_signals();
 
-    let bus_data = signals.iter().find(|s| s.name == "bus.data").expect("bus.data not found");
-    let bus_valid = signals.iter().find(|s| s.name == "bus.valid").expect("bus.valid not found");
+    let bus_data = signals
+        .iter()
+        .find(|s| s.name == "bus.data")
+        .expect("bus.data not found");
+    let bus_valid = signals
+        .iter()
+        .find(|s| s.name == "bus.valid")
+        .expect("bus.valid not found");
 
-    assert_eq!(bus_data.info.array_dims, vec![2], "bus.data should have array_dims [2]");
-    assert_eq!(bus_valid.info.array_dims, vec![2], "bus.valid should have array_dims [2]");
+    assert_eq!(
+        bus_data.info.array_dims,
+        vec![2],
+        "bus.data should have array_dims [2]"
+    );
+    assert_eq!(
+        bus_valid.info.array_dims,
+        vec![2],
+        "bus.valid should have array_dims [2]"
+    );
 
     // For a [2] array of logic<8>, total signal width = 16
     assert_eq!(bus_data.signal.width, 16, "bus.data total signal width");

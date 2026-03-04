@@ -1,7 +1,9 @@
 use crate::HashMap;
 use crate::ir::*;
 
-use super::cost_model::{CLIF_INST_THRESHOLD, estimate_clif_cost, estimate_eu_cost, estimate_units_cost};
+use super::cost_model::{
+    CLIF_INST_THRESHOLD, estimate_clif_cost, estimate_eu_cost, estimate_units_cost,
+};
 
 /// A chunk in the tail-call chain.
 #[derive(Debug, Clone)]
@@ -89,7 +91,10 @@ pub(crate) fn split_with_threshold(
 
     // Primary path: EU-boundary splitting.
     // Since RegisterIds are EU-scoped, splitting between EUs has zero live-reg cost.
-    let eu_costs: Vec<usize> = units.iter().map(|eu| estimate_eu_cost(eu, four_state)).collect();
+    let eu_costs: Vec<usize> = units
+        .iter()
+        .map(|eu| estimate_eu_cost(eu, four_state))
+        .collect();
 
     let mut chunks: Vec<TailCallChunk> = Vec::new();
     let mut current_units: Vec<ExecutionUnit<RegionedAbsoluteAddr>> = Vec::new();
@@ -473,7 +478,9 @@ pub(crate) fn split_multi_block_with_threshold(
     for eu in units {
         let eu_cost = estimate_eu_cost(eu, four_state);
         if eu_cost > threshold && eu.blocks.len() > 1 {
-            if let Some(plan) = split_multi_block_eu(eu, four_state, threshold, combined_scratch_bytes) {
+            if let Some(plan) =
+                split_multi_block_eu(eu, four_state, threshold, combined_scratch_bytes)
+            {
                 combined_scratch_bytes = plan.scratch_bytes;
                 combined_chunks.extend(plan.chunks);
             }
@@ -506,7 +513,13 @@ fn split_multi_block_eu(
     for bid in block_ids_to_check {
         let block_cost = estimate_block_cost(&modified_eu, bid, four_state);
         if block_cost > threshold {
-            split_oversized_block(&mut modified_eu, bid, &mut next_block_id, four_state, threshold);
+            split_oversized_block(
+                &mut modified_eu,
+                bid,
+                &mut next_block_id,
+                four_state,
+                threshold,
+            );
         }
     }
 
@@ -568,10 +581,10 @@ fn split_multi_block_eu(
     let mut all_spill_regs: HashSet<RegisterId> = HashSet::default();
 
     // (a) Forward liveness
-    for i in 0..n {
-        for j in (i + 1)..n {
-            for &reg in &defined_in[i] {
-                if used_in[j].contains(&reg) {
+    for (i, defined) in defined_in.iter().enumerate() {
+        for used in &used_in[(i + 1)..] {
+            for &reg in defined {
+                if used.contains(&reg) {
                     all_spill_regs.insert(reg);
                 }
             }
@@ -655,7 +668,11 @@ fn split_multi_block_eu(
                     }
                 }
             }
-            collect_terminator_regs_into_map(&block.terminator, &modified_eu.register_map, &mut register_map);
+            collect_terminator_regs_into_map(
+                &block.terminator,
+                &modified_eu.register_map,
+                &mut register_map,
+            );
         }
         // Include spill registers this chunk will load/store
         for slot in &all_spill_slots {
@@ -695,11 +712,11 @@ fn split_multi_block_eu(
         let mut outgoing_regs: HashSet<RegisterId> = HashSet::default();
         for slot in &all_spill_slots {
             if defined_in[ci].contains(&slot.reg_id) {
-                for j in (ci + 1)..n {
-                    if used_in[j].contains(&slot.reg_id) {
-                        outgoing_regs.insert(slot.reg_id);
-                        break;
-                    }
+                if used_in[(ci + 1)..]
+                    .iter()
+                    .any(|used| used.contains(&slot.reg_id))
+                {
+                    outgoing_regs.insert(slot.reg_id);
                 }
             }
         }
@@ -933,9 +950,11 @@ fn partition_single_pass(
             false
         } else {
             must_be_head.contains(&bid)
-                || forward_preds[&bid]
-                    .iter()
-                    .any(|pred| block_to_chunk.get(pred).map_or(false, |&c| c != current_chunk_idx))
+                || forward_preds[&bid].iter().any(|pred| {
+                    block_to_chunk
+                        .get(pred)
+                        .is_some_and(|&c| c != current_chunk_idx)
+                })
                 || current_cost + cost > threshold
         };
 
@@ -1189,7 +1208,13 @@ mod tests {
 
         for i in 0..num_stores {
             let load_reg = RegisterId(reg_counter);
-            register_map.insert(load_reg, RegisterType::Bit { width: 32, signed: false });
+            register_map.insert(
+                load_reg,
+                RegisterType::Bit {
+                    width: 32,
+                    signed: false,
+                },
+            );
             instructions.push(SIRInstruction::Load(
                 load_reg,
                 addr,
@@ -1199,7 +1224,13 @@ mod tests {
             reg_counter += 1;
 
             let imm_reg = RegisterId(reg_counter);
-            register_map.insert(imm_reg, RegisterType::Bit { width: 32, signed: false });
+            register_map.insert(
+                imm_reg,
+                RegisterType::Bit {
+                    width: 32,
+                    signed: false,
+                },
+            );
             instructions.push(SIRInstruction::Imm(
                 imm_reg,
                 SIRValue::new(BigUint::from(1u32)),
@@ -1207,7 +1238,13 @@ mod tests {
             reg_counter += 1;
 
             let result_reg = RegisterId(reg_counter);
-            register_map.insert(result_reg, RegisterType::Bit { width: 32, signed: false });
+            register_map.insert(
+                result_reg,
+                RegisterType::Bit {
+                    width: 32,
+                    signed: false,
+                },
+            );
             instructions.push(SIRInstruction::Binary(
                 result_reg,
                 load_reg,
@@ -1303,7 +1340,13 @@ mod tests {
 
         // Create a "shared" register defined in block 0
         let shared_reg = RegisterId(reg_counter);
-        register_map.insert(shared_reg, RegisterType::Bit { width: 32, signed: false });
+        register_map.insert(
+            shared_reg,
+            RegisterType::Bit {
+                width: 32,
+                signed: false,
+            },
+        );
         reg_counter += 1;
 
         for b in 0..num_blocks {
@@ -1320,7 +1363,13 @@ mod tests {
             } else {
                 // Block params: receive shared_reg from predecessor
                 let param_reg = RegisterId(reg_counter);
-                register_map.insert(param_reg, RegisterType::Bit { width: 32, signed: false });
+                register_map.insert(
+                    param_reg,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                );
                 reg_counter += 1;
                 params.push(param_reg);
 
@@ -1337,7 +1386,13 @@ mod tests {
             // Each block has load/add/store sequences
             for i in 0..stores_per_block {
                 let load_reg = RegisterId(reg_counter);
-                register_map.insert(load_reg, RegisterType::Bit { width: 32, signed: false });
+                register_map.insert(
+                    load_reg,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                );
                 instructions.push(SIRInstruction::Load(
                     load_reg,
                     addr,
@@ -1347,7 +1402,13 @@ mod tests {
                 reg_counter += 1;
 
                 let imm_reg = RegisterId(reg_counter);
-                register_map.insert(imm_reg, RegisterType::Bit { width: 32, signed: false });
+                register_map.insert(
+                    imm_reg,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                );
                 instructions.push(SIRInstruction::Imm(
                     imm_reg,
                     SIRValue::new(BigUint::from(1u32)),
@@ -1355,7 +1416,13 @@ mod tests {
                 reg_counter += 1;
 
                 let result_reg = RegisterId(reg_counter);
-                register_map.insert(result_reg, RegisterType::Bit { width: 32, signed: false });
+                register_map.insert(
+                    result_reg,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                );
                 instructions.push(SIRInstruction::Binary(
                     result_reg,
                     load_reg,
@@ -1407,13 +1474,20 @@ mod tests {
         let eu_cost = super::super::cost_model::estimate_eu_cost(&eu, false);
         // Use ~1/4 of EU cost as threshold to force multiple chunks
         let threshold = eu_cost / 4;
-        assert!(eu_cost > threshold, "EU cost should exceed our test threshold, got {eu_cost}");
+        assert!(
+            eu_cost > threshold,
+            "EU cost should exceed our test threshold, got {eu_cost}"
+        );
 
         let result = split_multi_block_with_threshold(&[eu], false, threshold);
         assert!(result.is_some(), "Should produce a spilled plan");
 
         let plan = result.unwrap();
-        assert!(plan.chunks.len() >= 2, "Should have at least 2 chunks, got {}", plan.chunks.len());
+        assert!(
+            plan.chunks.len() >= 2,
+            "Should have at least 2 chunks, got {}",
+            plan.chunks.len()
+        );
 
         // Each chunk should have a single entry block
         for (i, chunk) in plan.chunks.iter().enumerate() {
@@ -1428,7 +1502,8 @@ mod tests {
         // (first chunk has no incoming spills since it's the entry)
         assert!(
             plan.chunks[0].incoming_spills.is_empty()
-                || plan.chunks[0].incoming_spills.len() < plan.chunks.last().unwrap().incoming_spills.len()
+                || plan.chunks[0].incoming_spills.len()
+                    < plan.chunks.last().unwrap().incoming_spills.len()
                 || plan.chunks.len() == 2, // 2 chunks: first may have no incoming, second has some
             "First chunk should generally have fewer incoming spills"
         );
@@ -1452,7 +1527,10 @@ mod tests {
         let max_block_cost = block_costs.values().copied().max().unwrap_or(1);
         let threshold = max_block_cost; // fits exactly one block per chunk
         let groups = partition_single_pass(&eu, &topo_order, &block_costs, threshold);
-        assert!(groups.len() >= 2, "Should have multiple chunks with low threshold");
+        assert!(
+            groups.len() >= 2,
+            "Should have multiple chunks with low threshold"
+        );
 
         // Each chunk's first block should be the only entry point
         // (single-entry guarantee)
@@ -1472,11 +1550,9 @@ mod tests {
                         let src_chunk = block_to_chunk[&bid];
                         if succ_chunk != src_chunk {
                             assert_eq!(
-                                succ,
-                                groups[succ_chunk][0],
+                                succ, groups[succ_chunk][0],
                                 "Cross-chunk target b{} should be head of chunk {}",
-                                succ.0,
-                                succ_chunk
+                                succ.0, succ_chunk
                             );
                         }
                     }
@@ -1492,17 +1568,15 @@ mod tests {
         // Use threshold that forces at least 2 chunks
         let eu_cost = super::super::cost_model::estimate_eu_cost(&eu, false);
         let threshold = eu_cost / 3;
-        let result = split_multi_block_with_threshold(&[eu.clone()], false, threshold);
+        let result = split_multi_block_with_threshold(std::slice::from_ref(&eu), false, threshold);
 
         if let Some(plan) = result {
             for (ci, chunk) in plan.chunks.iter().enumerate() {
                 for (target_bid, edge) in &chunk.cross_chunk_edges {
-                    let target_block = &eu.blocks.get(target_bid)
-                        .or_else(|| {
-                            // Target might be in a different chunk's sub-EU
-                            plan.chunks.iter()
-                                .find_map(|c| c.eu.blocks.get(target_bid))
-                        });
+                    let target_block = &eu.blocks.get(target_bid).or_else(|| {
+                        // Target might be in a different chunk's sub-EU
+                        plan.chunks.iter().find_map(|c| c.eu.blocks.get(target_bid))
+                    });
                     if let Some(target_block) = target_block {
                         assert_eq!(
                             edge.param_scratch_offsets.len(),

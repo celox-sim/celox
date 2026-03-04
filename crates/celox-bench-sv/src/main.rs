@@ -88,9 +88,10 @@ fn read_veryl(veryl_std: &Path, parts: &[&str]) -> String {
     for p in parts {
         path = path.join(p);
     }
-    strip_test_blocks(&std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("Failed to read {}: {}", path.display(), e)
-    }))
+    strip_test_blocks(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e)),
+    )
 }
 
 /// Strip the sourceMappingURL comment from emitter output.

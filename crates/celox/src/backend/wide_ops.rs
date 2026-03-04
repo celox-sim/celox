@@ -74,8 +74,12 @@ pub fn emit_wide_binary(
 
         // EqWildcard/NeWildcard: value computation is same as Eq/Ne.
         // Wildcard mask semantics are handled separately in arith.rs.
-        BinaryOp::EqWildcard => emit_wide_unsigned_cmp(builder, &BinaryOp::Eq, l_chunks, r_chunks, num_chunks),
-        BinaryOp::NeWildcard => emit_wide_unsigned_cmp(builder, &BinaryOp::Ne, l_chunks, r_chunks, num_chunks),
+        BinaryOp::EqWildcard => {
+            emit_wide_unsigned_cmp(builder, &BinaryOp::Eq, l_chunks, r_chunks, num_chunks)
+        }
+        BinaryOp::NeWildcard => {
+            emit_wide_unsigned_cmp(builder, &BinaryOp::Ne, l_chunks, r_chunks, num_chunks)
+        }
     }
 }
 
@@ -544,12 +548,10 @@ pub fn emit_wide_sar_mem(
     // Calculate sign fill based on the logical MSB of the operand
     let msb_bit_idx = (l_width - 1) % 64;
     let msb_chunk_offset = ((l_width - 1) / 64) * 8;
-    let msb_chunk = builder.ins().load(
-        types::I64,
-        MemFlags::new(),
-        l_addr,
-        msb_chunk_offset as i32,
-    );
+    let msb_chunk =
+        builder
+            .ins()
+            .load(types::I64, MemFlags::new(), l_addr, msb_chunk_offset as i32);
     let sign_bit = builder.ins().ushr_imm(msb_chunk, msb_bit_idx as i64);
     let is_negative = builder.ins().band_imm(sign_bit, 1);
     let zero = builder.ins().iconst(types::I64, 0);
@@ -666,8 +668,7 @@ fn emit_wide_divrem(
 
         // if remainder >= divisor (multi-chunk unsigned GE)
         let mut ge_result = builder.ins().iconst(types::I8, 1);
-        for c in 0..num_chunks {
-            let rc = rem_chunks[c];
+        for (c, &rc) in rem_chunks.iter().enumerate() {
             let dc = get_chunk_as_i64(builder, r_chunks, c);
             let eq = builder.ins().icmp(IntCC::Equal, rc, dc);
             let gt = builder
@@ -680,8 +681,7 @@ fn emit_wide_divrem(
         let mut new_rem = Vec::with_capacity(num_chunks);
         {
             let mut borrow: Option<Value> = None;
-            for c in 0..num_chunks {
-                let rc = rem_chunks[c];
+            for (c, &rc) in rem_chunks.iter().enumerate() {
                 let dc = get_chunk_as_i64(builder, r_chunks, c);
                 let (diff, bout) = match borrow {
                     None => {

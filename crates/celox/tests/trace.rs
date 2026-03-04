@@ -88,6 +88,3 @@ module ModuleB (
     assert!(native.contains("Native Machine Code Dump"));
     assert!(native.contains("Hex: "));
 }
-
-
-

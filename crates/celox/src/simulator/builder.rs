@@ -1,13 +1,13 @@
-use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_analyzer::ir::{Comptime, Expression, VarPath};
 use veryl_analyzer::value::Value;
+use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::{ClockType, Metadata, ResetType};
 use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 use super::Simulator;
-use crate::{ParserError, SimulatorError, backend::JitBackend, ir::Program, parser};
 use crate::parser::BuildConfig;
+use crate::{ParserError, SimulatorError, backend::JitBackend, ir::Program, parser};
 fn analyze(
     code: &str,
     top: &str,

@@ -108,6 +108,3 @@ fn test_replication_concatenation_execution() {
     sim.modify(|io| io.set(a, 2u8)).unwrap();
     assert_eq!(sim.get(o), 0xAAu8.into());
 }
-
-
-

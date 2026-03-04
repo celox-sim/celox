@@ -151,11 +151,7 @@ impl<'a> FfParser<'a> {
                     64
                 }
             }
-            Factor::FunctionCall(call) => call
-                .comptime
-                .r#type
-                .total_width()
-                .unwrap_or(64),
+            Factor::FunctionCall(call) => call.comptime.r#type.total_width().unwrap_or(64),
             _ => 64,
         }
     }
@@ -511,7 +507,7 @@ impl<'a> FfParser<'a> {
         decls
             .iter()
             .flat_map(|d| d.statements.iter())
-            .flat_map(|s| Self::collect_assigned_var_ids(s))
+            .flat_map(Self::collect_assigned_var_ids)
             .filter(move |id| seen.insert(*id))
             .collect::<Vec<_>>()
             .into_iter()

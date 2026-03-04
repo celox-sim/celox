@@ -101,10 +101,9 @@ impl JitEngine {
         let mut ctx = self.module.make_context();
         define_simulation_function(&mut self.module, &mut ctx);
 
-        let chunk0_func_ref = self.module.declare_func_in_func(
-            first_chunk_func_id,
-            &mut ctx.func,
-        );
+        let chunk0_func_ref = self
+            .module
+            .declare_func_in_func(first_chunk_func_id, &mut ctx.func);
 
         let mut builder_ctx = FunctionBuilderContext::new();
         {
@@ -162,7 +161,14 @@ impl JitEngine {
             .declare_anonymous_function(&ctx.func.signature)
             .map_err(|e| format!("Failed to declare master function: {e}"))?;
 
-        self.optimize_and_define(&mut ctx, func_id, "=== eval_comb ===", pre_clif_out, post_clif_out, native_out)?;
+        self.optimize_and_define(
+            &mut ctx,
+            func_id,
+            "=== eval_comb ===",
+            pre_clif_out,
+            post_clif_out,
+            native_out,
+        )?;
 
         self.module
             .finalize_definitions()
@@ -223,10 +229,10 @@ impl JitEngine {
             ctx.func.signature = chunk_sigs[i].clone();
 
             let next_func_ref = if i + 1 < chunks.len() {
-                Some(self.module.declare_func_in_func(
-                    chunk_func_ids[i + 1],
-                    &mut ctx.func,
-                ))
+                Some(
+                    self.module
+                        .declare_func_in_func(chunk_func_ids[i + 1], &mut ctx.func),
+                )
             } else {
                 None
             };
@@ -234,7 +240,8 @@ impl JitEngine {
             let mut builder_ctx = FunctionBuilderContext::new();
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
-                self.translator.translate_chunk(chunk, next_func_ref, builder);
+                self.translator
+                    .translate_chunk(chunk, next_func_ref, builder);
             }
 
             let label = format!("=== Chunk {} ===", i);

@@ -74,6 +74,3 @@ fn test_struct_constructor_member_width_adjustment() {
     // wide(8bit) -> member logic<4> should keep lower 4 bits.
     assert_eq!(sim.get(o_cut), 0xBu8.into());
 }
-
-
-

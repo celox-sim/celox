@@ -1,5 +1,5 @@
-use test_case::test_case;
 use celox::{BigUint, IOContext, Simulator};
+use test_case::test_case;
 
 // ---------------------------------------------------------------------------
 // Helper: combinational binary operator  (assign o = a {op} b)
@@ -81,7 +81,11 @@ fn check_ff_binary(op: &str, in_type: &str, out_type: &str, a: u64, b: u64, expe
 // ---------------------------------------------------------------------------
 fn check_comb_unary(op: &str, in_type: &str, out_type: &str, a: u64, expected: u64) {
     // Logical NOT requires 1-bit operand; apply reduction OR
-    let operand = if op == "!" { format!("{op}(|a)") } else { format!("{op}a") };
+    let operand = if op == "!" {
+        format!("{op}(|a)")
+    } else {
+        format!("{op}a")
+    };
     let code = format!(
         r#"
         module Top (a: input {in_type}, o: output {out_type}) {{
@@ -107,7 +111,11 @@ fn check_comb_unary(op: &str, in_type: &str, out_type: &str, a: u64, expected: u
 // Helper: ff unary operator  (always_ff { r = {op}a; })
 // ---------------------------------------------------------------------------
 fn check_ff_unary(op: &str, in_type: &str, out_type: &str, a: u64, expected: u64) {
-    let operand = if op == "!" { format!("{op}(|a)") } else { format!("{op}a") };
+    let operand = if op == "!" {
+        format!("{op}(|a)")
+    } else {
+        format!("{op}a")
+    };
     let code = format!(
         r#"
         module Top (clk: input clock, a: input {in_type}, o: output {out_type}) {{
@@ -494,7 +502,11 @@ fn check_comb_unary_4s(
     exp_val: u64,
     exp_mask: u64,
 ) {
-    let operand = if op == "!" { format!("{op}(|a)") } else { format!("{op}a") };
+    let operand = if op == "!" {
+        format!("{op}(|a)")
+    } else {
+        format!("{op}a")
+    };
     let code = format!(
         r#"
         module Top (a: input {in_type}, o: output {out_type}) {{
@@ -669,15 +681,7 @@ fn comb_shift_4s(
 // With reduction OR: |0x55 (mask 0x01) = 1 (definite, since defined bits are nonzero),
 // then !1 = 0 with mask 0.
 #[test_case("!",  "logic<8>", "logic",    0x55, 0x01, 0x00, 0x00 ; "4s lognot X input")]
-fn comb_unary_4s(
-    op: &str,
-    in_ty: &str,
-    out_ty: &str,
-    a_v: u64,
-    a_m: u64,
-    e_v: u64,
-    e_m: u64,
-) {
+fn comb_unary_4s(op: &str, in_ty: &str, out_ty: &str, a_v: u64, a_m: u64, e_v: u64, e_m: u64) {
     check_comb_unary_4s(op, in_ty, out_ty, a_v, a_m, e_v, e_m);
 }
 
@@ -695,15 +699,7 @@ fn comb_unary_4s(
 #[test_case("~|", "logic<8>", "logic", 0x01, 0x01, 0x00, 0x01 ; "4s red nor X")]
 #[test_case("~^", "logic<8>", "logic", 0x03, 0x01, 0x01, 0x01 ; "4s red xnor X")]
 #[test_case("~^", "logic<8>", "logic", 0x03, 0x00, 0x01, 0x00 ; "4s red xnor defined")]
-fn comb_reduction_4s(
-    op: &str,
-    in_ty: &str,
-    out_ty: &str,
-    a_v: u64,
-    a_m: u64,
-    e_v: u64,
-    e_m: u64,
-) {
+fn comb_reduction_4s(op: &str, in_ty: &str, out_ty: &str, a_v: u64, a_m: u64, e_v: u64, e_m: u64) {
     check_comb_unary_4s(op, in_ty, out_ty, a_v, a_m, e_v, e_m);
 }
 
@@ -734,15 +730,7 @@ fn ff_binary_4s(
 #[test_case("^",  "logic<8>", "logic",    0x03, 0x01, 0x00, 0x01 ; "4s ff red xor X")]
 #[test_case("~^", "logic<8>", "logic",    0x03, 0x00, 0x01, 0x00 ; "4s ff red xnor defined")]
 #[test_case("~^", "logic<8>", "logic",    0x03, 0x01, 0x01, 0x01 ; "4s ff red xnor X")]
-fn ff_unary_4s(
-    op: &str,
-    in_ty: &str,
-    out_ty: &str,
-    a_v: u64,
-    a_m: u64,
-    e_v: u64,
-    e_m: u64,
-) {
+fn ff_unary_4s(op: &str, in_ty: &str, out_ty: &str, a_v: u64, a_m: u64, e_v: u64, e_m: u64) {
     check_ff_unary_4s(op, in_ty, out_ty, a_v, a_m, e_v, e_m);
 }
 
@@ -829,7 +817,8 @@ fn check_wide_comb_unary_4s(
 #[test]
 fn wide_4s_xor_with_x() {
     // 128-bit: a is defined, b is all-X (v=all-1s, m=all-1s) → result all-X
-    let a_val = BigUint::from(0xDEAD_BEEF_CAFE_BABEu64) << 64 | BigUint::from(0x1234_5678_9ABC_DEF0u64);
+    let a_val =
+        BigUint::from(0xDEAD_BEEF_CAFE_BABEu64) << 64 | BigUint::from(0x1234_5678_9ABC_DEF0u64);
     let a_mask = BigUint::from(0u64);
     let all_ones_128: BigUint = (BigUint::from(1u64) << 128) - BigUint::from(1u64);
     let b_val = all_ones_128.clone(); // X encoding: v=1
@@ -837,7 +826,9 @@ fn wide_4s_xor_with_x() {
     // XOR: a ^ all_ones = ~a (bitwise complement)
     let exp_val = &a_val ^ &b_val;
     let exp_mask = all_ones_128;
-    check_wide_comb_binary_4s("^", 128, &a_val, &a_mask, &b_val, &b_mask, &exp_val, &exp_mask);
+    check_wide_comb_binary_4s(
+        "^", 128, &a_val, &a_mask, &b_val, &b_mask, &exp_val, &exp_mask,
+    );
 }
 
 #[test]
@@ -849,7 +840,9 @@ fn wide_4s_xor_defined() {
     let b_mask = BigUint::from(0u64);
     let exp_val = (BigUint::from(1u64) << 128) - BigUint::from(1u64); // all ones
     let exp_mask = BigUint::from(0u64);
-    check_wide_comb_binary_4s("^", 128, &a_val, &a_mask, &b_val, &b_mask, &exp_val, &exp_mask);
+    check_wide_comb_binary_4s(
+        "^", 128, &a_val, &a_mask, &b_val, &b_mask, &exp_val, &exp_mask,
+    );
 }
 
 // ===================================================================
@@ -862,7 +855,8 @@ fn wide_4s_bitnot_partial_x() {
     // ~(0xFFFF..., mask=0x0000...FFFF...) →
     //   value: ~0xFFFF... = 0x0000... for upper, ~0xAAAA... for lower
     //   mask: 0x0000...FFFF...
-    let a_val = (BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64) << 64) | BigUint::from(0xAAAA_BBBB_CCCC_DDDDu64);
+    let a_val =
+        (BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64) << 64) | BigUint::from(0xAAAA_BBBB_CCCC_DDDDu64);
     let a_mask = BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64); // lower 64 bits are X
     // ~a: upper 64 bits → 0x0000..., lower 64 bits → ~0xAAAA_BBBB_CCCC_DDDD = 0x5555_4444_3333_2222
     let exp_val = BigUint::from(0x5555_4444_3333_2222u64); // no normalization
@@ -882,7 +876,9 @@ fn wide_4s_add_x() {
     let b_mask = BigUint::from(1u64);
     let exp_val = &a_val + &b_val; // actual computation result
     let exp_mask = (BigUint::from(1u64) << 128) - BigUint::from(1u64);
-    check_wide_comb_binary_4s("+", 128, &a_val, &a_mask, &b_val, &b_mask, &exp_val, &exp_mask);
+    check_wide_comb_binary_4s(
+        "+", 128, &a_val, &a_mask, &b_val, &b_mask, &exp_val, &exp_mask,
+    );
 }
 
 // ===================================================================
@@ -952,15 +948,24 @@ fn wide_concat_4s_partial_x() {
     let sig_o = sim.signal("o");
 
     sim.modify(|io: &mut IOContext| {
-        io.set_four_state(sig_a, BigUint::from(0xCAFE_BABE_DEAD_BEEFu64), BigUint::from(0u64));
-        io.set_four_state(sig_b, BigUint::from(0x1234_5678_9ABC_DEF0u64), BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64));
+        io.set_four_state(
+            sig_a,
+            BigUint::from(0xCAFE_BABE_DEAD_BEEFu64),
+            BigUint::from(0u64),
+        );
+        io.set_four_state(
+            sig_b,
+            BigUint::from(0x1234_5678_9ABC_DEF0u64),
+            BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64),
+        );
     })
     .unwrap();
 
     let (v, m) = sim.get_four_state(sig_o);
     let exp_mask = BigUint::from(0xFFFF_FFFF_FFFF_FFFFu64); // lower 64 bits X
     // Value at X positions preserved: upper=0xCAFE..., lower=0x1234...
-    let exp_val = (BigUint::from(0xCAFE_BABE_DEAD_BEEFu64) << 64) | BigUint::from(0x1234_5678_9ABC_DEF0u64);
+    let exp_val =
+        (BigUint::from(0xCAFE_BABE_DEAD_BEEFu64) << 64) | BigUint::from(0x1234_5678_9ABC_DEF0u64);
     assert_eq!(m, exp_mask, "wide concat 4s: mask mismatch");
     assert_eq!(v, exp_val, "wide concat 4s: value mismatch");
 }

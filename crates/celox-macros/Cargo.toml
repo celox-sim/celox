@@ -22,3 +22,6 @@ malachite-bigint  = "0.9.1"
 [dev-dependencies]
 prettyplease = "0.2.37"
 insta        = "1.39.0"
+
+[lints]
+workspace = true

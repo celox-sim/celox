@@ -4,9 +4,12 @@ use cranelift_frontend::FunctionBuilder;
 
 use crate::{
     HashMap, SimulatorOptions,
-    ir::{AbsoluteAddr, BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType, SIRInstruction, STABLE_REGION},
+    ir::{
+        AbsoluteAddr, BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType,
+        SIRInstruction, STABLE_REGION,
+    },
     optimizer::coalescing::TailCallChunk,
-    optimizer::coalescing::pass_tail_call_split::{SpilledChunk, SpillSlot},
+    optimizer::coalescing::pass_tail_call_split::{SpillSlot, SpilledChunk},
 };
 
 use super::MemoryLayout;
@@ -134,9 +137,7 @@ impl TransValue {
             TransValue::TwoState(v) => v[0],
             TransValue::FourState { values, .. } => values[0],
             TransValue::MemBacked { addr, .. } => {
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), *addr, 0)
+                builder.ins().load(types::I64, MemFlags::new(), *addr, 0)
             }
         }
     }
@@ -147,14 +148,11 @@ impl TransValue {
         match self {
             TransValue::TwoState(_) => None,
             TransValue::FourState { masks, .. } => Some(masks[0]),
-            TransValue::MemBacked { mask_addr, .. } => mask_addr.map(|ma| {
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), ma, 0)
-            }),
+            TransValue::MemBacked { mask_addr, .. } => {
+                mask_addr.map(|ma| builder.ins().load(types::I64, MemFlags::new(), ma, 0))
+            }
         }
     }
-
 }
 
 /// Create a new stack slot for `num_chunks` i64 values and return the base address.
@@ -214,12 +212,10 @@ pub(crate) fn promote_to_physical(
         val
     } else if src_phys_ty.bits() > dst_phys_ty.bits() {
         state.builder.ins().ireduce(dst_phys_ty, val)
+    } else if is_signed {
+        state.builder.ins().sextend(dst_phys_ty, val)
     } else {
-        if is_signed {
-            state.builder.ins().sextend(dst_phys_ty, val)
-        } else {
-            state.builder.ins().uextend(dst_phys_ty, val)
-        }
+        state.builder.ins().uextend(dst_phys_ty, val)
     };
 
     let phys_bits = dst_phys_ty.bits() as i64;
@@ -535,10 +531,7 @@ impl SIRTranslator {
                     masks.push(params[param_idx]);
                     param_idx += 1;
                 }
-                incoming_reg_values.insert(
-                    *reg_id,
-                    TransValue::FourState { values, masks },
-                );
+                incoming_reg_values.insert(*reg_id, TransValue::FourState { values, masks });
             } else {
                 let mut values = Vec::with_capacity(nc);
                 for _ in 0..nc {
@@ -671,7 +664,6 @@ impl SIRTranslator {
         builder.seal_all_blocks();
         builder.finalize();
     }
-
 }
 
 impl SIRTranslator {
@@ -744,10 +736,7 @@ impl SIRTranslator {
                         let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
                         masks.push(val);
                     }
-                    spill_reg_values.insert(
-                        slot.reg_id,
-                        TransValue::FourState { values, masks },
-                    );
+                    spill_reg_values.insert(slot.reg_id, TransValue::FourState { values, masks });
                 } else {
                     spill_reg_values.insert(slot.reg_id, TransValue::TwoState(values));
                 }
@@ -898,7 +887,10 @@ impl SIRTranslator {
         term: &crate::ir::SIRTerminator,
         block_map: &HashMap<BlockId, Block>,
         cross_chunk_targets: &HashMap<BlockId, usize>,
-        cross_chunk_edges: &HashMap<BlockId, crate::optimizer::coalescing::pass_tail_call_split::CrossChunkEdge>,
+        cross_chunk_edges: &HashMap<
+            BlockId,
+            crate::optimizer::coalescing::pass_tail_call_split::CrossChunkEdge,
+        >,
         chunk_func_refs: &[FuncRef],
         outgoing_spills: &[SpillSlot],
         scratch_base_offset: usize,
@@ -973,7 +965,8 @@ impl SIRTranslator {
                         let condition = state.regs[cond].first_value(state.builder);
                         let true_trampoline = state.builder.create_block();
                         let f_target = block_map[&false_block.0];
-                        let cl_f_args = self.build_local_block_args(state, f_target, &false_block.1);
+                        let cl_f_args =
+                            self.build_local_block_args(state, f_target, &false_block.1);
 
                         state.builder.ins().brif(
                             condition,
@@ -1038,7 +1031,9 @@ impl SIRTranslator {
         outgoing_spills: &[SpillSlot],
         scratch_base_offset: usize,
         target_func_ref: FuncRef,
-        cross_chunk_edge: Option<&crate::optimizer::coalescing::pass_tail_call_split::CrossChunkEdge>,
+        cross_chunk_edge: Option<
+            &crate::optimizer::coalescing::pass_tail_call_split::CrossChunkEdge,
+        >,
         jump_args: &[RegisterId],
     ) {
         // 1. Store outgoing live registers to scratch
@@ -1058,7 +1053,10 @@ impl SIRTranslator {
                             let off = scratch_base_offset + slot.scratch_byte_offset + (nc + i) * 8;
                             let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
                             let mask_i64 = cast_type(state.builder, mask, types::I64);
-                            state.builder.ins().store(MemFlags::new(), mask_i64, addr, 0);
+                            state
+                                .builder
+                                .ins()
+                                .store(MemFlags::new(), mask_i64, addr, 0);
                         }
                     }
                 }
@@ -1083,9 +1081,13 @@ impl SIRTranslator {
                                 let nc = values.len();
                                 for (j, &mask) in masks.iter().enumerate() {
                                     let off = scratch_base_offset + scratch_off + (nc + j) * 8;
-                                    let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                                    let addr =
+                                        state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
                                     let mask_i64 = cast_type(state.builder, mask, types::I64);
-                                    state.builder.ins().store(MemFlags::new(), mask_i64, addr, 0);
+                                    state
+                                        .builder
+                                        .ins()
+                                        .store(MemFlags::new(), mask_i64, addr, 0);
                                 }
                             }
                         }
@@ -1095,7 +1097,10 @@ impl SIRTranslator {
         }
 
         // 3. Tail-call to target chunk
-        state.builder.ins().return_call(target_func_ref, &[state.mem_ptr]);
+        state
+            .builder
+            .ins()
+            .return_call(target_func_ref, &[state.mem_ptr]);
     }
 
     /// Build block-call arguments for a local (non-cross-chunk) branch target.
@@ -1133,15 +1138,20 @@ impl SIRTranslator {
             let nc = width.div_ceil(64).max(1);
             // When nc==1, the signature uses get_cl_type(width) which may be I8/I16/I32.
             // When nc>1, each chunk is I64.
-            let expected_ty = if nc == 1 { get_cl_type(width) } else { types::I64 };
+            let expected_ty = if nc == 1 {
+                get_cl_type(width)
+            } else {
+                types::I64
+            };
             if let Some(trans_val) = state.regs.get(reg_id).cloned() {
                 let values = trans_val.load_value_chunks(state.builder);
                 if self.options.four_state {
                     let masks_opt = trans_val.load_mask_chunks(state.builder);
                     for i in 0..nc {
-                        let val = values.get(i).copied().unwrap_or_else(|| {
-                            state.builder.ins().iconst(expected_ty, 0)
-                        });
+                        let val = values
+                            .get(i)
+                            .copied()
+                            .unwrap_or_else(|| state.builder.ins().iconst(expected_ty, 0));
                         args.push(cast_type(state.builder, val, expected_ty));
                         let mask = masks_opt
                             .as_ref()
@@ -1151,9 +1161,10 @@ impl SIRTranslator {
                     }
                 } else {
                     for i in 0..nc {
-                        let val = values.get(i).copied().unwrap_or_else(|| {
-                            state.builder.ins().iconst(expected_ty, 0)
-                        });
+                        let val = values
+                            .get(i)
+                            .copied()
+                            .unwrap_or_else(|| state.builder.ins().iconst(expected_ty, 0));
                         args.push(cast_type(state.builder, val, expected_ty));
                     }
                 }

@@ -188,6 +188,3 @@ fn test_shift_rhs_constant_self_determination() {
         "Constant shift RHS failed self-determination boundary"
     );
 }
-
-
-

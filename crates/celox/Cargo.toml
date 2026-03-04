@@ -42,3 +42,6 @@ harness = false
 [[bench]]
 name = "overhead"
 harness = false
+
+[lints]
+workspace = true

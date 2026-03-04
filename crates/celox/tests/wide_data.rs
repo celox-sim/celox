@@ -163,6 +163,3 @@ fn test_wide_rmw_preserve_neighboring_bits() {
         "Neighbors were corrupted during Read-Modify-Write"
     );
 }
-
-
-

@@ -2,7 +2,10 @@ use celox::{ParserError, SchedulerError, Simulator, SimulatorError};
 
 /// Helper: assert the error is either Analyzer or a specific SIRParser variant.
 /// The updated Veryl analyzer may catch issues before the SIR scheduler does.
-fn assert_analyzer_or_sir(result: Result<Simulator, SimulatorError>, sir_check: impl FnOnce(&SimulatorError)) {
+fn assert_analyzer_or_sir(
+    result: Result<Simulator, SimulatorError>,
+    sir_check: impl FnOnce(&SimulatorError),
+) {
     let err = result.expect_err("Expected an error");
     match &err {
         SimulatorError::Analyzer(_) => {} // OK: analyzer caught it first
@@ -214,13 +217,11 @@ fn test_multiple_driver_error() {
         }
     "#;
     let result = Simulator::builder(code, "Top").build();
-    assert_analyzer_or_sir(result, |e| {
-        match e {
-            SimulatorError::SIRParser(ParserError::Scheduler(
-                SchedulerError::MultipleDriver { .. },
-            )) => {}
-            _ => panic!("Expected MultipleDriver error, got: {e:?}"),
-        }
+    assert_analyzer_or_sir(result, |e| match e {
+        SimulatorError::SIRParser(ParserError::Scheduler(SchedulerError::MultipleDriver {
+            ..
+        })) => {}
+        _ => panic!("Expected MultipleDriver error, got: {e:?}"),
     });
 }
 

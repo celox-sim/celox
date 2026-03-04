@@ -149,6 +149,3 @@ fn test_enum_assign_and_compare() {
     sim.modify(|io| io.set(i, 2u8)).unwrap();
     assert_eq!(sim.get(o_is_b), 1u8.into());
 }
-
-
-

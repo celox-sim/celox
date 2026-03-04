@@ -5,9 +5,9 @@
  */
 
 export {
-  createSimulatorBridge,
-  createSimulationBridge,
-  type RawNapiAddon,
-  type RawNapiSimulatorHandle,
-  type RawNapiSimulationHandle,
+	createSimulationBridge,
+	createSimulatorBridge,
+	type RawNapiAddon,
+	type RawNapiSimulationHandle,
+	type RawNapiSimulatorHandle,
 } from "./napi-helpers.js";

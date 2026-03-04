@@ -262,7 +262,7 @@ pub fn format_slt(sim_modules: &HashMap<ModuleId, SimModule>) -> String {
 
     output.push_str("=== Simulation Logic Tree (SLT) ===\n\n");
 
-    for (_id, sim_module) in sim_modules {
+    for sim_module in sim_modules.values() {
         output.push_str(&format!(
             "Module: {}\n",
             resource_table::get_str_value(sim_module.name).unwrap()

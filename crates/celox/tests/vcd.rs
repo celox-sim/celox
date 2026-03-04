@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
+    use celox::{IOContext, SimulatorBuilder};
     use std::fs;
     use std::path::Path;
-    use celox::{IOContext, SimulatorBuilder};
 
     #[test]
     fn test_vcd_generation() {
@@ -39,6 +39,3 @@ mod tests {
         fs::remove_file(vcd_path).unwrap();
     }
 }
-
-
-

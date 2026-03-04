@@ -31,12 +31,12 @@ impl<'a> IOContext<'a> {
 
 pub use backend::EventRef;
 pub use backend::{MemoryLayout, get_byte_size};
+pub use celox_macros::veryl_test;
 pub use debug::{CompilationTrace, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{AbsoluteAddr, PortTypeKind, SignalRef};
 pub use malachite_bigint::BigUint;
-pub use veryl_metadata::{ClockType, ResetType};
 pub use parser::ParserError;
 pub use parser::SchedulerError;
 pub use simulation::Simulation;
@@ -45,7 +45,7 @@ pub use simulator::SimulatorBuilder;
 pub use simulator::SimulatorError;
 pub use simulator::SimulatorOptions;
 pub use simulator::{InstanceHierarchy, NamedEvent, NamedSignal};
-pub use celox_macros::veryl_test;
+pub use veryl_metadata::{ClockType, ResetType};
 
 #[cfg(test)]
 mod flatting_tests;

@@ -16,3 +16,6 @@ veryl-parser    = { workspace = true }
 [dev-dependencies]
 insta           = "1.46"
 veryl-metadata  = { workspace = true }
+
+[lints]
+workspace = true

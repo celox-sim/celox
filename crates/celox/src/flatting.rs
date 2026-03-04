@@ -348,7 +348,9 @@ mod tests {
         // Second pass: parse with inst_ids
         let mut sim_modules = HashMap::default();
         for &(mid, module) in &ir_modules {
-            let inst_ids: Vec<ModuleId> = module.declarations.iter()
+            let inst_ids: Vec<ModuleId> = module
+                .declarations
+                .iter()
                 .filter_map(|d| match d {
                     Declaration::Inst(inst) => {
                         let child_name = match &inst.component {
@@ -361,8 +363,9 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            let sim_module = ModuleParser::parse(module, &crate::parser::BuildConfig::default(), &inst_ids)
-                .expect("module parse failed");
+            let sim_module =
+                ModuleParser::parse(module, &crate::parser::BuildConfig::default(), &inst_ids)
+                    .expect("module parse failed");
             sim_modules.insert(mid, sim_module);
         }
 

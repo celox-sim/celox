@@ -122,8 +122,10 @@ proptest! {
         // sel == 0: v[1] = i[1], v[0] = v[1] -> both bits are i[1]
         let expected = if sel_val == 1 {
             if (i_val & 0b01) != 0 { 0b11u8 } else { 0b00u8 }
+        } else if (i_val & 0b10) != 0 {
+            0b11u8
         } else {
-            if (i_val & 0b10) != 0 { 0b11u8 } else { 0b00u8 }
+            0b00u8
         };
 
         let actual: u8 = sim.get(id_o).try_into().unwrap();

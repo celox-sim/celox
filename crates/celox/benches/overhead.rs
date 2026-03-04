@@ -1,5 +1,5 @@
-use criterion::{Criterion, criterion_group, criterion_main};
 use celox::{Simulation, Simulator};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 const CODE: &str = r#"
     module Top #(
@@ -70,6 +70,3 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
 
 criterion_group!(benches, benchmark_simulation_overhead);
 criterion_main!(benches);
-
-
-

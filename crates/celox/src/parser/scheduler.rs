@@ -252,7 +252,6 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
     ) -> SchedulerError<B>
     where
         F: Fn(&A) -> B,
-        B: Hash,
     {
         let mut cache = HashMap::default();
         match self {

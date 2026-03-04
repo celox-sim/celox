@@ -124,8 +124,8 @@ fn test_bitwise_and_logical_in_concat() {
     // !a = 0 (1bit)
     // Expected: {0x00, 0xFF, 0xFF, 0x55, 1, 1, 0}
     // {8'h00, 8'hFF, 8'hFF, 8'h55, 1'b1, 1'b1, 1'b0}
-    let expected = (0x00u32 << (8 + 8 + 8)) | (0xFFu32 << (8 + 8)) | (0xFFu32 << (8)) | (0x55u32);
-    let expected2 = (1u8 << 2) | (1u8 << 1) | 0u8;
+    let expected = (0xFFu32 << (8 + 8)) | (0xFFu32 << 8) | 0x55u32;
+    let expected2 = (1u8 << 2) | (1u8 << 1);
     assert_eq!(sim.get(o), expected.into());
     assert_eq!(sim.get(o2), expected2.into());
 }
@@ -206,6 +206,3 @@ fn test_nested_concat_and_repeat() {
     // 0x55 repeat 2 = {0x55, 0x55} = 0x5555
     assert_eq!(sim.get(o), 0x5555u16.into());
 }
-
-
-

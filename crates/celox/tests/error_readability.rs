@@ -1,5 +1,5 @@
-use insta::assert_snapshot;
 use celox::SimulatorBuilder;
+use insta::assert_snapshot;
 
 #[test]
 fn test_combinational_loop_error_readability() {
@@ -35,6 +35,3 @@ fn test_multiple_driver_error_readability() {
     let err = res.unwrap_err().to_string();
     assert_snapshot!(err);
 }
-
-
-

@@ -74,7 +74,11 @@ impl<'a> ModuleParser<'a> {
         Ok(())
     }
 
-    fn parse_inst_declaration(&mut self, decl: &InstDeclaration, module_id: ModuleId) -> Result<(), ParserError> {
+    fn parse_inst_declaration(
+        &mut self,
+        decl: &InstDeclaration,
+        module_id: ModuleId,
+    ) -> Result<(), ParserError> {
         if let Component::SystemVerilog(system_verilog) = &decl.component {
             return Err(ParserError::UnsupportedSimulatorParser {
                 feature: "systemverilog module instantiation",
@@ -264,8 +268,7 @@ impl<'a> ModuleParser<'a> {
                 Declaration::Inst(inst_decl) => {
                     let mid = self.inst_ids[self.inst_idx];
                     self.inst_idx += 1;
-                    self.parse_inst_declaration(inst_decl, mid)
-                        .map_err(ParserError::from)?;
+                    self.parse_inst_declaration(inst_decl, mid)?;
                 }
                 _ => {}
             }

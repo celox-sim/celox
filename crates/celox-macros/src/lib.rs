@@ -92,12 +92,11 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
             veryl_analyzer::symbol::SymbolKind::Module(_)
                 | veryl_analyzer::symbol::SymbolKind::Interface(_)
                 | veryl_analyzer::symbol::SymbolKind::Package(_)
-        ) {
-            if let veryl_parser::veryl_token::TokenSource::File { path, .. } = symbol.token.source {
-                let path = PathBuf::from(format!("{path}"));
-                if let Some(x) = used_paths.remove(&path) {
-                    sorted_paths.push(x.clone());
-                }
+        ) && let veryl_parser::veryl_token::TokenSource::File { path, .. } = symbol.token.source
+        {
+            let path = PathBuf::from(format!("{path}"));
+            if let Some(x) = used_paths.remove(&path) {
+                sorted_paths.push(x.clone());
             }
         }
     }
@@ -142,7 +141,8 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
 
     for (i, (path_set, _code)) in parsed_files.iter().enumerate() {
         let parser = &parsers[i];
-        let errors = analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
+        let errors =
+            analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
         if !errors.is_empty() {
             let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
             exit_with_error!(&format!("Analysis pass2 errors: {}", msgs.join("; ")));

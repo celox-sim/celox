@@ -30,10 +30,10 @@ fn test_for_loop_unroll_shift_register() {
     "#;
 
     let mut sim = Simulator::builder(code, "Delay").build().unwrap();
-    let clk   = sim.event("i_clk");
+    let clk = sim.event("i_clk");
     let i_rst = sim.signal("i_rst");
-    let i_d   = sim.signal("i_d");
-    let o_d   = sim.signal("o_d");
+    let i_d = sim.signal("i_d");
+    let o_d = sim.signal("o_d");
 
     // Apply reset (AsyncLow default: rst=0 is active)
     sim.modify(|io| io.set(i_rst, 0u8)).unwrap();

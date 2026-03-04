@@ -1,5 +1,5 @@
-use std::fs;
 use celox::{SimulatorBuilder, veryl_test};
+use std::fs;
 
 veryl_test!("tests/macro_project");
 
@@ -43,6 +43,3 @@ fn test_macro_io_modify() {
     dut.tick();
     assert_eq!(dut.get_b(), 100);
 }
-
-
-

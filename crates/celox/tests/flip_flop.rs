@@ -1,5 +1,5 @@
-use insta::assert_snapshot;
 use celox::{BigUint, Simulation, Simulator, SimulatorBuilder};
+use insta::assert_snapshot;
 
 fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
     let result = SimulatorBuilder::new(code, top)
@@ -217,9 +217,7 @@ fn test_internal_generated_clock() {
             }
         }
     "#;
-    let mut simulation = Simulation::builder(code, "Top")
-        .build()
-        .unwrap();
+    let mut simulation = Simulation::builder(code, "Top").build().unwrap();
 
     let d = simulation.signal("d");
     let q = simulation.signal("q");
@@ -918,6 +916,3 @@ fn test_benchmark_loop_sir() {
     let output = trace.format_program().unwrap();
     assert_snapshot!("benchmark_loop_sir", output);
 }
-
-
-

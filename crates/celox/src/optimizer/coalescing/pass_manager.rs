@@ -23,11 +23,7 @@ impl ExecutionUnitPassManager {
         self.passes.push(Box::new(pass));
     }
 
-    pub(super) fn run(
-        &self,
-        eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-        options: &PassOptions,
-    ) {
+    pub(super) fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         for pass in &self.passes {
             let _ = pass.name();
             pass.run(eu, options);

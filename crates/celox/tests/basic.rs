@@ -1,5 +1,5 @@
-use insta::assert_snapshot;
 use celox::{Simulator, SimulatorBuilder};
+use insta::assert_snapshot;
 
 fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
     let result = SimulatorBuilder::new(code, top)
@@ -230,6 +230,3 @@ module ModuleA (
     let output = trace.format_program().unwrap();
     assert_snapshot!("rle_comb", output);
 }
-
-
-

@@ -57,7 +57,9 @@ pub fn split_if_needed(program: &mut Program, four_state: bool) {
     // estimate_units_cost call here.
     if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state) {
         program.eval_comb_plan = Some(crate::ir::EvalCombPlan::TailCallChunks(chunks));
-    } else if let Some(plan) = pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state) {
+    } else if let Some(plan) =
+        pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state)
+    {
         program.eval_comb_plan = Some(crate::ir::EvalCombPlan::MemorySpilled(plan));
     }
 }

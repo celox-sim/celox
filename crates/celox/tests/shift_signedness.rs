@@ -1,6 +1,6 @@
+use celox::{BigUint, Simulator, SimulatorBuilder};
 use num_traits::Num;
 use std::str::FromStr;
-use celox::{BigUint, Simulator, SimulatorBuilder};
 
 #[test]
 fn test_shift_right_arithmetic_native() {
@@ -228,6 +228,3 @@ fn test_shift_constant_folding_native() {
         "Native arithmetic constant folding failed"
     );
 }
-
-
-

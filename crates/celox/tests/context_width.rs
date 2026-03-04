@@ -383,6 +383,3 @@ fn test_runtime_arithmetic_shift_behavior() {
     // Arithmetic: 4'sb1000 >>> 2 = 4'sb1110 (14 or -2)
     assert_eq!(sim.get(o_a), 14u8.into());
 }
-
-
-

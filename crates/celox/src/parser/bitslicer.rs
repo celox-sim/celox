@@ -54,11 +54,7 @@ impl BitSlicer {
         &self.boundaries
     }
 
-    fn scan_declaration(
-        &mut self,
-        module: &Module,
-        decl: &Declaration,
-    ) -> Result<(), ParserError> {
+    fn scan_declaration(&mut self, module: &Module, decl: &Declaration) -> Result<(), ParserError> {
         if let Declaration::Comb(comb) = decl {
             for stmt in &comb.statements {
                 if let Statement::Assign(assign) = stmt {

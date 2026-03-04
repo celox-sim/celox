@@ -305,6 +305,3 @@ fn test_wide_context_addition_mixed_boundary() {
         "Mixed 64-bit + 1-bit addition should not truncate in 65-bit context"
     );
 }
-
-
-

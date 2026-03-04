@@ -99,8 +99,8 @@ pub fn eval_var_select(
         all_indices.len()
     };
 
-    for i in 0..limit {
-        if let Some(idx) = to_u(&all_indices[i]) {
+    for (i, index_val) in all_indices[..limit].iter().enumerate() {
+        if let Some(idx) = to_u(index_val) {
             if let Some(&stride) = strides.get(i) {
                 base_offset += idx * stride;
                 processed_count += 1;
@@ -276,7 +276,8 @@ pub fn build_partial_assign_expr(
 
     // mask = (1 << access_width) - 1  (all-ones of access_width bits)
     let mask_big = (BigUint::from(1u64) << access_width) - BigUint::from(1u64);
-    let mask_expr = Expression::create_value(Value::new_biguint(mask_big, total_width, false), token);
+    let mask_expr =
+        Expression::create_value(Value::new_biguint(mask_big, total_width, false), token);
 
     let ct = || Box::new(Comptime::create_unknown(token));
 
@@ -285,7 +286,12 @@ pub fn build_partial_assign_expr(
         mask_expr
     } else {
         let lsb_expr = Expression::create_value(Value::new(lsb as u64, total_width, false), token);
-        Expression::Binary(Box::new(mask_expr), Op::LogicShiftL, Box::new(lsb_expr), ct())
+        Expression::Binary(
+            Box::new(mask_expr),
+            Op::LogicShiftL,
+            Box::new(lsb_expr),
+            ct(),
+        )
     };
 
     // Build: ~shifted_mask

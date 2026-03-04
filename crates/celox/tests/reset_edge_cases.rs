@@ -239,6 +239,3 @@ fn test_nonzero_reset_value() {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x00u8.into()); // now captures d=0
 }
-
-
-

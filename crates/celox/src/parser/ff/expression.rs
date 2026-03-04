@@ -4,8 +4,9 @@ use crate::ir::{
     SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use crate::parser::{
-    ParserError, resolve_dims, resolve_shape_total,
+    ParserError,
     bitaccess::{eval_var_select, is_static_access},
+    resolve_dims, resolve_shape_total,
 };
 use malachite_bigint::BigUint;
 
@@ -856,7 +857,12 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context_width: Option<usize>,
     ) -> Result<(), ParserError> {
-        let parent_expr = Expression::Binary(Box::new(left.clone()), *op, Box::new(right.clone()), Box::new(Comptime::create_unknown(TokenRange::default())));
+        let parent_expr = Expression::Binary(
+            Box::new(left.clone()),
+            *op,
+            Box::new(right.clone()),
+            Box::new(Comptime::create_unknown(TokenRange::default())),
+        );
         if matches!(op, Op::LogicAnd) {
             self.parse_logic_op(
                 true, left, right, targets, domain, convert, sources, ir_builder,
@@ -1147,7 +1153,7 @@ impl<'a> FfParser<'a> {
 
     pub(super) fn parse_concatenation<A>(
         &mut self,
-        exprs: &Vec<(Expression, Option<Expression>)>,
+        exprs: &[(Expression, Option<Expression>)],
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,

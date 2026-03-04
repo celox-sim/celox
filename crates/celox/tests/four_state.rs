@@ -39,7 +39,11 @@ fn test_four_state_and_or() {
 
     let (v_or, m_or) = sim.get_four_state(id_y_or);
     assert_eq!(m_or, BigUint::from(1u32), "0 | X should have mask 1 (X)");
-    assert_eq!(v_or, BigUint::from(1u32), "0 | X should have value 1 (X encoding)");
+    assert_eq!(
+        v_or,
+        BigUint::from(1u32),
+        "0 | X should have value 1 (X encoding)"
+    );
 }
 
 #[test]
@@ -931,7 +935,10 @@ fn test_four_state_wide_shifts() {
     let (v_shr, m_shr) = sim.get_four_state(id_y_shr);
     // No normalization: value bits at X positions are preserved
     // Upper word val=0xAA stays; lower word 0x55 remains
-    assert_eq!(v_shr, (BigUint::from(0xAAu64) << 64) | BigUint::from(0x55u64));
+    assert_eq!(
+        v_shr,
+        (BigUint::from(0xAAu64) << 64) | BigUint::from(0x55u64)
+    );
     assert_eq!(m_shr, mask_a);
 
     // Case 2: Shift by 64 (entire word boundary)
@@ -1138,8 +1145,16 @@ fn test_four_state_mul_with_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "MUL with X should yield all-X mask");
-    assert_eq!(v, BigUint::from(0u32), "Value should be 0 after normalization");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "MUL with X should yield all-X mask"
+    );
+    assert_eq!(
+        v,
+        BigUint::from(0u32),
+        "Value should be 0 after normalization"
+    );
 }
 
 #[test]
@@ -1178,7 +1193,11 @@ fn test_four_state_div_with_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "DIV with X dividend should yield all-X");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "DIV with X dividend should yield all-X"
+    );
     assert_eq!(v, BigUint::from(0u32));
 }
 
@@ -1218,7 +1237,11 @@ fn test_four_state_mod_with_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "MOD with X divisor should yield all-X");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "MOD with X divisor should yield all-X"
+    );
     assert_eq!(v, BigUint::from(0u32));
 }
 
@@ -1443,7 +1466,11 @@ fn test_four_state_reduction_xor_with_x() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(1u32), "Reduction XOR with any X bit should yield X");
+    assert_eq!(
+        m,
+        BigUint::from(1u32),
+        "Reduction XOR with any X bit should yield X"
+    );
 }
 
 // ==========================================================================
@@ -1486,14 +1513,21 @@ fn test_four_state_65bit_boundary() {
     // AND: bit 64 of a is X, bit 64 of b is 1 → result bit 64 is X
     // Lower bits: 0xFF & 0x0F = 0x0F (no X); bit 64: 1 & 1 = 1 (but masked as X)
     let (v_and, m_and) = sim.get_four_state(id_y_and);
-    assert_eq!(m_and, BigUint::from(1u64) << 64, "AND: X bit should propagate at bit 64");
+    assert_eq!(
+        m_and,
+        BigUint::from(1u64) << 64,
+        "AND: X bit should propagate at bit 64"
+    );
     // bit 64 value = 1 & 1 = 1 (X position value preserved), lower = 0x0F
     assert_eq!(v_and, (BigUint::from(1u64) << 64) | BigUint::from(0x0Fu64));
 
     // ADD: any X → all-X (conservative), value is actual computation result
     let (v_add, m_add) = sim.get_four_state(id_y_add);
     let all_x_65 = (BigUint::from(1u64) << 65) - BigUint::from(1u64);
-    assert_eq!(m_add, all_x_65, "ADD with X should yield all-X mask for 65 bits");
+    assert_eq!(
+        m_add, all_x_65,
+        "ADD with X should yield all-X mask for 65 bits"
+    );
     // Without normalization, v contains Cranelift's actual addition result on the
     // X-encoded value bits (v=1 for X). The mask marks all bits as unknown, so the
     // value bits are don't-care from a simulation semantics perspective.
@@ -1538,7 +1572,11 @@ fn test_four_state_negation_with_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "Negation with X should yield all-X");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "Negation with X should yield all-X"
+    );
     assert_eq!(v, BigUint::from(0u32));
 }
 
@@ -1629,7 +1667,11 @@ fn test_four_state_sar_x_shift_amount() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "SAR by X amount should yield all-X");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "SAR by X amount should yield all-X"
+    );
     // Without normalization, v contains Cranelift's actual shift result: shift amount
     // (v=1) is masked by width-1 (7), giving 1. So 0x80 (signed) >>> 1 = 0xC0.
     // The mask marks all bits as unknown, so v is don't-care semantically.
@@ -1664,15 +1706,19 @@ fn test_four_state_concat_three_elements() {
     // a=0xA (X on all bits), b=0x5 (defined), c=0x3 (defined)
     sim.modify(|io: &mut IOContext| {
         io.set_four_state(id_a, BigUint::from(0xAu32), BigUint::from(0xFu32)); // a: all X
-        io.set_four_state(id_b, BigUint::from(0x5u32), BigUint::from(0u32));   // b: defined
-        io.set_four_state(id_c, BigUint::from(0x3u32), BigUint::from(0u32));   // c: defined
+        io.set_four_state(id_b, BigUint::from(0x5u32), BigUint::from(0u32)); // b: defined
+        io.set_four_state(id_c, BigUint::from(0x3u32), BigUint::from(0u32)); // c: defined
     })
     .unwrap();
 
     let (v, m) = sim.get_four_state(id_y);
     // y = {a, b, c} = {XXXX, 0101, 0011} → mask = 0xF00, value = 0xA53 (a value preserved)
     assert_eq!(m, BigUint::from(0xF00u32), "Only high nibble should be X");
-    assert_eq!(v, BigUint::from(0xA53u32), "Defined parts: b=5, c=3; a value preserved at 0xA");
+    assert_eq!(
+        v,
+        BigUint::from(0xA53u32),
+        "Defined parts: b=5, c=3; a value preserved at 0xA"
+    );
 }
 
 // ==========================================================================
@@ -1849,8 +1895,16 @@ fn test_four_state_width_widening_with_x() {
     let (v, m) = sim.get_four_state(id_y);
     // Upper byte: zero-extended → 0x00, mask 0x00
     // Lower byte: value 0xA5 (preserved, no normalization), mask 0x0F
-    assert_eq!(m, BigUint::from(0x0Fu32), "Only lower nibble X should propagate");
-    assert_eq!(v, BigUint::from(0xA5u32), "Value preserved at 0xA5 (no normalization)");
+    assert_eq!(
+        m,
+        BigUint::from(0x0Fu32),
+        "Only lower nibble X should propagate"
+    );
+    assert_eq!(
+        v,
+        BigUint::from(0xA5u32),
+        "Value preserved at 0xA5 (no normalization)"
+    );
 }
 
 // ==========================================================================
@@ -1908,7 +1962,11 @@ fn test_four_state_ff_conditional_with_x() {
     .unwrap();
     sim.tick(clk).unwrap();
     let (_, m_q) = sim.get_four_state(id_q);
-    assert_eq!(m_q, BigUint::from(0x0Fu32), "en=1: X from d should propagate to q");
+    assert_eq!(
+        m_q,
+        BigUint::from(0x0Fu32),
+        "en=1: X from d should propagate to q"
+    );
 
     // en=0, d changes → q should hold previous value (with X)
     sim.modify(|io: &mut IOContext| {
@@ -1918,7 +1976,11 @@ fn test_four_state_ff_conditional_with_x() {
     .unwrap();
     sim.tick(clk).unwrap();
     let (_, m_q) = sim.get_four_state(id_q);
-    assert_eq!(m_q, BigUint::from(0x0Fu32), "en=0: q should hold previous X mask");
+    assert_eq!(
+        m_q,
+        BigUint::from(0x0Fu32),
+        "en=0: q should hold previous X mask"
+    );
 }
 
 // ==========================================================================
@@ -1958,7 +2020,11 @@ fn test_four_state_concat_odd_width() {
     // value: a = 0b101 (bit 1 is X but val=0), b = 0x13
     // y_val = (0b101 << 5) | 0b10011 = 0b10110011 = 0xB3
     // Normalization: bit 6 val is already 0, so 0xB3 & ~0x40 = 0xB3
-    assert_eq!(v, BigUint::from(0xB3u32), "Concat value with X bit at position 6");
+    assert_eq!(
+        v,
+        BigUint::from(0xB3u32),
+        "Concat value with X bit at position 6"
+    );
 }
 
 // ==========================================================================
@@ -2115,16 +2181,28 @@ fn test_four_state_wide_reduction_with_x() {
 
     // Reduction AND: upper word bits 72-127 are definite 0 → dominant-value = definite 0
     let (_, m_rand) = sim.get_four_state(id_rand);
-    assert_eq!(m_rand, BigUint::from(0u32), "Wide &a with definite 0 bits should be defined (dominant-value)");
+    assert_eq!(
+        m_rand,
+        BigUint::from(0u32),
+        "Wide &a with definite 0 bits should be defined (dominant-value)"
+    );
 
     // Reduction OR: lower word has definite 1s → dominant-value = definite 1
     // IEEE 1800: |a = 1 if any bit is definite 1 (even if other bits are X)
     let (_, m_ror) = sim.get_four_state(id_ror);
-    assert_eq!(m_ror, BigUint::from(0u32), "Wide |a with definite 1 bits should be defined (dominant-value)");
+    assert_eq!(
+        m_ror,
+        BigUint::from(0u32),
+        "Wide |a with definite 1 bits should be defined (dominant-value)"
+    );
 
     // Reduction XOR: any X bit → result X
     let (_, m_rxor) = sim.get_four_state(id_rxor);
-    assert_eq!(m_rxor, BigUint::from(1u32), "Wide ^a with any X should be X");
+    assert_eq!(
+        m_rxor,
+        BigUint::from(1u32),
+        "Wide ^a with any X should be X"
+    );
 }
 
 // ==========================================================================
@@ -2160,7 +2238,11 @@ fn test_four_state_mux_both_branches_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "sel=1 selecting X branch → all-X");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "sel=1 selecting X branch → all-X"
+    );
     assert_eq!(v, BigUint::from(0u32));
 
     // sel=0 (defined), still selects b which is X
@@ -2169,7 +2251,11 @@ fn test_four_state_mux_both_branches_x() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "sel=0 selecting X branch → all-X");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "sel=0 selecting X branch → all-X"
+    );
 
     // sel=X, both branches X → definitely all-X
     sim.modify(|io: &mut IOContext| {
@@ -2232,7 +2318,11 @@ fn test_four_state_cascaded_mux_with_x() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_ne!(m, BigUint::from(0u32), "sel1=1,sel2=X → inner mux X propagates");
+    assert_ne!(
+        m,
+        BigUint::from(0u32),
+        "sel1=1,sel2=X → inner mux X propagates"
+    );
 
     // sel1=0 → c regardless of sel2
     sim.modify(|io: &mut IOContext| {
@@ -2274,7 +2364,11 @@ fn test_four_state_shift_both_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "Shift with X in both data and amount → all-X");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "Shift with X in both data and amount → all-X"
+    );
     // Without normalization, v contains Cranelift's actual shift result: shift amount
     // (v=3) is masked by width-1 (7), giving 3. So 0xFF >> 3 = 0x1F.
     // The mask marks all bits as unknown, so v is don't-care semantically.
@@ -2313,7 +2407,11 @@ fn test_four_state_case_defined_selector() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "Defined selector should produce defined result");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "Defined selector should produce defined result"
+    );
     assert_eq!(v, BigUint::from(20u32), "sel=1 should select value 20");
 }
 
@@ -2381,8 +2479,16 @@ fn test_four_state_reduction_or_dominant_one() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "Reduction OR with definite 1 should yield defined result");
-    assert_eq!(v, BigUint::from(1u32), "Reduction OR with definite 1 should yield 1");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "Reduction OR with definite 1 should yield defined result"
+    );
+    assert_eq!(
+        v,
+        BigUint::from(1u32),
+        "Reduction OR with definite 1 should yield 1"
+    );
 
     // Value = 0x00, Mask = 0x0F (lower nibble X, upper nibble all 0)
     // No definite 1 exists → result should be X
@@ -2391,7 +2497,11 @@ fn test_four_state_reduction_or_dominant_one() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(1u32), "Reduction OR with no definite 1 but X bits should yield X");
+    assert_eq!(
+        m,
+        BigUint::from(1u32),
+        "Reduction OR with no definite 1 but X bits should yield X"
+    );
 }
 
 #[test]
@@ -2419,8 +2529,16 @@ fn test_four_state_reduction_and_dominant_zero() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "Reduction AND with definite 0 should yield defined result");
-    assert_eq!(v, BigUint::from(0u32), "Reduction AND with definite 0 should yield 0");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "Reduction AND with definite 0 should yield defined result"
+    );
+    assert_eq!(
+        v,
+        BigUint::from(0u32),
+        "Reduction AND with definite 0 should yield 0"
+    );
 
     // Value = 0xF0, Mask = 0x0F (lower nibble X, upper nibble all 1)
     // All defined bits are 1, but X bits exist → result should be X
@@ -2429,7 +2547,11 @@ fn test_four_state_reduction_and_dominant_zero() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(1u32), "Reduction AND with no definite 0 but X bits should yield X");
+    assert_eq!(
+        m,
+        BigUint::from(1u32),
+        "Reduction AND with no definite 0 but X bits should yield X"
+    );
 }
 
 #[test]
@@ -2459,8 +2581,16 @@ fn test_four_state_wide_reduction_or_dominant() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "Wide reduction OR: definite 1 in any chunk → defined result");
-    assert_eq!(v, BigUint::from(1u32), "Wide reduction OR: definite 1 in any chunk → 1");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "Wide reduction OR: definite 1 in any chunk → defined result"
+    );
+    assert_eq!(
+        v,
+        BigUint::from(1u32),
+        "Wide reduction OR: definite 1 in any chunk → 1"
+    );
 }
 
 #[test]
@@ -2490,8 +2620,16 @@ fn test_four_state_wide_reduction_and_dominant() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "Wide reduction AND: definite 0 in any chunk → defined result");
-    assert_eq!(v, BigUint::from(0u32), "Wide reduction AND: definite 0 in any chunk → 0");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "Wide reduction AND: definite 0 in any chunk → defined result"
+    );
+    assert_eq!(
+        v,
+        BigUint::from(0u32),
+        "Wide reduction AND: definite 0 in any chunk → 0"
+    );
 }
 
 // ==========================================================================
@@ -2671,8 +2809,16 @@ fn test_four_state_eq_wildcard_value_at_wildcard_pos() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "==? with matching non-wildcard bits should be definite");
-    assert_eq!(v, BigUint::from(1u32), "==? with matching non-wildcard bits should be 1");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "==? with matching non-wildcard bits should be definite"
+    );
+    assert_eq!(
+        v,
+        BigUint::from(1u32),
+        "==? with matching non-wildcard bits should be 1"
+    );
 
     // LHS = 4'b1100 (definite), RHS = 4'b1x1x (mask=0b0101)
     // Non-wildcard positions: bit 1: LHS[1]=0, RHS[1]=1 → mismatch
@@ -2683,8 +2829,16 @@ fn test_four_state_eq_wildcard_value_at_wildcard_pos() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "==? with definite mismatch should be definite");
-    assert_eq!(v, BigUint::from(0u32), "==? with mismatch at non-wildcard should be 0");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "==? with definite mismatch should be definite"
+    );
+    assert_eq!(
+        v,
+        BigUint::from(0u32),
+        "==? with mismatch at non-wildcard should be 0"
+    );
 
     // LHS has X at non-wildcard position, no definite mismatch
     // LHS = 4'bxx10, RHS = 4'b1x1x → compare at bits 1,3
@@ -2697,7 +2851,11 @@ fn test_four_state_eq_wildcard_value_at_wildcard_pos() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_ne!(m, BigUint::from(0u32), "==? with LHS X at non-wildcard should be X");
+    assert_ne!(
+        m,
+        BigUint::from(0u32),
+        "==? with LHS X at non-wildcard should be X"
+    );
 
     // Definite mismatch takes priority over LHS X elsewhere
     // LHS = 4'bxx00, RHS = 4'b1x1x → compare at bits 1,3
@@ -2710,7 +2868,11 @@ fn test_four_state_eq_wildcard_value_at_wildcard_pos() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "==? with definite mismatch should be definite even with X elsewhere");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "==? with definite mismatch should be definite even with X elsewhere"
+    );
     assert_eq!(v, BigUint::from(0u32), "==? with definite mismatch = 0");
 }
 
@@ -2742,7 +2904,11 @@ fn test_four_state_ne_wildcard_value_at_wildcard_pos() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "!=? with all matching should be definite");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "!=? with all matching should be definite"
+    );
     assert_eq!(v, BigUint::from(0u32), "!=? with all matching = 0");
 
     // LHS = 4'b1100, RHS = 4'b1x1x → mismatch at bit 1
@@ -2753,7 +2919,11 @@ fn test_four_state_ne_wildcard_value_at_wildcard_pos() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0u32), "!=? with definite mismatch should be definite");
+    assert_eq!(
+        m,
+        BigUint::from(0u32),
+        "!=? with definite mismatch should be definite"
+    );
     assert_eq!(v, BigUint::from(1u32), "!=? with mismatch = 1");
 }
 
@@ -2991,7 +3161,11 @@ fn test_four_state_wide_ne_with_x() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(1u32), "Wide NE with X should yield X result");
+    assert_eq!(
+        m,
+        BigUint::from(1u32),
+        "Wide NE with X should yield X result"
+    );
 }
 
 // ==========================================================================
@@ -3036,7 +3210,11 @@ fn test_four_state_wide_gt_with_x() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(1u32), "Wide GT with X should yield X result");
+    assert_eq!(
+        m,
+        BigUint::from(1u32),
+        "Wide GT with X should yield X result"
+    );
 }
 
 // ==========================================================================
@@ -3132,9 +3310,17 @@ fn test_four_state_wide_signed_comparison_with_x() {
     .unwrap();
     let (v_lt, m_lt) = sim.get_four_state(id_lt);
     let (v_gt, m_gt) = sim.get_four_state(id_gt);
-    assert_eq!(v_lt, BigUint::from(1u32), "Wide signed: -1 < 1 should be true");
+    assert_eq!(
+        v_lt,
+        BigUint::from(1u32),
+        "Wide signed: -1 < 1 should be true"
+    );
     assert_eq!(m_lt, BigUint::from(0u32));
-    assert_eq!(v_gt, BigUint::from(0u32), "Wide signed: -1 > 1 should be false");
+    assert_eq!(
+        v_gt,
+        BigUint::from(0u32),
+        "Wide signed: -1 > 1 should be false"
+    );
     assert_eq!(m_gt, BigUint::from(0u32));
 
     // One has X → all comparisons yield X
@@ -3147,10 +3333,26 @@ fn test_four_state_wide_signed_comparison_with_x() {
     let (_, m_gt) = sim.get_four_state(id_gt);
     let (_, m_le) = sim.get_four_state(id_le);
     let (_, m_ge) = sim.get_four_state(id_ge);
-    assert_eq!(m_lt, BigUint::from(1u32), "Wide signed LT with X should yield X");
-    assert_eq!(m_gt, BigUint::from(1u32), "Wide signed GT with X should yield X");
-    assert_eq!(m_le, BigUint::from(1u32), "Wide signed LE with X should yield X");
-    assert_eq!(m_ge, BigUint::from(1u32), "Wide signed GE with X should yield X");
+    assert_eq!(
+        m_lt,
+        BigUint::from(1u32),
+        "Wide signed LT with X should yield X"
+    );
+    assert_eq!(
+        m_gt,
+        BigUint::from(1u32),
+        "Wide signed GT with X should yield X"
+    );
+    assert_eq!(
+        m_le,
+        BigUint::from(1u32),
+        "Wide signed LE with X should yield X"
+    );
+    assert_eq!(
+        m_ge,
+        BigUint::from(1u32),
+        "Wide signed GE with X should yield X"
+    );
 }
 
 // ==========================================================================
@@ -3200,7 +3402,11 @@ fn test_four_state_wide_logical_not_with_x() {
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(1u32), "Wide logical NOT with X should yield X");
+    assert_eq!(
+        m,
+        BigUint::from(1u32),
+        "Wide logical NOT with X should yield X"
+    );
 }
 
 // ==========================================================================
@@ -3252,11 +3458,19 @@ fn test_four_state_concat_chunk_boundary_x() {
     // c at bits [47:0] should be preserved
     let lower_48_mask = (BigUint::from(1u64) << 48) - BigUint::from(1u32);
     let v_c = &v & &lower_48_mask;
-    assert_eq!(v_c, BigUint::from(0xABCDEF012345u64), "Lower 48 bits from c should be intact");
+    assert_eq!(
+        v_c,
+        BigUint::from(0xABCDEF012345u64),
+        "Lower 48 bits from c should be intact"
+    );
 
     // a at bits [127:80] should be preserved (after normalization, b's value bits are 0)
     let v_a = &v >> 80;
-    assert_eq!(v_a, BigUint::from(0x123456789ABCu64), "Upper 48 bits from a should be intact");
+    assert_eq!(
+        v_a,
+        BigUint::from(0x123456789ABCu64),
+        "Upper 48 bits from a should be intact"
+    );
 }
 
 // ==========================================================================
@@ -3346,8 +3560,16 @@ fn test_four_state_ff_sync_reset_with_x() {
     .unwrap();
     sim.tick(clk).unwrap();
     let (v_q, m_q) = sim.get_four_state(id_q);
-    assert_eq!(v_q, BigUint::from(0u32), "Second sync reset should set q to 0");
-    assert_eq!(m_q, BigUint::from(0u32), "Second sync reset should clear all X");
+    assert_eq!(
+        v_q,
+        BigUint::from(0u32),
+        "Second sync reset should set q to 0"
+    );
+    assert_eq!(
+        m_q,
+        BigUint::from(0u32),
+        "Second sync reset should clear all X"
+    );
 }
 
 // ==========================================================================
@@ -3378,7 +3600,11 @@ fn test_four_state_explicit_cast_with_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(v, BigUint::from(0x80u32), "Signed→unsigned: value preserved");
+    assert_eq!(
+        v,
+        BigUint::from(0x80u32),
+        "Signed→unsigned: value preserved"
+    );
     assert_eq!(m, BigUint::from(0u32), "Signed→unsigned: no X");
 
     // a = 0x7F (+127 signed), no X
@@ -3387,7 +3613,11 @@ fn test_four_state_explicit_cast_with_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(v, BigUint::from(0x7Fu32), "Signed→unsigned: positive value preserved");
+    assert_eq!(
+        v,
+        BigUint::from(0x7Fu32),
+        "Signed→unsigned: positive value preserved"
+    );
     assert_eq!(m, BigUint::from(0u32));
 
     // a has X in sign bit (bit 7): X should propagate to output
@@ -3408,7 +3638,11 @@ fn test_four_state_explicit_cast_with_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0x0Fu32), "Signed→unsigned: X in lower bits preserved");
+    assert_eq!(
+        m,
+        BigUint::from(0x0Fu32),
+        "Signed→unsigned: X in lower bits preserved"
+    );
     assert_eq!(
         v,
         BigUint::from(0xA0u32),
@@ -3421,7 +3655,11 @@ fn test_four_state_explicit_cast_with_x() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "Signed→unsigned: all Z/X propagated");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "Signed→unsigned: all Z/X propagated"
+    );
     assert_eq!(v, BigUint::from(0u32), "Signed→unsigned: value preserved");
 }
 
@@ -3442,7 +3680,11 @@ fn test_z_literal_passthrough() {
         .unwrap();
     let y = sim.signal("y");
     let (v, m) = sim.get_four_state(y);
-    assert_eq!(m, BigUint::from(0xFFu32), "Z literal: all bits should have mask=1");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "Z literal: all bits should have mask=1"
+    );
     assert_eq!(v, BigUint::from(0x00u32), "Z literal: Z encoding has v=0");
 }
 
@@ -3478,7 +3720,11 @@ fn test_z_mux_tristate_pattern() {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
-    assert_eq!(m, BigUint::from(0xFFu32), "en=0: y should be all Z (mask=0xFF)");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "en=0: y should be all Z (mask=0xFF)"
+    );
     assert_eq!(v, BigUint::from(0x00u32), "en=0: Z encoding has v=0");
 }
 
@@ -3495,6 +3741,10 @@ fn test_x_literal_encoding() {
         .unwrap();
     let y = sim.signal("y");
     let (v, m) = sim.get_four_state(y);
-    assert_eq!(m, BigUint::from(0xFFu32), "X literal: all bits should have mask=1");
+    assert_eq!(
+        m,
+        BigUint::from(0xFFu32),
+        "X literal: all bits should have mask=1"
+    );
     assert_eq!(v, BigUint::from(0xFFu32), "X literal: X encoding has v=1");
 }

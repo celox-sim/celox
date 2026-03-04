@@ -18,26 +18,26 @@
  * a correctly-typed DUT accessor.
  */
 export interface ModuleDefinition<Ports = Record<string, unknown>> {
-  readonly __celox_module: true;
-  readonly name: string;
-  readonly source: string;
-  readonly ports: Record<string, PortInfo>;
-  readonly events: string[];
-  /** Absolute path to the Veryl project directory (set by Vite plugin). */
-  readonly projectPath?: string;
-  /** Phantom field — never set at runtime. Carries the `Ports` type. */
-  readonly __ports?: Ports;
+	readonly __celox_module: true;
+	readonly name: string;
+	readonly source: string;
+	readonly ports: Record<string, PortInfo>;
+	readonly events: string[];
+	/** Absolute path to the Veryl project directory (set by Vite plugin). */
+	readonly projectPath?: string;
+	/** Phantom field — never set at runtime. Carries the `Ports` type. */
+	readonly __ports?: Ports;
 }
 
 /** Metadata for a single port / interface member. */
 export interface PortInfo {
-  readonly direction: "input" | "output" | "inout";
-  readonly type: "clock" | "reset" | "logic" | "bit";
-  readonly width: number;
-  readonly arrayDims?: readonly number[];
-  readonly is4state?: boolean;
-  /** Nested interface members (recursive). */
-  readonly interface?: Record<string, PortInfo>;
+	readonly direction: "input" | "output" | "inout";
+	readonly type: "clock" | "reset" | "logic" | "bit";
+	readonly width: number;
+	readonly arrayDims?: readonly number[];
+	readonly is4state?: boolean;
+	/** Nested interface members (recursive). */
+	readonly interface?: Record<string, PortInfo>;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,19 +49,19 @@ export interface PortInfo {
  * @internal
  */
 export interface SignalLayout {
-  /** Byte offset within the STABLE region. */
-  readonly offset: number;
-  /** Bit width of the signal. */
-  readonly width: number;
-  /** Number of bytes occupied (ceil(width/8)). */
-  readonly byteSize: number;
-  /** If true, an equal-sized mask follows immediately after the value. */
-  readonly is4state: boolean;
-  readonly direction: "input" | "output" | "inout";
-  /** The Veryl type kind (e.g. "clock", "reset_async_high", "logic"). */
-  readonly typeKind?: string;
-  /** For reset signals, the name of the associated clock (from FfDeclaration). */
-  readonly associatedClock?: string;
+	/** Byte offset within the STABLE region. */
+	readonly offset: number;
+	/** Bit width of the signal. */
+	readonly width: number;
+	/** Number of bytes occupied (ceil(width/8)). */
+	readonly byteSize: number;
+	/** If true, an equal-sized mask follows immediately after the value. */
+	readonly is4state: boolean;
+	readonly direction: "input" | "output" | "inout";
+	/** The Veryl type kind (e.g. "clock", "reset_async_high", "logic"). */
+	readonly typeKind?: string;
+	/** For reset signals, the name of the associated clock (from FfDeclaration). */
+	readonly associatedClock?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,11 +73,11 @@ export interface SignalLayout {
  * @internal
  */
 export interface NativeSimulatorHandle {
-  tick(eventId: number): void;
-  tickN(eventId: number, count: number): void;
-  evalComb(): void;
-  dump(timestamp: number): void;
-  dispose(): void;
+	tick(eventId: number): void;
+	tickN(eventId: number, count: number): void;
+	evalComb(): void;
+	dump(timestamp: number): void;
+	dispose(): void;
 }
 
 /**
@@ -85,15 +85,15 @@ export interface NativeSimulatorHandle {
  * @internal
  */
 export interface NativeSimulationHandle {
-  addClock(eventId: number, period: number, initialDelay: number): void;
-  schedule(eventId: number, time: number, value: number): void;
-  runUntil(endTime: number): void;
-  step(): number | null;
-  time(): number;
-  nextEventTime(): number | null;
-  evalComb(): void;
-  dump(timestamp: number): void;
-  dispose(): void;
+	addClock(eventId: number, period: number, initialDelay: number): void;
+	schedule(eventId: number, time: number, value: number): void;
+	runUntil(endTime: number): void;
+	step(): number | null;
+	time(): number;
+	nextEventTime(): number | null;
+	evalComb(): void;
+	dump(timestamp: number): void;
+	dispose(): void;
 }
 
 /**
@@ -107,16 +107,16 @@ export type NativeHandle = NativeSimulatorHandle | NativeSimulationHandle;
  * @internal
  */
 export interface CreateResult<H extends NativeHandle = NativeHandle> {
-  /** The simulator's internal memory buffer shared zero-copy. */
-  readonly buffer: ArrayBuffer | SharedArrayBuffer;
-  /** Per-signal byte layout within `buffer`. */
-  readonly layout: Record<string, SignalLayout>;
-  /** Event name → internal event ID mapping. */
-  readonly events: Record<string, number>;
-  /** Native control handle. */
-  readonly handle: H;
-  /** Full instance hierarchy (optional — present when NAPI provides it). */
-  readonly hierarchy?: import("./napi-helpers.js").HierarchyNode;
+	/** The simulator's internal memory buffer shared zero-copy. */
+	readonly buffer: ArrayBuffer | SharedArrayBuffer;
+	/** Per-signal byte layout within `buffer`. */
+	readonly layout: Record<string, SignalLayout>;
+	/** Event name → internal event ID mapping. */
+	readonly events: Record<string, number>;
+	/** Native control handle. */
+	readonly handle: H;
+	/** Full instance hierarchy (optional — present when NAPI provides it). */
+	readonly hierarchy?: import("./napi-helpers.js").HierarchyNode;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,30 +124,30 @@ export interface CreateResult<H extends NativeHandle = NativeHandle> {
 // ---------------------------------------------------------------------------
 
 export interface SimulatorOptions {
-  /** Enable 4-state (X) simulation. Default: false. */
-  fourState?: boolean;
-  /** Path to write VCD waveform output. */
-  vcd?: string;
-  /** Enable Cranelift optimization passes. */
-  optimize?: boolean;
-  /** False-loop declarations to ignore during compilation. */
-  falseLoops?: LoopBreak[];
-  /** True-loop declarations with convergence limits. */
-  trueLoops?: TrueLoopSpec[];
-  /** Clock polarity. Default: "posedge". */
-  clockType?: "posedge" | "negedge";
-  /** Reset type. Default: "async_low". */
-  resetType?: "async_high" | "async_low" | "sync_high" | "sync_low";
-  /** Additional Veryl source to append to the main source code. */
-  extraSource?: string;
-  /** Top-level module parameter overrides. */
-  parameters?: ParamOverride[];
+	/** Enable 4-state (X) simulation. Default: false. */
+	fourState?: boolean;
+	/** Path to write VCD waveform output. */
+	vcd?: string;
+	/** Enable Cranelift optimization passes. */
+	optimize?: boolean;
+	/** False-loop declarations to ignore during compilation. */
+	falseLoops?: LoopBreak[];
+	/** True-loop declarations with convergence limits. */
+	trueLoops?: TrueLoopSpec[];
+	/** Clock polarity. Default: "posedge". */
+	clockType?: "posedge" | "negedge";
+	/** Reset type. Default: "async_low". */
+	resetType?: "async_high" | "async_low" | "sync_high" | "sync_low";
+	/** Additional Veryl source to append to the main source code. */
+	extraSource?: string;
+	/** Top-level module parameter overrides. */
+	parameters?: ParamOverride[];
 }
 
 /** A parameter override for a top-level module parameter. */
 export interface ParamOverride {
-  name: string;
-  value: number | bigint;
+	name: string;
+	value: number | bigint;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,8 +156,8 @@ export interface ParamOverride {
 
 /** A resolved event reference for use with `tick()`. */
 export interface EventHandle {
-  readonly name: string;
-  readonly id: number;
+	readonly name: string;
+	readonly id: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,25 +169,25 @@ export const X = Symbol.for("veryl:X");
 
 /** A 4-state value with explicit bit-level mask. */
 export interface FourStateValue {
-  readonly __fourState: true;
-  readonly value: bigint;
-  readonly mask: bigint;
+	readonly __fourState: true;
+	readonly value: bigint;
+	readonly mask: bigint;
 }
 
 /** Construct a 4-state value. Mask bits set to 1 indicate X. */
 export function FourState(
-  value: number | bigint,
-  mask: number | bigint,
+	value: number | bigint,
+	mask: number | bigint,
 ): FourStateValue {
-  return { __fourState: true, value: BigInt(value), mask: BigInt(mask) };
+	return { __fourState: true, value: BigInt(value), mask: BigInt(mask) };
 }
 
 export function isFourStateValue(v: unknown): v is FourStateValue {
-  return (
-    typeof v === "object" &&
-    v !== null &&
-    (v as FourStateValue).__fourState === true
-  );
+	return (
+		typeof v === "object" &&
+		v !== null &&
+		(v as FourStateValue).__fourState === true
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,15 +198,15 @@ export function isFourStateValue(v: unknown): v is FourStateValue {
  * Thrown when a simulation helper exceeds its step budget.
  */
 export class SimulationTimeoutError extends Error {
-  readonly time: number;
-  readonly steps: number;
+	readonly time: number;
+	readonly steps: number;
 
-  constructor(message: string, time: number, steps: number) {
-    super(message);
-    this.name = "SimulationTimeoutError";
-    this.time = time;
-    this.steps = steps;
-  }
+	constructor(message: string, time: number, steps: number) {
+		super(message);
+		this.name = "SimulationTimeoutError";
+		this.time = time;
+		this.steps = steps;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -215,11 +215,11 @@ export class SimulationTimeoutError extends Error {
 
 /** Specifies a false-loop to ignore during compilation. */
 export interface LoopBreak {
-  from: string;
-  to: string;
+	from: string;
+	to: string;
 }
 
 /** Specifies a true-loop with a convergence iteration limit. */
 export interface TrueLoopSpec extends LoopBreak {
-  maxIter: number;
+	maxIter: number;
 }

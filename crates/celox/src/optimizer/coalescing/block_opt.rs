@@ -252,9 +252,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
         let mut details: Vec<StoreInfo> = Vec::new();
 
         for &idx in &indices {
-            if let SIRInstruction::Store(_, SIROffset::Static(o), w, s, t) =
-                &instructions[idx]
-            {
+            if let SIRInstruction::Store(_, SIROffset::Static(o), w, s, t) = &instructions[idx] {
                 details.push(StoreInfo {
                     offset: *o,
                     width: *w,
@@ -273,10 +271,10 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
             let mut expected_next_offset =
                 details[segment_start].offset + details[segment_start].width;
 
-            for k in (segment_start + 1)..details.len() {
-                if details[k].offset == expected_next_offset {
+            for (k, detail) in details.iter().enumerate().skip(segment_start + 1) {
+                if detail.offset == expected_next_offset {
                     segment_end = k;
-                    expected_next_offset += details[k].width;
+                    expected_next_offset += detail.width;
                 } else {
                     break;
                 }
@@ -300,8 +298,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                     if s.index == insert_at_index {
                         continue;
                     }
-                    for check_idx in (s.index + 1)..=insert_at_index {
-                        let inst = &instructions[check_idx];
+                    for inst in &instructions[(s.index + 1)..=insert_at_index] {
                         if let SIRInstruction::Load(_, a, SIROffset::Static(o), w) = inst
                             && *a == addr
                         {
@@ -339,15 +336,16 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                         replaced_indices.insert(s.index);
                     }
 
-                    let mut new_ops = Vec::new();
-                    new_ops.push(SIRInstruction::Concat(new_reg_id, args));
-                    new_ops.push(SIRInstruction::Store(
-                        addr.clone(),
-                        SIROffset::Static(start_offset),
-                        total_width,
-                        new_reg_id,
-                        triggers,
-                    ));
+                    let new_ops = vec![
+                        SIRInstruction::Concat(new_reg_id, args),
+                        SIRInstruction::Store(
+                            addr.clone(),
+                            SIROffset::Static(start_offset),
+                            total_width,
+                            new_reg_id,
+                            triggers,
+                        ),
+                    ];
 
                     insertions
                         .entry(insert_at_index)
@@ -365,9 +363,9 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     }
 
     let mut new_instructions = Vec::with_capacity(instructions.len());
-    for i in 0..instructions.len() {
+    for (i, inst) in instructions.iter().enumerate() {
         if !replaced_indices.contains(&i) {
-            new_instructions.push(instructions[i].clone());
+            new_instructions.push(inst.clone());
         }
         if let Some(ops) = insertions.remove(&i) {
             new_instructions.extend(ops);
@@ -587,7 +585,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
     }
 
     let mut out = Vec::with_capacity(instructions.len() * 2);
-    for i in 0..instructions.len() {
+    for (i, inst) in instructions.iter().enumerate() {
         if let Some(ops) = insertions.remove(&i) {
             out.extend(ops);
         }
@@ -595,7 +593,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
         if let Some(ops) = replacements.remove(&i) {
             out.extend(ops);
         } else {
-            out.push(instructions[i].clone());
+            out.push(inst.clone());
         }
     }
 

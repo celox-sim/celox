@@ -1,6 +1,6 @@
+use celox::{InstanceHierarchy, NamedEvent, NamedSignal, PortTypeKind, get_byte_size};
 use serde::Serialize;
 use std::collections::HashMap;
-use celox::{InstanceHierarchy, NamedEvent, NamedSignal, PortTypeKind, get_byte_size};
 
 /// Layout information for a single signal, serialized to JS.
 #[derive(Debug, Clone, Serialize)]
@@ -53,8 +53,7 @@ fn build_signal_layout_entry(ns: &NamedSignal, four_state_mode: bool) -> SignalL
     let (width, array_dims) = if ns.info.array_dims.is_empty() {
         (ns.signal.width, vec![])
     } else {
-        let element_width = ns.signal.width
-            / ns.info.array_dims.iter().product::<usize>();
+        let element_width = ns.signal.width / ns.info.array_dims.iter().product::<usize>();
         (element_width, ns.info.array_dims.clone())
     };
 
@@ -74,10 +73,16 @@ fn build_signal_layout_entry(ns: &NamedSignal, four_state_mode: bool) -> SignalL
 ///
 /// `four_state_mode`: whether the simulator is running in 4-state mode.
 /// When false, `is_4state` is always reported as false (no mask space exists).
-pub fn build_signal_layout(signals: &[NamedSignal], four_state_mode: bool) -> HashMap<String, SignalLayout> {
+pub fn build_signal_layout(
+    signals: &[NamedSignal],
+    four_state_mode: bool,
+) -> HashMap<String, SignalLayout> {
     let mut map = HashMap::new();
     for ns in signals {
-        map.insert(ns.name.clone(), build_signal_layout_entry(ns, four_state_mode));
+        map.insert(
+            ns.name.clone(),
+            build_signal_layout_entry(ns, four_state_mode),
+        );
     }
     map
 }

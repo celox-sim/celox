@@ -47,9 +47,16 @@ pub fn estimate_clif_cost(
                     BinaryOp::Add | BinaryOp::Sub => 5,
                     BinaryOp::Mul => 5,
                     BinaryOp::Div | BinaryOp::Rem => 10,
-                    BinaryOp::Eq | BinaryOp::Ne | BinaryOp::LtU | BinaryOp::LtS
-                    | BinaryOp::LeU | BinaryOp::LeS | BinaryOp::GtU | BinaryOp::GtS
-                    | BinaryOp::GeU | BinaryOp::GeS => 4,
+                    BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::LtU
+                    | BinaryOp::LtS
+                    | BinaryOp::LeU
+                    | BinaryOp::LeS
+                    | BinaryOp::GtU
+                    | BinaryOp::GtS
+                    | BinaryOp::GeU
+                    | BinaryOp::GeS => 4,
                     _ => 3,
                 };
                 base * state_mul
@@ -75,9 +82,16 @@ pub fn estimate_clif_cost(
                     // Div/Rem: trial division O(n²), ~640*nc² + 384*nc
                     BinaryOp::Div | BinaryOp::Rem => 640 * nc * nc + 384 * nc,
                     // Comparisons: ~3 per chunk
-                    BinaryOp::Eq | BinaryOp::Ne | BinaryOp::LtU | BinaryOp::LtS
-                    | BinaryOp::LeU | BinaryOp::LeS | BinaryOp::GtU | BinaryOp::GtS
-                    | BinaryOp::GeU | BinaryOp::GeS => 3 * nc,
+                    BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::LtU
+                    | BinaryOp::LtS
+                    | BinaryOp::LeU
+                    | BinaryOp::LeS
+                    | BinaryOp::GtU
+                    | BinaryOp::GtS
+                    | BinaryOp::GeU
+                    | BinaryOp::GeS => 3 * nc,
                     _ => nc,
                 };
                 base * state_mul
@@ -158,10 +172,7 @@ pub fn estimate_clif_cost(
 }
 
 /// Estimate the total CLIF cost for an entire execution unit.
-pub fn estimate_eu_cost(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    four_state: bool,
-) -> usize {
+pub fn estimate_eu_cost(eu: &ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> usize {
     let state_mul = if four_state { 2 } else { 1 };
     let mut cost = 0usize;
     for block in eu.blocks.values() {
@@ -187,7 +198,10 @@ pub fn estimate_units_cost(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     four_state: bool,
 ) -> usize {
-    units.iter().map(|eu| estimate_eu_cost(eu, four_state)).sum()
+    units
+        .iter()
+        .map(|eu| estimate_eu_cost(eu, four_state))
+        .sum()
 }
 
 #[cfg(test)]
@@ -196,14 +210,20 @@ mod tests {
 
     #[test]
     fn test_threshold_constant() {
-        assert!(CLIF_INST_THRESHOLD < 16_000_000);
-        assert!(CLIF_INST_THRESHOLD > 4_000_000);
+        const _: () = assert!(CLIF_INST_THRESHOLD < 16_000_000);
+        const _: () = assert!(CLIF_INST_THRESHOLD > 4_000_000);
     }
 
     #[test]
     fn test_estimate_imm_cost() {
         let mut register_map = HashMap::default();
-        register_map.insert(RegisterId(0), RegisterType::Bit { width: 32, signed: false });
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 32,
+                signed: false,
+            },
+        );
 
         let inst: SIRInstruction<RegionedAbsoluteAddr> =
             SIRInstruction::Imm(RegisterId(0), SIRValue::new(42u64));
@@ -218,46 +238,112 @@ mod tests {
     fn test_shift_linear_cost_above_threshold() {
         let mut register_map = HashMap::default();
         // 4096-bit register → 64 chunks (above MEM_SHIFT_THRESHOLD)
-        register_map.insert(RegisterId(0), RegisterType::Bit { width: 4096, signed: false });
-        register_map.insert(RegisterId(1), RegisterType::Bit { width: 4096, signed: false });
-        register_map.insert(RegisterId(2), RegisterType::Bit { width: 64, signed: false });
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 4096,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(1),
+            RegisterType::Bit {
+                width: 4096,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(2),
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
 
         let inst: SIRInstruction<RegionedAbsoluteAddr> =
             SIRInstruction::Binary(RegisterId(0), RegisterId(1), BinaryOp::Shl, RegisterId(2));
         let cost = estimate_clif_cost(&inst, &register_map, false);
         // Memory-backed: 10*64 + 20 = 660 (linear, not quadratic)
-        assert!(cost < 1_000, "Shift cost for 4096-bit should be linear (<1K), got {cost}");
-        assert!(cost > 500, "Shift cost for 4096-bit should be >500, got {cost}");
+        assert!(
+            cost < 1_000,
+            "Shift cost for 4096-bit should be linear (<1K), got {cost}"
+        );
+        assert!(
+            cost > 500,
+            "Shift cost for 4096-bit should be >500, got {cost}"
+        );
     }
 
     #[test]
     fn test_shift_quadratic_cost_below_threshold() {
         let mut register_map = HashMap::default();
         // 128-bit register → 2 chunks (below MEM_SHIFT_THRESHOLD)
-        register_map.insert(RegisterId(0), RegisterType::Bit { width: 128, signed: false });
-        register_map.insert(RegisterId(1), RegisterType::Bit { width: 128, signed: false });
-        register_map.insert(RegisterId(2), RegisterType::Bit { width: 64, signed: false });
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 128,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(1),
+            RegisterType::Bit {
+                width: 128,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(2),
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
 
         let inst: SIRInstruction<RegionedAbsoluteAddr> =
             SIRInstruction::Binary(RegisterId(0), RegisterId(1), BinaryOp::Shl, RegisterId(2));
         let cost = estimate_clif_cost(&inst, &register_map, false);
         // Register-based: 5*2² + 7*2 + 5 = 20 + 14 + 5 = 39
-        assert!(cost > 30, "Shift cost for 128-bit should be >30, got {cost}");
+        assert!(
+            cost > 30,
+            "Shift cost for 128-bit should be >30, got {cost}"
+        );
     }
 
     #[test]
     fn test_comparison_uses_operand_width() {
         let mut register_map = HashMap::default();
         // Comparison: 1-bit result, but 4096-bit operands
-        register_map.insert(RegisterId(0), RegisterType::Bit { width: 1, signed: false });
-        register_map.insert(RegisterId(1), RegisterType::Bit { width: 4096, signed: false });
-        register_map.insert(RegisterId(2), RegisterType::Bit { width: 4096, signed: false });
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(1),
+            RegisterType::Bit {
+                width: 4096,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(2),
+            RegisterType::Bit {
+                width: 4096,
+                signed: false,
+            },
+        );
 
         // Shr with common_logical_width = max(1, 4096, 4096) = 4096
         let inst: SIRInstruction<RegionedAbsoluteAddr> =
             SIRInstruction::Binary(RegisterId(0), RegisterId(1), BinaryOp::Shr, RegisterId(2));
         let cost = estimate_clif_cost(&inst, &register_map, false);
         // Memory-backed linear cost, but should still be non-trivial
-        assert!(cost > 100, "Shr with 4096-bit operands should be >100, got {cost}");
+        assert!(
+            cost > 100,
+            "Shr with 4096-bit operands should be >100, got {cost}"
+        );
     }
 }

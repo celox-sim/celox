@@ -99,9 +99,7 @@ impl JitBackend {
             Some(crate::ir::EvalCombPlan::TailCallChunks(chunks)) => {
                 engine.compile_chunks(chunks, pre_clif_ptr, post_clif_ptr, native_ptr)
             }
-            None => {
-                engine.compile_units(&sir.eval_comb, pre_clif_ptr, post_clif_ptr, native_ptr)
-            }
+            None => engine.compile_units(&sir.eval_comb, pre_clif_ptr, post_clif_ptr, native_ptr),
         };
 
         if let Some(t) = trace.as_deref_mut() {
@@ -285,8 +283,7 @@ impl JitBackend {
                 if is_4state {
                     let allocated_size = super::get_byte_size(width);
                     unsafe {
-                        let base_ptr =
-                            (backend.memory.as_mut_ptr() as *mut u8).add(offset);
+                        let base_ptr = (backend.memory.as_mut_ptr() as *mut u8).add(offset);
                         // X = (v=1, m=1): fill both value and mask with 0xFF
                         std::ptr::write_bytes(base_ptr, 0xFF, allocated_size);
                         let mask_ptr = base_ptr.add(allocated_size);
@@ -306,8 +303,7 @@ impl JitBackend {
                 if is_4state {
                     let allocated_size = super::get_byte_size(width);
                     unsafe {
-                        let base_ptr =
-                            (backend.memory.as_mut_ptr() as *mut u8).add(offset);
+                        let base_ptr = (backend.memory.as_mut_ptr() as *mut u8).add(offset);
                         // X = (v=1, m=1): fill both value and mask with 0xFF
                         std::ptr::write_bytes(base_ptr, 0xFF, allocated_size);
                         let mask_ptr = base_ptr.add(allocated_size);

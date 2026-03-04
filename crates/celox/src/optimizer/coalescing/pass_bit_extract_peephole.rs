@@ -1,7 +1,7 @@
+use super::pass_manager::ExecutionUnitPass;
 use crate::HashMap;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
-use super::pass_manager::ExecutionUnitPass;
 
 pub(super) struct BitExtractPeepholePass;
 
@@ -39,16 +39,8 @@ fn mask_width(mask_val: u64) -> Option<usize> {
     // mask_val must be a contiguous run of 1-bits from bit 0
     // i.e. mask_val + 1 must be a power of 2 (or mask_val == u64::MAX for w=64)
     let w = mask_val.count_ones() as usize;
-    let expected = if w >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << w) - 1
-    };
-    if mask_val == expected {
-        Some(w)
-    } else {
-        None
-    }
+    let expected = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+    if mask_val == expected { Some(w) } else { None }
 }
 
 fn optimize_bit_extracts(
@@ -143,17 +135,13 @@ fn optimize_bit_extracts(
             continue;
         }
 
-        let new_load = SIRInstruction::Load(
-            *r_result,
-            addr.clone(),
-            SIROffset::Static(base + k),
-            w,
-        );
+        let new_load = SIRInstruction::Load(*r_result, *addr, SIROffset::Static(base + k), w);
 
-        let mut dead = Vec::new();
-        dead.push(shifted_def_idx); // Shr instruction
-        dead.push(shift_def_idx); // Imm(K)
-        dead.push(mask_def_idx); // Imm(mask)
+        let dead = vec![
+            shifted_def_idx, // Shr instruction
+            shift_def_idx,   // Imm(K)
+            mask_def_idx,    // Imm(mask)
+        ];
 
         replacements.push(Replacement {
             and_idx: idx,
@@ -235,16 +223,10 @@ fn optimize_bit_extracts(
             if use_count.get(&def_reg).copied().unwrap_or(0) == 0 {
                 // Also decrement use counts for operands of this dead instruction
                 if let SIRInstruction::Binary(_, lhs, _, rhs) = &instructions[dead_idx] {
-                    *use_count.entry(*lhs).or_default() = use_count
-                        .get(lhs)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_sub(1);
-                    *use_count.entry(*rhs).or_default() = use_count
-                        .get(rhs)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_sub(1);
+                    *use_count.entry(*lhs).or_default() =
+                        use_count.get(lhs).copied().unwrap_or(0).saturating_sub(1);
+                    *use_count.entry(*rhs).or_default() =
+                        use_count.get(rhs).copied().unwrap_or(0).saturating_sub(1);
                 }
                 dead_set.insert(dead_idx);
             }
@@ -256,7 +238,12 @@ fn optimize_bit_extracts(
         HashMap::default();
     for repl in replacements {
         replacement_map.insert(repl.and_idx, repl.load_inst);
-        register_map.insert(repl.result_reg, RegisterType::Logic { width: repl.result_width });
+        register_map.insert(
+            repl.result_reg,
+            RegisterType::Logic {
+                width: repl.result_width,
+            },
+        );
     }
 
     // Rebuild instructions

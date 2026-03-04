@@ -20,7 +20,7 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
         > = std::collections::HashMap::new();
         let mut top_level_ports = Vec::new();
 
-        for (var_path, _var_id) in &module.ports {
+        for var_path in module.ports.keys() {
             if let Some((r#type, _clock)) = module.port_types.get(var_path) {
                 if var_path.0.len() > 1 {
                     let interface_name = var_path.0[0].to_string();
@@ -49,7 +49,9 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
 
         // Process top-level ports
         for (var_path, r#type) in top_level_ports {
-            let name = veryl_parser::resource_table::get_str_value(*var_path.0.iter().last().unwrap()).unwrap();
+            let name =
+                veryl_parser::resource_table::get_str_value(*var_path.0.iter().last().unwrap())
+                    .unwrap();
             let port_ident = format_ident!("{}", name);
             let is_clk = r#type.is_clock();
             if is_clk {
@@ -94,11 +96,11 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
                         let mut val_full = sim.get(self.#port_ident);
                         let element_width = #element_width;
                         let bit_offset = index * element_width;
-                        
+
                         let mask = ((celox::BigUint::from(1u32) << element_width) - 1u32) << bit_offset;
-                        
+
                         val_full = (val_full.clone() ^ (val_full & &mask)) | (celox::BigUint::from(val) << bit_offset);
-                        
+
                         sim.modify(|io| io.set_wide(self.#port_ident, val_full)).unwrap();
                     }
                     pub fn #getter_name(&self, sim: &mut celox::Simulator, index: usize) -> #rust_type {

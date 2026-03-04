@@ -171,7 +171,11 @@ module Top (
         io.set(a9, 0x155u16);
     })
     .unwrap();
-    assert_eq!(sim.get(out), 1u16.into(), "en=1: out should be 1 (en zero-extended)");
+    assert_eq!(
+        sim.get(out),
+        1u16.into(),
+        "en=1: out should be 1 (en zero-extended)"
+    );
 }
 
 /// 4-state mode: exercises the mask-cast path in translate_terminator.
@@ -202,7 +206,11 @@ module Top (
         io.set(a9, 0x155u16);
     })
     .unwrap();
-    assert_eq!(sim.get(out), 0x155u16.into(), "4-state en=0: out should equal a9");
+    assert_eq!(
+        sim.get(out),
+        0x155u16.into(),
+        "4-state en=0: out should equal a9"
+    );
 
     // en=1: output is 1 (en zero-extended)
     sim.modify(|io| io.set(en, 1u8)).unwrap();

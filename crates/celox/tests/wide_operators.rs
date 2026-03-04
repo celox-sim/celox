@@ -350,31 +350,31 @@ fn test_wide_logic_or_with_narrow_operand() {
         }
     "#;
     let mut sim = Simulator::builder(code, "Top").build().unwrap();
-    let a     = sim.signal("a");
-    let b     = sim.signal("b");
-    let o_or  = sim.signal("o_or");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let o_or = sim.signal("o_or");
     let o_and = sim.signal("o_and");
 
     // a=0, b=0 → both 0
     sim.set(b, 0u8);
     sim.set_wide(a, 0u8.into());
-    assert_eq!(sim.get(o_or),  0u8.into());
+    assert_eq!(sim.get(o_or), 0u8.into());
     assert_eq!(sim.get(o_and), 0u8.into());
 
     // a=0, b=1 → or=1, and=0
     sim.set(b, 1u8);
-    assert_eq!(sim.get(o_or),  1u8.into());
+    assert_eq!(sim.get(o_or), 1u8.into());
     assert_eq!(sim.get(o_and), 0u8.into());
 
     // a=nonzero (bit 64 set), b=0 → or=1, and=0
     sim.set(b, 0u8);
     sim.set_wide(a, BigUint::from(1u64) << 64);
-    assert_eq!(sim.get(o_or),  1u8.into());
+    assert_eq!(sim.get(o_or), 1u8.into());
     assert_eq!(sim.get(o_and), 0u8.into());
 
     // a=nonzero, b=1 → both 1
     sim.set(b, 1u8);
-    assert_eq!(sim.get(o_or),  1u8.into());
+    assert_eq!(sim.get(o_or), 1u8.into());
     assert_eq!(sim.get(o_and), 1u8.into());
 }
 
@@ -761,6 +761,3 @@ fn test_wide_comb_reduction_xnor() {
     sim.modify(|io| io.set(a, 3u128)).unwrap();
     assert_eq!(sim.get(y), 1u8.into()); // 2 ones (even) -> 1
 }
-
-
-

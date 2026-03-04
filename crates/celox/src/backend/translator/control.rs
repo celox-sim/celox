@@ -2,8 +2,8 @@ use cranelift::{codegen::ir::BlockArg, prelude::*};
 
 use crate::HashMap;
 
-use super::{SIRTranslator, TranslationState};
 use super::core::cast_type;
+use super::{SIRTranslator, TranslationState};
 
 /// Collect the Cranelift types of all parameters declared on a block.
 /// This is used to ensure block-call arguments are cast to the exact
@@ -34,7 +34,11 @@ impl SIRTranslator {
                 let param_types = collect_block_param_types(state, target_cl_block);
                 debug_assert_eq!(
                     param_types.len(),
-                    if self.options.four_state { params.len() * 2 } else { params.len() },
+                    if self.options.four_state {
+                        params.len() * 2
+                    } else {
+                        params.len()
+                    },
                     "SIR Jump arg count does not match target block param count"
                 );
 
@@ -68,12 +72,20 @@ impl SIRTranslator {
                 let f_param_types = collect_block_param_types(state, block_map[f_id]);
                 debug_assert_eq!(
                     t_param_types.len(),
-                    if self.options.four_state { t_args.len() * 2 } else { t_args.len() },
+                    if self.options.four_state {
+                        t_args.len() * 2
+                    } else {
+                        t_args.len()
+                    },
                     "SIR Branch true-arg count does not match target block param count"
                 );
                 debug_assert_eq!(
                     f_param_types.len(),
-                    if self.options.four_state { f_args.len() * 2 } else { f_args.len() },
+                    if self.options.four_state {
+                        f_args.len() * 2
+                    } else {
+                        f_args.len()
+                    },
                     "SIR Branch false-arg count does not match target block param count"
                 );
 

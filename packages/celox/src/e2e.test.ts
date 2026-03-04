@@ -9,22 +9,25 @@
  */
 
 import path from "node:path";
-import { describe, test, expect, afterEach } from "vitest";
-import { Simulator } from "./simulator.js";
-import { Simulation } from "./simulation.js";
+import { afterEach, describe, expect, test } from "vitest";
 import { readFourState } from "./dut.js";
-import { X, FourState, SimulationTimeoutError } from "./types.js";
 import {
-  createSimulatorBridge,
-  loadNativeAddon,
-  parseNapiLayout,
-  parseSignalPath,
-  type RawNapiAddon,
-  type RawNapiSimulatorHandle,
+	createSimulatorBridge,
+	loadNativeAddon,
+	parseNapiLayout,
+	parseSignalPath,
+	type RawNapiAddon,
+	type RawNapiSimulatorHandle,
 } from "./napi-helpers.js";
+import { Simulation } from "./simulation.js";
+import { Simulator } from "./simulator.js";
+import { FourState, SimulationTimeoutError, X } from "./types.js";
 
 // Fixture project directories
-const FIXTURES_DIR = path.resolve(import.meta.dirname ?? __dirname, "../fixtures");
+const FIXTURES_DIR = path.resolve(
+	import.meta.dirname ?? __dirname,
+	"../fixtures",
+);
 const ADDER_PROJECT = path.join(FIXTURES_DIR, "adder");
 const COUNTER_PROJECT = path.join(FIXTURES_DIR, "counter_project");
 const CELOX_TOML_PROJECT = path.join(FIXTURES_DIR, "celox_toml");
@@ -96,157 +99,157 @@ module Mux4 (
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulator.fromSource (event-based)", () => {
-  test("combinational adder: a + b = sum", () => {
-    interface AdderPorts {
-      rst: bigint;
-      a: bigint;
-      b: bigint;
-      readonly sum: bigint;
-    }
+	test("combinational adder: a + b = sum", () => {
+		interface AdderPorts {
+			rst: bigint;
+			a: bigint;
+			b: bigint;
+			readonly sum: bigint;
+		}
 
-    const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
+		const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
 
-    sim.dut.a = 100n;
-    sim.dut.b = 200n;
-    sim.tick();
-    expect(sim.dut.sum).toBe(300n);
+		sim.dut.a = 100n;
+		sim.dut.b = 200n;
+		sim.tick();
+		expect(sim.dut.sum).toBe(300n);
 
-    sim.dut.a = 0xFFFFn;
-    sim.dut.b = 1n;
-    sim.tick();
-    expect(sim.dut.sum).toBe(0x10000n);
+		sim.dut.a = 0xffffn;
+		sim.dut.b = 1n;
+		sim.tick();
+		expect(sim.dut.sum).toBe(0x10000n);
 
-    sim.dut.a = 0n;
-    sim.dut.b = 0n;
-    sim.tick();
-    expect(sim.dut.sum).toBe(0n);
+		sim.dut.a = 0n;
+		sim.dut.b = 0n;
+		sim.tick();
+		expect(sim.dut.sum).toBe(0n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("combinational adder: lazy evalComb on output read", () => {
-    interface AdderPorts {
-      rst: bigint;
-      a: bigint;
-      b: bigint;
-      readonly sum: bigint;
-    }
+	test("combinational adder: lazy evalComb on output read", () => {
+		interface AdderPorts {
+			rst: bigint;
+			a: bigint;
+			b: bigint;
+			readonly sum: bigint;
+		}
 
-    const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
+		const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder");
 
-    sim.dut.a = 42n;
-    sim.dut.b = 58n;
-    expect(sim.dut.sum).toBe(100n);
+		sim.dut.a = 42n;
+		sim.dut.b = 58n;
+		expect(sim.dut.sum).toBe(100n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("sequential counter: counts on clock edges", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("sequential counter: counts on clock edges", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
 
-    // Reset the counter (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.tick();
-    sim.dut.rst = 1n;
-    sim.tick();
-    expect(sim.dut.count).toBe(0n);
+		// Reset the counter (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.dut.rst = 1n;
+		sim.tick();
+		expect(sim.dut.count).toBe(0n);
 
-    // Enable counting
-    sim.dut.en = 1n;
-    sim.tick();
-    expect(sim.dut.count).toBe(1n);
+		// Enable counting
+		sim.dut.en = 1n;
+		sim.tick();
+		expect(sim.dut.count).toBe(1n);
 
-    sim.tick();
-    expect(sim.dut.count).toBe(2n);
+		sim.tick();
+		expect(sim.dut.count).toBe(2n);
 
-    sim.tick();
-    expect(sim.dut.count).toBe(3n);
+		sim.tick();
+		expect(sim.dut.count).toBe(3n);
 
-    // Disable counting
-    sim.dut.en = 0n;
-    sim.tick();
-    expect(sim.dut.count).toBe(3n);
+		// Disable counting
+		sim.dut.en = 0n;
+		sim.tick();
+		expect(sim.dut.count).toBe(3n);
 
-    // Re-enable
-    sim.dut.en = 1n;
-    sim.tick(5);
-    expect(sim.dut.count).toBe(8n);
+		// Re-enable
+		sim.dut.en = 1n;
+		sim.tick(5);
+		expect(sim.dut.count).toBe(8n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("always_comb evaluated before FF on tick (no prior output read)", () => {
-    interface CounterPorts {
-      rst: number;
-      en: number;
-      readonly count: number;
-    }
+	test("always_comb evaluated before FF on tick (no prior output read)", () => {
+		interface CounterPorts {
+			rst: number;
+			en: number;
+			readonly count: number;
+		}
 
-    const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0;
-    sim.tick();
-    sim.dut.rst = 1;
-    sim.tick();
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0;
+		sim.tick();
+		sim.dut.rst = 1;
+		sim.tick();
 
-    // Write input and tick WITHOUT reading any output first.
-    // This catches the stale-comb bug where always_ff reads stale
-    // combinational values because eval_comb was skipped before FF.
-    sim.dut.en = 1;
-    sim.tick();
-    expect(Number(sim.dut.count)).toBe(1);
+		// Write input and tick WITHOUT reading any output first.
+		// This catches the stale-comb bug where always_ff reads stale
+		// combinational values because eval_comb was skipped before FF.
+		sim.dut.en = 1;
+		sim.tick();
+		expect(Number(sim.dut.count)).toBe(1);
 
-    // Again: set input, tick, verify — no intermediate reads
-    sim.dut.en = 1;
-    sim.tick();
-    expect(Number(sim.dut.count)).toBe(2);
+		// Again: set input, tick, verify — no intermediate reads
+		sim.dut.en = 1;
+		sim.tick();
+		expect(Number(sim.dut.count)).toBe(2);
 
-    // Disable, tick, verify
-    sim.dut.en = 0;
-    sim.tick();
-    expect(Number(sim.dut.count)).toBe(2);
+		// Disable, tick, verify
+		sim.dut.en = 0;
+		sim.tick();
+		expect(Number(sim.dut.count)).toBe(2);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("combinational multiplexer", () => {
-    interface Mux4Ports {
-      sel: bigint;
-      d0: bigint;
-      d1: bigint;
-      d2: bigint;
-      d3: bigint;
-      readonly y: bigint;
-    }
+	test("combinational multiplexer", () => {
+		interface Mux4Ports {
+			sel: bigint;
+			d0: bigint;
+			d1: bigint;
+			d2: bigint;
+			d3: bigint;
+			readonly y: bigint;
+		}
 
-    const sim = Simulator.fromSource<Mux4Ports>(MULTIPLEXER_SOURCE, "Mux4");
+		const sim = Simulator.fromSource<Mux4Ports>(MULTIPLEXER_SOURCE, "Mux4");
 
-    sim.dut.d0 = 0xAAn;
-    sim.dut.d1 = 0xBBn;
-    sim.dut.d2 = 0xCCn;
-    sim.dut.d3 = 0xDDn;
+		sim.dut.d0 = 0xaan;
+		sim.dut.d1 = 0xbbn;
+		sim.dut.d2 = 0xccn;
+		sim.dut.d3 = 0xddn;
 
-    sim.dut.sel = 0n;
-    expect(sim.dut.y).toBe(0xAAn);
+		sim.dut.sel = 0n;
+		expect(sim.dut.y).toBe(0xaan);
 
-    sim.dut.sel = 1n;
-    expect(sim.dut.y).toBe(0xBBn);
+		sim.dut.sel = 1n;
+		expect(sim.dut.y).toBe(0xbbn);
 
-    sim.dut.sel = 2n;
-    expect(sim.dut.y).toBe(0xCCn);
+		sim.dut.sel = 2n;
+		expect(sim.dut.y).toBe(0xccn);
 
-    sim.dut.sel = 3n;
-    expect(sim.dut.y).toBe(0xDDn);
+		sim.dut.sel = 3n;
+		expect(sim.dut.y).toBe(0xddn);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -254,32 +257,32 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulation.fromSource (time-based)", () => {
-  test("counter with timed clock: step-by-step", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("counter with timed clock: step-by-step", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
 
-    sim.addClock("clk", { period: 10 });
-    expect(sim.time()).toBe(0);
+		sim.addClock("clk", { period: 10 });
+		expect(sim.time()).toBe(0);
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
 
-    sim.runUntil(100);
+		sim.runUntil(100);
 
-    const count = sim.dut.count;
-    expect(count).toBeGreaterThan(0n);
-    expect(sim.time()).toBe(100);
+		const count = sim.dut.count;
+		expect(count).toBeGreaterThan(0n);
+		expect(sim.time()).toBe(100);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -287,58 +290,58 @@ describe("E2E: Simulation.fromSource (time-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulator.fromProject (event-based)", () => {
-  test("combinational adder from project directory", () => {
-    interface AdderPorts {
-      rst: bigint;
-      a: bigint;
-      b: bigint;
-      readonly sum: bigint;
-    }
+	test("combinational adder from project directory", () => {
+		interface AdderPorts {
+			rst: bigint;
+			a: bigint;
+			b: bigint;
+			readonly sum: bigint;
+		}
 
-    const sim = Simulator.fromProject<AdderPorts>(ADDER_PROJECT, "Adder");
+		const sim = Simulator.fromProject<AdderPorts>(ADDER_PROJECT, "Adder");
 
-    sim.dut.a = 100n;
-    sim.dut.b = 200n;
-    sim.tick();
-    expect(sim.dut.sum).toBe(300n);
+		sim.dut.a = 100n;
+		sim.dut.b = 200n;
+		sim.tick();
+		expect(sim.dut.sum).toBe(300n);
 
-    sim.dut.a = 0xFFFFn;
-    sim.dut.b = 1n;
-    sim.tick();
-    expect(sim.dut.sum).toBe(0x10000n);
+		sim.dut.a = 0xffffn;
+		sim.dut.b = 1n;
+		sim.tick();
+		expect(sim.dut.sum).toBe(0x10000n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("sequential counter from project directory", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("sequential counter from project directory", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulator.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
+		const sim = Simulator.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
 
-    // Reset the counter (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.tick();
-    sim.dut.rst = 1n;
-    sim.tick();
-    expect(sim.dut.count).toBe(0n);
+		// Reset the counter (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.dut.rst = 1n;
+		sim.tick();
+		expect(sim.dut.count).toBe(0n);
 
-    // Enable counting
-    sim.dut.en = 1n;
-    sim.tick();
-    expect(sim.dut.count).toBe(1n);
+		// Enable counting
+		sim.dut.en = 1n;
+		sim.tick();
+		expect(sim.dut.count).toBe(1n);
 
-    sim.tick();
-    expect(sim.dut.count).toBe(2n);
+		sim.tick();
+		expect(sim.dut.count).toBe(2n);
 
-    sim.tick();
-    expect(sim.dut.count).toBe(3n);
+		sim.tick();
+		expect(sim.dut.count).toBe(3n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -346,32 +349,35 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulation.fromProject (time-based)", () => {
-  test("counter with timed clock from project directory", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("counter with timed clock from project directory", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromProject<CounterPorts>(COUNTER_PROJECT, "Counter");
+		const sim = Simulation.fromProject<CounterPorts>(
+			COUNTER_PROJECT,
+			"Counter",
+		);
 
-    sim.addClock("clk", { period: 10 });
-    expect(sim.time()).toBe(0);
+		sim.addClock("clk", { period: 10 });
+		expect(sim.time()).toBe(0);
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
 
-    sim.runUntil(100);
+		sim.runUntil(100);
 
-    const count = sim.dut.count;
-    expect(count).toBeGreaterThan(0n);
-    expect(sim.time()).toBe(100);
+		const count = sim.dut.count;
+		expect(count).toBeGreaterThan(0n);
+		expect(sim.time()).toBe(100);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -379,41 +385,41 @@ describe("E2E: Simulation.fromProject (time-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulator.create (backward compat)", () => {
-  test("combinational adder via Simulator.create()", () => {
-    interface AdderPorts {
-      rst: bigint;
-      a: bigint;
-      b: bigint;
-      readonly sum: bigint;
-    }
+	test("combinational adder via Simulator.create()", () => {
+		interface AdderPorts {
+			rst: bigint;
+			a: bigint;
+			b: bigint;
+			readonly sum: bigint;
+		}
 
-    const addon = loadNativeAddon();
-    const nativeCreateSimulator = createSimulatorBridge(addon);
+		const addon = loadNativeAddon();
+		const nativeCreateSimulator = createSimulatorBridge(addon);
 
-    const sim = Simulator.create<AdderPorts>(
-      {
-        __celox_module: true,
-        name: "Adder",
-        source: ADDER_SOURCE,
-        ports: {
-          clk: { direction: "input", type: "clock", width: 1 },
-          rst: { direction: "input", type: "reset", width: 1 },
-          a: { direction: "input", type: "logic", width: 16 },
-          b: { direction: "input", type: "logic", width: 16 },
-          sum: { direction: "output", type: "logic", width: 17 },
-        },
-        events: ["clk"],
-      },
-      { __nativeCreate: nativeCreateSimulator },
-    );
+		const sim = Simulator.create<AdderPorts>(
+			{
+				__celox_module: true,
+				name: "Adder",
+				source: ADDER_SOURCE,
+				ports: {
+					clk: { direction: "input", type: "clock", width: 1 },
+					rst: { direction: "input", type: "reset", width: 1 },
+					a: { direction: "input", type: "logic", width: 16 },
+					b: { direction: "input", type: "logic", width: 16 },
+					sum: { direction: "output", type: "logic", width: 17 },
+				},
+				events: ["clk"],
+			},
+			{ __nativeCreate: nativeCreateSimulator },
+		);
 
-    sim.dut.a = 100n;
-    sim.dut.b = 200n;
-    sim.tick();
-    expect(sim.dut.sum).toBe(300n);
+		sim.dut.a = 100n;
+		sim.dut.b = 200n;
+		sim.tick();
+		expect(sim.dut.sum).toBe(300n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -472,325 +478,347 @@ module Adder4S (
 `;
 
 describe("E2E: 4-state simulation", () => {
-  let raw: RawNapiSimulatorHandle | undefined;
-  let addon: RawNapiAddon;
+	let raw: RawNapiSimulatorHandle | undefined;
+	let addon: RawNapiAddon;
 
-  try {
-    addon = loadNativeAddon();
-  } catch (e) {
-    throw new Error(`Failed to load NAPI addon for 4-state tests: ${e}`);
-  }
+	try {
+		addon = loadNativeAddon();
+	} catch (e) {
+		throw new Error(`Failed to load NAPI addon for 4-state tests: ${e}`);
+	}
 
-  afterEach(() => {
-    raw?.dispose();
-    raw = undefined;
-  });
+	afterEach(() => {
+		raw?.dispose();
+		raw = undefined;
+	});
 
-  test("initial values: logic ports start as X, bit ports start as 0", () => {
-    const source = `
+	test("initial values: logic ports start as X, bit ports start as 0", () => {
+		const source = `
 module InitTest (
     a: input logic<8>,
     b: input bit<8>,
 ) {}
 `;
-    raw = new addon.NativeSimulatorHandle(source, "InitTest", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-
-    // logic port should have mask=0xFF (all X), X encoding: v=1, m=1
-    const [valA, maskA] = readFourState(buf, layout.forDut.a);
-    expect(valA).toBe(0xFFn);
-    expect(maskA).toBe(0xFFn);
-
-    // bit port should have mask=0 (defined)
-    // bit is not 4-state, so no mask — reading its value should be 0
-    expect(layout.forDut.b.is4state).toBe(false);
-  });
-
-  test("writing X clears value and sets mask", () => {
-    interface Ports {
-      a: bigint;
-      readonly y_and: bigint;
-    }
-
-    const sim = Simulator.fromSource<Ports>(AND_OR_SOURCE, "AndOr", { fourState: true });
-    raw = undefined; // sim manages its own handle
-
-    // Write X to input 'a' via DUT
-    (sim.dut as any).a = X;
-
-    // We can't inspect mask through DUT getter (it only returns value),
-    // so this test verifies X write doesn't throw and propagation works.
-    // For detailed mask inspection, see the raw NAPI tests below.
-    sim.dispose();
-  });
-
-  test("AND: 0 & X = 0 (dominant zero)", () => {
-    raw = new addon.NativeSimulatorHandle(AND_OR_SOURCE, "AndOr", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-    const events: Record<string, number> = JSON.parse(raw.eventsJson);
-
-    const sigA = layout.forDut.a;
-    const sigB = layout.forDut.b;
-    const sigYAnd = layout.forDut.y_and;
-    const sigYOr = layout.forDut.y_or;
-
-    // a = 0 (value=0, mask=0)
-    view.setUint8(sigA.offset, 0);
-    view.setUint8(sigA.offset + sigA.byteSize, 0);
-
-    // b = X (value=0, mask=1)
-    view.setUint8(sigB.offset, 0);
-    view.setUint8(sigB.offset + sigB.byteSize, 1);
-
-    raw.evalComb();
-
-    // 0 & X = 0 (mask should be 0 — dominant zero)
-    const [vAnd, mAnd] = readFourState(buf, sigYAnd);
-    expect(vAnd).toBe(0n);
-    expect(mAnd).toBe(0n);
-
-    // 0 | X = X (mask should be 1)
-    const [vOr, mOr] = readFourState(buf, sigYOr);
-    expect(vOr).toBe(0n);
-    expect(mOr).toBe(1n);
-  });
-
-  test("OR: 1 | X = 1 (dominant one)", () => {
-    raw = new addon.NativeSimulatorHandle(AND_OR_SOURCE, "AndOr", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-
-    const sigA = layout.forDut.a;
-    const sigB = layout.forDut.b;
-    const sigYOr = layout.forDut.y_or;
-
-    // a = 1 (value=1, mask=0)
-    view.setUint8(sigA.offset, 1);
-    view.setUint8(sigA.offset + sigA.byteSize, 0);
-
-    // b = X (value=0, mask=1)
-    view.setUint8(sigB.offset, 0);
-    view.setUint8(sigB.offset + sigB.byteSize, 1);
-
-    raw.evalComb();
-
-    // 1 | X = 1 (mask should be 0 — dominant one)
-    const [vOr, mOr] = readFourState(buf, sigYOr);
-    expect(vOr).toBe(1n);
-    expect(mOr).toBe(0n);
-  });
-
-  test("logic-to-bit assignment strips X mask", () => {
-    raw = new addon.NativeSimulatorHandle(LOGIC_BIT_MIX_SOURCE, "LogicBitMix", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-
-    const sigALogic = layout.forDut.a_logic;
-    const sigYBitFromLogic = layout.forDut.y_bit_from_logic;
-
-    // a_logic = all-X (value=0, mask=0xFF)
-    view.setUint8(sigALogic.offset, 0);
-    view.setUint8(sigALogic.offset + sigALogic.byteSize, 0xFF);
-
-    raw.evalComb();
-
-    // y_bit_from_logic is bit type — X should be stripped (mask=0)
-    expect(sigYBitFromLogic.is4state).toBe(false);
-  });
-
-  test("bit-to-logic assignment has no X", () => {
-    raw = new addon.NativeSimulatorHandle(LOGIC_BIT_MIX_SOURCE, "LogicBitMix", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-
-    const sigBBit = layout.forDut.b_bit;
-    const sigYLogicFromBit = layout.forDut.y_logic_from_bit;
-
-    // b_bit = 0xAA (bit type, always defined)
-    view.setUint8(sigBBit.offset, 0xAA);
-
-    raw.evalComb();
-
-    // y_logic_from_bit should be 0xAA with mask=0
-    const [vLogic, mLogic] = readFourState(buf, sigYLogicFromBit);
-    expect(vLogic).toBe(0xAAn);
-    expect(mLogic).toBe(0n);
-  });
-
-  test("arithmetic with X produces all-X output", () => {
-    raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-
-    const sigA = layout.forDut.a;
-    const sigB = layout.forDut.b;
-    const sigY = layout.forDut.y;
-
-    // a = 42 (defined), b = X (all X)
-    view.setUint8(sigA.offset, 42);
-    view.setUint8(sigA.offset + sigA.byteSize, 0); // mask=0
-
-    view.setUint8(sigB.offset, 0);
-    view.setUint8(sigB.offset + sigB.byteSize, 0xFF); // mask=0xFF
-
-    raw.evalComb();
-
-    // a + X = all-X
-    const [, mY] = readFourState(buf, sigY);
-    expect(mY).toBe(0xFFn);
-  });
-
-  test("defined inputs in 4-state mode behave like 2-state", () => {
-    raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-
-    const sigA = layout.forDut.a;
-    const sigB = layout.forDut.b;
-    const sigY = layout.forDut.y;
-
-    // a = 100 (defined), b = 55 (defined)
-    view.setUint8(sigA.offset, 100);
-    view.setUint8(sigA.offset + sigA.byteSize, 0);
-
-    view.setUint8(sigB.offset, 55);
-    view.setUint8(sigB.offset + sigB.byteSize, 0);
-
-    raw.evalComb();
-
-    const [vY, mY] = readFourState(buf, sigY);
-    expect(vY).toBe(155n);
-    expect(mY).toBe(0n);
-  });
-
-  test("FF captures X from input, reset clears X", () => {
-    raw = new addon.NativeSimulatorHandle(FF_SOURCE, "FF", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-    const events: Record<string, number> = JSON.parse(raw.eventsJson);
-
-    const sigRst = layout.forDut.rst;
-    const sigD = layout.forDut.d;
-    const sigQ = layout.forDut.q;
-    const clkEventId = events.clk;
-
-    // 1. Assert reset (default async_low: rst=0 is active), d=X
-    view.setUint8(sigRst.offset, 0);
-    view.setUint8(sigRst.offset + sigRst.byteSize, 0); // rst is defined
-
-    view.setUint8(sigD.offset, 0);
-    view.setUint8(sigD.offset + sigD.byteSize, 0xFF); // d = all-X
-
-    raw.tick(clkEventId);
-
-    // After reset, q should be 0 with mask=0
-    const [vQ1, mQ1] = readFourState(buf, sigQ);
-    expect(vQ1).toBe(0n);
-    expect(mQ1).toBe(0n);
-
-    // 2. Release reset (rst=1 is inactive), d = partial X (value=0xA5, mask=0x0F)
-    view.setUint8(sigRst.offset, 1);
-    view.setUint8(sigRst.offset + sigRst.byteSize, 0);
-
-    view.setUint8(sigD.offset, 0xA5);
-    view.setUint8(sigD.offset + sigD.byteSize, 0x0F);
-
-    raw.tick(clkEventId);
-
-    // FF should capture X mask from d
-    const [, mQ2] = readFourState(buf, sigQ);
-    expect(mQ2).toBe(0x0Fn);
-
-    // 3. Assert reset again (rst=0): should clear X
-    view.setUint8(sigRst.offset, 0);
-    view.setUint8(sigRst.offset + sigRst.byteSize, 0);
-
-    raw.tick(clkEventId);
-
-    const [vQ3, mQ3] = readFourState(buf, sigQ);
-    expect(vQ3).toBe(0n);
-    expect(mQ3).toBe(0n);
-  });
-
-  test("FourState write through DUT sets value and mask", () => {
-    raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-
-    const sigA = layout.forDut.a;
-
-    // Write via DUT-style: FourState(0b1010_0101, 0b0000_1111)
-    // value=0xA5, mask=0x0F means lower 4 bits are X
-    view.setUint8(sigA.offset, 0xA5);
-    view.setUint8(sigA.offset + sigA.byteSize, 0x0F);
-
-    const [vA, mA] = readFourState(buf, sigA);
-    expect(vA).toBe(0xA5n);
-    expect(mA).toBe(0x0Fn);
-  });
-
-  test("setting defined value clears X mask", () => {
-    raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
-
-    const sigA = layout.forDut.a;
-
-    // Start with X
-    view.setUint8(sigA.offset, 0);
-    view.setUint8(sigA.offset + sigA.byteSize, 0xFF);
-
-    const [, mBefore] = readFourState(buf, sigA);
-    expect(mBefore).toBe(0xFFn);
-
-    // Write a defined value (clear mask)
-    view.setUint8(sigA.offset, 42);
-    view.setUint8(sigA.offset + sigA.byteSize, 0);
-
-    const [vAfter, mAfter] = readFourState(buf, sigA);
-    expect(vAfter).toBe(42n);
-    expect(mAfter).toBe(0n);
-  });
-
-  test("4-state through DUT high-level API (fromSource with fourState)", () => {
-    interface Ports {
-      a: bigint;
-      b: bigint;
-      readonly y: bigint;
-    }
-
-    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
-
-    // Write defined values — should behave like 2-state
-    sim.dut.a = 100n;
-    sim.dut.b = 55n;
-    expect(sim.dut.y).toBe(155n);
-
-    // Write X to a — output should propagate X (value reads as 0)
-    (sim.dut as any).a = X;
-    // After writing X, the value part of 'y' is implementation-defined
-    // but the read should not throw
-    const _yVal = sim.dut.y;
-    expect(typeof _yVal).toBe("bigint");
-
-    // Write FourState with partial X
-    (sim.dut as any).a = FourState(0xA0, 0x0F);
-    const _yVal2 = sim.dut.y;
-    expect(typeof _yVal2).toBe("bigint");
-
-    sim.dispose();
-  });
+		raw = new addon.NativeSimulatorHandle(source, "InitTest", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+
+		// logic port should have mask=0xFF (all X), X encoding: v=1, m=1
+		const [valA, maskA] = readFourState(buf, layout.forDut.a);
+		expect(valA).toBe(0xffn);
+		expect(maskA).toBe(0xffn);
+
+		// bit port should have mask=0 (defined)
+		// bit is not 4-state, so no mask — reading its value should be 0
+		expect(layout.forDut.b.is4state).toBe(false);
+	});
+
+	test("writing X clears value and sets mask", () => {
+		interface Ports {
+			a: bigint;
+			readonly y_and: bigint;
+		}
+
+		const sim = Simulator.fromSource<Ports>(AND_OR_SOURCE, "AndOr", {
+			fourState: true,
+		});
+		raw = undefined; // sim manages its own handle
+
+		// Write X to input 'a' via DUT
+		(sim.dut as any).a = X;
+
+		// We can't inspect mask through DUT getter (it only returns value),
+		// so this test verifies X write doesn't throw and propagation works.
+		// For detailed mask inspection, see the raw NAPI tests below.
+		sim.dispose();
+	});
+
+	test("AND: 0 & X = 0 (dominant zero)", () => {
+		raw = new addon.NativeSimulatorHandle(AND_OR_SOURCE, "AndOr", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+		const _events: Record<string, number> = JSON.parse(raw.eventsJson);
+
+		const sigA = layout.forDut.a;
+		const sigB = layout.forDut.b;
+		const sigYAnd = layout.forDut.y_and;
+		const sigYOr = layout.forDut.y_or;
+
+		// a = 0 (value=0, mask=0)
+		view.setUint8(sigA.offset, 0);
+		view.setUint8(sigA.offset + sigA.byteSize, 0);
+
+		// b = X (value=0, mask=1)
+		view.setUint8(sigB.offset, 0);
+		view.setUint8(sigB.offset + sigB.byteSize, 1);
+
+		raw.evalComb();
+
+		// 0 & X = 0 (mask should be 0 — dominant zero)
+		const [vAnd, mAnd] = readFourState(buf, sigYAnd);
+		expect(vAnd).toBe(0n);
+		expect(mAnd).toBe(0n);
+
+		// 0 | X = X (mask should be 1)
+		const [vOr, mOr] = readFourState(buf, sigYOr);
+		expect(vOr).toBe(0n);
+		expect(mOr).toBe(1n);
+	});
+
+	test("OR: 1 | X = 1 (dominant one)", () => {
+		raw = new addon.NativeSimulatorHandle(AND_OR_SOURCE, "AndOr", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+
+		const sigA = layout.forDut.a;
+		const sigB = layout.forDut.b;
+		const sigYOr = layout.forDut.y_or;
+
+		// a = 1 (value=1, mask=0)
+		view.setUint8(sigA.offset, 1);
+		view.setUint8(sigA.offset + sigA.byteSize, 0);
+
+		// b = X (value=0, mask=1)
+		view.setUint8(sigB.offset, 0);
+		view.setUint8(sigB.offset + sigB.byteSize, 1);
+
+		raw.evalComb();
+
+		// 1 | X = 1 (mask should be 0 — dominant one)
+		const [vOr, mOr] = readFourState(buf, sigYOr);
+		expect(vOr).toBe(1n);
+		expect(mOr).toBe(0n);
+	});
+
+	test("logic-to-bit assignment strips X mask", () => {
+		raw = new addon.NativeSimulatorHandle(LOGIC_BIT_MIX_SOURCE, "LogicBitMix", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+
+		const sigALogic = layout.forDut.a_logic;
+		const sigYBitFromLogic = layout.forDut.y_bit_from_logic;
+
+		// a_logic = all-X (value=0, mask=0xFF)
+		view.setUint8(sigALogic.offset, 0);
+		view.setUint8(sigALogic.offset + sigALogic.byteSize, 0xff);
+
+		raw.evalComb();
+
+		// y_bit_from_logic is bit type — X should be stripped (mask=0)
+		expect(sigYBitFromLogic.is4state).toBe(false);
+	});
+
+	test("bit-to-logic assignment has no X", () => {
+		raw = new addon.NativeSimulatorHandle(LOGIC_BIT_MIX_SOURCE, "LogicBitMix", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+
+		const sigBBit = layout.forDut.b_bit;
+		const sigYLogicFromBit = layout.forDut.y_logic_from_bit;
+
+		// b_bit = 0xAA (bit type, always defined)
+		view.setUint8(sigBBit.offset, 0xaa);
+
+		raw.evalComb();
+
+		// y_logic_from_bit should be 0xAA with mask=0
+		const [vLogic, mLogic] = readFourState(buf, sigYLogicFromBit);
+		expect(vLogic).toBe(0xaan);
+		expect(mLogic).toBe(0n);
+	});
+
+	test("arithmetic with X produces all-X output", () => {
+		raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+
+		const sigA = layout.forDut.a;
+		const sigB = layout.forDut.b;
+		const sigY = layout.forDut.y;
+
+		// a = 42 (defined), b = X (all X)
+		view.setUint8(sigA.offset, 42);
+		view.setUint8(sigA.offset + sigA.byteSize, 0); // mask=0
+
+		view.setUint8(sigB.offset, 0);
+		view.setUint8(sigB.offset + sigB.byteSize, 0xff); // mask=0xFF
+
+		raw.evalComb();
+
+		// a + X = all-X
+		const [, mY] = readFourState(buf, sigY);
+		expect(mY).toBe(0xffn);
+	});
+
+	test("defined inputs in 4-state mode behave like 2-state", () => {
+		raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+
+		const sigA = layout.forDut.a;
+		const sigB = layout.forDut.b;
+		const sigY = layout.forDut.y;
+
+		// a = 100 (defined), b = 55 (defined)
+		view.setUint8(sigA.offset, 100);
+		view.setUint8(sigA.offset + sigA.byteSize, 0);
+
+		view.setUint8(sigB.offset, 55);
+		view.setUint8(sigB.offset + sigB.byteSize, 0);
+
+		raw.evalComb();
+
+		const [vY, mY] = readFourState(buf, sigY);
+		expect(vY).toBe(155n);
+		expect(mY).toBe(0n);
+	});
+
+	test("FF captures X from input, reset clears X", () => {
+		raw = new addon.NativeSimulatorHandle(FF_SOURCE, "FF", { fourState: true });
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+		const events: Record<string, number> = JSON.parse(raw.eventsJson);
+
+		const sigRst = layout.forDut.rst;
+		const sigD = layout.forDut.d;
+		const sigQ = layout.forDut.q;
+		const clkEventId = events.clk;
+
+		// 1. Assert reset (default async_low: rst=0 is active), d=X
+		view.setUint8(sigRst.offset, 0);
+		view.setUint8(sigRst.offset + sigRst.byteSize, 0); // rst is defined
+
+		view.setUint8(sigD.offset, 0);
+		view.setUint8(sigD.offset + sigD.byteSize, 0xff); // d = all-X
+
+		raw.tick(clkEventId);
+
+		// After reset, q should be 0 with mask=0
+		const [vQ1, mQ1] = readFourState(buf, sigQ);
+		expect(vQ1).toBe(0n);
+		expect(mQ1).toBe(0n);
+
+		// 2. Release reset (rst=1 is inactive), d = partial X (value=0xA5, mask=0x0F)
+		view.setUint8(sigRst.offset, 1);
+		view.setUint8(sigRst.offset + sigRst.byteSize, 0);
+
+		view.setUint8(sigD.offset, 0xa5);
+		view.setUint8(sigD.offset + sigD.byteSize, 0x0f);
+
+		raw.tick(clkEventId);
+
+		// FF should capture X mask from d
+		const [, mQ2] = readFourState(buf, sigQ);
+		expect(mQ2).toBe(0x0fn);
+
+		// 3. Assert reset again (rst=0): should clear X
+		view.setUint8(sigRst.offset, 0);
+		view.setUint8(sigRst.offset + sigRst.byteSize, 0);
+
+		raw.tick(clkEventId);
+
+		const [vQ3, mQ3] = readFourState(buf, sigQ);
+		expect(vQ3).toBe(0n);
+		expect(mQ3).toBe(0n);
+	});
+
+	test("FourState write through DUT sets value and mask", () => {
+		raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+
+		const sigA = layout.forDut.a;
+
+		// Write via DUT-style: FourState(0b1010_0101, 0b0000_1111)
+		// value=0xA5, mask=0x0F means lower 4 bits are X
+		view.setUint8(sigA.offset, 0xa5);
+		view.setUint8(sigA.offset + sigA.byteSize, 0x0f);
+
+		const [vA, mA] = readFourState(buf, sigA);
+		expect(vA).toBe(0xa5n);
+		expect(mA).toBe(0x0fn);
+	});
+
+	test("setting defined value clears X mask", () => {
+		raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
+
+		const sigA = layout.forDut.a;
+
+		// Start with X
+		view.setUint8(sigA.offset, 0);
+		view.setUint8(sigA.offset + sigA.byteSize, 0xff);
+
+		const [, mBefore] = readFourState(buf, sigA);
+		expect(mBefore).toBe(0xffn);
+
+		// Write a defined value (clear mask)
+		view.setUint8(sigA.offset, 42);
+		view.setUint8(sigA.offset + sigA.byteSize, 0);
+
+		const [vAfter, mAfter] = readFourState(buf, sigA);
+		expect(vAfter).toBe(42n);
+		expect(mAfter).toBe(0n);
+	});
+
+	test("4-state through DUT high-level API (fromSource with fourState)", () => {
+		interface Ports {
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}
+
+		const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
+
+		// Write defined values — should behave like 2-state
+		sim.dut.a = 100n;
+		sim.dut.b = 55n;
+		expect(sim.dut.y).toBe(155n);
+
+		// Write X to a — output should propagate X (value reads as 0)
+		(sim.dut as any).a = X;
+		// After writing X, the value part of 'y' is implementation-defined
+		// but the read should not throw
+		const _yVal = sim.dut.y;
+		expect(typeof _yVal).toBe("bigint");
+
+		// Write FourState with partial X
+		(sim.dut as any).a = FourState(0xa0, 0x0f);
+		const _yVal2 = sim.dut.y;
+		expect(typeof _yVal2).toBe("bigint");
+
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -798,127 +826,133 @@ module InitTest (
 // ---------------------------------------------------------------------------
 
 describe("E2E: 4-state high-level DUT API", () => {
-  test("counter in 4-state mode: reset clears X, counting works", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("counter in 4-state mode: reset clears X, counting works", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulator.fromSource<CounterPorts>(
-      COUNTER_SOURCE, "Counter", { fourState: true },
-    );
+		const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+			fourState: true,
+		});
 
-    // In 4-state mode, count starts as X. Reset should clear it.
-    // (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    // Clear X on en before deactivating reset. In 4-state mode, en starts
-    // as X (v=1, m=1). The FF branch condition currently uses only the value
-    // bit, so X with v=1 is treated as "true" — a known limitation in FF
-    // conditional handling (combinational mux handles X correctly).
-    sim.dut.en = 0n;
-    sim.tick();
-    sim.dut.rst = 1n;
-    sim.tick();
-    expect(sim.dut.count).toBe(0n);
+		// In 4-state mode, count starts as X. Reset should clear it.
+		// (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		// Clear X on en before deactivating reset. In 4-state mode, en starts
+		// as X (v=1, m=1). The FF branch condition currently uses only the value
+		// bit, so X with v=1 is treated as "true" — a known limitation in FF
+		// conditional handling (combinational mux handles X correctly).
+		sim.dut.en = 0n;
+		sim.tick();
+		sim.dut.rst = 1n;
+		sim.tick();
+		expect(sim.dut.count).toBe(0n);
 
-    // Enable counting — should work exactly like 2-state
-    sim.dut.en = 1n;
-    sim.tick();
-    expect(sim.dut.count).toBe(1n);
+		// Enable counting — should work exactly like 2-state
+		sim.dut.en = 1n;
+		sim.tick();
+		expect(sim.dut.count).toBe(1n);
 
-    sim.tick();
-    expect(sim.dut.count).toBe(2n);
+		sim.tick();
+		expect(sim.dut.count).toBe(2n);
 
-    sim.tick();
-    expect(sim.dut.count).toBe(3n);
+		sim.tick();
+		expect(sim.dut.count).toBe(3n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("multiplexer with X selector produces X output", () => {
-    const addon = loadNativeAddon();
-    const raw = new addon.NativeSimulatorHandle(MULTIPLEXER_SOURCE, "Mux4", { fourState: true });
-    const layout = parseNapiLayout(raw.layoutJson);
-    const buf = raw.sharedMemory().buffer;
-    const view = new DataView(buf);
+	test("multiplexer with X selector produces X output", () => {
+		const addon = loadNativeAddon();
+		const raw = new addon.NativeSimulatorHandle(MULTIPLEXER_SOURCE, "Mux4", {
+			fourState: true,
+		});
+		const layout = parseNapiLayout(raw.layoutJson);
+		const buf = raw.sharedMemory().buffer;
+		const view = new DataView(buf);
 
-    const sigSel = layout.forDut.sel;
-    const sigD0 = layout.forDut.d0;
-    const sigY = layout.forDut.y;
+		const sigSel = layout.forDut.sel;
+		const sigD0 = layout.forDut.d0;
+		const sigY = layout.forDut.y;
 
-    // Set d0 = 0xAA (defined)
-    view.setUint8(sigD0.offset, 0xAA);
-    view.setUint8(sigD0.offset + sigD0.byteSize, 0);
+		// Set d0 = 0xAA (defined)
+		view.setUint8(sigD0.offset, 0xaa);
+		view.setUint8(sigD0.offset + sigD0.byteSize, 0);
 
-    // Set sel = X
-    view.setUint8(sigSel.offset, 0);
-    view.setUint8(sigSel.offset + sigSel.byteSize, 0x03);
+		// Set sel = X
+		view.setUint8(sigSel.offset, 0);
+		view.setUint8(sigSel.offset + sigSel.byteSize, 0x03);
 
-    raw.evalComb();
+		raw.evalComb();
 
-    // With X selector, output should be all-X
-    const [, mY2] = readFourState(buf, sigY);
-    expect(mY2).toBe(0xFFn);
+		// With X selector, output should be all-X
+		const [, mY2] = readFourState(buf, sigY);
+		expect(mY2).toBe(0xffn);
 
-    raw.dispose();
-  });
+		raw.dispose();
+	});
 
-  test("FF via DUT API: write X input, tick, read output", () => {
-    interface FFPorts {
-      rst: bigint;
-      d: bigint;
-      readonly q: bigint;
-    }
+	test("FF via DUT API: write X input, tick, read output", () => {
+		interface FFPorts {
+			rst: bigint;
+			d: bigint;
+			readonly q: bigint;
+		}
 
-    const sim = Simulator.fromSource<FFPorts>(FF_SOURCE, "FF", { fourState: true });
+		const sim = Simulator.fromSource<FFPorts>(FF_SOURCE, "FF", {
+			fourState: true,
+		});
 
-    // Reset to clear initial X (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.tick();
-    sim.dut.rst = 1n;
-    expect(sim.dut.q).toBe(0n);
+		// Reset to clear initial X (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.dut.rst = 1n;
+		expect(sim.dut.q).toBe(0n);
 
-    // Write a defined value
-    sim.dut.d = 0x42n;
-    sim.tick();
-    expect(sim.dut.q).toBe(0x42n);
+		// Write a defined value
+		sim.dut.d = 0x42n;
+		sim.tick();
+		expect(sim.dut.q).toBe(0x42n);
 
-    // Write X to d, tick — q should capture it (value read still returns a bigint)
-    (sim.dut as any).d = X;
-    sim.tick();
-    expect(typeof sim.dut.q).toBe("bigint");
+		// Write X to d, tick — q should capture it (value read still returns a bigint)
+		(sim.dut as any).d = X;
+		sim.tick();
+		expect(typeof sim.dut.q).toBe("bigint");
 
-    // Write defined value again — q should recover
-    sim.dut.d = 0x99n;
-    sim.tick();
-    expect(sim.dut.q).toBe(0x99n);
+		// Write defined value again — q should recover
+		sim.dut.d = 0x99n;
+		sim.tick();
+		expect(sim.dut.q).toBe(0x99n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("X to defined transition: adder recovers from X", () => {
-    interface Ports {
-      a: bigint;
-      b: bigint;
-      readonly y: bigint;
-    }
+	test("X to defined transition: adder recovers from X", () => {
+		interface Ports {
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}
 
-    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", { fourState: true });
+		const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
 
-    // Start with X
-    (sim.dut as any).a = X;
-    sim.dut.b = 10n;
-    // Output has X — just verify it doesn't crash
-    expect(typeof sim.dut.y).toBe("bigint");
+		// Start with X
+		(sim.dut as any).a = X;
+		sim.dut.b = 10n;
+		// Output has X — just verify it doesn't crash
+		expect(typeof sim.dut.y).toBe("bigint");
 
-    // Clear X by writing defined values
-    sim.dut.a = 20n;
-    sim.dut.b = 30n;
-    expect(sim.dut.y).toBe(50n);
+		// Clear X by writing defined values
+		sim.dut.a = 20n;
+		sim.dut.b = 30n;
+		expect(sim.dut.y).toBe(50n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -926,85 +960,87 @@ describe("E2E: 4-state high-level DUT API", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: 4-state Simulation (time-based)", () => {
-  test("FF with clock-driven 4-state: reset clears X, captures defined values", () => {
-    interface FFPorts {
-      rst: bigint;
-      d: bigint;
-      readonly q: bigint;
-    }
+	test("FF with clock-driven 4-state: reset clears X, captures defined values", () => {
+		interface FFPorts {
+			rst: bigint;
+			d: bigint;
+			readonly q: bigint;
+		}
 
-    const sim = Simulation.fromSource<FFPorts>(FF_SOURCE, "FF", { fourState: true });
+		const sim = Simulation.fromSource<FFPorts>(FF_SOURCE, "FF", {
+			fourState: true,
+		});
 
-    sim.addClock("clk", { period: 10 });
-    expect(sim.time()).toBe(0);
+		sim.addClock("clk", { period: 10 });
+		expect(sim.time()).toBe(0);
 
-    // Reset to clear initial X on q (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    expect(sim.dut.q).toBe(0n);
+		// Reset to clear initial X on q (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		expect(sim.dut.q).toBe(0n);
 
-    // Drive d with defined value
-    sim.dut.d = 0x55n;
-    sim.runUntil(40);
-    expect(sim.dut.q).toBe(0x55n);
+		// Drive d with defined value
+		sim.dut.d = 0x55n;
+		sim.runUntil(40);
+		expect(sim.dut.q).toBe(0x55n);
 
-    // Drive d with different value
-    sim.dut.d = 0xAAn;
-    sim.runUntil(60);
-    expect(sim.dut.q).toBe(0xAAn);
+		// Drive d with different value
+		sim.dut.d = 0xaan;
+		sim.runUntil(60);
+		expect(sim.dut.q).toBe(0xaan);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("counter in 4-state time-based mode", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("counter in 4-state time-based mode", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(
-      COUNTER_SOURCE, "Counter", { fourState: true },
-    );
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+			fourState: true,
+		});
 
-    sim.addClock("clk", { period: 10 });
+		sim.addClock("clk", { period: 10 });
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
 
-    sim.runUntil(100);
+		sim.runUntil(100);
 
-    const count = sim.dut.count;
-    expect(count).toBeGreaterThan(0n);
-    expect(sim.time()).toBe(100);
+		const count = sim.dut.count;
+		expect(count).toBeGreaterThan(0n);
+		expect(sim.time()).toBe(100);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("4-state combinational in time-based simulation", () => {
-    interface Ports {
-      a: bigint;
-      b: bigint;
-      readonly y: bigint;
-    }
+	test("4-state combinational in time-based simulation", () => {
+		interface Ports {
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}
 
-    const sim = Simulation.fromSource<Ports>(
-      ADDER_4STATE_SOURCE, "Adder4S", { fourState: true },
-    );
+		const sim = Simulation.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
 
-    // No clock needed for pure combinational — just set values and read
-    sim.dut.a = 100n;
-    sim.dut.b = 55n;
-    // runUntil(0) to force eval
-    sim.runUntil(0);
-    expect(sim.dut.y).toBe(155n);
+		// No clock needed for pure combinational — just set values and read
+		sim.dut.a = 100n;
+		sim.dut.b = 55n;
+		// runUntil(0) to force eval
+		sim.runUntil(0);
+		expect(sim.dut.y).toBe(155n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1012,225 +1048,225 @@ describe("E2E: 4-state Simulation (time-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulation testbench helpers", () => {
-  test("waitForCycles: advances correct number of clock cycles", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("waitForCycles: advances correct number of clock cycles", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
-    sim.addClock("clk", { period: 10 });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		sim.addClock("clk", { period: 10 });
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
 
-    const beforeTime = sim.time();
-    const afterTime = sim.waitForCycles("clk", 5);
+		const beforeTime = sim.time();
+		const afterTime = sim.waitForCycles("clk", 5);
 
-    expect(afterTime).toBeGreaterThan(beforeTime);
-    // Each cycle = 2 steps with period 10, so 5 cycles ≈ 50 time units
-    expect(afterTime - beforeTime).toBe(50);
+		expect(afterTime).toBeGreaterThan(beforeTime);
+		// Each cycle = 2 steps with period 10, so 5 cycles ≈ 50 time units
+		expect(afterTime - beforeTime).toBe(50);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("waitUntil: waits for condition to be met", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("waitUntil: waits for condition to be met", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
-    sim.addClock("clk", { period: 10 });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		sim.addClock("clk", { period: 10 });
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
 
-    const t = sim.waitUntil(() => sim.dut.count >= 3n);
-    expect(sim.dut.count).toBeGreaterThanOrEqual(3n);
-    expect(t).toBeGreaterThan(20);
+		const t = sim.waitUntil(() => sim.dut.count >= 3n);
+		expect(sim.dut.count).toBeGreaterThanOrEqual(3n);
+		expect(t).toBeGreaterThan(20);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("waitUntil: throws SimulationTimeoutError on timeout", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("waitUntil: throws SimulationTimeoutError on timeout", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
-    sim.addClock("clk", { period: 10 });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		sim.addClock("clk", { period: 10 });
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 0n; // disabled — count won't increase
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 0n; // disabled — count won't increase
 
-    expect(() =>
-      sim.waitUntil(() => sim.dut.count >= 100n, { maxSteps: 20 }),
-    ).toThrow(SimulationTimeoutError);
+		expect(() =>
+			sim.waitUntil(() => sim.dut.count >= 100n, { maxSteps: 20 }),
+		).toThrow(SimulationTimeoutError);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("reset: asserts and releases reset on counter", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("reset: asserts and releases reset on counter", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
-    sim.addClock("clk", { period: 10 });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		sim.addClock("clk", { period: 10 });
 
-    // Count up a bit (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
-    sim.runUntil(100);
-    expect(sim.dut.count).toBeGreaterThan(0n);
+		// Count up a bit (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
+		sim.runUntil(100);
+		expect(sim.dut.count).toBeGreaterThan(0n);
 
-    // Reset using the helper
-    sim.reset("rst");
-    expect(sim.dut.count).toBe(0n);
+		// Reset using the helper
+		sim.reset("rst");
+		expect(sim.dut.count).toBe(0n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("reset: explicit async_low resetType activates with 0", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("reset: explicit async_low resetType activates with 0", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
-      resetType: "async_low",
-    });
-    sim.addClock("clk", { period: 10 });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+			resetType: "async_low",
+		});
+		sim.addClock("clk", { period: 10 });
 
-    // With async_low, rst=0 is active, rst=1 is inactive
-    sim.reset("rst");
+		// With async_low, rst=0 is active, rst=1 is inactive
+		sim.reset("rst");
 
-    sim.dut.en = 1n;
-    sim.runUntil(100);
-    expect(sim.dut.count).toBeGreaterThan(0n);
+		sim.dut.en = 1n;
+		sim.runUntil(100);
+		expect(sim.dut.count).toBeGreaterThan(0n);
 
-    // Reset again using helper, verify it resets the counter
-    sim.reset("rst");
-    expect(sim.dut.count).toBe(0n);
+		// Reset again using helper, verify it resets the counter
+		sim.reset("rst");
+		expect(sim.dut.count).toBe(0n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("reset: explicit async_high resetType activates with 1", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("reset: explicit async_high resetType activates with 1", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
-      resetType: "async_high",
-    });
-    sim.addClock("clk", { period: 10 });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+			resetType: "async_high",
+		});
+		sim.addClock("clk", { period: 10 });
 
-    // With async_high, rst=1 is active, rst=0 is inactive
-    sim.reset("rst");
+		// With async_high, rst=1 is active, rst=0 is inactive
+		sim.reset("rst");
 
-    sim.dut.en = 1n;
-    sim.runUntil(100);
-    expect(sim.dut.count).toBeGreaterThan(0n);
+		sim.dut.en = 1n;
+		sim.runUntil(100);
+		expect(sim.dut.count).toBeGreaterThan(0n);
 
-    // Reset again
-    sim.reset("rst");
-    expect(sim.dut.count).toBe(0n);
+		// Reset again
+		sim.reset("rst");
+		expect(sim.dut.count).toBe(0n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("Simulator.fromSource: resetType option works", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("Simulator.fromSource: resetType option works", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
-      resetType: "async_high",
-    });
+		const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+			resetType: "async_high",
+		});
 
-    // With async_high, assert reset with 1
-    sim.dut.rst = 1n;
-    sim.tick();
-    sim.dut.rst = 0n;
-    sim.tick();
-    expect(sim.dut.count).toBe(0n);
+		// With async_high, assert reset with 1
+		sim.dut.rst = 1n;
+		sim.tick();
+		sim.dut.rst = 0n;
+		sim.tick();
+		expect(sim.dut.count).toBe(0n);
 
-    // Count up
-    sim.dut.en = 1n;
-    sim.tick();
-    expect(sim.dut.count).toBe(1n);
+		// Count up
+		sim.dut.en = 1n;
+		sim.tick();
+		expect(sim.dut.count).toBe(1n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("runUntil with maxSteps: succeeds within budget", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("runUntil with maxSteps: succeeds within budget", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
-    sim.addClock("clk", { period: 10 });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		sim.addClock("clk", { period: 10 });
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
 
-    // 100 time units with period 10 = 10 events, should fit in 100 steps
-    sim.runUntil(120, { maxSteps: 100 });
-    expect(sim.time()).toBe(120);
+		// 100 time units with period 10 = 10 events, should fit in 100 steps
+		sim.runUntil(120, { maxSteps: 100 });
+		expect(sim.time()).toBe(120);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("runUntil with maxSteps: throws on exceeded budget", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("runUntil with maxSteps: throws on exceeded budget", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
-    sim.addClock("clk", { period: 10 });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter");
+		sim.addClock("clk", { period: 10 });
 
-    // Release reset so counter can count (default async_low: rst=1 is inactive)
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
+		// Release reset so counter can count (default async_low: rst=1 is inactive)
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
 
-    // Very small budget for a long run
-    expect(() => sim.runUntil(100000, { maxSteps: 5 })).toThrow(
-      SimulationTimeoutError,
-    );
+		// Very small budget for a long run
+		expect(() => sim.runUntil(100000, { maxSteps: 5 })).toThrow(
+			SimulationTimeoutError,
+		);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1238,89 +1274,89 @@ describe("E2E: Simulation testbench helpers", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: fourState() method", () => {
-  test("Simulator.fourState: reads 4-state value and mask", () => {
-    interface Ports {
-      a: bigint;
-      b: bigint;
-      readonly y: bigint;
-    }
+	test("Simulator.fourState: reads 4-state value and mask", () => {
+		interface Ports {
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}
 
-    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
-      fourState: true,
-    });
+		const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
 
-    sim.dut.a = 100n;
-    sim.dut.b = 55n;
-    // Trigger evalComb via output read (Adder4S is purely combinational)
-    expect(sim.dut.y).toBe(155n);
+		sim.dut.a = 100n;
+		sim.dut.b = 55n;
+		// Trigger evalComb via output read (Adder4S is purely combinational)
+		expect(sim.dut.y).toBe(155n);
 
-    const fs = sim.fourState("y");
-    expect(fs.__fourState).toBe(true);
-    expect(fs.value).toBe(155n);
-    expect(fs.mask).toBe(0n);
+		const fs = sim.fourState("y");
+		expect(fs.__fourState).toBe(true);
+		expect(fs.value).toBe(155n);
+		expect(fs.mask).toBe(0n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("Simulator.fourState: reads X mask when input is X", () => {
-    interface Ports {
-      a: bigint;
-      b: bigint;
-      readonly y: bigint;
-    }
+	test("Simulator.fourState: reads X mask when input is X", () => {
+		interface Ports {
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}
 
-    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
-      fourState: true,
-    });
+		const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
 
-    (sim.dut as any).a = X;
-    sim.dut.b = 10n;
-    // Trigger evalComb via output read
-    sim.dut.y;
+		(sim.dut as any).a = X;
+		sim.dut.b = 10n;
+		// Trigger evalComb via output read
+		sim.dut.y;
 
-    const fs = sim.fourState("y");
-    expect(fs.mask).toBe(0xFFn); // all X from arithmetic propagation
+		const fs = sim.fourState("y");
+		expect(fs.mask).toBe(0xffn); // all X from arithmetic propagation
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("Simulation.fourState: reads 4-state value", () => {
-    interface Ports {
-      a: bigint;
-      b: bigint;
-      readonly y: bigint;
-    }
+	test("Simulation.fourState: reads 4-state value", () => {
+		interface Ports {
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}
 
-    const sim = Simulation.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
-      fourState: true,
-    });
+		const sim = Simulation.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
 
-    sim.dut.a = 50n;
-    sim.dut.b = 25n;
-    sim.runUntil(0);
+		sim.dut.a = 50n;
+		sim.dut.b = 25n;
+		sim.runUntil(0);
 
-    const fs = sim.fourState("y");
-    expect(fs.value).toBe(75n);
-    expect(fs.mask).toBe(0n);
+		const fs = sim.fourState("y");
+		expect(fs.value).toBe(75n);
+		expect(fs.mask).toBe(0n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("fourState: throws for unknown port", () => {
-    interface Ports {
-      a: bigint;
-      b: bigint;
-      readonly y: bigint;
-    }
+	test("fourState: throws for unknown port", () => {
+		interface Ports {
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}
 
-    const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
-      fourState: true,
-    });
+		const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
 
-    expect(() => sim.fourState("nonexistent")).toThrow("Unknown port");
+		expect(() => sim.fourState("nonexistent")).toThrow("Unknown port");
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1328,50 +1364,50 @@ describe("E2E: fourState() method", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: optimize flag", () => {
-  test("Simulator.fromSource with optimize: true", () => {
-    interface AdderPorts {
-      rst: bigint;
-      a: bigint;
-      b: bigint;
-      readonly sum: bigint;
-    }
+	test("Simulator.fromSource with optimize: true", () => {
+		interface AdderPorts {
+			rst: bigint;
+			a: bigint;
+			b: bigint;
+			readonly sum: bigint;
+		}
 
-    const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder", {
-      optimize: true,
-    });
+		const sim = Simulator.fromSource<AdderPorts>(ADDER_SOURCE, "Adder", {
+			optimize: true,
+		});
 
-    sim.dut.a = 100n;
-    sim.dut.b = 200n;
-    sim.tick();
-    expect(sim.dut.sum).toBe(300n);
+		sim.dut.a = 100n;
+		sim.dut.b = 200n;
+		sim.tick();
+		expect(sim.dut.sum).toBe(300n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("Simulation.fromSource with optimize: true", () => {
-    interface CounterPorts {
-      rst: bigint;
-      en: bigint;
-      readonly count: bigint;
-    }
+	test("Simulation.fromSource with optimize: true", () => {
+		interface CounterPorts {
+			rst: bigint;
+			en: bigint;
+			readonly count: bigint;
+		}
 
-    const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
-      optimize: true,
-    });
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+			optimize: true,
+		});
 
-    sim.addClock("clk", { period: 10 });
+		sim.addClock("clk", { period: 10 });
 
-    // Reset (default async_low: rst=0 is active)
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
-    sim.dut.en = 1n;
-    sim.runUntil(100);
+		// Reset (default async_low: rst=0 is active)
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
+		sim.dut.en = 1n;
+		sim.runUntil(100);
 
-    expect(sim.dut.count).toBeGreaterThan(0n);
+		expect(sim.dut.count).toBeGreaterThan(0n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1379,32 +1415,32 @@ describe("E2E: optimize flag", () => {
 // ---------------------------------------------------------------------------
 
 describe("parseSignalPath", () => {
-  test("simple variable path", () => {
-    const result = parseSignalPath("v");
-    expect(result.instancePath).toEqual([]);
-    expect(result.varPath).toEqual(["v"]);
-  });
+	test("simple variable path", () => {
+		const result = parseSignalPath("v");
+		expect(result.instancePath).toEqual([]);
+		expect(result.varPath).toEqual(["v"]);
+	});
 
-  test("instance:variable split", () => {
-    const result = parseSignalPath("p2:i");
-    expect(result.instancePath).toEqual([{ name: "p2", index: 0 }]);
-    expect(result.varPath).toEqual(["i"]);
-  });
+	test("instance:variable split", () => {
+		const result = parseSignalPath("p2:i");
+		expect(result.instancePath).toEqual([{ name: "p2", index: 0 }]);
+		expect(result.varPath).toEqual(["i"]);
+	});
 
-  test("nested instance with array index", () => {
-    const result = parseSignalPath("a.b[3]:x.y");
-    expect(result.instancePath).toEqual([
-      { name: "a", index: 0 },
-      { name: "b", index: 3 },
-    ]);
-    expect(result.varPath).toEqual(["x", "y"]);
-  });
+	test("nested instance with array index", () => {
+		const result = parseSignalPath("a.b[3]:x.y");
+		expect(result.instancePath).toEqual([
+			{ name: "a", index: 0 },
+			{ name: "b", index: 3 },
+		]);
+		expect(result.varPath).toEqual(["x", "y"]);
+	});
 
-  test("dotted variable path without instance", () => {
-    const result = parseSignalPath("foo.bar.baz");
-    expect(result.instancePath).toEqual([]);
-    expect(result.varPath).toEqual(["foo", "bar", "baz"]);
-  });
+	test("dotted variable path without instance", () => {
+		const result = parseSignalPath("foo.bar.baz");
+		expect(result.instancePath).toEqual([]);
+		expect(result.varPath).toEqual(["foo", "bar", "baz"]);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1486,179 +1522,195 @@ module ParamChild #(
 `;
 
 describe("E2E: child instance DUT access", () => {
-  test("Simulator: read child instance ports via dut.u_sub", () => {
-    const sim = Simulator.fromSource(HIERARCHY_SOURCE, "Top");
+	test("Simulator: read child instance ports via dut.u_sub", () => {
+		const sim = Simulator.fromSource(HIERARCHY_SOURCE, "Top");
 
-    sim.dut.top_in = 0xABn;
-    sim.tick();
-    expect(sim.dut.top_out).toBe(0xABn);
+		sim.dut.top_in = 0xabn;
+		sim.tick();
+		expect(sim.dut.top_out).toBe(0xabn);
 
-    // Read the same value through the child instance accessor
-    expect((sim.dut as any).u_sub.o_data).toBe(0xABn);
-    expect((sim.dut as any).u_sub.i_data).toBe(0xABn);
+		// Read the same value through the child instance accessor
+		expect((sim.dut as any).u_sub.o_data).toBe(0xabn);
+		expect((sim.dut as any).u_sub.i_data).toBe(0xabn);
 
-    // Change top-level input and verify child reflects it
-    sim.dut.top_in = 0x42n;
-    sim.tick();
-    expect((sim.dut as any).u_sub.i_data).toBe(0x42n);
-    expect((sim.dut as any).u_sub.o_data).toBe(0x42n);
+		// Change top-level input and verify child reflects it
+		sim.dut.top_in = 0x42n;
+		sim.tick();
+		expect((sim.dut as any).u_sub.i_data).toBe(0x42n);
+		expect((sim.dut as any).u_sub.o_data).toBe(0x42n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("Simulation: read child instance ports via dut.u_sub", () => {
-    const sim = Simulation.fromSource(HIERARCHY_SOURCE, "Top");
-    sim.addClock("clk", { period: 10 });
+	test("Simulation: read child instance ports via dut.u_sub", () => {
+		const sim = Simulation.fromSource(HIERARCHY_SOURCE, "Top");
+		sim.addClock("clk", { period: 10 });
 
-    sim.dut.rst = 0n;
-    sim.runUntil(20);
-    sim.dut.rst = 1n;
+		sim.dut.rst = 0n;
+		sim.runUntil(20);
+		sim.dut.rst = 1n;
 
-    sim.dut.top_in = 0x55n;
-    sim.runUntil(40);
-    expect((sim.dut as any).u_sub.o_data).toBe(0x55n);
-    expect((sim.dut as any).u_sub.i_data).toBe(0x55n);
+		sim.dut.top_in = 0x55n;
+		sim.runUntil(40);
+		expect((sim.dut as any).u_sub.o_data).toBe(0x55n);
+		expect((sim.dut as any).u_sub.i_data).toBe(0x55n);
 
-    sim.dut.top_in = 0xFFn;
-    sim.runUntil(60);
-    expect((sim.dut as any).u_sub.o_data).toBe(0xFFn);
+		sim.dut.top_in = 0xffn;
+		sim.runUntil(60);
+		expect((sim.dut as any).u_sub.o_data).toBe(0xffn);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 describe("E2E: parameter override — DUT correctness", () => {
-  test("scalar width override: WIDTH 8→16 via fromSource", () => {
-    interface Ports {
-      a: bigint;
-      readonly b: bigint;
-    }
+	test("scalar width override: WIDTH 8→16 via fromSource", () => {
+		interface Ports {
+			a: bigint;
+			readonly b: bigint;
+		}
 
-    // Default WIDTH=8 (purely combinational — read output to trigger evalComb)
-    const sim8 = Simulator.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth");
-    sim8.dut.a = 0xABn;
-    expect(sim8.dut.b).toBe(0xABn);
-    // Writing a 16-bit value to an 8-bit port should truncate
-    sim8.dut.a = 0xABCDn;
-    expect(sim8.dut.b).toBe(0xCDn); // truncated to 8 bits
-    sim8.dispose();
+		// Default WIDTH=8 (purely combinational — read output to trigger evalComb)
+		const sim8 = Simulator.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth");
+		sim8.dut.a = 0xabn;
+		expect(sim8.dut.b).toBe(0xabn);
+		// Writing a 16-bit value to an 8-bit port should truncate
+		sim8.dut.a = 0xabcdn;
+		expect(sim8.dut.b).toBe(0xcdn); // truncated to 8 bits
+		sim8.dispose();
 
-    // Override WIDTH=16 — DUT should handle 16-bit values
-    const sim16 = Simulator.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth", {
-      parameters: [{ name: "WIDTH", value: 16 }],
-    });
-    sim16.dut.a = 0xABCDn;
-    expect(sim16.dut.b).toBe(0xABCDn); // full 16-bit value preserved
-    sim16.dispose();
-  });
+		// Override WIDTH=16 — DUT should handle 16-bit values
+		const sim16 = Simulator.fromSource<Ports>(
+			PARAM_WIDTH_SOURCE,
+			"ParamWidth",
+			{
+				parameters: [{ name: "WIDTH", value: 16 }],
+			},
+		);
+		sim16.dut.a = 0xabcdn;
+		expect(sim16.dut.b).toBe(0xabcdn); // full 16-bit value preserved
+		sim16.dispose();
+	});
 
-  test("scalar width override: WIDTH 8→32 via fromSource", () => {
-    interface Ports {
-      a: bigint;
-      readonly b: bigint;
-    }
+	test("scalar width override: WIDTH 8→32 via fromSource", () => {
+		interface Ports {
+			a: bigint;
+			readonly b: bigint;
+		}
 
-    const sim = Simulator.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth", {
-      parameters: [{ name: "WIDTH", value: 32 }],
-    });
-    sim.dut.a = 0xDEAD_BEEFn;
-    expect(sim.dut.b).toBe(0xDEAD_BEEFn);
-    sim.dispose();
-  });
+		const sim = Simulator.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth", {
+			parameters: [{ name: "WIDTH", value: 32 }],
+		});
+		sim.dut.a = 0xdead_beefn;
+		expect(sim.dut.b).toBe(0xdead_beefn);
+		sim.dispose();
+	});
 
-  test.skip("param value reflected in logic via fromSource", () => { // blocked by upstream Veryl IR bug
-    interface Ports {
-      a: bigint;
-      readonly b: bigint;
-    }
+	test.skip("param value reflected in logic via fromSource", () => {
+		// blocked by upstream Veryl IR bug
+		interface Ports {
+			a: bigint;
+			readonly b: bigint;
+		}
 
-    // Default OFFSET=10
-    const sim10 = Simulator.fromSource<Ports>(PARAM_OFFSET_SOURCE, "ParamOffset");
-    sim10.dut.a = 5n;
-    expect(sim10.dut.b).toBe(15n);
-    sim10.dispose();
+		// Default OFFSET=10
+		const sim10 = Simulator.fromSource<Ports>(
+			PARAM_OFFSET_SOURCE,
+			"ParamOffset",
+		);
+		sim10.dut.a = 5n;
+		expect(sim10.dut.b).toBe(15n);
+		sim10.dispose();
 
-    // Override OFFSET=100
-    const sim100 = Simulator.fromSource<Ports>(PARAM_OFFSET_SOURCE, "ParamOffset", {
-      parameters: [{ name: "OFFSET", value: 100 }],
-    });
-    sim100.dut.a = 5n;
-    expect(sim100.dut.b).toBe(105n);
-    sim100.dispose();
-  });
+		// Override OFFSET=100
+		const sim100 = Simulator.fromSource<Ports>(
+			PARAM_OFFSET_SOURCE,
+			"ParamOffset",
+			{
+				parameters: [{ name: "OFFSET", value: 100 }],
+			},
+		);
+		sim100.dut.a = 5n;
+		expect(sim100.dut.b).toBe(105n);
+		sim100.dispose();
+	});
 
-  test("child module param propagation via fromSource", () => {
-    interface Ports {
-      a: bigint;
-      readonly b: bigint;
-    }
+	test("child module param propagation via fromSource", () => {
+		interface Ports {
+			a: bigint;
+			readonly b: bigint;
+		}
 
-    // Default WIDTH=8
-    const sim8 = Simulator.fromSource<Ports>(PARAM_CHILD_SOURCE, "ParamChild");
-    sim8.dut.a = 0xABn;
-    expect(sim8.dut.b).toBe(0xABn);
-    sim8.dispose();
+		// Default WIDTH=8
+		const sim8 = Simulator.fromSource<Ports>(PARAM_CHILD_SOURCE, "ParamChild");
+		sim8.dut.a = 0xabn;
+		expect(sim8.dut.b).toBe(0xabn);
+		sim8.dispose();
 
-    // Override WIDTH=16 — child also gets 16-bit ports
-    const sim16 = Simulator.fromSource<Ports>(PARAM_CHILD_SOURCE, "ParamChild", {
-      parameters: [{ name: "WIDTH", value: 16 }],
-    });
-    sim16.dut.a = 0xABCDn;
-    expect(sim16.dut.b).toBe(0xABCDn);
-    sim16.dispose();
-  });
+		// Override WIDTH=16 — child also gets 16-bit ports
+		const sim16 = Simulator.fromSource<Ports>(
+			PARAM_CHILD_SOURCE,
+			"ParamChild",
+			{
+				parameters: [{ name: "WIDTH", value: 16 }],
+			},
+		);
+		sim16.dut.a = 0xabcdn;
+		expect(sim16.dut.b).toBe(0xabcdn);
+		sim16.dispose();
+	});
 
-  test("Simulator.create() with stale ModuleDefinition + param override", () => {
-    // This is the most dangerous case: ModuleDefinition has width=8 (stale),
-    // but we override WIDTH=16. The DUT must use runtime-derived ports
-    // from hierarchy, not the stale module.ports.
-    interface Ports {
-      a: bigint;
-      readonly b: bigint;
-    }
+	test("Simulator.create() with stale ModuleDefinition + param override", () => {
+		// This is the most dangerous case: ModuleDefinition has width=8 (stale),
+		// but we override WIDTH=16. The DUT must use runtime-derived ports
+		// from hierarchy, not the stale module.ports.
+		interface Ports {
+			a: bigint;
+			readonly b: bigint;
+		}
 
-    const addon = loadNativeAddon();
-    const nativeCreate = createSimulatorBridge(addon);
+		const addon = loadNativeAddon();
+		const nativeCreate = createSimulatorBridge(addon);
 
-    const sim = Simulator.create<Ports>(
-      {
-        __celox_module: true,
-        name: "ParamWidth",
-        source: PARAM_WIDTH_SOURCE,
-        ports: {
-          // STALE: these say width=8, but we'll override to 16
-          a: { direction: "input", type: "logic", width: 8 },
-          b: { direction: "output", type: "logic", width: 8 },
-        },
-        events: [],
-      },
-      {
-        __nativeCreate: nativeCreate,
-        parameters: [{ name: "WIDTH", value: 16 }],
-      },
-    );
+		const sim = Simulator.create<Ports>(
+			{
+				__celox_module: true,
+				name: "ParamWidth",
+				source: PARAM_WIDTH_SOURCE,
+				ports: {
+					// STALE: these say width=8, but we'll override to 16
+					a: { direction: "input", type: "logic", width: 8 },
+					b: { direction: "output", type: "logic", width: 8 },
+				},
+				events: [],
+			},
+			{
+				__nativeCreate: nativeCreate,
+				parameters: [{ name: "WIDTH", value: 16 }],
+			},
+		);
 
-    // If DUT used stale ports (width=8), this would truncate or corrupt
-    sim.dut.a = 0xABCDn;
-    expect(sim.dut.b).toBe(0xABCDn); // full 16-bit value preserved
-    sim.dispose();
-  });
+		// If DUT used stale ports (width=8), this would truncate or corrupt
+		sim.dut.a = 0xabcdn;
+		expect(sim.dut.b).toBe(0xabcdn); // full 16-bit value preserved
+		sim.dispose();
+	});
 
-  test("Simulation.fromSource with param override", () => {
-    interface Ports {
-      a: bigint;
-      readonly b: bigint;
-    }
+	test("Simulation.fromSource with param override", () => {
+		interface Ports {
+			a: bigint;
+			readonly b: bigint;
+		}
 
-    const sim = Simulation.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth", {
-      parameters: [{ name: "WIDTH", value: 16 }],
-    });
+		const sim = Simulation.fromSource<Ports>(PARAM_WIDTH_SOURCE, "ParamWidth", {
+			parameters: [{ name: "WIDTH", value: 16 }],
+		});
 
-    sim.dut.a = 0xFEDCn;
-    sim.runUntil(0);
-    expect(sim.dut.b).toBe(0xFEDCn);
-    sim.dispose();
-  });
+		sim.dut.a = 0xfedcn;
+		sim.runUntil(0);
+		expect(sim.dut.b).toBe(0xfedcn);
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1666,65 +1718,77 @@ describe("E2E: parameter override — DUT correctness", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: celox.toml test sources", () => {
-  test("fromProject loads test-only module declared in celox.toml", () => {
-    interface RegPorts {
-      rst: bigint;
-      d: bigint;
-      readonly q: bigint;
-    }
+	test("fromProject loads test-only module declared in celox.toml", () => {
+		interface RegPorts {
+			rst: bigint;
+			d: bigint;
+			readonly q: bigint;
+		}
 
-    // `Reg` lives in test_veryl/ — not in Veryl.toml sources — but celox.toml
-    // declares test_veryl/ as an additional test source directory.
-    const sim = Simulator.fromProject<RegPorts>(CELOX_TOML_PROJECT, "Reg");
+		// `Reg` lives in test_veryl/ — not in Veryl.toml sources — but celox.toml
+		// declares test_veryl/ as an additional test source directory.
+		const sim = Simulator.fromProject<RegPorts>(CELOX_TOML_PROJECT, "Reg");
 
-    // Deassert async_low reset (rst=0 is active; rst=1 is normal operation)
-    sim.dut.rst = 1n;
-    sim.dut.d = 0xABn;
-    sim.tick();
-    expect(sim.dut.q).toBe(0xABn);
+		// Deassert async_low reset (rst=0 is active; rst=1 is normal operation)
+		sim.dut.rst = 1n;
+		sim.dut.d = 0xabn;
+		sim.tick();
+		expect(sim.dut.q).toBe(0xabn);
 
-    sim.dut.d = 0xCDn;
-    expect(sim.dut.q).toBe(0xABn); // not yet clocked
-    sim.tick();
-    expect(sim.dut.q).toBe(0xCDn);
+		sim.dut.d = 0xcdn;
+		expect(sim.dut.q).toBe(0xabn); // not yet clocked
+		sim.tick();
+		expect(sim.dut.q).toBe(0xcdn);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("genTs includes test-only module declared in celox.toml", () => {
-    const addon = loadNativeAddon();
-    const json = addon.genTs(CELOX_TOML_PROJECT);
-    const output = JSON.parse(json) as { modules: Array<{ moduleName: string }> };
-    const names = output.modules.map((m) => m.moduleName);
-    // Both the regular source (Adder) and the test-only source (Reg) must appear
-    expect(names).toContain("Adder");
-    expect(names).toContain("Reg");
-  });
+	test("genTs includes test-only module declared in celox.toml", () => {
+		const addon = loadNativeAddon();
+		const json = addon.genTs(CELOX_TOML_PROJECT);
+		const output = JSON.parse(json) as {
+			modules: Array<{ moduleName: string }>;
+		};
+		const names = output.modules.map((m) => m.moduleName);
+		// Both the regular source (Adder) and the test-only source (Reg) must appear
+		expect(names).toContain("Adder");
+		expect(names).toContain("Reg");
+	});
 
-  test("[simulation] max_steps from celox.toml is used as waitUntil default", () => {
-    // celox.toml sets [simulation] max_steps = 20; waitUntil should honour it
-    // when no per-call maxSteps is provided.
-    const sim = Simulation.fromProject(CELOX_TOML_PROJECT, "Reg");
-    sim.addClock("clk", { period: 10 });
-    expect(() => sim.waitUntil(() => false)).toThrow(SimulationTimeoutError);
-    const err = (() => {
-      try { sim.waitUntil(() => false); } catch (e) { return e; }
-    })() as SimulationTimeoutError;
-    expect(err.steps).toBe(20);
-    sim.dispose();
-  });
+	test("[simulation] max_steps from celox.toml is used as waitUntil default", () => {
+		// celox.toml sets [simulation] max_steps = 20; waitUntil should honour it
+		// when no per-call maxSteps is provided.
+		const sim = Simulation.fromProject(CELOX_TOML_PROJECT, "Reg");
+		sim.addClock("clk", { period: 10 });
+		expect(() => sim.waitUntil(() => false)).toThrow(SimulationTimeoutError);
+		const err = (() => {
+			try {
+				sim.waitUntil(() => false);
+			} catch (e) {
+				return e;
+			}
+		})() as SimulationTimeoutError;
+		expect(err.steps).toBe(20);
+		sim.dispose();
+	});
 
-  test("[simulation] max_steps per-call override takes precedence over celox.toml", () => {
-    const sim = Simulation.fromProject(CELOX_TOML_PROJECT, "Reg");
-    sim.addClock("clk", { period: 10 });
-    // Per-call maxSteps=5 is lower than the toml default of 20
-    expect(() => sim.waitUntil(() => false, { maxSteps: 5 })).toThrow(SimulationTimeoutError);
-    const err = (() => {
-      try { sim.waitUntil(() => false, { maxSteps: 5 }); } catch (e) { return e; }
-    })() as SimulationTimeoutError;
-    expect(err.steps).toBe(5);
-    sim.dispose();
-  });
+	test("[simulation] max_steps per-call override takes precedence over celox.toml", () => {
+		const sim = Simulation.fromProject(CELOX_TOML_PROJECT, "Reg");
+		sim.addClock("clk", { period: 10 });
+		// Per-call maxSteps=5 is lower than the toml default of 20
+		expect(() => sim.waitUntil(() => false, { maxSteps: 5 })).toThrow(
+			SimulationTimeoutError,
+		);
+		const err = (() => {
+			try {
+				sim.waitUntil(() => false, { maxSteps: 5 });
+			} catch (e) {
+				return e;
+			}
+		})() as SimulationTimeoutError;
+		expect(err.steps).toBe(5);
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1802,29 +1866,29 @@ module Top (
 `;
 
 describe("E2E: interface port DUT accessor", () => {
-  test("top-level interface port members accessible as nested dut properties", () => {
-    interface TopPorts {
-      sig: { data: bigint; valid: bigint };
-      readonly out: bigint;
-    }
+	test("top-level interface port members accessible as nested dut properties", () => {
+		interface TopPorts {
+			sig: { data: bigint; valid: bigint };
+			readonly out: bigint;
+		}
 
-    const sim = Simulator.fromSource<TopPorts>(INTERFACE_PORT_SOURCE, "Top");
+		const sim = Simulator.fromSource<TopPorts>(INTERFACE_PORT_SOURCE, "Top");
 
-    sim.dut.sig.data = 0x42n;
-    expect(sim.dut.out).toBe(0x42n);
+		sim.dut.sig.data = 0x42n;
+		expect(sim.dut.out).toBe(0x42n);
 
-    sim.dut.sig.data = 0xFFn;
-    expect(sim.dut.out).toBe(0xFFn);
+		sim.dut.sig.data = 0xffn;
+		expect(sim.dut.out).toBe(0xffn);
 
-    sim.dut.sig.data = 0x00n;
-    expect(sim.dut.out).toBe(0x00n);
+		sim.dut.sig.data = 0x00n;
+		expect(sim.dut.out).toBe(0x00n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("writing to interface output member throws", () => {
-    // bus.data / bus.valid are outputs of Top — writing should throw.
-    const PRODUCER_ONLY = `
+	test("writing to interface output member throws", () => {
+		// bus.data / bus.valid are outputs of Top — writing should throw.
+		const PRODUCER_ONLY = `
 interface Bus {
     var data:  logic<8>;
     var valid: logic;
@@ -1841,52 +1905,55 @@ module Top (
     assign bus.valid = 1'b1;
 }
 `;
-    const sim = Simulator.fromSource(PRODUCER_ONLY, "Top");
+		const sim = Simulator.fromSource(PRODUCER_ONLY, "Top");
 
-    expect(() => {
-      (sim.dut as any).bus.data = 0n;
-    }).toThrow("Cannot write to output port 'data'");
+		expect(() => {
+			(sim.dut as any).bus.data = 0n;
+		}).toThrow("Cannot write to output port 'data'");
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("interface port propagates through sub-module instances", () => {
-    interface TopPorts {
-      val: bigint;
-      readonly out: bigint;
-      readonly got: bigint;
-    }
+	test("interface port propagates through sub-module instances", () => {
+		interface TopPorts {
+			val: bigint;
+			readonly out: bigint;
+			readonly got: bigint;
+		}
 
-    const sim = Simulator.fromSource<TopPorts>(INTERFACE_HIERARCHY_SOURCE, "Top");
+		const sim = Simulator.fromSource<TopPorts>(
+			INTERFACE_HIERARCHY_SOURCE,
+			"Top",
+		);
 
-    sim.dut.val = 0xABn;
-    expect(sim.dut.out).toBe(0xABn);
-    expect(sim.dut.got).toBe(1n);
+		sim.dut.val = 0xabn;
+		expect(sim.dut.out).toBe(0xabn);
+		expect(sim.dut.got).toBe(1n);
 
-    sim.dut.val = 0x00n;
-    expect(sim.dut.out).toBe(0x00n);
+		sim.dut.val = 0x00n;
+		expect(sim.dut.out).toBe(0x00n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("multiple interface port members are independently accessible", () => {
-    interface TopPorts {
-      sig: { data: bigint; valid: bigint };
-      readonly out: bigint;
-    }
+	test("multiple interface port members are independently accessible", () => {
+		interface TopPorts {
+			sig: { data: bigint; valid: bigint };
+			readonly out: bigint;
+		}
 
-    const sim = Simulator.fromSource<TopPorts>(INTERFACE_PORT_SOURCE, "Top");
+		const sim = Simulator.fromSource<TopPorts>(INTERFACE_PORT_SOURCE, "Top");
 
-    sim.dut.sig.data = 0x77n;
-    sim.dut.sig.valid = 1n;
-    expect(sim.dut.out).toBe(0x77n);
+		sim.dut.sig.data = 0x77n;
+		sim.dut.sig.valid = 1n;
+		expect(sim.dut.out).toBe(0x77n);
 
-    sim.dut.sig.data = 0x33n;
-    sim.dut.sig.valid = 0n;
-    expect(sim.dut.out).toBe(0x33n);
+		sim.dut.sig.data = 0x33n;
+		sim.dut.sig.valid = 0n;
+		expect(sim.dut.out).toBe(0x33n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1912,30 +1979,38 @@ module Top (
 `;
 
 describe("E2E: interface array port (modport [N])", () => {
-  test("interface array members accessible via .at()/.set()", () => {
-    interface TopPorts {
-      bus: {
-        data: { at(i: number): bigint; set(i: number, v: bigint): void; length: number };
-        valid: { at(i: number): bigint; set(i: number, v: bigint): void; length: number };
-      };
-      readonly out: bigint;
-    }
+	test("interface array members accessible via .at()/.set()", () => {
+		interface TopPorts {
+			bus: {
+				data: {
+					at(i: number): bigint;
+					set(i: number, v: bigint): void;
+					length: number;
+				};
+				valid: {
+					at(i: number): bigint;
+					set(i: number, v: bigint): void;
+					length: number;
+				};
+			};
+			readonly out: bigint;
+		}
 
-    const sim = Simulator.fromSource<TopPorts>(INTERFACE_ARRAY_SOURCE, "Top");
+		const sim = Simulator.fromSource<TopPorts>(INTERFACE_ARRAY_SOURCE, "Top");
 
-    sim.dut.bus.data.set(0, 0x10n);
-    sim.dut.bus.data.set(1, 0x20n);
-    expect(sim.dut.out).toBe(0x30n);
+		sim.dut.bus.data.set(0, 0x10n);
+		sim.dut.bus.data.set(1, 0x20n);
+		expect(sim.dut.out).toBe(0x30n);
 
-    sim.dut.bus.data.set(0, 0xAAn);
-    sim.dut.bus.data.set(1, 0x11n);
-    expect(sim.dut.out).toBe(0xBBn);
+		sim.dut.bus.data.set(0, 0xaan);
+		sim.dut.bus.data.set(1, 0x11n);
+		expect(sim.dut.out).toBe(0xbbn);
 
-    expect(sim.dut.bus.data.length).toBe(2);
-    expect(sim.dut.bus.valid.length).toBe(2);
+		expect(sim.dut.bus.data.length).toBe(2);
+		expect(sim.dut.bus.valid.length).toBe(2);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1962,113 +2037,135 @@ module ArrayPassThrough (
 `;
 
 describe("E2E: 1-bit unpacked array port (logic [N])", () => {
-  test("each element is independently visible in hardware (issue #6)", () => {
-    interface Ports {
-      rst: bigint;
-      en: { at(i: number): bigint; set(i: number, v: bigint): void; length: number };
-      readonly y0: bigint;
-      readonly y1: bigint;
-      readonly y2: bigint;
-      readonly y3: bigint;
-    }
+	test("each element is independently visible in hardware (issue #6)", () => {
+		interface Ports {
+			rst: bigint;
+			en: {
+				at(i: number): bigint;
+				set(i: number, v: bigint): void;
+				length: number;
+			};
+			readonly y0: bigint;
+			readonly y1: bigint;
+			readonly y2: bigint;
+			readonly y3: bigint;
+		}
 
-    const sim = Simulator.fromSource<Ports>(ARRAY_1BIT_SOURCE, "ArrayPassThrough");
+		const sim = Simulator.fromSource<Ports>(
+			ARRAY_1BIT_SOURCE,
+			"ArrayPassThrough",
+		);
 
-    // Default: all inputs 0
-    sim.tick();
-    expect(sim.dut.y0).toBe(0n);
-    expect(sim.dut.y1).toBe(0n);
-    expect(sim.dut.y2).toBe(0n);
-    expect(sim.dut.y3).toBe(0n);
+		// Default: all inputs 0
+		sim.tick();
+		expect(sim.dut.y0).toBe(0n);
+		expect(sim.dut.y1).toBe(0n);
+		expect(sim.dut.y2).toBe(0n);
+		expect(sim.dut.y3).toBe(0n);
 
-    // Set element 0 only
-    sim.dut.en.set(0, 1n);
-    sim.tick();
-    expect(sim.dut.y0).toBe(1n);
-    expect(sim.dut.y1).toBe(0n);
-    expect(sim.dut.y2).toBe(0n);
-    expect(sim.dut.y3).toBe(0n);
+		// Set element 0 only
+		sim.dut.en.set(0, 1n);
+		sim.tick();
+		expect(sim.dut.y0).toBe(1n);
+		expect(sim.dut.y1).toBe(0n);
+		expect(sim.dut.y2).toBe(0n);
+		expect(sim.dut.y3).toBe(0n);
 
-    // Set element 1 (was silently ignored before the fix)
-    sim.dut.en.set(0, 0n);
-    sim.dut.en.set(1, 1n);
-    sim.tick();
-    expect(sim.dut.y0).toBe(0n);
-    expect(sim.dut.y1).toBe(1n);
-    expect(sim.dut.y2).toBe(0n);
-    expect(sim.dut.y3).toBe(0n);
+		// Set element 1 (was silently ignored before the fix)
+		sim.dut.en.set(0, 0n);
+		sim.dut.en.set(1, 1n);
+		sim.tick();
+		expect(sim.dut.y0).toBe(0n);
+		expect(sim.dut.y1).toBe(1n);
+		expect(sim.dut.y2).toBe(0n);
+		expect(sim.dut.y3).toBe(0n);
 
-    // Set elements 2 and 3
-    sim.dut.en.set(1, 0n);
-    sim.dut.en.set(2, 1n);
-    sim.dut.en.set(3, 1n);
-    sim.tick();
-    expect(sim.dut.y0).toBe(0n);
-    expect(sim.dut.y1).toBe(0n);
-    expect(sim.dut.y2).toBe(1n);
-    expect(sim.dut.y3).toBe(1n);
+		// Set elements 2 and 3
+		sim.dut.en.set(1, 0n);
+		sim.dut.en.set(2, 1n);
+		sim.dut.en.set(3, 1n);
+		sim.tick();
+		expect(sim.dut.y0).toBe(0n);
+		expect(sim.dut.y1).toBe(0n);
+		expect(sim.dut.y2).toBe(1n);
+		expect(sim.dut.y3).toBe(1n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 
-  test("length property is correct", () => {
-    interface Ports {
-      rst: bigint;
-      en: { at(i: number): bigint; set(i: number, v: bigint): void; length: number };
-      readonly y0: bigint;
-      readonly y1: bigint;
-      readonly y2: bigint;
-      readonly y3: bigint;
-    }
+	test("length property is correct", () => {
+		interface Ports {
+			rst: bigint;
+			en: {
+				at(i: number): bigint;
+				set(i: number, v: bigint): void;
+				length: number;
+			};
+			readonly y0: bigint;
+			readonly y1: bigint;
+			readonly y2: bigint;
+			readonly y3: bigint;
+		}
 
-    const sim = Simulator.fromSource<Ports>(ARRAY_1BIT_SOURCE, "ArrayPassThrough");
-    expect(sim.dut.en.length).toBe(4);
-    sim.dispose();
-  });
+		const sim = Simulator.fromSource<Ports>(
+			ARRAY_1BIT_SOURCE,
+			"ArrayPassThrough",
+		);
+		expect(sim.dut.en.length).toBe(4);
+		sim.dispose();
+	});
 
-  test("4-state mode: X written to element i propagates only to output yi (verifies maskBase layout)", () => {
-    // This test validates that the maskBase = baseOffset + totalValueBytes assumption
-    // matches the actual JIT memory layout when fourState: true is used.
-    interface Ports {
-      rst: bigint;
-      en: { at(i: number): bigint; set(i: number, v: unknown): void; length: number };
-      readonly y0: bigint;
-      readonly y1: bigint;
-      readonly y2: bigint;
-      readonly y3: bigint;
-    }
+	test("4-state mode: X written to element i propagates only to output yi (verifies maskBase layout)", () => {
+		// This test validates that the maskBase = baseOffset + totalValueBytes assumption
+		// matches the actual JIT memory layout when fourState: true is used.
+		interface Ports {
+			rst: bigint;
+			en: {
+				at(i: number): bigint;
+				set(i: number, v: unknown): void;
+				length: number;
+			};
+			readonly y0: bigint;
+			readonly y1: bigint;
+			readonly y2: bigint;
+			readonly y3: bigint;
+		}
 
-    const sim = Simulator.fromSource<Ports>(ARRAY_1BIT_SOURCE, "ArrayPassThrough", { fourState: true });
+		const sim = Simulator.fromSource<Ports>(
+			ARRAY_1BIT_SOURCE,
+			"ArrayPassThrough",
+			{ fourState: true },
+		);
 
-    // Start with all defined zeros
-    for (let i = 0; i < 4; i++) sim.dut.en.set(i, 0n);
-    sim.tick();
+		// Start with all defined zeros
+		for (let i = 0; i < 4; i++) sim.dut.en.set(i, 0n);
+		sim.tick();
 
-    // Set element 1 to X; only y1 should become X
-    sim.dut.en.set(1, X);
-    sim.tick();
+		// Set element 1 to X; only y1 should become X
+		sim.dut.en.set(1, X);
+		sim.tick();
 
-    expect(sim.fourState("y1").mask).not.toBe(0n);  // y1 = X
-    expect(sim.fourState("y0").mask).toBe(0n);       // y0 defined
-    expect(sim.fourState("y2").mask).toBe(0n);       // y2 defined
-    expect(sim.fourState("y3").mask).toBe(0n);       // y3 defined
+		expect(sim.fourState("y1").mask).not.toBe(0n); // y1 = X
+		expect(sim.fourState("y0").mask).toBe(0n); // y0 defined
+		expect(sim.fourState("y2").mask).toBe(0n); // y2 defined
+		expect(sim.fourState("y3").mask).toBe(0n); // y3 defined
 
-    // Set element 2 to X; y2 becomes X, y1 remains X
-    sim.dut.en.set(2, X);
-    sim.tick();
+		// Set element 2 to X; y2 becomes X, y1 remains X
+		sim.dut.en.set(2, X);
+		sim.tick();
 
-    expect(sim.fourState("y1").mask).not.toBe(0n);
-    expect(sim.fourState("y2").mask).not.toBe(0n);
-    expect(sim.fourState("y0").mask).toBe(0n);
-    expect(sim.fourState("y3").mask).toBe(0n);
+		expect(sim.fourState("y1").mask).not.toBe(0n);
+		expect(sim.fourState("y2").mask).not.toBe(0n);
+		expect(sim.fourState("y0").mask).toBe(0n);
+		expect(sim.fourState("y3").mask).toBe(0n);
 
-    // Clear element 1 to defined 0; y1 becomes defined again
-    sim.dut.en.set(1, 0n);
-    sim.tick();
+		// Clear element 1 to defined 0; y1 becomes defined again
+		sim.dut.en.set(1, 0n);
+		sim.tick();
 
-    expect(sim.fourState("y1").mask).toBe(0n);
-    expect(sim.fourState("y2").mask).not.toBe(0n);
+		expect(sim.fourState("y1").mask).toBe(0n);
+		expect(sim.fourState("y2").mask).not.toBe(0n);
 
-    sim.dispose();
-  });
+		sim.dispose();
+	});
 });

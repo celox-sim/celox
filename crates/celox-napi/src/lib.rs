@@ -152,16 +152,8 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let clock_type = o
-                .clock_type
-                .as_deref()
-                .map(parse_clock_type)
-                .transpose()?;
-            let reset_type = o
-                .reset_type
-                .as_deref()
-                .map(parse_reset_type)
-                .transpose()?;
+            let clock_type = o.clock_type.as_deref().map(parse_clock_type).transpose()?;
+            let reset_type = o.reset_type.as_deref().map(parse_reset_type).transpose()?;
             let parameters = o
                 .parameters
                 .as_ref()
@@ -273,8 +265,7 @@ fn walkdir(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
     let read = std::fs::read_dir(dir)
         .map_err(|e| Error::from_reason(format!("Cannot read directory {}: {e}", dir.display())))?;
     for entry in read {
-        let entry = entry
-            .map_err(|e| Error::from_reason(format!("Directory entry error: {e}")))?;
+        let entry = entry.map_err(|e| Error::from_reason(format!("Directory entry error: {e}")))?;
         let path = entry.path();
         if path.is_dir() {
             files.extend(walkdir(&path)?);
@@ -400,7 +391,11 @@ impl NativeSimulatorHandle {
     /// `.veryl` source files, and builds the simulator using the project's
     /// clock/reset settings.
     #[napi(factory)]
-    pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
+    pub fn from_project(
+        project_path: String,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
         let opts = parse_options(&options)?;
         let (source, metadata, _celox_cfg) = load_project_source(&project_path)?;
         let source = append_extra_source(source, &opts.extra_source);
@@ -590,7 +585,11 @@ impl NativeSimulationHandle {
 
     /// Create a new timed simulation from a Veryl project directory.
     #[napi(factory)]
-    pub fn from_project(project_path: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
+    pub fn from_project(
+        project_path: String,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
         let opts = parse_options(&options)?;
         let (source, metadata, celox_cfg) = load_project_source(&project_path)?;
         let source = append_extra_source(source, &opts.extra_source);
@@ -879,7 +878,11 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         // On Windows, metadata.paths() may return extended-length paths
         // (\\?\...) while base_path does not have the prefix, so strip it
         // before computing the relative source_file key.
-        let src_normalized = path.src.to_string_lossy().replace(r"\\?\", "").replace('\\', "/");
+        let src_normalized = path
+            .src
+            .to_string_lossy()
+            .replace(r"\\?\", "")
+            .replace('\\', "/");
         let base_normalized = base_path.replace('\\', "/");
         let source_file = src_normalized
             .strip_prefix(&base_normalized)

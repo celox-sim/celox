@@ -19,16 +19,16 @@ fn setup_to_flatting(
     crate::logic_tree::SLTNodeArena<crate::ir::AbsoluteAddr>,
 ) {
     let metadata = Metadata::create_default("prj").unwrap();
-    let parser = Parser::parse(&code, &"").unwrap();
+    let parser = Parser::parse(code, &"").unwrap();
     let analyzer = Analyzer::new(&metadata);
     let mut context = Context::default();
     let mut ir = Ir::default();
 
-    let errors = analyzer.analyze_pass1(&"prj", &parser.veryl);
+    let errors = analyzer.analyze_pass1("prj", &parser.veryl);
     assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass1();
     assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
-    let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
+    let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
     assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass2();
     assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
@@ -51,7 +51,9 @@ fn setup_to_flatting(
     // Parse each module with proper inst_ids
     let mut modules: HashMap<ModuleId, crate::ir::SimModule> = HashMap::default();
     for (&mid, &module) in &ir_modules {
-        let inst_ids: Vec<ModuleId> = module.declarations.iter()
+        let inst_ids: Vec<ModuleId> = module
+            .declarations
+            .iter()
             .filter_map(|d| match d {
                 Declaration::Inst(inst) => {
                     let child_name = match &inst.component {
@@ -322,16 +324,16 @@ fn test_mixed_boundaries() {
 
 fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
     let metadata = Metadata::create_default("prj").unwrap();
-    let parser = Parser::parse(&code, &"").unwrap();
+    let parser = Parser::parse(code, &"").unwrap();
     let analyzer = Analyzer::new(&metadata);
     let mut context = Context::default();
     let mut ir = Ir::default();
 
-    let errors = analyzer.analyze_pass1(&"prj", &parser.veryl);
+    let errors = analyzer.analyze_pass1("prj", &parser.veryl);
     assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass1();
     assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
-    let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
+    let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
     assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass2();
     assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
@@ -406,7 +408,9 @@ fn test_instances_inherit_module_boundaries() {
 
     // Find VarId for 'x' in Child module
     let child_name = resource_table::insert_str("Child");
-    let child_module_id = program.module_names.iter()
+    let child_module_id = program
+        .module_names
+        .iter()
         .find(|(_, name)| **name == child_name)
         .map(|(id, _)| *id)
         .expect("Child module not found");
@@ -488,7 +492,8 @@ fn test_boundary_propagation() {
 
     let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
 
-    let b_id = modules.values()
+    let b_id = modules
+        .values()
         .find(|m| m.name == resource_table::insert_str("Child"))
         .expect("Child module not found")
         .variables
@@ -566,5 +571,5 @@ fn test_assign_partial_no_cycle() {
 
     let program = setup_and_parse(code, "Top");
 
-    assert!(program.eval_comb.len() > 0);
+    assert!(!program.eval_comb.is_empty());
 }

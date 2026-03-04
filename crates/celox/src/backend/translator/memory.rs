@@ -126,8 +126,7 @@ impl SIRTranslator {
                 )
             }
             SIROffset::Dynamic(reg) => {
-                let total_bit_offset =
-                    {
+                let total_bit_offset = {
                     let v = state.regs[reg].first_value(state.builder);
                     cast_type(state.builder, v, types::I64)
                 };
@@ -248,8 +247,7 @@ impl SIRTranslator {
                 )
             }
             SIROffset::Dynamic(reg) => {
-                let total_bit_offset =
-                    {
+                let total_bit_offset = {
                     let v = state.regs[reg].first_value(state.builder);
                     cast_type(state.builder, v, types::I64)
                 };
@@ -485,8 +483,7 @@ impl SIRTranslator {
                 )
             }
             SIROffset::Dynamic(reg) => {
-                let total_bit_offset =
-                    {
+                let total_bit_offset = {
                     let v = state.regs[reg].first_value(state.builder);
                     cast_type(state.builder, v, types::I64)
                 };
@@ -1037,8 +1034,7 @@ impl SIRTranslator {
                 }
             }
             SIROffset::Dynamic(reg) => {
-                let total_bit_offset =
-                    {
+                let total_bit_offset = {
                     let v = state.regs[reg].first_value(state.builder);
                     cast_type(state.builder, v, types::I64)
                 };
@@ -1074,8 +1070,7 @@ impl SIRTranslator {
                 )
             }
             SIROffset::Dynamic(reg) => {
-                let total_bit_offset =
-                    {
+                let total_bit_offset = {
                     let v = state.regs[reg].first_value(state.builder);
                     cast_type(state.builder, v, types::I64)
                 };

@@ -1,5 +1,5 @@
-use criterion::{Criterion, criterion_group, criterion_main};
 use celox::Simulator;
+use criterion::{Criterion, criterion_group, criterion_main};
 
 // P=6: K=63-bit codeword, N=57-bit data
 const LINEAR_SEC_SRC: &str = concat!(
@@ -183,8 +183,8 @@ fn benchmark_linear_sec(c: &mut Criterion) {
     });
 
     let mut sim = Simulator::builder(LINEAR_SEC_SRC, "Top").build().unwrap();
-    let i_word      = sim.signal("i_word");
-    let o_word      = sim.signal("o_word");
+    let i_word = sim.signal("i_word");
+    let o_word = sim.signal("o_word");
     let o_corrected = sim.signal("o_corrected");
 
     c.bench_function("simulation_eval_linear_sec_p6_x1", |b| {
@@ -368,20 +368,22 @@ fn benchmark_std_counter(c: &mut Criterion) {
     });
 
     let mut sim = Simulator::builder(STD_COUNTER_SRC, "Top").build().unwrap();
-    let clk     = sim.event("clk");
-    let rst     = sim.signal("rst");
-    let i_up    = sim.signal("i_up");
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let i_up = sim.signal("i_up");
     let o_count = sim.signal("o_count");
 
     sim.modify(|io| {
         io.set(rst, 1u8);
         io.set(i_up, 0u8);
-    }).unwrap();
+    })
+    .unwrap();
     sim.tick(clk).unwrap();
     sim.modify(|io| {
         io.set(rst, 0u8);
         io.set(i_up, 1u8);
-    }).unwrap();
+    })
+    .unwrap();
 
     c.bench_function("simulation_tick_std_counter_w32_x1", |b| {
         b.iter(|| {
@@ -416,20 +418,22 @@ fn benchmark_gray_counter(c: &mut Criterion) {
     });
 
     let mut sim = Simulator::builder(GRAY_COUNTER_SRC, "Top").build().unwrap();
-    let clk     = sim.event("clk");
-    let rst     = sim.signal("rst");
-    let i_up    = sim.signal("i_up");
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let i_up = sim.signal("i_up");
     let o_count = sim.signal("o_count");
 
     sim.modify(|io| {
         io.set(rst, 1u8);
         io.set(i_up, 0u8);
-    }).unwrap();
+    })
+    .unwrap();
     sim.tick(clk).unwrap();
     sim.modify(|io| {
         io.set(rst, 0u8);
         io.set(i_up, 1u8);
-    }).unwrap();
+    })
+    .unwrap();
 
     c.bench_function("simulation_tick_gray_counter_w32_x1", |b| {
         b.iter(|| {
