@@ -1372,7 +1372,7 @@ impl SIRTranslator {
         }
     }
 }
-fn apply_d_width_mask(state: &mut TranslationState, val: Value, ty: Type, d_width: usize) -> Value {
+pub(super) fn apply_d_width_mask(state: &mut TranslationState, val: Value, ty: Type, d_width: usize) -> Value {
     if d_width < ty.bits() as usize {
         let mask_val = (1u64 << d_width).wrapping_sub(1);
         let mask = state.builder.ins().iconst(ty, mask_val as i64);

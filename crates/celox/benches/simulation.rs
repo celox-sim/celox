@@ -220,6 +220,114 @@ fn benchmark_linear_sec(c: &mut Criterion) {
     });
 }
 
+fn benchmark_linear_sec_isolation(c: &mut Criterion) {
+    let mut sim = Simulator::builder(LINEAR_SEC_SRC, "Top").build().unwrap();
+    let i_word = sim.signal("i_word");
+    let o_word = sim.signal("o_word");
+
+    // -- 1. Pure eval_comb (same input, no I/O overhead) --
+    sim.modify(|io| io.set(i_word, 42u64)).unwrap();
+    sim.eval_comb().unwrap();
+
+    c.bench_function("isolation_eval_comb_linear_sec_p6", |b| {
+        b.iter(|| {
+            sim.eval_comb().unwrap();
+        })
+    });
+
+    c.bench_function("isolation_eval_comb_linear_sec_p6_x1000000", |b| {
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.eval_comb().unwrap();
+            }
+        })
+    });
+
+    // -- 2. Raw pointer I/O + eval_comb (Verilator-equivalent) --
+    let i_offset = i_word.offset;
+    let o_offset = o_word.offset;
+
+    c.bench_function("isolation_raw_io_eval_linear_sec_p6", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            let (ptr, _) = sim.memory_as_mut_ptr();
+            unsafe {
+                std::ptr::write(ptr.add(i_offset) as *mut u64, input);
+            }
+            sim.eval_comb().unwrap();
+            let out: u64 = unsafe {
+                let (ptr, _) = sim.memory_as_ptr();
+                std::ptr::read(ptr.add(o_offset) as *const u64)
+            };
+            std::hint::black_box(out);
+            input = input.wrapping_add(1);
+        })
+    });
+
+    c.bench_function("isolation_raw_io_eval_linear_sec_p6_x1000000", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                let (ptr, _) = sim.memory_as_mut_ptr();
+                unsafe {
+                    std::ptr::write(ptr.add(i_offset) as *mut u64, input);
+                }
+                sim.eval_comb().unwrap();
+                let out: u64 = unsafe {
+                    let (ptr, _) = sim.memory_as_ptr();
+                    std::ptr::read(ptr.add(o_offset) as *const u64)
+                };
+                std::hint::black_box(out);
+                input = input.wrapping_add(1);
+            }
+        })
+    });
+
+    // -- 3. set (modify) + eval_comb (no get) --
+    c.bench_function("isolation_set_eval_linear_sec_p6", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            sim.modify(|io| io.set(i_word, input)).unwrap();
+            sim.eval_comb().unwrap();
+            input = input.wrapping_add(1);
+        })
+    });
+
+    c.bench_function("isolation_set_eval_linear_sec_p6_x1000000", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.modify(|io| io.set(i_word, input)).unwrap();
+                sim.eval_comb().unwrap();
+                input = input.wrapping_add(1);
+            }
+        })
+    });
+
+    // -- 4. set + eval_comb + get_as<u64> (stack read, no BigUint) --
+    c.bench_function("isolation_set_eval_get_as_linear_sec_p6", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            sim.modify(|io| io.set(i_word, input)).unwrap();
+            let out: u64 = sim.get_as(o_word);
+            std::hint::black_box(out);
+            input = input.wrapping_add(1);
+        })
+    });
+
+    c.bench_function("isolation_set_eval_get_as_linear_sec_p6_x1000000", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.modify(|io| io.set(i_word, input)).unwrap();
+                let out: u64 = sim.get_as(o_word);
+                std::hint::black_box(out);
+                input = input.wrapping_add(1);
+            }
+        })
+    });
+}
+
 fn benchmark_countones(c: &mut Criterion) {
     c.bench_function("simulation_build_countones_w64", |b| {
         b.iter(|| {
@@ -352,6 +460,7 @@ criterion_group!(
     benches,
     benchmark_counter,
     benchmark_linear_sec,
+    benchmark_linear_sec_isolation,
     benchmark_countones,
     benchmark_std_counter,
     benchmark_gray_counter,

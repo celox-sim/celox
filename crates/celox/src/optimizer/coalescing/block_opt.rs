@@ -218,22 +218,19 @@ pub(super) fn schedule_instructions<A: Clone + PartialEq>(
     }
 }
 
-pub(super) fn optimize_block<A: Clone + std::fmt::Debug + PartialEq + Ord + std::hash::Hash>(
-    block: &mut BasicBlock<A>,
+/// Coalesce contiguous static stores to the same address into a single wide
+/// Concat + Store. Returns true if any coalescing was performed.
+fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::hash::Hash>(
+    instructions: &mut Vec<SIRInstruction<A>>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
-    unit_replacement_map: &mut HashMap<RegisterId, RegisterId>,
-) {
-    const MAX_INFLIGHT_LOADS: usize = 8;
-    coalesce_static_loads(&mut block.instructions, register_map);
-
-    let mut new_instructions = Vec::with_capacity(block.instructions.len());
+) -> bool {
     let mut replaced_indices = std::collections::HashSet::new();
     let mut insertions: HashMap<usize, Vec<SIRInstruction<A>>> = HashMap::default();
 
     type StoreGroupKey<A> = A;
     let mut groups: HashMap<StoreGroupKey<A>, Vec<usize>> = HashMap::default();
 
-    for (idx, inst) in block.instructions.iter().enumerate() {
+    for (idx, inst) in instructions.iter().enumerate() {
         if let SIRInstruction::Store(addr, SIROffset::Static(_), _, _, _) = inst {
             let key = addr.clone();
             groups.entry(key).or_default().push(idx);
@@ -256,7 +253,7 @@ pub(super) fn optimize_block<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
 
         for &idx in &indices {
             if let SIRInstruction::Store(_, SIROffset::Static(o), w, s, t) =
-                &block.instructions[idx]
+                &instructions[idx]
             {
                 details.push(StoreInfo {
                     offset: *o,
@@ -304,7 +301,7 @@ pub(super) fn optimize_block<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                         continue;
                     }
                     for check_idx in (s.index + 1)..=insert_at_index {
-                        let inst = &block.instructions[check_idx];
+                        let inst = &instructions[check_idx];
                         if let SIRInstruction::Load(_, a, SIROffset::Static(o), w) = inst
                             && *a == addr
                         {
@@ -363,26 +360,48 @@ pub(super) fn optimize_block<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
         }
     }
 
-    for i in 0..block.instructions.len() {
+    if replaced_indices.is_empty() {
+        return false;
+    }
+
+    let mut new_instructions = Vec::with_capacity(instructions.len());
+    for i in 0..instructions.len() {
         if !replaced_indices.contains(&i) {
-            new_instructions.push(block.instructions[i].clone());
+            new_instructions.push(instructions[i].clone());
         }
         if let Some(ops) = insertions.remove(&i) {
             new_instructions.extend(ops);
         }
     }
 
+    *instructions = new_instructions;
+    true
+}
+
+pub(super) fn optimize_block<A: Clone + std::fmt::Debug + PartialEq + Ord + std::hash::Hash>(
+    block: &mut BasicBlock<A>,
+    register_map: &mut HashMap<RegisterId, RegisterType>,
+    unit_replacement_map: &mut HashMap<RegisterId, RegisterId>,
+) {
+    const MAX_INFLIGHT_LOADS: usize = 8;
+    coalesce_static_loads(&mut block.instructions, register_map);
+
+    // First pass: coalesce stores that are safe even with intermediate loads present
+    coalesce_static_stores(&mut block.instructions, register_map);
+
     let mut local_replacement_map = HashMap::default();
-    eliminate_redundant_loads(&mut new_instructions, &mut local_replacement_map);
+    eliminate_redundant_loads(&mut block.instructions, &mut local_replacement_map);
+
+    // Second pass: after eliminate_redundant_loads removed store-forwarded loads,
+    // previously-unsafe store groups may now be safe to coalesce
+    coalesce_static_stores(&mut block.instructions, register_map);
 
     for (from, to) in local_replacement_map {
         unit_replacement_map.insert(from, to);
         replace_reg_in_terminator(&mut block.terminator, from, to);
     }
 
-    schedule_instructions(new_instructions.as_mut_slice(), MAX_INFLIGHT_LOADS);
-
-    block.instructions = new_instructions;
+    schedule_instructions(block.instructions.as_mut_slice(), MAX_INFLIGHT_LOADS);
 }
 
 fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::hash::Hash>(

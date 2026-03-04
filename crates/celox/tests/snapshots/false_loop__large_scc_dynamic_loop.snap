@@ -191,137 +191,6 @@ Execution Unit 0:
     r176: logic<64>
     r177: logic<64>
     r178: logic<64>
-    r179: logic<64>
-    r180: logic<64>
-    r181: logic<64>
-    r182: logic<64>
-    r183: logic<64>
-    r184: logic<64>
-    r185: logic<64>
-    r186: logic<64>
-    r187: logic<64>
-    r188: logic<64>
-    r189: logic<64>
-    r190: logic<64>
-    r191: logic<64>
-    r192: logic<64>
-    r193: logic<64>
-    r194: logic<64>
-    r195: logic<64>
-    r196: logic<64>
-    r197: logic<64>
-    r198: logic<64>
-    r199: logic<64>
-    r200: logic<64>
-    r201: logic<64>
-    r202: logic<64>
-    r203: logic<64>
-    r204: logic<64>
-    r205: logic<64>
-    r206: logic<64>
-    r207: logic<64>
-    r208: logic<64>
-    r209: logic<64>
-    r210: logic<64>
-    r211: logic<64>
-    r212: logic<64>
-    r213: logic<64>
-    r214: logic<64>
-    r215: logic<64>
-    r216: logic<64>
-    r217: logic<64>
-    r218: logic<64>
-    r219: logic<64>
-    r220: logic<64>
-    r221: logic<64>
-    r222: logic<64>
-    r223: logic<64>
-    r224: logic<64>
-    r225: logic<64>
-    r226: logic<64>
-    r227: logic<64>
-    r228: logic<64>
-    r229: logic<64>
-    r230: logic<64>
-    r231: logic<64>
-    r232: logic<64>
-    r233: logic<64>
-    r234: logic<64>
-    r235: logic<64>
-    r236: logic<64>
-    r237: logic<64>
-    r238: logic<64>
-    r239: logic<64>
-    r240: logic<64>
-    r241: logic<64>
-    r242: logic<64>
-    r243: logic<64>
-    r244: logic<64>
-    r245: logic<64>
-    r246: logic<64>
-    r247: logic<64>
-    r248: logic<64>
-    r249: logic<64>
-    r250: logic<64>
-    r251: logic<64>
-    r252: logic<64>
-    r253: logic<64>
-    r254: logic<64>
-    r255: logic<64>
-    r256: logic<64>
-    r257: logic<64>
-    r258: logic<64>
-    r259: logic<64>
-    r260: logic<64>
-    r261: logic<64>
-    r262: logic<64>
-    r263: logic<64>
-    r264: logic<64>
-    r265: logic<64>
-    r266: logic<64>
-    r267: logic<64>
-    r268: logic<64>
-    r269: logic<64>
-    r270: logic<64>
-    r271: logic<64>
-    r272: logic<64>
-    r273: logic<64>
-    r274: logic<64>
-    r275: logic<64>
-    r276: logic<64>
-    r277: logic<64>
-    r278: logic<64>
-    r279: logic<64>
-    r280: logic<64>
-    r281: logic<64>
-    r282: logic<64>
-    r283: logic<64>
-    r284: logic<64>
-    r285: logic<64>
-    r286: logic<64>
-    r287: logic<64>
-    r288: logic<64>
-    r289: logic<64>
-    r290: logic<64>
-    r291: logic<64>
-    r292: logic<64>
-    r293: logic<64>
-    r294: logic<64>
-    r295: logic<64>
-    r296: logic<64>
-    r297: logic<64>
-    r298: logic<64>
-    r299: logic<64>
-    r300: logic<64>
-    r301: logic<64>
-    r302: logic<64>
-    r303: logic<64>
-    r304: logic<64>
-    r305: logic<64>
-    r306: logic<64>
-    r307: logic<64>
-    r308: logic<64>
-    r309: logic<64>
   b0:
     r0 = SIRValue(0x0)
     r1 = SIRValue(0x3)
@@ -330,335 +199,105 @@ Execution Unit 0:
     r3 = r2 LtU r1
     Branch(r3 ? b2 : b4)
   b2:
-    r174 = Load(addr=v (region=0), offset=0, bits=64)
-    r143 = Load(addr=i (region=0), offset=0, bits=1)
+    r5 = Load(addr=v (region=0), offset=3, bits=1)
+    r6 = Load(addr=v (region=0), offset=2, bits=1)
+    Store(addr=v (region=0), offset=3, bits=1, src_reg = 6)
+    r13 = Load(addr=v (region=0), offset=4, bits=1)
+    Store(addr=v (region=0), offset=4, bits=1, src_reg = 6)
+    r21 = Load(addr=v (region=0), offset=5, bits=1)
+    Store(addr=v (region=0), offset=5, bits=1, src_reg = 6)
+    r29 = Load(addr=v (region=0), offset=6, bits=1)
+    Store(addr=v (region=0), offset=6, bits=1, src_reg = 6)
+    r37 = Load(addr=v (region=0), offset=7, bits=1)
+    Store(addr=v (region=0), offset=7, bits=1, src_reg = 6)
+    r45 = Load(addr=v (region=0), offset=8, bits=1)
+    Store(addr=v (region=0), offset=8, bits=1, src_reg = 6)
+    r53 = Load(addr=v (region=0), offset=9, bits=1)
+    Store(addr=v (region=0), offset=9, bits=1, src_reg = 6)
+    r61 = Load(addr=v (region=0), offset=10, bits=1)
+    Store(addr=v (region=0), offset=10, bits=1, src_reg = 6)
     r4 = SIRValue(0x0)
-    r175 = SIRValue(0x3)
-    r176 = r174 Shr r175
-    r177 = SIRValue(0x1)
-    r5 = r176 And r177
-    r178 = SIRValue(0x2)
-    r179 = r174 Shr r178
-    r180 = SIRValue(0x1)
-    r6 = r179 And r180
-    r7 = SIRValue(0x0)
-    r8 = r6 Shr r7
-    r9 = SIRValue(0x1)
-    r10 = r8 And r9
-    Store(addr=v (region=0), offset=3, bits=1, src_reg = 10)
-    r181 = Load(addr=v (region=0), offset=0, bits=64)
-    r11 = r5 Ne r10
+    r11 = r5 Ne r6
+    r69 = Load(addr=v (region=0), offset=11, bits=1)
+    Store(addr=v (region=0), offset=11, bits=1, src_reg = 6)
     r12 = r4 Or r11
-    r182 = SIRValue(0x4)
-    r183 = r181 Shr r182
-    r184 = SIRValue(0x1)
-    r13 = r183 And r184
-    r185 = SIRValue(0x3)
-    r186 = r181 Shr r185
-    r187 = SIRValue(0x1)
-    r14 = r186 And r187
-    r15 = SIRValue(0x0)
-    r16 = r14 Shr r15
-    r17 = SIRValue(0x1)
-    r18 = r16 And r17
-    Store(addr=v (region=0), offset=4, bits=1, src_reg = 18)
-    r188 = Load(addr=v (region=0), offset=0, bits=64)
-    r19 = r13 Ne r18
+    r19 = r13 Ne r6
+    r77 = Load(addr=v (region=0), offset=12, bits=1)
+    Store(addr=v (region=0), offset=12, bits=1, src_reg = 6)
     r20 = r12 Or r19
-    r189 = SIRValue(0x5)
-    r190 = r188 Shr r189
-    r191 = SIRValue(0x1)
-    r21 = r190 And r191
-    r192 = SIRValue(0x4)
-    r193 = r188 Shr r192
-    r194 = SIRValue(0x1)
-    r22 = r193 And r194
-    r23 = SIRValue(0x0)
-    r24 = r22 Shr r23
-    r25 = SIRValue(0x1)
-    r26 = r24 And r25
-    Store(addr=v (region=0), offset=5, bits=1, src_reg = 26)
-    r195 = Load(addr=v (region=0), offset=0, bits=64)
-    r27 = r21 Ne r26
+    r27 = r21 Ne r6
+    r85 = Load(addr=v (region=0), offset=13, bits=1)
+    Store(addr=v (region=0), offset=13, bits=1, src_reg = 6)
     r28 = r20 Or r27
-    r196 = SIRValue(0x6)
-    r197 = r195 Shr r196
-    r198 = SIRValue(0x1)
-    r29 = r197 And r198
-    r199 = SIRValue(0x5)
-    r200 = r195 Shr r199
-    r201 = SIRValue(0x1)
-    r30 = r200 And r201
-    r31 = SIRValue(0x0)
-    r32 = r30 Shr r31
-    r33 = SIRValue(0x1)
-    r34 = r32 And r33
-    Store(addr=v (region=0), offset=6, bits=1, src_reg = 34)
-    r202 = Load(addr=v (region=0), offset=0, bits=64)
-    r35 = r29 Ne r34
+    r35 = r29 Ne r6
+    r93 = Load(addr=v (region=0), offset=14, bits=1)
+    Store(addr=v (region=0), offset=14, bits=1, src_reg = 6)
     r36 = r28 Or r35
-    r203 = SIRValue(0x7)
-    r204 = r202 Shr r203
-    r205 = SIRValue(0x1)
-    r37 = r204 And r205
-    r206 = SIRValue(0x6)
-    r207 = r202 Shr r206
-    r208 = SIRValue(0x1)
-    r38 = r207 And r208
-    r39 = SIRValue(0x0)
-    r40 = r38 Shr r39
-    r41 = SIRValue(0x1)
-    r42 = r40 And r41
-    Store(addr=v (region=0), offset=7, bits=1, src_reg = 42)
-    r209 = Load(addr=v (region=0), offset=0, bits=64)
-    r43 = r37 Ne r42
+    r43 = r37 Ne r6
+    r101 = Load(addr=v (region=0), offset=15, bits=1)
+    Store(addr=v (region=0), offset=15, bits=1, src_reg = 6)
     r44 = r36 Or r43
-    r210 = SIRValue(0x8)
-    r211 = r209 Shr r210
-    r212 = SIRValue(0x1)
-    r45 = r211 And r212
-    r213 = SIRValue(0x7)
-    r214 = r209 Shr r213
-    r215 = SIRValue(0x1)
-    r46 = r214 And r215
-    r47 = SIRValue(0x0)
-    r48 = r46 Shr r47
-    r49 = SIRValue(0x1)
-    r50 = r48 And r49
-    Store(addr=v (region=0), offset=8, bits=1, src_reg = 50)
-    r216 = Load(addr=v (region=0), offset=0, bits=64)
-    r51 = r45 Ne r50
+    r51 = r45 Ne r6
+    r109 = Load(addr=v (region=0), offset=16, bits=1)
+    Store(addr=v (region=0), offset=16, bits=1, src_reg = 6)
     r52 = r44 Or r51
-    r217 = SIRValue(0x9)
-    r218 = r216 Shr r217
-    r219 = SIRValue(0x1)
-    r53 = r218 And r219
-    r220 = SIRValue(0x8)
-    r221 = r216 Shr r220
-    r222 = SIRValue(0x1)
-    r54 = r221 And r222
-    r55 = SIRValue(0x0)
-    r56 = r54 Shr r55
-    r57 = SIRValue(0x1)
-    r58 = r56 And r57
-    Store(addr=v (region=0), offset=9, bits=1, src_reg = 58)
-    r223 = Load(addr=v (region=0), offset=0, bits=64)
-    r59 = r53 Ne r58
+    r59 = r53 Ne r6
+    r117 = Load(addr=v (region=0), offset=17, bits=1)
+    Store(addr=v (region=0), offset=17, bits=1, src_reg = 6)
     r60 = r52 Or r59
-    r224 = SIRValue(0xa)
-    r225 = r223 Shr r224
-    r226 = SIRValue(0x1)
-    r61 = r225 And r226
-    r227 = SIRValue(0x9)
-    r228 = r223 Shr r227
-    r229 = SIRValue(0x1)
-    r62 = r228 And r229
-    r63 = SIRValue(0x0)
-    r64 = r62 Shr r63
-    r65 = SIRValue(0x1)
-    r66 = r64 And r65
-    Store(addr=v (region=0), offset=10, bits=1, src_reg = 66)
-    r230 = Load(addr=v (region=0), offset=0, bits=64)
-    r67 = r61 Ne r66
+    r67 = r61 Ne r6
+    r125 = Load(addr=v (region=0), offset=18, bits=1)
+    Store(addr=v (region=0), offset=18, bits=1, src_reg = 6)
     r68 = r60 Or r67
-    r231 = SIRValue(0xb)
-    r232 = r230 Shr r231
-    r233 = SIRValue(0x1)
-    r69 = r232 And r233
-    r234 = SIRValue(0xa)
-    r235 = r230 Shr r234
-    r236 = SIRValue(0x1)
-    r70 = r235 And r236
-    r71 = SIRValue(0x0)
-    r72 = r70 Shr r71
-    r73 = SIRValue(0x1)
-    r74 = r72 And r73
-    Store(addr=v (region=0), offset=11, bits=1, src_reg = 74)
-    r237 = Load(addr=v (region=0), offset=0, bits=64)
-    r75 = r69 Ne r74
+    r75 = r69 Ne r6
+    r133 = Load(addr=v (region=0), offset=19, bits=1)
+    Store(addr=v (region=0), offset=19, bits=1, src_reg = 6)
     r76 = r68 Or r75
-    r238 = SIRValue(0xc)
-    r239 = r237 Shr r238
-    r240 = SIRValue(0x1)
-    r77 = r239 And r240
-    r241 = SIRValue(0xb)
-    r242 = r237 Shr r241
-    r243 = SIRValue(0x1)
-    r78 = r242 And r243
-    r79 = SIRValue(0x0)
-    r80 = r78 Shr r79
-    r81 = SIRValue(0x1)
-    r82 = r80 And r81
-    Store(addr=v (region=0), offset=12, bits=1, src_reg = 82)
-    r244 = Load(addr=v (region=0), offset=0, bits=64)
-    r83 = r77 Ne r82
+    r83 = r77 Ne r6
+    r174 = Load(addr=v (region=0), offset=0, bits=64)
     r84 = r76 Or r83
-    r245 = SIRValue(0xd)
-    r246 = r244 Shr r245
-    r247 = SIRValue(0x1)
-    r85 = r246 And r247
-    r248 = SIRValue(0xc)
-    r249 = r244 Shr r248
-    r250 = SIRValue(0x1)
-    r86 = r249 And r250
-    r87 = SIRValue(0x0)
-    r88 = r86 Shr r87
-    r89 = SIRValue(0x1)
-    r90 = r88 And r89
-    Store(addr=v (region=0), offset=13, bits=1, src_reg = 90)
-    r251 = Load(addr=v (region=0), offset=0, bits=64)
-    r91 = r85 Ne r90
+    r91 = r85 Ne r6
+    r143 = Load(addr=i (region=0), offset=0, bits=1)
     r92 = r84 Or r91
-    r252 = SIRValue(0xe)
-    r253 = r251 Shr r252
-    r254 = SIRValue(0x1)
-    r93 = r253 And r254
-    r255 = SIRValue(0xd)
-    r256 = r251 Shr r255
-    r257 = SIRValue(0x1)
-    r94 = r256 And r257
-    r95 = SIRValue(0x0)
-    r96 = r94 Shr r95
-    r97 = SIRValue(0x1)
-    r98 = r96 And r97
-    Store(addr=v (region=0), offset=14, bits=1, src_reg = 98)
-    r258 = Load(addr=v (region=0), offset=0, bits=64)
-    r99 = r93 Ne r98
+    r99 = r93 Ne r6
+    r151 = Load(addr=v (region=0), offset=1, bits=1)
     r100 = r92 Or r99
-    r259 = SIRValue(0xf)
-    r260 = r258 Shr r259
-    r261 = SIRValue(0x1)
-    r101 = r260 And r261
-    r262 = SIRValue(0xe)
-    r263 = r258 Shr r262
-    r264 = SIRValue(0x1)
-    r102 = r263 And r264
-    r103 = SIRValue(0x0)
-    r104 = r102 Shr r103
-    r105 = SIRValue(0x1)
-    r106 = r104 And r105
-    Store(addr=v (region=0), offset=15, bits=1, src_reg = 106)
-    r265 = Load(addr=v (region=0), offset=0, bits=64)
-    r107 = r101 Ne r106
+    r107 = r101 Ne r6
     r108 = r100 Or r107
-    r266 = SIRValue(0x10)
-    r267 = r265 Shr r266
-    r268 = SIRValue(0x1)
-    r109 = r267 And r268
-    r269 = SIRValue(0xf)
-    r270 = r265 Shr r269
-    r271 = SIRValue(0x1)
-    r110 = r270 And r271
-    r111 = SIRValue(0x0)
-    r112 = r110 Shr r111
-    r113 = SIRValue(0x1)
-    r114 = r112 And r113
-    Store(addr=v (region=0), offset=16, bits=1, src_reg = 114)
-    r272 = Load(addr=v (region=0), offset=0, bits=64)
-    r115 = r109 Ne r114
+    r115 = r109 Ne r6
     r116 = r108 Or r115
-    r273 = SIRValue(0x11)
-    r274 = r272 Shr r273
-    r275 = SIRValue(0x1)
-    r117 = r274 And r275
-    r276 = SIRValue(0x10)
-    r277 = r272 Shr r276
-    r278 = SIRValue(0x1)
-    r118 = r277 And r278
-    r119 = SIRValue(0x0)
-    r120 = r118 Shr r119
-    r121 = SIRValue(0x1)
-    r122 = r120 And r121
-    Store(addr=v (region=0), offset=17, bits=1, src_reg = 122)
-    r279 = Load(addr=v (region=0), offset=0, bits=64)
-    r123 = r117 Ne r122
+    r123 = r117 Ne r6
     r124 = r116 Or r123
-    r280 = SIRValue(0x12)
-    r281 = r279 Shr r280
-    r282 = SIRValue(0x1)
-    r125 = r281 And r282
-    r283 = SIRValue(0x11)
-    r284 = r279 Shr r283
-    r285 = SIRValue(0x1)
-    r126 = r284 And r285
-    r127 = SIRValue(0x0)
-    r128 = r126 Shr r127
-    r129 = SIRValue(0x1)
-    r130 = r128 And r129
-    Store(addr=v (region=0), offset=18, bits=1, src_reg = 130)
-    r286 = Load(addr=v (region=0), offset=0, bits=64)
-    r131 = r125 Ne r130
+    r131 = r125 Ne r6
     r132 = r124 Or r131
-    r287 = SIRValue(0x13)
-    r288 = r286 Shr r287
-    r289 = SIRValue(0x1)
-    r133 = r288 And r289
-    r290 = SIRValue(0x12)
-    r291 = r286 Shr r290
-    r292 = SIRValue(0x1)
-    r134 = r291 And r292
-    r135 = SIRValue(0x0)
-    r136 = r134 Shr r135
-    r137 = SIRValue(0x1)
-    r138 = r136 And r137
-    Store(addr=v (region=0), offset=19, bits=1, src_reg = 138)
-    r293 = Load(addr=v (region=0), offset=0, bits=64)
-    r139 = r133 Ne r138
+    r139 = r133 Ne r6
     r140 = r132 Or r139
-    r294 = SIRValue(0x1)
-    r141 = r293 And r294
-    r295 = SIRValue(0x13)
-    r296 = r293 Shr r295
-    r297 = SIRValue(0x1)
-    r142 = r296 And r297
+    r175 = SIRValue(0x1)
+    r141 = r174 And r175
+    r176 = SIRValue(0x13)
+    r177 = r174 Shr r176
+    r178 = SIRValue(0x1)
+    r142 = r177 And r178
     r144 = r142 Xor r143
     r145 = SIRValue(0x0)
     r146 = r144 Shr r145
     r147 = SIRValue(0x1)
     r148 = r146 And r147
     Store(addr=v (region=0), offset=0, bits=1, src_reg = 148)
-    r298 = Load(addr=v (region=0), offset=0, bits=64)
+    Store(addr=v (region=0), offset=1, bits=1, src_reg = 148)
+    Store(addr=v (region=0), offset=2, bits=1, src_reg = 148)
     r149 = r141 Ne r148
     r150 = r140 Or r149
-    r299 = SIRValue(0x1)
-    r300 = r298 Shr r299
-    r301 = SIRValue(0x1)
-    r151 = r300 And r301
-    r302 = SIRValue(0x1)
-    r152 = r298 And r302
-    r153 = SIRValue(0x0)
-    r154 = r152 Shr r153
-    r155 = SIRValue(0x1)
-    r156 = r154 And r155
-    Store(addr=v (region=0), offset=1, bits=1, src_reg = 156)
-    r303 = Load(addr=v (region=0), offset=0, bits=64)
-    r157 = r151 Ne r156
+    r157 = r151 Ne r148
     r158 = r150 Or r157
-    r304 = SIRValue(0x2)
-    r305 = r303 Shr r304
-    r306 = SIRValue(0x1)
-    r159 = r305 And r306
-    r307 = SIRValue(0x1)
-    r308 = r303 Shr r307
-    r309 = SIRValue(0x1)
-    r160 = r308 And r309
-    r161 = SIRValue(0x0)
-    r162 = r160 Shr r161
-    r163 = SIRValue(0x1)
-    r164 = r162 And r163
-    Store(addr=v (region=0), offset=2, bits=1, src_reg = 164)
-    r165 = r159 Ne r164
+    r165 = r6 Ne r148
     r166 = r158 Or r165
     r167 = SIRValue(0x1)
     r168 = r2 Add r167
     Branch(r166 ? b1 [r168] : b3)
   b3:
     r169 = Load(addr=v (region=0), offset=0, bits=20)
-    r170 = SIRValue(0x0)
-    r171 = r169 Shr r170
-    r172 = SIRValue(0xfffff)
-    r173 = r171 And r172
-    Store(addr=o (region=0), offset=0, bits=20, src_reg = 173)
+    Store(addr=o (region=0), offset=0, bits=20, src_reg = 169)
     Return
   b4:
     Error(1)

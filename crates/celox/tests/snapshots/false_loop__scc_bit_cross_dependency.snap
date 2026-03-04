@@ -1,6 +1,5 @@
 ---
 source: crates/celox/tests/false_loop.rs
-assertion_line: 449
 expression: sir_output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -102,9 +101,5 @@ Execution Unit 0:
     r28 = r26 And r27
     Store(addr=v (region=0), offset=0, bits=1, src_reg = 28)
     r29 = Load(addr=v (region=0), offset=0, bits=2)
-    r30 = SIRValue(0x0)
-    r31 = r29 Shr r30
-    r32 = SIRValue(0x3)
-    r33 = r31 And r32
-    Store(addr=o (region=0), offset=0, bits=2, src_reg = 33)
+    Store(addr=o (region=0), offset=0, bits=2, src_reg = 29)
     Return

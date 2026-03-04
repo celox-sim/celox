@@ -4,7 +4,7 @@ use cranelift_frontend::FunctionBuilder;
 
 use crate::{
     HashMap, SimulatorOptions,
-    ir::{AbsoluteAddr, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType, SIRInstruction, STABLE_REGION},
+    ir::{AbsoluteAddr, BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType, SIRInstruction, STABLE_REGION},
     optimizer::coalescing::TailCallChunk,
     optimizer::coalescing::pass_tail_call_split::{SpilledChunk, SpillSlot},
 };
@@ -184,6 +184,9 @@ pub struct TranslationState<'a, 'b, 'c> {
     /// Pre-loaded trigger signal values (old values captured at function entry).
     /// Key: (AbsoluteAddr, region). Value: i64 SSA value of the full signal.
     pub trigger_old_values: HashMap<(AbsoluteAddr, u32), Value>,
+    /// Tracks SIR Imm constants (2-state, ≤64-bit) for peephole optimizations
+    /// such as shift-by-0 elimination.
+    pub imm_constants: HashMap<RegisterId, u64>,
 }
 
 pub(crate) fn get_cl_type(width: usize) -> Type {
@@ -289,12 +292,54 @@ impl SIRTranslator {
         match inst {
             SIRInstruction::Imm(dst, val) => {
                 self.translate_imm_inst(state, dst, val);
+                // Track 2-state constants that fit in u64 for peephole opts
+                if val.mask.to_u64_digits().is_empty() {
+                    let digits = val.payload.to_u64_digits();
+                    if digits.len() <= 1 {
+                        state
+                            .imm_constants
+                            .insert(*dst, digits.first().copied().unwrap_or(0));
+                    }
+                }
             }
             SIRInstruction::Concat(dst, args) => {
                 self.translate_concat_inst(state, dst, args);
             }
             SIRInstruction::Binary(dst, lhs, op, rhs) => {
-                self.translate_binary_inst(state, dst, lhs, op, rhs);
+                if matches!(op, BinaryOp::Shr | BinaryOp::Shl | BinaryOp::Sar)
+                    && state.imm_constants.get(rhs) == Some(&0)
+                {
+                    // Shift by 0 is identity — copy lhs to dst with width adjustment
+                    let d_width = state.register_map[dst].width();
+                    let l_val = state.regs[lhs].clone();
+                    if d_width <= 64 {
+                        let ty = get_cl_type(d_width);
+                        let v = l_val.first_value(state.builder);
+                        let cast = cast_type(state.builder, v, ty);
+                        let masked = super::arith::apply_d_width_mask(state, cast, ty, d_width);
+                        if self.options.four_state {
+                            let m = l_val
+                                .first_mask(state.builder)
+                                .unwrap_or_else(|| state.builder.ins().iconst(ty, 0));
+                            let m_cast = cast_type(state.builder, m, ty);
+                            let m_masked =
+                                super::arith::apply_d_width_mask(state, m_cast, ty, d_width);
+                            state.regs.insert(
+                                *dst,
+                                TransValue::FourState {
+                                    values: vec![masked],
+                                    masks: vec![m_masked],
+                                },
+                            );
+                        } else {
+                            state.regs.insert(*dst, TransValue::TwoState(vec![masked]));
+                        }
+                    } else {
+                        state.regs.insert(*dst, l_val);
+                    }
+                } else {
+                    self.translate_binary_inst(state, dst, lhs, op, rhs);
+                }
             }
             SIRInstruction::Unary(dst, op, rhs) => {
                 self.translate_unary_inst(state, dst, op, rhs);
@@ -369,6 +414,7 @@ impl SIRTranslator {
                 mem_ptr,
                 register_map: &unit.register_map,
                 trigger_old_values: trigger_old_values.clone(),
+                imm_constants: HashMap::default(),
             };
 
             // Create block map for this unit
@@ -547,6 +593,7 @@ impl SIRTranslator {
                 mem_ptr,
                 register_map: &unit.register_map,
                 trigger_old_values: trigger_old_values.clone(),
+                imm_constants: HashMap::default(),
             };
 
             // Seed incoming live regs into the first EU's register state
@@ -791,6 +838,7 @@ impl SIRTranslator {
             mem_ptr,
             register_map: &eu.register_map,
             trigger_old_values: trigger_old_values.clone(),
+            imm_constants: HashMap::default(),
         };
 
         // Seed spill values (available in all blocks via dominating entry)

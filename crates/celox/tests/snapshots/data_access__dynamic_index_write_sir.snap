@@ -1,6 +1,5 @@
 ---
 source: crates/celox/tests/data_access.rs
-assertion_line: 219
 expression: output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -135,11 +134,7 @@ Execution Unit 0:
     r51 = SIRValue(0xff)
     r52 = r50 And r51
     Store(addr=a (region=0), offset=16, bits=8, src_reg = 52)
-    r54 = SIRValue(0x0)
-    r55 = r52 Shr r54
-    r56 = SIRValue(0xff)
-    r57 = r55 And r56
-    Store(addr=o (region=0), offset=0, bits=8, src_reg = 57)
+    Store(addr=o (region=0), offset=0, bits=8, src_reg = 52)
     r58 = SIRValue(0x8)
     r59 = r44 Shr r58
     r60 = SIRValue(0xff)

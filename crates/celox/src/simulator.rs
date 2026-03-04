@@ -140,6 +140,16 @@ impl Simulator {
         self.backend.resolve_event(&addr)
     }
 
+    /// Retrieves the current value as a fixed-size type without `BigUint` allocation.
+    /// Lazily evaluates combinational logic if the state is dirty.
+    pub fn get_as<T: Default + Copy>(&mut self, signal: SignalRef) -> T {
+        if self.dirty {
+            self.backend.eval_comb().unwrap();
+            self.dirty = false;
+        }
+        self.backend.get_as(signal)
+    }
+
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     /// Lazily evaluates combinational logic if the state is dirty.
     pub fn get(&mut self, signal: SignalRef) -> BigUint {
