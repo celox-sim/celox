@@ -861,12 +861,19 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     for (path, parser) in &parsers {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let _errors = analyzer.analyze_pass2(
+        let errors = analyzer.analyze_pass2(
             &path.prj,
             &parser.veryl,
             &mut analyzer_context,
             Some(&mut ir),
         );
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+            return Err(Error::from_reason(format!(
+                "Errors in analysis pass 2: {}",
+                msgs.join("; ")
+            )));
+        }
 
         let modules = generate_all(&ir);
         // On Windows, metadata.paths() may return extended-length paths
@@ -898,7 +905,14 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         }
     }
 
-    let _errors = Analyzer::analyze_post_pass2();
+    let errors = Analyzer::analyze_post_pass2();
+    if !errors.is_empty() {
+        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        return Err(Error::from_reason(format!(
+            "Errors in post-pass 2 analysis: {}",
+            msgs.join("; ")
+        )));
+    }
 
     // Sort for deterministic output
     all_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));

@@ -283,10 +283,10 @@ fn test_wide_comb_logic_and_or() {
             y_and_w: output logic<128>,
             y_or_w:  output logic<128>
         ) {
-            assign y_and   = a && b;
-            assign y_or    = a || b;
-            assign y_and_w = a && b;
-            assign y_or_w  = a || b;
+            assign y_and   = (|a) && (|b);
+            assign y_or    = (|a) || (|b);
+            assign y_and_w = (|a) && (|b);
+            assign y_or_w  = (|a) || (|b);
         }
     "#;
 
@@ -345,8 +345,8 @@ fn test_wide_logic_or_with_narrow_operand() {
             o_or:  output logic,
             o_and: output logic,
         ) {
-            assign o_or  = a || b;
-            assign o_and = a && b;
+            assign o_or  = (|a) || b;
+            assign o_and = (|a) && b;
         }
     "#;
     let mut sim = Simulator::builder(code, "Top").build().unwrap();

@@ -10,16 +10,14 @@ fn test_cascade_race_condition() {
     // In the current implementation, clk domain is evaluated and updates cnt1 BEFORE gclk domain is evaluated.
     let code = r#"
         module Top (
-            clk: input clock,
-            rst: input reset_async_high,
+            clk: input '_ clock,
+            rst: input '_ reset_async_high,
             cnt1_out: output logic<8>,
             cnt2_out: output logic<8>
         ) {
             var cnt1: logic<8>;
             var cnt2: logic<8>;
-            var gclk: clock;
-
-            assign gclk = clk; // Combinational cascade
+            let gclk: '_ clock = clk;
 
             always_ff (clk, rst) {
                 if_reset {
@@ -99,29 +97,27 @@ fn test_cascade_race_condition() {
 #[test]
 fn test_sequential_cascade_race_condition() {
     // This design demonstrates a race condition with sequential cascade.
-    // clk -> clk_div
-    // clk_div -> cnt
+    // clk drives cnt1, clk_div (external half-rate clock) drives cnt2.
+    // cnt2 reads cnt1, so the evaluation order matters.
     let code = r#"
         module Top (
-            clk: input clock,
-            rst: input reset_async_high,
+            clk: input '_ clock,
+            clk_div: input '_ clock,
+            rst: input '_ reset_async_high,
             cnt_out: output logic<8>
         ) {
             var cnt1: logic<8>;
             var cnt2: logic<8>;
-            var clk_div: clock;
 
             always_ff (clk, rst) {
                 if_reset {
                     cnt1 = 8'd0;
-                    clk_div = 1'b0;
                 } else {
                     cnt1 = cnt1 + 8'd1;
-                    clk_div = ~clk_div;
                 }
             }
 
-            // clk_div rises when clk rises (if clk_div was 0)
+            // clk_div rises every other clk cycle
             always_ff (clk_div, rst) {
                 if_reset {
                     cnt2 = 8'd0;
@@ -140,24 +136,27 @@ fn test_sequential_cascade_race_condition() {
     // Reset
     sim.schedule("rst", 0, 1).unwrap();
     sim.schedule("clk", 0, 0).unwrap();
+    sim.schedule("clk_div", 0, 0).unwrap();
     sim.step().unwrap();
 
     // Release reset
     sim.schedule("rst", 10, 0).unwrap();
     sim.step().unwrap();
 
-    // 1st tick: clk rises, clk_div: 0 -> 1.
+    // 1st tick: clk rises, clk_div rises (both rise together)
     // cnt1: 0 -> 1
     // cnt2: 0 + cnt1(OLD=0) -> 0
     sim.schedule("clk", 20, 1).unwrap();
+    sim.schedule("clk_div", 20, 1).unwrap();
     sim.step().unwrap();
     println!("Seq Step 1: cnt={}", sim.get(cnt_out));
 
-    // 2nd tick: clk falls
+    // 2nd tick: clk falls, clk_div falls
     sim.schedule("clk", 30, 0).unwrap();
+    sim.schedule("clk_div", 30, 0).unwrap();
     sim.step().unwrap();
 
-    // 3rd tick: clk rises, clk_div: 1 -> 0.
+    // 3rd tick: clk rises, clk_div stays low (half-rate)
     // cnt1: 1 -> 2
     // cnt2: remains 0
     sim.schedule("clk", 40, 1).unwrap();
@@ -168,10 +167,11 @@ fn test_sequential_cascade_race_condition() {
     sim.schedule("clk", 50, 0).unwrap();
     sim.step().unwrap();
 
-    // 5th tick: clk rises, clk_div: 0 -> 1.
+    // 5th tick: clk rises, clk_div rises again
     // cnt1: 2 -> 3
     // cnt2: 0 + cnt1(OLD=2) -> 2
     sim.schedule("clk", 60, 1).unwrap();
+    sim.schedule("clk_div", 60, 1).unwrap();
     sim.step().unwrap();
     println!("Seq Step 3: cnt={}", sim.get(cnt_out));
 

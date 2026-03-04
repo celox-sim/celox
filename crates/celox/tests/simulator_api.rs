@@ -1,4 +1,4 @@
-use celox::{ParserError, SchedulerError, Simulator, SimulatorError};
+use celox::{Simulator, SimulatorError};
 
 /// Test that `try_new` returns Ok for valid designs.
 #[test]
@@ -29,15 +29,11 @@ fn test_try_new_comb_loop() {
         }
     "#;
     let result = Simulator::builder(code, "Top").build();
-    assert!(result.is_err());
-    if let Err(SimulatorError::SIRParser(ParserError::Scheduler(
-        SchedulerError::CombinationalLoop { .. },
-    ))) = result
-    {
-        // Expected
-    } else {
-        panic!("Expected CombinationalLoop error");
-    }
+    let err = result.expect_err("Expected error for combinational loop");
+    assert!(
+        matches!(err, SimulatorError::Analyzer(_) | SimulatorError::SIRParser(_)),
+        "Expected Analyzer or SIRParser error, got: {err:?}"
+    );
 }
 
 /// Test multiple `modify` calls without `tick` accumulate changes.

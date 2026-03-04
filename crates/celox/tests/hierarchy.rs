@@ -708,9 +708,9 @@ fn test_named_hierarchy_multiple_instances() {
             i_val: input  logic<8>,
             o_val: output logic<8>
         ) {
-            var reg: logic<8>;
-            always_ff { reg = i_val; }
-            assign o_val = reg;
+            var r_val: logic<8>;
+            always_ff { r_val = i_val; }
+            assign o_val = r_val;
         }
 
         module Top (

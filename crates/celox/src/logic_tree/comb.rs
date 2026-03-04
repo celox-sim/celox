@@ -2141,10 +2141,14 @@ mod tests {
         let mut ir = Ir::default();
 
         // Pass 1 & 2 を実行して Ir を構築
-        analyzer.analyze_pass1(&"prj", &parser.veryl);
-        Analyzer::analyze_post_pass1();
-        analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
-        Analyzer::analyze_post_pass2();
+        let errors = analyzer.analyze_pass1(&"prj", &parser.veryl);
+        assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
+        let errors = Analyzer::analyze_post_pass1();
+        assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
+        let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
+        assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
+        let errors = Analyzer::analyze_post_pass2();
+        assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
         // Top モジュールを探す
         let top_id = veryl_parser::resource_table::insert_str(&"Top");

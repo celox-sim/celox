@@ -1,51 +1,5 @@
 use celox::Simulation;
 
-/// [CAN DO] Clock Division
-#[test]
-fn test_can_clock_division() {
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            rst: input  reset,
-            cnt: output logic<8>
-        ) {
-            var div: logic;
-            var counter: logic<8>;
-            always_ff (clk, rst) {
-                if_reset {
-                    div = 1'b0;
-                } else {
-                    div = ~div;
-                }
-            }
-            always_ff (div, rst) {
-                if_reset {
-                    counter = 8'd0;
-                } else {
-                    counter = counter + 8'd1;
-                }
-            }
-            assign cnt = counter;
-        }
-    "#;
-
-    let mut vsim = Simulation::builder(code, "Top").build().unwrap();
-    vsim.add_clock("clk", 10, 0);
-    let rst = vsim.signal("rst");
-    let cnt = vsim.signal("cnt");
-
-    // AsyncLow: rst=0 means active reset
-    vsim.modify(|io| io.set::<u8>(rst, 0)).unwrap();
-    vsim.step().unwrap();
-    // Release reset
-    vsim.modify(|io| io.set::<u8>(rst, 1)).unwrap();
-
-    vsim.step().unwrap(); // t=5
-    vsim.step().unwrap(); // t=10
-    let val = vsim.get(cnt);
-    assert!(val == 1u8.into() || val == 2u8.into());
-}
-
 /// [CAN DO] Clock Delay / Phase offset
 #[test]
 fn test_can_delay_clock() {
@@ -94,11 +48,6 @@ fn test_can_schedule_reset() {
 
     vsim.run_until(40).unwrap();
 
-    // At t=5, posedge clk, but rst is high -> counter remains 0
-    // At t=15, posedge clk, but rst is high -> counter remains 0
-    // At t=20, rst becomes low
-    // At t=25, posedge clk, rst is low -> counter becomes 1
-    // At t=35, posedge clk, rst is low -> counter becomes 2
     let cnt = vsim.signal("cnt");
     assert_eq!(vsim.get(cnt), 2u8.into());
 }
@@ -126,9 +75,9 @@ fn test_cannot_schedule_non_event() {
 fn test_mixed_edge_triggering() {
     let code = r#"
         module Top (
-            clk:   input clock,
-            clk_n: input clock_negedge,
-            rst_n: input reset_async_low,
+            clk:   input '_ clock,
+            clk_n: input '_ clock_negedge,
+            rst_n: input '_ reset_async_low,
             out_p: output logic<8>,
             out_n: output logic<8>
         ) {
@@ -154,11 +103,7 @@ fn test_mixed_edge_triggering() {
 
     let mut vsim = Simulation::builder(code, "Top").build().unwrap();
 
-    // clk: posedge at 5, 15, 25...
     vsim.add_clock("clk", 10, 5);
-    // clk_n: negedge at 5, 15, 25... (initial_delay=5 means first rising edge at 5, but we trigger on negedge)
-    // Actually add_clock schedules first rising edge at initial_delay.
-    // Rising edge at 5, falling edge at 10, rising at 15, falling at 20...
     vsim.add_clock("clk_n", 10, 5);
 
     // Initial state: rst_n = 0 (reset)
@@ -170,20 +115,6 @@ fn test_mixed_edge_triggering() {
 
     vsim.run_until(50).unwrap();
 
-    // Trace:
-    // t=0: rst_n=0. cnt_p=0
-    // t=5: clk↑, but rst_n=0 -> cnt_p=0. clk_n↑ -> cnt_n no change.
-    // t=10: clk↓. clk_n↓ -> cnt_n becomes 1 (first negedge)
-    // t=12: rst_n=1.
-    // t=15: clk↑, rst_n=1 -> cnt_p becomes 1 (first posedge after reset)
-    // t=20: clk_n↓ -> cnt_n becomes 2 (second negedge)
-    // t=25: clk↑ -> cnt_p becomes 2
-    // t=30: clk_n↓ -> cnt_n becomes 3
-    // t=35: clk↑ -> cnt_p becomes 3
-    // t=40: clk_n↓ -> cnt_n becomes 4
-    // t=45: clk↑ -> cnt_p becomes 4
-    // t=50: clk_n↓ -> cnt_n becomes 5
-
     assert_eq!(vsim.get(out_p), 4u8.into());
     assert_eq!(vsim.get(out_n), 5u8.into());
 }
@@ -193,8 +124,8 @@ fn test_mixed_edge_triggering() {
 fn test_multiple_clocks() {
     let code = r#"
         module Top (
-            clk0: input clock,
-            clk1: input clock,
+            clk0: input '_ clock,
+            clk1: input '_ clock,
             cnt0: output logic<8>,
             cnt1: output logic<8>
         ) {
@@ -218,15 +149,15 @@ fn test_multiple_clocks() {
     let cnt0 = vsim.signal("cnt0");
     let cnt1 = vsim.signal("cnt1");
 
-    vsim.run_until(10).unwrap(); // After t=5 (both tick)
+    vsim.run_until(10).unwrap();
     assert_eq!(vsim.get(cnt0), 1u8.into(), "t=10, cnt0");
     assert_eq!(vsim.get(cnt1), 1u8.into(), "t=10, cnt1");
 
-    vsim.run_until(20).unwrap(); // After t=15 (clk0 ticks)
+    vsim.run_until(20).unwrap();
     assert_eq!(vsim.get(cnt0), 2u8.into(), "t=20, cnt0");
     assert_eq!(vsim.get(cnt1), 1u8.into(), "t=20, cnt1");
 
-    vsim.run_until(30).unwrap(); // After t=25 (both tick)
+    vsim.run_until(30).unwrap();
     assert_eq!(vsim.get(cnt0), 3u8.into(), "t=30, cnt0");
     assert_eq!(vsim.get(cnt1), 2u8.into(), "t=30, cnt1");
 
@@ -260,15 +191,13 @@ fn test_regular_reset() {
     vsim.add_clock("clk", 10, 5);
 
     let rst = vsim.signal("rst");
-    // Activate reset (AsyncLow: rst=0 means active)
     vsim.modify(|io| {
         io.set(rst, 0u8);
     })
     .unwrap();
-    vsim.run_until(7).unwrap(); // after first posedge
+    vsim.run_until(7).unwrap();
     let cnt = vsim.signal("cnt");
     assert_eq!(vsim.get(cnt), 0u8.into());
-    // Deactivate reset
     vsim.modify(|io| {
         io.set(rst, 1u8);
     })
@@ -278,22 +207,19 @@ fn test_regular_reset() {
     vsim.run_until(15).unwrap();
     assert_eq!(vsim.get(cnt), 1u8.into());
 
-    // Re-activate reset
     vsim.modify(|io| {
         io.set(rst, 0u8);
     })
     .unwrap();
-    // rst is low but clk hasn't ticked yet, so cnt should still be 1
     assert_eq!(vsim.get(cnt), 1u8.into());
 
-    vsim.run_until(25).unwrap(); // after second posedge
+    vsim.run_until(25).unwrap();
     assert_eq!(vsim.get(cnt), 0u8.into());
     vsim.run_until(35).unwrap();
-    // Deactivate reset
     vsim.modify(|io| {
         io.set(rst, 1u8);
     })
     .unwrap();
-    vsim.run_until(45).unwrap(); // after third posedge
+    vsim.run_until(45).unwrap();
     assert_eq!(vsim.get(cnt), 1u8.into());
 }

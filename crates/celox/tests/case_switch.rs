@@ -42,15 +42,15 @@ fn test_case_in_always_ff() {
             sel: input logic<2>,
             o:   output logic<8>
         ) {
-            var reg: logic<8>;
+            var r_val: logic<8>;
             always_ff {
                 case sel {
-                    2'd0: reg = 8'h10;
-                    2'd1: reg = 8'h20;
-                    default: reg = 8'hFF;
+                    2'd0: r_val = 8'h10;
+                    2'd1: r_val = 8'h20;
+                    default: r_val = 8'hFF;
                 }
             }
-            assign o = reg;
+            assign o = r_val;
         }
     "#;
     let result = SimulatorBuilder::new(code, "Top")

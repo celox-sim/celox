@@ -66,7 +66,14 @@ fn test_multidimensional_access() {
     let code = r#"
         module Top (i: input logic<8>, o: output logic<8>) {
             var a: logic<8> [4, 2];
-            assign a[1][0] = i;
+            always_comb {
+                for i_idx: u32 in 0..4 {
+                    for j_idx: u32 in 0..2 {
+                        a[i_idx][j_idx] = 8'b0;
+                    }
+                }
+                a[1][0] = i;
+            }
             assign o = a[1][0];
         }
     "#;
@@ -82,8 +89,11 @@ fn test_multidimensional_access() {
 fn test_minus_colon_and_step_execution() {
     let code = r#"
         module Top (a: input logic<8>, b: output logic<32>) {
-            assign b[31-:8] = a;
-            assign b[1 step 8] = a;
+            always_comb {
+                b = 32'b0;
+                b[31-:8] = a;
+                b[1 step 8] = a;
+            }
         }
     "#;
     let mut sim = Simulator::builder(code, "Top").build().unwrap();

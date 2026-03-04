@@ -5,16 +5,16 @@ use celox::Simulator;
 fn test_independent_clock_domains() {
     let code = r#"
         module Top (
-            clk_a: input  clock,
-            clk_b: input  clock,
-            rst:   input  reset,
-            da:    input  logic<8>,
-            db:    input  logic<8>,
-            qa:    output logic<8>,
-            qb:    output logic<8>
+            clk_a: input  'a clock,
+            clk_b: input  'b clock,
+            rst:   input  'a reset,
+            da:    input  'a logic<8>,
+            db:    input  'b logic<8>,
+            qa:    output 'a logic<8>,
+            qb:    output 'b logic<8>
         ) {
-            var ra: logic<8>;
-            var rb: logic<8>;
+            var ra: 'a logic<8>;
+            var rb: 'b logic<8>;
             always_ff (clk_a, rst) {
                 if_reset {
                     ra = 8'd0;
@@ -22,11 +22,13 @@ fn test_independent_clock_domains() {
                     ra = da;
                 }
             }
-            always_ff (clk_b, rst) {
-                if_reset {
-                    rb = 8'd0;
-                } else {
-                    rb = db;
+            unsafe (cdc) {
+                always_ff (clk_b, rst) {
+                    if_reset {
+                        rb = 8'd0;
+                    } else {
+                        rb = db;
+                    }
                 }
             }
             assign qa = ra;
@@ -75,14 +77,14 @@ fn test_independent_clock_domains() {
 fn test_clock_domain_crossing_pattern() {
     let code = r#"
         module Top (
-            clk_fast: input  clock,
-            clk_slow: input  clock,
-            rst:      input  reset,
-            count_out:  output logic<4>,
-            sample_out: output logic<4>
+            clk_fast: input  'a clock,
+            clk_slow: input  'b clock,
+            rst:      input  'a reset,
+            count_out:  output 'a logic<4>,
+            sample_out: output 'b logic<4>
         ) {
-            var counter: logic<4>;
-            var sample:  logic<4>;
+            var counter: 'a logic<4>;
+            var sample:  'b logic<4>;
 
             // Fast domain: counter increments
             always_ff (clk_fast, rst) {
@@ -93,12 +95,14 @@ fn test_clock_domain_crossing_pattern() {
                 }
             }
 
-            // Slow domain: samples the counter
-            always_ff (clk_slow, rst) {
-                if_reset {
-                    sample = 4'd0;
-                } else {
-                    sample = counter;
+            // Slow domain: samples the counter (CDC)
+            unsafe (cdc) {
+                always_ff (clk_slow, rst) {
+                    if_reset {
+                        sample = 4'd0;
+                    } else {
+                        sample = counter;
+                    }
                 }
             }
 
@@ -149,17 +153,17 @@ fn test_clock_domain_crossing_pattern() {
 fn test_separate_resets_per_domain() {
     let code = r#"
         module Top (
-            clk_a: input  clock,
-            clk_b: input  clock,
-            rst_a: input  reset,
-            rst_b: input  reset,
-            da:    input  logic<8>,
-            db:    input  logic<8>,
-            qa:    output logic<8>,
-            qb:    output logic<8>
+            clk_a: input  'a clock,
+            clk_b: input  'b clock,
+            rst_a: input  'a reset,
+            rst_b: input  'b reset,
+            da:    input  'a logic<8>,
+            db:    input  'b logic<8>,
+            qa:    output 'a logic<8>,
+            qb:    output 'b logic<8>
         ) {
-            var ra: logic<8>;
-            var rb: logic<8>;
+            var ra: 'a logic<8>;
+            var rb: 'b logic<8>;
             always_ff (clk_a, rst_a) {
                 if_reset {
                     ra = 8'hAA;
@@ -213,6 +217,3 @@ fn test_separate_resets_per_domain() {
     assert_eq!(sim.get(qa), 0x11u8.into()); // A captures data
     assert_eq!(sim.get(qb), 0xBBu8.into()); // B in reset
 }
-
-
-

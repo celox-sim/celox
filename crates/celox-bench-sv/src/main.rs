@@ -22,9 +22,14 @@ fn emit_sv(code: &str) -> String {
     let analyzer = Analyzer::new(&metadata);
     let mut context = Context::default();
 
-    analyzer.analyze_pass1(&"prj", &parser.veryl);
-    Analyzer::analyze_post_pass1();
-    analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, None);
+    let errors = analyzer.analyze_pass1(&"prj", &parser.veryl);
+    assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
+    let errors = Analyzer::analyze_post_pass1();
+    assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
+    let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, None);
+    assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
+    let errors = Analyzer::analyze_post_pass2();
+    assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
     let mut emitter = Emitter::new(
         &metadata,

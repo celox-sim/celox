@@ -323,10 +323,14 @@ mod tests {
         let mut context = Context::default();
         let mut ir = veryl_analyzer::ir::Ir::default();
 
-        analyzer.analyze_pass1("prj", &parser.veryl);
-        Analyzer::analyze_post_pass1();
-        analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
-        Analyzer::analyze_post_pass2();
+        let errors = analyzer.analyze_pass1("prj", &parser.veryl);
+        assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
+        let errors = Analyzer::analyze_post_pass1();
+        assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
+        let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
+        assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
+        let errors = Analyzer::analyze_post_pass2();
+        assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
         // First pass: assign ModuleIds
         let mut name_to_id: HashMap<StrId, ModuleId> = HashMap::default();

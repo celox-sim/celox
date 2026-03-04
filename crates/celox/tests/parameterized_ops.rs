@@ -5,10 +5,16 @@ use celox::{BigUint, IOContext, Simulator};
 // Helper: combinational binary operator  (assign o = a {op} b)
 // ---------------------------------------------------------------------------
 fn check_comb_binary(op: &str, in_type: &str, out_type: &str, a: u64, b: u64, expected: u64) {
+    // Logical operators require 1-bit operands in Veryl; apply reduction OR
+    let (lhs, rhs) = if op == "&&" || op == "||" {
+        ("(|a)".to_string(), "(|b)".to_string())
+    } else {
+        ("a".to_string(), "b".to_string())
+    };
     let code = format!(
         r#"
         module Top (a: input {in_type}, b: input {in_type}, o: output {out_type}) {{
-            assign o = a {op} b;
+            assign o = {lhs} {op} {rhs};
         }}
     "#
     );
@@ -34,12 +40,17 @@ fn check_comb_binary(op: &str, in_type: &str, out_type: &str, a: u64, b: u64, ex
 // Helper: ff binary operator  (always_ff { r = a {op} b; })
 // ---------------------------------------------------------------------------
 fn check_ff_binary(op: &str, in_type: &str, out_type: &str, a: u64, b: u64, expected: u64) {
+    let (lhs, rhs) = if op == "&&" || op == "||" {
+        ("(|a)".to_string(), "(|b)".to_string())
+    } else {
+        ("a".to_string(), "b".to_string())
+    };
     let code = format!(
         r#"
         module Top (clk: input clock, a: input {in_type}, b: input {in_type}, o: output {out_type}) {{
             var r: {out_type};
             always_ff (clk) {{
-                r = a {op} b;
+                r = {lhs} {op} {rhs};
             }}
             assign o = r;
         }}
@@ -69,10 +80,12 @@ fn check_ff_binary(op: &str, in_type: &str, out_type: &str, a: u64, b: u64, expe
 // Helper: combinational unary operator  (assign o = {op}a)
 // ---------------------------------------------------------------------------
 fn check_comb_unary(op: &str, in_type: &str, out_type: &str, a: u64, expected: u64) {
+    // Logical NOT requires 1-bit operand; apply reduction OR
+    let operand = if op == "!" { format!("{op}(|a)") } else { format!("{op}a") };
     let code = format!(
         r#"
         module Top (a: input {in_type}, o: output {out_type}) {{
-            assign o = {op}a;
+            assign o = {operand};
         }}
     "#
     );
@@ -94,12 +107,13 @@ fn check_comb_unary(op: &str, in_type: &str, out_type: &str, a: u64, expected: u
 // Helper: ff unary operator  (always_ff { r = {op}a; })
 // ---------------------------------------------------------------------------
 fn check_ff_unary(op: &str, in_type: &str, out_type: &str, a: u64, expected: u64) {
+    let operand = if op == "!" { format!("{op}(|a)") } else { format!("{op}a") };
     let code = format!(
         r#"
         module Top (clk: input clock, a: input {in_type}, o: output {out_type}) {{
             var r: {out_type};
             always_ff (clk) {{
-                r = {op}a;
+                r = {operand};
             }}
             assign o = r;
         }}
@@ -281,7 +295,7 @@ fn check_comb_logical_wide_narrow(op: &str, wide_width: usize, a: u128, b: u8, e
     let code = format!(
         r#"
         module Top (a: input logic<{wide_width}>, b: input logic, o: output logic) {{
-            assign o = a {op} b;
+            assign o = (|a) {op} b;
         }}
     "#
     );
@@ -480,10 +494,11 @@ fn check_comb_unary_4s(
     exp_val: u64,
     exp_mask: u64,
 ) {
+    let operand = if op == "!" { format!("{op}(|a)") } else { format!("{op}a") };
     let code = format!(
         r#"
         module Top (a: input {in_type}, o: output {out_type}) {{
-            assign o = {op}a;
+            assign o = {operand};
         }}
     "#
     );
@@ -651,7 +666,9 @@ fn comb_shift_4s(
 // ~0xA5=0x5A, mask 0x0F preserved (no normalization: value at X positions is computation result)
 #[test_case("~",  "logic<8>", "logic<8>", 0xA5, 0x0F, 0x5A, 0x0F ; "4s bitnot partial X")]
 #[test_case("~",  "logic<8>", "logic<8>", 0xFF, 0x00, 0x00, 0x00 ; "4s bitnot defined")]
-#[test_case("!",  "logic<8>", "logic",    0x55, 0x01, 0x00, 0x01 ; "4s lognot X input")]
+// With reduction OR: |0x55 (mask 0x01) = 1 (definite, since defined bits are nonzero),
+// then !1 = 0 with mask 0.
+#[test_case("!",  "logic<8>", "logic",    0x55, 0x01, 0x00, 0x00 ; "4s lognot X input")]
 fn comb_unary_4s(
     op: &str,
     in_ty: &str,

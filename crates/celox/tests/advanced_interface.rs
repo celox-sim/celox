@@ -207,7 +207,6 @@ fn test_interface_wide_signal() {
 
 /// Parametric interface array: verify array_dims are populated for parametric-type members.
 #[test]
-#[ignore = "blocked by upstream Veryl IR bug: generic type param not resolved in interface member width"]
 fn test_parametric_interface_array() {
     let code = r#"
     interface Bus::<T: type> {

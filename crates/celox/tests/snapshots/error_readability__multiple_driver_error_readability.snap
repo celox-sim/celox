@@ -2,4 +2,4 @@
 source: crates/celox/tests/error_readability.rs
 expression: err
 ---
-Multiple driver detected: y[0],y[0]
+"y" is assigned in multiple procedural blocks or assignment statements

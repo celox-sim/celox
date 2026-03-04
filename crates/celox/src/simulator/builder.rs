@@ -57,12 +57,7 @@ fn analyze(
     errors.append(&mut analyzer.analyze_pass1("prj", &parser.veryl));
     errors.append(&mut Analyzer::analyze_post_pass1());
     errors.append(&mut analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir)));
-
     errors.append(&mut Analyzer::analyze_post_pass2());
-    let errors: Vec<_> = errors
-        .into_iter()
-        .filter(|x| matches!(x, AnalyzerError::UnsupportedByIr { .. }))
-        .collect();
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
     if let Some(ct) = clock_type {
@@ -104,7 +99,7 @@ pub(crate) fn compile_to_sir(
     clock_type: Option<ClockType>,
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
-) -> Result<Program, ParserError> {
+) -> Result<Program, SimulatorError> {
     let (sir, errors) = analyze(
         code,
         top,
@@ -120,9 +115,9 @@ pub(crate) fn compile_to_sir(
         param_overrides,
     );
     if !errors.is_empty() {
-        panic!("Compiler errors found: {:?}", errors);
+        return Err(SimulatorError::Analyzer(errors));
     }
-    sir
+    sir.map_err(SimulatorError::SIRParser)
 }
 #[derive(Debug, Clone)]
 pub struct SimulatorOptions {
@@ -345,8 +340,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.clock_type,
             self.reset_type,
             &self.param_overrides,
-        )
-        .map_err(SimulatorError::SIRParser)?;
+        )?;
         let backend = JitBackend::new(&program, &self.options, None)?;
 
         let mut sim = Simulator::with_backend_and_program(backend, program);
@@ -376,8 +370,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.clock_type,
             self.reset_type,
             &self.param_overrides,
-        )
-        .map_err(SimulatorError::SIRParser);
+        );
 
         let sim_res = program_res.and_then(|program| {
             let backend = JitBackend::new(&program, &self.options, Some(&mut trace))?;
@@ -431,8 +424,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             self.clock_type,
             self.reset_type,
             &self.param_overrides,
-        )
-        .map_err(SimulatorError::SIRParser)?;
+        )?;
         let backend = JitBackend::new(&program, &self.options, None)?;
 
         let mut sim = Simulator::with_backend_and_program(backend, program);

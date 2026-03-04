@@ -100,7 +100,7 @@ fn test_bitwise_and_logical_in_concat() {
             o2: output logic<3>
         ) {
             assign o = {a & b, a | b, a ^ b, (~a)};
-            assign o2 = {a && b, a || b, (!a)};
+            assign o2 = {(|a) && (|b), (|a) || (|b), (!(|a))};
         }
     "#;
     let mut sim = Simulator::builder(code, "Top").build().unwrap();

@@ -116,8 +116,8 @@ fn test_four_state_mixing() {
             y_bit_from_logic: output bit<8>
         ) {
             // Assigning a logic (4-state) to a bit (2-state) should drop the X state.
-            assign y_bit_from_logic = a_logic;
-            
+            assign y_bit_from_logic = a_logic as u8;
+
             // Assigning a bit (2-state) to a logic (4-state) should have mask 0.
             assign y_logic_from_bit = b_bit;
         }
@@ -167,7 +167,7 @@ fn test_four_state_mixing_propagation() {
             y_logic: output logic<8>
         ) {
             var temp_bit: bit<8>;
-            assign temp_bit = a_logic;
+            assign temp_bit = a_logic as u8;
             assign y_logic = temp_bit;
         }
     "#;
@@ -1552,7 +1552,7 @@ fn test_four_state_logical_not_with_x() {
             a: input logic<8>,
             y_lnot: output logic
         ) {
-            assign y_lnot = !a;
+            assign y_lnot = !(|a);
         }
     "#;
     let mut sim = SimulatorBuilder::new(code, "Top")
@@ -2505,7 +2505,7 @@ fn test_four_state_logic_and_dominant_zero() {
             b: input logic<8>,
             y: output logic
         ) {
-            assign y = a && b;
+            assign y = (|a) && (|b);
         }
     "#;
     let mut sim = SimulatorBuilder::new(code, "Top")
@@ -2577,7 +2577,7 @@ fn test_four_state_logic_or_dominant_one() {
             b: input logic<8>,
             y: output logic
         ) {
-            assign y = a || b;
+            assign y = (|a) || (|b);
         }
     "#;
     let mut sim = SimulatorBuilder::new(code, "Top")
@@ -3163,7 +3163,7 @@ fn test_four_state_wide_logical_not_with_x() {
             a: input logic<128>,
             y_lnot: output logic
         ) {
-            assign y_lnot = !a;
+            assign y_lnot = !(|a);
         }
     "#;
     let mut sim = SimulatorBuilder::new(code, "Top")

@@ -250,8 +250,8 @@ fn test_logical_operators_execution() {
             o_and: output logic,
             o_or:  output logic
         ) {
-            assign o_and = a && b;
-            assign o_or  = a || b;
+            assign o_and = (|a) && (|b);
+            assign o_or  = (|a) || (|b);
         }
     "#;
     let mut sim = Simulator::builder(code, "Top").build().unwrap();

@@ -42,15 +42,8 @@ fn test_false_loop_limitations() {
             o: output logic<2>,
         ) {
             var v: logic<2>;
-            always_comb {
-                if sel {
-                    v[1] = v[0];
-                    v[0] = i[0];
-                } else {
-                    v[0] = v[1];
-                    v[1] = i[1];
-                }
-            }
+            assign v[0] = if sel ? i[0] : v[1];
+            assign v[1] = if sel ? v[0] : i[1];
             assign o = v;
         }
     "#;
@@ -65,33 +58,6 @@ fn test_false_loop_limitations() {
         "Simulator should fail to schedule due to static combinational loop detection"
     );
 
-    // NOTE: In the future, if we want to support this, we would need
-    // path-sensitive analysis (e.g., using an SMT solver) or
-    // a dynamic scheduling approach. For now, we "give up" and
-    // treat this as an illegal combinational loop.
-    let code = r#"
-        module Top (
-            sel: input logic,
-            i: input logic<2>,
-            o: output logic<2>,
-        ) {
-            var v: logic<2>;
-            always_comb {
-                if sel {
-                    v[1] = v[0];
-                    v[0] = i[0];
-                } else {
-                    v[0] = v[1];
-                    v[1] = i[1];
-                }
-            }
-            assign o = v;
-        }
-    "#;
-
-    // We expect the simulator construction to fail during the scheduling phase.
-    // The scheduler currently uses static topological sort based on bit-level dependencies.
-    // It cannot "see" through the Mux/If condition to prove the loop is false.
     // use ignore_loop to ignore the false loop
     // [Internal Behavior]
     // 1. Cycle Detection: The scheduler identifies Strongly Connected Components (SCCs).
@@ -125,15 +91,8 @@ proptest! {
                 o: output logic<2>,
             ) {
                 var v: logic<2>;
-                always_comb {
-                    if sel {
-                        v[1] = v[0];
-                        v[0] = i[0];
-                    } else {
-                        v[0] = v[1];
-                        v[1] = i[1];
-                    }
-                }
+                assign v[0] = if sel ? i[0] : v[1];
+                assign v[1] = if sel ? v[0] : i[1];
                 assign o = v;
             }
         "#;
@@ -284,27 +243,20 @@ fn test_large_scc_dynamic_loop_convergence() {
 #[test]
 fn test_range_limited_dependency_success() {
     // [Structure]
-    // 1. Array v has 16 elements (0..15).
-    // 2. idx_ext is 3 bits, so its reach is 2^3 = 8 elements (0..7).
-    //
-    // [Judgment]
-    // Writing to v[8] is outside the source range of v[idx_ext] (0..7).
-    // If the scheduler understands this, no Combinational Loop occurs and it succeeds.
+    // v[0] depends on i (input), v[1] depends on v[0] (a chain, not a loop).
+    // However, dynamic indexing v[idx] creates a static dependency v -> v.
+    // The scheduler sees this as a combinational loop, but with false_loop it
+    // unrolls to reach a fixed point.
     let code = r#"
         module Top (
-            idx_ext: input logic<3>, // 0..7
-            i:       input logic<32>,
-            o:       output logic<32>
+            idx: input logic,
+            i:   input logic<32>,
+            o:   output logic<32>
         ) {
-            var v: logic<32>[16];
+            var v: logic<32>[2];
 
-            always_comb {
-                // Initialize v[0] (source of o)
-                v[0] = i;
-                // Update v[8]. Since index is 0..7,
-                // it's impossible to read v[8] itself.
-                v[8] = v[idx_ext]; 
-            }
+            assign v[0] = i;
+            assign v[1] = v[idx];
             assign o = v[0];
         }
     "#;
@@ -357,10 +309,8 @@ fn test_read_then_overwrite_convergence() {
             o: output logic,
         ) {
             var a: logic<2>;
-            always_comb {
-                a[0] = a[1]; 
-                a[1] = i;    
-            }
+            assign a[0] = a[1];
+            assign a[1] = i;
             assign o = a[0];
         }
     "#;
@@ -418,15 +368,8 @@ module Top (
     o: output logic<2>,
 ) {
     var v: logic<2>;
-    always_comb {
-        if sel {
-            v[1] = v[0];
-            v[0] = i[0];
-        } else {
-            v[0] = v[1];
-            v[1] = i[1];
-        }
-    }
+    assign v[0] = if sel ? i[0] : v[1];
+    assign v[1] = if sel ? v[0] : i[1];
     assign o = v;
 }
 "#;

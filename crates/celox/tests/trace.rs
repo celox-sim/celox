@@ -57,9 +57,10 @@ module BrokenLoop {
 #[test]
 fn test_compilation_trace_backend_info() {
     let code = r#"
-module ModuleB {
-    var a: logic<32>;
-    var b: logic<32>;
+module ModuleB (
+    a: input logic<32>,
+    b: output logic<32>
+) {
     assign b = a + 1;
 }
     "#;

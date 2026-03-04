@@ -22,6 +22,7 @@ mod tests {
                 a  : input logic<32>,
                 b  : output logic<64>,
             ) {
+                assign b = a as 64;
             }
         "#;
 
@@ -30,18 +31,22 @@ mod tests {
         let metadata = Metadata::create_default("test_project").unwrap();
 
         let analyzer = Analyzer::new(&metadata);
-        analyzer.analyze_pass1(&metadata.project.name, &parser.veryl);
-        Analyzer::analyze_post_pass1();
+        let errors = analyzer.analyze_pass1(&metadata.project.name, &parser.veryl);
+        assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
+        let errors = Analyzer::analyze_post_pass1();
+        assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
 
         let mut ir = Ir::default();
         let mut context = Context::default();
-        analyzer.analyze_pass2(
+        let errors = analyzer.analyze_pass2(
             &metadata.project.name,
             &parser.veryl,
             &mut context,
             Some(&mut ir),
         );
-        Analyzer::analyze_post_pass2();
+        assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
+        let errors = Analyzer::analyze_post_pass2();
+        assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
         let generated_tokens = generate_project(&ir);
 
@@ -79,16 +84,20 @@ mod tests {
         let mut parsers = Vec::new();
         for (path_set, code) in &parsed_files {
             let parser = Parser::parse(code, &path_set.src).unwrap();
-            analyzer.analyze_pass1(&path_set.prj, &parser.veryl);
+            let errors = analyzer.analyze_pass1(&path_set.prj, &parser.veryl);
+            assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
             parsers.push(parser);
         }
-        Analyzer::analyze_post_pass1();
+        let errors = Analyzer::analyze_post_pass1();
+        assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
 
         for (i, (path_set, _code)) in parsed_files.iter().enumerate() {
             let parser = &parsers[i];
-            analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
+            let errors = analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
+            assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
         }
-        Analyzer::analyze_post_pass2();
+        let errors = Analyzer::analyze_post_pass2();
+        assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
         let tokens = generate_project(&ir);
         let code = tokens_to_string(tokens);

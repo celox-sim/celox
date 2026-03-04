@@ -24,10 +24,14 @@ fn setup_to_flatting(
     let mut context = Context::default();
     let mut ir = Ir::default();
 
-    analyzer.analyze_pass1(&"prj", &parser.veryl);
-    Analyzer::analyze_post_pass1();
-    analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
-    Analyzer::analyze_post_pass2();
+    let errors = analyzer.analyze_pass1(&"prj", &parser.veryl);
+    assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
+    let errors = Analyzer::analyze_post_pass1();
+    assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
+    let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
+    assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
+    let errors = Analyzer::analyze_post_pass2();
+    assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
     let top_id = resource_table::insert_str(top_name);
 
@@ -323,10 +327,14 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
     let mut context = Context::default();
     let mut ir = Ir::default();
 
-    analyzer.analyze_pass1(&"prj", &parser.veryl);
-    Analyzer::analyze_post_pass1();
-    analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
-    Analyzer::analyze_post_pass2();
+    let errors = analyzer.analyze_pass1(&"prj", &parser.veryl);
+    assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
+    let errors = Analyzer::analyze_post_pass1();
+    assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
+    let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
+    assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
+    let errors = Analyzer::analyze_post_pass2();
+    assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
     let top_id = resource_table::insert_str(top_name);
 
@@ -473,6 +481,7 @@ fn test_boundary_propagation() {
         always_comb {
             v[15:0] = 16'hAAAA;
             v[31:16] = 16'hBBBB;
+            out = v[15:0];
         }
     }
     "#;

@@ -1,5 +1,16 @@
 use celox::{ParserError, SchedulerError, Simulator, SimulatorError};
 
+/// Helper: assert the error is either Analyzer or a specific SIRParser variant.
+/// The updated Veryl analyzer may catch issues before the SIR scheduler does.
+fn assert_analyzer_or_sir(result: Result<Simulator, SimulatorError>, sir_check: impl FnOnce(&SimulatorError)) {
+    let err = result.expect_err("Expected an error");
+    match &err {
+        SimulatorError::Analyzer(_) => {} // OK: analyzer caught it first
+        SimulatorError::SIRParser(_) => sir_check(&err),
+        other => panic!("Expected Analyzer or SIRParser error, got: {other:?}"),
+    }
+}
+
 #[test]
 fn test_scheduler_loop_detection() {
     let code = r#"
@@ -61,6 +72,8 @@ fn test_combinational_loop() {
 
 #[test]
 fn test_combinational_loop_in_single_block() {
+    // The Veryl analyzer now catches this as UnassignVariable (y is read before
+    // being written in the same always_comb block), so we expect an Analyzer error.
     let code = r#"
         module Top () {
             var y: logic;
@@ -73,27 +86,17 @@ fn test_combinational_loop_in_single_block() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    match result {
-        Err(SimulatorError::SIRParser(ParserError::Scheduler(
-            SchedulerError::CombinationalLoop { blocks },
-        ))) => {
-            assert_eq!(blocks.len(), 1);
-        }
-        Err(e) => panic!("Expected CombinationalLoop, but got: {:?}", e),
-        Ok(_) => {
-            panic!("Should have failed because 'y' is read before being written in the same block")
-        }
-    }
+    assert_analyzer_or_sir(result, |e| {
+        panic!("Expected Analyzer (UnassignVariable) error, got: {e:?}");
+    });
 }
 
 #[test]
 fn test_dynamic_index_bit_disparity_bullying() {
     let code = r#"
         module Top (
-            i: input logic,
             j: input logic
         ) {
-            var y: logic;
             var x: logic[2,4];
             always_comb{ x[j][0] = x[j][1]; }
             always_comb{ x[j][1] = x[j][0]; }
@@ -101,20 +104,15 @@ fn test_dynamic_index_bit_disparity_bullying() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    match result {
-        Err(SimulatorError::SIRParser(ParserError::Scheduler(
-            SchedulerError::MultipleDriver { blocks: _ },
-        ))) => {}
-        Err(e) => panic!("Expected MultipleDriver error, but got: {:?}", e),
-        Ok(_) => panic!("Should have failed"),
-    }
+    assert_analyzer_or_sir(result, |e| {
+        panic!("Expected Analyzer or MultipleDriver error, got: {e:?}");
+    });
 }
 
 #[test]
 fn test_dynamic_access_with_static_precedence_is_ok() {
     let code = r#"
-        module Top (j: input logic) {
-            var a: logic;
+        module Top (j: input logic, a: input logic) {
             var x: logic[2,4];
             always_comb {
                 x[0][0] = a;
@@ -133,9 +131,11 @@ fn test_dynamic_access_with_static_precedence_is_ok() {
 
 #[test]
 fn test_dynamic_access_self_loop_is_err() {
+    // The Veryl analyzer catches InvalidOperand (can't apply + to an array).
+    // Use logic<8>[2] so x[j] is a scalar and + is valid.
     let code = r#"
         module Top (j: input logic) {
-            var x: logic[2,4];
+            var x: logic<8> [2];
             always_comb {
                 x[j] = x[j] + 1;
             }
@@ -143,15 +143,9 @@ fn test_dynamic_access_self_loop_is_err() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    match result {
-        Err(SimulatorError::SIRParser(ParserError::Scheduler(
-            SchedulerError::CombinationalLoop { blocks },
-        ))) => {
-            assert!(blocks.len() >= 1, "Should detect a loop: {:?}", blocks);
-        }
-        Err(e) => panic!("Expected CombinationalLoop, but got: {:?}", e),
-        Ok(_) => panic!("Should have failed: x[j] depends on its previous value (latch/loop)"),
-    }
+    assert_analyzer_or_sir(result, |e| {
+        panic!("Expected Analyzer (UnassignVariable) error, got: {e:?}");
+    });
 }
 
 #[test]
@@ -170,10 +164,9 @@ fn test_if_without_else_latch_loop() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    assert!(
-        result.is_err(),
-        "Should fail: x is not guaranteed to be defined before being read (latch/loop)"
-    );
+    assert_analyzer_or_sir(result, |e| {
+        panic!("Expected Analyzer (UnassignVariable) error, got: {e:?}");
+    });
 }
 
 #[test]
@@ -221,12 +214,14 @@ fn test_multiple_driver_error() {
         }
     "#;
     let result = Simulator::builder(code, "Top").build();
-    match result {
-        Err(SimulatorError::SIRParser(ParserError::Scheduler(
-            SchedulerError::MultipleDriver { .. },
-        ))) => {}
-        _ => panic!("Should have failed with MultipleDriver error"),
-    }
+    assert_analyzer_or_sir(result, |e| {
+        match e {
+            SimulatorError::SIRParser(ParserError::Scheduler(
+                SchedulerError::MultipleDriver { .. },
+            )) => {}
+            _ => panic!("Expected MultipleDriver error, got: {e:?}"),
+        }
+    });
 }
 
 #[test]
@@ -376,10 +371,8 @@ fn test_interface_design_is_currently_accepted() {
     "#;
 
     let result = Simulator::builder(code, "Top").build();
-    assert!(
-        result.is_ok(),
-        "interface-only design is accepted by analyzer/simulator pipeline"
-    );
+    // The updated Veryl analyzer rejects interface-only designs.
+    assert!(result.is_err(), "Expected error for interface-only design");
 }
 
 #[test]

@@ -127,16 +127,32 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
             Ok(p) => p,
             Err(_) => exit_with_error!(&format!("Failed to parse {}", path_set.src.display())),
         };
-        analyzer.analyze_pass1(&path_set.prj, &parser.veryl);
+        let errors = analyzer.analyze_pass1(&path_set.prj, &parser.veryl);
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+            exit_with_error!(&format!("Analysis pass1 errors: {}", msgs.join("; ")));
+        }
         parsers.push(parser);
     }
-    Analyzer::analyze_post_pass1();
+    let errors = Analyzer::analyze_post_pass1();
+    if !errors.is_empty() {
+        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        exit_with_error!(&format!("Analysis post-pass1 errors: {}", msgs.join("; ")));
+    }
 
     for (i, (path_set, _code)) in parsed_files.iter().enumerate() {
         let parser = &parsers[i];
-        analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
+        let errors = analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+            exit_with_error!(&format!("Analysis pass2 errors: {}", msgs.join("; ")));
+        }
     }
-    Analyzer::analyze_post_pass2();
+    let errors = Analyzer::analyze_post_pass2();
+    if !errors.is_empty() {
+        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        exit_with_error!(&format!("Analysis post-pass2 errors: {}", msgs.join("; ")));
+    }
 
     // 3. Generate TokenStream
     let expanded = generator::generate_project(&ir);
