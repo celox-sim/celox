@@ -1,6 +1,6 @@
 use serde::Serialize;
-use std::collections::HashMap;
-use veryl_analyzer::ir::{Component, Declaration, Ir, Module, TypeKind, VarKind};
+use std::collections::{HashMap, HashSet};
+use veryl_analyzer::ir::{Component, Declaration, Ir, Module, TypeKind, VarId, VarKind};
 use veryl_parser::resource_table;
 
 /// A generated TypeScript module definition (`.d.ts` + `.js` + `.md` content).
@@ -108,6 +108,59 @@ fn extract_ports(module: &Module) -> Vec<PortInfo> {
             },
             is_4state,
             is_output: variable.kind == VarKind::Output,
+            is_hierarchical,
+            array_dims,
+        });
+    }
+
+    // Collect internal vars (VarKind::Variable) not already covered by ports
+    let port_var_ids: HashSet<VarId> = module.ports.values().copied().collect();
+
+    for (var_id, variable) in &module.variables {
+        if port_var_ids.contains(var_id) {
+            continue;
+        }
+        if variable.kind != VarKind::Variable {
+            continue;
+        }
+
+        let name = variable
+            .path
+            .0
+            .iter()
+            .map(|s| resource_table::get_str_value(*s).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(".");
+
+        let is_hierarchical = variable.path.0.len() > 1;
+
+        let element_width = variable.total_width().unwrap_or(1);
+
+        let array_dims: Option<Vec<usize>> = {
+            let dims: Vec<usize> = variable.r#type.array.iter().filter_map(|d| *d).collect();
+            if dims.is_empty() {
+                None
+            } else {
+                Some(dims)
+            }
+        };
+
+        let total_width = element_width * variable.r#type.total_array().unwrap_or(1);
+
+        let type_info = classify_type(&variable.r#type.kind);
+        let is_4state = is_4state_type(&variable.r#type.kind);
+
+        ports.push(PortInfo {
+            name,
+            direction: "internal",
+            type_info,
+            width: if array_dims.is_some() {
+                element_width
+            } else {
+                total_width
+            },
+            is_4state,
+            is_output: false,
             is_hierarchical,
             array_dims,
         });
@@ -922,5 +975,42 @@ module Top (
             top.dts_content.contains("at(i: number)"),
             "DTS must contain array accessor"
         );
+    }
+
+    /// Internal vars: a module with `var` declarations that are not ports.
+    /// The generated DTS must include them as writable members,
+    /// and the generated JS must emit `direction: "internal"`.
+    #[test]
+    fn test_internal_vars() {
+        let code = r#"
+module Counter (
+    clk: input clock,
+    rst: input reset,
+    en: input logic,
+    count: output logic<8>,
+) {
+    var count_r: logic<8>;
+    always_ff (clk, rst) {
+        if_reset {
+            count_r = 0;
+        } else {
+            if en {
+                count_r = count_r + 1;
+            }
+        }
+    }
+    assign count = count_r;
+}
+"#;
+        let modules = generate_from_source(code);
+        assert_eq!(modules.len(), 1);
+        assert_snapshot!("internal_vars_dts", modules[0].dts_content);
+        assert_snapshot!("internal_vars_js", modules[0].js_content);
+        assert_snapshot!("internal_vars_md", modules[0].md_content);
+
+        // Verify internal var in JSON ports
+        let count_r = &modules[0].ports["count_r"];
+        assert_eq!(count_r.direction, "internal");
+        assert_eq!(count_r.width, 8);
     }
 }

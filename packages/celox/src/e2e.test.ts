@@ -2036,6 +2036,108 @@ module ArrayPassThrough (
 }
 `;
 
+// ---------------------------------------------------------------------------
+// Internal var access tests
+// ---------------------------------------------------------------------------
+
+const INTERNAL_VAR_HIERARCHY_SOURCE = `
+module SubCounter (
+    clk: input clock,
+    rst: input reset,
+    en: input logic,
+    count: output logic<8>,
+) {
+    var count_r: logic<8>;
+    always_ff (clk, rst) {
+        if_reset {
+            count_r = 0;
+        } else if en {
+            count_r = count_r + 1;
+        }
+    }
+    assign count = count_r;
+}
+
+module TopCounter (
+    clk: input clock,
+    rst: input reset,
+    en: input logic,
+    top_count: output logic<8>,
+) {
+    var top_reg: logic<8>;
+    inst u_sub: SubCounter (
+        clk,
+        rst,
+        en,
+        count: top_count,
+    );
+    always_ff (clk, rst) {
+        if_reset {
+            top_reg = 0;
+        } else {
+            top_reg = top_count;
+        }
+    }
+}
+`;
+
+describe("E2E: internal var access", () => {
+	test("top-level internal var is accessible and tracks values", () => {
+		const sim = Simulator.fromSource(COUNTER_SOURCE, "Counter");
+
+		// Reset
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.dut.rst = 1n;
+		sim.tick();
+
+		// Internal var count_r should be accessible and start at 0
+		expect((sim.dut as any).count_r).toBe(0n);
+
+		// Enable counting and tick
+		sim.dut.en = 1n;
+		sim.tick();
+		expect((sim.dut as any).count_r).toBe(1n);
+
+		sim.tick();
+		expect((sim.dut as any).count_r).toBe(2n);
+
+		// count_r should equal count (output)
+		expect((sim.dut as any).count_r).toBe(sim.dut.count);
+
+		sim.dispose();
+	});
+
+	test("child instance internal var is accessible", () => {
+		const sim = Simulator.fromSource(
+			INTERNAL_VAR_HIERARCHY_SOURCE,
+			"TopCounter",
+		);
+
+		// Reset
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.dut.rst = 1n;
+		sim.tick();
+
+		// Top-level internal var
+		expect((sim.dut as any).top_reg).toBe(0n);
+
+		// Child instance internal var
+		expect((sim.dut as any).u_sub.count_r).toBe(0n);
+
+		// Enable counting
+		sim.dut.en = 1n;
+		sim.tick();
+		expect((sim.dut as any).u_sub.count_r).toBe(1n);
+
+		sim.tick();
+		expect((sim.dut as any).u_sub.count_r).toBe(2n);
+
+		sim.dispose();
+	});
+});
+
 describe("E2E: 1-bit unpacked array port (logic [N])", () => {
 	test("each element is independently visible in hardware (issue #6)", () => {
 		interface Ports {

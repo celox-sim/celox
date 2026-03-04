@@ -1,0 +1,20 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].md_content"
+---
+# Counter
+
+## Ports
+
+| Port | Direction | Type | Width | TS Type | 4-State |
+|------|-----------|------|-------|---------|--------|
+| count | output | logic | 8 | `bigint` (readonly) | yes |
+| count_r | internal | logic | 8 | `bigint` | yes |
+| en | input | logic | 1 | `bigint` | yes |
+| rst | input | reset | 1 | `bigint` | yes |
+
+## Events
+
+| Event | Port |
+|-------|------|
+| clk | clk |

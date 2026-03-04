@@ -1,0 +1,14 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: "modules[0].dts_content"
+---
+import type { ModuleDefinition } from "@celox-sim/celox";
+
+export interface CounterPorts {
+  readonly count: bigint;
+  count_r: bigint;
+  en: bigint;
+  rst: bigint;
+}
+
+export declare const Counter: ModuleDefinition<CounterPorts>;

@@ -311,7 +311,7 @@ export function parseNapiLayout(json: string): {
 			width: r.width,
 			byteSize: r.byte_size > 0 ? r.byte_size : Math.ceil(r.width / 8),
 			is4state: r.is_4state,
-			direction: r.direction as "input" | "output" | "inout",
+			direction: r.direction as SignalLayout["direction"],
 		};
 		const entry: SignalLayout & {
 			typeKind: string;
@@ -458,7 +458,7 @@ function convertHierarchyNode(
 			width: r.width,
 			byteSize: r.byte_size > 0 ? r.byte_size : Math.ceil(r.width / 8),
 			is4state: r.is_4state,
-			direction: r.direction as "input" | "output" | "inout",
+			direction: r.direction as SignalLayout["direction"],
 		};
 		const entry: SignalLayout & { typeKind: string; arrayDims?: number[] } = {
 			...sl,
@@ -569,7 +569,7 @@ function parseLegacyLayout(json: string): Record<string, SignalLayout> {
 			width: r.width,
 			byteSize: r.byte_size > 0 ? r.byte_size : Math.ceil(r.width / 8),
 			is4state: r.is_4state,
-			direction: r.direction as "input" | "output" | "inout",
+			direction: r.direction as SignalLayout["direction"],
 		};
 	}
 	return result;

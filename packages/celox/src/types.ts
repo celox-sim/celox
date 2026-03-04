@@ -31,7 +31,7 @@ export interface ModuleDefinition<Ports = Record<string, unknown>> {
 
 /** Metadata for a single port / interface member. */
 export interface PortInfo {
-	readonly direction: "input" | "output" | "inout";
+	readonly direction: "input" | "output" | "inout" | "internal";
 	readonly type: "clock" | "reset" | "logic" | "bit";
 	readonly width: number;
 	readonly arrayDims?: readonly number[];
@@ -57,7 +57,7 @@ export interface SignalLayout {
 	readonly byteSize: number;
 	/** If true, an equal-sized mask follows immediately after the value. */
 	readonly is4state: boolean;
-	readonly direction: "input" | "output" | "inout";
+	readonly direction: "input" | "output" | "inout" | "internal";
 	/** The Veryl type kind (e.g. "clock", "reset_async_high", "logic"). */
 	readonly typeKind?: string;
 	/** For reset signals, the name of the associated clock (from FfDeclaration). */
