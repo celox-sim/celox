@@ -275,7 +275,11 @@ fn instances_to_json(instances: &[InstanceInfo]) -> Vec<JsonInstanceInfo> {
 }
 
 /// Generate TypeScript type definitions and JS metadata for all modules in the IR.
-pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
+///
+/// `source_files` contains the relative paths of all `.veryl` source files in
+/// the project. These are embedded into the generated JS so that the NAPI
+/// constructor receives the full project source at runtime.
+pub fn generate_all(ir: &Ir, source_files: &[&str]) -> Vec<GeneratedModule> {
     let mut result = Vec::new();
 
     for component in &ir.components {
@@ -296,7 +300,7 @@ pub fn generate_all(ir: &Ir) -> Vec<GeneratedModule> {
         let instances = extract_instances(module);
 
         let dts_content = generate_dts(&module_name, &ports, &instances);
-        let js_content = generate_js(&module_name, &ports);
+        let js_content = generate_js(&module_name, &ports, source_files);
         let md_content = generate_md(&module_name, &ports);
 
         let json_ports = ports_to_json(&ports);
@@ -498,17 +502,23 @@ fn write_dts_instance_members(out: &mut String, instances: &[InstanceInfo], inde
     }
 }
 
-fn generate_js(module_name: &str, ports: &[PortInfo]) -> String {
+fn generate_js(module_name: &str, ports: &[PortInfo], source_files: &[&str]) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
         "exports.{} = {{\n  __celox_module: true,\n  name: \"{}\",\n",
         module_name, module_name
     ));
-    out.push_str(&format!(
-        "  source: require(\"fs\").readFileSync(__dirname + \"/../{}.veryl\", \"utf-8\"),\n",
-        module_name
-    ));
+
+    // Emit a static sources array with readFileSync for each known source file.
+    out.push_str("  sources: [\n");
+    for file in source_files {
+        out.push_str(&format!(
+            "    {{ path: \"{f}\", content: require(\"fs\").readFileSync(__dirname + \"/../{f}\", \"utf-8\") }},\n",
+            f = file,
+        ));
+    }
+    out.push_str("  ],\n");
 
     // Ports object — hierarchical ports (e.g. "bus.data") are grouped into a
     // nested { interface: { ... } } entry so that the TS DUT can expose them
@@ -685,7 +695,7 @@ mod tests {
         let errors = Analyzer::analyze_post_pass2();
         assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
-        generate_all(&ir)
+        generate_all(&ir, &["test.veryl"])
     }
 
     #[test]

@@ -23,6 +23,7 @@ import type {
 	NativeSimulatorHandle,
 	SignalLayout,
 	SimulatorOptions,
+	SourceFile,
 } from "./types.js";
 
 /**
@@ -33,7 +34,7 @@ import type {
  * @internal
  */
 export type NativeCreateFn = (
-	source: string,
+	sources: ReadonlyArray<SourceFile>,
 	moduleName: string,
 	options: SimulatorOptions,
 ) => CreateResult<NativeSimulatorHandle>;
@@ -122,7 +123,7 @@ export class Simulator<P = Record<string, unknown>> {
 			parameters,
 			deadStorePolicy,
 		} = merged ?? {};
-		const result = createFn(module.source, module.name, {
+		const result = createFn(module.sources, module.name, {
 			fourState,
 			vcd,
 			optimize,
@@ -183,7 +184,11 @@ export class Simulator<P = Record<string, unknown>> {
 	): Simulator<P> {
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const napiOpts = buildNapiOpts(options);
-		const raw = new addon.NativeSimulatorHandle(source, top, napiOpts);
+		const raw = new addon.NativeSimulatorHandle(
+			[{ content: source, path: "" }],
+			top,
+			napiOpts,
+		);
 
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);

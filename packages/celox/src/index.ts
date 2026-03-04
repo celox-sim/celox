@@ -51,6 +51,7 @@ export type {
 	PortInfo,
 	SignalLayout,
 	SimulatorOptions,
+	SourceFile,
 	TrueLoopSpec,
 } from "./types.js";
 // 4-state helpers

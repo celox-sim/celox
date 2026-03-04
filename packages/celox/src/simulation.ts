@@ -22,6 +22,7 @@ import type {
 	NativeSimulationHandle,
 	SignalLayout,
 	SimulatorOptions,
+	SourceFile,
 } from "./types.js";
 import { SimulationTimeoutError } from "./types.js";
 
@@ -31,7 +32,7 @@ import { SimulationTimeoutError } from "./types.js";
  * @internal
  */
 export type NativeCreateSimulationFn = (
-	source: string,
+	sources: ReadonlyArray<SourceFile>,
 	moduleName: string,
 	options: SimulatorOptions,
 ) => CreateResult<NativeSimulationHandle>;
@@ -133,7 +134,7 @@ export class Simulation<P = Record<string, unknown>> {
 			parameters,
 			deadStorePolicy,
 		} = merged ?? {};
-		const result = createFn(module.source, module.name, {
+		const result = createFn(module.sources, module.name, {
 			fourState,
 			vcd,
 			optimize,
@@ -189,7 +190,11 @@ export class Simulation<P = Record<string, unknown>> {
 	): Simulation<P> {
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const napiOpts = buildNapiOpts(options);
-		const raw = new addon.NativeSimulationHandle(source, top, napiOpts);
+		const raw = new addon.NativeSimulationHandle(
+			[{ content: source, path: "" }],
+			top,
+			napiOpts,
+		);
 
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);

@@ -59,6 +59,13 @@ impl Simulator {
         SimulatorBuilder::<Simulator>::new(code, top)
     }
 
+    pub fn from_sources<'a>(
+        sources: Vec<(&'a str, &'a std::path::Path)>,
+        top: &'a str,
+    ) -> SimulatorBuilder<'a, Simulator> {
+        SimulatorBuilder::<Simulator>::from_sources(sources, top)
+    }
+
     pub(crate) fn with_backend_and_program(backend: JitBackend, program: Program) -> Self {
         Self {
             backend,

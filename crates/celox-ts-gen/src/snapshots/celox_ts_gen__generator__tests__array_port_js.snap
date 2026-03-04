@@ -5,7 +5,9 @@ expression: "modules[0].js_content"
 exports.Counter = {
   __celox_module: true,
   name: "Counter",
-  source: require("fs").readFileSync(__dirname + "/../Counter.veryl", "utf-8"),
+  sources: [
+    { path: "test.veryl", content: require("fs").readFileSync(__dirname + "/../test.veryl", "utf-8") },
+  ],
   ports: {
     clk: { direction: "input", type: "clock", width: 1, is4state: true },
     cnt: { direction: "output", type: "logic", width: 32, is4state: true, arrayDims: [4] },

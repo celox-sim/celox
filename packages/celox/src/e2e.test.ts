@@ -400,7 +400,7 @@ describe("E2E: Simulator.create (backward compat)", () => {
 			{
 				__celox_module: true,
 				name: "Adder",
-				source: ADDER_SOURCE,
+				sources: [{ path: "", content: ADDER_SOURCE }],
 				ports: {
 					clk: { direction: "input", type: "clock", width: 1 },
 					rst: { direction: "input", type: "reset", width: 1 },
@@ -499,7 +499,7 @@ module InitTest (
     b: input bit<8>,
 ) {}
 `;
-		raw = new addon.NativeSimulatorHandle(source, "InitTest", {
+		raw = new addon.NativeSimulatorHandle([{ content: source, path: "" }], "InitTest", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -536,7 +536,7 @@ module InitTest (
 	});
 
 	test("AND: 0 & X = 0 (dominant zero)", () => {
-		raw = new addon.NativeSimulatorHandle(AND_OR_SOURCE, "AndOr", {
+		raw = new addon.NativeSimulatorHandle([{ content: AND_OR_SOURCE, path: "" }], "AndOr", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -571,7 +571,7 @@ module InitTest (
 	});
 
 	test("OR: 1 | X = 1 (dominant one)", () => {
-		raw = new addon.NativeSimulatorHandle(AND_OR_SOURCE, "AndOr", {
+		raw = new addon.NativeSimulatorHandle([{ content: AND_OR_SOURCE, path: "" }], "AndOr", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -599,7 +599,7 @@ module InitTest (
 	});
 
 	test("logic-to-bit assignment strips X mask", () => {
-		raw = new addon.NativeSimulatorHandle(LOGIC_BIT_MIX_SOURCE, "LogicBitMix", {
+		raw = new addon.NativeSimulatorHandle([{ content: LOGIC_BIT_MIX_SOURCE, path: "" }], "LogicBitMix", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -620,7 +620,7 @@ module InitTest (
 	});
 
 	test("bit-to-logic assignment has no X", () => {
-		raw = new addon.NativeSimulatorHandle(LOGIC_BIT_MIX_SOURCE, "LogicBitMix", {
+		raw = new addon.NativeSimulatorHandle([{ content: LOGIC_BIT_MIX_SOURCE, path: "" }], "LogicBitMix", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -642,7 +642,7 @@ module InitTest (
 	});
 
 	test("arithmetic with X produces all-X output", () => {
-		raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", {
+		raw = new addon.NativeSimulatorHandle([{ content: ADDER_4STATE_SOURCE, path: "" }], "Adder4S", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -668,7 +668,7 @@ module InitTest (
 	});
 
 	test("defined inputs in 4-state mode behave like 2-state", () => {
-		raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", {
+		raw = new addon.NativeSimulatorHandle([{ content: ADDER_4STATE_SOURCE, path: "" }], "Adder4S", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -694,7 +694,7 @@ module InitTest (
 	});
 
 	test("FF captures X from input, reset clears X", () => {
-		raw = new addon.NativeSimulatorHandle(FF_SOURCE, "FF", { fourState: true });
+		raw = new addon.NativeSimulatorHandle([{ content: FF_SOURCE, path: "" }], "FF", { fourState: true });
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -744,7 +744,7 @@ module InitTest (
 	});
 
 	test("FourState write through DUT sets value and mask", () => {
-		raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", {
+		raw = new addon.NativeSimulatorHandle([{ content: ADDER_4STATE_SOURCE, path: "" }], "Adder4S", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -764,7 +764,7 @@ module InitTest (
 	});
 
 	test("setting defined value clears X mask", () => {
-		raw = new addon.NativeSimulatorHandle(ADDER_4STATE_SOURCE, "Adder4S", {
+		raw = new addon.NativeSimulatorHandle([{ content: ADDER_4STATE_SOURCE, path: "" }], "Adder4S", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -866,7 +866,7 @@ describe("E2E: 4-state high-level DUT API", () => {
 
 	test("multiplexer with X selector produces X output", () => {
 		const addon = loadNativeAddon();
-		const raw = new addon.NativeSimulatorHandle(MULTIPLEXER_SOURCE, "Mux4", {
+		const raw = new addon.NativeSimulatorHandle([{ content: MULTIPLEXER_SOURCE, path: "" }], "Mux4", {
 			fourState: true,
 		});
 		const layout = parseNapiLayout(raw.layoutJson);
@@ -1676,7 +1676,7 @@ describe("E2E: parameter override — DUT correctness", () => {
 			{
 				__celox_module: true,
 				name: "ParamWidth",
-				source: PARAM_WIDTH_SOURCE,
+				sources: [{ path: "", content: PARAM_WIDTH_SOURCE }],
 				ports: {
 					// STALE: these say width=8, but we'll override to 16
 					a: { direction: "input", type: "logic", width: 8 },
@@ -2342,6 +2342,171 @@ describe("E2E: deadStorePolicy option", () => {
 		expect((sim.dut as any).u_sub).toBeDefined();
 		expect((sim.dut as any).u_sub.o_data).toBe(0xffn);
 
+		sim.dispose();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// E2E: Proto package ordering (issue #22)
+// ---------------------------------------------------------------------------
+
+const PROTO_PKG_SOURCE = `
+pub proto package ItemProto {
+    type Item;
+}
+
+pub package ItemPlain::<WIDTH: u32 = 16> for ItemProto {
+    type Item = logic<WIDTH>;
+}
+`;
+
+const GENERIC_MODULE_SOURCE = `
+pub module GenericModule::<PKG: ItemProto> #(
+    param DEPTH: u32 = 4,
+) (
+    clk  : input  clock     ,
+    rst  : input  reset     ,
+    d_in : input  PKG::Item ,
+    d_out: output PKG::Item ,
+) {
+    var store: PKG::Item;
+    always_ff (clk, rst) {
+        if_reset { store = '0; }
+        else     { store = d_in; }
+    }
+    assign d_out = store;
+}
+
+pub module ConcreteModule #(
+    param DEPTH: u32 = 4,
+) (
+    clk  : input  clock     ,
+    rst  : input  reset     ,
+    d_in : input  logic<16> ,
+    d_out: output logic<16> ,
+) {
+    inst u_inner: GenericModule::<ItemPlain::<16>> #(DEPTH: DEPTH) (
+        clk, rst, d_in, d_out,
+    );
+}
+`;
+
+const UNRELATED_MODULE_SOURCE = `
+pub module UnrelatedModule (
+    clk  : input  clock    ,
+    rst  : input  reset    ,
+    d_in : input  logic<8> ,
+    d_out: output logic<8> ,
+) {
+    var data_r: logic<8>;
+    always_ff (clk, rst) {
+        if_reset { data_r = 0; }
+        else     { data_r = d_in; }
+    }
+    assign d_out = data_r;
+}
+`;
+
+describe("E2E: Proto package ordering (issue #22)", () => {
+	test("single-file source fails when project has proto packages in wrong order", () => {
+		// Reproduce the original bug: when proto_pkg definitions come after
+		// the code that references them (as a single concatenated source),
+		// the analyzer fails with "referred before it is defined".
+		expect(() =>
+			Simulator.fromSource(
+				GENERIC_MODULE_SOURCE + PROTO_PKG_SOURCE + UNRELATED_MODULE_SOURCE,
+				"ConcreteModule",
+			),
+		).toThrow();
+	});
+
+	test("multi-source: unrelated module compiles with proto packages in project", () => {
+		// New behavior: all source files are passed as separate entries.
+		// The Rust from_sources() handles dependency ordering correctly.
+		const sim = Simulator.fromSource<{
+			d_in: bigint;
+			readonly d_out: bigint;
+		}>(
+			PROTO_PKG_SOURCE + GENERIC_MODULE_SOURCE + UNRELATED_MODULE_SOURCE,
+			"UnrelatedModule",
+		);
+
+		// Reset sequence
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.tick();
+		sim.dut.rst = 1n;
+
+		sim.dut.d_in = 42n;
+		sim.tick();
+		sim.tick();
+
+		expect(sim.dut.d_out).toBe(42n);
+		sim.dispose();
+	});
+
+	test("multi-source: ConcreteModule using proto package works", () => {
+		// The concrete module that actually uses the proto package should
+		// also compile and simulate correctly.
+		const sim = Simulator.fromSource<{
+			d_in: bigint;
+			readonly d_out: bigint;
+		}>(
+			PROTO_PKG_SOURCE + GENERIC_MODULE_SOURCE + UNRELATED_MODULE_SOURCE,
+			"ConcreteModule",
+		);
+
+		// Reset sequence
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.tick();
+		sim.dut.rst = 1n;
+
+		sim.dut.d_in = 0xabcdn;
+		sim.tick();
+		sim.tick();
+
+		expect(sim.dut.d_out).toBe(0xabcdn);
+		sim.dispose();
+	});
+
+	test("Simulator.create() with multi-source ModuleDefinition", () => {
+		// Simulates what celox-ts-gen now generates: a ModuleDefinition with
+		// sources[] containing all project files.
+		const addon = loadNativeAddon();
+		const nativeCreate = createSimulatorBridge(addon);
+
+		const sim = Simulator.create(
+			{
+				__celox_module: true,
+				name: "UnrelatedModule",
+				sources: [
+					{ path: "proto_pkg.veryl", content: PROTO_PKG_SOURCE },
+					{ path: "generic_module.veryl", content: GENERIC_MODULE_SOURCE },
+					{ path: "unrelated_module.veryl", content: UNRELATED_MODULE_SOURCE },
+				],
+				ports: {
+					clk: { direction: "input", type: "clock", width: 1 },
+					rst: { direction: "input", type: "reset", width: 1 },
+					d_in: { direction: "input", type: "logic", width: 8 },
+					d_out: { direction: "output", type: "logic", width: 8 },
+				},
+				events: ["clk"],
+			},
+			{ __nativeCreate: nativeCreate },
+		);
+
+		// Reset sequence
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.tick();
+		sim.dut.rst = 1n;
+
+		sim.dut.d_in = 99n;
+		sim.tick();
+		sim.tick();
+
+		expect(sim.dut.d_out).toBe(99n);
 		sim.dispose();
 	});
 });

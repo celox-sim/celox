@@ -40,6 +40,13 @@ pub struct NapiTrueLoop {
     pub max_iter: u32,
 }
 
+/// A source file with its content and path.
+#[napi(object)]
+pub struct NapiSourceFile {
+    pub content: String,
+    pub path: String,
+}
+
 /// A parameter override for a top-level module parameter.
 #[napi(object)]
 pub struct NapiParamOverride {
@@ -214,13 +221,14 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
     }
 }
 
-/// Append extra source to the main source if provided.
-fn append_extra_source(mut source: String, extra: &Option<String>) -> String {
+/// Append extra source as a separate file entry if provided.
+fn append_extra_source(
+    sources: &mut Vec<(String, std::path::PathBuf)>,
+    extra: &Option<String>,
+) {
     if let Some(extra) = extra {
-        source.push('\n');
-        source.push_str(extra);
+        sources.push((extra.clone(), std::path::PathBuf::from("<extra>")));
     }
-    source
 }
 
 /// Configuration loaded from an optional `celox.toml` in the project root.
@@ -261,9 +269,9 @@ fn load_celox_config(project_root: &std::path::Path) -> Result<CeloxConfig> {
 }
 
 /// Collect all `.veryl` files from the extra test source directories declared in
-/// `celox.toml` and append their contents to `source`.
-fn append_test_sources(
-    source: &mut String,
+/// `celox.toml` and add them as individual source entries.
+fn collect_test_sources(
+    sources: &mut Vec<(String, std::path::PathBuf)>,
     project_root: &std::path::Path,
     config: &CeloxConfig,
 ) -> Result<()> {
@@ -276,8 +284,7 @@ fn append_test_sources(
         for entry in entries {
             let content = std::fs::read_to_string(&entry)
                 .map_err(|e| Error::from_reason(format!("{}: {e}", entry.display())))?;
-            source.push_str(&content);
-            source.push('\n');
+            sources.push((content, entry));
         }
     }
     Ok(())
@@ -304,9 +311,11 @@ fn walkdir(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
 /// Load a Veryl project's source files and metadata from a directory.
 ///
 /// Searches upward from `project_path` for `Veryl.toml`, gathers all `.veryl`
-/// source files, and returns the concatenated source, project metadata, and
+/// source files, and returns the per-file sources, project metadata, and
 /// the parsed `celox.toml` configuration.
-fn load_project_source(project_path: &str) -> Result<(String, Metadata, CeloxConfig)> {
+fn load_project_sources(
+    project_path: &str,
+) -> Result<(Vec<(String, std::path::PathBuf)>, Metadata, CeloxConfig)> {
     let toml_path = Metadata::search_from(project_path)
         .map_err(|e| Error::from_reason(format!("Could not find Veryl.toml: {e}")))?;
     let mut metadata = Metadata::load(&toml_path)
@@ -314,17 +323,16 @@ fn load_project_source(project_path: &str) -> Result<(String, Metadata, CeloxCon
     let paths = metadata
         .paths::<&str>(&[], false, false)
         .map_err(|e| Error::from_reason(format!("Failed to gather sources: {e}")))?;
-    let mut source = String::new();
+    let mut sources = Vec::new();
     for p in &paths {
         let content = std::fs::read_to_string(&p.src)
             .map_err(|e| Error::from_reason(format!("{}: {e}", p.src.display())))?;
-        source.push_str(&content);
-        source.push('\n');
+        sources.push((content, p.src.clone()));
     }
     let project_root = toml_path.parent().unwrap_or(&toml_path);
     let celox_cfg = load_celox_config(project_root)?;
-    append_test_sources(&mut source, project_root, &celox_cfg)?;
-    Ok((source, metadata, celox_cfg))
+    collect_test_sources(&mut sources, project_root, &celox_cfg)?;
+    Ok((sources, metadata, celox_cfg))
 }
 
 /// Apply parsed options to a SimulatorBuilder.
@@ -375,10 +383,25 @@ pub struct NativeSimulatorHandle {
 impl NativeSimulatorHandle {
     /// Create a new simulator from Veryl source code.
     #[napi(constructor)]
-    pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
+    pub fn new(
+        sources: Vec<NapiSourceFile>,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
         let opts = parse_options(&options)?;
-        let code = append_extra_source(code, &opts.extra_source);
-        let builder = apply_options(celox::Simulator::builder(&code, &top), &opts);
+        let mut src_pairs: Vec<(String, std::path::PathBuf)> = sources
+            .into_iter()
+            .map(|s| (s.content, std::path::PathBuf::from(s.path)))
+            .collect();
+        append_extra_source(&mut src_pairs, &opts.extra_source);
+        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let builder = apply_options(
+            celox::Simulator::from_sources(source_refs, &top),
+            &opts,
+        );
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -422,11 +445,15 @@ impl NativeSimulatorHandle {
         options: Option<NapiOptions>,
     ) -> Result<Self> {
         let opts = parse_options(&options)?;
-        let (source, metadata, _celox_cfg) = load_project_source(&project_path)?;
-        let source = append_extra_source(source, &opts.extra_source);
+        let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+        append_extra_source(&mut sources, &opts.extra_source);
+        let source_refs: Vec<(&str, &std::path::Path)> = sources
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
 
         let builder = apply_options(
-            celox::Simulator::builder(&source, &top).with_metadata(metadata),
+            celox::Simulator::from_sources(source_refs, &top).with_metadata(metadata),
             &opts,
         );
         let sim = builder
@@ -572,10 +599,25 @@ pub struct NativeSimulationHandle {
 impl NativeSimulationHandle {
     /// Create a new timed simulation from Veryl source code.
     #[napi(constructor)]
-    pub fn new(code: String, top: String, options: Option<NapiOptions>) -> Result<Self> {
+    pub fn new(
+        sources: Vec<NapiSourceFile>,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
         let opts = parse_options(&options)?;
-        let code = append_extra_source(code, &opts.extra_source);
-        let builder = apply_options(celox::Simulation::builder(&code, &top), &opts);
+        let mut src_pairs: Vec<(String, std::path::PathBuf)> = sources
+            .into_iter()
+            .map(|s| (s.content, std::path::PathBuf::from(s.path)))
+            .collect();
+        append_extra_source(&mut src_pairs, &opts.extra_source);
+        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let builder = apply_options(
+            celox::Simulation::from_sources(source_refs, &top),
+            &opts,
+        );
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -616,11 +658,15 @@ impl NativeSimulationHandle {
         options: Option<NapiOptions>,
     ) -> Result<Self> {
         let opts = parse_options(&options)?;
-        let (source, metadata, celox_cfg) = load_project_source(&project_path)?;
-        let source = append_extra_source(source, &opts.extra_source);
+        let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
+        append_extra_source(&mut sources, &opts.extra_source);
+        let source_refs: Vec<(&str, &std::path::Path)> = sources
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
 
         let builder = apply_options(
-            celox::Simulation::builder(&source, &top).with_metadata(metadata),
+            celox::Simulation::from_sources(source_refs, &top).with_metadata(metadata),
             &opts,
         );
         let sim = builder
@@ -879,10 +925,30 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     }
 
     // Pass 2: per-file IR → generate
+
+    // Compute all source file relative paths for embedding in generated JS.
+    let base_normalized = base_path.replace('\\', "/");
+    let all_source_files: Vec<String> = parsers
+        .iter()
+        .map(|(path, _)| {
+            let src_normalized = path
+                .src
+                .to_string_lossy()
+                .replace(r"\\?\", "")
+                .replace('\\', "/");
+            src_normalized
+                .strip_prefix(&base_normalized)
+                .unwrap_or(&src_normalized)
+                .trim_start_matches('/')
+                .to_string()
+        })
+        .collect();
+    let source_file_refs: Vec<&str> = all_source_files.iter().map(|s| s.as_str()).collect();
+
     let mut all_modules = Vec::new();
     let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
 
-    for (path, parser) in &parsers {
+    for (i, (path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
         let errors = analyzer.analyze_pass2(
@@ -899,21 +965,8 @@ pub fn gen_ts(project_path: String) -> Result<String> {
             )));
         }
 
-        let modules = generate_all(&ir);
-        // On Windows, metadata.paths() may return extended-length paths
-        // (\\?\...) while base_path does not have the prefix, so strip it
-        // before computing the relative source_file key.
-        let src_normalized = path
-            .src
-            .to_string_lossy()
-            .replace(r"\\?\", "")
-            .replace('\\', "/");
-        let base_normalized = base_path.replace('\\', "/");
-        let source_file = src_normalized
-            .strip_prefix(&base_normalized)
-            .unwrap_or(&src_normalized)
-            .trim_start_matches('/')
-            .to_string();
+        let modules = generate_all(&ir, &source_file_refs);
+        let source_file = all_source_files[i].clone();
 
         let module_names: Vec<String> = modules.iter().map(|m| m.module_name.clone()).collect();
         if !module_names.is_empty() {

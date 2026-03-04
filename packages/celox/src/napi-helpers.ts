@@ -19,6 +19,7 @@ import type {
 	PortInfo,
 	SignalLayout,
 	SimulatorOptions,
+	SourceFile,
 	TrueLoopSpec,
 } from "./types.js";
 
@@ -98,10 +99,15 @@ export interface NapiOptions {
 	deadStorePolicy?: string;
 }
 
+export interface NapiSourceFile {
+	content: string;
+	path: string;
+}
+
 export interface RawNapiAddon {
 	NativeSimulatorHandle: {
 		new (
-			code: string,
+			sources: NapiSourceFile[],
 			top: string,
 			options?: NapiOptions,
 		): RawNapiSimulatorHandle;
@@ -113,7 +119,7 @@ export interface RawNapiAddon {
 	};
 	NativeSimulationHandle: {
 		new (
-			code: string,
+			sources: NapiSourceFile[],
 			top: string,
 			options?: NapiOptions,
 		): RawNapiSimulationHandle;
@@ -611,12 +617,16 @@ function parseLegacyLayout(json: string): Record<string, SignalLayout> {
  */
 export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 	return (
-		source: string,
+		sources: ReadonlyArray<SourceFile>,
 		moduleName: string,
 		options: SimulatorOptions,
 	): CreateResult<NativeSimulatorHandle> => {
 		const napiOpts = buildNapiOpts(options);
-		const raw = new addon.NativeSimulatorHandle(source, moduleName, napiOpts);
+		const napiSources = sources.map((s) => ({
+			content: s.content,
+			path: s.path,
+		}));
+		const raw = new addon.NativeSimulatorHandle(napiSources, moduleName, napiOpts);
 
 		const layout = parseLegacyLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -637,12 +647,16 @@ export function createSimulationBridge(
 	addon: RawNapiAddon,
 ): NativeCreateSimulationFn {
 	return (
-		source: string,
+		sources: ReadonlyArray<SourceFile>,
 		moduleName: string,
 		options: SimulatorOptions,
 	): CreateResult<NativeSimulationHandle> => {
 		const napiOpts = buildNapiOpts(options);
-		const raw = new addon.NativeSimulationHandle(source, moduleName, napiOpts);
+		const napiSources = sources.map((s) => ({
+			content: s.content,
+			path: s.path,
+		}));
+		const raw = new addon.NativeSimulationHandle(napiSources, moduleName, napiOpts);
 
 		const layout = parseLegacyLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);

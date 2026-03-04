@@ -11,6 +11,12 @@
 // Module definition (produced by Stream A's `celox-gen-ts`)
 // ---------------------------------------------------------------------------
 
+/** A source file with its path and content. */
+export interface SourceFile {
+	readonly path: string;
+	readonly content: string;
+}
+
 /**
  * A compiled module descriptor emitted by `celox-gen-ts`.
  * The type parameter `Ports` carries the generated port interface
@@ -20,7 +26,7 @@
 export interface ModuleDefinition<Ports = Record<string, unknown>> {
 	readonly __celox_module: true;
 	readonly name: string;
-	readonly source: string;
+	readonly sources: ReadonlyArray<SourceFile>;
 	readonly ports: Record<string, PortInfo>;
 	readonly events: string[];
 	/** Absolute path to the Veryl project directory (set by Vite plugin). */

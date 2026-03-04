@@ -20,7 +20,7 @@ interface TopPorts {
 const TopModule: ModuleDefinition<TopPorts> = {
 	__celox_module: true,
 	name: "Top",
-	source: "module Top ...",
+	sources: [{ path: "", content: "module Top ..." }],
 	ports: {
 		clk: { direction: "input", type: "clock", width: 1 },
 		rst: { direction: "input", type: "reset", width: 1 },

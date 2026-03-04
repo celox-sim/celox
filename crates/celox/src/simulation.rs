@@ -41,6 +41,13 @@ impl Simulation {
         crate::SimulatorBuilder::<Simulation>::new(code, top)
     }
 
+    pub fn from_sources<'a>(
+        sources: Vec<(&'a str, &'a std::path::Path)>,
+        top: &'a str,
+    ) -> crate::SimulatorBuilder<'a, Simulation> {
+        crate::SimulatorBuilder::<Simulation>::from_sources(sources, top)
+    }
+
     pub(crate) fn new(simulator: Simulator) -> Self {
         let num_events = simulator.backend.num_events();
         let topo_signals: Vec<(SignalRef, usize, usize)> = simulator

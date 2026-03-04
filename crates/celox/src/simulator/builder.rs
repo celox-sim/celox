@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use veryl_analyzer::ir::{Comptime, Expression, VarPath};
 use veryl_analyzer::value::Value;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
@@ -9,7 +11,7 @@ use super::Simulator;
 use crate::parser::BuildConfig;
 use crate::{ParserError, SimulatorError, backend::JitBackend, ir::Program, parser};
 fn analyze(
-    code: &str,
+    sources: &[(&str, &Path)],
     top: &str,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -33,8 +35,21 @@ fn analyze(
     attribute_table::clear();
 
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
-    let parser = Parser::parse(code, &"").unwrap();
     let analyzer = Analyzer::new(&metadata);
+
+    // Per-file: parse + pass1
+    let mut parsers = Vec::new();
+    let mut errors = vec![];
+    for (code, path) in sources {
+        let parsed = Parser::parse(code, path).unwrap();
+        errors.append(&mut analyzer.analyze_pass1("prj", &parsed.veryl));
+        parsers.push(parsed);
+    }
+
+    // Global post-pass1
+    errors.append(&mut Analyzer::analyze_post_pass1());
+
+    // Shared context for pass2
     let mut context = Context::default();
 
     if !param_overrides.is_empty() {
@@ -53,11 +68,11 @@ fn analyze(
 
     let mut ir = Ir::default();
 
-    let mut errors = vec![];
-    errors.append(&mut analyzer.analyze_pass1("prj", &parser.veryl));
-    errors.append(&mut Analyzer::analyze_post_pass1());
-    errors.append(&mut analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir)));
+    for parsed in &parsers {
+        errors.append(&mut analyzer.analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir)));
+    }
     errors.append(&mut Analyzer::analyze_post_pass2());
+
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
     if let Some(ct) = clock_type {
@@ -80,7 +95,7 @@ fn analyze(
     (sir, errors)
 }
 pub(crate) fn compile_to_sir(
-    code: &str,
+    sources: &[(&str, &Path)],
     top: &str,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -101,7 +116,7 @@ pub(crate) fn compile_to_sir(
     param_overrides: &[(String, u64)],
 ) -> Result<Program, SimulatorError> {
     let (sir, errors) = analyze(
-        code,
+        sources,
         top,
         ignored_loops,
         true_loops,
@@ -162,7 +177,7 @@ impl Default for SimulatorOptions {
 /// to obtain the appropriate variant. Both share the same configuration methods;
 /// only `.build()` differs in return type.
 pub struct SimulatorBuilder<'a, Target = Simulator> {
-    code: &'a str,
+    sources: Vec<(&'a str, &'a Path)>,
     top: &'a str,
     ignored_loops: Vec<(
         (Vec<(String, usize)>, Vec<String>),
@@ -346,7 +361,24 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn new(code: &'a str, top: &'a str) -> Self {
         Self {
-            code,
+            sources: vec![(code, Path::new(""))],
+            top,
+            ignored_loops: Vec::new(),
+            true_loops: Vec::new(),
+            options: SimulatorOptions::default(),
+            vcd_path: None,
+            metadata: None,
+            clock_type: None,
+            reset_type: None,
+            param_overrides: Vec::new(),
+            live_signals: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn from_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
+        Self {
+            sources,
             top,
             ignored_loops: Vec::new(),
             true_loops: Vec::new(),
@@ -364,7 +396,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     /// Compiles the Veryl source and constructs the core logic simulator.
     pub fn build(self) -> Result<Simulator, SimulatorError> {
         let program = compile_to_sir(
-            self.code,
+            &self.sources,
             self.top,
             &self.ignored_loops,
             &self.true_loops,
@@ -398,7 +430,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
         let mut trace = crate::debug::CompilationTrace::default();
         let program_res = compile_to_sir(
-            self.code,
+            &self.sources,
             self.top,
             &self.ignored_loops,
             &self.true_loops,
@@ -437,7 +469,24 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     pub(crate) fn new(code: &'a str, top: &'a str) -> Self {
         Self {
-            code,
+            sources: vec![(code, Path::new(""))],
+            top,
+            ignored_loops: Vec::new(),
+            true_loops: Vec::new(),
+            options: SimulatorOptions::default(),
+            vcd_path: None,
+            metadata: None,
+            clock_type: None,
+            reset_type: None,
+            param_overrides: Vec::new(),
+            live_signals: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn from_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
+        Self {
+            sources,
             top,
             ignored_loops: Vec::new(),
             true_loops: Vec::new(),
@@ -456,7 +505,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
         self.options.emit_triggers = true;
         let mut program = compile_to_sir(
-            self.code,
+            &self.sources,
             self.top,
             &self.ignored_loops,
             &self.true_loops,

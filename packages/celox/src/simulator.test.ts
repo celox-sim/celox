@@ -20,7 +20,7 @@ interface AdderPorts {
 const AdderModule: ModuleDefinition<AdderPorts> = {
 	__celox_module: true,
 	name: "Adder",
-	source: "module Adder ...",
+	sources: [{ path: "", content: "module Adder ..." }],
 	ports: {
 		clk: { direction: "input", type: "clock", width: 1 },
 		rst: { direction: "input", type: "reset", width: 1 },

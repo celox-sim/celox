@@ -190,7 +190,7 @@ function generateEsmExport(
 	return `export const ${mod.moduleName} = {
   __celox_module: true,
   name: ${JSON.stringify(mod.moduleName)},
-  source: "",
+  sources: [],
   projectPath: ${JSON.stringify(projectPath)},
   ports: ${portsJson},
   events: ${eventsJson},${defaultOptsLine}
