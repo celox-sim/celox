@@ -2019,10 +2019,7 @@ fn eval_factor(
                     // Slice from bit_select_lsb for element_width bits
                     arena.alloc(SLTNode::Slice {
                         expr: raw_input,
-                        access: BitAccess::new(
-                            bit_select_lsb,
-                            bit_select_lsb + element_width - 1,
-                        ),
+                        access: BitAccess::new(bit_select_lsb, bit_select_lsb + element_width - 1),
                     })
                 } else {
                     // --- If already written ---
@@ -2036,10 +2033,7 @@ fn eval_factor(
                     // Slice from bit_select_lsb for element_width bits
                     arena.alloc(SLTNode::Slice {
                         expr: shifted,
-                        access: BitAccess::new(
-                            bit_select_lsb,
-                            bit_select_lsb + element_width - 1,
-                        ),
+                        access: BitAccess::new(bit_select_lsb, bit_select_lsb + element_width - 1),
                     })
                 };
 
