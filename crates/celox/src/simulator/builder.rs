@@ -9,7 +9,9 @@ use veryl_parser::resource_table;
 
 use super::Simulator;
 use crate::parser::BuildConfig;
-use crate::{ParserError, SimulatorError, SimulatorErrorKind, backend::JitBackend, ir::Program, parser};
+use crate::{
+    ParserError, SimulatorError, SimulatorErrorKind, backend::JitBackend, ir::Program, parser,
+};
 fn analyze(
     sources: &[(&str, &Path)],
     top: &str,
@@ -134,11 +136,11 @@ pub(crate) fn compile_to_sir(
         reset_type,
         param_overrides,
     );
-    let (real_errors, warnings): (Vec<_>, Vec<_>) =
-        errors.into_iter().partition(|e| e.is_error());
+    let (real_errors, warnings): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| e.is_error());
     if !real_errors.is_empty() {
-        return Err(SimulatorError::new(SimulatorErrorKind::Analyzer(real_errors))
-            .with_warnings(warnings));
+        return Err(
+            SimulatorError::new(SimulatorErrorKind::Analyzer(real_errors)).with_warnings(warnings),
+        );
     }
     match sir {
         Ok(p) => Ok((p, warnings)),

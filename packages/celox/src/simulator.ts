@@ -219,7 +219,15 @@ export class Simulator<P = Record<string, unknown>> {
 
 		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
-		return new Simulator<P>(handle, dut, events, state, buf, layout.forDut, warnings);
+		return new Simulator<P>(
+			handle,
+			dut,
+			events,
+			state,
+			buf,
+			layout.forDut,
+			warnings,
+		);
 	}
 
 	/**
@@ -271,7 +279,15 @@ export class Simulator<P = Record<string, unknown>> {
 
 		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
-		return new Simulator<P>(handle, dut, events, state, buf, layout.forDut, warnings);
+		return new Simulator<P>(
+			handle,
+			dut,
+			events,
+			state,
+			buf,
+			layout.forDut,
+			warnings,
+		);
 	}
 
 	/** The DUT accessor object — read/write ports as plain properties. */

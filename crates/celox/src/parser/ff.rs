@@ -6,7 +6,10 @@ use crate::ir::{
 };
 use crate::{
     HashMap, HashSet,
-    parser::{BuildConfig, LoweringPhase, ParserError, bitaccess::{eval_constexpr, eval_var_select}},
+    parser::{
+        BuildConfig, LoweringPhase, ParserError,
+        bitaccess::{eval_constexpr, eval_var_select},
+    },
 };
 use bit_set::BitSet;
 use num_traits::ToPrimitive;

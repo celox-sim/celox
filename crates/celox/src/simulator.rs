@@ -9,8 +9,8 @@ mod builder;
 mod error;
 
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
-pub use error::{SimulatorError, SimulatorErrorKind};
 pub use error::render_diagnostic;
+pub use error::{SimulatorError, SimulatorErrorKind};
 
 /// Hierarchical instance tree with resolved signals.
 #[derive(Debug, Clone)]

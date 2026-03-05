@@ -34,7 +34,7 @@ pub enum SimulatorErrorKind {
 /// A simulator error that may also carry accumulated analyzer warnings.
 #[derive(Debug)]
 pub struct SimulatorError {
-    kind: SimulatorErrorKind,
+    kind: Box<SimulatorErrorKind>,
     warnings: Vec<veryl_analyzer::AnalyzerError>,
 }
 
@@ -42,7 +42,7 @@ impl SimulatorError {
     /// Create a new `SimulatorError` with no warnings.
     pub fn new(kind: SimulatorErrorKind) -> Self {
         Self {
-            kind,
+            kind: Box::new(kind),
             warnings: Vec::new(),
         }
     }
@@ -66,7 +66,7 @@ impl SimulatorError {
 
 impl fmt::Display for SimulatorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
+        match self.kind.as_ref() {
             SimulatorErrorKind::SIRParser(e) => f.write_str(&render_diagnostic(e))?,
             SimulatorErrorKind::Analyzer(errors) => {
                 for (i, e) in errors.iter().enumerate() {
@@ -94,7 +94,7 @@ impl fmt::Display for SimulatorError {
 
 impl std::error::Error for SimulatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.kind {
+        match self.kind.as_ref() {
             SimulatorErrorKind::SIRParser(e) => Some(e),
             SimulatorErrorKind::Runtime(e) => Some(e),
             _ => None,

@@ -1414,9 +1414,7 @@ pub fn eval_expression(
     if !matches!(expr, Expression::Term(_)) {
         let ct = expr.comptime();
         if ct.is_const {
-            if let Some((celox_value, mask_xz, width, signed)) =
-                celox_value_from_comptime(ct)
-            {
+            if let Some((celox_value, mask_xz, width, signed)) = celox_value_from_comptime(ct) {
                 let expr = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
                 return Ok(((expr, HashSet::default()), BoundaryMap::default()));
             }
@@ -1845,17 +1843,13 @@ fn eval_factor(
         Factor::Variable(var_id, index, select, comptime) => {
             // Compile-time constant (e.g. genvar inside generate block): emit a
             // constant node directly instead of loading from memory.
-            if comptime.is_const
-                && index.0.is_empty()
-                && select.0.is_empty()
-                && select.1.is_none()
+            if comptime.is_const && index.0.is_empty() && select.0.is_empty() && select.1.is_none()
             {
                 if let Some((celox_value, mask_xz, width, signed)) =
                     celox_value_from_comptime(comptime)
                 {
-                    let mut expr = arena.alloc(SLTNode::Constant(
-                        celox_value, mask_xz, width, signed,
-                    ));
+                    let mut expr =
+                        arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
                     if let Some(target_width) = context_width {
                         if width < target_width {
                             let pad_width = target_width - width;
@@ -1882,10 +1876,7 @@ fn eval_factor(
                             });
                         }
                     }
-                    return Ok((
-                        (expr, HashSet::default()),
-                        BoundaryMap::default(),
-                    ));
+                    return Ok(((expr, HashSet::default()), BoundaryMap::default()));
                 }
             }
 
