@@ -1,5 +1,54 @@
 use celox::Simulator;
 
+/// For-loop instances: verify named_hierarchy groups them correctly
+/// and child_signal access works.
+#[test]
+fn test_for_loop_instance_hierarchy() {
+    let code = r#"
+        module Sub (
+            clk: input '_ clock,
+            i_data: input  logic<8>,
+            o_data: output logic<8>
+        ) {
+            assign o_data = i_data + 8'h01;
+        }
+
+        module Top (
+            clk: input '_ clock,
+            rst: input reset,
+            top_in: input  logic<8>,
+            top_out: output logic<8>[2]
+        ) {
+            for i in 0..2: g {
+                inst u_sub: Sub (
+                    clk,
+                    i_data: top_in,
+                    o_data: top_out[i],
+                );
+            }
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let hierarchy = sim.named_hierarchy();
+
+    // Verify hierarchy structure
+    assert_eq!(hierarchy.children.len(), 1, "should have 1 child group");
+    let (child_name, instances) = &hierarchy.children[0];
+    assert_eq!(child_name, "u_sub");
+    assert_eq!(instances.len(), 2, "for-loop should produce 2 instances");
+    assert_eq!(instances[0].module_name, "Sub");
+    assert_eq!(instances[1].module_name, "Sub");
+
+    // Verify child_signal access works for each for-loop instance
+    let top_in = sim.signal("top_in");
+    sim.modify(|io| io.set(top_in, 0x10u8)).unwrap();
+
+    let child0_o = sim.child_signal(&[("u_sub", 0)], "o_data");
+    let child1_o = sim.child_signal(&[("u_sub", 1)], "o_data");
+    assert_eq!(sim.get(child0_o), 0x11u8.into());
+    assert_eq!(sim.get(child1_o), 0x11u8.into());
+}
+
 #[test]
 fn test_flattened_instance_port_connection() {
     let code = r#"

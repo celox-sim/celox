@@ -71,6 +71,20 @@ fn is_one(v: &usize) -> bool {
     *v == 1
 }
 
+/// Strip a trailing `[N]` suffix from a name, returning the base name.
+///
+/// The Veryl analyzer bakes for-loop indices into hierarchy labels
+/// (e.g. `g_lv[0]`, `g_lv[1]`). We strip these suffixes to group
+/// for-loop instances under a single base name.
+fn strip_bracket_suffix(name: &str) -> &str {
+    if let Some(bracket) = name.rfind('[') {
+        if name.ends_with(']') {
+            return &name[..bracket];
+        }
+    }
+    name
+}
+
 /// Extract port information from a module.
 fn extract_ports(module: &Module) -> Vec<PortInfo> {
     let mut ports = Vec::new();
@@ -133,14 +147,22 @@ fn extract_ports(module: &Module) -> Vec<PortInfo> {
             continue;
         }
 
-        let name = variable
+        let segments: Vec<String> = variable
             .path
             .0
             .iter()
             .map(|s| resource_table::get_str_value(*s).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join(".");
+            .collect();
 
+        // Skip variables whose path contains a for-loop hierarchy label
+        // (e.g. `g_node[0].g_buf.mn_data`). These are internal signals of
+        // for-loop instances and are accessed via the instance hierarchy,
+        // not as flat ports.
+        if segments.iter().any(|s| s.contains('[')) {
+            continue;
+        }
+
+        let name = segments.join(".");
         let is_hierarchical = variable.path.0.len() > 1;
 
         let element_width = variable.total_width().unwrap_or(1);
@@ -188,9 +210,13 @@ struct InstanceInfo {
 
 /// Extract instance information from a module's declarations.
 ///
-/// For-loop unrolled instances share the same name. These are grouped into a
-/// single `InstanceInfo` with `count > 1` so that the DTS emits a
-/// `ReadonlyArray<...>` type instead of duplicate properties.
+/// For-loop unrolled instances are grouped into a single `InstanceInfo` with
+/// `count > 1` so that the DTS emits `ReadonlyArray<...>` instead of duplicate
+/// or bracket-indexed properties.
+///
+/// The Veryl analyzer produces two naming patterns for for-loop instances:
+/// - Same name repeated (e.g. two `inst u_sub`): grouped by exact match
+/// - Label with index suffix (e.g. `g_lv[0]`, `g_lv[1]`): grouped by base name
 fn extract_instances(module: &Module) -> Vec<InstanceInfo> {
     use std::collections::BTreeMap;
 
@@ -204,12 +230,13 @@ fn extract_instances(module: &Module) -> Vec<InstanceInfo> {
             continue;
         };
 
-        let inst_name =
+        let raw_name =
             resource_table::get_str_value(inst.name).unwrap_or_else(|| "unknown".to_string());
+        let base_name = strip_bracket_suffix(&raw_name).to_string();
         let sub_module_name =
             resource_table::get_str_value(sub_module.name).unwrap_or_else(|| "unknown".to_string());
 
-        if let Some(existing) = grouped.get_mut(&inst_name) {
+        if let Some(existing) = grouped.get_mut(&base_name) {
             // All for-loop iterations instantiate the same module with the same
             // port set, so we only need ports/children from the first occurrence.
             existing.count += 1;
@@ -218,9 +245,9 @@ fn extract_instances(module: &Module) -> Vec<InstanceInfo> {
             let children = extract_instances(sub_module);
 
             grouped.insert(
-                inst_name.clone(),
+                base_name.clone(),
                 InstanceInfo {
-                    name: inst_name,
+                    name: base_name,
                     module_name: sub_module_name,
                     ports,
                     children,

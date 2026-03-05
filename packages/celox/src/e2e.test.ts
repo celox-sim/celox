@@ -1516,6 +1516,62 @@ module Top (
 }
 `;
 
+const FOR_LOOP_INSTANCE_SOURCE = `
+module Sub (
+    clk: input '_ clock,
+    i_data: input logic<8>,
+    o_data: output logic<8>,
+) {
+    always_comb {
+        o_data = i_data + 8'h01;
+    }
+}
+
+module Top (
+    clk: input '_ clock,
+    rst: input reset,
+    top_in: input logic<8>,
+    top_out: output logic<8>[2],
+) {
+    for i in 0..2: g {
+        inst u_sub: Sub (
+            clk,
+            i_data: top_in,
+            o_data: top_out[i],
+        );
+    }
+}
+`;
+
+describe("E2E: for-loop instance DUT access", () => {
+	test("Simulator: for-loop instances are arrays, values accessible", () => {
+		const sim = Simulator.fromSource(FOR_LOOP_INSTANCE_SOURCE, "Top");
+
+		sim.dut.top_in = 0x10n;
+		sim.tick();
+
+		// For-loop instances should be accessible as an array
+		const children = (sim.dut as any).u_sub;
+		expect(children).toBeDefined();
+		expect(Array.isArray(children)).toBe(true);
+		expect(children.length).toBe(2);
+
+		// Each instance should expose its ports
+		expect(children[0].o_data).toBe(0x11n);
+		expect(children[1].o_data).toBe(0x11n);
+		expect(children[0].i_data).toBe(0x10n);
+		expect(children[1].i_data).toBe(0x10n);
+
+		// Change input and verify both instances update
+		sim.dut.top_in = 0xffn;
+		sim.tick();
+		expect(children[0].o_data).toBe(0x00n); // 0xFF + 1 = 0x00 (8-bit wrap)
+		expect(children[1].o_data).toBe(0x00n);
+
+		sim.dispose();
+	});
+});
+
 // ---------------------------------------------------------------------------
 // Parameter override: DUT correctness tests
 // ---------------------------------------------------------------------------
