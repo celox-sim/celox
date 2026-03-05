@@ -101,6 +101,10 @@ impl<'a> ModuleParser<'a> {
         let mut parent_store = SymbolicStore::default();
         for (id, var) in &self.module.variables {
             let width = resolve_total_width(self.module, var)?;
+            if width == 0 {
+                parent_store.insert(*id, RangeStore::new(None, 0));
+                continue;
+            }
             let initial_node = self.arena.alloc(SLTNode::Input {
                 variable: *id,
                 index: vec![],
@@ -138,7 +142,7 @@ impl<'a> ModuleParser<'a> {
                 let width = ty.width();
                 let access = BitAccess::new(current_lsb, current_lsb + width - 1);
                 // Slice the expression
-                let sliced = if access.lsb == 0 && access.msb == expr_width - 1 {
+                let sliced = if expr_width > 0 && access.lsb == 0 && access.msb == expr_width - 1 {
                     mapped_node
                 } else {
                     glue_arena.alloc(SLTNode::Slice {

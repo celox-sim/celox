@@ -979,6 +979,9 @@ fn combine_parts<A: Clone + PartialEq + Eq + Hash>(
     if parts.len() == 1 {
         let ((expr, sources), access) = &parts[0];
         let w = get_width(*expr, arena);
+        if w == 0 {
+            return (*expr, sources.clone());
+        }
         if access.lsb == 0 && access.msb == w - 1 {
             return (*expr, sources.clone());
         } else {
@@ -1118,40 +1121,52 @@ fn extract_function_return_expr(
     ret_id: VarId,
 ) -> Result<Expression, ParserError> {
     fn substitute_expr(expr: &Expression, defs: &HashMap<VarId, Expression>) -> Expression {
+        substitute_expr_inner(expr, defs, &mut HashSet::default())
+    }
+
+    fn substitute_expr_inner(
+        expr: &Expression,
+        defs: &HashMap<VarId, Expression>,
+        expanding: &mut HashSet<VarId>,
+    ) -> Expression {
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(var_id, index, select, _)
                     if index.0.is_empty() && select.0.is_empty() && select.1.is_none() =>
                 {
                     if let Some(bound) = defs.get(var_id) {
-                        return substitute_expr(bound, defs);
+                        if expanding.insert(*var_id) {
+                            let result = substitute_expr_inner(bound, defs, expanding);
+                            expanding.remove(var_id);
+                            return result;
+                        }
                     }
                     expr.clone()
                 }
                 Factor::FunctionCall(call) => {
                     let mut call = call.clone();
                     for input_expr in call.inputs.values_mut() {
-                        *input_expr = substitute_expr(input_expr, defs);
+                        *input_expr = substitute_expr_inner(input_expr, defs, expanding);
                     }
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
                 _ => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, _) => Expression::Binary(
-                Box::new(substitute_expr(lhs, defs)),
+                Box::new(substitute_expr_inner(lhs, defs, expanding)),
                 *op,
-                Box::new(substitute_expr(rhs, defs)),
+                Box::new(substitute_expr_inner(rhs, defs, expanding)),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
             ),
             Expression::Unary(op, inner, _) => Expression::Unary(
                 *op,
-                Box::new(substitute_expr(inner, defs)),
+                Box::new(substitute_expr_inner(inner, defs, expanding)),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
             ),
             Expression::Ternary(cond, then_expr, else_expr, _) => Expression::Ternary(
-                Box::new(substitute_expr(cond, defs)),
-                Box::new(substitute_expr(then_expr, defs)),
-                Box::new(substitute_expr(else_expr, defs)),
+                Box::new(substitute_expr_inner(cond, defs, expanding)),
+                Box::new(substitute_expr_inner(then_expr, defs, expanding)),
+                Box::new(substitute_expr_inner(else_expr, defs, expanding)),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
             ),
             Expression::Concatenation(parts, _) => Expression::Concatenation(
@@ -1159,8 +1174,9 @@ fn extract_function_return_expr(
                     .iter()
                     .map(|(x, rep)| {
                         (
-                            substitute_expr(x, defs),
-                            rep.as_ref().map(|r| substitute_expr(r, defs)),
+                            substitute_expr_inner(x, defs, expanding),
+                            rep.as_ref()
+                                .map(|r| substitute_expr_inner(r, defs, expanding)),
                         )
                     })
                     .collect(),
@@ -1171,11 +1187,12 @@ fn extract_function_return_expr(
                     .iter()
                     .map(|item| match item {
                         ArrayLiteralItem::Value(x, rep) => ArrayLiteralItem::Value(
-                            substitute_expr(x, defs),
-                            rep.as_ref().map(|r| substitute_expr(r, defs)),
+                            substitute_expr_inner(x, defs, expanding),
+                            rep.as_ref()
+                                .map(|r| substitute_expr_inner(r, defs, expanding)),
                         ),
                         ArrayLiteralItem::Defaul(x) => {
-                            ArrayLiteralItem::Defaul(substitute_expr(x, defs))
+                            ArrayLiteralItem::Defaul(substitute_expr_inner(x, defs, expanding))
                         }
                     })
                     .collect(),
@@ -1185,7 +1202,7 @@ fn extract_function_return_expr(
                 ty.clone(),
                 fields
                     .iter()
-                    .map(|(name, x)| (*name, substitute_expr(x, defs)))
+                    .map(|(name, x)| (*name, substitute_expr_inner(x, defs, expanding)))
                     .collect(),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
             ),

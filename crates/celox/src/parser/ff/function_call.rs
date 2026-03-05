@@ -1,6 +1,6 @@
 use super::{Domain, FfParser};
 use crate::{
-    HashMap,
+    HashMap, HashSet,
     ir::{SIRBuilder, VarAtomBase},
     parser::{
         LoweringPhase, ParserError,
@@ -111,40 +111,58 @@ impl<'a> FfParser<'a> {
         expr: &Expression,
         defs: &HashMap<VarId, Expression>,
     ) -> Expression {
+        Self::substitute_function_expr_inner(expr, defs, &mut HashSet::default())
+    }
+
+    fn substitute_function_expr_inner(
+        expr: &Expression,
+        defs: &HashMap<VarId, Expression>,
+        expanding: &mut HashSet<VarId>,
+    ) -> Expression {
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(var_id, index, select, _)
                     if index.0.is_empty() && select.0.is_empty() && select.1.is_none() =>
                 {
                     if let Some(bound) = defs.get(var_id) {
-                        return Self::substitute_function_expr(bound, defs);
+                        if expanding.insert(*var_id) {
+                            let result =
+                                Self::substitute_function_expr_inner(bound, defs, expanding);
+                            expanding.remove(var_id);
+                            return result;
+                        }
                     }
                     expr.clone()
                 }
                 Factor::FunctionCall(call) => {
                     let mut call = call.clone();
                     for input_expr in call.inputs.values_mut() {
-                        *input_expr = Self::substitute_function_expr(input_expr, defs);
+                        *input_expr =
+                            Self::substitute_function_expr_inner(input_expr, defs, expanding);
                     }
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
                 _ => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, _) => Expression::Binary(
-                Box::new(Self::substitute_function_expr(lhs, defs)),
+                Box::new(Self::substitute_function_expr_inner(lhs, defs, expanding)),
                 *op,
-                Box::new(Self::substitute_function_expr(rhs, defs)),
+                Box::new(Self::substitute_function_expr_inner(rhs, defs, expanding)),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
             ),
             Expression::Unary(op, inner, _) => Expression::Unary(
                 *op,
-                Box::new(Self::substitute_function_expr(inner, defs)),
+                Box::new(Self::substitute_function_expr_inner(inner, defs, expanding)),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
             ),
             Expression::Ternary(cond, then_expr, else_expr, _) => Expression::Ternary(
-                Box::new(Self::substitute_function_expr(cond, defs)),
-                Box::new(Self::substitute_function_expr(then_expr, defs)),
-                Box::new(Self::substitute_function_expr(else_expr, defs)),
+                Box::new(Self::substitute_function_expr_inner(cond, defs, expanding)),
+                Box::new(Self::substitute_function_expr_inner(
+                    then_expr, defs, expanding,
+                )),
+                Box::new(Self::substitute_function_expr_inner(
+                    else_expr, defs, expanding,
+                )),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
             ),
             Expression::Concatenation(parts, _) => Expression::Concatenation(
@@ -152,9 +170,9 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|(x, rep)| {
                         (
-                            Self::substitute_function_expr(x, defs),
+                            Self::substitute_function_expr_inner(x, defs, expanding),
                             rep.as_ref()
-                                .map(|r| Self::substitute_function_expr(r, defs)),
+                                .map(|r| Self::substitute_function_expr_inner(r, defs, expanding)),
                         )
                     })
                     .collect(),
@@ -165,13 +183,13 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|item| match item {
                         ArrayLiteralItem::Value(x, rep) => ArrayLiteralItem::Value(
-                            Self::substitute_function_expr(x, defs),
+                            Self::substitute_function_expr_inner(x, defs, expanding),
                             rep.as_ref()
-                                .map(|r| Self::substitute_function_expr(r, defs)),
+                                .map(|r| Self::substitute_function_expr_inner(r, defs, expanding)),
                         ),
-                        ArrayLiteralItem::Defaul(x) => {
-                            ArrayLiteralItem::Defaul(Self::substitute_function_expr(x, defs))
-                        }
+                        ArrayLiteralItem::Defaul(x) => ArrayLiteralItem::Defaul(
+                            Self::substitute_function_expr_inner(x, defs, expanding),
+                        ),
                     })
                     .collect(),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
@@ -180,7 +198,12 @@ impl<'a> FfParser<'a> {
                 ty.clone(),
                 fields
                     .iter()
-                    .map(|(name, x)| (*name, Self::substitute_function_expr(x, defs)))
+                    .map(|(name, x)| {
+                        (
+                            *name,
+                            Self::substitute_function_expr_inner(x, defs, expanding),
+                        )
+                    })
                     .collect(),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
             ),
