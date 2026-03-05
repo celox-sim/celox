@@ -909,7 +909,10 @@ module Top (
 
         // Single instance: count must be omitted from JSON
         let json = serde_json::to_value(&top.instances[0]).unwrap();
-        assert!(json.get("count").is_none(), "count must be omitted for single instances");
+        assert!(
+            json.get("count").is_none(),
+            "count must be omitted for single instances"
+        );
     }
 
     /// Interface port: a module that takes a modport as a top-level port.
