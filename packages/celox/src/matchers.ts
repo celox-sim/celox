@@ -18,18 +18,24 @@ import type { SignalLayout } from "./types.js";
 
 declare module "vitest" {
 	interface Assertion {
-		/** Assert that the value has any X bits (mask !== 0). */
+		/** Assert that the value has any X/Z bits (mask !== 0). */
 		toBeX(): void;
-		/** Assert that the value is all-X (mask === all-ones). */
+		/** Assert that the value is all-X (v=1,m=1 for all bits). */
 		toBeAllX(): void;
-		/** Assert that the value has no X bits (mask === 0). */
+		/** Assert that the value has no X/Z bits (mask === 0). */
 		toBeNotX(): void;
+		/** Assert that the value has any Z bits (mask=1,value=0 somewhere). */
+		toBeZ(): void;
+		/** Assert that the value is all-Z (v=0,m=1 for all bits). */
+		toBeAllZ(): void;
 	}
 
 	interface AsymmetricMatchersContaining {
 		toBeX(): void;
 		toBeAllX(): void;
 		toBeNotX(): void;
+		toBeZ(): void;
+		toBeAllZ(): void;
 	}
 }
 
@@ -70,27 +76,26 @@ function isFourStateRef(v: unknown): v is FourStateRef {
 // Matcher implementations
 // ---------------------------------------------------------------------------
 
-function getMask(received: unknown): bigint {
+function getValueAndMask(received: unknown): [bigint, bigint] {
 	if (!isFourStateRef(received)) {
 		throw new TypeError(
-			"toBeX/toBeAllX/toBeNotX matchers require a FourStateRef. " +
+			"4-state matchers require a FourStateRef. " +
 				"Use sim.fourStateRef(name) to get one.",
 		);
 	}
-	const [, mask] = readFourState(received.buffer, received.layout);
-	return mask;
+	return readFourState(received.buffer, received.layout);
 }
 
 const customMatchers = {
 	toBeX(received: unknown) {
-		const mask = getMask(received);
+		const [, mask] = getValueAndMask(received);
 		const pass = mask !== 0n;
 		return {
 			pass,
 			message: () =>
 				pass
-					? `expected signal NOT to have X bits, but mask = ${mask}`
-					: `expected signal to have X bits, but mask = 0`,
+					? `expected signal NOT to have X/Z bits, but mask = ${mask}`
+					: `expected signal to have X/Z bits, but mask = 0`,
 		};
 	},
 
@@ -98,28 +103,59 @@ const customMatchers = {
 		if (!isFourStateRef(received)) {
 			throw new TypeError("toBeAllX requires a FourStateRef");
 		}
-		const [, mask] = readFourState(received.buffer, received.layout);
+		const [value, mask] = readFourState(received.buffer, received.layout);
 		const width = received.layout.width;
 		const allOnes = (1n << BigInt(width)) - 1n;
-		const pass = mask === allOnes;
+		const pass = mask === allOnes && value === allOnes;
 		return {
 			pass,
 			message: () =>
 				pass
 					? `expected signal NOT to be all-X`
-					: `expected signal to be all-X, but mask = ${mask}`,
+					: `expected signal to be all-X (v=all-1s, m=all-1s), but v=${value}, m=${mask}`,
 		};
 	},
 
 	toBeNotX(received: unknown) {
-		const mask = getMask(received);
+		const [, mask] = getValueAndMask(received);
 		const pass = mask === 0n;
 		return {
 			pass,
 			message: () =>
 				pass
-					? `expected signal to have X bits, but mask = 0`
-					: `expected signal NOT to have X bits, but mask = ${mask}`,
+					? `expected signal to have X/Z bits, but mask = 0`
+					: `expected signal NOT to have X/Z bits, but mask = ${mask}`,
+		};
+	},
+
+	toBeZ(received: unknown) {
+		const [value, mask] = getValueAndMask(received);
+		// Z bits: mask=1 AND value=0
+		const zBits = mask & ~value;
+		const pass = zBits !== 0n;
+		return {
+			pass,
+			message: () =>
+				pass
+					? `expected signal NOT to have Z bits, but found Z`
+					: `expected signal to have Z bits, but none found (v=${value}, m=${mask})`,
+		};
+	},
+
+	toBeAllZ(received: unknown) {
+		if (!isFourStateRef(received)) {
+			throw new TypeError("toBeAllZ requires a FourStateRef");
+		}
+		const [value, mask] = readFourState(received.buffer, received.layout);
+		const width = received.layout.width;
+		const allOnes = (1n << BigInt(width)) - 1n;
+		const pass = mask === allOnes && value === 0n;
+		return {
+			pass,
+			message: () =>
+				pass
+					? `expected signal NOT to be all-Z`
+					: `expected signal to be all-Z (v=0, m=all-1s), but v=${value}, m=${mask}`,
 		};
 	},
 };

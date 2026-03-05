@@ -176,17 +176,33 @@ export interface EventHandle {
 // 4-state helpers
 // ---------------------------------------------------------------------------
 
-/** Sentinel representing all-X. */
+/** Sentinel representing all-X (unknown). X = (v=1, m=1) per bit. */
 export const X = Symbol.for("veryl:X");
 
-/** A 4-state value with explicit bit-level mask. */
+/** Sentinel representing all-Z (high-impedance). Z = (v=0, m=1) per bit. */
+export const Z = Symbol.for("veryl:Z");
+
+/**
+ * A 4-state value with explicit bit-level mask.
+ *
+ * Encoding per bit:
+ * - `(v=0, m=0)` → 0
+ * - `(v=1, m=0)` → 1
+ * - `(v=0, m=1)` → Z (high-impedance)
+ * - `(v=1, m=1)` → X (unknown)
+ */
 export interface FourStateValue {
 	readonly __fourState: true;
 	readonly value: bigint;
 	readonly mask: bigint;
 }
 
-/** Construct a 4-state value. Mask bits set to 1 indicate X. */
+/**
+ * Construct a 4-state value with explicit value and mask.
+ *
+ * Mask bits set to 1 with value=1 indicate X (unknown).
+ * Mask bits set to 1 with value=0 indicate Z (high-impedance).
+ */
 export function FourState(
 	value: number | bigint,
 	mask: number | bigint,

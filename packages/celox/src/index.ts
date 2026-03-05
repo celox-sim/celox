@@ -61,6 +61,7 @@ export {
 	isFourStateValue,
 	SimulationTimeoutError,
 	X,
+	Z,
 } from "./types.js";
 
 // NAPI bridge (backward compat — re-exports from napi-helpers)

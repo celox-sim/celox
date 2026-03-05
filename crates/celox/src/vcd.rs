@@ -7,9 +7,9 @@ use std::path::Path;
 
 pub struct VcdWriter {
     writer: BufWriter<File>,
-    id_map: HashMap<AbsoluteAddr, (String, usize)>,
+    id_map: HashMap<AbsoluteAddr, (String, usize, bool)>,
     signal_order: Vec<AbsoluteAddr>,
-    last_values: HashMap<AbsoluteAddr, BigUint>,
+    last_values: HashMap<AbsoluteAddr, (BigUint, BigUint)>,
     timestamp: u64,
 }
 
@@ -38,7 +38,7 @@ impl VcdWriter {
         // We need to group signals by instance
         let mut instance_signals: HashMap<
             crate::ir::InstanceId,
-            Vec<(String, AbsoluteAddr, usize)>,
+            Vec<(String, AbsoluteAddr, usize, bool)>,
         > = HashMap::default();
 
         for (instance_id, module_id) in &program.instance_module {
@@ -61,7 +61,7 @@ impl VcdWriter {
                 instance_signals
                     .entry(*instance_id)
                     .or_default()
-                    .push((name, addr, info.width));
+                    .push((name, addr, info.width, info.is_4state));
             }
         }
 
@@ -74,11 +74,11 @@ impl VcdWriter {
             let mut sorted_signals = signals.clone();
             sorted_signals.sort_by(|a, b| a.0.cmp(&b.0));
 
-            for (name, addr, width) in sorted_signals {
+            for (name, addr, width, is_4state) in sorted_signals {
                 let vcd_id = Self::generate_vcd_id(next_id_num);
                 next_id_num += 1;
                 writeln!(writer, "$var wire {} {} {} $end", width, vcd_id, name)?;
-                id_map.insert(addr, (vcd_id, width));
+                id_map.insert(addr, (vcd_id, width, is_4state));
                 signal_order.push(addr);
             }
             writeln!(writer, "$upscope $end")?;
@@ -114,7 +114,7 @@ impl VcdWriter {
     pub fn dump(
         &mut self,
         timestamp: u64,
-        get_val: impl Fn(&AbsoluteAddr) -> BigUint,
+        get_val: impl Fn(&AbsoluteAddr) -> (BigUint, BigUint),
     ) -> std::io::Result<()> {
         if timestamp > self.timestamp || timestamp == 0 {
             writeln!(self.writer, "#{}", timestamp)?;
@@ -122,20 +122,74 @@ impl VcdWriter {
         }
 
         for addr in &self.signal_order {
-            let (vcd_id, width) = &self.id_map[addr];
-            let current_val = get_val(addr);
-            let prev_val = self.last_values.get(addr);
+            let &(ref vcd_id, width, is_4state) = &self.id_map[addr];
+            let (current_val, current_mask) = get_val(addr);
+            let prev = self.last_values.get(addr);
 
-            if prev_val != Some(&current_val) {
-                if *width == 1 {
+            let changed = match prev {
+                Some((pv, pm)) => pv != &current_val || pm != &current_mask,
+                None => true,
+            };
+
+            if changed {
+                if is_4state && current_mask != BigUint::from(0u32) {
+                    // 4-state output with x/z characters
+                    Self::write_four_state_value(
+                        &mut self.writer,
+                        width,
+                        &current_val,
+                        &current_mask,
+                        vcd_id,
+                    )?;
+                } else if width == 1 {
                     writeln!(self.writer, "{}{}", current_val, vcd_id)?;
                 } else {
-                    writeln!(self.writer, "b{} {}", current_val.to_str_radix(2), vcd_id)?;
+                    writeln!(
+                        self.writer,
+                        "b{} {}",
+                        current_val.to_str_radix(2),
+                        vcd_id
+                    )?;
                 }
-                self.last_values.insert(*addr, current_val);
+                self.last_values
+                    .insert(*addr, (current_val, current_mask));
             }
         }
         self.writer.flush()?;
         Ok(())
+    }
+
+    fn write_four_state_value(
+        writer: &mut BufWriter<File>,
+        width: usize,
+        value: &BigUint,
+        mask: &BigUint,
+        vcd_id: &str,
+    ) -> std::io::Result<()> {
+        if width == 1 {
+            let m = mask.bit(0);
+            let v = value.bit(0);
+            let ch = match (m, v) {
+                (false, false) => '0',
+                (false, true) => '1',
+                (true, false) => 'z',
+                (true, true) => 'x',
+            };
+            writeln!(writer, "{}{}", ch, vcd_id)
+        } else {
+            write!(writer, "b")?;
+            for i in (0..width).rev() {
+                let m = mask.bit(i as u64);
+                let v = value.bit(i as u64);
+                let ch = match (m, v) {
+                    (false, false) => '0',
+                    (false, true) => '1',
+                    (true, false) => 'z',
+                    (true, true) => 'x',
+                };
+                write!(writer, "{}", ch)?;
+            }
+            writeln!(writer, " {}", vcd_id)
+        }
     }
 }

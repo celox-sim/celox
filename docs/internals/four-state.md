@@ -10,40 +10,16 @@ Celox supports IEEE 1800-compliant 4-state simulation with X (unknown) propagati
 |------|-------|---------|
 | 0    | 0     | `0`     |
 | 0    | 1     | `1`     |
-| 1    | 0     | `X`     |
-| 1    | 1     | Reserved (eliminated by normalization) |
+| 1    | 0     | `Z` (high-impedance) |
+| 1    | 1     | `X` (unknown) |
 
 Signals wider than 64 bits are split into chunks (`i64 x N`) and stored as a pair of value chunk arrays and mask chunk arrays (`TransValue::FourState { values, masks }`).
 
-## Normalization Invariant
+## Z vs X Encoding
 
-**IEEE 1800 normalization: `v &= ~m`**
+Both `(v=0, m=1)` (Z) and `(v=1, m=1)` (X) indicate uncertain bits. The distinction is preserved throughout the pipeline — no normalization is applied. Z literals like `8'hzz` retain their Z encoding `(v=0, m=1)` through operations, and X literals retain `(v=1, m=1)`.
 
-At bit positions where the mask is 1, the corresponding value bit is always kept at 0. This eliminates the invalid state `(mask=1, value=1)` and guarantees consistency for comparisons and debug output.
-
-### Application Points
-
-Normalization is applied in **all computation paths that produce a `TransValue::FourState`**.
-
-| Location (arith.rs) | Operation | Width |
-|-----------------|------|-----|
-| Assign (single chunk) | Assignment/type conversion | ≤ 64bit |
-| Assign (multi-chunk) | Assignment/type conversion | > 64bit |
-| Binary ops (single) | Arithmetic/logic/comparison/shift | ≤ 64bit |
-| Binary ops (multi) | Same as above | > 64bit |
-| Unary ops (single) | Bitwise inversion/negation/reduction | ≤ 64bit |
-| Unary ops (multi) | Same as above | > 64bit |
-| Concat (single) | Concatenation | ≤ 64bit |
-| Concat (multi) | Concatenation | > 64bit |
-
-### Why Normalization Is Not Needed on Memory Load
-
-The Load operation in `memory.rs` does not perform normalization. Values written to memory are always one of the following, both of which are already normalized:
-
-1. Results from operations in arith.rs (normalized as described above)
-2. Input values via the external API (`set_four_state`)
-
-Therefore, the invariant that **values in memory are always normalized** holds, and re-normalization on Load is unnecessary.
+The VCD writer distinguishes Z and X per-bit using the `(mask, value)` pair for correct waveform output.
 
 ## X Propagation Rules
 

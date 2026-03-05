@@ -98,7 +98,11 @@ impl Simulator {
             writer
                 .dump(timestamp, |addr| {
                     let signal = backend.resolve_signal(addr);
-                    backend.get(signal)
+                    if signal.is_4state {
+                        backend.get_four_state(signal)
+                    } else {
+                        (backend.get(signal), BigUint::from(0u32))
+                    }
                 })
                 .unwrap();
         }

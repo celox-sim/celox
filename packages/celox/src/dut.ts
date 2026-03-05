@@ -157,9 +157,22 @@ function writeFourState(
 	writeSignal(view, maskLayout, fsv.mask);
 }
 
-/** Write all-X mask for a signal. */
+/** Write all-X to a signal: X = (v=1, m=1) per bit. */
 function writeAllX(view: DataView, sig: SignalLayout): void {
-	// Value = 0, mask = all 1s
+	const allOnes = (1n << BigInt(sig.width)) - 1n;
+	writeSignal(view, sig, allOnes);
+	const maskLayout: SignalLayout = {
+		offset: sig.offset + sig.byteSize,
+		width: sig.width,
+		byteSize: sig.byteSize,
+		is4state: false,
+		direction: sig.direction,
+	};
+	writeSignal(view, maskLayout, allOnes);
+}
+
+/** Write all-Z to a signal: Z = (v=0, m=1) per bit. */
+function writeAllZ(view: DataView, sig: SignalLayout): void {
 	writeSignal(view, sig, 0n);
 	const allOnes = (1n << BigInt(sig.width)) - 1n;
 	const maskLayout: SignalLayout = {
@@ -381,6 +394,11 @@ function defineSignalProperty(
 					throw new Error(`Port '${name}' is not 4-state; cannot assign X`);
 				}
 				writeAllX(view, sig);
+			} else if (value === Symbol.for("veryl:Z")) {
+				if (!sig.is4state) {
+					throw new Error(`Port '${name}' is not 4-state; cannot assign Z`);
+				}
+				writeAllZ(view, sig);
 			} else if (isFourStateValue(value)) {
 				if (!sig.is4state) {
 					throw new Error(
@@ -574,6 +592,13 @@ function createArrayDut(
 					if (!is4state) {
 						throw new Error("Array port is not 4-state; cannot assign X");
 					}
+					const allOnes = (1 << elementWidth) - 1;
+					writeBitPackedElement(view, baseOffset, elementWidth, i, allOnes);
+					writeBitPackedElement(view, maskBase, elementWidth, i, allOnes);
+				} else if (value === Symbol.for("veryl:Z")) {
+					if (!is4state) {
+						throw new Error("Array port is not 4-state; cannot assign Z");
+					}
 					writeBitPackedElement(view, baseOffset, elementWidth, i, 0);
 					writeBitPackedElement(
 						view,
@@ -656,6 +681,18 @@ function createArrayDut(
 					direction: baseSig.direction,
 				};
 				writeAllX(view, elemSig);
+			} else if (value === Symbol.for("veryl:Z")) {
+				if (!is4state) {
+					throw new Error("Array port is not 4-state; cannot assign Z");
+				}
+				const elemSig: SignalLayout = {
+					offset,
+					width: elementWidth,
+					byteSize: elementByteSize,
+					is4state,
+					direction: baseSig.direction,
+				};
+				writeAllZ(view, elemSig);
 			} else if (isFourStateValue(value)) {
 				if (!is4state) {
 					throw new Error("Array port is not 4-state; cannot assign FourState");
