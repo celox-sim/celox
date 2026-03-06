@@ -56,6 +56,28 @@ fn sorter_tree_n16_compiles() {
     );
 }
 
+/// N=64 compiles in reasonable time.
+#[test]
+fn sorter_tree_n64_compiles() {
+    let elapsed = build_sorter(64);
+    eprintln!("SorterTreeDistEntry N=64: {elapsed:?}");
+    assert!(
+        elapsed.as_secs() < 60,
+        "N=64 took {elapsed:?}, expected < 60s"
+    );
+}
+
+/// N=128 compiles in reasonable time (debug build is slower, allow 180s).
+#[test]
+fn sorter_tree_n128_compiles() {
+    let elapsed = build_sorter(128);
+    eprintln!("SorterTreeDistEntry N=128: {elapsed:?}");
+    assert!(
+        elapsed.as_secs() < 180,
+        "N=128 took {elapsed:?}, expected < 180s"
+    );
+}
+
 /// Scaling regression: N=8 should take at most 4x longer than N=4.
 /// Linear scaling gives ~2x; exponential would give >100x.
 #[test]
@@ -67,5 +89,34 @@ fn sorter_tree_scaling_n4_n8() {
     assert!(
         ratio < 4.0,
         "N=8/N=4 ratio is {ratio:.2}x, expected < 4.0x (linear scaling)"
+    );
+}
+
+/// Scaling regression: N=64 should take at most 6x longer than N=16.
+/// Catches super-linear blowup in flatten, optimizer, or JIT phases.
+#[test]
+fn sorter_tree_scaling_n16_n64() {
+    let t16 = build_sorter(16);
+    let t64 = build_sorter(64);
+    let ratio = t64.as_secs_f64() / t16.as_secs_f64();
+    eprintln!("N=16: {t16:?}, N=64: {t64:?}, ratio: {ratio:.2}x");
+    assert!(
+        ratio < 6.0,
+        "N=64/N=16 ratio is {ratio:.2}x, expected < 6.0x"
+    );
+}
+
+/// Scaling regression: N=128 should take at most 8x longer than N=32.
+/// N increases 4x; linear scaling gives ~4x, allowing margin for
+/// super-linear optimizer/JIT costs in debug builds.
+#[test]
+fn sorter_tree_scaling_n32_n128() {
+    let t32 = build_sorter(32);
+    let t128 = build_sorter(128);
+    let ratio = t128.as_secs_f64() / t32.as_secs_f64();
+    eprintln!("N=32: {t32:?}, N=128: {t128:?}, ratio: {ratio:.2}x");
+    assert!(
+        ratio < 8.0,
+        "N=128/N=32 ratio is {ratio:.2}x, expected < 8.0x"
     );
 }

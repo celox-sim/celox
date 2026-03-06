@@ -507,17 +507,31 @@ pub(crate) fn flatten(
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
 ) -> Result<Program, ParserError> {
+    let flatten_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
+    macro_rules! timed_sub {
+        ($label:expr, $body:expr) => {{
+            if flatten_timing {
+                let start = std::time::Instant::now();
+                let result = $body;
+                eprintln!("[flatten] {}: {:?}", $label, start.elapsed());
+                result
+            } else {
+                $body
+            }
+        }};
+    }
+
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.sim_modules
     {
         t.sim_modules = Some(modules.clone());
     }
 
-    let (expanded, instance_modules) = expand_hierarchy(root_id, &modules);
-    let global_boundaries = propagate_boundaries(&expanded, &instance_modules, &modules);
+    let (expanded, instance_modules) = timed_sub!("expand_hierarchy", expand_hierarchy(root_id, &modules));
+    let global_boundaries = timed_sub!("propagate_boundaries", propagate_boundaries(&expanded, &instance_modules, &modules));
 
-    let clock_domains = unify_clock_domains(&expanded, &instance_modules, &modules);
-    let (global_arena, mut eval_apply_ffs, eval_only_ffs, apply_ffs, comb_blocks) = relocate_units(
+    let clock_domains = timed_sub!("unify_clock_domains", unify_clock_domains(&expanded, &instance_modules, &modules));
+    let (global_arena, mut eval_apply_ffs, eval_only_ffs, apply_ffs, comb_blocks) = timed_sub!("relocate_units", relocate_units(
         &expanded,
         &instance_modules,
         &modules,
@@ -525,7 +539,7 @@ pub(crate) fn flatten(
         &clock_domains,
         trace_opts,
         &mut trace,
-    );
+    ));
     let ignored_loops = parse_ignored_loops(ignored_loops, &instance_modules, &modules, &expanded);
     let true_loops = parse_true_loops(true_loops, &instance_modules, &modules, &expanded);
 
@@ -556,7 +570,7 @@ pub(crate) fn flatten(
         }
     }
 
-    let (topological_clocks, cascaded_clocks) = analyze_clock_dependencies(
+    let (topological_clocks, cascaded_clocks) = timed_sub!("analyze_clock_dependencies", analyze_clock_dependencies(
         &mut eval_apply_ffs,
         &comb_blocks,
         &global_arena,
@@ -565,7 +579,7 @@ pub(crate) fn flatten(
         &instance_modules,
         &modules,
         config,
-    );
+    ));
 
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.flattened_comb_blocks
@@ -573,6 +587,7 @@ pub(crate) fn flatten(
         t.flattened_comb_blocks = Some((comb_blocks.clone(), global_arena.clone()));
     }
 
+    let sched_start = flatten_timing.then(std::time::Instant::now);
     let schduled = scheduler::sort(
         comb_blocks,
         &global_arena,
@@ -603,6 +618,7 @@ pub(crate) fn flatten(
             program.get_path(addr)
         }))
     })?;
+    if let Some(s) = sched_start { eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed()); }
     let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schduled
         .into_iter()
         .map(|eu| crate::ir::ExecutionUnit {
@@ -1534,6 +1550,8 @@ fn analyze_clock_dependencies(
     }
 
     // 2. Build combinational dependency graph (target -> sources)
+    let acd_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
+    let acd_start = acd_timing.then(std::time::Instant::now);
     let mut comb_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     for path in comb_blocks {
         let target_abs = path.target.id;
@@ -1543,12 +1561,16 @@ fn analyze_clock_dependencies(
             comb_deps.entry(target_abs).or_default().insert(source.id);
         }
     }
+    if let Some(s) = acd_start { eprintln!("[acd] comb_deps build ({} blocks): {:?}", comb_deps.len(), s.elapsed()); }
 
     // 3. Propagate FF outputs through combinational graph to find all derived variables
+    let fp_start = acd_timing.then(std::time::Instant::now);
     let mut derived_from_ff: BTreeSet<AbsoluteAddr> = ff_outputs.clone();
     let mut changed = true;
+    let mut fp_rounds = 0u32;
     while changed {
         changed = false;
+        fp_rounds += 1;
         for (target, sources) in &comb_deps {
             if !derived_from_ff.contains(target) {
                 // If any source is derived from an FF, the target is too
@@ -1559,6 +1581,7 @@ fn analyze_clock_dependencies(
             }
         }
     }
+    if let Some(s) = fp_start { eprintln!("[acd] fixpoint: {fp_rounds} rounds, {} entries, {:?}", comb_deps.len(), s.elapsed()); }
 
     // 4. Any clock domain that is derived from an FF is a cascaded clock!
     // We add them to a special "pseudo-domain" or just add themselves to trigger cascade marking.

@@ -144,7 +144,8 @@ pub fn collect_inputs<A: Hash + Eq + Clone + Debug>(
     arena: &SLTNodeArena<A>,
     set: &mut crate::HashSet<VarAtomBase<A>>,
 ) {
-    collect_inputs_with_window(expr, None, arena, set);
+    let mut visited = crate::HashSet::default();
+    collect_inputs_with_window(expr, None, arena, set, &mut visited);
 }
 
 fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
@@ -152,7 +153,15 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
     window: Option<BitAccess>,
     arena: &SLTNodeArena<A>,
     set: &mut crate::HashSet<VarAtomBase<A>>,
+    visited: &mut crate::HashSet<NodeId>,
 ) {
+    // For nodes that drop the window (Binary, Unary, Mux), the result depends
+    // only on the NodeId.  When window is None, we can skip nodes already
+    // visited — their inputs are already in `set`.
+    if window.is_none() && !visited.insert(expr) {
+        return;
+    }
+
     match arena.get(expr) {
         SLTNode::Input {
             variable,
@@ -206,7 +215,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
 
             // Also collect inputs from the index expressions (dynamic indexing).
             for idx in index {
-                collect_inputs_with_window(idx.node, None, arena, set);
+                collect_inputs_with_window(idx.node, None, arena, set, visited);
             }
         }
         SLTNode::Slice { expr, access } => {
@@ -215,7 +224,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             } else {
                 *access
             };
-            collect_inputs_with_window(*expr, Some(composed), arena, set)
+            collect_inputs_with_window(*expr, Some(composed), arena, set, visited)
         }
         SLTNode::Concat(parts) => {
             if let Some(win) = window {
@@ -228,29 +237,29 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                         let ov_lsb = std::cmp::max(win.lsb, part_lsb);
                         let ov_msb = std::cmp::min(win.msb, part_msb);
                         let local = BitAccess::new(ov_lsb - part_lsb, ov_msb - part_lsb);
-                        collect_inputs_with_window(*part, Some(local), arena, set);
+                        collect_inputs_with_window(*part, Some(local), arena, set, visited);
                     }
                     part_lsb += width;
                 }
             } else {
                 for (part, _) in parts {
-                    collect_inputs_with_window(*part, None, arena, set);
+                    collect_inputs_with_window(*part, None, arena, set, visited);
                 }
             }
         }
         SLTNode::Binary(lhs, _, rhs) => {
-            collect_inputs_with_window(*lhs, None, arena, set);
-            collect_inputs_with_window(*rhs, None, arena, set);
+            collect_inputs_with_window(*lhs, None, arena, set, visited);
+            collect_inputs_with_window(*rhs, None, arena, set, visited);
         }
-        SLTNode::Unary(_, inner) => collect_inputs_with_window(*inner, None, arena, set),
+        SLTNode::Unary(_, inner) => collect_inputs_with_window(*inner, None, arena, set, visited),
         SLTNode::Mux {
             cond,
             then_expr,
             else_expr,
         } => {
-            collect_inputs_with_window(*cond, None, arena, set);
-            collect_inputs_with_window(*then_expr, None, arena, set);
-            collect_inputs_with_window(*else_expr, None, arena, set);
+            collect_inputs_with_window(*cond, None, arena, set, visited);
+            collect_inputs_with_window(*then_expr, None, arena, set, visited);
+            collect_inputs_with_window(*else_expr, None, arena, set, visited);
         }
         SLTNode::Constant(_, _, _, _) => {}
     }
