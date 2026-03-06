@@ -1,9 +1,18 @@
 pre-push:
-  parallel: true
+  piped: true
   commands:
+    submodule-check:
+      priority: 1
+      run: bash scripts/check-submodules.sh
     cargo-fmt:
+      priority: 2
       run: cargo fmt --all -- --check
-    cargo-clippy:
-      run: cargo clippy -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets
     biome:
+      priority: 2
       run: pnpm run lint
+    cargo-clippy:
+      priority: 3
+      run: cargo clippy -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets
+    test:
+      priority: 4
+      run: pnpm test
