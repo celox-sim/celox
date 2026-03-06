@@ -407,16 +407,34 @@ struct CacheKey {
     clock_type: Option<u8>,
     reset_type: Option<u8>,
     parameters: Vec<(String, u64)>,
+    false_loops: Vec<(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )>,
+    true_loops: Vec<(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )>,
+    /// Effective clock/reset from metadata (from_project path).
+    /// None when using the `new` constructor (no metadata).
+    metadata_clock_type: Option<u8>,
+    metadata_reset_type: Option<u8>,
 }
 
 static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Build a collision-free cache key from source content, top module, and options.
+///
+/// When `metadata` is `Some`, the effective clock/reset settings from
+/// `Veryl.toml` are included in the key so that changing project config
+/// invalidates the cache.
 fn build_cache_key(
     sources: &[(String, std::path::PathBuf)],
     top: &str,
     opts: &ParsedOptions,
+    metadata: Option<&Metadata>,
 ) -> CacheKey {
     let mut sorted_sources: Vec<(String, String)> = sources
         .iter()
@@ -433,6 +451,10 @@ fn build_cache_key(
         clock_type: opts.clock_type.map(|ct| ct as u8),
         reset_type: opts.reset_type.map(|rt| rt as u8),
         parameters: opts.parameters.clone(),
+        false_loops: opts.false_loops.clone(),
+        true_loops: opts.true_loops.clone(),
+        metadata_clock_type: metadata.map(|m| m.build.clock_type as u8),
+        metadata_reset_type: metadata.map(|m| m.build.reset_type as u8),
     }
 }
 
@@ -598,10 +620,11 @@ impl NativeSimulatorHandle {
             .collect();
         append_extra_source(&mut src_pairs, &opts.extra_source);
 
-        let cache_key = build_cache_key(&src_pairs, &top, &opts);
+        // VCD requires a Full simulator — bypass cache
+        let use_cache = opts.vcd.is_none();
+        let cache_key = build_cache_key(&src_pairs, &top, &opts, None);
 
-        // Check cache
-        {
+        if use_cache {
             let cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(cached) = cache.get(&cache_key) {
                 return Ok(Self::from_cached(cached));
@@ -617,7 +640,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache(sim, opts.four_state, Some(cache_key))
+        Self::build_and_cache(sim, opts.four_state, if use_cache { Some(cache_key) } else { None })
     }
 
     /// Create a new simulator from a Veryl project directory.
@@ -635,10 +658,10 @@ impl NativeSimulatorHandle {
         let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
         append_extra_source(&mut sources, &opts.extra_source);
 
-        let cache_key = build_cache_key(&sources, &top, &opts);
+        let use_cache = opts.vcd.is_none();
+        let cache_key = build_cache_key(&sources, &top, &opts, Some(&metadata));
 
-        // Check cache
-        {
+        if use_cache {
             let cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(cached) = cache.get(&cache_key) {
                 return Ok(Self::from_cached(cached));
@@ -658,7 +681,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache(sim, opts.four_state, Some(cache_key))
+        Self::build_and_cache(sim, opts.four_state, if use_cache { Some(cache_key) } else { None })
     }
 
     /// Returns the signal layout as a JSON string.
@@ -1272,8 +1295,8 @@ mod tests {
     fn same_inputs_produce_same_key() {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let opts = default_opts();
-        let k1 = build_cache_key(&src, "Top", &opts);
-        let k2 = build_cache_key(&src, "Top", &opts);
+        let k1 = build_cache_key(&src, "Top", &opts, None);
+        let k2 = build_cache_key(&src, "Top", &opts, None);
         assert_eq!(k1, k2);
     }
 
@@ -1283,8 +1306,8 @@ mod tests {
         let s2 = make_sources(&[("module B {}", "a.veryl")]);
         let opts = default_opts();
         assert_ne!(
-            build_cache_key(&s1, "Top", &opts),
-            build_cache_key(&s2, "Top", &opts),
+            build_cache_key(&s1, "Top", &opts, None),
+            build_cache_key(&s2, "Top", &opts, None),
         );
     }
 
@@ -1294,8 +1317,8 @@ mod tests {
         let s2 = make_sources(&[("module A {}", "b.veryl")]);
         let opts = default_opts();
         assert_ne!(
-            build_cache_key(&s1, "Top", &opts),
-            build_cache_key(&s2, "Top", &opts),
+            build_cache_key(&s1, "Top", &opts, None),
+            build_cache_key(&s2, "Top", &opts, None),
         );
     }
 
@@ -1304,8 +1327,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let opts = default_opts();
         assert_ne!(
-            build_cache_key(&src, "Top", &opts),
-            build_cache_key(&src, "Other", &opts),
+            build_cache_key(&src, "Top", &opts, None),
+            build_cache_key(&src, "Other", &opts, None),
         );
     }
 
@@ -1317,8 +1340,8 @@ mod tests {
         o1.four_state = false;
         o2.four_state = true;
         assert_ne!(
-            build_cache_key(&src, "Top", &o1),
-            build_cache_key(&src, "Top", &o2),
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
         );
     }
 
@@ -1330,8 +1353,8 @@ mod tests {
         o1.optimize = None;
         o2.optimize = Some(true);
         assert_ne!(
-            build_cache_key(&src, "Top", &o1),
-            build_cache_key(&src, "Top", &o2),
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
         );
     }
 
@@ -1343,8 +1366,8 @@ mod tests {
         o1.dead_store_policy = celox::DeadStorePolicy::Off;
         o2.dead_store_policy = celox::DeadStorePolicy::PreserveTopPorts;
         assert_ne!(
-            build_cache_key(&src, "Top", &o1),
-            build_cache_key(&src, "Top", &o2),
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
         );
     }
 
@@ -1356,8 +1379,8 @@ mod tests {
         o1.clock_type = None;
         o2.clock_type = Some(celox::ClockType::NegEdge);
         assert_ne!(
-            build_cache_key(&src, "Top", &o1),
-            build_cache_key(&src, "Top", &o2),
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
         );
     }
 
@@ -1369,8 +1392,8 @@ mod tests {
         o1.reset_type = None;
         o2.reset_type = Some(celox::ResetType::SyncHigh);
         assert_ne!(
-            build_cache_key(&src, "Top", &o1),
-            build_cache_key(&src, "Top", &o2),
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
         );
     }
 
@@ -1382,8 +1405,8 @@ mod tests {
         o1.parameters = vec![("WIDTH".into(), 8)];
         o2.parameters = vec![("WIDTH".into(), 16)];
         assert_ne!(
-            build_cache_key(&src, "Top", &o1),
-            build_cache_key(&src, "Top", &o2),
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
         );
     }
 
@@ -1393,8 +1416,8 @@ mod tests {
         let s2 = make_sources(&[("bbb", "b.veryl"), ("aaa", "a.veryl")]);
         let opts = default_opts();
         assert_eq!(
-            build_cache_key(&s1, "Top", &opts),
-            build_cache_key(&s2, "Top", &opts),
+            build_cache_key(&s1, "Top", &opts, None),
+            build_cache_key(&s2, "Top", &opts, None),
         );
     }
 
@@ -1407,8 +1430,77 @@ mod tests {
         o1.vcd = None;
         o2.vcd = Some("/tmp/dump.vcd".into());
         assert_eq!(
-            build_cache_key(&src, "Top", &o1),
-            build_cache_key(&src, "Top", &o2),
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
+        );
+    }
+
+    #[test]
+    fn false_loops_differ() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        o1.false_loops = vec![];
+        o2.false_loops = vec![(
+            (vec![], vec!["a".into()]),
+            (vec![], vec!["b".into()]),
+        )];
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
+        );
+    }
+
+    #[test]
+    fn true_loops_differ() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        o1.true_loops = vec![];
+        o2.true_loops = vec![(
+            (vec![], vec!["x".into()]),
+            (vec![], vec!["y".into()]),
+            4,
+        )];
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
+        );
+    }
+
+    #[test]
+    fn metadata_clock_reset_differs() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let opts = default_opts();
+
+        let mut m1 = Metadata::create_default("prj").unwrap();
+        let mut m2 = Metadata::create_default("prj").unwrap();
+        m1.build.clock_type = celox::ClockType::PosEdge;
+        m2.build.clock_type = celox::ClockType::NegEdge;
+        assert_ne!(
+            build_cache_key(&src, "Top", &opts, Some(&m1)),
+            build_cache_key(&src, "Top", &opts, Some(&m2)),
+        );
+
+        let mut m3 = Metadata::create_default("prj").unwrap();
+        let mut m4 = Metadata::create_default("prj").unwrap();
+        m3.build.reset_type = celox::ResetType::AsyncLow;
+        m4.build.reset_type = celox::ResetType::SyncHigh;
+        assert_ne!(
+            build_cache_key(&src, "Top", &opts, Some(&m3)),
+            build_cache_key(&src, "Top", &opts, Some(&m4)),
+        );
+    }
+
+    #[test]
+    fn no_metadata_vs_metadata_differs() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let opts = default_opts();
+        let m = Metadata::create_default("prj").unwrap();
+        // No metadata vs with metadata should differ (metadata adds clock/reset info)
+        assert_ne!(
+            build_cache_key(&src, "Top", &opts, None),
+            build_cache_key(&src, "Top", &opts, Some(&m)),
         );
     }
 }
