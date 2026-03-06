@@ -6,6 +6,7 @@ mod ir;
 mod logic_tree;
 mod optimizer;
 mod parser;
+pub(crate) mod portable;
 mod scheduler;
 mod simulation;
 mod simulator;
