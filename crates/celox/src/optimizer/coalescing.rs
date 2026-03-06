@@ -70,7 +70,9 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
             ff_passes.run(eu, &options);
         }
     }
-    if let Some(s) = phase_start { eprintln!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed()); }
+    if let Some(s) = phase_start {
+        eprintln!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
+    }
 
     // 2. Logic-Only Cache (Split Path Phase 1):
     // MUST NOT use EliminateDeadWorkingStoresPass because the Commits are in Phase 2.
@@ -88,7 +90,9 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
             eval_only_passes.run(eu, &options);
         }
     }
-    if let Some(s) = phase_start { eprintln!("[phase] eval_only_ffs ({eu_count} EUs): {:?}", s.elapsed()); }
+    if let Some(s) = phase_start {
+        eprintln!("[phase] eval_only_ffs ({eu_count} EUs): {:?}", s.elapsed());
+    }
 
     // 3. Commit-Only Cache (Split Path Phase 2):
     let phase_start = timing.then(std::time::Instant::now);
@@ -107,7 +111,9 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
             apply_passes.run(eu, &options);
         }
     }
-    if let Some(s) = phase_start { eprintln!("[phase] apply_ffs ({eu_count} EUs): {:?}", s.elapsed()); }
+    if let Some(s) = phase_start {
+        eprintln!("[phase] apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
+    }
 
     // 4. Combinational Blocks:
     let phase_start = timing.then(std::time::Instant::now);
@@ -126,7 +132,9 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
         }
         comb_passes.run(eu, &options);
     }
-    if let Some(s) = phase_start { eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed()); }
+    if let Some(s) = phase_start {
+        eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
+    }
 
     // 5. Tail-call chain splitting for eval_comb.
     // When the estimated CLIF instruction count exceeds Cranelift's limit,
@@ -137,24 +145,46 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
     if timing {
         for (i, eu) in program.eval_comb.iter().enumerate() {
             let cost = cost_model::estimate_eu_cost(eu, four_state);
-            eprintln!("[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={cost} threshold={}", eu.blocks.len(), eu.blocks.values().map(|b| b.instructions.len()).sum::<usize>(), cost_model::CLIF_INST_THRESHOLD);
+            eprintln!(
+                "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={cost} threshold={}",
+                eu.blocks.len(),
+                eu.blocks
+                    .values()
+                    .map(|b| b.instructions.len())
+                    .sum::<usize>(),
+                cost_model::CLIF_INST_THRESHOLD
+            );
         }
     }
     let split_start = timing.then(std::time::Instant::now);
     if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state) {
         if timing {
-            eprintln!("[split] TailCallChunks: {} chunks, took {:?}", chunks.len(), split_start.unwrap().elapsed());
+            eprintln!(
+                "[split] TailCallChunks: {} chunks, took {:?}",
+                chunks.len(),
+                split_start.unwrap().elapsed()
+            );
         }
         program.eval_comb_plan = Some(crate::ir::EvalCombPlan::TailCallChunks(chunks));
     } else if let Some(plan) =
         pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state)
     {
         if timing {
-            eprintln!("[split] MemorySpilled: {} chunks, scratch={}B, took {:?}", plan.chunks.len(), plan.scratch_bytes, split_start.unwrap().elapsed());
+            eprintln!(
+                "[split] MemorySpilled: {} chunks, scratch={}B, took {:?}",
+                plan.chunks.len(),
+                plan.scratch_bytes,
+                split_start.unwrap().elapsed()
+            );
             for (i, chunk) in plan.chunks.iter().enumerate() {
                 let blocks = chunk.eu.blocks.len();
                 let insts: usize = chunk.eu.blocks.values().map(|b| b.instructions.len()).sum();
-                eprintln!("[split]   chunk[{i}]: blocks={blocks} insts={insts} in_spills={} out_spills={} cross_edges={}", chunk.incoming_spills.len(), chunk.outgoing_spills.len(), chunk.cross_chunk_edges.len());
+                eprintln!(
+                    "[split]   chunk[{i}]: blocks={blocks} insts={insts} in_spills={} out_spills={} cross_edges={}",
+                    chunk.incoming_spills.len(),
+                    chunk.outgoing_spills.len(),
+                    chunk.cross_chunk_edges.len()
+                );
             }
         }
         program.eval_comb_plan = Some(crate::ir::EvalCombPlan::MemorySpilled(plan));

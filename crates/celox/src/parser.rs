@@ -1118,18 +1118,21 @@ pub fn parse(
     {
         t.analyzer_ir = Some(ir.to_string());
     }
-    let mut program = timed_phase!("flatten", flatten(
-        &result.root_id,
-        &result.module_ir,
-        result.modules,
-        result.module_names,
-        config,
-        ignored_loops,
-        true_loops,
-        four_state,
-        trace_opts,
-        trace.as_deref_mut(),
-    ))?;
+    let mut program = timed_phase!(
+        "flatten",
+        flatten(
+            &result.root_id,
+            &result.module_ir,
+            result.modules,
+            result.module_names,
+            config,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace.as_deref_mut(),
+        )
+    )?;
 
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir
@@ -1138,7 +1141,10 @@ pub fn parse(
     }
 
     if optimize {
-        timed_phase!("optimize", crate::optimizer::optimize(&mut program, four_state));
+        timed_phase!(
+            "optimize",
+            crate::optimizer::optimize(&mut program, four_state)
+        );
     } else {
         // Even without optimization, run tail-call splitting to avoid
         // exceeding Cranelift's 24-bit instruction index limit.

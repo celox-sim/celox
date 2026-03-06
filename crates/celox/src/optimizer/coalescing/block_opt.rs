@@ -88,13 +88,12 @@ fn schedule_block_interleaved<A: Clone + PartialEq>(
     let mut succs: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut indeg = vec![0usize; n];
 
-    let add_edge =
-        |from: usize, to: usize, succs: &mut Vec<Vec<usize>>, indeg: &mut Vec<usize>| {
-            if !succs[from].contains(&to) {
-                succs[from].push(to);
-                indeg[to] += 1;
-            }
-        };
+    let add_edge = |from: usize, to: usize, succs: &mut Vec<Vec<usize>>, indeg: &mut Vec<usize>| {
+        if !succs[from].contains(&to) {
+            succs[from].push(to);
+            indeg[to] += 1;
+        }
+    };
 
     // Track memory accesses for ordering
     let mut mem_writes: Vec<usize> = Vec::new();
@@ -304,8 +303,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                     })
                     .or_insert(i);
             }
-            let keep: std::collections::HashSet<usize> =
-                best.into_values().collect();
+            let keep: std::collections::HashSet<usize> = best.into_values().collect();
             let mut i = 0;
             details.retain(|_| {
                 let k = keep.contains(&i);

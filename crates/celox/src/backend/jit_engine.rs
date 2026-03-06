@@ -316,7 +316,9 @@ impl JitEngine {
                 let ok = builder.ins().icmp_imm(IntCC::Equal, result, 0);
                 let continue_block = builder.create_block();
                 let error_block = builder.create_block();
-                builder.ins().brif(ok, continue_block, &[], error_block, &[]);
+                builder
+                    .ins()
+                    .brif(ok, continue_block, &[], error_block, &[]);
 
                 builder.switch_to_block(error_block);
                 builder.ins().return_(&[result]);

@@ -22,7 +22,12 @@ impl ExecutionUnitPass for OptimizeBlocksPass {
 
         for id in block_ids {
             let block = eu.blocks.get_mut(&id).unwrap();
-            optimize_block(block, &mut eu.register_map, &mut replacement_map, &mut reg_counter);
+            optimize_block(
+                block,
+                &mut eu.register_map,
+                &mut replacement_map,
+                &mut reg_counter,
+            );
         }
 
         if replacement_map.is_empty() {

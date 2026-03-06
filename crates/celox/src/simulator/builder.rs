@@ -427,7 +427,10 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         )?;
 
         if phase_timing {
-            eprintln!("[phase-timing] compile_to_sir (total): {:?}", phase_start.unwrap().elapsed());
+            eprintln!(
+                "[phase-timing] compile_to_sir (total): {:?}",
+                phase_start.unwrap().elapsed()
+            );
         }
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
@@ -441,7 +444,10 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let jit_start = phase_timing.then(std::time::Instant::now);
         let backend = JitBackend::new(&program, &self.options, None)?;
         if phase_timing {
-            eprintln!("[phase-timing] jit_backend: {:?}", jit_start.unwrap().elapsed());
+            eprintln!(
+                "[phase-timing] jit_backend: {:?}",
+                jit_start.unwrap().elapsed()
+            );
         }
 
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);

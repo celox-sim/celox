@@ -2,7 +2,10 @@ use crate::HashMap;
 use crate::HashSet;
 use crate::ir::*;
 
-fn next_register_id(register_map: &mut HashMap<RegisterId, RegisterType>, counter: &mut usize) -> RegisterId {
+fn next_register_id(
+    register_map: &mut HashMap<RegisterId, RegisterType>,
+    counter: &mut usize,
+) -> RegisterId {
     *counter += 1;
     while register_map.contains_key(&RegisterId(*counter)) {
         *counter += 1;
