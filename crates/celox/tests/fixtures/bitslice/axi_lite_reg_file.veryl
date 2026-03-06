@@ -1,0 +1,292 @@
+// AXI-Lite Register File for IvfPqTop control
+//
+// Register map (byte addresses, 32-bit aligned):
+//   0x00  CTRL       W   [0] start (self-clearing), [1] merge_en
+//   0x04  STATUS     R   [0] busy, [1] done
+//   0x08  REQ_LAST   R/W bit[i] = req_last for channel i
+//   0x100+4*ch  REQ_ADDR[ch]  R/W  request address per channel
+//   0x200+8*i   D_OUT_LO[i]   R    result low  32 bits
+//   0x204+8*i   D_OUT_HI[i]   R    result high 32 bits
+//
+// Single clock domain (CDC deferred to Phase B later).
+
+pub module AxiLiteRegFile #(
+    param ADDR_W    : u32 = 16,
+    param N_CH      : u32 = 4 ,
+    param OUT_DEPTH : u32 = 16,
+    param AXL_ADDR_W: u32 = 12,
+    param AXL_DATA_W: u32 = 32,
+) (
+    clk: input clock,
+    rst: input reset,
+
+    // AXI-Lite Slave — Write Address
+    s_awvalid: input  logic              ,
+    s_awready: output logic              ,
+    s_awaddr : input  logic<AXL_ADDR_W>  ,
+    // AXI-Lite Slave — Write Data
+    s_wvalid : input  logic              ,
+    s_wready : output logic              ,
+    s_wdata  : input  logic<AXL_DATA_W>  ,
+    s_wstrb  : input  logic<AXL_DATA_W/8>,
+    // AXI-Lite Slave — Write Response
+    s_bvalid : output logic              ,
+    s_bready : input  logic              ,
+    s_bresp  : output logic<2>           ,
+    // AXI-Lite Slave — Read Address
+    s_arvalid: input  logic              ,
+    s_arready: output logic              ,
+    s_araddr : input  logic<AXL_ADDR_W>  ,
+    // AXI-Lite Slave — Read Data
+    s_rvalid : output logic              ,
+    s_rready : input  logic              ,
+    s_rdata  : output logic<AXL_DATA_W>  ,
+    s_rresp  : output logic<2>           ,
+
+    // IvfPqTop — request outputs
+    req_valid: output logic         [N_CH]    ,
+    req_ready: input  logic         [N_CH]    ,
+    req_addr : output logic<ADDR_W> [N_CH]    ,
+    req_last : output logic         [N_CH]    ,
+    merge_en : output logic                   ,
+    // IvfPqTop — result inputs
+    d_out    : input  logic<64>     [OUT_DEPTH],
+    done     : input  logic                    ,
+) {
+    // ================================================================
+    // Storage registers
+    // ================================================================
+    var reg_req_addr    : logic<ADDR_W> [N_CH]    ;
+    var reg_req_last_vec: logic<N_CH>              ;
+    var reg_merge_en    : logic                    ;
+    var result_regs     : logic<64>     [OUT_DEPTH];
+    var done_latched    : logic                    ;
+    var start_pending   : logic                    ;
+    var ch_accepted     : logic         [N_CH]     ;
+
+    // ================================================================
+    // AXI-Lite write FSM (AW and W can arrive in any order)
+    // ================================================================
+    var aw_captured: logic              ;
+    var w_captured : logic              ;
+    var aw_buf     : logic<AXL_ADDR_W>  ;
+    var w_buf      : logic<AXL_DATA_W>  ;
+    var b_pending  : logic              ;
+
+    assign s_awready = !aw_captured;
+    assign s_wready  = !w_captured;
+    assign s_bvalid  = b_pending;
+    assign s_bresp   = 2'b00;
+
+    // Decode: both AW and W captured, B not yet pending
+    let do_write: logic = aw_captured && w_captured && !b_pending;
+
+    always_ff (clk, rst) {
+        if_reset {
+            aw_captured = 0;
+            w_captured  = 0;
+            aw_buf      = '0;
+            w_buf       = '0;
+            b_pending   = 0;
+        } else {
+            if s_awvalid && s_awready {
+                aw_captured = 1;
+                aw_buf      = s_awaddr;
+            }
+            if s_wvalid && s_wready {
+                w_captured = 1;
+                w_buf      = s_wdata;
+            }
+            if do_write {
+                b_pending = 1;
+            }
+            if b_pending && s_bready {
+                b_pending   = 0;
+                aw_captured = 0;
+                w_captured  = 0;
+            }
+        }
+    }
+
+    // ================================================================
+    // AXI-Lite read FSM + Read MUX
+    // ================================================================
+    var ar_captured: logic             ;
+    var ar_buf     : logic<AXL_ADDR_W> ;
+    var r_pending  : logic             ;
+    var r_data_buf : logic<AXL_DATA_W> ;
+
+    // Read MUX (combinational, must be defined before read FSM)
+    var read_mux: logic<AXL_DATA_W>;
+
+    let region     : logic<4> = ar_buf[11:8];
+    let addr_ch_idx: logic<5> = ar_buf[6:2];
+    let dout_idx   : logic<4> = ar_buf[6:3];
+    let dout_hi    : logic    = ar_buf[2];
+
+    always_comb {
+        read_mux = '0;
+
+        if region == 4'h0 {
+            if ar_buf[3:2] == 2'b00 {
+                read_mux[0] = start_pending;
+                read_mux[1] = reg_merge_en;
+            } else if ar_buf[3:2] == 2'b01 {
+                read_mux[0] = start_pending;
+                read_mux[1] = done_latched;
+            } else if ar_buf[3:2] == 2'b10 {
+                read_mux[N_CH - 1:0] = reg_req_last_vec;
+            }
+        }
+
+        if region == 4'h1 {
+            read_mux[ADDR_W - 1:0] = reg_req_addr[addr_ch_idx];
+        }
+
+        if region == 4'h2 {
+            if !dout_hi {
+                read_mux = result_regs[dout_idx][31:0];
+            } else {
+                read_mux = result_regs[dout_idx][63:32];
+            }
+        }
+    }
+
+    assign s_arready = !ar_captured && !r_pending;
+    assign s_rvalid  = r_pending;
+    assign s_rdata   = r_data_buf;
+    assign s_rresp   = 2'b00;
+
+    always_ff (clk, rst) {
+        if_reset {
+            ar_captured = 0;
+            ar_buf      = '0;
+            r_pending   = 0;
+            r_data_buf  = '0;
+        } else {
+            if s_arvalid && s_arready {
+                ar_captured = 1;
+                ar_buf      = s_araddr;
+            }
+            if ar_captured && !r_pending {
+                r_pending   = 1;
+                ar_captured = 0;
+                r_data_buf  = read_mux;
+            }
+            if r_pending && s_rready {
+                r_pending = 0;
+            }
+        }
+    }
+
+    // ================================================================
+    // Write decode — register updates
+    // ================================================================
+    always_ff (clk, rst) {
+        if_reset {
+            for i: u32 in 0..N_CH {
+                reg_req_addr[i] = '0;
+            }
+            reg_req_last_vec = '0;
+            reg_merge_en     = 0;
+        } else if do_write {
+            // Region 0x0xx
+            if aw_buf[11:8] == 4'h0 {
+                if aw_buf[3:2] == 2'b00 {
+                    // CTRL: bit[1] = merge_en (sticky)
+                    reg_merge_en = w_buf[1];
+                } else if aw_buf[3:2] == 2'b10 {
+                    // REQ_LAST_VEC
+                    reg_req_last_vec = w_buf[N_CH - 1:0];
+                }
+            }
+            // Region 0x1xx: REQ_ADDR[ch]
+            if aw_buf[11:8] == 4'h1 {
+                reg_req_addr[aw_buf[6:2]] = w_buf[ADDR_W - 1:0];
+            }
+        }
+    }
+
+    // ================================================================
+    // Request dispatch: start_pending + per-channel acceptance
+    // ================================================================
+    var all_accepted: logic;
+
+    always_comb {
+        all_accepted = 1;
+        for i: u32 in 0..N_CH {
+            if !ch_accepted[i] {
+                all_accepted = 0;
+            }
+        }
+    }
+
+    always_ff (clk, rst) {
+        if_reset {
+            start_pending = 0;
+            for i: u32 in 0..N_CH {
+                ch_accepted[i] = 0;
+            }
+        } else {
+            // Start trigger
+            if do_write && aw_buf[11:8] == 4'h0 && aw_buf[3:2] == 2'b00 && w_buf[0] {
+                start_pending = 1;
+                for i: u32 in 0..N_CH {
+                    ch_accepted[i] = 0;
+                }
+            }
+            // Track acceptance
+            if start_pending {
+                for i: u32 in 0..N_CH {
+                    if req_ready[i] && !ch_accepted[i] {
+                        ch_accepted[i] = 1;
+                    }
+                }
+                if all_accepted {
+                    start_pending = 0;
+                }
+            }
+        }
+    }
+
+    // req_valid / req_addr / req_last outputs
+    for ch in 0..N_CH :g_req {
+        assign req_valid[ch] = start_pending && !ch_accepted[ch];
+        assign req_addr[ch]  = reg_req_addr[ch];
+        assign req_last[ch]  = reg_req_last_vec[ch];
+    }
+
+    assign merge_en = reg_merge_en;
+
+    // ================================================================
+    // Result capture: latch d_out 1 cycle after done rising edge
+    // (done asserts on the last tree output beat; d_out settles 1 cycle later)
+    // ================================================================
+    var done_prev  : logic;
+    var done_rose_q: logic;
+
+    always_ff (clk, rst) {
+        if_reset {
+            done_prev    = 0;
+            done_rose_q  = 0;
+            done_latched = 0;
+            for i: u32 in 0..OUT_DEPTH {
+                result_regs[i] = '0;
+            }
+        } else {
+            done_prev   = done;
+            done_rose_q = done && !done_prev;
+            // Latch d_out 1 cycle after done rising edge
+            if done_rose_q {
+                for i: u32 in 0..OUT_DEPTH {
+                    result_regs[i] = d_out[i];
+                }
+                done_latched = 1;
+            }
+            // Clear done_latched on new start
+            if do_write && aw_buf[11:8] == 4'h0 && aw_buf[3:2] == 2'b00 && w_buf[0] {
+                done_latched = 0;
+            }
+        }
+    }
+}

@@ -793,6 +793,27 @@ impl<'a> FfParser<'a> {
             Factor::Value(comptime) => {
                 let (celox_value, mask_xz, width, _) = celox_value_from_comptime(comptime)
                     .expect("Factor::Value should always have a numeric value");
+                // Fill-literals (`'0`, `'1`, `'x`, `'z`) have width 0 from
+                // the analyzer.  Per IEEE 1800-2023 §5.7.1, replicate bit 0
+                // across the context width (or 1 bit in self-determined
+                // contexts) so that e.g. '1 becomes all-ones, not 0x01.
+                let (celox_value, mask_xz, width) = if width == 0 {
+                    let ew = context_width.unwrap_or(1);
+                    let fill_mask = (BigUint::from(1u64) << ew) - BigUint::from(1u64);
+                    let cv = if celox_value.bit(0) {
+                        fill_mask.clone()
+                    } else {
+                        BigUint::from(0u8)
+                    };
+                    let mxz = if mask_xz.bit(0) {
+                        fill_mask
+                    } else {
+                        BigUint::from(0u8)
+                    };
+                    (cv, mxz, ew)
+                } else {
+                    (celox_value, mask_xz, width)
+                };
                 self.op_constant(
                     SIRValue::new_four_state(celox_value, mask_xz),
                     width,

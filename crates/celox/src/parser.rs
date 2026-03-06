@@ -527,19 +527,29 @@ pub(crate) fn flatten(
         t.sim_modules = Some(modules.clone());
     }
 
-    let (expanded, instance_modules) = timed_sub!("expand_hierarchy", expand_hierarchy(root_id, &modules));
-    let global_boundaries = timed_sub!("propagate_boundaries", propagate_boundaries(&expanded, &instance_modules, &modules));
+    let (expanded, instance_modules) =
+        timed_sub!("expand_hierarchy", expand_hierarchy(root_id, &modules));
+    let global_boundaries = timed_sub!(
+        "propagate_boundaries",
+        propagate_boundaries(&expanded, &instance_modules, &modules)
+    );
 
-    let clock_domains = timed_sub!("unify_clock_domains", unify_clock_domains(&expanded, &instance_modules, &modules));
-    let (global_arena, mut eval_apply_ffs, eval_only_ffs, apply_ffs, comb_blocks) = timed_sub!("relocate_units", relocate_units(
-        &expanded,
-        &instance_modules,
-        &modules,
-        &global_boundaries,
-        &clock_domains,
-        trace_opts,
-        &mut trace,
-    ));
+    let clock_domains = timed_sub!(
+        "unify_clock_domains",
+        unify_clock_domains(&expanded, &instance_modules, &modules)
+    );
+    let (global_arena, mut eval_apply_ffs, eval_only_ffs, apply_ffs, comb_blocks) = timed_sub!(
+        "relocate_units",
+        relocate_units(
+            &expanded,
+            &instance_modules,
+            &modules,
+            &global_boundaries,
+            &clock_domains,
+            trace_opts,
+            &mut trace,
+        )
+    );
     let ignored_loops = parse_ignored_loops(ignored_loops, &instance_modules, &modules, &expanded);
     let true_loops = parse_true_loops(true_loops, &instance_modules, &modules, &expanded);
 
@@ -570,16 +580,19 @@ pub(crate) fn flatten(
         }
     }
 
-    let (topological_clocks, cascaded_clocks) = timed_sub!("analyze_clock_dependencies", analyze_clock_dependencies(
-        &mut eval_apply_ffs,
-        &comb_blocks,
-        &global_arena,
-        &clock_domains,
-        &expanded,
-        &instance_modules,
-        &modules,
-        config,
-    ));
+    let (topological_clocks, cascaded_clocks) = timed_sub!(
+        "analyze_clock_dependencies",
+        analyze_clock_dependencies(
+            &mut eval_apply_ffs,
+            &comb_blocks,
+            &global_arena,
+            &clock_domains,
+            &expanded,
+            &instance_modules,
+            &modules,
+            config,
+        )
+    );
 
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.flattened_comb_blocks
@@ -618,7 +631,9 @@ pub(crate) fn flatten(
             program.get_path(addr)
         }))
     })?;
-    if let Some(s) = sched_start { eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed()); }
+    if let Some(s) = sched_start {
+        eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
+    }
     let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schduled
         .into_iter()
         .map(|eu| crate::ir::ExecutionUnit {
@@ -1561,7 +1576,13 @@ fn analyze_clock_dependencies(
             comb_deps.entry(target_abs).or_default().insert(source.id);
         }
     }
-    if let Some(s) = acd_start { eprintln!("[acd] comb_deps build ({} blocks): {:?}", comb_deps.len(), s.elapsed()); }
+    if let Some(s) = acd_start {
+        eprintln!(
+            "[acd] comb_deps build ({} blocks): {:?}",
+            comb_deps.len(),
+            s.elapsed()
+        );
+    }
 
     // 3. Propagate FF outputs through combinational graph to find all derived variables
     let fp_start = acd_timing.then(std::time::Instant::now);
@@ -1581,7 +1602,13 @@ fn analyze_clock_dependencies(
             }
         }
     }
-    if let Some(s) = fp_start { eprintln!("[acd] fixpoint: {fp_rounds} rounds, {} entries, {:?}", comb_deps.len(), s.elapsed()); }
+    if let Some(s) = fp_start {
+        eprintln!(
+            "[acd] fixpoint: {fp_rounds} rounds, {} entries, {:?}",
+            comb_deps.len(),
+            s.elapsed()
+        );
+    }
 
     // 4. Any clock domain that is derived from an FF is a cascaded clock!
     // We add them to a special "pseudo-domain" or just add themselves to trigger cascade marking.

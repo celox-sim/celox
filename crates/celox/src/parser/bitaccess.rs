@@ -114,7 +114,8 @@ pub fn eval_var_select(
     }
 
     if let Some((op, range_expr)) = &select.1 {
-        let anchor = to_u(all_indices.last().unwrap()).unwrap_or(0);
+        let anchor_expr = all_indices.last().unwrap();
+        let anchor = to_u(anchor_expr).unwrap_or(0);
         let val = if let Some(v) = to_u(range_expr) {
             v
         } else {

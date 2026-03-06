@@ -1426,8 +1426,10 @@ pub fn eval_expression(
     context_width: Option<usize>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     // Short-circuit: compile-time constant compound expression → emit Constant node.
-    // context_width is not applied here, consistent with Factor::Value handling —
-    // the parent expression node is responsible for width adjustment.
+    // context_width is not applied here — compound constant expressions (e.g. `N - 1`)
+    // always have well-defined widths from the analyzer.  Fill-literals like `'0` are
+    // Term(Factor::Value), not compound, so they take the Factor::Value path which
+    // does apply context_width.
     if !matches!(expr, Expression::Term(_)) {
         let ct = expr.comptime();
         if ct.is_const {
@@ -2114,9 +2116,45 @@ fn eval_factor(
         Factor::Value(v) => {
             let (celox_value, mask_xz, width, signed) = celox_value_from_comptime(v)
                 .expect("Factor::Value should always have a numeric value");
+            // Fill-literals (`'0`, `'1`, `'x`, `'z`) have width 0 from the
+            // analyzer (context-dependent).  Per IEEE 1800-2023 §5.7.1:
+            //   "All bits of the unsized value shall be set to the value of
+            //    the specified bit. In a self-determined context, it shall
+            //    have a width of 1 bit."
+            // Use context_width when available; fall back to 1 bit for
+            // self-determined contexts.  Without this, a 0-width Constant
+            // in the RangeStore causes Mux lowering to produce 0-bit masks
+            // that zero out the else-arm.
+            //
+            // The analyzer stores fill-literals with only bit 0 set in
+            // payload and mask_xz (e.g. '1 → payload=1, mask_xz=0).
+            // We replicate bit 0 across the full width so '1 → all-ones,
+            // 'x → all-X, etc.
+            let (celox_value, mask_xz, effective_width) = if width == 0 {
+                let ew = context_width.unwrap_or(1);
+                let fill_mask = (BigUint::from(1u64) << ew) - BigUint::from(1u64);
+                let cv = if celox_value.bit(0) {
+                    fill_mask.clone()
+                } else {
+                    BigUint::from(0u8)
+                };
+                let mxz = if mask_xz.bit(0) {
+                    fill_mask
+                } else {
+                    BigUint::from(0u8)
+                };
+                (cv, mxz, ew)
+            } else {
+                (celox_value, mask_xz, width)
+            };
             Ok((
                 (
-                    arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed)),
+                    arena.alloc(SLTNode::Constant(
+                        celox_value,
+                        mask_xz,
+                        effective_width,
+                        signed,
+                    )),
                     HashSet::default(),
                 ),
                 BoundaryMap::default(),
