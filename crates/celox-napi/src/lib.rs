@@ -381,7 +381,6 @@ fn apply_options<'a, T>(
 // ---------------------------------------------------------------------------
 
 /// Cached compilation result shared across simulator instances.
-#[allow(dead_code)]
 struct CachedBuild {
     shared_code: Arc<celox::SharedJitCode>,
     layout_json: String,
@@ -390,7 +389,6 @@ struct CachedBuild {
     warnings_json: String,
     stable_size: u32,
     total_size: u32,
-    four_state: bool,
 }
 
 /// Exact cache key — no hashing, no collisions.
@@ -556,11 +554,9 @@ impl NativeSimulatorHandle {
                 warnings_json: warnings_json.clone(),
                 stable_size: stable_size as u32,
                 total_size: total_size as u32,
-                four_state,
             });
-            if let Ok(mut cache) = JIT_CACHE.lock() {
-                cache.insert(key, cached);
-            }
+            let mut cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            cache.insert(key, cached);
         }
 
         Ok(Self {
@@ -605,7 +601,8 @@ impl NativeSimulatorHandle {
         let cache_key = build_cache_key(&src_pairs, &top, &opts);
 
         // Check cache
-        if let Ok(cache) = JIT_CACHE.lock() {
+        {
+            let cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(cached) = cache.get(&cache_key) {
                 return Ok(Self::from_cached(cached));
             }
@@ -641,7 +638,8 @@ impl NativeSimulatorHandle {
         let cache_key = build_cache_key(&sources, &top, &opts);
 
         // Check cache
-        if let Ok(cache) = JIT_CACHE.lock() {
+        {
+            let cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(cached) = cache.get(&cache_key) {
                 return Ok(Self::from_cached(cached));
             }
@@ -1062,9 +1060,8 @@ fn format_errors_with_warnings(
 /// Call this when source files have changed and cached compiled code may be stale.
 #[napi]
 pub fn clear_jit_cache() {
-    if let Ok(mut cache) = JIT_CACHE.lock() {
-        cache.clear();
-    }
+    let mut cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.clear();
 }
 
 /// Generate TypeScript type information as JSON for a Veryl project.
