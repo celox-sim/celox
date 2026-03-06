@@ -23,6 +23,7 @@ export type {
 export {
 	buildNapiOpts,
 	buildPortsFromLayout,
+	clearJitCache,
 	createSimulationBridge,
 	createSimulatorBridge,
 	loadNativeAddon,

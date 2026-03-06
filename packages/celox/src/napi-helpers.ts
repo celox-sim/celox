@@ -132,6 +132,7 @@ export interface RawNapiAddon {
 		): RawNapiSimulationHandle;
 	};
 	genTs(projectPath: string): string;
+	clearJitCache(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -681,4 +682,14 @@ export function createSimulationBridge(
 
 		return { buffer: buf, layout, events, handle, hierarchy, warnings };
 	};
+}
+
+/**
+ * Clear the process-global JIT compilation cache.
+ *
+ * Call this when source files have changed and cached compiled code
+ * may be stale (e.g. during HMR or between benchmark iterations).
+ */
+export function clearJitCache(addon: RawNapiAddon): void {
+	addon.clearJitCache();
 }
