@@ -280,12 +280,15 @@ use veryl_parser::resource_table::StrId;
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockId(pub usize);
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GlueBlock {
+pub struct GlueBlockBase<V: std::hash::Hash + Eq + Clone> {
     pub module_id: ModuleId,
-    pub input_ports: Vec<(Vec<VarId>, LogicPath<GlueAddr>)>,
-    pub output_ports: Vec<(Vec<VarId>, LogicPath<GlueAddr>)>,
-    pub arena: SLTNodeArena<GlueAddr>,
+    pub input_ports: Vec<(Vec<V>, LogicPath<GlueAddrBase<V>>)>,
+    pub output_ports: Vec<(Vec<V>, LogicPath<GlueAddrBase<V>>)>,
+    pub arena: SLTNodeArena<GlueAddrBase<V>>,
 }
+
+/// Concrete glue block using the Veryl analyzer's `VarId`.
+pub type GlueBlock = GlueBlockBase<VarId>;
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModuleId(pub usize);
 
@@ -305,12 +308,15 @@ impl fmt::Display for InstanceId {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AbsoluteAddr {
+pub struct AbsoluteAddrBase<V> {
     pub instance_id: InstanceId,
-    pub var_id: VarId,
+    pub var_id: V,
 }
 
-impl fmt::Display for AbsoluteAddr {
+/// Concrete address type using the Veryl analyzer's `VarId`.
+pub type AbsoluteAddr = AbsoluteAddrBase<VarId>;
+
+impl<V: fmt::Display> fmt::Display for AbsoluteAddrBase<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "AbsoluteAddr({}, {})", self.instance_id, self.var_id)
     }
@@ -334,12 +340,15 @@ pub const STABLE_REGION: u32 = 0;
 pub const WORKING_REGION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RegionedVarAddr {
+pub struct RegionedVarAddrBase<V> {
     pub region: u32,
-    pub var_id: VarId,
+    pub var_id: V,
 }
 
-impl fmt::Display for RegionedVarAddr {
+/// Concrete regioned variable address using the Veryl analyzer's `VarId`.
+pub type RegionedVarAddr = RegionedVarAddrBase<VarId>;
+
+impl<V: fmt::Display> fmt::Display for RegionedVarAddrBase<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -350,14 +359,17 @@ impl fmt::Display for RegionedVarAddr {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RegionedAbsoluteAddr {
+pub struct RegionedAbsoluteAddrBase<V> {
     pub region: u32,
     pub instance_id: InstanceId,
-    pub var_id: VarId,
+    pub var_id: V,
 }
 
-impl RegionedAbsoluteAddr {
-    pub fn from_absolute_addr(region: u32, addr: AbsoluteAddr) -> Self {
+/// Concrete regioned address type using the Veryl analyzer's `VarId`.
+pub type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<VarId>;
+
+impl<V: Copy> RegionedAbsoluteAddrBase<V> {
+    pub fn from_absolute_addr(region: u32, addr: AbsoluteAddrBase<V>) -> Self {
         Self {
             region,
             instance_id: addr.instance_id,
@@ -365,15 +377,15 @@ impl RegionedAbsoluteAddr {
         }
     }
 
-    pub fn absolute_addr(&self) -> AbsoluteAddr {
-        AbsoluteAddr {
+    pub fn absolute_addr(&self) -> AbsoluteAddrBase<V> {
+        AbsoluteAddrBase {
             instance_id: self.instance_id,
             var_id: self.var_id,
         }
     }
 }
 
-impl fmt::Display for RegionedAbsoluteAddr {
+impl<V: fmt::Display> fmt::Display for RegionedAbsoluteAddrBase<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -840,25 +852,28 @@ impl<A> SIRInstruction<A> {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GlueAddr {
-    Parent(VarId),
-    Child(VarId),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GlueAddrBase<V> {
+    Parent(V),
+    Child(V),
 }
-impl GlueAddr {
-    pub fn var_id(&self) -> VarId {
+
+/// Concrete glue address type using the Veryl analyzer's `VarId`.
+pub type GlueAddr = GlueAddrBase<VarId>;
+
+impl<V: Copy> GlueAddrBase<V> {
+    pub fn var_id(&self) -> V {
         match self {
-            GlueAddr::Parent(var_id) => *var_id,
-            GlueAddr::Child(var_id) => *var_id,
+            GlueAddrBase::Parent(v) | GlueAddrBase::Child(v) => *v,
         }
     }
 }
 
-impl fmt::Display for GlueAddr {
+impl<V: fmt::Display> fmt::Display for GlueAddrBase<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GlueAddr::Parent(var_id) => write!(f, "GlueAddr::Parent({})", var_id),
-            GlueAddr::Child(var_id) => write!(f, "GlueAddr::Child({})", var_id),
+            GlueAddrBase::Parent(v) => write!(f, "GlueAddr::Parent({})", v),
+            GlueAddrBase::Child(v) => write!(f, "GlueAddr::Child({})", v),
         }
     }
 }
