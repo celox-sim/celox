@@ -17,12 +17,12 @@ use std::time::Instant;
 // ---------------------------------------------------------------------------
 
 fn linear_sec_source(p: u32) -> String {
-    format!(
-        "{}\n{}\n{}",
-        include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_encoder.veryl"),
-        include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_decoder.veryl"),
-        format!(
-            r#"
+    let encoder =
+        include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_encoder.veryl");
+    let decoder =
+        include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_decoder.veryl");
+    let top = format!(
+        r#"
 module Top #(
     param P: u32 = {p},
     const K: u32 = (1 << P) - 1,
@@ -44,8 +44,8 @@ module Top #(
     );
 }}
 "#
-        ),
-    )
+    );
+    format!("{encoder}\n{decoder}\n{top}")
 }
 
 fn build_linear_sec(p: u32) -> std::time::Duration {
