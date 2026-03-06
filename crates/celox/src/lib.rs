@@ -8,6 +8,7 @@ mod optimizer;
 mod parser;
 pub(crate) mod portable;
 mod scheduler;
+pub(crate) mod serde_helpers;
 mod simulation;
 mod simulator;
 mod vcd;
@@ -31,7 +32,8 @@ impl<'a> IOContext<'a> {
 }
 
 pub use backend::EventRef;
-pub use backend::{MemoryLayout, get_byte_size};
+pub use backend::SharedJitCode;
+pub use backend::{JitBackend, MemoryLayout, get_byte_size};
 pub use celox_macros::veryl_test;
 pub use debug::{CompilationTrace, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;

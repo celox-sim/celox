@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use malachite_bigint::BigUint;
 
 use crate::{
@@ -6,7 +8,6 @@ use crate::{
 };
 
 use super::{JitEngine, MemoryLayout, get_byte_size};
-// ... (omitting intermediate types for brevity in thought, but I will provide the full block in actual call)
 use thiserror::Error;
 pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 
@@ -50,23 +51,65 @@ impl std::fmt::Display for SimulatorErrorCode {
     }
 }
 
+/// Immutable compilation result that can be shared across simulator instances.
+///
+/// Contains JIT-compiled function pointers, event maps, and memory layout.
+/// The `JitEngine` (which owns the JITModule code pages) is kept alive here.
+///
+/// # Safety
+///
+/// After `JITModule::finalize_definitions()`, the compiled code memory is
+/// immutable. The function pointers (`SimFunc`) are plain pointers to these
+/// code pages and remain valid across threads for the lifetime of this struct.
+pub struct SharedJitCode {
+    _engine: JitEngine,
+    pub(crate) comb_func: SimFunc,
+    pub(crate) event_map: HashMap<AbsoluteAddr, EventRef>,
+    pub(crate) eval_only_event_map: HashMap<AbsoluteAddr, EventRef>,
+    pub(crate) apply_event_map: HashMap<AbsoluteAddr, EventRef>,
+    pub(crate) id_to_addr: Vec<AbsoluteAddr>,
+    pub(crate) id_to_event: Vec<EventRef>,
+    pub(crate) layout: MemoryLayout,
+    pub(crate) options: SimulatorOptions,
+    /// Pre-computed 4-state init regions: (offset, allocated_size) for stable
+    /// and working regions.
+    four_state_inits: Vec<(usize, usize)>,
+}
+
+// SAFETY: After JITModule finalization, compiled code is immutable.
+// Function pointers are valid across threads for SharedJitCode's lifetime.
+// We never call mutating methods on JitEngine after construction.
+unsafe impl Send for SharedJitCode {}
+unsafe impl Sync for SharedJitCode {}
+
+impl SharedJitCode {
+    /// Returns a reference to the memory layout.
+    pub fn layout(&self) -> &MemoryLayout {
+        &self.layout
+    }
+}
+
 pub struct JitBackend {
-    engine: JitEngine,
+    shared: Arc<SharedJitCode>,
     memory: Vec<u64>,
-    comb_func: SimFunc,
-    pub event_map: HashMap<AbsoluteAddr, EventRef>,
-    pub eval_only_event_map: HashMap<AbsoluteAddr, EventRef>,
-    pub apply_event_map: HashMap<AbsoluteAddr, EventRef>,
-    pub id_to_addr: Vec<AbsoluteAddr>,
-    pub id_to_event: Vec<EventRef>,
 }
 
 impl JitBackend {
     pub fn new(
         sir: &crate::ir::Program,
         options: &SimulatorOptions,
-        mut trace: Option<&mut crate::debug::CompilationTrace>,
+        trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<Self, crate::SimulatorError> {
+        let shared = Arc::new(Self::compile(sir, options, trace)?);
+        Ok(Self::from_shared(shared))
+    }
+
+    /// Build the shared JIT code from a Program.
+    fn compile(
+        sir: &crate::ir::Program,
+        options: &SimulatorOptions,
+        mut trace: Option<&mut crate::debug::CompilationTrace>,
+    ) -> Result<SharedJitCode, crate::SimulatorError> {
         let layout = MemoryLayout::build(sir, options);
         let mut engine = JitEngine::new(layout, options).map_err(SimulatorError::from)?;
 
@@ -259,61 +302,80 @@ impl JitBackend {
                 & !7
         );
 
-        let merged_total_size = engine.translator.layout.merged_total_size;
-        let num_u64 = merged_total_size.div_ceil(8);
-        let mut backend = Self {
-            engine,
-            memory: vec![0u64; num_u64],
+        // Pre-compute 4-state initialization regions
+        let mut four_state_inits = Vec::new();
+        if options.four_state {
+            for (addr, &offset) in &engine.translator.layout.offsets {
+                let width = engine.translator.layout.widths[addr];
+                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
+                    .values()
+                    .find(|v| v.id == addr.var_id)
+                    .map(|v| v.is_4state)
+                    .unwrap_or(false);
+
+                if is_4state {
+                    let allocated_size = super::get_byte_size(width);
+                    four_state_inits.push((offset, allocated_size));
+                }
+            }
+            for (addr, &rel_offset) in &engine.translator.layout.working_offsets {
+                let offset = engine.translator.layout.working_base_offset + rel_offset;
+                let width = engine.translator.layout.widths[addr];
+                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
+                    .values()
+                    .find(|v| v.id == addr.var_id)
+                    .map(|v| v.is_4state)
+                    .unwrap_or(false);
+
+                if is_4state {
+                    let allocated_size = super::get_byte_size(width);
+                    four_state_inits.push((offset, allocated_size));
+                }
+            }
+        }
+
+        let layout = engine.translator.layout.clone();
+        let options = options.clone();
+
+        Ok(SharedJitCode {
+            _engine: engine,
             comb_func,
             event_map,
             eval_only_event_map,
             apply_event_map,
             id_to_addr,
             id_to_event,
-        };
-        if options.four_state {
-            for (addr, &offset) in &backend.engine.translator.layout.offsets {
-                let width = backend.engine.translator.layout.widths[addr];
-                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
-                    .values()
-                    .find(|v| v.id == addr.var_id)
-                    .map(|v| v.is_4state)
-                    .unwrap_or(false);
+            layout,
+            options,
+            four_state_inits,
+        })
+    }
 
-                if is_4state {
-                    let allocated_size = super::get_byte_size(width);
-                    unsafe {
-                        let base_ptr = (backend.memory.as_mut_ptr() as *mut u8).add(offset);
-                        // X = (v=1, m=1): fill both value and mask with 0xFF
-                        std::ptr::write_bytes(base_ptr, 0xFF, allocated_size);
-                        let mask_ptr = base_ptr.add(allocated_size);
-                        std::ptr::write_bytes(mask_ptr, 0xFF, allocated_size);
-                    }
-                }
-            }
-            for (addr, &rel_offset) in &backend.engine.translator.layout.working_offsets {
-                let offset = backend.engine.translator.layout.working_base_offset + rel_offset;
-                let width = backend.engine.translator.layout.widths[addr];
-                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
-                    .values()
-                    .find(|v| v.id == addr.var_id)
-                    .map(|v| v.is_4state)
-                    .unwrap_or(false);
+    /// Create a new backend instance from shared compiled code.
+    ///
+    /// Allocates a fresh simulation memory buffer and initializes 4-state
+    /// regions. The compiled function pointers are shared across instances.
+    pub fn from_shared(shared: Arc<SharedJitCode>) -> Self {
+        let num_u64 = shared.layout.merged_total_size.div_ceil(8);
+        let mut memory = vec![0u64; num_u64];
 
-                if is_4state {
-                    let allocated_size = super::get_byte_size(width);
-                    unsafe {
-                        let base_ptr = (backend.memory.as_mut_ptr() as *mut u8).add(offset);
-                        // X = (v=1, m=1): fill both value and mask with 0xFF
-                        std::ptr::write_bytes(base_ptr, 0xFF, allocated_size);
-                        let mask_ptr = base_ptr.add(allocated_size);
-                        std::ptr::write_bytes(mask_ptr, 0xFF, allocated_size);
-                    }
-                }
+        // Initialize 4-state regions to X (v=1, m=1)
+        for &(offset, allocated_size) in &shared.four_state_inits {
+            unsafe {
+                let base_ptr = (memory.as_mut_ptr() as *mut u8).add(offset);
+                std::ptr::write_bytes(base_ptr, 0xFF, allocated_size);
+                let mask_ptr = base_ptr.add(allocated_size);
+                std::ptr::write_bytes(mask_ptr, 0xFF, allocated_size);
             }
         }
 
-        Ok(backend)
+        Self { shared, memory }
+    }
+
+    /// Returns the shared compiled code, allowing it to be reused for
+    /// creating additional simulator instances without recompilation.
+    pub fn shared_code(&self) -> Arc<SharedJitCode> {
+        Arc::clone(&self.shared)
     }
 
     #[inline]
@@ -333,15 +395,15 @@ impl JitBackend {
     }
     /// Execute combinational logic
     pub fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
-        self.run_sim_func(self.comb_func)
+        self.run_sim_func(self.shared.comb_func)
     }
 
     /// Resolves an `AbsoluteAddr` into a performance-optimized [`SignalRef`].
     /// This handle allows for direct memory access without `HashMap` lookups.
     pub fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {
-        let offset = self.engine.translator.layout.offsets[addr];
-        let width = self.engine.translator.layout.widths[addr];
-        let is_4state = self.engine.translator.layout.is_4states[addr];
+        let offset = self.shared.layout.offsets[addr];
+        let width = self.shared.layout.widths[addr];
+        let is_4state = self.shared.layout.is_4states[addr];
         SignalRef {
             offset,
             width,
@@ -362,7 +424,7 @@ impl JitBackend {
             let ptr = base_ptr as *mut T;
             std::ptr::write_unaligned(ptr, value);
 
-            if self.engine.translator.options.four_state && signal.is_4state {
+            if self.shared.options.four_state && signal.is_4state {
                 let mask_ptr = base_ptr.add(allocated_size);
                 std::ptr::write_bytes(mask_ptr, 0, allocated_size);
             }
@@ -385,7 +447,7 @@ impl JitBackend {
             let dst_ptr = dst_ptr.add(signal.offset);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst_ptr, allocated_size);
 
-            if self.engine.translator.options.four_state && signal.is_4state {
+            if self.shared.options.four_state && signal.is_4state {
                 let mask_ptr = dst_ptr.add(allocated_size);
                 std::ptr::write_bytes(mask_ptr, 0, allocated_size);
             }
@@ -448,11 +510,7 @@ impl JitBackend {
     /// Check if a signal has an entry in the Working region.
     #[allow(dead_code)]
     pub fn has_working_offset(&self, addr: &AbsoluteAddr) -> bool {
-        self.engine
-            .translator
-            .layout
-            .working_offsets
-            .contains_key(addr)
+        self.shared.layout.working_offsets.contains_key(addr)
     }
 
     /// Set 4-state value for a variable using a pre-resolved [`SignalRef`].
@@ -480,7 +538,7 @@ impl JitBackend {
                 allocated_size,
             );
 
-            if self.engine.translator.options.four_state && signal.is_4state {
+            if self.shared.options.four_state && signal.is_4state {
                 let mut m_bytes = mask.to_bytes_le();
                 if m_bytes.len() > allocated_size {
                     m_bytes.truncate(allocated_size);
@@ -510,7 +568,7 @@ impl JitBackend {
         let v_slice = unsafe { std::slice::from_raw_parts(v_ptr, byte_size) };
         let mut v_val = BigUint::from_bytes_le(v_slice);
 
-        let mut m_val = if self.engine.translator.options.four_state && signal.is_4state {
+        let mut m_val = if self.shared.options.four_state && signal.is_4state {
             let m_ptr: *const u8 = unsafe { v_ptr.add(byte_size) };
             let m_slice = unsafe { std::slice::from_raw_parts(m_ptr, byte_size) };
             BigUint::from_bytes_le(m_slice)
@@ -533,19 +591,19 @@ impl JitBackend {
     /// returned handle can then be passed to [`eval_apply_ff_at`] for zero-cost
     /// direct function-pointer dispatch.
     pub fn resolve_event(&self, addr: &AbsoluteAddr) -> EventRef {
-        self.event_map[addr]
+        self.shared.event_map[addr]
     }
 
     pub fn resolve_event_opt(&self, addr: &AbsoluteAddr) -> Option<EventRef> {
-        self.event_map.get(addr).copied()
+        self.shared.event_map.get(addr).copied()
     }
 
     pub fn resolve_eval_only_event(&self, addr: &AbsoluteAddr) -> Option<EventRef> {
-        self.eval_only_event_map.get(addr).copied()
+        self.shared.eval_only_event_map.get(addr).copied()
     }
 
     pub fn resolve_apply_event(&self, addr: &AbsoluteAddr) -> Option<EventRef> {
-        self.apply_event_map.get(addr).copied()
+        self.shared.apply_event_map.get(addr).copied()
     }
 
     pub fn eval_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
@@ -562,40 +620,50 @@ impl JitBackend {
 
     /// Returns a raw pointer to the JIT memory and its total size in bytes.
     pub fn memory_as_ptr(&self) -> (*const u8, usize) {
-        let size = self.engine.translator.layout.merged_total_size;
+        let size = self.shared.layout.merged_total_size;
         (self.memory.as_ptr() as *const u8, size)
     }
 
     /// Returns a mutable raw pointer to the JIT memory and its total size in bytes.
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        let size = self.engine.translator.layout.merged_total_size;
+        let size = self.shared.layout.merged_total_size;
         (self.memory.as_mut_ptr() as *mut u8, size)
     }
 
     /// Returns the stable region size in bytes.
     pub fn stable_region_size(&self) -> usize {
-        self.engine.translator.layout.total_size
+        self.shared.layout.total_size
     }
 
     /// Returns a reference to the memory layout.
     pub fn layout(&self) -> &MemoryLayout {
-        &self.engine.translator.layout
+        &self.shared.layout
+    }
+
+    /// Returns the `id_to_addr` mapping (event ID → AbsoluteAddr).
+    pub fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {
+        &self.shared.id_to_addr
+    }
+
+    /// Returns the `id_to_event` mapping (event ID → EventRef).
+    pub fn id_to_event_slice(&self) -> &[EventRef] {
+        &self.shared.id_to_event
     }
 
     pub fn num_events(&self) -> usize {
         let mut max_id = 0;
-        for ev in self.event_map.values() {
+        for ev in self.shared.event_map.values() {
             max_id = max_id.max(ev.id);
         }
-        for ev in self.eval_only_event_map.values() {
+        for ev in self.shared.eval_only_event_map.values() {
             max_id = max_id.max(ev.id);
         }
-        for ev in self.apply_event_map.values() {
+        for ev in self.shared.apply_event_map.values() {
             max_id = max_id.max(ev.id);
         }
-        if self.event_map.is_empty()
-            && self.eval_only_event_map.is_empty()
-            && self.apply_event_map.is_empty()
+        if self.shared.event_map.is_empty()
+            && self.shared.eval_only_event_map.is_empty()
+            && self.shared.apply_event_map.is_empty()
         {
             0
         } else {
@@ -607,8 +675,8 @@ impl JitBackend {
     pub fn clear_triggered_bits(&mut self) {
         let base_ptr = self.memory.as_mut_ptr() as *mut u8;
         let triggered_bits_ptr =
-            unsafe { base_ptr.add(self.engine.translator.layout.triggered_bits_offset) };
-        let total_size = self.engine.translator.layout.triggered_bits_total_size;
+            unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
+        let total_size = self.shared.layout.triggered_bits_total_size;
         unsafe {
             std::ptr::write_bytes(triggered_bits_ptr, 0, total_size);
         }
@@ -620,7 +688,7 @@ impl JitBackend {
         let bit_idx = id % 8;
         let base_ptr = self.memory.as_mut_ptr() as *mut u8;
         let triggered_bits_ptr =
-            unsafe { base_ptr.add(self.engine.translator.layout.triggered_bits_offset) };
+            unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
         unsafe {
             let byte_ptr = triggered_bits_ptr.add(byte_idx);
             *byte_ptr |= 1 << bit_idx;
@@ -632,8 +700,8 @@ impl JitBackend {
         let mut bits = bit_set::BitSet::with_capacity(self.num_events());
         let base_ptr = self.memory.as_ptr() as *const u8;
         let triggered_bits_ptr =
-            unsafe { base_ptr.add(self.engine.translator.layout.triggered_bits_offset) };
-        let total_size = self.engine.translator.layout.triggered_bits_total_size;
+            unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
+        let total_size = self.shared.layout.triggered_bits_total_size;
 
         for i in 0..total_size {
             let byte = unsafe { *triggered_bits_ptr.add(i) };

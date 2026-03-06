@@ -1,6 +1,7 @@
 mod layout;
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -375,12 +376,141 @@ fn apply_options<'a, T>(
     builder
 }
 
-/// Low-level handle wrapping a `celox::Simulator`.
+// ---------------------------------------------------------------------------
+//  Process-global JIT cache
+// ---------------------------------------------------------------------------
+
+/// Cached compilation result shared across simulator instances.
+#[allow(dead_code)]
+struct CachedBuild {
+    shared_code: Arc<celox::SharedJitCode>,
+    layout_json: String,
+    events_json: String,
+    hierarchy_json: String,
+    warnings_json: String,
+    stable_size: u32,
+    total_size: u32,
+    four_state: bool,
+}
+
+/// Exact cache key — no hashing, no collisions.
+///
+/// Contains the full source content + paths + top module + all compilation-
+/// affecting options. Two builds produce the same `CacheKey` iff they would
+/// produce identical compiled code.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CacheKey {
+    /// (path, content) sorted by path for determinism.
+    sources: Vec<(String, String)>,
+    top: String,
+    four_state: bool,
+    optimize: Option<bool>,
+    dead_store_policy: u8,
+    clock_type: Option<u8>,
+    reset_type: Option<u8>,
+    parameters: Vec<(String, u64)>,
+}
+
+static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Build a collision-free cache key from source content, top module, and options.
+fn build_cache_key(
+    sources: &[(String, std::path::PathBuf)],
+    top: &str,
+    opts: &ParsedOptions,
+) -> CacheKey {
+    let mut sorted_sources: Vec<(String, String)> = sources
+        .iter()
+        .map(|(content, path)| (path.to_string_lossy().into_owned(), content.clone()))
+        .collect();
+    sorted_sources.sort_by(|a, b| a.0.cmp(&b.0));
+
+    CacheKey {
+        sources: sorted_sources,
+        top: top.to_string(),
+        four_state: opts.four_state,
+        optimize: opts.optimize,
+        dead_store_policy: opts.dead_store_policy as u8,
+        clock_type: opts.clock_type.map(|ct| ct as u8),
+        reset_type: opts.reset_type.map(|rt| rt as u8),
+        parameters: opts.parameters.clone(),
+    }
+}
+
+/// Simulator backend state: either a full Simulator or a cached JitBackend.
+enum SimBackend {
+    Full(celox::Simulator),
+    Cached(celox::JitBackend),
+}
+
+impl SimBackend {
+    fn tick_by_id(&mut self, event_id: usize) -> std::result::Result<(), celox::RuntimeErrorCode> {
+        match self {
+            Self::Full(sim) => sim.tick_by_id(event_id),
+            Self::Cached(backend) => {
+                let event = backend.id_to_event_slice()[event_id];
+                backend.eval_comb()?;
+                backend.eval_apply_ff_at(event)?;
+                backend.eval_comb()?;
+                Ok(())
+            }
+        }
+    }
+
+    fn tick_by_id_n(
+        &mut self,
+        event_id: usize,
+        count: u32,
+    ) -> std::result::Result<(), celox::RuntimeErrorCode> {
+        match self {
+            Self::Full(sim) => sim.tick_by_id_n(event_id, count),
+            Self::Cached(backend) => {
+                let event = backend.id_to_event_slice()[event_id];
+                for _ in 0..count {
+                    backend.eval_comb()?;
+                    backend.eval_apply_ff_at(event)?;
+                    backend.eval_comb()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn eval_comb(&mut self) -> std::result::Result<(), celox::RuntimeErrorCode> {
+        match self {
+            Self::Full(sim) => sim.eval_comb(),
+            Self::Cached(backend) => backend.eval_comb().map_err(Into::into),
+        }
+    }
+
+    fn dump(&mut self, timestamp: u64) {
+        if let Self::Full(sim) = self {
+            sim.dump(timestamp);
+        }
+    }
+
+    fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
+        match self {
+            Self::Full(sim) => sim.memory_as_mut_ptr(),
+            Self::Cached(backend) => backend.memory_as_mut_ptr(),
+        }
+    }
+
+    fn stable_region_size(&self) -> usize {
+        match self {
+            Self::Full(sim) => sim.stable_region_size(),
+            Self::Cached(backend) => backend.stable_region_size(),
+        }
+    }
+}
+
+/// Low-level handle wrapping a `celox::Simulator` or a cached JitBackend.
 ///
 /// JS holds this as an opaque class; all operations go through methods.
 #[napi]
 pub struct NativeSimulatorHandle {
-    sim: Option<celox::Simulator>,
+    backend: Option<SimBackend>,
     layout_json: String,
     events_json: String,
     hierarchy_json: String,
@@ -391,6 +521,73 @@ pub struct NativeSimulatorHandle {
 
 #[napi]
 impl NativeSimulatorHandle {
+    /// Build a full simulator, extract metadata, cache the compiled code,
+    /// and return the handle.
+    fn build_and_cache(
+        sim: celox::Simulator,
+        four_state: bool,
+        cache_key: Option<CacheKey>,
+    ) -> Result<Self> {
+        let warnings_json = format_warnings_json(sim.warnings());
+        let signals = sim.named_signals();
+        let events = sim.named_events();
+        let hierarchy = sim.named_hierarchy();
+        let (_, total_size) = sim.memory_as_ptr();
+        let stable_size = sim.stable_region_size();
+
+        let layout_map = build_signal_layout(&signals, four_state);
+        let event_map = build_event_map(&events);
+        let hierarchy_node = build_hierarchy_node(&hierarchy, four_state);
+
+        let layout_json = serde_json::to_string(&layout_map)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize layout: {}", e)))?;
+        let events_json = serde_json::to_string(&event_map)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
+        let hierarchy_json = serde_json::to_string(&hierarchy_node)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
+
+        // Cache the compiled code + metadata for future instances
+        if let Some(key) = cache_key {
+            let cached = Arc::new(CachedBuild {
+                shared_code: sim.shared_code(),
+                layout_json: layout_json.clone(),
+                events_json: events_json.clone(),
+                hierarchy_json: hierarchy_json.clone(),
+                warnings_json: warnings_json.clone(),
+                stable_size: stable_size as u32,
+                total_size: total_size as u32,
+                four_state,
+            });
+            if let Ok(mut cache) = JIT_CACHE.lock() {
+                cache.insert(key, cached);
+            }
+        }
+
+        Ok(Self {
+            backend: Some(SimBackend::Full(sim)),
+            layout_json,
+            events_json,
+            hierarchy_json,
+            warnings_json,
+            stable_size: stable_size as u32,
+            total_size: total_size as u32,
+        })
+    }
+
+    /// Create a handle from a cached build (shared compiled code + fresh memory).
+    fn from_cached(cached: &CachedBuild) -> Self {
+        let backend = celox::JitBackend::from_shared(Arc::clone(&cached.shared_code));
+        Self {
+            backend: Some(SimBackend::Cached(backend)),
+            layout_json: cached.layout_json.clone(),
+            events_json: cached.events_json.clone(),
+            hierarchy_json: cached.hierarchy_json.clone(),
+            warnings_json: cached.warnings_json.clone(),
+            stable_size: cached.stable_size,
+            total_size: cached.total_size,
+        }
+    }
+
     /// Create a new simulator from Veryl source code.
     #[napi(constructor)]
     pub fn new(
@@ -404,6 +601,16 @@ impl NativeSimulatorHandle {
             .map(|s| (s.content, std::path::PathBuf::from(s.path)))
             .collect();
         append_extra_source(&mut src_pairs, &opts.extra_source);
+
+        let cache_key = build_cache_key(&src_pairs, &top, &opts);
+
+        // Check cache
+        if let Ok(cache) = JIT_CACHE.lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(Self::from_cached(cached));
+            }
+        }
+
         let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
@@ -413,33 +620,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        let warnings_json = format_warnings_json(sim.warnings());
-        let signals = sim.named_signals();
-        let events = sim.named_events();
-        let hierarchy = sim.named_hierarchy();
-        let (_, total_size) = sim.memory_as_ptr();
-        let stable_size = sim.stable_region_size();
-
-        let layout_map = build_signal_layout(&signals, opts.four_state);
-        let event_map = build_event_map(&events);
-        let hierarchy_node = build_hierarchy_node(&hierarchy, opts.four_state);
-
-        let layout_json = serde_json::to_string(&layout_map)
-            .map_err(|e| Error::from_reason(format!("Failed to serialize layout: {}", e)))?;
-        let events_json = serde_json::to_string(&event_map)
-            .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
-        let hierarchy_json = serde_json::to_string(&hierarchy_node)
-            .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
-
-        Ok(Self {
-            sim: Some(sim),
-            layout_json,
-            events_json,
-            hierarchy_json,
-            warnings_json,
-            stable_size: stable_size as u32,
-            total_size: total_size as u32,
-        })
+        Self::build_and_cache(sim, opts.four_state, Some(cache_key))
     }
 
     /// Create a new simulator from a Veryl project directory.
@@ -456,6 +637,16 @@ impl NativeSimulatorHandle {
         let opts = parse_options(&options)?;
         let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
         append_extra_source(&mut sources, &opts.extra_source);
+
+        let cache_key = build_cache_key(&sources, &top, &opts);
+
+        // Check cache
+        if let Ok(cache) = JIT_CACHE.lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(Self::from_cached(cached));
+            }
+        }
+
         let source_refs: Vec<(&str, &std::path::Path)> = sources
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
@@ -469,33 +660,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        let warnings_json = format_warnings_json(sim.warnings());
-        let signals = sim.named_signals();
-        let events = sim.named_events();
-        let hierarchy = sim.named_hierarchy();
-        let (_, total_size) = sim.memory_as_ptr();
-        let stable_size = sim.stable_region_size();
-
-        let layout_map = build_signal_layout(&signals, opts.four_state);
-        let event_map = build_event_map(&events);
-        let hierarchy_node = build_hierarchy_node(&hierarchy, opts.four_state);
-
-        let layout_json = serde_json::to_string(&layout_map)
-            .map_err(|e| Error::from_reason(format!("Failed to serialize layout: {}", e)))?;
-        let events_json = serde_json::to_string(&event_map)
-            .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
-        let hierarchy_json = serde_json::to_string(&hierarchy_node)
-            .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
-
-        Ok(Self {
-            sim: Some(sim),
-            layout_json,
-            events_json,
-            hierarchy_json,
-            warnings_json,
-            stable_size: stable_size as u32,
-            total_size: total_size as u32,
-        })
+        Self::build_and_cache(sim, opts.four_state, Some(cache_key))
     }
 
     /// Returns the signal layout as a JSON string.
@@ -537,44 +702,44 @@ impl NativeSimulatorHandle {
     /// Trigger a clock/event by its numeric ID.
     #[napi]
     pub fn tick(&mut self, event_id: u32) -> Result<()> {
-        let sim = self
-            .sim
+        let b = self
+            .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        sim.tick_by_id(event_id as usize)
+        b.tick_by_id(event_id as usize)
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
     /// Trigger a clock/event N times in a single NAPI call.
     #[napi]
     pub fn tick_n(&mut self, event_id: u32, count: u32) -> Result<()> {
-        let sim = self
-            .sim
+        let b = self
+            .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        sim.tick_by_id_n(event_id as usize, count)
+        b.tick_by_id_n(event_id as usize, count)
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
     /// Evaluate combinational logic.
     #[napi]
     pub fn eval_comb(&mut self) -> Result<()> {
-        let sim = self
-            .sim
+        let b = self
+            .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        sim.eval_comb()
+        b.eval_comb()
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
     /// Write VCD dump at the given timestamp.
     #[napi]
     pub fn dump(&mut self, timestamp: f64) -> Result<()> {
-        let sim = self
-            .sim
+        let b = self
+            .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        sim.dump(timestamp as u64);
+        b.dump(timestamp as u64);
         Ok(())
     }
 
@@ -582,19 +747,19 @@ impl NativeSimulatorHandle {
     /// JS can access `.buffer` to get the underlying `ArrayBuffer`.
     #[napi]
     pub fn shared_memory(&mut self) -> Result<Uint8Array> {
-        let sim = self
-            .sim
+        let b = self
+            .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        let (ptr, _) = sim.memory_as_mut_ptr();
-        let stable_size = sim.stable_region_size();
+        let (ptr, _) = b.memory_as_mut_ptr();
+        let stable_size = b.stable_region_size();
         Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, |_, _| {}) })
     }
 
     /// Invalidate this handle (no-op on the Rust side; drop happens via GC).
     #[napi]
     pub fn dispose(&mut self) {
-        self.sim = None;
+        self.backend = None;
     }
 }
 
@@ -892,6 +1057,16 @@ fn format_errors_with_warnings(
     msg
 }
 
+/// Clear the process-global JIT compilation cache.
+///
+/// Call this when source files have changed and cached compiled code may be stale.
+#[napi]
+pub fn clear_jit_cache() {
+    if let Ok(mut cache) = JIT_CACHE.lock() {
+        cache.clear();
+    }
+}
+
 /// Generate TypeScript type information as JSON for a Veryl project.
 ///
 /// Equivalent to running `celox-gen-ts --json` from the given project directory.
@@ -1068,4 +1243,175 @@ pub fn gen_ts(project_path: String) -> Result<String> {
 
     serde_json::to_string(&output)
         .map_err(|e| Error::from_reason(format!("Failed to serialize JSON: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_opts() -> ParsedOptions {
+        ParsedOptions {
+            four_state: false,
+            optimize: None,
+            vcd: None,
+            false_loops: vec![],
+            true_loops: vec![],
+            clock_type: None,
+            reset_type: None,
+            extra_source: None,
+            parameters: vec![],
+            dead_store_policy: celox::DeadStorePolicy::Off,
+        }
+    }
+
+    fn make_sources(pairs: &[(&str, &str)]) -> Vec<(String, std::path::PathBuf)> {
+        pairs
+            .iter()
+            .map(|(content, path)| (content.to_string(), std::path::PathBuf::from(path)))
+            .collect()
+    }
+
+    #[test]
+    fn same_inputs_produce_same_key() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let opts = default_opts();
+        let k1 = build_cache_key(&src, "Top", &opts);
+        let k2 = build_cache_key(&src, "Top", &opts);
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn different_source_content_different_key() {
+        let s1 = make_sources(&[("module A {}", "a.veryl")]);
+        let s2 = make_sources(&[("module B {}", "a.veryl")]);
+        let opts = default_opts();
+        assert_ne!(
+            build_cache_key(&s1, "Top", &opts),
+            build_cache_key(&s2, "Top", &opts),
+        );
+    }
+
+    #[test]
+    fn different_source_path_different_key() {
+        let s1 = make_sources(&[("module A {}", "a.veryl")]);
+        let s2 = make_sources(&[("module A {}", "b.veryl")]);
+        let opts = default_opts();
+        assert_ne!(
+            build_cache_key(&s1, "Top", &opts),
+            build_cache_key(&s2, "Top", &opts),
+        );
+    }
+
+    #[test]
+    fn different_top_different_key() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let opts = default_opts();
+        assert_ne!(
+            build_cache_key(&src, "Top", &opts),
+            build_cache_key(&src, "Other", &opts),
+        );
+    }
+
+    #[test]
+    fn four_state_differs() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        o1.four_state = false;
+        o2.four_state = true;
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1),
+            build_cache_key(&src, "Top", &o2),
+        );
+    }
+
+    #[test]
+    fn optimize_differs() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        o1.optimize = None;
+        o2.optimize = Some(true);
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1),
+            build_cache_key(&src, "Top", &o2),
+        );
+    }
+
+    #[test]
+    fn dead_store_policy_differs() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        o1.dead_store_policy = celox::DeadStorePolicy::Off;
+        o2.dead_store_policy = celox::DeadStorePolicy::PreserveTopPorts;
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1),
+            build_cache_key(&src, "Top", &o2),
+        );
+    }
+
+    #[test]
+    fn clock_type_differs() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        o1.clock_type = None;
+        o2.clock_type = Some(celox::ClockType::NegEdge);
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1),
+            build_cache_key(&src, "Top", &o2),
+        );
+    }
+
+    #[test]
+    fn reset_type_differs() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        o1.reset_type = None;
+        o2.reset_type = Some(celox::ResetType::SyncHigh);
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1),
+            build_cache_key(&src, "Top", &o2),
+        );
+    }
+
+    #[test]
+    fn parameters_differ() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        o1.parameters = vec![("WIDTH".into(), 8)];
+        o2.parameters = vec![("WIDTH".into(), 16)];
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1),
+            build_cache_key(&src, "Top", &o2),
+        );
+    }
+
+    #[test]
+    fn source_order_independent() {
+        let s1 = make_sources(&[("aaa", "a.veryl"), ("bbb", "b.veryl")]);
+        let s2 = make_sources(&[("bbb", "b.veryl"), ("aaa", "a.veryl")]);
+        let opts = default_opts();
+        assert_eq!(
+            build_cache_key(&s1, "Top", &opts),
+            build_cache_key(&s2, "Top", &opts),
+        );
+    }
+
+    #[test]
+    fn non_compilation_options_ignored() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut o1 = default_opts();
+        let mut o2 = default_opts();
+        // VCD path doesn't affect compilation
+        o1.vcd = None;
+        o2.vcd = Some("/tmp/dump.vcd".into());
+        assert_eq!(
+            build_cache_key(&src, "Top", &o1),
+            build_cache_key(&src, "Top", &o2),
+        );
+    }
 }

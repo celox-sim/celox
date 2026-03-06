@@ -1,7 +1,12 @@
 use crate::ir::BitAccess;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "T: Serialize",
+    deserialize = "T: Deserialize<'de>"
+))]
 pub struct RangeStore<T> {
     /// key: lsb (absolute position)
     /// value: (expression, width, origin LSB when this data was originally placed)

@@ -19,6 +19,7 @@ thiserror             = { workspace = true }
 clap                  = { workspace = true }
 miette                = { workspace = true }
 malachite-bigint      = "0.9.1"
+serde                 = { workspace = true }
 num-traits            = { workspace = true }
 bit-set               = { workspace = true }
 itertools             = { workspace = true }
@@ -30,10 +31,10 @@ cranelift-frontend    = "0.128.0"
 cranelift-native      = "0.128.0"
 
 [dev-dependencies]
-insta    = "1.46"
-criterion = "0.5"
-proptest = "1.10"
-test-case = "3"
+insta      = "1.46"
+criterion  = "0.5"
+proptest   = "1.10"
+test-case  = "3"
 
 [[bench]]
 name = "simulation"

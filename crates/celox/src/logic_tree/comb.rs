@@ -1,5 +1,7 @@
 use std::{collections::BTreeSet, fmt, hash::Hash};
 
+use serde::{Deserialize, Serialize};
+
 use crate::ParserError;
 use crate::context_width::get_context_width;
 use crate::logic_tree::range_store::RangeStore;
@@ -25,12 +27,17 @@ use veryl_parser::token_range::TokenRange;
 pub type SymbolicStore<A> = HashMap<VarId, RangeStore<Option<(NodeId, HashSet<VarAtomBase<A>>)>>>;
 pub type BoundaryMap<A> = HashMap<A, BTreeSet<usize>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + std::hash::Hash + Eq + Clone",
+    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
 pub struct SLTNodeArena<A> {
     pub nodes: Vec<SLTNode<A>>,
+    #[serde(skip, default = "crate::HashMap::default")]
     pub cache: crate::HashMap<SLTNode<A>, NodeId>,
 }
 
@@ -214,13 +221,21 @@ impl<A> Default for SLTNodeArena<A> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SLTIndex {
     pub node: NodeId,
     pub stride: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(
+    into = "SLTNodeSerde<A>",
+    from = "SLTNodeSerde<A>",
+    bound(
+        serialize = "A: Serialize + Clone",
+        deserialize = "A: Deserialize<'de>"
+    )
+)]
 pub enum SLTNode<A> {
     Input {
         variable: A,
@@ -242,6 +257,86 @@ pub enum SLTNode<A> {
         expr: NodeId,
         access: BitAccess,
     },
+}
+
+/// Serde-friendly mirror of [`SLTNode`] that replaces [`BigUint`] with `Vec<u8>` (little-endian).
+#[derive(Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize",
+    deserialize = "A: Deserialize<'de>"
+))]
+enum SLTNodeSerde<A> {
+    Input {
+        variable: A,
+        index: Vec<SLTIndex>,
+        access: BitAccess,
+    },
+    Constant {
+        payload: Vec<u8>,
+        mask: Vec<u8>,
+        width: usize,
+        signed: bool,
+    },
+    Binary(NodeId, BinaryOp, NodeId),
+    Unary(UnaryOp, NodeId),
+    Mux {
+        cond: NodeId,
+        then_expr: NodeId,
+        else_expr: NodeId,
+    },
+    Concat(Vec<(NodeId, usize)>),
+    Slice {
+        expr: NodeId,
+        access: BitAccess,
+    },
+}
+
+impl<A> From<SLTNode<A>> for SLTNodeSerde<A> {
+    fn from(node: SLTNode<A>) -> Self {
+        match node {
+            SLTNode::Input { variable, index, access } => {
+                SLTNodeSerde::Input { variable, index, access }
+            }
+            SLTNode::Constant(payload, mask, width, signed) => SLTNodeSerde::Constant {
+                payload: payload.to_bytes_le(),
+                mask: mask.to_bytes_le(),
+                width,
+                signed,
+            },
+            SLTNode::Binary(a, op, b) => SLTNodeSerde::Binary(a, op, b),
+            SLTNode::Unary(op, a) => SLTNodeSerde::Unary(op, a),
+            SLTNode::Mux { cond, then_expr, else_expr } => {
+                SLTNodeSerde::Mux { cond, then_expr, else_expr }
+            }
+            SLTNode::Concat(parts) => SLTNodeSerde::Concat(parts),
+            SLTNode::Slice { expr, access } => SLTNodeSerde::Slice { expr, access },
+        }
+    }
+}
+
+impl<A> From<SLTNodeSerde<A>> for SLTNode<A> {
+    fn from(node: SLTNodeSerde<A>) -> Self {
+        match node {
+            SLTNodeSerde::Input { variable, index, access } => {
+                SLTNode::Input { variable, index, access }
+            }
+            SLTNodeSerde::Constant { payload, mask, width, signed } => {
+                SLTNode::Constant(
+                    BigUint::from_bytes_le(&payload),
+                    BigUint::from_bytes_le(&mask),
+                    width,
+                    signed,
+                )
+            }
+            SLTNodeSerde::Binary(a, op, b) => SLTNode::Binary(a, op, b),
+            SLTNodeSerde::Unary(op, a) => SLTNode::Unary(op, a),
+            SLTNodeSerde::Mux { cond, then_expr, else_expr } => {
+                SLTNode::Mux { cond, then_expr, else_expr }
+            }
+            SLTNodeSerde::Concat(parts) => SLTNode::Concat(parts),
+            SLTNodeSerde::Slice { expr, access } => SLTNode::Slice { expr, access },
+        }
+    }
 }
 impl<A> SLTNode<A> {
     /// Maps the address type A to B recursively throughout the tree.
@@ -477,7 +572,11 @@ impl<A: fmt::Debug> SLTNode<A> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + std::hash::Hash + Eq",
+    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
 pub struct LogicPath<A: Hash + Eq + Clone> {
     pub target: VarAtomBase<A>,
     pub sources: HashSet<VarAtomBase<A>>,

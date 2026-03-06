@@ -79,7 +79,7 @@ impl Simulation {
         let mut domain_kinds = vec![None; num_events];
         for (_, id, _) in topo_signals.iter().copied() {
             if id != usize::MAX {
-                let addr = simulator.backend.id_to_addr[id];
+                let addr = simulator.backend.id_to_addr_slice()[id];
                 if let Some(info) = simulator.program.get_variable_info(&addr) {
                     domain_kinds[id] = Some(info.kind);
                 }
@@ -107,7 +107,7 @@ impl Simulation {
             num_events
         ];
         for (id, info) in event_info.iter_mut().enumerate() {
-            let addr = simulator.backend.id_to_addr[id];
+            let addr = simulator.backend.id_to_addr_slice()[id];
             let canonical = simulator
                 .program
                 .clock_domains
@@ -467,7 +467,7 @@ impl Simulation {
 
     /// Register a clock signal by event ID.
     pub fn add_clock_by_id(&mut self, event_id: u32, period: u64, initial_delay: u64) {
-        let addr = self.simulator.backend.id_to_addr[event_id as usize];
+        let addr = self.simulator.backend.id_to_addr_slice()[event_id as usize];
         let signal = self.simulator.backend.resolve_signal(&addr);
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
             if ev.id >= self.scheduler.clocks.len() {
@@ -490,7 +490,7 @@ impl Simulation {
         time: u64,
         value: u64,
     ) -> Result<(), RuntimeErrorCode> {
-        let addr = self.simulator.backend.id_to_addr[event_id as usize];
+        let addr = self.simulator.backend.id_to_addr_slice()[event_id as usize];
         let signal = self.simulator.backend.resolve_signal(&addr);
         let ev_opt = self.simulator.backend.resolve_event_opt(&addr);
         if let Some(ev) = ev_opt {

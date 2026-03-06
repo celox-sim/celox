@@ -4,11 +4,11 @@
 //! self-contained identifiers backed by a [`StringTable`], enabling
 //! serialization and caching of SLT/SIR without analyzer dependencies.
 //!
-//! When `serde` is added as a dependency, add `Serialize`/`Deserialize`
-//! derives and `#[serde(skip)]` on `StringTable::lookup`.
+//! All portable types derive `Serialize`/`Deserialize` for caching.
 
 #![allow(dead_code, unused_imports)]
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -29,9 +29,10 @@ use crate::logic_tree::{LogicPath, NodeId, SLTNodeArena};
 /// Strings are interned once and referred to by [`StrIdx`] elsewhere in the
 /// portable IR.  The lookup map must be rebuilt after deserialization via
 /// [`rebuild_lookup`](StringTable::rebuild_lookup).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StringTable {
     strings: Vec<String>,
+    #[serde(skip, default = "HashMap::default")]
     lookup: HashMap<String, u32>,
 }
 
@@ -87,7 +88,7 @@ impl Default for StringTable {
 // ---------------------------------------------------------------------------
 
 /// A lightweight handle into a [`StringTable`].
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StrIdx(pub u32);
 
 impl fmt::Debug for StrIdx {
@@ -106,7 +107,7 @@ impl fmt::Display for StrIdx {
 // PortableVarKind — mirrors VarKind without analyzer dependency
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PortableVarKind {
     Param,
     Const,
@@ -147,7 +148,7 @@ impl fmt::Display for PortableVarKind {
 
 /// Stripped-down variable descriptor carrying only what the SLT/SIR pipeline
 /// needs, with no references to analyzer-internal types.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortableVariable {
     /// Fully qualified path, interned in the StringTable.
     pub path: StrIdx,
@@ -206,7 +207,7 @@ use crate::ir::ExecutionUnit;
 pub type PortableSymbolicStore =
     HashMap<StrIdx, RangeStore<Option<(NodeId, HashSet<VarAtomBase<StrIdx>>)>>>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortableSimModule {
     pub name: StrIdx,
     pub variables: HashMap<StrIdx, PortableVariable>,
@@ -600,6 +601,56 @@ impl PortableConversion {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PortableIrCache — serializable cache payload for parsed SLT/SIR
+// ---------------------------------------------------------------------------
+
+/// A fully self-contained, serializable snapshot of parsed module IR.
+///
+/// Contains everything needed to reconstruct the SLT/SIR representation
+/// without re-running the Veryl analyzer or module parser.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PortableIrCache {
+    pub string_table: StringTable,
+    pub modules: HashMap<ModuleId, PortableSimModule>,
+    pub module_names: HashMap<ModuleId, StrIdx>,
+    pub root_id: ModuleId,
+}
+
+impl PortableIrCache {
+    /// Build a cache payload from `parse_ir` results.
+    pub fn from_parse_result(
+        modules: &HashMap<ModuleId, crate::ir::SimModule>,
+        module_names: &HashMap<ModuleId, veryl_parser::resource_table::StrId>,
+        root_id: ModuleId,
+    ) -> Self {
+        let mut conv = PortableConversion::new();
+        conv.intern_all_modules(modules);
+
+        let portable_modules = modules
+            .iter()
+            .map(|(&mid, sim)| (mid, conv.convert_sim_module(sim)))
+            .collect();
+
+        let portable_names = module_names
+            .iter()
+            .map(|(&mid, &str_id)| (mid, conv.intern_str_id_readonly(str_id)))
+            .collect();
+
+        PortableIrCache {
+            string_table: conv.string_table,
+            modules: portable_modules,
+            module_names: portable_names,
+            root_id,
+        }
+    }
+
+    /// Call after deserialization to rebuild the string table's lookup map.
+    pub fn rebuild_lookup(&mut self) {
+        self.string_table.rebuild_lookup();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,5 +864,60 @@ mod tests {
         // Re-intern should return same index
         let idx2 = table.intern("test");
         assert_eq!(idx, idx2);
+    }
+
+    /// Minimal binary round-trip using serde's Serialize/Deserialize impls
+    /// without depending on an external crate.  We just verify that the
+    /// derive compiles and the types satisfy the trait bounds.
+    #[test]
+    fn serde_impls_exist() {
+        fn assert_serde<T: Serialize + for<'de> Deserialize<'de>>() {}
+        assert_serde::<PortableSimModule>();
+        assert_serde::<PortableIrCache>();
+        assert_serde::<StringTable>();
+    }
+
+    #[test]
+    fn portable_ir_cache_from_parse_result() {
+        let code = r#"
+            module Top (
+                clk: input '_ clock,
+                rst: input '_ reset,
+                a: input logic<8>,
+                b: input logic<8>,
+                out: output logic<8>,
+            ) {
+                var r_val: logic<8>;
+                always_ff (clk, rst) {
+                    if_reset {
+                        r_val = '0;
+                    } else {
+                        r_val = a;
+                    }
+                }
+                always_comb {
+                    out = r_val + b;
+                }
+            }
+        "#;
+        let modules = parse_modules(code);
+        let module_names: HashMap<ModuleId, veryl_parser::resource_table::StrId> = modules
+            .iter()
+            .map(|(&mid, m)| (mid, m.name))
+            .collect();
+        let root_id = *modules.keys().next().unwrap();
+
+        let cache = PortableIrCache::from_parse_result(&modules, &module_names, root_id);
+
+        assert_eq!(cache.modules.len(), modules.len());
+        assert_eq!(cache.root_id, root_id);
+        assert!(!cache.string_table.is_empty());
+
+        // Verify the portable module has same structure
+        let (_, sim_module) = modules.iter().next().unwrap();
+        let portable = &cache.modules[&root_id];
+        assert_eq!(portable.variables.len(), sim_module.variables.len());
+        assert_eq!(portable.comb_blocks.len(), sim_module.comb_blocks.len());
+        assert_eq!(portable.arena.nodes.len(), sim_module.arena.nodes.len());
     }
 }

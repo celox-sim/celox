@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use crate::{
     EventRef, IOContext, RuntimeErrorCode,
-    backend::{JitBackend, MemoryLayout},
+    backend::{JitBackend, MemoryLayout, SharedJitCode},
     ir::{InstancePath, Program, SignalRef, VariableInfo},
 };
 use malachite_bigint::BigUint;
@@ -80,6 +82,12 @@ impl Simulator {
             dirty: false,
             warnings,
         }
+    }
+
+    /// Returns the shared compiled JIT code, allowing it to be reused
+    /// for creating additional simulator instances without recompilation.
+    pub fn shared_code(&self) -> Arc<SharedJitCode> {
+        self.backend.shared_code()
     }
 
     /// Returns analyzer warnings emitted during compilation.
@@ -288,7 +296,7 @@ impl Simulator {
     /// Returns all events (clock/reset signals) with their IDs and event references.
     pub fn named_events(&self) -> Vec<NamedEvent> {
         let mut result = Vec::new();
-        for (id, addr) in self.backend.id_to_addr.iter().enumerate() {
+        for (id, addr) in self.backend.id_to_addr_slice().iter().enumerate() {
             let name = self.program.get_path(addr);
             if let Some(ev) = self.backend.resolve_event_opt(addr) {
                 result.push(NamedEvent {
@@ -303,14 +311,14 @@ impl Simulator {
 
     /// Triggers a clock/event by its numeric ID.
     pub fn tick_by_id(&mut self, event_id: usize) -> Result<(), RuntimeErrorCode> {
-        let event = self.backend.id_to_event[event_id];
+        let event = self.backend.id_to_event_slice()[event_id];
         self.tick(event)
     }
 
     /// Triggers a clock/event N times by its numeric ID.
     /// Avoids repeated cross-boundary calls when used from FFI.
     pub fn tick_by_id_n(&mut self, event_id: usize, count: u32) -> Result<(), RuntimeErrorCode> {
-        let event = self.backend.id_to_event[event_id];
+        let event = self.backend.id_to_event_slice()[event_id];
         for _ in 0..count {
             self.tick(event)?;
         }

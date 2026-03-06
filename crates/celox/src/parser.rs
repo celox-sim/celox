@@ -263,6 +263,18 @@ pub struct ParseIrResult<'a> {
     pub root_id: ModuleId,
 }
 
+impl ParseIrResult<'_> {
+    /// Build a portable, serializable cache of the parsed IR.
+    #[allow(dead_code)]
+    pub fn to_cache(&self) -> crate::portable::PortableIrCache {
+        crate::portable::PortableIrCache::from_parse_result(
+            &self.modules,
+            &self.module_names,
+            self.root_id,
+        )
+    }
+}
+
 pub fn parse_ir<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
     config: &BuildConfig,
