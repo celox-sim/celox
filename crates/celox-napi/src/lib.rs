@@ -500,7 +500,7 @@ impl SimBackend {
     fn eval_comb(&mut self) -> std::result::Result<(), celox::RuntimeErrorCode> {
         match self {
             Self::Full(sim) => sim.eval_comb(),
-            Self::Cached(backend) => backend.eval_comb().map_err(Into::into),
+            Self::Cached(backend) => backend.eval_comb(),
         }
     }
 
