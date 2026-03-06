@@ -3,8 +3,8 @@ pre-push:
   commands:
     clean-tree:
       priority: 0
-      run: git diff --quiet && git diff --cached --quiet
-      fail_text: "Push rejected: uncommitted changes exist. Commit or stash them first."
+      run: git diff --quiet && git diff --cached --quiet && test -z "$(git ls-files --others --exclude-standard)"
+      fail_text: "Push rejected: uncommitted or untracked changes exist. Commit, stash, or .gitignore them first."
     submodule-check:
       priority: 1
       run: bash scripts/check-submodules.sh
