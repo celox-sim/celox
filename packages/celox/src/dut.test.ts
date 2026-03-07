@@ -991,7 +991,7 @@ describe("createDut — array ports", () => {
 		// Set element 1 to a defined value first
 		dut.data.set(1, 0x42n);
 		expect(view.getUint8(1)).toBe(0x42); // value[1]
-		expect(view.getUint8(5)).toBe(0);    // mask[1] cleared
+		expect(view.getUint8(5)).toBe(0); // mask[1] cleared
 
 		// Set element 0 to X — must NOT corrupt element 1's value
 		dut.data.set(0, X);
@@ -1044,7 +1044,7 @@ describe("createDut — array ports", () => {
 		expect(view.getUint32(4, true)).toBe(0xcafebabe); // value[1]
 
 		// Masks at bytes 8-15
-		expect(view.getUint32(8, true)).toBe(0);  // mask[0]
+		expect(view.getUint32(8, true)).toBe(0); // mask[0]
 		expect(view.getUint32(12, true)).toBe(0); // mask[1]
 
 		// Read back
@@ -1053,10 +1053,10 @@ describe("createDut — array ports", () => {
 
 		// Set element 0 to X, verify element 1 is not corrupted
 		dut.data.set(0, X);
-		expect(view.getUint32(0, true)).toBe(0xffffffff);  // value[0] = X
-		expect(view.getUint32(8, true)).toBe(0xffffffff);  // mask[0] = X
-		expect(view.getUint32(4, true)).toBe(0xcafebabe);  // value[1] preserved
-		expect(view.getUint32(12, true)).toBe(0);           // mask[1] unchanged
+		expect(view.getUint32(0, true)).toBe(0xffffffff); // value[0] = X
+		expect(view.getUint32(8, true)).toBe(0xffffffff); // mask[0] = X
+		expect(view.getUint32(4, true)).toBe(0xcafebabe); // value[1] preserved
+		expect(view.getUint32(12, true)).toBe(0); // mask[1] unchanged
 	});
 });
 

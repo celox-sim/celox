@@ -108,7 +108,10 @@ fn shared_code_sequential_logic() {
     // Verify layouts are identical between shared codes.
     let shared2 = sim2.shared_code();
     assert_eq!(shared.layout().total_size, shared2.layout().total_size);
-    assert_eq!(shared.layout().merged_total_size, shared2.layout().merged_total_size);
+    assert_eq!(
+        shared.layout().merged_total_size,
+        shared2.layout().merged_total_size
+    );
 }
 
 /// Memory isolation: writing to one backend does not affect another.

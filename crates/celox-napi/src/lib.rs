@@ -640,7 +640,11 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache(sim, opts.four_state, if use_cache { Some(cache_key) } else { None })
+        Self::build_and_cache(
+            sim,
+            opts.four_state,
+            if use_cache { Some(cache_key) } else { None },
+        )
     }
 
     /// Create a new simulator from a Veryl project directory.
@@ -681,7 +685,11 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache(sim, opts.four_state, if use_cache { Some(cache_key) } else { None })
+        Self::build_and_cache(
+            sim,
+            opts.four_state,
+            if use_cache { Some(cache_key) } else { None },
+        )
     }
 
     /// Returns the signal layout as a JSON string.
@@ -1441,10 +1449,7 @@ mod tests {
         let mut o1 = default_opts();
         let mut o2 = default_opts();
         o1.false_loops = vec![];
-        o2.false_loops = vec![(
-            (vec![], vec!["a".into()]),
-            (vec![], vec!["b".into()]),
-        )];
+        o2.false_loops = vec![((vec![], vec!["a".into()]), (vec![], vec!["b".into()]))];
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
@@ -1457,11 +1462,7 @@ mod tests {
         let mut o1 = default_opts();
         let mut o2 = default_opts();
         o1.true_loops = vec![];
-        o2.true_loops = vec![(
-            (vec![], vec!["x".into()]),
-            (vec![], vec!["y".into()]),
-            4,
-        )];
+        o2.true_loops = vec![((vec![], vec!["x".into()]), (vec![], vec!["y".into()]), 4)];
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),

@@ -261,10 +261,7 @@ pub enum SLTNode<A> {
 
 /// Serde-friendly mirror of [`SLTNode`] that replaces [`BigUint`] with `Vec<u8>` (little-endian).
 #[derive(Serialize, Deserialize)]
-#[serde(bound(
-    serialize = "A: Serialize",
-    deserialize = "A: Deserialize<'de>"
-))]
+#[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
 enum SLTNodeSerde<A> {
     Input {
         variable: A,
@@ -294,9 +291,15 @@ enum SLTNodeSerde<A> {
 impl<A> From<SLTNode<A>> for SLTNodeSerde<A> {
     fn from(node: SLTNode<A>) -> Self {
         match node {
-            SLTNode::Input { variable, index, access } => {
-                SLTNodeSerde::Input { variable, index, access }
-            }
+            SLTNode::Input {
+                variable,
+                index,
+                access,
+            } => SLTNodeSerde::Input {
+                variable,
+                index,
+                access,
+            },
             SLTNode::Constant(payload, mask, width, signed) => SLTNodeSerde::Constant {
                 payload: payload.to_bytes_le(),
                 mask: mask.to_bytes_le(),
@@ -305,9 +308,15 @@ impl<A> From<SLTNode<A>> for SLTNodeSerde<A> {
             },
             SLTNode::Binary(a, op, b) => SLTNodeSerde::Binary(a, op, b),
             SLTNode::Unary(op, a) => SLTNodeSerde::Unary(op, a),
-            SLTNode::Mux { cond, then_expr, else_expr } => {
-                SLTNodeSerde::Mux { cond, then_expr, else_expr }
-            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => SLTNodeSerde::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            },
             SLTNode::Concat(parts) => SLTNodeSerde::Concat(parts),
             SLTNode::Slice { expr, access } => SLTNodeSerde::Slice { expr, access },
         }
@@ -317,22 +326,37 @@ impl<A> From<SLTNode<A>> for SLTNodeSerde<A> {
 impl<A> From<SLTNodeSerde<A>> for SLTNode<A> {
     fn from(node: SLTNodeSerde<A>) -> Self {
         match node {
-            SLTNodeSerde::Input { variable, index, access } => {
-                SLTNode::Input { variable, index, access }
-            }
-            SLTNodeSerde::Constant { payload, mask, width, signed } => {
-                SLTNode::Constant(
-                    BigUint::from_bytes_le(&payload),
-                    BigUint::from_bytes_le(&mask),
-                    width,
-                    signed,
-                )
-            }
+            SLTNodeSerde::Input {
+                variable,
+                index,
+                access,
+            } => SLTNode::Input {
+                variable,
+                index,
+                access,
+            },
+            SLTNodeSerde::Constant {
+                payload,
+                mask,
+                width,
+                signed,
+            } => SLTNode::Constant(
+                BigUint::from_bytes_le(&payload),
+                BigUint::from_bytes_le(&mask),
+                width,
+                signed,
+            ),
             SLTNodeSerde::Binary(a, op, b) => SLTNode::Binary(a, op, b),
             SLTNodeSerde::Unary(op, a) => SLTNode::Unary(op, a),
-            SLTNodeSerde::Mux { cond, then_expr, else_expr } => {
-                SLTNode::Mux { cond, then_expr, else_expr }
-            }
+            SLTNodeSerde::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            },
             SLTNodeSerde::Concat(parts) => SLTNode::Concat(parts),
             SLTNodeSerde::Slice { expr, access } => SLTNode::Slice { expr, access },
         }

@@ -281,7 +281,10 @@ use veryl_parser::resource_table::StrId;
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub usize);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound(serialize = "V: Serialize", deserialize = "V: Deserialize<'de> + std::hash::Hash + Eq + Clone"))]
+#[serde(bound(
+    serialize = "V: Serialize",
+    deserialize = "V: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
 pub struct GlueBlockBase<V: std::hash::Hash + Eq + Clone> {
     pub module_id: ModuleId,
     pub input_ports: Vec<(Vec<V>, LogicPath<GlueAddrBase<V>>)>,

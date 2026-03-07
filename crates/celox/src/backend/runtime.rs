@@ -674,8 +674,7 @@ impl JitBackend {
     /// Clears the triggered bits bitset in JIT memory.
     pub fn clear_triggered_bits(&mut self) {
         let base_ptr = self.memory.as_mut_ptr() as *mut u8;
-        let triggered_bits_ptr =
-            unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
+        let triggered_bits_ptr = unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
         let total_size = self.shared.layout.triggered_bits_total_size;
         unsafe {
             std::ptr::write_bytes(triggered_bits_ptr, 0, total_size);
@@ -687,8 +686,7 @@ impl JitBackend {
         let byte_idx = id / 8;
         let bit_idx = id % 8;
         let base_ptr = self.memory.as_mut_ptr() as *mut u8;
-        let triggered_bits_ptr =
-            unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
+        let triggered_bits_ptr = unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
         unsafe {
             let byte_ptr = triggered_bits_ptr.add(byte_idx);
             *byte_ptr |= 1 << bit_idx;
@@ -699,8 +697,7 @@ impl JitBackend {
     pub fn get_triggered_bits(&self) -> bit_set::BitSet {
         let mut bits = bit_set::BitSet::with_capacity(self.num_events());
         let base_ptr = self.memory.as_ptr() as *const u8;
-        let triggered_bits_ptr =
-            unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
+        let triggered_bits_ptr = unsafe { base_ptr.add(self.shared.layout.triggered_bits_offset) };
         let total_size = self.shared.layout.triggered_bits_total_size;
 
         for i in 0..total_size {
