@@ -795,8 +795,7 @@ impl NativeSimulationHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let mut builder =
-            apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
+        let mut builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
         if let Some(path) = &opts.vcd {
             builder = builder.vcd(path);
         }
