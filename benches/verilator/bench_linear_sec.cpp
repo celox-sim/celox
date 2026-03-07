@@ -4,14 +4,14 @@
  */
 
 #include <benchmark/benchmark.h>
-#include "VLinearSecTop.h"
+#include "VTop.h"
 #include "verilated.h"
 #include <chrono>
 #include <cstdint>
 
 // --- simulation_eval_linear_sec_p6_x1 ---
 static void BM_simulation_eval_x1(benchmark::State &state) {
-    VLinearSecTop top;
+    VTop top;
     uint64_t input = 0;
     for (uint64_t i = 0; i < 100000; i++) { top.i_word = i; top.eval(); }  // warm up
     for (auto _ : state) {
@@ -26,7 +26,7 @@ BENCHMARK(BM_simulation_eval_x1)
 
 // --- simulation_eval_linear_sec_p6_x1000000 ---
 static void BM_simulation_eval_x1000000(benchmark::State &state) {
-    VLinearSecTop top;
+    VTop top;
     uint64_t input = 0;
     for (auto _ : state) {
         volatile uint64_t sink = 0;
@@ -48,7 +48,7 @@ BENCHMARK(BM_simulation_eval_x1000000)
 
 // --- testbench_eval_linear_sec_p6_x1000000 ---
 static void BM_testbench_eval_x1000000(benchmark::State &state) {
-    VLinearSecTop top;
+    VTop top;
     uint64_t input = 0;
     for (auto _ : state) {
         volatile uint8_t sink = 0;

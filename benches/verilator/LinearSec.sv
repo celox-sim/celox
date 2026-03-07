@@ -93,7 +93,7 @@ module linear_sec_decoder #(
     end
 endmodule
 
-module LinearSecTop #(
+module Top #(
     parameter  int unsigned P = 6           ,
     localparam int unsigned K = (1 << P) - 1,
     localparam int unsigned N = K - P   
@@ -104,13 +104,13 @@ module LinearSecTop #(
     output var logic         o_corrected
 );
     linear_sec_encoder #(
-        .P          (P         )
+        .P (P)
     ) u_enc (
         .i_word     (i_word    ),
         .o_codeword (o_codeword)
     );
     linear_sec_decoder #(
-        .P           (P          )
+        .P (P)
     ) u_dec (
         .i_codeword  (o_codeword ),
         .o_word      (o_word     ),

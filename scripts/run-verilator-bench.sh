@@ -35,7 +35,7 @@ cargo run -p celox-bench-sv --release 2>/dev/null
 run_bench simulation_build_top_n1000      Top          Top.sv       bench_main.cpp
 
 # ── LinearSec benchmark (P=6: 57-bit data, 63-bit codeword) ──
-run_bench simulation_build_linear_sec_p6  LinearSecTop LinearSec.sv bench_linear_sec.cpp
+run_bench simulation_build_linear_sec_p6  Top          LinearSec.sv bench_linear_sec.cpp
 
 # ── Countones benchmark (W=64) ──
 run_bench simulation_build_countones_w64  Top          Countones.sv bench_countones.cpp

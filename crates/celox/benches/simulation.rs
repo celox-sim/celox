@@ -1,130 +1,36 @@
 use celox::{DeadStorePolicy, Simulator};
 use criterion::{Criterion, criterion_group, criterion_main};
 
+// Wrapper modules are shared with celox-bench-sv (Verilator SV generation)
+// via benches/veryl/*.veryl to guarantee identical circuits.
+
+const CODE: &str = include_str!("../../../benches/veryl/top_n1000.veryl");
+
 // P=6: K=63-bit codeword, N=57-bit data
 const LINEAR_SEC_SRC: &str = concat!(
     include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_encoder.veryl"),
     include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_decoder.veryl"),
-    r#"
-module Top #(
-    param P: u32 = 6,
-    const K: u32 = (1 << P) - 1,
-    const N: u32 = K - P,
-)(
-    i_word     : input  logic<N>,
-    o_codeword : output logic<K>,
-    o_word     : output logic<N>,
-    o_corrected: output logic,
-) {
-    inst u_enc: linear_sec_encoder #(
-        P: P,
-    ) (
-        i_word,
-        o_codeword,
-    );
-    inst u_dec: linear_sec_decoder #(
-        P: P,
-    ) (
-        i_codeword: o_codeword,
-        o_word,
-        o_corrected,
-    );
-}
-"#
+    include_str!("../../../benches/veryl/linear_sec_top.veryl"),
 );
-
-const CODE: &str = r#"
-    module Top #(
-        param N: u32 = 1000,
-    )(
-        clk: input clock,
-        rst: input reset,
-        cnt: output logic<32>[N],
-        cnt0: output logic<32>,
-    ) {
-        assign cnt0 = cnt[0];
-        for i in 0..N: g {
-            always_ff (clk, rst) {
-                if_reset {
-                    cnt[i] = 0;
-                } else {
-                    cnt[i] += 1;
-                }
-            }
-        }
-    }
-    "#;
 
 // std::countones W=64: recursive combinational popcount tree
-// CLOGW = $clog2(64) + 1 = 7 bits
 const COUNTONES_SRC: &str = concat!(
     include_str!("../../../deps/veryl/crates/std/veryl/src/countones/countones.veryl"),
-    r#"
-module Top (
-    i_data: input  logic<64>,
-    o_ones: output logic<7>,
-) {
-    inst u: countones #(W: 64) (
-        i_data,
-        o_ones,
-    );
-}
-"#
+    include_str!("../../../benches/veryl/countones_top.veryl"),
 );
 
-// std::counter WIDTH=32: compare against the N=1000 inline counter above
+// std::counter WIDTH=32
 const STD_COUNTER_SRC: &str = concat!(
     include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
-    r#"
-module Top (
-    clk    : input  clock,
-    rst    : input  reset,
-    i_up   : input  logic,
-    o_count: output logic<32>,
-) {
-    inst u: counter #(WIDTH: 32) (
-        i_clk       : clk,
-        i_rst       : rst,
-        i_clear     : 1'b0,
-        i_set       : 1'b0,
-        i_set_value : 32'b0,
-        i_up,
-        i_down      : 1'b0,
-        o_count,
-        o_count_next: _,
-        o_wrap_around: _,
-    );
-}
-"#
+    include_str!("../../../benches/veryl/std_counter_top.veryl"),
 );
 
-// std::gray_counter WIDTH=32: sequential Gray-encoded counter
-// Exercises counter + gray_encoder together
+// std::gray_counter WIDTH=32
 const GRAY_COUNTER_SRC: &str = concat!(
     include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
     include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_encoder.veryl"),
     include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_counter.veryl"),
-    r#"
-module Top (
-    clk    : input  clock,
-    rst    : input  reset,
-    i_up   : input  logic,
-    o_count: output logic<32>,
-) {
-    inst u: gray_counter #(WIDTH: 32) (
-        i_clk       : clk,
-        i_rst       : rst,
-        i_clear     : 1'b0,
-        i_set       : 1'b0,
-        i_set_value : 32'b0,
-        i_up,
-        i_down      : 1'b0,
-        o_count,
-        o_count_next: _,
-        o_wrap_around: _,
-    );
-}
-"#
+    include_str!("../../../benches/veryl/gray_counter_top.veryl"),
 );
 
 fn benchmark_counter(c: &mut Criterion) {

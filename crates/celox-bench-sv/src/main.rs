@@ -111,28 +111,12 @@ fn main() {
     let veryl_std = project_root.join("deps/veryl/crates/std/veryl/src");
     let out_dir = project_root.join("benches/verilator");
 
+    // Wrapper modules are shared with the Celox Rust benchmarks
+    // (crates/celox/benches/simulation.rs) via benches/veryl/*.veryl
+    // to guarantee identical circuits.
+
     // --- Top (N=1000 parallel 32-bit counters) ---
-    let top_code = r#"
-module Top #(
-    param N: u32 = 1000,
-)(
-    clk: input clock,
-    rst: input reset,
-    cnt: output logic<32>[N],
-    cnt0: output logic<32>,
-) {
-    assign cnt0 = cnt[0];
-    for i in 0..N: g {
-        always_ff (clk, rst) {
-            if_reset {
-                cnt[i] = 0;
-            } else {
-                cnt[i] += 1;
-            }
-        }
-    }
-}
-"#;
+    let top_code = include_str!("../../../benches/veryl/top_n1000.veryl");
     let sv = strip_sourcemap(&emit_sv(top_code));
     std::fs::write(out_dir.join("Top.sv"), &sv).unwrap();
     println!("Wrote Top.sv ({} bytes)", sv.len());
@@ -142,28 +126,7 @@ module Top #(
         "{}\n{}\n{}",
         read_veryl(&veryl_std, &["coding", "linear_sec_encoder.veryl"]),
         read_veryl(&veryl_std, &["coding", "linear_sec_decoder.veryl"]),
-        r#"
-module LinearSecTop #(
-    param P: u32 = 6,
-    const K: u32 = (1 << P) - 1,
-    const N: u32 = K - P,
-)(
-    i_word     : input  logic<N>,
-    o_codeword : output logic<K>,
-    o_word     : output logic<N>,
-    o_corrected: output logic,
-) {
-    inst u_enc: linear_sec_encoder #(P: P) (
-        i_word,
-        o_codeword,
-    );
-    inst u_dec: linear_sec_decoder #(P: P) (
-        i_codeword: o_codeword,
-        o_word,
-        o_corrected,
-    );
-}
-"#
+        include_str!("../../../benches/veryl/linear_sec_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&linear_sec_code));
     std::fs::write(out_dir.join("LinearSec.sv"), &sv).unwrap();
@@ -173,14 +136,7 @@ module LinearSecTop #(
     let countones_code = format!(
         "{}\n{}",
         read_veryl(&veryl_std, &["countones", "countones.veryl"]),
-        r#"
-module Top (
-    i_data: input  logic<64>,
-    o_ones: output logic<7>,
-) {
-    inst u: countones #(W: 64) (i_data, o_ones);
-}
-"#
+        include_str!("../../../benches/veryl/countones_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&countones_code));
     std::fs::write(out_dir.join("Countones.sv"), &sv).unwrap();
@@ -190,27 +146,7 @@ module Top (
     let std_counter_code = format!(
         "{}\n{}",
         read_veryl(&veryl_std, &["counter", "counter.veryl"]),
-        r#"
-module Top (
-    clk    : input  clock,
-    rst    : input  reset,
-    i_up   : input  logic,
-    o_count: output logic<32>,
-) {
-    inst u: counter #(WIDTH: 32) (
-        i_clk       : clk,
-        i_rst       : rst,
-        i_clear     : 1'b0,
-        i_set       : 1'b0,
-        i_set_value : 32'b0,
-        i_up,
-        i_down      : 1'b0,
-        o_count,
-        o_count_next: _,
-        o_wrap_around: _,
-    );
-}
-"#
+        include_str!("../../../benches/veryl/std_counter_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&std_counter_code));
     std::fs::write(out_dir.join("StdCounter.sv"), &sv).unwrap();
@@ -222,27 +158,7 @@ module Top (
         read_veryl(&veryl_std, &["counter", "counter.veryl"]),
         read_veryl(&veryl_std, &["gray", "gray_encoder.veryl"]),
         read_veryl(&veryl_std, &["gray", "gray_counter.veryl"]),
-        r#"
-module Top (
-    clk    : input  clock,
-    rst    : input  reset,
-    i_up   : input  logic,
-    o_count: output logic<32>,
-) {
-    inst u: gray_counter #(WIDTH: 32) (
-        i_clk       : clk,
-        i_rst       : rst,
-        i_clear     : 1'b0,
-        i_set       : 1'b0,
-        i_set_value : 32'b0,
-        i_up,
-        i_down      : 1'b0,
-        o_count,
-        o_count_next: _,
-        o_wrap_around: _,
-    );
-}
-"#
+        include_str!("../../../benches/veryl/gray_counter_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&gray_counter_code));
     std::fs::write(out_dir.join("GrayCounter.sv"), &sv).unwrap();
