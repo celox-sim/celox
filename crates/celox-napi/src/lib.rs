@@ -732,7 +732,7 @@ impl NativeSimulatorHandle {
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         if let Some(ref mut writer) = self.vcd_writer {
             let (ptr, size) = b.memory_as_ptr();
-            let memory = unsafe { std::slice::from_raw_parts(ptr as *const u8, size) };
+            let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
             writer
                 .dump(timestamp as u64, memory)
                 .map_err(|e| Error::from_reason(format!("VCD write error: {}", e)))?;
