@@ -10,10 +10,10 @@
 #include <cstdint>
 
 static void reset(VTop *top) {
-    top->rst = 1;
+    top->rst = 0;     // assert reset (active-low)
     top->clk = 0; top->eval();
     top->clk = 1; top->eval();
-    top->rst = 0;
+    top->rst = 1;     // release reset
     top->clk = 0; top->eval();
 }
 
