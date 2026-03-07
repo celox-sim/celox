@@ -92,6 +92,8 @@ impl SharedJitCode {
 pub struct JitBackend {
     shared: Arc<SharedJitCode>,
     memory: Vec<u64>,
+    /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
+    comb_func: SimFunc,
 }
 
 impl JitBackend {
@@ -369,7 +371,12 @@ impl JitBackend {
             }
         }
 
-        Self { shared, memory }
+        let comb_func = shared.comb_func;
+        Self {
+            shared,
+            memory,
+            comb_func,
+        }
     }
 
     /// Returns the shared compiled code, allowing it to be reused for
@@ -395,7 +402,7 @@ impl JitBackend {
     }
     /// Execute combinational logic
     pub fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
-        self.run_sim_func(self.shared.comb_func)
+        self.run_sim_func(self.comb_func)
     }
 
     /// Resolves an `AbsoluteAddr` into a performance-optimized [`SignalRef`].
