@@ -648,6 +648,9 @@ function createArrayDut(
 
 	// elementWidth >= 8: byte-aligned stride.
 	const elementByteSize = Math.ceil(elementWidth / 8);
+	// 4-state: mask region starts after ALL value bytes, not after each element.
+	const totalValueBytes = totalElements * elementByteSize;
+	const maskBase = baseOffset + totalValueBytes;
 
 	return {
 		length: totalElements,
@@ -669,30 +672,49 @@ function createArrayDut(
 				throw new Error("Cannot write to output array port");
 			}
 			const offset = baseOffset + i * elementByteSize;
+			const maskOffset = maskBase + i * elementByteSize;
 			if (value === Symbol.for("veryl:X")) {
 				if (!is4state) {
 					throw new Error("Array port is not 4-state; cannot assign X");
 				}
-				const elemSig: SignalLayout = {
+				const allOnes = (1n << BigInt(elementWidth)) - 1n;
+				const valSig: SignalLayout = {
 					offset,
 					width: elementWidth,
 					byteSize: elementByteSize,
-					is4state,
+					is4state: false,
 					direction: baseSig.direction,
 				};
-				writeAllX(view, elemSig);
+				const mskSig: SignalLayout = {
+					offset: maskOffset,
+					width: elementWidth,
+					byteSize: elementByteSize,
+					is4state: false,
+					direction: baseSig.direction,
+				};
+				writeSignal(view, valSig, allOnes);
+				writeSignal(view, mskSig, allOnes);
 			} else if (value === Symbol.for("veryl:Z")) {
 				if (!is4state) {
 					throw new Error("Array port is not 4-state; cannot assign Z");
 				}
-				const elemSig: SignalLayout = {
+				const allOnes = (1n << BigInt(elementWidth)) - 1n;
+				const valSig: SignalLayout = {
 					offset,
 					width: elementWidth,
 					byteSize: elementByteSize,
-					is4state,
+					is4state: false,
 					direction: baseSig.direction,
 				};
-				writeAllZ(view, elemSig);
+				const mskSig: SignalLayout = {
+					offset: maskOffset,
+					width: elementWidth,
+					byteSize: elementByteSize,
+					is4state: false,
+					direction: baseSig.direction,
+				};
+				writeSignal(view, valSig, 0n);
+				writeSignal(view, mskSig, allOnes);
 			} else if (isFourStateValue(value)) {
 				if (!is4state) {
 					throw new Error("Array port is not 4-state; cannot assign FourState");
@@ -701,10 +723,18 @@ function createArrayDut(
 					offset,
 					width: elementWidth,
 					byteSize: elementByteSize,
-					is4state,
+					is4state: false,
 					direction: baseSig.direction,
 				};
-				writeFourState(view, elemSig, value);
+				writeSignal(view, elemSig, value.value);
+				const maskSig: SignalLayout = {
+					offset: maskOffset,
+					width: elementWidth,
+					byteSize: elementByteSize,
+					is4state: false,
+					direction: baseSig.direction,
+				};
+				writeSignal(view, maskSig, value.mask);
 			} else {
 				const bigVal =
 					typeof value === "bigint" ? value : BigInt(value as number);
@@ -712,13 +742,13 @@ function createArrayDut(
 					offset,
 					width: elementWidth,
 					byteSize: elementByteSize,
-					is4state,
+					is4state: false,
 					direction: baseSig.direction,
 				};
 				writeSignal(view, elemSig, bigVal);
 				if (is4state) {
 					const maskSig: SignalLayout = {
-						offset: offset + elementByteSize,
+						offset: maskOffset,
 						width: elementWidth,
 						byteSize: elementByteSize,
 						is4state: false,

@@ -894,6 +894,170 @@ describe("createDut — array ports", () => {
 		expect(view.getUint8(0) & 0b111).toBe(0b110); // value bits 0-2 = 6
 		expect(view.getUint8(2) & 0b111).toBe(0); // mask bits 0-2 cleared
 	});
+
+	test("8-bit 4-state: mask region after all values, not per-element", () => {
+		// logic<8>[4] with 4-state:
+		//   value bytes 0-3 (4 elements × 1 byte each)
+		//   mask  bytes 4-7 (4 elements × 1 byte each)
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			data: {
+				offset: 0,
+				width: 8,
+				byteSize: 1,
+				is4state: true,
+				direction: "input",
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			data: {
+				direction: "input",
+				type: "logic",
+				width: 8,
+				arrayDims: [4],
+				is4state: true,
+			},
+		};
+		const handle = mockHandle();
+		const state: DirtyState = { dirty: false };
+
+		const dut = createDut<{
+			data: {
+				at(i: number): bigint;
+				set(i: number, v: bigint | symbol): void;
+			};
+		}>(buffer, layout, ports, handle, state);
+
+		const view = new DataView(buffer);
+
+		// Write defined values to all 4 elements
+		dut.data.set(0, 0xaan);
+		dut.data.set(1, 0xbbn);
+		dut.data.set(2, 0xccn);
+		dut.data.set(3, 0xddn);
+
+		// Verify values are correct (not corrupted by mask writes)
+		expect(view.getUint8(0)).toBe(0xaa); // value[0]
+		expect(view.getUint8(1)).toBe(0xbb); // value[1]
+		expect(view.getUint8(2)).toBe(0xcc); // value[2]
+		expect(view.getUint8(3)).toBe(0xdd); // value[3]
+
+		// Verify masks are in the correct region (bytes 4-7), all cleared
+		expect(view.getUint8(4)).toBe(0); // mask[0]
+		expect(view.getUint8(5)).toBe(0); // mask[1]
+		expect(view.getUint8(6)).toBe(0); // mask[2]
+		expect(view.getUint8(7)).toBe(0); // mask[3]
+
+		// Read back via at()
+		expect(dut.data.at(0)).toBe(0xaan);
+		expect(dut.data.at(1)).toBe(0xbbn);
+		expect(dut.data.at(2)).toBe(0xccn);
+		expect(dut.data.at(3)).toBe(0xddn);
+	});
+
+	test("8-bit 4-state: X writes mask to correct offset, not adjacent element", () => {
+		// logic<8>[4] with 4-state: values at 0-3, masks at 4-7
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			data: {
+				offset: 0,
+				width: 8,
+				byteSize: 1,
+				is4state: true,
+				direction: "input",
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			data: {
+				direction: "input",
+				type: "logic",
+				width: 8,
+				arrayDims: [4],
+				is4state: true,
+			},
+		};
+		const handle = mockHandle();
+		const state: DirtyState = { dirty: false };
+
+		const dut = createDut<{
+			data: {
+				at(i: number): bigint;
+				set(i: number, v: bigint | symbol): void;
+			};
+		}>(buffer, layout, ports, handle, state);
+
+		const view = new DataView(buffer);
+
+		// Set element 1 to a defined value first
+		dut.data.set(1, 0x42n);
+		expect(view.getUint8(1)).toBe(0x42); // value[1]
+		expect(view.getUint8(5)).toBe(0);    // mask[1] cleared
+
+		// Set element 0 to X — must NOT corrupt element 1's value
+		dut.data.set(0, X);
+		expect(view.getUint8(0)).toBe(0xff); // value[0] = all-ones (X)
+		expect(view.getUint8(4)).toBe(0xff); // mask[0] = all-ones (X)
+		expect(view.getUint8(1)).toBe(0x42); // value[1] must be preserved
+	});
+
+	test("32-bit 4-state: mask region after all values", () => {
+		// logic<32>[2] with 4-state:
+		//   value bytes 0-7 (2 elements × 4 bytes each)
+		//   mask  bytes 8-15 (2 elements × 4 bytes each)
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			data: {
+				offset: 0,
+				width: 32,
+				byteSize: 4,
+				is4state: true,
+				direction: "input",
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			data: {
+				direction: "input",
+				type: "logic",
+				width: 32,
+				arrayDims: [2],
+				is4state: true,
+			},
+		};
+		const handle = mockHandle();
+		const state: DirtyState = { dirty: false };
+
+		const dut = createDut<{
+			data: {
+				at(i: number): bigint;
+				set(i: number, v: bigint | symbol): void;
+			};
+		}>(buffer, layout, ports, handle, state);
+
+		const view = new DataView(buffer);
+
+		// Write defined values
+		dut.data.set(0, 0xdeadbeefn);
+		dut.data.set(1, 0xcafebaben);
+
+		// Values at correct positions
+		expect(view.getUint32(0, true)).toBe(0xdeadbeef); // value[0]
+		expect(view.getUint32(4, true)).toBe(0xcafebabe); // value[1]
+
+		// Masks at bytes 8-15
+		expect(view.getUint32(8, true)).toBe(0);  // mask[0]
+		expect(view.getUint32(12, true)).toBe(0); // mask[1]
+
+		// Read back
+		expect(dut.data.at(0)).toBe(0xdeadbeefn);
+		expect(dut.data.at(1)).toBe(0xcafebaben);
+
+		// Set element 0 to X, verify element 1 is not corrupted
+		dut.data.set(0, X);
+		expect(view.getUint32(0, true)).toBe(0xffffffff);  // value[0] = X
+		expect(view.getUint32(8, true)).toBe(0xffffffff);  // mask[0] = X
+		expect(view.getUint32(4, true)).toBe(0xcafebabe);  // value[1] preserved
+		expect(view.getUint32(12, true)).toBe(0);           // mask[1] unchanged
+	});
 });
 
 // ---------------------------------------------------------------------------
