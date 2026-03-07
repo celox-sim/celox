@@ -459,8 +459,9 @@ fn build_cache_key(
 }
 
 /// Simulator backend state: either a full Simulator or a cached JitBackend.
+#[allow(clippy::large_enum_variant)]
 enum SimBackend {
-    Full(Box<celox::Simulator>),
+    Full(celox::Simulator),
     Cached(celox::JitBackend),
 }
 
@@ -582,7 +583,7 @@ impl NativeSimulatorHandle {
         }
 
         Ok(Self {
-            backend: Some(SimBackend::Full(Box::new(sim))),
+            backend: Some(SimBackend::Full(sim)),
             layout_json,
             events_json,
             hierarchy_json,
