@@ -24,9 +24,96 @@ pub fn eval_constexpr(expr: &Expression) -> Option<BigUint> {
     // compound expressions we require `is_const` (true compile-time constants).
     let is_value = matches!(expr, Expression::Term(f) if matches!(f.as_ref(), Factor::Value(_)));
     if comptime.is_const || (is_value && comptime.evaluated) {
-        comptime.get_value().ok().map(|e| e.payload().into_owned())
+        if let Ok(v) = comptime.get_value() {
+            return Some(v.payload().into_owned());
+        }
+        // The analyzer may set is_const=true on compound expressions without
+        // computing the value (value=Unknown).  Fall through to recursive
+        // evaluation from sub-expressions.
     } else {
-        None
+        return None;
+    }
+
+    // Recursive evaluation for is_const expressions whose top-level value is Unknown.
+    match expr {
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::Variable(_, _, _, ct) | Factor::Value(ct) => {
+                ct.get_value().ok().map(|v| v.payload().into_owned())
+            }
+            _ => None,
+        },
+        Expression::Binary(lhs, op, rhs, _) => {
+            let l = eval_constexpr(lhs)?;
+            let r = eval_constexpr(rhs)?;
+            match op {
+                Op::Add => Some(l + r),
+                Op::Sub => {
+                    if l >= r {
+                        Some(l - r)
+                    } else {
+                        // Wrap around for unsigned subtraction (2^width)
+                        let width = expr.comptime().r#type.total_width().unwrap_or(64);
+                        let modulus = BigUint::from(1u8) << width;
+                        Some(modulus - (r - l))
+                    }
+                }
+                Op::Mul => Some(l * r),
+                Op::Div => {
+                    if r.is_zero() {
+                        None
+                    } else {
+                        Some(l / r)
+                    }
+                }
+                Op::Rem => {
+                    if r.is_zero() {
+                        None
+                    } else {
+                        Some(l % r)
+                    }
+                }
+                Op::BitAnd => Some(l & r),
+                Op::BitOr => Some(l | r),
+                Op::BitXor => Some(l ^ r),
+                Op::LogicShiftL | Op::ArithShiftL => {
+                    use num_traits::ToPrimitive;
+                    Some(l << r.to_usize()?)
+                }
+                Op::LogicShiftR | Op::ArithShiftR => {
+                    use num_traits::ToPrimitive;
+                    Some(l >> r.to_usize()?)
+                }
+                Op::Eq => Some(BigUint::from(u64::from(l == r))),
+                Op::Ne => Some(BigUint::from(u64::from(l != r))),
+                Op::Less => Some(BigUint::from(u64::from(l < r))),
+                Op::LessEq => Some(BigUint::from(u64::from(l <= r))),
+                Op::Greater => Some(BigUint::from(u64::from(l > r))),
+                Op::GreaterEq => Some(BigUint::from(u64::from(l >= r))),
+                _ => None,
+            }
+        }
+        Expression::Unary(op, inner, _) => {
+            let v = eval_constexpr(inner)?;
+            match op {
+                Op::Add => Some(v),
+                Op::Sub => {
+                    let width = expr.comptime().r#type.total_width().unwrap_or(64);
+                    let modulus = BigUint::from(1u8) << width;
+                    if v.is_zero() {
+                        Some(v)
+                    } else {
+                        Some(modulus - v)
+                    }
+                }
+                Op::BitNot => {
+                    let width = expr.comptime().r#type.total_width().unwrap_or(64);
+                    let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+                    Some(v ^ mask)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 

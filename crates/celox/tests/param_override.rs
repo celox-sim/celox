@@ -314,6 +314,75 @@ fn test_param_in_child_always_ff() {
     );
 }
 
+/// Const-folded if condition using param expression in always_ff.
+#[test]
+fn test_param_const_fold_if() {
+    let code = r#"
+        module Top #(
+            param MODE: u32 = 1,
+        )(
+            clk: input clock,
+            rst: input reset,
+            a: input logic<8>,
+            b: input logic<8>,
+            o: output logic<8>,
+        ) {
+            always_ff (clk, rst) {
+                if_reset {
+                    o = 0;
+                } else {
+                    if MODE == 1 {
+                        o = a;
+                    } else {
+                        o = b;
+                    }
+                }
+            }
+        }
+    "#;
+
+    // Default MODE=1 → o = a
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let o = sim.signal("o");
+
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    sim.modify(|io| {
+        io.set(rst, 1u8);
+        io.set(a, 0xAAu8);
+        io.set(b, 0xBBu8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o), 0xAAu32.into(), "MODE=1 should select a");
+
+    // Override MODE=2 → o = b
+    let mut sim = Simulator::builder(code, "Top")
+        .param("MODE", 2)
+        .build()
+        .unwrap();
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let o = sim.signal("o");
+
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    sim.modify(|io| {
+        io.set(rst, 1u8);
+        io.set(a, 0xAAu8);
+        io.set(b, 0xBBu8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o), 0xBBu32.into(), "MODE=2 should select b");
+}
+
 /// Param propagation to a child module via inst param override.
 #[test]
 fn test_param_override_child_propagation() {
