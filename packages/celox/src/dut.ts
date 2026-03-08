@@ -29,6 +29,7 @@ import { isFourStateValue } from "./types.js";
  */
 export interface DirtyState {
 	dirty: boolean;
+	disposed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +377,7 @@ function defineSignalProperty(
 
 	Object.defineProperty(target, name, {
 		get(): bigint {
+			if (state.disposed) throw new Error("Simulator has been disposed");
 			// Output reads: lazy evalComb if dirty
 			if (state.dirty && !isInput) {
 				handle.evalComb();
@@ -385,6 +387,7 @@ function defineSignalProperty(
 		},
 
 		set(value: bigint | number | symbol | FourStateValue) {
+			if (state.disposed) throw new Error("Simulator has been disposed");
 			if (isOutput) {
 				throw new Error(`Cannot write to output port '${name}'`);
 			}
@@ -631,6 +634,7 @@ function createArrayDut(
 			length: totalElements,
 
 			at(i: number): bigint {
+				if (state.disposed) throw new Error("Simulator has been disposed");
 				if (state.dirty && !isInput) {
 					handle.evalComb();
 					state.dirty = false;
@@ -639,6 +643,7 @@ function createArrayDut(
 			},
 
 			set(i: number, value: bigint | number | symbol | FourStateValue): void {
+				if (state.disposed) throw new Error("Simulator has been disposed");
 				if (isOutput) {
 					throw new Error("Cannot write to output array port");
 				}
@@ -706,6 +711,7 @@ function createArrayDut(
 			length: totalElements,
 
 			at(i: number): bigint {
+				if (state.disposed) throw new Error("Simulator has been disposed");
 				if (state.dirty && !isInput) {
 					handle.evalComb();
 					state.dirty = false;
@@ -714,6 +720,7 @@ function createArrayDut(
 			},
 
 			set(i: number, value: bigint | number | symbol | FourStateValue): void {
+				if (state.disposed) throw new Error("Simulator has been disposed");
 				if (isOutput) {
 					throw new Error("Cannot write to output array port");
 				}
@@ -760,6 +767,7 @@ function createArrayDut(
 		length: totalElements,
 
 		at(i: number): bigint {
+			if (state.disposed) throw new Error("Simulator has been disposed");
 			if (state.dirty && !isInput) {
 				handle.evalComb();
 				state.dirty = false;
@@ -772,6 +780,7 @@ function createArrayDut(
 		},
 
 		set(i: number, value: bigint | number | symbol | FourStateValue): void {
+			if (state.disposed) throw new Error("Simulator has been disposed");
 			if (isOutput) {
 				throw new Error("Cannot write to output array port");
 			}

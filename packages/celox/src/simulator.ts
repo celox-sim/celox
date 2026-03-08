@@ -377,6 +377,9 @@ export class Simulator<P = Record<string, unknown>> {
 	dispose(): void {
 		if (!this._disposed) {
 			this._disposed = true;
+			// Mark DUT state as disposed BEFORE freeing Rust memory to prevent
+			// use-after-free through lingering DUT references.
+			this._state.disposed = true;
 			this._handle.dispose();
 		}
 	}
