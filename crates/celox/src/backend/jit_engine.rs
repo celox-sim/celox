@@ -7,6 +7,7 @@ use crate::SimulatorOptions;
 use crate::backend::memory_layout::MemoryLayout;
 use crate::ir::RegionedAbsoluteAddr;
 use crate::optimizer::coalescing::TailCallChunk;
+use crate::optimizer::coalescing::cost_model::{CLIF_INST_THRESHOLD, estimate_eu_cost};
 use crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan;
 
 use super::SIRTranslator;
@@ -139,10 +140,6 @@ impl JitEngine {
         Ok(func_id)
     }
 
-    /// Maximum number of SIR blocks in a single Cranelift function before we
-    /// split into multiple functions called sequentially.
-    const BLOCK_SPLIT_THRESHOLD: usize = 20_000;
-
     pub fn compile_units(
         &mut self,
         units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
@@ -150,9 +147,12 @@ impl JitEngine {
         post_clif_out: Option<&mut String>,
         native_out: Option<&mut String>,
     ) -> Result<*const u8, String> {
-        // Check if any single EU is too large for one Cranelift function
-        let total_blocks: usize = units.iter().map(|eu| eu.blocks.len()).sum();
-        if total_blocks > Self::BLOCK_SPLIT_THRESHOLD {
+        let four_state = self.translator.options.four_state;
+        let total_cost: usize = units
+            .iter()
+            .map(|eu| estimate_eu_cost(eu, four_state))
+            .sum();
+        if total_cost > CLIF_INST_THRESHOLD {
             return self.compile_units_batched(units, pre_clif_out, post_clif_out, native_out);
         }
 
@@ -207,43 +207,47 @@ impl JitEngine {
         mut native_out: Option<&mut String>,
     ) -> Result<*const u8, String> {
         let timing = std::env::var("CELOX_PASS_TIMING").is_ok();
+        let four_state = self.translator.options.four_state;
 
-        // 1. Partition units into batches, each under BLOCK_SPLIT_THRESHOLD blocks
+        // 1. Partition units into batches, each under CLIF_INST_THRESHOLD estimated cost
+        let eu_costs: Vec<usize> = units
+            .iter()
+            .map(|eu| estimate_eu_cost(eu, four_state))
+            .collect();
+
         let mut batches: Vec<Vec<usize>> = Vec::new();
         let mut current_batch: Vec<usize> = Vec::new();
-        let mut current_blocks = 0usize;
+        let mut current_cost = 0usize;
 
-        for (i, eu) in units.iter().enumerate() {
-            let eu_blocks = eu.blocks.len();
-
+        for (i, &eu_cost) in eu_costs.iter().enumerate() {
             // If a single EU exceeds the threshold, it gets its own batch
-            if eu_blocks > Self::BLOCK_SPLIT_THRESHOLD {
+            if eu_cost > CLIF_INST_THRESHOLD {
                 if !current_batch.is_empty() {
                     batches.push(std::mem::take(&mut current_batch));
-                    current_blocks = 0;
+                    current_cost = 0;
                 }
                 batches.push(vec![i]);
                 continue;
             }
 
-            if current_blocks + eu_blocks > Self::BLOCK_SPLIT_THRESHOLD && !current_batch.is_empty()
-            {
+            if current_cost + eu_cost > CLIF_INST_THRESHOLD && !current_batch.is_empty() {
                 batches.push(std::mem::take(&mut current_batch));
-                current_blocks = 0;
+                current_cost = 0;
             }
 
             current_batch.push(i);
-            current_blocks += eu_blocks;
+            current_cost += eu_cost;
         }
         if !current_batch.is_empty() {
             batches.push(current_batch);
         }
 
         if timing {
+            let total_cost: usize = eu_costs.iter().sum();
             eprintln!(
-                "[jit-split] Splitting {} EUs ({} total blocks) into {} batches",
+                "[jit-split] Splitting {} EUs (est. {} CLIF insts) into {} batches",
                 units.len(),
-                units.iter().map(|eu| eu.blocks.len()).sum::<usize>(),
+                total_cost,
                 batches.len()
             );
         }
@@ -283,11 +287,11 @@ impl JitEngine {
             batch_func_ids.push(func_id);
 
             if let Some(s) = batch_start {
-                let batch_blocks: usize = batch.iter().map(|&i| units[i].blocks.len()).sum();
+                let batch_cost: usize = batch.iter().map(|&i| eu_costs[i]).sum();
                 eprintln!(
-                    "[jit-split]   batch[{batch_idx}]: {} EUs, {} blocks, {:?}",
+                    "[jit-split]   batch[{batch_idx}]: {} EUs, est. {} CLIF insts, {:?}",
                     batch.len(),
-                    batch_blocks,
+                    batch_cost,
                     s.elapsed()
                 );
             }
