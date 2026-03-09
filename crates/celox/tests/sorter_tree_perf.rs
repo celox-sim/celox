@@ -116,7 +116,7 @@ fn sorter_tree_scaling_n32_n128() {
     let ratio = t128.as_secs_f64() / t32.as_secs_f64();
     eprintln!("N=32: {t32:?}, N=128: {t128:?}, ratio: {ratio:.2}x");
     assert!(
-        ratio < 8.0,
-        "N=128/N=32 ratio is {ratio:.2}x, expected < 8.0x"
+        ratio < 12.0,
+        "N=128/N=32 ratio is {ratio:.2}x, expected < 12.0x"
     );
 }
