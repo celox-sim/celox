@@ -18,6 +18,8 @@ pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 #[derive(Clone, Copy)]
 pub struct EventRef {
     pub func: SimFunc,
+    /// Merged eval_apply_ff + eval_comb function, if available.
+    pub merged_func: Option<SimFunc>,
     pub addr: AbsoluteAddr,
     pub id: usize,
 }
@@ -26,6 +28,7 @@ impl std::fmt::Debug for EventRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventRef")
             .field("func", &(self.func as usize))
+            .field("merged_func", &self.merged_func.map(|f| f as usize))
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
@@ -248,6 +251,7 @@ impl JitBackend {
                     *clock,
                     EventRef {
                         func,
+                        merged_func: None,
                         addr: *clock,
                         id,
                     },
@@ -275,6 +279,9 @@ impl JitBackend {
             &mut id_to_addr,
         )?;
 
+        // Release borrows captured by compile_ffs so engine is available again.
+        drop(compile_ffs);
+
         // Insert clock_domains aliases so every event signal resolves
         for (alias, canonical) in &sir.clock_domains {
             if let Some(&ev) = event_map.get(canonical) {
@@ -285,6 +292,32 @@ impl JitBackend {
             }
             if let Some(&ev) = apply_event_map.get(canonical) {
                 apply_event_map.insert(*alias, ev);
+            }
+        }
+
+        // Compile merged eval_apply_ff + eval_comb functions per domain and
+        // patch the merged_func into existing event_map entries.
+        // Only when eval_comb uses the simple (non-chunked) compilation path.
+        let mut eval_apply_and_comb_map: HashMap<AbsoluteAddr, SimFunc> = HashMap::default();
+        if sir.eval_comb_plan.is_none() {
+            for (clock, units) in &sir.eval_apply_ffs {
+                if units.is_empty() {
+                    continue;
+                }
+                let mut merged_units: Vec<_> = units.clone();
+                merged_units.extend(sir.eval_comb.iter().cloned());
+
+                let ptr = engine
+                    .compile_units(&merged_units, None, None, None)
+                    .map_err(SimulatorError::from)?;
+                let func: SimFunc = unsafe { std::mem::transmute(ptr) };
+                eval_apply_and_comb_map.insert(*clock, func);
+            }
+            // Patch merged_func into event_map entries
+            for (addr, ev) in &mut event_map {
+                if let Some(&merged) = eval_apply_and_comb_map.get(addr) {
+                    ev.merged_func = Some(merged);
+                }
             }
         }
 
@@ -615,6 +648,13 @@ impl JitBackend {
 
     pub fn eval_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
         self.run_sim_func(event.func)
+    }
+
+    pub fn eval_apply_ff_and_comb_at(
+        &mut self,
+        merged_func: SimFunc,
+    ) -> Result<(), SimulatorErrorCode> {
+        self.run_sim_func(merged_func)
     }
 
     pub fn eval_only_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {

@@ -144,8 +144,12 @@ impl Simulator {
         if self.dirty {
             self.backend.eval_comb()?;
         }
-        self.backend.eval_apply_ff_at(event)?;
-        self.backend.eval_comb()?;
+        if let Some(merged) = event.merged_func {
+            self.backend.eval_apply_ff_and_comb_at(merged)?;
+        } else {
+            self.backend.eval_apply_ff_at(event)?;
+            self.backend.eval_comb()?;
+        }
         self.dirty = false;
         Ok(())
     }

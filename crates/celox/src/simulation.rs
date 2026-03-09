@@ -263,6 +263,7 @@ impl Simulation {
 
         self.simulator.backend.eval_comb()?;
 
+        let mut comb_already_done = false;
         loop {
             let mut any_new_outer_loop_trigger = false;
             let mut newly_triggered = Vec::new();
@@ -292,6 +293,18 @@ impl Simulation {
                     }
 
                     if can_use_eval_apply {
+                        if let Some(ev) = info.eval_ff_event {
+                            // Try merged eval_apply + comb first (saves one JIT function call)
+                            if let Some(merged) = ev.merged_func {
+                                discovered_in_this_step.insert(single_id);
+                                triggered_domains.insert(info.canonical_id);
+                                any_new_outer_loop_trigger = true;
+
+                                self.simulator.backend.eval_apply_ff_and_comb_at(merged)?;
+                                comb_already_done = true;
+                                break;
+                            }
+                        }
                         if let Some(ev) = info.eval_ff_event {
                             discovered_in_this_step.insert(single_id);
                             triggered_domains.insert(info.canonical_id);
@@ -352,8 +365,12 @@ impl Simulation {
             }
 
             // Phase 3: Evaluate combinational logic on stable region to propagate FF outputs.
-            // If this triggers combinational clocks, the next outer delta cycle catches them.
-            self.simulator.backend.eval_comb()?;
+            // Skip if already done by the merged eval_apply_ff_and_comb function.
+            if comb_already_done {
+                comb_already_done = false;
+            } else {
+                self.simulator.backend.eval_comb()?;
+            }
 
             if !any_new_outer_loop_trigger && newly_triggered.is_empty() {
                 break;
