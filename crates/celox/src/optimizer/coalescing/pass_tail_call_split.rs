@@ -2,7 +2,8 @@ use crate::HashMap;
 use crate::ir::*;
 
 use super::cost_model::{
-    CLIF_INST_THRESHOLD, estimate_clif_cost, estimate_eu_cost, estimate_units_cost,
+    CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_clif_cost, estimate_eu_cost,
+    estimate_eu_value_count, estimate_units_cost,
 };
 
 /// A chunk in the tail-call chain.
@@ -68,43 +69,57 @@ pub struct CrossChunkEdge {
 }
 
 /// Attempt to split a set of execution units into tail-call chunks if the total
-/// estimated CLIF cost exceeds the threshold.
+/// estimated CLIF cost or value count exceeds either threshold.
 ///
-/// Returns `None` if no splitting is needed (total cost within threshold).
+/// Returns `None` if no splitting is needed (both metrics within thresholds).
 pub fn split_if_needed(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     four_state: bool,
 ) -> Option<Vec<TailCallChunk>> {
-    split_with_threshold(units, four_state, CLIF_INST_THRESHOLD)
+    split_with_threshold(units, four_state, CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD)
 }
 
-/// Internal version with configurable threshold (for testing).
+/// Internal version with configurable thresholds (for testing).
+///
+/// Splitting is triggered when either the instruction cost exceeds `inst_threshold`
+/// or the value count exceeds `value_threshold`.
 pub(crate) fn split_with_threshold(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     four_state: bool,
-    threshold: usize,
+    inst_threshold: usize,
+    value_threshold: usize,
 ) -> Option<Vec<TailCallChunk>> {
     let total_cost = estimate_units_cost(units, four_state);
-    if total_cost <= threshold {
+    let total_values: usize = units
+        .iter()
+        .map(|eu| estimate_eu_value_count(eu, four_state))
+        .sum();
+    if total_cost <= inst_threshold && total_values <= value_threshold {
         return None;
     }
 
     // Primary path: EU-boundary splitting.
     // Since RegisterIds are EU-scoped, splitting between EUs has zero live-reg cost.
-    let eu_costs: Vec<usize> = units
+    let eu_costs: Vec<(usize, usize)> = units
         .iter()
-        .map(|eu| estimate_eu_cost(eu, four_state))
+        .map(|eu| {
+            (
+                estimate_eu_cost(eu, four_state),
+                estimate_eu_value_count(eu, four_state),
+            )
+        })
         .collect();
 
     let mut chunks: Vec<TailCallChunk> = Vec::new();
     let mut current_units: Vec<ExecutionUnit<RegionedAbsoluteAddr>> = Vec::new();
-    let mut current_cost = 0usize;
+    let mut current_inst_cost = 0usize;
+    let mut current_value_count = 0usize;
 
     for (i, eu) in units.iter().enumerate() {
-        let eu_cost = eu_costs[i];
+        let (eu_inst, eu_val) = eu_costs[i];
 
-        // If a single EU exceeds threshold, try intra-EU splitting
-        if eu_cost > threshold {
+        // If a single EU exceeds either threshold, try intra-EU splitting
+        if eu_inst > inst_threshold || eu_val > value_threshold {
             // Flush current chunk first
             if !current_units.is_empty() {
                 chunks.push(TailCallChunk {
@@ -112,11 +127,14 @@ pub(crate) fn split_with_threshold(
                     incoming_live_regs: Vec::new(),
                     outgoing_live_regs: Vec::new(),
                 });
-                current_cost = 0;
+                current_inst_cost = 0;
+                current_value_count = 0;
             }
 
             // Try intra-EU split
-            if let Some(sub_chunks) = split_single_eu(eu, four_state, threshold) {
+            if let Some(sub_chunks) =
+                split_single_eu(eu, four_state, inst_threshold, value_threshold)
+            {
                 chunks.extend(sub_chunks);
             } else {
                 // Fallback: treat as single chunk (will be large but is our best effort)
@@ -129,18 +147,23 @@ pub(crate) fn split_with_threshold(
             continue;
         }
 
-        // Would adding this EU exceed the threshold?
-        if current_cost + eu_cost > threshold && !current_units.is_empty() {
+        // Would adding this EU exceed either threshold?
+        if (current_inst_cost + eu_inst > inst_threshold
+            || current_value_count + eu_val > value_threshold)
+            && !current_units.is_empty()
+        {
             chunks.push(TailCallChunk {
                 units: std::mem::take(&mut current_units),
                 incoming_live_regs: Vec::new(),
                 outgoing_live_regs: Vec::new(),
             });
-            current_cost = 0;
+            current_inst_cost = 0;
+            current_value_count = 0;
         }
 
         current_units.push(eu.clone());
-        current_cost += eu_cost;
+        current_inst_cost += eu_inst;
+        current_value_count += eu_val;
     }
 
     // Flush remaining
@@ -160,12 +183,13 @@ pub(crate) fn split_with_threshold(
     Some(chunks)
 }
 
-/// Try to split a single EU that exceeds the threshold.
+/// Try to split a single EU that exceeds either threshold.
 /// Targets single-block EUs (the common case for eval_comb).
 fn split_single_eu(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     four_state: bool,
-    threshold: usize,
+    inst_threshold: usize,
+    value_threshold: usize,
 ) -> Option<Vec<TailCallChunk>> {
     // Only handle single-block EUs
     if eu.blocks.len() != 1 {
@@ -198,8 +222,12 @@ fn split_single_eu(
         return None;
     }
 
-    // Step 2: Compute instruction costs
+    // Step 2: Compute instruction costs and value counts
     let inst_costs: Vec<usize> = instructions
+        .iter()
+        .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
+        .collect();
+    let value_costs: Vec<usize> = instructions
         .iter()
         .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
         .collect();
@@ -215,28 +243,34 @@ fn split_single_eu(
     // dp[j] = minimum total live-reg cost to split [0..candidates[j]]
     let n = candidates.len();
 
-    // Prefix sum of instruction costs
-    let mut prefix_cost = vec![0usize; instructions.len() + 1];
-    for (i, &c) in inst_costs.iter().enumerate() {
-        prefix_cost[i + 1] = prefix_cost[i] + c;
+    // Prefix sums of instruction costs and value counts
+    let mut prefix_inst = vec![0usize; instructions.len() + 1];
+    let mut prefix_value = vec![0usize; instructions.len() + 1];
+    for (i, (&ic, &vc)) in inst_costs.iter().zip(value_costs.iter()).enumerate() {
+        prefix_inst[i + 1] = prefix_inst[i] + ic;
+        prefix_value[i + 1] = prefix_value[i] + vc;
     }
 
-    let total_inst_cost = prefix_cost[instructions.len()];
-    if total_inst_cost <= threshold {
-        // Re-check: maybe after more careful accounting we're under threshold
+    let total_inst_cost = prefix_inst[instructions.len()];
+    let total_value_count = prefix_value[instructions.len()];
+    if total_inst_cost <= inst_threshold && total_value_count <= value_threshold {
+        // Re-check: maybe after more careful accounting we're under both thresholds
         return None;
     }
+
+    // Returns true if the segment [start..end) fits within both thresholds.
+    let segment_fits = |start_inst: usize, end_inst: usize| -> bool {
+        let inst = prefix_inst[end_inst] - prefix_inst[start_inst];
+        let value = prefix_value[end_inst] - prefix_value[start_inst];
+        inst <= inst_threshold && value <= value_threshold
+    };
 
     // dp[j]: min live-reg count to split using candidates[0..j] as possible endpoints
     // The last segment from candidates[j] to end is always included.
     // We model: segments are [0..candidates[s0]], [candidates[s0]..candidates[s1]], etc.
     // plus a final segment from the last split to end.
 
-    let segment_cost = |start_inst: usize, end_inst: usize| -> usize {
-        prefix_cost[end_inst] - prefix_cost[start_inst]
-    };
-
-    // We need split points s.t. each resulting segment's cost ≤ threshold.
+    // We need split points s.t. each resulting segment fits within both thresholds.
     // Among these, choose the set minimizing total live-reg params.
 
     // dp[j] = min total incoming_live_regs size for splitting [0..candidates[j]] into valid chunks
@@ -245,8 +279,7 @@ fn split_single_eu(
     let mut dp_prev = vec![usize::MAX; n]; // which candidate was the previous split
 
     for j in 0..n {
-        let seg_cost = segment_cost(0, candidates[j]);
-        if seg_cost <= threshold {
+        if segment_fits(0, candidates[j]) {
             // Single segment [0..candidates[j]] is valid
             dp[j] = live_sets[j].len();
             dp_prev[j] = usize::MAX; // no previous split
@@ -259,9 +292,18 @@ fn split_single_eu(
         }
         // Try extending from candidates[j] to candidates[k]
         for k in (j + 1)..n {
-            let seg_cost = segment_cost(candidates[j], candidates[k]);
-            if seg_cost > threshold {
-                break; // further candidates will be even more expensive
+            if !segment_fits(candidates[j], candidates[k]) {
+                // Note: unlike the single-threshold version, we can't always `break`
+                // here because value count and inst cost may not be monotonically
+                // correlated. However, the prefix sums are monotonically increasing
+                // for each metric individually, so once BOTH exceed their threshold
+                // we can safely break.
+                let inst = prefix_inst[candidates[k]] - prefix_inst[candidates[j]];
+                let value = prefix_value[candidates[k]] - prefix_value[candidates[j]];
+                if inst > inst_threshold && value > value_threshold {
+                    break;
+                }
+                continue;
             }
             let new_cost = dp[j] + live_sets[k].len();
             if new_cost < dp[k] {
@@ -271,7 +313,7 @@ fn split_single_eu(
         }
     }
 
-    // Find the best final split point such that the remainder fits in threshold
+    // Find the best final split point such that the remainder fits within both thresholds
     let mut best_end = usize::MAX;
     let mut best_total_cost = usize::MAX;
 
@@ -279,8 +321,7 @@ fn split_single_eu(
         if dp[j] == usize::MAX {
             continue;
         }
-        let remainder_cost = segment_cost(candidates[j], instructions.len());
-        if remainder_cost <= threshold {
+        if segment_fits(candidates[j], instructions.len()) {
             if dp[j] < best_total_cost {
                 best_total_cost = dp[j];
                 best_end = j;
@@ -461,15 +502,16 @@ pub fn split_if_needed_spilled(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     four_state: bool,
 ) -> Option<MemorySpilledPlan> {
-    split_multi_block_with_threshold(units, four_state, CLIF_INST_THRESHOLD)
+    split_multi_block_with_threshold(units, four_state, CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD)
 }
 
 pub(crate) fn split_multi_block_with_threshold(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     four_state: bool,
-    threshold: usize,
+    inst_threshold: usize,
+    value_threshold: usize,
 ) -> Option<MemorySpilledPlan> {
-    // Process ALL multi-block EUs that exceed the threshold.
+    // Process ALL multi-block EUs that exceed either threshold.
     // (In practice, split_if_needed_spilled is called when split_if_needed returned None,
     //  meaning all units are in a single oversized chunk — typically one multi-block EU.)
     let mut combined_chunks: Vec<SpilledChunk> = Vec::new();
@@ -477,10 +519,15 @@ pub(crate) fn split_multi_block_with_threshold(
 
     for eu in units {
         let eu_cost = estimate_eu_cost(eu, four_state);
-        if eu_cost > threshold && eu.blocks.len() > 1 {
-            if let Some(plan) =
-                split_multi_block_eu(eu, four_state, threshold, combined_scratch_bytes)
-            {
+        let eu_values = estimate_eu_value_count(eu, four_state);
+        if (eu_cost > inst_threshold || eu_values > value_threshold) && eu.blocks.len() > 1 {
+            if let Some(plan) = split_multi_block_eu(
+                eu,
+                four_state,
+                inst_threshold,
+                value_threshold,
+                combined_scratch_bytes,
+            ) {
                 combined_scratch_bytes = plan.scratch_bytes;
                 combined_chunks.extend(plan.chunks);
             }
@@ -500,7 +547,8 @@ pub(crate) fn split_multi_block_with_threshold(
 fn split_multi_block_eu(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     four_state: bool,
-    threshold: usize,
+    inst_threshold: usize,
+    value_threshold: usize,
     scratch_base: usize,
 ) -> Option<MemorySpilledPlan> {
     use crate::HashSet;
@@ -511,14 +559,16 @@ fn split_multi_block_eu(
     let mut next_block_id = modified_eu.blocks.keys().map(|b| b.0).max().unwrap_or(0) + 1;
     let block_ids_to_check: Vec<BlockId> = modified_eu.blocks.keys().copied().collect();
     for bid in block_ids_to_check {
-        let block_cost = estimate_block_cost(&modified_eu, bid, four_state);
-        if block_cost > threshold {
+        let block_inst = estimate_block_cost(&modified_eu, bid, four_state);
+        let block_val = estimate_block_value_count(&modified_eu, bid, four_state);
+        if block_inst > inst_threshold || block_val > value_threshold {
             split_oversized_block(
                 &mut modified_eu,
                 bid,
                 &mut next_block_id,
                 four_state,
-                threshold,
+                inst_threshold,
+                value_threshold,
             );
         }
     }
@@ -526,17 +576,31 @@ fn split_multi_block_eu(
     // 2. Topological sort
     let topo_order = topological_sort_blocks(&modified_eu.blocks, modified_eu.entry_block_id);
 
-    // 3. Compute per-block costs
-    let block_costs: HashMap<BlockId, usize> = topo_order
+    // 3. Compute per-block costs (both metrics)
+    let block_costs: HashMap<BlockId, (usize, usize)> = topo_order
         .iter()
-        .map(|&bid| (bid, estimate_block_cost(&modified_eu, bid, four_state)))
+        .map(|&bid| {
+            (
+                bid,
+                (
+                    estimate_block_cost(&modified_eu, bid, four_state),
+                    estimate_block_value_count(&modified_eu, bid, four_state),
+                ),
+            )
+        })
         .collect();
 
     // 4. Single-pass partition ensuring single entry per chunk.
     //    Pre-identifies back-edge targets (loop headers) and forces them as chunk heads.
     //    Then processes blocks in topo order, also forcing new chunks when a block has
     //    a forward predecessor in a different chunk.
-    let chunk_groups = partition_single_pass(&modified_eu, &topo_order, &block_costs, threshold);
+    let chunk_groups = partition_single_pass(
+        &modified_eu,
+        &topo_order,
+        &block_costs,
+        inst_threshold,
+        value_threshold,
+    );
 
     if chunk_groups.len() <= 1 {
         return None;
@@ -784,6 +848,24 @@ fn estimate_block_cost(
     cost
 }
 
+fn estimate_block_value_count(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    four_state: bool,
+) -> usize {
+    let state_mul = if four_state { 2 } else { 1 };
+    let block = &eu.blocks[&block_id];
+    let mut count = block.params.len() * state_mul;
+    for inst in &block.instructions {
+        count += estimate_clif_cost(inst, &eu.register_map, four_state);
+    }
+    count += match &block.terminator {
+        SIRTerminator::Branch { .. } => 1,
+        _ => 0,
+    };
+    count
+}
+
 /// Topological sort using Kahn's algorithm.
 /// The entry block is always placed first, even if it has back-edges.
 /// Blocks in cycles that never reach in-degree 0 are appended in sorted order.
@@ -891,12 +973,13 @@ fn terminator_targets_with_args(term: &SIRTerminator) -> Vec<(BlockId, Vec<Regis
 /// 2. Processes blocks in topological order. A new chunk is started when:
 ///    - The block is a back-edge target (loop header)
 ///    - The block has a forward predecessor in a different chunk
-///    - Adding the block would exceed the cost threshold
+///    - Adding the block would exceed either cost threshold
 fn partition_single_pass(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     topo_order: &[BlockId],
-    block_costs: &HashMap<BlockId, usize>,
-    threshold: usize,
+    block_costs: &HashMap<BlockId, (usize, usize)>,
+    inst_threshold: usize,
+    value_threshold: usize,
 ) -> Vec<Vec<BlockId>> {
     use crate::HashSet;
 
@@ -940,11 +1023,12 @@ fn partition_single_pass(
     let mut block_to_chunk: HashMap<BlockId, usize> = HashMap::default();
     let mut groups: Vec<Vec<BlockId>> = Vec::new();
     let mut current_group: Vec<BlockId> = Vec::new();
-    let mut current_cost = 0usize;
+    let mut current_inst_cost = 0usize;
+    let mut current_value_count = 0usize;
     let mut current_chunk_idx = 0usize;
 
     for &bid in topo_order {
-        let cost = block_costs[&bid];
+        let (inst_cost, value_count) = block_costs[&bid];
 
         let force_new_chunk = if current_group.is_empty() {
             false
@@ -955,18 +1039,21 @@ fn partition_single_pass(
                         .get(pred)
                         .is_some_and(|&c| c != current_chunk_idx)
                 })
-                || current_cost + cost > threshold
+                || current_inst_cost + inst_cost > inst_threshold
+                || current_value_count + value_count > value_threshold
         };
 
         if force_new_chunk {
             groups.push(std::mem::take(&mut current_group));
-            current_cost = 0;
+            current_inst_cost = 0;
+            current_value_count = 0;
             current_chunk_idx = groups.len();
         }
 
         current_group.push(bid);
         block_to_chunk.insert(bid, current_chunk_idx);
-        current_cost += cost;
+        current_inst_cost += inst_cost;
+        current_value_count += value_count;
     }
 
     if !current_group.is_empty() {
@@ -982,7 +1069,8 @@ fn split_oversized_block(
     block_id: BlockId,
     next_block_id: &mut usize,
     four_state: bool,
-    threshold: usize,
+    inst_threshold: usize,
+    value_threshold: usize,
 ) {
     let block = &eu.blocks[&block_id];
     let instructions = &block.instructions;
@@ -999,24 +1087,31 @@ fn split_oversized_block(
         return;
     }
 
-    // Prefix costs
+    // Prefix costs for both metrics
     let inst_costs: Vec<usize> = instructions
         .iter()
         .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
         .collect();
-    let mut prefix_cost = vec![0usize; instructions.len() + 1];
-    for (i, &c) in inst_costs.iter().enumerate() {
-        prefix_cost[i + 1] = prefix_cost[i] + c;
+    let value_costs: Vec<usize> = instructions
+        .iter()
+        .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
+        .collect();
+    let mut prefix_inst = vec![0usize; instructions.len() + 1];
+    let mut prefix_value = vec![0usize; instructions.len() + 1];
+    for (i, (&ic, &vc)) in inst_costs.iter().zip(value_costs.iter()).enumerate() {
+        prefix_inst[i + 1] = prefix_inst[i] + ic;
+        prefix_value[i + 1] = prefix_value[i] + vc;
     }
 
-    // Greedy: cut when segment cost exceeds threshold
+    // Greedy: cut when segment exceeds either threshold
     let mut split_positions: Vec<usize> = Vec::new();
     let mut seg_start = 0;
     let mut prev_cand = 0;
 
     for &cand in &candidates {
-        let seg_cost = prefix_cost[cand] - prefix_cost[seg_start];
-        if seg_cost > threshold && prev_cand > seg_start {
+        let seg_inst = prefix_inst[cand] - prefix_inst[seg_start];
+        let seg_val = prefix_value[cand] - prefix_value[seg_start];
+        if (seg_inst > inst_threshold || seg_val > value_threshold) && prev_cand > seg_start {
             split_positions.push(prev_cand);
             seg_start = prev_cand;
         }
@@ -1283,7 +1378,7 @@ mod tests {
     #[test]
     fn test_no_split_below_threshold() {
         let eu = make_large_eu(2);
-        let result = split_with_threshold(&[eu], false, 1_000_000);
+        let result = split_with_threshold(&[eu], false, 1_000_000, usize::MAX);
         assert!(result.is_none());
     }
 
@@ -1298,7 +1393,7 @@ mod tests {
         let single_eu_cost = super::super::cost_model::estimate_eu_cost(&eu1, false);
         let threshold = single_eu_cost + single_eu_cost / 2; // ~1.5× single EU
 
-        let result = split_with_threshold(&[eu1, eu2, eu3], false, threshold);
+        let result = split_with_threshold(&[eu1, eu2, eu3], false, threshold, usize::MAX);
         assert!(result.is_some());
         let chunks = result.unwrap();
         assert!(chunks.len() >= 2);
@@ -1319,7 +1414,7 @@ mod tests {
         let eu_cost = super::super::cost_model::estimate_eu_cost(&eu, false);
         let threshold = eu_cost / 3;
 
-        let result = split_with_threshold(&[eu], false, threshold);
+        let result = split_with_threshold(&[eu], false, threshold, usize::MAX);
         assert!(result.is_some());
         let chunks = result.unwrap();
         assert!(chunks.len() >= 2);
@@ -1479,7 +1574,7 @@ mod tests {
             "EU cost should exceed our test threshold, got {eu_cost}"
         );
 
-        let result = split_multi_block_with_threshold(&[eu], false, threshold);
+        let result = split_multi_block_with_threshold(&[eu], false, threshold, usize::MAX);
         assert!(result.is_some(), "Should produce a spilled plan");
 
         let plan = result.unwrap();
@@ -1518,15 +1613,24 @@ mod tests {
         let eu = make_multi_block_chain_eu(4, 3);
         let topo_order = topological_sort_blocks(&eu.blocks, eu.entry_block_id);
 
-        let block_costs: HashMap<BlockId, usize> = topo_order
+        let block_costs: HashMap<BlockId, (usize, usize)> = topo_order
             .iter()
-            .map(|&bid| (bid, estimate_block_cost(&eu, bid, false)))
+            .map(|&bid| {
+                (
+                    bid,
+                    (
+                        estimate_block_cost(&eu, bid, false),
+                        estimate_block_value_count(&eu, bid, false),
+                    ),
+                )
+            })
             .collect();
 
         // Use threshold smaller than any single block cost to force many chunks
-        let max_block_cost = block_costs.values().copied().max().unwrap_or(1);
+        let max_block_cost = block_costs.values().map(|&(ic, _)| ic).max().unwrap_or(1);
         let threshold = max_block_cost; // fits exactly one block per chunk
-        let groups = partition_single_pass(&eu, &topo_order, &block_costs, threshold);
+        let groups =
+            partition_single_pass(&eu, &topo_order, &block_costs, threshold, usize::MAX);
         assert!(
             groups.len() >= 2,
             "Should have multiple chunks with low threshold"
@@ -1568,7 +1672,8 @@ mod tests {
         // Use threshold that forces at least 2 chunks
         let eu_cost = super::super::cost_model::estimate_eu_cost(&eu, false);
         let threshold = eu_cost / 3;
-        let result = split_multi_block_with_threshold(std::slice::from_ref(&eu), false, threshold);
+        let result =
+            split_multi_block_with_threshold(std::slice::from_ref(&eu), false, threshold, usize::MAX);
 
         if let Some(plan) = result {
             for (ci, chunk) in plan.chunks.iter().enumerate() {

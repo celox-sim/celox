@@ -7,7 +7,9 @@ use crate::SimulatorOptions;
 use crate::backend::memory_layout::MemoryLayout;
 use crate::ir::RegionedAbsoluteAddr;
 use crate::optimizer::coalescing::TailCallChunk;
-use crate::optimizer::coalescing::cost_model::{CLIF_INST_THRESHOLD, estimate_eu_cost};
+use crate::optimizer::coalescing::cost_model::{
+    CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_eu_cost, estimate_eu_value_count,
+};
 use crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan;
 
 use super::SIRTranslator;
@@ -148,11 +150,29 @@ impl JitEngine {
         native_out: Option<&mut String>,
     ) -> Result<*const u8, String> {
         let four_state = self.translator.options.four_state;
-        let total_cost: usize = units
-            .iter()
-            .map(|eu| estimate_eu_cost(eu, four_state))
-            .sum();
-        if total_cost > CLIF_INST_THRESHOLD {
+        let mut total_inst_cost = 0usize;
+        let mut total_value_count = 0usize;
+        for eu in units {
+            total_inst_cost += estimate_eu_cost(eu, four_state);
+            total_value_count += estimate_eu_value_count(eu, four_state);
+        }
+        if std::env::var("CELOX_PASS_TIMING").is_ok() {
+            let sir_insts: usize = units
+                .iter()
+                .map(|eu| {
+                    eu.blocks
+                        .values()
+                        .map(|b| b.instructions.len())
+                        .sum::<usize>()
+                })
+                .sum();
+            eprintln!(
+                "[compile_units] {} EUs, {} SIR insts, clif_cost={total_inst_cost}/{CLIF_INST_THRESHOLD} values={total_value_count}/{VREG_VALUE_THRESHOLD}",
+                units.len(),
+                sir_insts,
+            );
+        }
+        if total_inst_cost > CLIF_INST_THRESHOLD || total_value_count > VREG_VALUE_THRESHOLD {
             return self.compile_units_batched(units, pre_clif_out, post_clif_out, native_out);
         }
 
@@ -174,6 +194,15 @@ impl JitEngine {
         {
             let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
             self.translator.translate_units(units, builder);
+        }
+
+        if std::env::var("CELOX_PASS_TIMING").is_ok() {
+            let num_values = ctx.func.dfg.num_values();
+            let num_insts = ctx.func.dfg.num_insts();
+            let num_blocks = ctx.func.dfg.num_blocks();
+            eprintln!(
+                "[compile_units_single] after translation: blocks={num_blocks} insts={num_insts} values={num_values}"
+            );
         }
 
         let func_id = self
@@ -209,45 +238,59 @@ impl JitEngine {
         let timing = std::env::var("CELOX_PASS_TIMING").is_ok();
         let four_state = self.translator.options.four_state;
 
-        // 1. Partition units into batches, each under CLIF_INST_THRESHOLD estimated cost
-        let eu_costs: Vec<usize> = units
+        // 1. Partition units into batches, each under both thresholds
+        let eu_metrics: Vec<(usize, usize)> = units
             .iter()
-            .map(|eu| estimate_eu_cost(eu, four_state))
+            .map(|eu| {
+                (
+                    estimate_eu_cost(eu, four_state),
+                    estimate_eu_value_count(eu, four_state),
+                )
+            })
             .collect();
 
         let mut batches: Vec<Vec<usize>> = Vec::new();
         let mut current_batch: Vec<usize> = Vec::new();
-        let mut current_cost = 0usize;
+        let mut current_inst_cost = 0usize;
+        let mut current_value_count = 0usize;
 
-        for (i, &eu_cost) in eu_costs.iter().enumerate() {
-            // If a single EU exceeds the threshold, it gets its own batch
-            if eu_cost > CLIF_INST_THRESHOLD {
+        for (i, &(eu_inst, eu_val)) in eu_metrics.iter().enumerate() {
+            // If a single EU exceeds either threshold, it gets its own batch
+            if eu_inst > CLIF_INST_THRESHOLD || eu_val > VREG_VALUE_THRESHOLD {
                 if !current_batch.is_empty() {
                     batches.push(std::mem::take(&mut current_batch));
-                    current_cost = 0;
+                    current_inst_cost = 0;
+                    current_value_count = 0;
                 }
                 batches.push(vec![i]);
                 continue;
             }
 
-            if current_cost + eu_cost > CLIF_INST_THRESHOLD && !current_batch.is_empty() {
+            if (current_inst_cost + eu_inst > CLIF_INST_THRESHOLD
+                || current_value_count + eu_val > VREG_VALUE_THRESHOLD)
+                && !current_batch.is_empty()
+            {
                 batches.push(std::mem::take(&mut current_batch));
-                current_cost = 0;
+                current_inst_cost = 0;
+                current_value_count = 0;
             }
 
             current_batch.push(i);
-            current_cost += eu_cost;
+            current_inst_cost += eu_inst;
+            current_value_count += eu_val;
         }
         if !current_batch.is_empty() {
             batches.push(current_batch);
         }
 
         if timing {
-            let total_cost: usize = eu_costs.iter().sum();
+            let total_inst: usize = eu_metrics.iter().map(|m| m.0).sum();
+            let total_val: usize = eu_metrics.iter().map(|m| m.1).sum();
             eprintln!(
-                "[jit-split] Splitting {} EUs (est. {} CLIF insts) into {} batches",
+                "[jit-split] Splitting {} EUs (est. {} CLIF insts, {} values) into {} batches",
                 units.len(),
-                total_cost,
+                total_inst,
+                total_val,
                 batches.len()
             );
         }
@@ -287,7 +330,7 @@ impl JitEngine {
             batch_func_ids.push(func_id);
 
             if let Some(s) = batch_start {
-                let batch_cost: usize = batch.iter().map(|&i| eu_costs[i]).sum();
+                let batch_cost: usize = batch.iter().map(|&i| eu_metrics[i].0).sum();
                 eprintln!(
                     "[jit-split]   batch[{batch_idx}]: {} EUs, est. {} CLIF insts, {:?}",
                     batch.len(),

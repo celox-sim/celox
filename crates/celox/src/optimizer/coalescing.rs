@@ -144,15 +144,17 @@ fn optimize_with_options(program: &mut Program, max_inflight_loads: usize, four_
     // Fall back to memory-spilled multi-block splitting if needed.
     if timing {
         for (i, eu) in program.eval_comb.iter().enumerate() {
-            let cost = cost_model::estimate_eu_cost(eu, four_state);
+            let inst_cost = cost_model::estimate_eu_cost(eu, four_state);
+            let value_count = cost_model::estimate_eu_value_count(eu, four_state);
             eprintln!(
-                "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={cost} threshold={}",
+                "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={inst_cost}/{} values={value_count}/{}",
                 eu.blocks.len(),
                 eu.blocks
                     .values()
                     .map(|b| b.instructions.len())
                     .sum::<usize>(),
-                cost_model::CLIF_INST_THRESHOLD
+                cost_model::CLIF_INST_THRESHOLD,
+                cost_model::VREG_VALUE_THRESHOLD,
             );
         }
     }
