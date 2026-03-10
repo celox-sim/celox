@@ -6,7 +6,11 @@ use crate::optimizer::PassOptions;
 
 use super::pass_manager::ExecutionUnitPass;
 
-pub(super) struct OptimizeBlocksPass;
+pub(super) struct OptimizeBlocksPass {
+    /// When true, skip the final `schedule_instructions` inside `optimize_block`
+    /// because a `ReschedulePass` will run afterward in the same pipeline.
+    pub skip_final_schedule: bool,
+}
 
 impl ExecutionUnitPass for OptimizeBlocksPass {
     fn name(&self) -> &'static str {
@@ -14,6 +18,8 @@ impl ExecutionUnitPass for OptimizeBlocksPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
+        let skip_final_schedule = self.skip_final_schedule;
+
         let mut replacement_map = HashMap::default();
         let mut block_ids: Vec<_> = eu.blocks.keys().copied().collect();
         block_ids.sort();
@@ -27,6 +33,7 @@ impl ExecutionUnitPass for OptimizeBlocksPass {
                 &mut eu.register_map,
                 &mut replacement_map,
                 &mut reg_counter,
+                skip_final_schedule,
             );
         }
 

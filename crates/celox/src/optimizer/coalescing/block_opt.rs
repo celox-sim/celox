@@ -54,17 +54,21 @@ fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, us
     }
 }
 
-fn may_alias<A: PartialEq>(a: (&A, Option<usize>, usize), b: (&A, Option<usize>, usize)) -> bool {
-    if a.0 != b.0 {
-        return false;
-    }
-    match (a.1, b.1) {
-        (Some(off_a), Some(off_b)) => off_a < off_b + b.2 && off_b < off_a + a.2,
+/// Check if two memory ranges at the same address may alias (offset overlap check only).
+/// Used when the address equality is already guaranteed by HashMap bucketing.
+fn ranges_alias(
+    off_a: Option<usize>,
+    width_a: usize,
+    off_b: Option<usize>,
+    width_b: usize,
+) -> bool {
+    match (off_a, off_b) {
+        (Some(a), Some(b)) => a < b + width_b && b < a + width_a,
         _ => true,
     }
 }
 
-fn schedule_block_interleaved<A: Clone + PartialEq>(
+fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
     window: &[SIRInstruction<A>],
     max_inflight_loads: usize,
 ) -> Vec<SIRInstruction<A>> {
@@ -95,9 +99,19 @@ fn schedule_block_interleaved<A: Clone + PartialEq>(
         }
     };
 
-    // Track memory accesses for ordering
-    let mut mem_writes: Vec<usize> = Vec::new();
-    let mut mem_reads: Vec<usize> = Vec::new();
+    // Track memory accesses indexed by address for O(n*k) instead of O(n²).
+    // In large designs, most addresses are distinct so only a few entries per bucket.
+    let mut mem_writes: HashMap<A, Vec<usize>> = HashMap::default();
+    let mut mem_reads: HashMap<A, Vec<usize>> = HashMap::default();
+
+    // Pre-extract memory access info to avoid redundant pattern matching
+    let mem_infos: Vec<Option<(A, Option<usize>, usize, bool)>> = window
+        .iter()
+        .map(|inst| {
+            mem_access_info(inst)
+                .map(|(addr, off, width, is_write)| (addr.clone(), off, width, is_write))
+        })
+        .collect();
 
     for j in 0..n {
         // Data dependencies: for each register used by j, add edge from its def
@@ -110,47 +124,44 @@ fn schedule_block_interleaved<A: Clone + PartialEq>(
             def_map.insert(d, j);
         }
 
-        // Memory dependencies
-        if let Some(info_j) = mem_access_info(&window[j]) {
+        // Memory dependencies — only check entries with the same address
+        if let Some(ref info_j) = mem_infos[j] {
             let j_write = info_j.3;
 
             if j_write {
-                // WAW: depend on previous writes that alias
-                for &prev in &mem_writes {
-                    if let Some(info_prev) = mem_access_info(&window[prev]) {
-                        if may_alias(
-                            (info_prev.0, info_prev.1, info_prev.2),
-                            (info_j.0, info_j.1, info_j.2),
-                        ) {
-                            add_edge(prev, j, &mut succs, &mut indeg);
+                // WAW: depend on previous writes to the same address that alias
+                if let Some(prev_writes) = mem_writes.get(&info_j.0) {
+                    for &prev in prev_writes {
+                        if let Some(ref info_prev) = mem_infos[prev] {
+                            if ranges_alias(info_prev.1, info_prev.2, info_j.1, info_j.2) {
+                                add_edge(prev, j, &mut succs, &mut indeg);
+                            }
                         }
                     }
                 }
-                // WAR: depend on previous reads that alias
-                for &prev in &mem_reads {
-                    if let Some(info_prev) = mem_access_info(&window[prev]) {
-                        if may_alias(
-                            (info_prev.0, info_prev.1, info_prev.2),
-                            (info_j.0, info_j.1, info_j.2),
-                        ) {
-                            add_edge(prev, j, &mut succs, &mut indeg);
+                // WAR: depend on previous reads to the same address that alias
+                if let Some(prev_reads) = mem_reads.get(&info_j.0) {
+                    for &prev in prev_reads {
+                        if let Some(ref info_prev) = mem_infos[prev] {
+                            if ranges_alias(info_prev.1, info_prev.2, info_j.1, info_j.2) {
+                                add_edge(prev, j, &mut succs, &mut indeg);
+                            }
                         }
                     }
                 }
-                mem_writes.push(j);
+                mem_writes.entry(info_j.0.clone()).or_default().push(j);
             } else {
-                // RAW: depend on previous writes that alias
-                for &prev in &mem_writes {
-                    if let Some(info_prev) = mem_access_info(&window[prev]) {
-                        if may_alias(
-                            (info_prev.0, info_prev.1, info_prev.2),
-                            (info_j.0, info_j.1, info_j.2),
-                        ) {
-                            add_edge(prev, j, &mut succs, &mut indeg);
+                // RAW: depend on previous writes to the same address that alias
+                if let Some(prev_writes) = mem_writes.get(&info_j.0) {
+                    for &prev in prev_writes {
+                        if let Some(ref info_prev) = mem_infos[prev] {
+                            if ranges_alias(info_prev.1, info_prev.2, info_j.1, info_j.2) {
+                                add_edge(prev, j, &mut succs, &mut indeg);
+                            }
                         }
                     }
                 }
-                mem_reads.push(j);
+                mem_reads.entry(info_j.0.clone()).or_default().push(j);
             }
         }
     }
@@ -203,7 +214,7 @@ fn schedule_block_interleaved<A: Clone + PartialEq>(
     out
 }
 
-pub(super) fn schedule_instructions<A: Clone + PartialEq>(
+pub(super) fn schedule_instructions<A: Clone + PartialEq + Eq + std::hash::Hash>(
     instructions: &mut [SIRInstruction<A>],
     max_inflight_loads: usize,
 ) {
@@ -256,6 +267,27 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
         if let SIRInstruction::Store(addr, SIROffset::Static(_), _, _, _) = inst {
             let key = addr.clone();
             groups.entry(key).or_default().push(idx);
+        }
+    }
+
+    // Pre-index loads by address for efficient safety checks.
+    // Each entry is (instruction_index, offset, width, is_dynamic).
+    let mut load_index: HashMap<A, Vec<(usize, Option<usize>, usize)>> = HashMap::default();
+    for (idx, inst) in instructions.iter().enumerate() {
+        match inst {
+            SIRInstruction::Load(_, addr, SIROffset::Static(off), w) => {
+                load_index
+                    .entry(addr.clone())
+                    .or_default()
+                    .push((idx, Some(*off), *w));
+            }
+            SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), w) => {
+                load_index
+                    .entry(addr.clone())
+                    .or_default()
+                    .push((idx, None, *w));
+            }
+            _ => {}
         }
     }
 
@@ -314,6 +346,9 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
             details.sort_by_key(|d| d.offset);
         }
 
+        // Get loads for this address once (empty slice if none)
+        let addr_loads = load_index.get(&addr);
+
         let mut segment_start = 0;
         while segment_start < details.len() {
             let mut segment_end = segment_start;
@@ -342,33 +377,31 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
 
                 let insert_at_index = segment.iter().map(|s| s.index).max().unwrap();
 
-                let mut safe = true;
-                for s in segment {
-                    if s.index == insert_at_index {
-                        continue;
-                    }
-                    for inst in &instructions[(s.index + 1)..=insert_at_index] {
-                        if let SIRInstruction::Load(_, a, SIROffset::Static(o), w) = inst
-                            && *a == addr
-                        {
-                            let range1 = s.offset..(s.offset + s.width);
-                            let range2 = *o..(*o + *w);
-                            if range1.start < range2.end && range2.start < range1.end {
-                                safe = false;
-                                break;
+                // Safety check: ensure no conflicting load between store and insert point.
+                // Use pre-indexed loads to avoid scanning all instructions.
+                let safe = if let Some(loads) = addr_loads {
+                    segment.iter().all(|s| {
+                        if s.index == insert_at_index {
+                            return true;
+                        }
+                        // Check loads to this address in range (s.index, insert_at_index]
+                        !loads.iter().any(|&(load_idx, load_off, load_w)| {
+                            if load_idx <= s.index || load_idx > insert_at_index {
+                                return false;
                             }
-                        }
-                        if let SIRInstruction::Load(_, a, SIROffset::Dynamic(_), _) = inst
-                            && *a == addr
-                        {
-                            safe = false;
-                            break;
-                        }
-                    }
-                    if !safe {
-                        break;
-                    }
-                }
+                            match load_off {
+                                None => true, // dynamic offset — conservatively unsafe
+                                Some(lo) => {
+                                    let range1 = s.offset..(s.offset + s.width);
+                                    let range2 = lo..(lo + load_w);
+                                    range1.start < range2.end && range2.start < range1.end
+                                }
+                            }
+                        })
+                    })
+                } else {
+                    true // no loads to this address at all — always safe
+                };
 
                 if safe {
                     let total_width: usize = segment.iter().map(|s| s.width).sum();
@@ -428,11 +461,14 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     true
 }
 
-pub(super) fn optimize_block<A: Clone + std::fmt::Debug + PartialEq + Ord + std::hash::Hash>(
+pub(super) fn optimize_block<
+    A: Clone + std::fmt::Debug + PartialEq + Eq + Ord + std::hash::Hash,
+>(
     block: &mut BasicBlock<A>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
     unit_replacement_map: &mut HashMap<RegisterId, RegisterId>,
     reg_counter: &mut usize,
+    skip_final_schedule: bool,
 ) {
     const MAX_INFLIGHT_LOADS: usize = 8;
     coalesce_static_loads(&mut block.instructions, register_map, reg_counter);
@@ -452,7 +488,10 @@ pub(super) fn optimize_block<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
         replace_reg_in_terminator(&mut block.terminator, from, to);
     }
 
-    schedule_instructions(block.instructions.as_mut_slice(), MAX_INFLIGHT_LOADS);
+    // Skip scheduling if the reschedule pass will run afterward on this EU
+    if !skip_final_schedule {
+        schedule_instructions(block.instructions.as_mut_slice(), MAX_INFLIGHT_LOADS);
+    }
 }
 
 fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::hash::Hash>(

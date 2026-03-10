@@ -75,7 +75,9 @@ fn optimize_with_options(
         ff_passes.add_pass(BitExtractPeepholePass);
     }
     if opt.optimize_blocks {
-        ff_passes.add_pass(OptimizeBlocksPass);
+        ff_passes.add_pass(OptimizeBlocksPass {
+            skip_final_schedule: opt.reschedule,
+        });
     }
     if opt.split_wide_commits {
         ff_passes.add_pass(SplitWideCommitsPass);
@@ -117,7 +119,9 @@ fn optimize_with_options(
         eval_only_passes.add_pass(BitExtractPeepholePass);
     }
     if opt.optimize_blocks {
-        eval_only_passes.add_pass(OptimizeBlocksPass);
+        eval_only_passes.add_pass(OptimizeBlocksPass {
+            skip_final_schedule: opt.reschedule,
+        });
     }
     if opt.reschedule {
         eval_only_passes.add_pass(ReschedulePass);
@@ -146,7 +150,9 @@ fn optimize_with_options(
         apply_passes.add_pass(BitExtractPeepholePass);
     }
     if opt.optimize_blocks {
-        apply_passes.add_pass(OptimizeBlocksPass);
+        apply_passes.add_pass(OptimizeBlocksPass {
+            skip_final_schedule: opt.reschedule,
+        });
     } // Still useful for loading from working memory
     if opt.split_wide_commits {
         apply_passes.add_pass(SplitWideCommitsPass);
@@ -181,7 +187,9 @@ fn optimize_with_options(
         comb_passes.add_pass(BitExtractPeepholePass);
     }
     if opt.optimize_blocks {
-        comb_passes.add_pass(OptimizeBlocksPass);
+        comb_passes.add_pass(OptimizeBlocksPass {
+            skip_final_schedule: false, // eval_comb has no reschedule pass
+        });
     }
 
     let eu_count = program.eval_comb.len();
