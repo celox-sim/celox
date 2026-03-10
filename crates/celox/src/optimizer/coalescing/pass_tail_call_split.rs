@@ -227,10 +227,10 @@ fn split_single_eu(
         .iter()
         .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
         .collect();
-    let value_costs: Vec<usize> = instructions
-        .iter()
-        .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
-        .collect();
+    // Value costs currently equal inst costs (estimate_eu_value_count delegates
+    // to estimate_eu_cost). If a separate per-instruction value estimator is
+    // added later, replace this clone with the new function.
+    let value_costs = inst_costs.clone();
 
     // Step 3: Backward liveness analysis
     // For each split candidate position, compute the set of live registers.
@@ -1092,10 +1092,8 @@ fn split_oversized_block(
         .iter()
         .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
         .collect();
-    let value_costs: Vec<usize> = instructions
-        .iter()
-        .map(|inst| estimate_clif_cost(inst, &eu.register_map, four_state))
-        .collect();
+    // Value costs = inst costs (see estimate_eu_value_count doc comment).
+    let value_costs = inst_costs.clone();
     let mut prefix_inst = vec![0usize; instructions.len() + 1];
     let mut prefix_value = vec![0usize; instructions.len() + 1];
     for (i, (&ic, &vc)) in inst_costs.iter().zip(value_costs.iter()).enumerate() {
