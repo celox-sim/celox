@@ -8,7 +8,7 @@ use crate::{
     HashMap, HashSet,
     parser::{
         BuildConfig, LoweringPhase, ParserError,
-        bitaccess::{eval_constexpr, eval_var_select},
+        bitaccess::{eval_constexpr, get_access_width},
     },
 };
 use bit_set::BitSet;
@@ -135,8 +135,8 @@ impl<'a> FfParser<'a> {
     fn get_factor_width(&self, factor: &Factor) -> usize {
         match factor {
             Factor::Variable(var_id, index, select, _) => {
-                if let Ok(access) = eval_var_select(self.module, *var_id, index, select) {
-                    access.msb - access.lsb + 1
+                if let Ok(w) = get_access_width(self.module, *var_id, index, select) {
+                    w
                 } else {
                     64
                 }

@@ -5,7 +5,7 @@ use crate::ir::{
 };
 use crate::parser::{
     LoweringPhase, ParserError,
-    bitaccess::{celox_value_from_comptime, eval_var_select, is_static_access},
+    bitaccess::{celox_value_from_comptime, eval_var_select, get_access_width, is_static_access},
     resolve_dims, resolve_shape_total,
 };
 use malachite_bigint::BigUint;
@@ -196,8 +196,10 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
-        let access = eval_var_select(self.module, var_id, index, select)?;
-        let width = access.msb - access.lsb + 1; // Selected bit width
+        // Use get_access_width for the actual element width (correct for dynamic indices).
+        // eval_var_select returns the full-level range for dynamic indices, which is too
+        // wide for Load/Store instructions.
+        let width = get_access_width(self.module, var_id, index, select)?;
         let dest_reg = if self.module.variables[&var_id].r#type.signed {
             ir_builder.alloc_bit(width, true)
         } else {
@@ -206,9 +208,6 @@ impl<'a> FfParser<'a> {
 
         let offset =
             self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
-
-        let access = eval_var_select(self.module, var_id, index, select)?;
-        let width = access.msb - access.lsb + 1;
 
         ir_builder.emit(SIRInstruction::Load(
             dest_reg,
@@ -219,6 +218,9 @@ impl<'a> FfParser<'a> {
 
         self.stack.push_back(dest_reg);
 
+        // For source tracking, use the conservative range from eval_var_select
+        // (covers all bits that might be read by a dynamic index).
+        let access = eval_var_select(self.module, var_id, index, select)?;
         let is_internal = self.is_range_fully_defined(var_id, access)
             || self.dynamic_defined_vars.contains(&var_id);
         if !is_internal {
@@ -252,9 +254,8 @@ impl<'a> FfParser<'a> {
             sources,
             ir_builder,
         )?;
-        let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
-
-        let target_width = access.msb - access.lsb + 1;
+        // Use get_access_width for actual element width (correct for dynamic array indices).
+        let target_width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
         ir_builder.emit(SIRInstruction::Store(
             convert(dst.id, domain.region()),
             offset,
@@ -263,6 +264,8 @@ impl<'a> FfParser<'a> {
             Vec::new(),
         ));
 
+        // Use conservative range from eval_var_select for tracking (covers all possible bits).
+        let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
         if is_static_access(&dst.index, &dst.select) {
             let bits = self.defined_ranges.entry(dst.id).or_default();
             for i in access.lsb..=access.msb {
@@ -576,8 +579,7 @@ impl<'a> FfParser<'a> {
         let rhs_width = ir_builder.register(&rhs_reg).width();
 
         for dst in dsts.iter().rev() {
-            let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
-            let part_width = access.msb - access.lsb + 1;
+            let part_width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
 
             let final_reg = if current_offset == 0 && part_width == rhs_width {
                 rhs_reg
@@ -640,10 +642,7 @@ impl<'a> FfParser<'a> {
         let expected_width: usize = assign_statement
             .dst
             .iter()
-            .map(|dst| {
-                let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
-                Ok(access.msb - access.lsb + 1)
-            })
+            .map(|dst| get_access_width(self.module, dst.id, &dst.index, &dst.select))
             .sum::<Result<usize, ParserError>>()?;
 
         match &assign_statement.expr {
