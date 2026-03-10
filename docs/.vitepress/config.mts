@@ -74,6 +74,10 @@ export default defineConfig({
                   text: "celox.toml",
                   link: "/ja/guide/celox-toml",
                 },
+                {
+                  text: "最適化チューニング",
+                  link: "/ja/guide/optimization-tuning",
+                },
               ],
             },
           ],
@@ -111,6 +115,7 @@ export default defineConfig({
             { text: "Type Conversion", link: "/guide/type-conversion" },
             { text: "Vite Plugin", link: "/guide/vite-plugin" },
             { text: "celox.toml", link: "/guide/celox-toml" },
+            { text: "Optimization Tuning", link: "/guide/optimization-tuning" },
           ],
         },
       ],

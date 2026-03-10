@@ -74,7 +74,7 @@ Two levels of optimization control:
 | `eliminate_dead_working_stores` | Removes working-memory stores that are never read |
 | `reschedule` | Reorders instructions for better Cranelift codegen |
 
-All passes default to `true`. `.optimize(false)` sets all to `false` as a shorthand.
+All passes default to `true`. `.optimize(false)` sets all to `false` as a shorthand. See `docs/guide/optimization-tuning.md` for tuning guidance and benchmark data.
 
 ### Cranelift Backend Optimization
 
