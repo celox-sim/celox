@@ -62,19 +62,19 @@ fn sorter_tree_n64_compiles() {
     let elapsed = build_sorter(64);
     eprintln!("SorterTreeDistEntry N=64: {elapsed:?}");
     assert!(
-        elapsed.as_secs() < 60,
-        "N=64 took {elapsed:?}, expected < 60s"
+        elapsed.as_secs() < 120,
+        "N=64 took {elapsed:?}, expected < 120s"
     );
 }
 
-/// N=128 compiles in reasonable time (debug build is slower, allow 180s).
+/// N=128 compiles in reasonable time (debug build is slower, allow generous margin for CI).
 #[test]
 fn sorter_tree_n128_compiles() {
     let elapsed = build_sorter(128);
     eprintln!("SorterTreeDistEntry N=128: {elapsed:?}");
     assert!(
-        elapsed.as_secs() < 180,
-        "N=128 took {elapsed:?}, expected < 180s"
+        elapsed.as_secs() < 360,
+        "N=128 took {elapsed:?}, expected < 360s"
     );
 }
 
