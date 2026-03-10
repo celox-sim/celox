@@ -1627,8 +1627,7 @@ mod tests {
         // Use threshold smaller than any single block cost to force many chunks
         let max_block_cost = block_costs.values().map(|&(ic, _)| ic).max().unwrap_or(1);
         let threshold = max_block_cost; // fits exactly one block per chunk
-        let groups =
-            partition_single_pass(&eu, &topo_order, &block_costs, threshold, usize::MAX);
+        let groups = partition_single_pass(&eu, &topo_order, &block_costs, threshold, usize::MAX);
         assert!(
             groups.len() >= 2,
             "Should have multiple chunks with low threshold"
@@ -1670,8 +1669,12 @@ mod tests {
         // Use threshold that forces at least 2 chunks
         let eu_cost = super::super::cost_model::estimate_eu_cost(&eu, false);
         let threshold = eu_cost / 3;
-        let result =
-            split_multi_block_with_threshold(std::slice::from_ref(&eu), false, threshold, usize::MAX);
+        let result = split_multi_block_with_threshold(
+            std::slice::from_ref(&eu),
+            false,
+            threshold,
+            usize::MAX,
+        );
 
         if let Some(plan) = result {
             for (ci, chunk) in plan.chunks.iter().enumerate() {
