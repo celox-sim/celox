@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use veryl_analyzer::ir::{Component, Declaration, Ir, Module, TypeKind, VarId, VarKind};
+use veryl_analyzer::symbol::Affiliation;
 use veryl_parser::resource_table;
 
 /// A generated TypeScript module definition (`.d.ts` + `.js` + `.md` content).
@@ -144,6 +145,12 @@ fn extract_ports(module: &Module) -> Vec<PortInfo> {
             continue;
         }
         if variable.kind != VarKind::Variable {
+            continue;
+        }
+        // Skip function-local variables (e.g. package function args/return
+        // values like PKG.lt.a) — these are inlined and not accessible as
+        // signals.
+        if variable.affiliation == Affiliation::Function {
             continue;
         }
 
