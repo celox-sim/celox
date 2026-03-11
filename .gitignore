@@ -43,3 +43,5 @@ ts-output.json
 
 # OS
 .DS_Store
+crates/celox/examples/bench_n4000.rs
+crates/celox/examples/bench_scaling.rs
