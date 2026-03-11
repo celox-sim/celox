@@ -370,3 +370,67 @@ fn test_dynamic_index_with_bitslice() {
     assert_eq!(sim.get(o_lo), 0x00000001u64.into()); // lo 32 bits
     assert_eq!(sim.get(o_hi), 0x0000000Bu64.into()); // hi 32 bits
 }
+
+#[test]
+fn test_let_index_with_bitslice_write() {
+    // Regression: using a `let`-bound variable as an array index combined
+    // with a bitslice write (e.g. data[idx][63:32]) produced wrong values
+    // because eval_dynamic_assign treated the Colon MSB anchor as a
+    // dimension index.
+    let code = r#"
+        module Top (
+            o_lo: output logic<32>,
+            o_hi: output logic<32>
+        ) {
+            var data: logic<64> [4];
+            always_comb {
+                for i: u32 in 0..4 {
+                    data[i] = 64'd0;
+                }
+                for g: u32 in 0..2 {
+                    for s: u32 in 0..2 {
+                        let idx: u32 = g * 2 + s;
+                        data[idx][63:32] = (g * 2 + s) as u32;
+                        data[idx][31:0]  = (g * 2 + s + 100) as u32;
+                    }
+                }
+                o_hi = data[2][63:32];
+                o_lo = data[2][31:0];
+            }
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let o_hi = sim.signal("o_hi");
+    let o_lo = sim.signal("o_lo");
+
+    assert_eq!(sim.get(o_hi), 2u64.into());
+    assert_eq!(sim.get(o_lo), 102u64.into());
+}
+
+#[test]
+fn test_let_index_with_bitslice_write_single() {
+    // Minimal: single let index + bitslice write
+    let code = r#"
+        module Top (
+            o_lo: output logic<16>,
+            o_hi: output logic<16>
+        ) {
+            var data: logic<32> [2];
+            always_comb {
+                data[0] = 32'd0;
+                data[1] = 32'd0;
+                let idx: u32 = 1;
+                data[idx][31:16] = 16'hBEEF;
+                data[idx][15:0]  = 16'hCAFE;
+                o_hi = data[1][31:16];
+                o_lo = data[1][15:0];
+            }
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let o_hi = sim.signal("o_hi");
+    let o_lo = sim.signal("o_lo");
+
+    assert_eq!(sim.get(o_hi), 0xBEEFu64.into());
+    assert_eq!(sim.get(o_lo), 0xCAFEu64.into());
+}

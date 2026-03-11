@@ -849,7 +849,6 @@ fn eval_dynamic_assign(
     let mut all_sources = rhs_sources;
 
     let (_, strides, _) = crate::parser::bitaccess::get_dimensions_and_strides(module, dst.id)?;
-    let mut stride_iter = strides.iter();
     let mut offset_node = arena.alloc(SLTNode::Constant(
         BigUint::from(0u32),
         BigUint::from(0u32),
@@ -859,12 +858,25 @@ fn eval_dynamic_assign(
 
     let mut index_exprs = dst.index.0.clone();
     index_exprs.extend(dst.select.0.clone());
-    for idx_expr in &index_exprs {
+
+    // For Colon selects (e.g. [31:0]), the last element of index_exprs is
+    // the MSB anchor—not a dimension index. Exclude it from the dynamic
+    // offset and instead add the LSB as a static bit offset below.
+    // For PlusColon/MinusColon/Step, the anchor is the dynamic start
+    // position and belongs in the offset.
+    let is_colon_select = matches!(&dst.select.1, Some((VarSelectOp::Colon, _)));
+    let dim_limit = if is_colon_select {
+        index_exprs.len().saturating_sub(1)
+    } else {
+        index_exprs.len()
+    };
+
+    for (dim_i, idx_expr) in index_exprs[..dim_limit].iter().enumerate() {
         let ((expr, sources), bounds) = eval_expression(module, &store, idx_expr, arena, None)?;
         boundaries = merge_boundaries(boundaries, bounds);
         all_sources.extend(sources);
 
-        let stride = stride_iter.next().copied().unwrap_or(1);
+        let stride = strides.get(dim_i).copied().unwrap_or(1);
         let stride_node = arena.alloc(SLTNode::Constant(
             BigUint::from(stride),
             BigUint::from(0u32),
@@ -873,6 +885,25 @@ fn eval_dynamic_assign(
         ));
         let term = arena.alloc(SLTNode::Binary(expr, BinaryOp::Mul, stride_node));
         offset_node = arena.alloc(SLTNode::Binary(offset_node, BinaryOp::Add, term));
+    }
+
+    // For Colon selects, add the LSB as a static bit offset within the
+    // element selected by the array indices.
+    if let Some((VarSelectOp::Colon, range_expr)) = &dst.select.1 {
+        let weight = strides.get(dim_limit).copied().unwrap_or(1);
+        let lsb = eval_constexpr(range_expr)
+            .map(|v| v.to_u64_digits().first().copied().unwrap_or(0) as usize)
+            .unwrap_or(0);
+        let bit_offset = lsb * weight;
+        if bit_offset > 0 {
+            let lsb_node = arena.alloc(SLTNode::Constant(
+                BigUint::from(bit_offset),
+                BigUint::from(0u32),
+                64,
+                false,
+            ));
+            offset_node = arena.alloc(SLTNode::Binary(offset_node, BinaryOp::Add, lsb_node));
+        }
     }
 
     let access_width =
