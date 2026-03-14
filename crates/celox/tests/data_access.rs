@@ -535,10 +535,22 @@ fn test_ff_bit_select_in_generate_loop() {
     sim.tick(clk).unwrap();
 
     // Path A and Path B should produce identical results
-    assert_eq!(sim.get(out_a0), sim.get(out_b0), "d0=5: Path A vs B mismatch");
-    assert_eq!(sim.get(out_a1), sim.get(out_b1), "d1=-5: Path A vs B mismatch");
+    assert_eq!(
+        sim.get(out_a0),
+        sim.get(out_b0),
+        "d0=5: Path A vs B mismatch"
+    );
+    assert_eq!(
+        sim.get(out_a1),
+        sim.get(out_b1),
+        "d1=-5: Path A vs B mismatch"
+    );
     assert_eq!(sim.get(out_a0), 5u64.into(), "abs(5) should be 5");
     assert_eq!(sim.get(out_a1), 5u64.into(), "abs(-5) should be 5");
     assert_eq!(sim.get(out_b0), 5u64.into(), "abs(5) should be 5 (ff path)");
-    assert_eq!(sim.get(out_b1), 5u64.into(), "abs(-5) should be 5 (ff path)");
+    assert_eq!(
+        sim.get(out_b1),
+        5u64.into(),
+        "abs(-5) should be 5 (ff path)"
+    );
 }

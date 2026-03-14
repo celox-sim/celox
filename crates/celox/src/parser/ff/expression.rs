@@ -146,9 +146,8 @@ impl<'a> FfParser<'a> {
                 .get(stride_offset + select_dim_limit)
                 .copied()
                 .unwrap_or(1);
-            if let Some(lsb_val) =
-                crate::parser::bitaccess::eval_constexpr(range_expr)
-                    .map(|v| v.to_u64_digits().first().copied().unwrap_or(0))
+            if let Some(lsb_val) = crate::parser::bitaccess::eval_constexpr(range_expr)
+                .map(|v| v.to_u64_digits().first().copied().unwrap_or(0))
             {
                 static_offset += lsb_val * (weight as u64);
             }
