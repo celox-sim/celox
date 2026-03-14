@@ -6,13 +6,12 @@ use crate::ir::{
 use crate::parser::{
     LoweringPhase, ParserError,
     bitaccess::{celox_value_from_comptime, eval_var_select, get_access_width, is_static_access},
-    resolve_dims, resolve_shape_total,
 };
 use malachite_bigint::BigUint;
 
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignDestination, AssignStatement, Comptime, Expression, Factor, Op, Type,
-    ValueVariant, VarId, VarIndex, VarSelect,
+    ValueVariant, VarId, VarIndex, VarSelect, VarSelectOp,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -28,23 +27,9 @@ impl<'a> FfParser<'a> {
 
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<SIROffset, ParserError> {
-        let variable = &self.module.variables[&var_id];
-        let var_type = &variable.r#type;
-
-        // 1. Calculate Stride for array dimensions
-        let array_dims: Vec<usize> =
-            resolve_dims(self.module, variable, var_type.array.as_slice(), "array")?;
-
-        // Scalar bit width (N in logic<N>)
-        let scalar_bits = resolve_shape_total(self.module, variable)?;
-
-        // Strides: How many bits each array index moves
-        let mut strides = vec![0; array_dims.len()];
-        let mut current_stride = scalar_bits;
-        for i in (0..array_dims.len()).rev() {
-            strides[i] = current_stride;
-            current_stride *= array_dims[i];
-        }
+        // 1. Calculate strides for all dimensions (array + width)
+        let (_, strides, _) =
+            crate::parser::bitaccess::get_dimensions_and_strides(self.module, var_id)?;
 
         // 2. Offset calculation (Static + Dynamic)
         let mut static_offset: u64 = 0;
@@ -83,8 +68,27 @@ impl<'a> FfParser<'a> {
         }
 
         // 4. Bit select / Final dimension array part (VarSelect)
+        // Offset stride lookup by the number of array indices already consumed
+        let stride_offset = index.0.len();
+
+        // For Colon selects (e.g. [31:0]), the last element of select.0
+        // is the MSB anchor—not a dimension index.
+        // Exclude it from the dynamic offset and instead handle the
+        // bit range LSB separately (matching the comb path's dim_limit logic).
+        let is_colon_select = matches!(&select.1, Some((VarSelectOp::Colon, _)));
+        let select_dim_limit = if is_colon_select {
+            select.0.len().saturating_sub(1)
+        } else {
+            select.0.len()
+        };
+
         let select_len = select.0.len();
         for (i, expr) in select.0.iter().enumerate() {
+            if i >= select_dim_limit {
+                // This is the MSB anchor of a Colon select — skip it.
+                // The LSB is handled below.
+                break;
+            }
             // Case: final element and slice (Option exists)
             if i == select_len - 1
                 && let Some((op, end_expr)) = &select.1
@@ -92,14 +96,18 @@ impl<'a> FfParser<'a> {
                 // Get LSB expression using VarSelectOp::eval_expr
                 let (_, lsb_expr) = op.eval_expr(expr, end_expr);
 
-                // Stride is 1 since it's the start position of a bit slice
+                let stride = if stride_offset + i < strides.len() {
+                    strides[stride_offset + i]
+                } else {
+                    1
+                };
                 if let Some(c) = self.get_constant_value(&lsb_expr) {
-                    static_offset += c;
+                    static_offset += c * (stride as u64);
                 } else {
                     let term_reg = self.emit_arith_term(
                         &lsb_expr,
                         &mut dummy_targets,
-                        1,
+                        stride,
                         domain,
                         convert,
                         sources,
@@ -109,8 +117,11 @@ impl<'a> FfParser<'a> {
                 }
             } else {
                 // Normal index (array dimension or single bit select)
-                // Stride is strides[j] if still in array dimension, 1 if inside scalar
-                let stride = if i < strides.len() { strides[i] } else { 1 };
+                let stride = if stride_offset + i < strides.len() {
+                    strides[stride_offset + i]
+                } else {
+                    1
+                };
 
                 if let Some(c) = self.get_constant_value(expr) {
                     static_offset += c * (stride as u64);
@@ -126,6 +137,20 @@ impl<'a> FfParser<'a> {
                     )?;
                     add_dynamic_term(term_reg, ir_builder);
                 }
+            }
+        }
+
+        // For Colon selects, add the LSB as a static offset
+        if let Some((VarSelectOp::Colon, range_expr)) = &select.1 {
+            let weight = strides
+                .get(stride_offset + select_dim_limit)
+                .copied()
+                .unwrap_or(1);
+            if let Some(lsb_val) =
+                crate::parser::bitaccess::eval_constexpr(range_expr)
+                    .map(|v| v.to_u64_digits().first().copied().unwrap_or(0))
+            {
+                static_offset += lsb_val * (weight as u64);
             }
         }
 

@@ -224,17 +224,6 @@ pub(crate) fn resolve_total_width(
     Ok(width * array)
 }
 
-/// Resolve `Shape::total()` for the width shape, returning an error when unresolvable.
-pub(crate) fn resolve_shape_total(
-    module: &veryl_analyzer::ir::Module,
-    var: &veryl_analyzer::ir::Variable,
-) -> Result<usize, ParserError> {
-    var.r#type
-        .width
-        .total()
-        .ok_or_else(|| ParserError::unresolved_width(module, var, var.r#type.to_string()))
-}
-
 /// Resolve each dimension in an array/width shape, returning an error when any is `None`.
 pub(crate) fn resolve_dims(
     module: &veryl_analyzer::ir::Module,

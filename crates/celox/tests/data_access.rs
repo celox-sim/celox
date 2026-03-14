@@ -434,3 +434,111 @@ fn test_let_index_with_bitslice_write_single() {
     assert_eq!(sim.get(o_hi), 0xBEEFu64.into());
     assert_eq!(sim.get(o_lo), 0xCAFEu64.into());
 }
+
+#[test]
+fn test_ff_bit_select_in_generate_loop() {
+    // Regression: bit-select inside always_ff in a generate loop (e.g. din[i][15])
+    // produced wrong values because emit_offset_calc computed strides only from
+    // array dimensions, causing bit indices to be multiplied by the array stride
+    // instead of 1.
+    let code = r#"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            d0: input logic<16>,
+            d1: input logic<16>,
+            en: input logic,
+            out_a0: output logic<16>,
+            out_a1: output logic<16>,
+            out_b0: output logic<16>,
+            out_b1: output logic<16>,
+        ) {
+            var din: logic<16> [2];
+            always_comb {
+                din[0] = d0;
+                din[1] = d1;
+            }
+
+            // Path A: comb abs → ff register (workaround)
+            var abs_c: logic<16> [2];
+            for i in 0..2 :g_abs_c {
+                always_comb {
+                    if din[i][15] {
+                        abs_c[i] = ~din[i] + 1;
+                    } else {
+                        abs_c[i] = din[i];
+                    }
+                }
+            }
+            always_ff (clk, rst) {
+                if_reset {
+                    out_a0 = 0;
+                    out_a1 = 0;
+                } else if en {
+                    out_a0 = abs_c[0];
+                    out_a1 = abs_c[1];
+                }
+            }
+
+            // Path B: inline bit-select in always_ff
+            var out_b: logic<16> [2];
+            for i in 0..2 :g_reg_b {
+                always_ff (clk, rst) {
+                    if_reset {
+                        out_b[i] = 0;
+                    } else if en {
+                        if din[i][15] {
+                            out_b[i] = ~din[i] + 1;
+                        } else {
+                            out_b[i] = din[i];
+                        }
+                    }
+                }
+            }
+            always_comb {
+                out_b0 = out_b[0];
+                out_b1 = out_b[1];
+            }
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let d0 = sim.signal("d0");
+    let d1 = sim.signal("d1");
+    let en = sim.signal("en");
+    let out_a0 = sim.signal("out_a0");
+    let out_a1 = sim.signal("out_a1");
+    let out_b0 = sim.signal("out_b0");
+    let out_b1 = sim.signal("out_b1");
+
+    // Reset (AsyncLow: active when rst=0)
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(en, 0u8);
+        io.set(d0, 0u16);
+        io.set(d1, 0u16);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+
+    // Deactivate reset
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+
+    // Set d0 = 5 (positive), d1 = 0xFFFB (-5 as i16)
+    sim.modify(|io| {
+        io.set(en, 1u8);
+        io.set(d0, 5u16);
+        io.set(d1, 0xFFFBu16); // -5 in two's complement
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+
+    // Path A and Path B should produce identical results
+    assert_eq!(sim.get(out_a0), sim.get(out_b0), "d0=5: Path A vs B mismatch");
+    assert_eq!(sim.get(out_a1), sim.get(out_b1), "d1=-5: Path A vs B mismatch");
+    assert_eq!(sim.get(out_a0), 5u64.into(), "abs(5) should be 5");
+    assert_eq!(sim.get(out_a1), 5u64.into(), "abs(-5) should be 5");
+    assert_eq!(sim.get(out_b0), 5u64.into(), "abs(5) should be 5 (ff path)");
+    assert_eq!(sim.get(out_b1), 5u64.into(), "abs(-5) should be 5 (ff path)");
+}
