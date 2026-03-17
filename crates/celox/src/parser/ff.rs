@@ -98,6 +98,13 @@ impl<'a> FfParser<'a> {
                     | Op::LogicAnd
                     | Op::LogicOr
                     | Op::LogicNot => 1,
+                    // Shift/pow result width is determined by the LHS only
+                    // (IEEE 1800-2023 §11.4.10).
+                    Op::LogicShiftL
+                    | Op::LogicShiftR
+                    | Op::ArithShiftL
+                    | Op::ArithShiftR
+                    | Op::Pow => lw,
                     _ => lw.max(rw),
                 }
             }

@@ -980,6 +980,16 @@ impl<'a> FfParser<'a> {
             (None, None)
         } else if matches!(
             op,
+            Op::LogicShiftL | Op::LogicShiftR | Op::ArithShiftL | Op::ArithShiftR | Op::Pow
+        ) {
+            // Shift result width is determined by the LHS only (IEEE 1800-2023 §11.4.10).
+            // The RHS (shift amount) must not widen the result.
+            (
+                crate::context_width::get_context_width(&parent_expr, context_width),
+                None,
+            )
+        } else if matches!(
+            op,
             Op::Less
                 | Op::LessEq
                 | Op::Greater
@@ -1079,9 +1089,17 @@ impl<'a> FfParser<'a> {
             return Ok(());
         }
 
-        let width = self
-            .get_expression_width(left)
-            .max(self.get_expression_width(right));
+        let is_shift = matches!(
+            op,
+            Op::LogicShiftL | Op::LogicShiftR | Op::ArithShiftL | Op::ArithShiftR | Op::Pow
+        );
+        let width = if is_shift {
+            // Shift result width is determined by the LHS only.
+            self.get_expression_width(left)
+        } else {
+            self.get_expression_width(left)
+                .max(self.get_expression_width(right))
+        };
         if let Some(w) = context_width {
             let width = width.max(w);
             self.parse_expression(
