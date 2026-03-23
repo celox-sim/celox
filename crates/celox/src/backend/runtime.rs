@@ -128,7 +128,39 @@ impl JitBackend {
         mut trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<SharedJitCode, crate::SimulatorError> {
         let layout = MemoryLayout::build(sir, options.four_state);
-        let mut engine = JitEngine::new(layout, options).map_err(SimulatorError::from)?;
+
+        // Auto-select SinglePass RA for large designs where Backtracking RA's
+        // superlinear compile time would dominate. The threshold is half the
+        // CLIF instruction limit — at this size, code quality differences
+        // between allocators are negligible compared to compile time savings.
+        let mut options = options.clone();
+        {
+            use crate::optimizer::coalescing::cost_model::*;
+            let _comb_cost: usize = sir
+                .eval_comb
+                .iter()
+                .map(|eu| estimate_eu_cost(eu, options.four_state))
+                .sum();
+            let comb_vregs: usize = sir
+                .eval_comb
+                .iter()
+                .map(|eu| estimate_eu_value_count(eu, options.four_state))
+                .sum();
+            // estimate_eu_value_count under-counts by ~2x vs actual CLIF values.
+            // Backtracking RA scales superlinearly with vreg count; switch to
+            // SinglePass when estimated vregs suggest actual count would be large.
+            if comb_vregs > VREG_VALUE_THRESHOLD / 4
+                && matches!(
+                    options.cranelift_options.regalloc_algorithm,
+                    crate::optimizer::RegallocAlgorithm::Backtracking
+                )
+            {
+                options.cranelift_options.regalloc_algorithm =
+                    crate::optimizer::RegallocAlgorithm::SinglePass;
+            }
+        }
+
+        let mut engine = JitEngine::new(layout, &options).map_err(SimulatorError::from)?;
 
         let mut pre_clif_buf = String::new();
         let mut post_clif_buf = String::new();

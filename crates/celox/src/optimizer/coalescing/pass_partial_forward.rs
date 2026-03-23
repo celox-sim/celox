@@ -21,17 +21,6 @@ impl ExecutionUnitPass for PartialForwardPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        // Each forwarded Load adds Slice+Slice+Concat, extending live ranges
-        // in a way that makes Backtracking RA compile time grow superlinearly.
-        // Cap the number of forwarded Loads per EU to keep compile time bounded.
-        // Typical beneficial case (SEC P6): ~57 forwardings. Pathological
-        // case (sorter_tree N=64): ~1354. Threshold balances optimization
-        // benefit vs compile-time regression; will be lifted with vectorization.
-        const MAX_FORWARDINGS: usize = 200;
-        let forwardable = count_forwardable_loads(eu);
-        if forwardable == 0 || forwardable > MAX_FORWARDINGS {
-            return;
-        }
         let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
 
         for block in eu.blocks.values_mut() {
@@ -198,51 +187,6 @@ fn emit_gap(
     let reg = alloc_reg(register_map, reg_counter, gap_width);
     instructions.push(SIRInstruction::Slice(reg, base_reg, gap_rel_start, gap_width));
     concat_args.push(reg);
-}
-
-/// Quick pre-scan: count how many Loads would be forwarded by partial forward.
-fn count_forwardable_loads(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> usize {
-    let mut count = 0;
-    for block in eu.blocks.values() {
-        let mut has_store: HashMap<RegionedAbsoluteAddr, (usize, usize)> = HashMap::default(); // addr -> (base_off, base_width)
-        let mut pending_overlay: HashMap<RegionedAbsoluteAddr, bool> = HashMap::default();
-        for inst in &block.instructions {
-            match inst {
-                SIRInstruction::Load(_, addr, SIROffset::Static(off), width) => {
-                    if let Some(&(base_off, base_width)) = has_store.get(addr) {
-                        if *off == base_off && *width == base_width && pending_overlay.get(addr) == Some(&true) {
-                            count += 1;
-                            pending_overlay.insert(*addr, false);
-                        }
-                    }
-                    has_store.insert(*addr, (*off, *width));
-                    pending_overlay.insert(*addr, false);
-                }
-                SIRInstruction::Store(addr, SIROffset::Static(off), width, _, triggers)
-                    if triggers.is_empty() =>
-                {
-                    if let Some(&(base_off, base_width)) = has_store.get(addr) {
-                        if *off >= base_off && *off + *width <= base_off + base_width {
-                            pending_overlay.insert(*addr, true);
-                            continue;
-                        }
-                    }
-                    has_store.remove(addr);
-                    pending_overlay.remove(addr);
-                }
-                SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _) => {
-                    has_store.remove(addr);
-                    pending_overlay.remove(addr);
-                }
-                SIRInstruction::Commit(_, dst, _, _, _) => {
-                    has_store.remove(dst);
-                    pending_overlay.remove(dst);
-                }
-                _ => {}
-            }
-        }
-    }
-    count
 }
 
 fn alloc_reg(
