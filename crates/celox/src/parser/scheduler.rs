@@ -271,6 +271,120 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
     }
 }
 
+/// Flush pending DAG nodes, optionally coalescing contiguous stores to the
+/// same variable into a single `Concat` + `Store`.
+fn flush_pending_coalesce<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
+    pending: &mut Vec<usize>,
+    input: &[LogicPath<Addr>],
+    _atoms_map: &HashMap<Addr, Vec<(BitAccess, usize)>>,
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+
+    // Only attempt coalescing when we have multiple paths AND not in four_state mode.
+    let can_coalesce = pending.len() > 1 && !four_state;
+
+    if can_coalesce {
+        // Sort a COPY by lsb to check contiguity — don't mutate pending (preserve topo order).
+        let mut sorted_by_lsb: Vec<usize> = pending.clone();
+        sorted_by_lsb.sort_by_key(|&idx| input[idx].target.access.lsb);
+
+        // Check contiguity: every next path's lsb == previous path's msb + 1
+        let contiguous = sorted_by_lsb.windows(2).all(|w| {
+            input[w[1]].target.access.lsb == input[w[0]].target.access.msb + 1
+        });
+
+        // Check total merged width doesn't exceed variable's declared width.
+        let target_addr = input[sorted_by_lsb[0]].target.id;
+        let merged_lsb = input[sorted_by_lsb[0]].target.access.lsb;
+        let merged_msb = input[*sorted_by_lsb.last().unwrap()].target.access.msb;
+        let merged_width = merged_msb - merged_lsb + 1;
+        let within_var_width = var_widths
+            .get(&target_addr)
+            .is_some_and(|&vw| merged_width <= vw);
+
+        // Don't coalesce if any path has a self-reference (source reads from same var as target).
+        let has_self_ref = sorted_by_lsb.iter().any(|&idx| {
+            let path = &input[idx];
+            path.sources.iter().any(|s| s.id == path.target.id)
+        });
+
+        if contiguous && within_var_width && !has_self_ref {
+            // Coalesce: lower each path expression, then concat + single wide store.
+            // SIR Concat order is [MSB, ..., LSB], so reverse after lsb sort.
+            let mut regs: Vec<(RegisterId, usize)> = Vec::with_capacity(sorted_by_lsb.len());
+            for &idx in &sorted_by_lsb {
+                let path = &input[idx];
+                collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
+                let reg = lowerer.lower(builder, path.expr, arena, lower_cache);
+                let w = 1 + path.target.access.msb - path.target.access.lsb;
+                regs.push((reg, w));
+            }
+
+            // Reverse so that MSB comes first (Concat order).
+            regs.reverse();
+
+            let concat_reg = builder.alloc_bit(merged_width, false);
+            builder.emit(SIRInstruction::Concat(
+                concat_reg,
+                regs.iter().map(|(r, _)| *r).collect(),
+            ));
+
+            builder.emit(SIRInstruction::Store(
+                target_addr,
+                SIROffset::Static(merged_lsb),
+                merged_width,
+                concat_reg,
+                Vec::new(),
+            ));
+
+            // Invalidate cache for the target variable.
+            if let Some(to_remove) = inverse_dep_memo.get(&target_addr) {
+                for node in to_remove {
+                    lower_cache.remove(node);
+                }
+            }
+
+            pending.clear();
+            return;
+        }
+    }
+
+    // Fallback: emit in original topological order (don't sort pending).
+    for &idx in pending.iter() {
+        let path = &input[idx];
+        collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
+        let result_reg = lowerer.lower(builder, path.expr, arena, lower_cache);
+        let width = 1 + path.target.access.msb - path.target.access.lsb;
+        let addr = path.target.id;
+
+        builder.emit(SIRInstruction::Store(
+            addr,
+            SIROffset::Static(path.target.access.lsb),
+            width,
+            result_reg,
+            Vec::new(),
+        ));
+
+        if let Some(to_remove) = inverse_dep_memo.get(&addr) {
+            for node in to_remove {
+                lower_cache.remove(node);
+            }
+        }
+    }
+
+    pending.clear();
+}
+
 /// Schedules and transforms LogicPaths into Simulation Intermediate Representation (SIR).
 ///
 /// This process performs:
@@ -286,6 +400,7 @@ pub fn sort<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
     ignored_loops: &HashSet<(Addr, Addr)>,
     true_loops: &HashMap<(Addr, Addr), usize>,
     four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
 ) -> Result<Vec<ExecutionUnit<Addr>>, SchedulerError<Addr>> {
     // 1. Build Atom Map & Multiple Driver Check
     let mut atoms_map: HashMap<Addr, Vec<(BitAccess, usize)>> = HashMap::default();
@@ -379,6 +494,9 @@ pub fn sort<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
 
     let mut result_eus: Vec<ExecutionUnit<Addr>> = Vec::new();
 
+    let mut pending_indices: Vec<usize> = Vec::new();
+    let mut pending_target: Option<Addr> = None;
+
     // 4. Scheduling: Process each SCC by selecting either Static Unrolling (A) or Dynamic Convergence (B).
     for scc in ctx.sccs {
         let mut user_safety_limit = None;
@@ -396,6 +514,21 @@ pub fn sort<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
         let is_loop = scc.len() > 1 || (scc.len() == 1 && adj[scc[0]].contains(&scc[0]));
 
         if is_loop {
+            // Flush any buffered DAG nodes before entering a loop SCC.
+            flush_pending_coalesce(
+                &mut pending_indices,
+                &input,
+                &atoms_map,
+                &lowerer,
+                &mut builder,
+                arena,
+                &mut lower_cache,
+                &mut dep_memo,
+                &mut inverse_dep_memo,
+                four_state,
+                var_widths,
+            );
+            pending_target = None;
             let mut authorized = user_safety_limit.is_some();
             'check_scc: for &v_idx in &scc {
                 for &u_idx in &adj[v_idx] {
@@ -572,6 +705,20 @@ pub fn sort<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
         } else {
             // DAG Part — flush before emitting if the EU has grown too large
             if builder.block_count() >= EU_BLOCK_LIMIT {
+                flush_pending_coalesce(
+                    &mut pending_indices,
+                    &input,
+                    &atoms_map,
+                    &lowerer,
+                    &mut builder,
+                    arena,
+                    &mut lower_cache,
+                    &mut dep_memo,
+                    &mut inverse_dep_memo,
+                    four_state,
+                    var_widths,
+                );
+                pending_target = None;
                 if let Some(eu) = builder.flush_eu() {
                     result_eus.push(eu);
                     // Clear the lowering cache — register IDs are EU-scoped
@@ -579,15 +726,47 @@ pub fn sort<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                 }
             }
 
-            emit_node(
-                &mut builder,
-                scc[0],
-                &mut lower_cache,
-                &mut dep_memo,
-                &mut inverse_dep_memo,
-            );
+            let idx = scc[0];
+            let this_target = input[idx].target.id;
+
+            if pending_target.as_ref() == Some(&this_target) {
+                // Same target variable — buffer into pending.
+                pending_indices.push(idx);
+            } else {
+                // Different target — flush previous pending, start new group.
+                flush_pending_coalesce(
+                    &mut pending_indices,
+                    &input,
+                    &atoms_map,
+                    &lowerer,
+                    &mut builder,
+                    arena,
+                    &mut lower_cache,
+                    &mut dep_memo,
+                    &mut inverse_dep_memo,
+                    four_state,
+                    var_widths,
+                );
+                pending_target = Some(this_target);
+                pending_indices.push(idx);
+            }
         }
     }
+
+    // Flush remaining pending DAG nodes after the SCC loop.
+    flush_pending_coalesce(
+        &mut pending_indices,
+        &input,
+        &atoms_map,
+        &lowerer,
+        &mut builder,
+        arena,
+        &mut lower_cache,
+        &mut dep_memo,
+        &mut inverse_dep_memo,
+        four_state,
+        var_widths,
+    );
 
     builder.seal_block(SIRTerminator::Return);
     let (blocks, reg_map, _) = builder.drain();

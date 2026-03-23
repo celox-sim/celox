@@ -16,38 +16,37 @@ Execution Unit 0:
     r1: bit<8>
     r2: bit<8>
     r3: bit<8>
-    r4: logic<32>
-    r5: bit<64>
-    r6: logic<2>
-    r7: bit<6>
-    r8: bit<64>
-    r9: logic<8>
+    r4: bit<32>
+    r5: logic<32>
+    r6: bit<64>
+    r7: logic<2>
+    r8: bit<6>
+    r9: bit<64>
     r10: logic<8>
-    r11: bit<64>
+    r11: logic<8>
     r12: bit<64>
     r13: bit<64>
     r14: bit<64>
-    r15: logic<8>
-    r16: bit<8>
-    r17: logic<8>
+    r15: bit<64>
+    r16: logic<8>
+    r17: bit<8>
+    r18: logic<8>
   b0:
-    r6 = Load(addr=i (region=0), offset=0, bits=2)
-    r0 = SIRValue(0xdd)
-    Store(addr=a (region=0), offset=24, bits=8, src_reg = 0)
-    r1 = SIRValue(0xcc)
-    Store(addr=a (region=0), offset=16, bits=8, src_reg = 1)
-    r2 = SIRValue(0xbb)
-    Store(addr=a (region=0), offset=8, bits=8, src_reg = 2)
-    r3 = SIRValue(0xaa)
-    Store(addr=a (region=0), offset=0, bits=8, src_reg = 3)
-    r7 = SIRValue(0x0)
-    r8 = SIRValue(0x2)
-    r9 = r7 Shl r8
-    r10 = r6 Or r9
-    r11 = SIRValue(0x8)
-    r12 = r10 Mul r11
-    r4 = Load(addr=a (region=0), offset=r12, bits=32)
-    r16 = SIRValue(0xff)
-    r17 = r4 And r16
-    Store(addr=o (region=0), offset=0, bits=8, src_reg = 17)
+    r7 = Load(addr=i (region=0), offset=0, bits=2)
+    r0 = SIRValue(0xaa)
+    r1 = SIRValue(0xbb)
+    r2 = SIRValue(0xcc)
+    r3 = SIRValue(0xdd)
+    r4 = Concat(r3, r2, r1, r0)
+    Store(addr=a (region=0), offset=0, bits=32, src_reg = 4)
+    r8 = SIRValue(0x0)
+    r9 = SIRValue(0x2)
+    r10 = r8 Shl r9
+    r11 = r7 Or r10
+    r12 = SIRValue(0x8)
+    r13 = r11 Mul r12
+    r5 = Load(addr=a (region=0), offset=r13, bits=32)
+    r17 = SIRValue(0xff)
+    r18 = r5 And r17
+    Store(addr=o (region=0), offset=0, bits=8, src_reg = 18)
     Return

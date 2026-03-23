@@ -595,6 +595,18 @@ pub(crate) fn flatten(
     // (e.g. genvar-expanded parity-check matrices).
     crate::logic_tree::const_inline::inline_constant_variables(&mut comb_blocks, &mut global_arena);
 
+    let var_widths: HashMap<AbsoluteAddr, usize> = instance_modules
+        .iter()
+        .flat_map(|(&inst_id, &mod_id)| {
+            let module = module_ir[&mod_id];
+            module.variables.iter().filter_map(move |(var_id, var)| {
+                resolve_total_width(module, var).ok().map(|w| {
+                    (AbsoluteAddr { instance_id: inst_id, var_id: *var_id }, w)
+                })
+            })
+        })
+        .collect();
+
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schduled = scheduler::sort(
         comb_blocks,
@@ -602,6 +614,7 @@ pub(crate) fn flatten(
         &ignored_loops,
         &true_loops,
         four_state,
+        &var_widths,
     )
     .map_err(|e| {
         let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
