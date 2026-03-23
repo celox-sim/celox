@@ -34,11 +34,15 @@ export interface RawNapiSimulatorHandle {
 	readonly warningsJson: string;
 	readonly stableSize: number;
 	readonly totalSize: number;
-	tick(eventId: number): void;
-	tickN(eventId: number, count: number): void;
-	evalComb(): void;
-	dump(timestamp: number): void;
-	sharedMemory(): Uint8Array;
+	// Native (JIT) methods — present when built for native target
+	tick?(eventId: number): void;
+	tickN?(eventId: number, count: number): void;
+	evalComb?(): void;
+	dump?(timestamp: number): void;
+	sharedMemory?(): Uint8Array;
+	// WASM methods — present when built for wasm32 target
+	combWasmBytes?(): Uint8Array | number[];
+	eventWasmBytes?(name: string): Uint8Array | number[];
 	dispose(): void;
 }
 
@@ -603,16 +607,16 @@ export function wrapDirectSimulatorHandle(
 ): NativeSimulatorHandle {
 	return {
 		tick(eventId: number): void {
-			raw.tick(eventId);
+			raw.tick!(eventId);
 		},
 		tickN(eventId: number, count: number): void {
-			raw.tickN(eventId, count);
+			raw.tickN!(eventId, count);
 		},
 		evalComb(): void {
-			raw.evalComb();
+			raw.evalComb!();
 		},
 		dump(timestamp: number): void {
-			raw.dump(timestamp);
+			raw.dump!(timestamp);
 		},
 		dispose(): void {
 			raw.dispose();
@@ -705,7 +709,7 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 
-		const buf = raw.sharedMemory().buffer;
+		const buf = raw.sharedMemory!().buffer;
 		const handle = wrapDirectSimulatorHandle(raw);
 
 		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");

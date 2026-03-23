@@ -1,8 +1,12 @@
+#[cfg(not(target_arch = "wasm32"))]
 use celox::{InstanceHierarchy, NamedEvent, NamedSignal, PortTypeKind, get_byte_size};
+#[cfg(not(target_arch = "wasm32"))]
 use serde::Serialize;
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 
 /// Layout information for a single signal, serialized to JS.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Serialize)]
 pub struct SignalLayout {
     pub offset: usize,
@@ -18,6 +22,7 @@ pub struct SignalLayout {
 }
 
 /// Hierarchical node with signals and children, serialized to JS.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Serialize)]
 pub struct HierarchyNode {
     pub module_name: String,
@@ -25,6 +30,7 @@ pub struct HierarchyNode {
     pub children: HashMap<String, Vec<HierarchyNode>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn direction_str(var_kind: veryl_analyzer::ir::VarKind) -> &'static str {
     match var_kind {
         veryl_analyzer::ir::VarKind::Input => "input",
@@ -34,6 +40,7 @@ fn direction_str(var_kind: veryl_analyzer::ir::VarKind) -> &'static str {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn type_kind_str(type_kind: PortTypeKind) -> &'static str {
     match type_kind {
         PortTypeKind::Clock => "clock",
@@ -47,6 +54,7 @@ fn type_kind_str(type_kind: PortTypeKind) -> &'static str {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_signal_layout_entry(ns: &NamedSignal, four_state_mode: bool) -> SignalLayout {
     let direction = direction_str(ns.info.var_kind);
     let type_kind = type_kind_str(ns.info.type_kind);
@@ -73,6 +81,7 @@ fn build_signal_layout_entry(ns: &NamedSignal, four_state_mode: bool) -> SignalL
 ///
 /// `four_state_mode`: whether the simulator is running in 4-state mode.
 /// When false, `is_4state` is always reported as false (no mask space exists).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_signal_layout(
     signals: &[NamedSignal],
     four_state_mode: bool,
@@ -88,6 +97,7 @@ pub fn build_signal_layout(
 }
 
 /// Build a hierarchy node from an InstanceHierarchy.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_hierarchy_node(h: &InstanceHierarchy, four_state: bool) -> HierarchyNode {
     let mut signals = HashMap::new();
     for ns in &h.signals {
@@ -111,6 +121,7 @@ pub fn build_hierarchy_node(h: &InstanceHierarchy, four_state: bool) -> Hierarch
 }
 
 /// Build a map of event name -> event ID from named events.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_event_map(events: &[NamedEvent]) -> HashMap<String, u32> {
     let mut map = HashMap::new();
     for ne in events {

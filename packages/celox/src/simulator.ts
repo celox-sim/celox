@@ -25,6 +25,10 @@ import type {
 	SimulatorOptions,
 	SourceFile,
 } from "./types.js";
+import {
+	isWasmHandle,
+	createWasmSimulatorBridge,
+} from "./wasm-bridge.js";
 
 /**
  * Placeholder for the NAPI binding's `createSimulator()`.
@@ -204,10 +208,19 @@ export class Simulator<P = Record<string, unknown>> {
 
 		const ports = buildPortsFromLayout(hierarchy.signals, events);
 
-		const buf = raw.sharedMemory().buffer;
+		// Detect WASM-compiled addon and use the bridge
+		let buf: ArrayBuffer | SharedArrayBuffer;
+		let handle: NativeSimulatorHandle;
+		if (isWasmHandle(raw)) {
+			const bridge = createWasmSimulatorBridge(raw);
+			buf = bridge.sharedMemory.buffer;
+			handle = bridge.handle;
+		} else {
+			buf = raw.sharedMemory!().buffer;
+			handle = wrapDirectSimulatorHandle(raw);
+		}
 
 		const state: DirtyState = { dirty: false };
-		const handle = wrapDirectSimulatorHandle(raw);
 		const dut = createDut<P>(
 			buf,
 			layout.forDut,
@@ -264,10 +277,19 @@ export class Simulator<P = Record<string, unknown>> {
 
 		const ports = buildPortsFromLayout(hierarchy.signals, events);
 
-		const buf = raw.sharedMemory().buffer;
+		// Detect WASM-compiled addon and use the bridge
+		let buf: ArrayBuffer | SharedArrayBuffer;
+		let handle: NativeSimulatorHandle;
+		if (isWasmHandle(raw)) {
+			const bridge = createWasmSimulatorBridge(raw);
+			buf = bridge.sharedMemory.buffer;
+			handle = bridge.handle;
+		} else {
+			buf = raw.sharedMemory!().buffer;
+			handle = wrapDirectSimulatorHandle(raw);
+		}
 
 		const state: DirtyState = { dirty: false };
-		const handle = wrapDirectSimulatorHandle(raw);
 		const dut = createDut<P>(
 			buf,
 			layout.forDut,

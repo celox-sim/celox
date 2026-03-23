@@ -66,5 +66,14 @@ export {
 	Z,
 } from "./types.js";
 
+// WASM bridge for browser simulation
+/** @internal */
+export type { RawWasmSimulatorHandle, WasmBridgeResult } from "./wasm-bridge.js";
+export {
+	isWasmHandle,
+	createWasmSimulatorBridge,
+	createWasmSimulatorBridgeAsync,
+} from "./wasm-bridge.js";
+
 // NAPI bridge (backward compat — re-exports from napi-helpers)
 // Consumers that import from "./napi-bridge.js" still work.

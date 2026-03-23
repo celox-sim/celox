@@ -1,6 +1,7 @@
 mod layout;
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
@@ -10,6 +11,7 @@ use veryl_metadata::Metadata;
 use veryl_parser::Parser;
 use veryl_path::PathSet;
 
+#[cfg(not(target_arch = "wasm32"))]
 use layout::{build_event_map, build_hierarchy_node, build_signal_layout};
 
 /// A segment of a hierarchical instance path.
@@ -101,12 +103,11 @@ pub struct NapiOptions {
     pub dead_store_policy: Option<String>,
 }
 
-/// Parsed builder options from NapiOptions.
-struct ParsedOptions {
+/// Parsed builder options from NapiOptions (common fields available on all targets).
+#[allow(dead_code)]
+struct ParsedOptionsCommon {
     four_state: bool,
     optimize_options: celox::OptimizeOptions,
-    cranelift_opt_level: celox::CraneliftOptLevel,
-    cranelift_options: celox::CraneliftOptions,
     vcd: Option<String>,
     false_loops: Vec<(
         (Vec<(String, usize)>, Vec<String>),
@@ -121,7 +122,23 @@ struct ParsedOptions {
     reset_type: Option<celox::ResetType>,
     extra_source: Option<String>,
     parameters: Vec<(String, u64)>,
+}
+
+/// Parsed builder options from NapiOptions (native-only, includes Cranelift/DSE options).
+#[cfg(not(target_arch = "wasm32"))]
+struct ParsedOptions {
+    common: ParsedOptionsCommon,
+    cranelift_opt_level: celox::CraneliftOptLevel,
+    cranelift_options: celox::CraneliftOptions,
     dead_store_policy: celox::DeadStorePolicy,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::ops::Deref for ParsedOptions {
+    type Target = ParsedOptionsCommon;
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
 }
 
 /// Convert a NapiSignalPath to the Rust builder's tuple format.
@@ -195,6 +212,7 @@ fn convert_optimize_options(napi: &NapiOptimizeOptions) -> celox::OptimizeOption
 }
 
 /// Parse a Cranelift optimization level string.
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_cranelift_opt_level(s: &str) -> Result<celox::CraneliftOptLevel> {
     match s {
         "none" => Ok(celox::CraneliftOptLevel::None),
@@ -208,6 +226,7 @@ fn parse_cranelift_opt_level(s: &str) -> Result<celox::CraneliftOptLevel> {
 }
 
 /// Parse a register allocator algorithm string.
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_regalloc_algorithm(s: &str) -> Result<celox::RegallocAlgorithm> {
     match s {
         "backtracking" => Ok(celox::RegallocAlgorithm::Backtracking),
@@ -220,6 +239,7 @@ fn parse_regalloc_algorithm(s: &str) -> Result<celox::RegallocAlgorithm> {
 }
 
 /// Parse a dead store policy string into DeadStorePolicy.
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_dead_store_policy(s: &str) -> Result<celox::DeadStorePolicy> {
     match s {
         "off" => Ok(celox::DeadStorePolicy::Off),
@@ -232,8 +252,8 @@ fn parse_dead_store_policy(s: &str) -> Result<celox::DeadStorePolicy> {
     }
 }
 
-/// Helper to extract the builder config from NapiOptions.
-fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
+/// Helper to extract the common builder config from NapiOptions (available on all targets).
+fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCommon> {
     match options.as_ref() {
         Some(o) => {
             let false_loops = o
@@ -274,12 +294,6 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let dead_store_policy = o
-                .dead_store_policy
-                .as_deref()
-                .map(parse_dead_store_policy)
-                .transpose()?
-                .unwrap_or(celox::DeadStorePolicy::Off);
             // Resolve optimize_options: per-pass flags take precedence over the shorthand bool.
             let optimize_options = if let Some(ref oo) = o.optimize_options {
                 convert_optimize_options(oo)
@@ -288,6 +302,44 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
             } else {
                 celox::OptimizeOptions::all()
             };
+            Ok(ParsedOptionsCommon {
+                four_state: o.four_state.unwrap_or(false),
+                optimize_options,
+                vcd: o.vcd.clone(),
+                false_loops,
+                true_loops,
+                clock_type,
+                reset_type,
+                extra_source: o.extra_source.clone(),
+                parameters,
+            })
+        }
+        None => Ok(ParsedOptionsCommon {
+            four_state: false,
+            optimize_options: celox::OptimizeOptions::all(),
+            vcd: None,
+            false_loops: Vec::new(),
+            true_loops: Vec::new(),
+            clock_type: None,
+            reset_type: None,
+            extra_source: None,
+            parameters: Vec::new(),
+        }),
+    }
+}
+
+/// Helper to extract the full builder config from NapiOptions (native only).
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
+    let common = parse_options_common(options)?;
+    match options.as_ref() {
+        Some(o) => {
+            let dead_store_policy = o
+                .dead_store_policy
+                .as_deref()
+                .map(parse_dead_store_policy)
+                .transpose()?
+                .unwrap_or(celox::DeadStorePolicy::Off);
             let cranelift_opt_level = o
                 .cranelift_opt_level
                 .as_deref()
@@ -307,32 +359,16 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                 enable_verifier: o.enable_verifier.unwrap_or(true),
             };
             Ok(ParsedOptions {
-                four_state: o.four_state.unwrap_or(false),
-                optimize_options,
+                common,
                 cranelift_opt_level,
                 cranelift_options,
-                vcd: o.vcd.clone(),
-                false_loops,
-                true_loops,
-                clock_type,
-                reset_type,
-                extra_source: o.extra_source.clone(),
-                parameters,
                 dead_store_policy,
             })
         }
         None => Ok(ParsedOptions {
-            four_state: false,
-            optimize_options: celox::OptimizeOptions::all(),
+            common,
             cranelift_opt_level: celox::CraneliftOptLevel::Speed,
             cranelift_options: celox::CraneliftOptions::default(),
-            vcd: None,
-            false_loops: Vec::new(),
-            true_loops: Vec::new(),
-            clock_type: None,
-            reset_type: None,
-            extra_source: None,
-            parameters: Vec::new(),
             dead_store_policy: celox::DeadStorePolicy::Off,
         }),
     }
@@ -347,6 +383,7 @@ fn append_extra_source(sources: &mut Vec<(String, std::path::PathBuf)>, extra: &
 
 /// Configuration loaded from an optional `celox.toml` in the project root.
 #[derive(serde::Deserialize, Default)]
+#[allow(dead_code)]
 struct CeloxConfig {
     #[serde(default)]
     test: CeloxTestConfig,
@@ -363,6 +400,7 @@ struct CeloxTestConfig {
 }
 
 #[derive(serde::Deserialize, Default)]
+#[allow(dead_code)]
 struct CeloxSimulationConfig {
     /// Default maximum steps for `waitUntil` / `waitForCycles`.
     /// Overridden by the per-call `maxSteps` option.
@@ -462,6 +500,7 @@ fn format_warnings_json(warnings: &[veryl_analyzer::AnalyzerError]) -> String {
 }
 
 /// Apply parsed options to a SimulatorBuilder.
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_options<'a, T>(
     mut builder: celox::SimulatorBuilder<'a, T>,
     opts: &ParsedOptions,
@@ -490,9 +529,10 @@ fn apply_options<'a, T>(
 }
 
 // ---------------------------------------------------------------------------
-//  Process-global JIT cache
+//  Process-global JIT cache (native only)
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Cached compilation result shared across simulator instances.
 struct CachedBuild {
     shared_code: Arc<celox::SharedJitCode>,
@@ -506,6 +546,7 @@ struct CachedBuild {
     vcd_descs: Vec<celox::VcdSignalDesc>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Exact cache key — no hashing, no collisions.
 ///
 /// Contains the full source content + paths + top module + all compilation-
@@ -542,9 +583,11 @@ struct CacheKey {
     metadata_reset_type: Option<u8>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Pack OptimizeOptions bools into a bitmask for cache key hashing.
 fn encode_optimize_options(opts: &celox::OptimizeOptions) -> u16 {
     let mut flags: u16 = 0;
@@ -578,6 +621,7 @@ fn encode_optimize_options(opts: &celox::OptimizeOptions) -> u16 {
     flags
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Build a collision-free cache key from source content, top module, and options.
 ///
 /// When `metadata` is `Some`, the effective clock/reset settings from
@@ -618,6 +662,7 @@ fn build_cache_key(
 /// Low-level handle wrapping a JIT backend and optional VCD writer.
 ///
 /// JS holds this as an opaque class; all operations go through methods.
+#[cfg(not(target_arch = "wasm32"))]
 #[napi]
 pub struct NativeSimulatorHandle {
     backend: Option<celox::JitBackend>,
@@ -630,6 +675,7 @@ pub struct NativeSimulatorHandle {
     total_size: u32,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[napi]
 impl NativeSimulatorHandle {
     /// Build a full simulator, extract metadata, cache the compiled code,
@@ -919,6 +965,7 @@ impl NativeSimulatorHandle {
 }
 
 /// Low-level handle wrapping a `celox::Simulation`.
+#[cfg(not(target_arch = "wasm32"))]
 #[napi]
 pub struct NativeSimulationHandle {
     sim: Option<celox::Simulation>,
@@ -933,6 +980,7 @@ pub struct NativeSimulationHandle {
     default_max_steps: Option<u32>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[napi]
 impl NativeSimulationHandle {
     /// Create a new timed simulation from Veryl source code.
@@ -1196,6 +1244,302 @@ impl NativeSimulationHandle {
     }
 }
 
+// ---------------------------------------------------------------------------
+//  WASM32 NativeSimulatorHandle — compiles Veryl to WASM bytecode
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+#[napi]
+pub struct NativeSimulatorHandle {
+    program: celox::Program,
+    layout: celox::MemoryLayout,
+    four_state: bool,
+    layout_json: String,
+    events_json: String,
+    hierarchy_json: String,
+    warnings_json: String,
+    stable_size: u32,
+    total_size: u32,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[napi]
+impl NativeSimulatorHandle {
+    /// Compile Veryl source code and produce a WASM-oriented handle.
+    ///
+    /// Unlike the native (JIT) variant, this handle does NOT execute
+    /// simulation directly. Instead it exposes `combWasmBytes()` and
+    /// `eventWasmBytes(name)` for the TS runtime to instantiate in the
+    /// browser via WebAssembly.
+    #[napi(constructor)]
+    pub fn new(
+        sources: Vec<NapiSourceFile>,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options_common(&options)?;
+        let mut src_pairs: Vec<(String, std::path::PathBuf)> = sources
+            .into_iter()
+            .map(|s| (s.content, std::path::PathBuf::from(s.path)))
+            .collect();
+        append_extra_source(&mut src_pairs, &opts.extra_source);
+
+        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+
+        let trace_opts = celox::TraceOptions::default();
+        let (program, warnings) = celox::compile_to_sir(
+            &source_refs,
+            &top,
+            &opts.false_loops.iter().map(|(f, t)| (f.clone(), t.clone())).collect::<Vec<_>>(),
+            &opts.true_loops.iter().map(|(f, t, m)| (f.clone(), t.clone(), *m)).collect::<Vec<_>>(),
+            opts.four_state,
+            &trace_opts,
+            None,
+            None,
+            opts.clock_type,
+            opts.reset_type,
+            &opts.parameters,
+            &opts.optimize_options,
+        )
+        .map_err(|e| Error::from_reason(format!("{}", e)))?;
+
+        let layout = celox::MemoryLayout::build(&program, opts.four_state);
+
+        let layout_json = Self::build_layout_json(&program, &layout);
+        let events_json = Self::build_events_json(&program);
+        let hierarchy_json = "{}".to_string(); // Hierarchy not available on wasm32
+        let warnings_json = format_warnings_json(&warnings);
+
+        let stable_size = layout.total_size as u32;
+        let total_size = layout.merged_total_size as u32;
+
+        Ok(Self {
+            program,
+            layout,
+            four_state: opts.four_state,
+            layout_json,
+            events_json,
+            hierarchy_json,
+            warnings_json,
+            stable_size,
+            total_size,
+        })
+    }
+
+    /// Create a new simulator from a Veryl project directory.
+    #[napi(factory)]
+    pub fn from_project(
+        project_path: String,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options_common(&options)?;
+        let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+        append_extra_source(&mut sources, &opts.extra_source);
+
+        let source_refs: Vec<(&str, &std::path::Path)> = sources
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+
+        let trace_opts = celox::TraceOptions::default();
+        let (program, warnings) = celox::compile_to_sir(
+            &source_refs,
+            &top,
+            &opts.false_loops.iter().map(|(f, t)| (f.clone(), t.clone())).collect::<Vec<_>>(),
+            &opts.true_loops.iter().map(|(f, t, m)| (f.clone(), t.clone(), *m)).collect::<Vec<_>>(),
+            opts.four_state,
+            &trace_opts,
+            None,
+            Some(metadata),
+            opts.clock_type,
+            opts.reset_type,
+            &opts.parameters,
+            &opts.optimize_options,
+        )
+        .map_err(|e| Error::from_reason(format!("{}", e)))?;
+
+        let layout = celox::MemoryLayout::build(&program, opts.four_state);
+
+        let layout_json = Self::build_layout_json(&program, &layout);
+        let events_json = Self::build_events_json(&program);
+        let hierarchy_json = "{}".to_string();
+        let warnings_json = format_warnings_json(&warnings);
+
+        let stable_size = layout.total_size as u32;
+        let total_size = layout.merged_total_size as u32;
+
+        Ok(Self {
+            program,
+            layout,
+            four_state: opts.four_state,
+            layout_json,
+            events_json,
+            hierarchy_json,
+            warnings_json,
+            stable_size,
+            total_size,
+        })
+    }
+
+    /// Returns the signal layout as a JSON string.
+    #[napi(getter)]
+    pub fn layout_json(&self) -> String {
+        self.layout_json.clone()
+    }
+
+    /// Returns the event map as a JSON string.
+    #[napi(getter)]
+    pub fn events_json(&self) -> String {
+        self.events_json.clone()
+    }
+
+    /// Returns the instance hierarchy as a JSON string.
+    #[napi(getter)]
+    pub fn hierarchy_json(&self) -> String {
+        self.hierarchy_json.clone()
+    }
+
+    /// Returns analyzer warnings as a JSON array of strings.
+    #[napi(getter)]
+    pub fn warnings_json(&self) -> String {
+        self.warnings_json.clone()
+    }
+
+    /// Returns the stable region size in bytes.
+    #[napi(getter)]
+    pub fn stable_size(&self) -> u32 {
+        self.stable_size
+    }
+
+    /// Returns the total memory size in bytes.
+    #[napi(getter)]
+    pub fn total_size(&self) -> u32 {
+        self.total_size
+    }
+
+    /// Returns the WASM module bytes for eval_comb (combinational logic evaluation).
+    #[napi]
+    pub fn comb_wasm_bytes(&self) -> Vec<u8> {
+        let wasm = celox::wasm_codegen::compile_units(
+            &self.program.eval_comb,
+            &self.layout,
+            self.four_state,
+            false,
+        );
+        wasm.bytes
+    }
+
+    /// Returns the WASM module bytes for a specific clock/reset event.
+    ///
+    /// `event_name` should match a clock or reset port name (e.g. "clk", "rst").
+    #[napi]
+    pub fn event_wasm_bytes(&self, event_name: String) -> Result<Vec<u8>> {
+        for (addr, units) in &self.program.eval_apply_ffs {
+            let event_path = self.program.get_path(addr);
+            if event_path == event_name {
+                let wasm = celox::wasm_codegen::compile_units(
+                    units,
+                    &self.layout,
+                    self.four_state,
+                    false,
+                );
+                return Ok(wasm.bytes);
+            }
+        }
+
+        Err(Error::from_reason(format!(
+            "Event '{}' not found. Available events: {}",
+            event_name,
+            self.program
+                .eval_apply_ffs
+                .keys()
+                .map(|addr| self.program.get_path(addr))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+
+    /// No-op on wasm32 (no native resources to release).
+    #[napi]
+    pub fn dispose(&mut self) {}
+}
+
+#[cfg(target_arch = "wasm32")]
+impl NativeSimulatorHandle {
+    /// Build signal layout JSON from the Program and MemoryLayout.
+    /// Mirrors the layout format from celox-wasm.
+    fn build_layout_json(program: &celox::Program, layout: &celox::MemoryLayout) -> String {
+        use std::collections::BTreeMap;
+
+        let mut layout_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+
+        for (instance_id, module_id) in &program.instance_module {
+            let variables = &program.module_variables[module_id];
+            let path_index = &program.module_var_path_index[module_id];
+
+            for info in variables.values() {
+                if path_index.get(&info.path) == Some(&None) {
+                    continue;
+                }
+                let name = info
+                    .path
+                    .0
+                    .iter()
+                    .map(|s| {
+                        veryl_parser::resource_table::get_str_value(*s)
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".");
+
+                let addr = celox::AbsoluteAddr {
+                    instance_id: *instance_id,
+                    var_id: info.id,
+                };
+
+                if let Some(&offset) = layout.offsets.get(&addr) {
+                    let width = layout.widths.get(&addr).copied().unwrap_or(0);
+                    let byte_size = celox::get_byte_size(width);
+                    layout_map.insert(
+                        name,
+                        serde_json::json!({
+                            "offset": offset,
+                            "width": width,
+                            "byte_size": byte_size,
+                            "is_4state": false,
+                            "direction": "input",
+                            "type_kind": "logic",
+                        }),
+                    );
+                }
+            }
+        }
+
+        serde_json::to_string(&layout_map).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Build events JSON from the Program.
+    fn build_events_json(program: &celox::Program) -> String {
+        use std::collections::BTreeMap;
+
+        let mut events: BTreeMap<String, usize> = BTreeMap::new();
+        let mut next_id = 0usize;
+
+        for addr in program.eval_apply_ffs.keys() {
+            let name = program.get_path(addr);
+            events.insert(name, next_id);
+            next_id += 1;
+        }
+
+        serde_json::to_string(&events).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
 /// Format analyzer errors with accumulated warnings for gen_ts error messages.
 fn format_errors_with_warnings(
     pass_label: &str,
@@ -1221,11 +1565,17 @@ fn format_errors_with_warnings(
 /// Clear the process-global JIT compilation cache.
 ///
 /// Call this when source files have changed and cached compiled code may be stale.
+#[cfg(not(target_arch = "wasm32"))]
 #[napi]
 pub fn clear_jit_cache() {
     let mut cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache.clear();
 }
+
+/// Stub for wasm32: no JIT cache to clear.
+#[cfg(target_arch = "wasm32")]
+#[napi]
+pub fn clear_jit_cache() {}
 
 /// Generate TypeScript type information as JSON for a Veryl project.
 ///
@@ -1405,23 +1755,25 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         .map_err(|e| Error::from_reason(format!("Failed to serialize JSON: {e}")))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
     fn default_opts() -> ParsedOptions {
         ParsedOptions {
-            four_state: false,
-            optimize_options: celox::OptimizeOptions::all(),
+            common: ParsedOptionsCommon {
+                four_state: false,
+                optimize_options: celox::OptimizeOptions::all(),
+                vcd: None,
+                false_loops: vec![],
+                true_loops: vec![],
+                clock_type: None,
+                reset_type: None,
+                extra_source: None,
+                parameters: vec![],
+            },
             cranelift_opt_level: celox::CraneliftOptLevel::Speed,
             cranelift_options: celox::CraneliftOptions::default(),
-            vcd: None,
-            false_loops: vec![],
-            true_loops: vec![],
-            clock_type: None,
-            reset_type: None,
-            extra_source: None,
-            parameters: vec![],
             dead_store_policy: celox::DeadStorePolicy::Off,
         }
     }
@@ -1479,8 +1831,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        o1.four_state = false;
-        o2.four_state = true;
+        o1.common.four_state = false;
+        o2.common.four_state = true;
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
@@ -1492,8 +1844,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        o1.optimize_options = celox::OptimizeOptions::all();
-        o2.optimize_options = celox::OptimizeOptions::none();
+        o1.common.optimize_options = celox::OptimizeOptions::all();
+        o2.common.optimize_options = celox::OptimizeOptions::none();
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
@@ -1544,8 +1896,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        o1.clock_type = None;
-        o2.clock_type = Some(celox::ClockType::NegEdge);
+        o1.common.clock_type = None;
+        o2.common.clock_type = Some(celox::ClockType::NegEdge);
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
@@ -1557,8 +1909,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        o1.reset_type = None;
-        o2.reset_type = Some(celox::ResetType::SyncHigh);
+        o1.common.reset_type = None;
+        o2.common.reset_type = Some(celox::ResetType::SyncHigh);
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
@@ -1570,8 +1922,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        o1.parameters = vec![("WIDTH".into(), 8)];
-        o2.parameters = vec![("WIDTH".into(), 16)];
+        o1.common.parameters = vec![("WIDTH".into(), 8)];
+        o2.common.parameters = vec![("WIDTH".into(), 16)];
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
@@ -1595,8 +1947,8 @@ mod tests {
         let mut o1 = default_opts();
         let mut o2 = default_opts();
         // VCD path doesn't affect compilation
-        o1.vcd = None;
-        o2.vcd = Some("/tmp/dump.vcd".into());
+        o1.common.vcd = None;
+        o2.common.vcd = Some("/tmp/dump.vcd".into());
         assert_eq!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
@@ -1608,8 +1960,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        o1.false_loops = vec![];
-        o2.false_loops = vec![((vec![], vec!["a".into()]), (vec![], vec!["b".into()]))];
+        o1.common.false_loops = vec![];
+        o2.common.false_loops = vec![((vec![], vec!["a".into()]), (vec![], vec!["b".into()]))];
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
@@ -1621,8 +1973,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        o1.true_loops = vec![];
-        o2.true_loops = vec![((vec![], vec!["x".into()]), (vec![], vec!["y".into()]), 4)];
+        o1.common.true_loops = vec![];
+        o2.common.true_loops = vec![((vec![], vec!["x".into()]), (vec![], vec!["y".into()]), 4)];
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),

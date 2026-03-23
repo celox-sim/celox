@@ -16,9 +16,24 @@ importers:
       '@biomejs/biome':
         specifier: ^2.4.5
         version: 2.4.5
+      '@emnapi/core':
+        specifier: ^1.9.1
+        version: 1.9.1
+      '@emnapi/runtime':
+        specifier: ^1.9.1
+        version: 1.9.1
+      '@napi-rs/wasm-runtime':
+        specifier: ^1.1.1
+        version: 1.1.1
+      '@tybys/wasm-util':
+        specifier: ^0.10.1
+        version: 0.10.1
       chart.js:
         specifier: ^4.4.0
         version: 4.5.1
+      emnapi:
+        specifier: ^1.9.1
+        version: 1.9.1
       lefthook:
         specifier: ^2.1.2
         version: 2.1.2
@@ -42,7 +57,7 @@ importers:
     devDependencies:
       '@napi-rs/cli':
         specifier: ^3.2.0
-        version: 3.5.1(@emnapi/runtime@1.8.1)(@types/node@25.3.2)
+        version: 3.5.1(@emnapi/runtime@1.9.1)(@types/node@25.3.2)
 
   examples/template:
     devDependencies:
@@ -68,6 +83,21 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.4(@types/node@25.3.2)(yaml@2.8.2)
+
+  packages/playground:
+    devDependencies:
+      '@celox-sim/celox':
+        specifier: workspace:*
+        version: link:../celox
+      '@celox-sim/vite-plugin':
+        specifier: workspace:*
+        version: link:../vite-plugin
+      vite:
+        specifier: ^6.0.0
+        version: 6.4.1(@types/node@25.3.2)(yaml@2.8.2)
       vitest:
         specifier: ^3.0.0
         version: 3.2.4(@types/node@25.3.2)(yaml@2.8.2)
@@ -259,14 +289,14 @@ packages:
       search-insights:
         optional: true
 
-  '@emnapi/core@1.8.1':
-    resolution: {integrity: sha512-AvT9QFpxK0Zd8J0jopedNm+w/2fIzvtPKPjqyw9jwvBaReTTqPBk9Hixaz7KbjimP+QNz605/XnjFcDAL2pqBg==}
+  '@emnapi/core@1.9.1':
+    resolution: {integrity: sha512-mukuNALVsoix/w1BJwFzwXBN/dHeejQtuVzcDsfOEsdpCumXb/E9j8w11h5S54tT1xhifGfbbSm/ICrObRb3KA==}
 
-  '@emnapi/runtime@1.8.1':
-    resolution: {integrity: sha512-mehfKSMWjjNol8659Z8KxEMrdSJDDot5SXMq00dM8BN4o+CLNXQ0xH2V7EchNHV4RmbZLmmPdEaXZc5H2FXmDg==}
+  '@emnapi/runtime@1.9.1':
+    resolution: {integrity: sha512-VYi5+ZVLhpgK4hQ0TAjiQiZ6ol0oe4mBx7mVv7IflsiEp0OWoVsp/+f9Vc1hOhE0TtkORVrI1GvzyreqpgWtkA==}
 
-  '@emnapi/wasi-threads@1.1.0':
-    resolution: {integrity: sha512-WI0DdZ8xFSbgMjR1sFsKABJ/C5OnRrjT06JXbZKexJGrDuPTzZdDYfFlsgcCXCyf+suG5QU2e/y1Wo2V/OapLQ==}
+  '@emnapi/wasi-threads@1.2.0':
+    resolution: {integrity: sha512-N10dEJNSsUx41Z6pZsXU8FjPjpBEplgH24sfkmITrBED1/U2Esum9F3lfLrMjKHHjmi557zQn7kR9R+XWXu5Rg==}
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -1521,6 +1551,14 @@ packages:
       node-addon-api:
         optional: true
 
+  emnapi@1.9.1:
+    resolution: {integrity: sha512-s4RbfzgbYg9cWBZXJT6LazImJQ5p+F+LyTsCWQJXbGVdPmtCtdlwqd0Oiv3O51KyYV/Hq58xszaQ/l153tK6Uw==}
+    peerDependencies:
+      node-addon-api: '>= 6.1.0'
+    peerDependenciesMeta:
+      node-addon-api:
+        optional: true
+
   emoji-regex-xs@1.0.0:
     resolution: {integrity: sha512-LRlerrMYoIDrT6jgpeZ2YYl/L8EulRTt5hQcYjy5AInh7HWXKimpqx68aknBFpGL2+/IcogTcaydJEgaTmOpDg==}
 
@@ -2251,21 +2289,18 @@ snapshots:
     transitivePeerDependencies:
       - '@algolia/client-search'
 
-  '@emnapi/core@1.8.1':
+  '@emnapi/core@1.9.1':
     dependencies:
-      '@emnapi/wasi-threads': 1.1.0
+      '@emnapi/wasi-threads': 1.2.0
       tslib: 2.8.1
-    optional: true
 
-  '@emnapi/runtime@1.8.1':
+  '@emnapi/runtime@1.9.1':
     dependencies:
       tslib: 2.8.1
-    optional: true
 
-  '@emnapi/wasi-threads@1.1.0':
+  '@emnapi/wasi-threads@1.2.0':
     dependencies:
       tslib: 2.8.1
-    optional: true
 
   '@esbuild/aix-ppc64@0.21.5':
     optional: true
@@ -2551,7 +2586,7 @@ snapshots:
 
   '@kurkle/color@0.3.4': {}
 
-  '@napi-rs/cli@3.5.1(@emnapi/runtime@1.8.1)(@types/node@25.3.2)':
+  '@napi-rs/cli@3.5.1(@emnapi/runtime@1.9.1)(@types/node@25.3.2)':
     dependencies:
       '@inquirer/prompts': 8.3.0(@types/node@25.3.2)
       '@napi-rs/cross-toolchain': 1.0.3
@@ -2566,7 +2601,7 @@ snapshots:
       semver: 7.7.4
       typanion: 3.14.0
     optionalDependencies:
-      '@emnapi/runtime': 1.8.1
+      '@emnapi/runtime': 1.9.1
     transitivePeerDependencies:
       - '@napi-rs/cross-toolchain-arm64-target-aarch64'
       - '@napi-rs/cross-toolchain-arm64-target-armv7'
@@ -2734,10 +2769,9 @@ snapshots:
 
   '@napi-rs/wasm-runtime@1.1.1':
     dependencies:
-      '@emnapi/core': 1.8.1
-      '@emnapi/runtime': 1.8.1
+      '@emnapi/core': 1.9.1
+      '@emnapi/runtime': 1.9.1
       '@tybys/wasm-util': 0.10.1
-    optional: true
 
   '@napi-rs/wasm-tools-android-arm-eabi@1.0.1':
     optional: true
@@ -2995,7 +3029,6 @@ snapshots:
   '@tybys/wasm-util@0.10.1':
     dependencies:
       tslib: 2.8.1
-    optional: true
 
   '@types/chai@5.2.3':
     dependencies:
@@ -3263,6 +3296,8 @@ snapshots:
       dequal: 2.0.3
 
   emnapi@1.8.1: {}
+
+  emnapi@1.9.1: {}
 
   emoji-regex-xs@1.0.0: {}
 
@@ -3643,8 +3678,7 @@ snapshots:
 
   trim-lines@3.0.1: {}
 
-  tslib@2.8.1:
-    optional: true
+  tslib@2.8.1: {}
 
   typanion@3.14.0: {}
 
