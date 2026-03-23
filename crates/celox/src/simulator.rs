@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    EventRef, IOContext, RuntimeErrorCode,
-    backend::{JitBackend, MemoryLayout, SharedJitCode},
+    IOContext, RuntimeErrorCode,
+    backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     ir::{InstancePath, Program, SignalRef, VariableInfo},
 };
 use malachite_bigint::BigUint;
@@ -34,44 +34,38 @@ pub struct NamedSignal {
 
 /// A named event with its resolved ID and event reference.
 #[derive(Debug, Clone)]
-pub struct NamedEvent {
+pub struct NamedEvent<B: SimBackend = JitBackend> {
     pub name: String,
     pub id: usize,
-    pub event_ref: EventRef,
+    pub event_ref: B::Event,
 }
 
 /// The core logic evaluation engine.
 ///
-/// Encapsulates the JIT-compiled backend, the original SIR program,
+/// Encapsulates the backend, the original SIR program,
 /// and an optional VCD writer. Provides low-level, event-driven control.
-pub struct Simulator {
-    pub(crate) backend: JitBackend,
+///
+/// The default type parameter `B = JitBackend` means that bare `Simulator`
+/// is equivalent to `Simulator<JitBackend>` for backward compatibility.
+pub struct Simulator<B: SimBackend = JitBackend> {
+    pub(crate) backend: B,
     pub(crate) program: Program,
     pub(crate) vcd_writer: Option<crate::vcd::VcdWriter>,
     pub(crate) dirty: bool,
     pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
 }
 
-impl std::fmt::Debug for Simulator {
+impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Simulator").finish()
     }
 }
 
-impl Simulator {
-    pub fn builder<'a>(code: &'a str, top: &'a str) -> SimulatorBuilder<'a, Simulator> {
-        SimulatorBuilder::<Simulator>::new(code, top)
-    }
+// ── Generic methods available for any backend ────────────────────────
 
-    pub fn from_sources<'a>(
-        sources: Vec<(&'a str, &'a std::path::Path)>,
-        top: &'a str,
-    ) -> SimulatorBuilder<'a, Simulator> {
-        SimulatorBuilder::<Simulator>::from_sources(sources, top)
-    }
-
+impl<B: SimBackend> Simulator<B> {
     pub(crate) fn with_backend_and_program(
-        backend: JitBackend,
+        backend: B,
         program: Program,
         warnings: Vec<veryl_analyzer::AnalyzerError>,
     ) -> Self {
@@ -84,10 +78,9 @@ impl Simulator {
         }
     }
 
-    /// Returns the shared compiled JIT code, allowing it to be reused
-    /// for creating additional simulator instances without recompilation.
-    pub fn shared_code(&self) -> Arc<SharedJitCode> {
-        self.backend.shared_code()
+    /// Returns a reference to the compiled SIR program.
+    pub fn program(&self) -> &Program {
+        &self.program
     }
 
     /// Returns analyzer warnings emitted during compilation.
@@ -129,7 +122,7 @@ impl Simulator {
     /// Modifies internal state via a callback and marks combinational logic as dirty.
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where
-        F: FnOnce(&mut IOContext),
+        F: FnOnce(&mut IOContext<B>),
     {
         let mut ctx = IOContext {
             backend: &mut self.backend,
@@ -140,16 +133,11 @@ impl Simulator {
     }
 
     /// Manually triggers a clock or event to process sequential logic.
-    pub fn tick(&mut self, event: EventRef) -> Result<(), RuntimeErrorCode> {
+    pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
         if self.dirty {
             self.backend.eval_comb()?;
         }
-        if let Some(merged) = event.merged_func {
-            self.backend.eval_apply_ff_and_comb_at(merged)?;
-        } else {
-            self.backend.eval_apply_ff_at(event)?;
-            self.backend.eval_comb()?;
-        }
+        self.backend.eval_apply_ff_and_comb(event)?;
         self.dirty = false;
         Ok(())
     }
@@ -161,8 +149,8 @@ impl Simulator {
         self.backend.resolve_signal(&addr)
     }
 
-    /// Resolve a port name to an [`EventRef`] handle.
-    pub fn event(&self, port: &str) -> EventRef {
+    /// Resolve a port name to an event handle.
+    pub fn event(&self, port: &str) -> B::Event {
         let addr = self.program.get_addr(&[], &[port]).unwrap();
         self.backend.resolve_event(&addr)
     }
@@ -173,8 +161,8 @@ impl Simulator {
         Ok(self.backend.resolve_signal(&addr))
     }
 
-    /// Try to resolve a port name to an [`EventRef`] handle.
-    pub fn try_event(&self, port: &str) -> Result<EventRef, crate::ir::AddrLookupError> {
+    /// Try to resolve a port name to an event handle.
+    pub fn try_event(&self, port: &str) -> Result<B::Event, crate::ir::AddrLookupError> {
         let addr = self.program.get_addr(&[], &[port])?;
         Ok(self.backend.resolve_event(&addr))
     }
@@ -216,12 +204,12 @@ impl Simulator {
         Ok(())
     }
 
-    /// Returns a raw pointer to the JIT memory and its total size in bytes.
+    /// Returns a raw pointer to the backend memory and its total size in bytes.
     pub fn memory_as_ptr(&self) -> (*const u8, usize) {
         self.backend.memory_as_ptr()
     }
 
-    /// Returns a mutable raw pointer to the JIT memory and its total size in bytes.
+    /// Returns a mutable raw pointer to the backend memory and its total size in bytes.
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         self.backend.memory_as_mut_ptr()
     }
@@ -290,11 +278,6 @@ impl Simulator {
             }
         }
         descs
-    }
-
-    /// Consume the simulator and return the inner JIT backend.
-    pub fn into_backend(self) -> JitBackend {
-        self.backend
     }
 
     /// Returns all ports of the top-level module with their resolved signal references.
@@ -373,7 +356,7 @@ impl Simulator {
     }
 
     /// Returns all events (clock/reset signals) with their IDs and event references.
-    pub fn named_events(&self) -> Vec<NamedEvent> {
+    pub fn named_events(&self) -> Vec<NamedEvent<B>> {
         let mut result = Vec::new();
         for (id, addr) in self.backend.id_to_addr_slice().iter().enumerate() {
             let name = self.program.get_path(addr);
@@ -480,5 +463,31 @@ impl Simulator {
             signals,
             children,
         }
+    }
+}
+
+// ── JitBackend-specific methods ──────────────────────────────────────
+
+impl Simulator<JitBackend> {
+    pub fn builder<'a>(code: &'a str, top: &'a str) -> SimulatorBuilder<'a, Simulator<JitBackend>> {
+        SimulatorBuilder::<Simulator<JitBackend>>::new(code, top)
+    }
+
+    pub fn from_sources<'a>(
+        sources: Vec<(&'a str, &'a std::path::Path)>,
+        top: &'a str,
+    ) -> SimulatorBuilder<'a, Simulator<JitBackend>> {
+        SimulatorBuilder::<Simulator<JitBackend>>::from_sources(sources, top)
+    }
+
+    /// Returns the shared compiled JIT code, allowing it to be reused
+    /// for creating additional simulator instances without recompilation.
+    pub fn shared_code(&self) -> Arc<SharedJitCode> {
+        self.backend.shared_code()
+    }
+
+    /// Consume the simulator and return the inner JIT backend.
+    pub fn into_backend(self) -> JitBackend {
+        self.backend
     }
 }

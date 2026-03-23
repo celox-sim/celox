@@ -29,6 +29,8 @@ cranelift-module      = "0.128.0"
 cranelift-jit         = "0.128.0"
 cranelift-frontend    = "0.128.0"
 cranelift-native      = "0.128.0"
+wasm-encoder          = "0.245"
+wasmtime              = "43"
 
 [dev-dependencies]
 insta      = "1.46"

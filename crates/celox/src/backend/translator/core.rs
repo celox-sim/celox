@@ -357,8 +357,6 @@ impl SIRTranslator {
         units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
         mut builder: FunctionBuilder,
     ) {
-        // 1. Create function entry (entry block)
-        // Here we create a "true entry" to connect all units
         let master_entry = builder.create_block();
         builder.append_block_params_for_function_params(master_entry);
         builder.switch_to_block(master_entry);
@@ -370,42 +368,64 @@ impl SIRTranslator {
             return;
         }
 
-        // Get argument pointer
         let mem_ptr = builder.block_params(master_entry)[0];
+        self.translate_units_into(units, &mut builder, mem_ptr, None);
+
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
+
+    /// Translate execution units into the current function, starting from the
+    /// current block in the builder.
+    ///
+    /// The current block is terminated with a jump to the first unit's entry.
+    /// If `continuation` is `Some`, the last unit's `Return` jumps there instead
+    /// of emitting a real return. `Error` terminators always return immediately.
+    ///
+    /// The caller is responsible for calling `seal_all_blocks()` and `finalize()`.
+    pub fn translate_units_into(
+        &self,
+        units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+        builder: &mut FunctionBuilder,
+        mem_ptr: Value,
+        continuation: Option<Block>,
+    ) {
+        if units.is_empty() {
+            if let Some(cont) = continuation {
+                builder.ins().jump(cont, &[]);
+            } else {
+                let r = builder.ins().iconst(types::I64, 0);
+                builder.ins().return_(&[r]);
+            }
+            return;
+        }
+
         let mut unit_entry_blocks = Vec::new();
         for _ in units {
             unit_entry_blocks.push(builder.create_block());
         }
-        if units.is_empty() {
-            let r = builder.ins().iconst(types::I64, 0);
-            builder.ins().return_(&[r]);
-            builder.seal_all_blocks();
-            builder.finalize();
-            return;
-        }
 
         let trigger_old_values = preload_trigger_old_values(
             units.iter().flat_map(|u| u.blocks.values()),
-            &mut builder,
+            builder,
             mem_ptr,
             &self.layout,
             self.options.emit_triggers,
         );
 
         builder.ins().jump(unit_entry_blocks[0], &[]);
-        // 2. Translate each ExecutionUnit in order
+
         for (i, unit) in units.iter().enumerate() {
-            // --- Create "isolated" state for each unit ---
             let unit_entry = unit_entry_blocks[i];
             let next_unit_entry = if i + 1 < units.len() {
                 Some(unit_entry_blocks[i + 1])
             } else {
-                None
+                continuation
             };
 
             // Important: RegisterId is unique within a Unit, so clear regs for each Unit
             let mut state = TranslationState {
-                builder: &mut builder,
+                builder: &mut *builder,
                 regs: HashMap::default(),
                 mem_ptr,
                 register_map: &unit.register_map,
@@ -424,9 +444,7 @@ impl SIRTranslator {
                 for &param_reg in &block.params {
                     let width = unit.register_map[&param_reg].width();
                     let ty = get_cl_type(width);
-                    // Value block param
                     state.builder.append_block_param(cl_bb, ty);
-                    // In 4-state mode, also append a mask block param
                     if self.options.four_state {
                         state.builder.append_block_param(cl_bb, ty);
                     }
@@ -434,10 +452,9 @@ impl SIRTranslator {
                 block_map.insert(*id, cl_bb);
             }
 
-            // Jump from the previous unit (or master entry) to the starting point of this unit
             let mut block_ids: Vec<_> = unit.blocks.keys().collect();
             block_ids.sort();
-            // 3. Translate each block within the unit
+
             for id in &block_ids {
                 let cl_block = block_map[id];
                 state.builder.switch_to_block(cl_block);
@@ -446,7 +463,6 @@ impl SIRTranslator {
 
                 for (i, &sir_param_reg) in sir_block.params.iter().enumerate() {
                     let tval = if self.options.four_state {
-                        // In 4-state mode, each SIR param maps to 2 Cranelift params: value + mask
                         let val = cl_params[i * 2];
                         let mask = cl_params[i * 2 + 1];
                         TransValue::FourState {
@@ -463,21 +479,14 @@ impl SIRTranslator {
                     self.translate_instruction(&mut state, inst);
                 }
 
-                // Translate terminator
-                // However, SIRTerminator::Return for units other than the last one
-                // must be handled as "transition to the next unit" (described later)
                 self.translate_terminator(
                     &mut state,
                     &sir_block.terminator,
                     &block_map,
-                    next_unit_entry, // 最後のユニットかどうかを渡す
+                    next_unit_entry,
                 );
             }
         }
-
-        // Finally, seal all blocks
-        builder.seal_all_blocks();
-        builder.finalize();
     }
 
     /// Translate a single chunk of a tail-call chain.

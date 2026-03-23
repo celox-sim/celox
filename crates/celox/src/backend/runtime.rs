@@ -10,6 +10,8 @@ use crate::{
 use super::{JitEngine, MemoryLayout, get_byte_size};
 use thiserror::Error;
 pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
+#[allow(dead_code)]
+pub type BatchFunc = unsafe extern "C" fn(*mut u8, *const u8, *mut u8, i64) -> u64;
 
 /// Opaque handle to a compiled event (clock / async-reset) function.
 /// Holds the JIT-compiled function pointer directly — no indirection.
@@ -32,6 +34,16 @@ impl std::fmt::Debug for EventRef {
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
+    }
+}
+
+impl super::EventHandle for EventRef {
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    fn addr(&self) -> AbsoluteAddr {
+        self.addr
     }
 }
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -757,5 +769,118 @@ impl JitBackend {
             }
         }
         bits
+    }
+}
+
+impl super::SimBackend for JitBackend {
+    type Event = EventRef;
+
+    fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
+        self.eval_comb()
+    }
+
+    fn eval_apply_ff_and_comb(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        if let Some(merged) = event.merged_func {
+            self.eval_apply_ff_and_comb_at(merged)
+        } else {
+            self.eval_apply_ff_at(event)?;
+            self.eval_comb()
+        }
+    }
+
+    fn eval_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        self.eval_apply_ff_at(event)
+    }
+
+    fn eval_only_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        self.eval_only_ff_at(event)
+    }
+
+    fn apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        self.apply_ff_at(event)
+    }
+
+    fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {
+        self.resolve_signal(addr)
+    }
+
+    fn resolve_event(&self, addr: &AbsoluteAddr) -> EventRef {
+        self.resolve_event(addr)
+    }
+
+    fn resolve_event_opt(&self, addr: &AbsoluteAddr) -> Option<EventRef> {
+        self.resolve_event_opt(addr)
+    }
+
+    fn resolve_eval_only_event(&self, addr: &AbsoluteAddr) -> Option<EventRef> {
+        self.resolve_eval_only_event(addr)
+    }
+
+    fn resolve_apply_event(&self, addr: &AbsoluteAddr) -> Option<EventRef> {
+        self.resolve_apply_event(addr)
+    }
+
+    fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        self.set(signal, val)
+    }
+
+    fn set_wide(&mut self, signal: SignalRef, val: BigUint) {
+        self.set_wide(signal, val)
+    }
+
+    fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint) {
+        self.set_four_state(signal, val, mask)
+    }
+
+    fn get(&self, signal: SignalRef) -> BigUint {
+        self.get(signal)
+    }
+
+    fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        self.get_as(signal)
+    }
+
+    fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
+        self.get_four_state(signal)
+    }
+
+    fn memory_as_ptr(&self) -> (*const u8, usize) {
+        self.memory_as_ptr()
+    }
+
+    fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
+        self.memory_as_mut_ptr()
+    }
+
+    fn stable_region_size(&self) -> usize {
+        self.stable_region_size()
+    }
+
+    fn layout(&self) -> &super::MemoryLayout {
+        self.layout()
+    }
+
+    fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {
+        self.id_to_addr_slice()
+    }
+
+    fn id_to_event_slice(&self) -> &[EventRef] {
+        self.id_to_event_slice()
+    }
+
+    fn num_events(&self) -> usize {
+        self.num_events()
+    }
+
+    fn clear_triggered_bits(&mut self) {
+        self.clear_triggered_bits()
+    }
+
+    fn mark_triggered_bit(&mut self, id: usize) {
+        self.mark_triggered_bit(id)
+    }
+
+    fn get_triggered_bits(&self) -> bit_set::BitSet {
+        self.get_triggered_bits()
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     RuntimeErrorCode, Simulator,
-    backend::MemoryLayout,
+    backend::{EventHandle, JitBackend, MemoryLayout, SimBackend},
     ir::{DomainKind, SignalRef},
     scheduler::{Scheduler, SimEvent},
     simulator::{InstanceHierarchy, NamedEvent, NamedSignal},
@@ -9,26 +9,48 @@ use crate::{
 /// A timed simulation wrapper around the core logic engine.
 ///
 /// Manages simulation time, periodic clocks, and an event queue.
-pub struct Simulation {
-    pub(crate) simulator: Simulator,
-    pub(crate) scheduler: Scheduler,
+///
+/// The default type parameter `B = JitBackend` means that bare `Simulation`
+/// is equivalent to `Simulation<JitBackend>` for backward compatibility.
+pub struct Simulation<B: SimBackend = JitBackend> {
+    pub(crate) simulator: Simulator<B>,
+    pub(crate) scheduler: Scheduler<B>,
     pub(crate) last_clock_values: bit_set::BitSet,
     pub(crate) topo_signals: Vec<(SignalRef, usize, usize)>, // (signal, id, canonical_id)
     pub(crate) domain_kinds: Vec<Option<DomainKind>>,
-    pub(crate) event_info: Vec<EventInfo>,
+    pub(crate) event_info: Vec<EventInfo<B>>,
     pub(crate) signal_to_id: crate::HashMap<SignalRef, usize>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct EventInfo {
+pub(crate) struct EventInfo<B: SimBackend = JitBackend> {
     pub(crate) canonical_id: usize,
     pub(crate) is_cascaded: bool,
-    pub(crate) eval_ff_event: Option<crate::backend::EventRef>,
-    pub(crate) eval_only_event: Option<crate::backend::EventRef>,
-    pub(crate) apply_event: Option<crate::backend::EventRef>,
+    pub(crate) eval_ff_event: Option<B::Event>,
+    pub(crate) eval_only_event: Option<B::Event>,
+    pub(crate) apply_event: Option<B::Event>,
 }
 
-impl std::fmt::Debug for Simulation {
+impl<B: SimBackend> Clone for EventInfo<B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<B: SimBackend> Copy for EventInfo<B> {}
+
+impl<B: SimBackend> std::fmt::Debug for EventInfo<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventInfo")
+            .field("canonical_id", &self.canonical_id)
+            .field("is_cascaded", &self.is_cascaded)
+            .field("eval_ff_event", &self.eval_ff_event)
+            .field("eval_only_event", &self.eval_only_event)
+            .field("apply_event", &self.apply_event)
+            .finish()
+    }
+}
+
+impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Simulation")
             .field("time", &self.scheduler.time)
@@ -36,19 +58,25 @@ impl std::fmt::Debug for Simulation {
     }
 }
 
-impl Simulation {
-    pub fn builder<'a>(code: &'a str, top: &'a str) -> crate::SimulatorBuilder<'a, Simulation> {
-        crate::SimulatorBuilder::<Simulation>::new(code, top)
+// ── JitBackend-specific constructors ────────────────────────────────
+
+impl Simulation<JitBackend> {
+    pub fn builder<'a>(code: &'a str, top: &'a str) -> crate::SimulatorBuilder<'a, Simulation<JitBackend>> {
+        crate::SimulatorBuilder::<Simulation<JitBackend>>::new(code, top)
     }
 
     pub fn from_sources<'a>(
         sources: Vec<(&'a str, &'a std::path::Path)>,
         top: &'a str,
-    ) -> crate::SimulatorBuilder<'a, Simulation> {
-        crate::SimulatorBuilder::<Simulation>::from_sources(sources, top)
+    ) -> crate::SimulatorBuilder<'a, Simulation<JitBackend>> {
+        crate::SimulatorBuilder::<Simulation<JitBackend>>::from_sources(sources, top)
     }
+}
 
-    pub(crate) fn new(simulator: Simulator) -> Self {
+// ── Generic methods available for any backend ───────────────────────
+
+impl<B: SimBackend> Simulation<B> {
+    pub(crate) fn new(simulator: Simulator<B>) -> Self {
         let num_events = simulator.backend.num_events();
         let topo_signals: Vec<(SignalRef, usize, usize)> = simulator
             .program
@@ -59,7 +87,7 @@ impl Simulation {
                 let id = simulator
                     .backend
                     .resolve_event_opt(addr)
-                    .map(|ev| ev.id)
+                    .map(|ev| ev.id())
                     .unwrap_or(usize::MAX);
                 let canonical = simulator
                     .program
@@ -70,7 +98,7 @@ impl Simulation {
                 let canonical_id = simulator
                     .backend
                     .resolve_event_opt(&canonical)
-                    .map(|ev| ev.id)
+                    .map(|ev| ev.id())
                     .unwrap_or(usize::MAX);
                 (signal, id, canonical_id)
             })
@@ -123,7 +151,7 @@ impl Simulation {
 
             if let Some(canonical_ev) = eval_ff_event {
                 *info = EventInfo {
-                    canonical_id: canonical_ev.id,
+                    canonical_id: canonical_ev.id(),
                     is_cascaded,
                     eval_ff_event,
                     eval_only_event,
@@ -173,7 +201,7 @@ impl Simulation {
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where
-        F: FnOnce(&mut crate::IOContext),
+        F: FnOnce(&mut crate::IOContext<B>),
     {
         self.simulator.modify(f)
     }
@@ -184,10 +212,11 @@ impl Simulation {
         let signal = self.simulator.signal(port);
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
-            if ev.id >= self.scheduler.clocks.len() {
-                self.scheduler.clocks.resize(ev.id + 1, None);
+            let ev_id = ev.id();
+            if ev_id >= self.scheduler.clocks.len() {
+                self.scheduler.clocks.resize(ev_id + 1, None);
             }
-            self.scheduler.clocks[ev.id] = Some(crate::scheduler::ClockDef { period });
+            self.scheduler.clocks[ev_id] = Some(crate::scheduler::ClockDef { period });
             // Start all clocks with rising edge at t = initial_delay
             self.scheduler.push(SimEvent {
                 time: initial_delay,
@@ -294,28 +323,13 @@ impl Simulation {
 
                     if can_use_eval_apply {
                         if let Some(ev) = info.eval_ff_event {
-                            // Try merged eval_apply + comb first (saves one JIT function call)
-                            if let Some(merged) = ev.merged_func {
-                                discovered_in_this_step.insert(single_id);
-                                triggered_domains.insert(info.canonical_id);
-                                any_new_outer_loop_trigger = true;
-
-                                self.simulator.backend.eval_apply_ff_and_comb_at(merged)?;
-                                comb_already_done = true;
-                                break;
-                            }
-                        }
-                        if let Some(ev) = info.eval_ff_event {
+                            // Use merged eval_apply + comb (saves function calls)
                             discovered_in_this_step.insert(single_id);
                             triggered_domains.insert(info.canonical_id);
                             any_new_outer_loop_trigger = true;
 
-                            // Directly execute eval + apply
-                            self.simulator.backend.eval_apply_ff_at(ev)?;
-
-                            // The FF has been applied. We do NOT add it to `newly_triggered`
-                            // because it's already committed. We just break the inner loop
-                            // and let Phase 3 eval_comb catch any combinational changes.
+                            self.simulator.backend.eval_apply_ff_and_comb(ev)?;
+                            comb_already_done = true;
                             break;
                         }
                     }
@@ -391,8 +405,8 @@ impl Simulation {
 
         // Reschedule clocks
         for ev in &events_to_process {
-            let ev_ref = ev.event_ref;
-            if let Some(Some(def)) = self.scheduler.clocks.get(ev_ref.id) {
+            let ev_id = ev.event_ref.id();
+            if let Some(Some(def)) = self.scheduler.clocks.get(ev_id) {
                 let half_period = def.period / 2;
                 self.scheduler.push(SimEvent {
                     time: current_time + half_period,
@@ -437,12 +451,12 @@ impl Simulation {
         self.simulator.eval_comb()
     }
 
-    /// Returns a raw pointer to the JIT memory and its total size in bytes.
+    /// Returns a raw pointer to the backend memory and its total size in bytes.
     pub fn memory_as_ptr(&self) -> (*const u8, usize) {
         self.simulator.memory_as_ptr()
     }
 
-    /// Returns a mutable raw pointer to the JIT memory and its total size in bytes.
+    /// Returns a mutable raw pointer to the backend memory and its total size in bytes.
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         self.simulator.memory_as_mut_ptr()
     }
@@ -463,7 +477,7 @@ impl Simulation {
     }
 
     /// Returns all events with their IDs and event references.
-    pub fn named_events(&self) -> Vec<NamedEvent> {
+    pub fn named_events(&self) -> Vec<NamedEvent<B>> {
         self.simulator.named_events()
     }
 
@@ -487,10 +501,11 @@ impl Simulation {
         let addr = self.simulator.backend.id_to_addr_slice()[event_id as usize];
         let signal = self.simulator.backend.resolve_signal(&addr);
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
-            if ev.id >= self.scheduler.clocks.len() {
-                self.scheduler.clocks.resize(ev.id + 1, None);
+            let ev_id = ev.id();
+            if ev_id >= self.scheduler.clocks.len() {
+                self.scheduler.clocks.resize(ev_id + 1, None);
             }
-            self.scheduler.clocks[ev.id] = Some(crate::scheduler::ClockDef { period });
+            self.scheduler.clocks[ev_id] = Some(crate::scheduler::ClockDef { period });
             self.scheduler.push(SimEvent {
                 time: initial_delay,
                 event_ref: ev,

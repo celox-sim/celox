@@ -279,3 +279,5 @@ fn test_concat_with_dynamic_index_runtime() {
     // out = {a[2], a[0]} = {1,1} = 3
     assert_eq!(sim.get(out), 0b11u8.into());
 }
+
+// TODO: restore batch_eval test after SimBackend refactor

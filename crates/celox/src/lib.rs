@@ -16,11 +16,11 @@ pub use vcd::{VcdSignalDesc, VcdWriter};
 
 pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 
-pub struct IOContext<'a> {
-    pub(crate) backend: &'a mut backend::JitBackend,
+pub struct IOContext<'a, B: backend::SimBackend = backend::JitBackend> {
+    pub(crate) backend: &'a mut B,
 }
 
-impl<'a> IOContext<'a> {
+impl<'a, B: backend::SimBackend> IOContext<'a, B> {
     pub fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
         self.backend.set(signal, val);
     }
@@ -34,7 +34,8 @@ impl<'a> IOContext<'a> {
 
 pub use backend::EventRef;
 pub use backend::SharedJitCode;
-pub use backend::{JitBackend, MemoryLayout, get_byte_size};
+pub use backend::wasm_runtime::WasmBackend;
+pub use backend::{EventHandle, JitBackend, MemoryLayout, SimBackend, get_byte_size};
 pub use celox_macros::veryl_test;
 pub use debug::{CompilationTrace, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;
