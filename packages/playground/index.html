@@ -11,27 +11,29 @@
             background: #1a1a2e;
             color: #e0e0e0;
             min-height: 100vh;
+            overflow: hidden;
         }
         header {
             background: #16213e;
-            padding: 12px 24px;
+            padding: 10px 24px;
             display: flex;
             align-items: center;
             gap: 16px;
             border-bottom: 1px solid #0f3460;
+            height: 46px;
         }
         header h1 {
-            font-size: 1.3rem;
+            font-size: 1.2rem;
             color: #e94560;
             font-weight: 700;
         }
         header select, header button {
-            padding: 6px 12px;
+            padding: 5px 12px;
             border-radius: 4px;
             border: 1px solid #0f3460;
             background: #1a1a2e;
             color: #e0e0e0;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             cursor: pointer;
         }
         header button {
@@ -44,52 +46,44 @@
         header button:disabled { opacity: 0.5; cursor: not-allowed; }
         .status {
             margin-left: auto;
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             color: #888;
         }
         .container {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            grid-template-rows: 1fr 1fr;
+            grid-template-rows: 1fr 200px;
             gap: 0;
-            height: calc(100vh - 50px);
+            height: calc(100vh - 46px);
         }
         .panel {
             display: flex;
             flex-direction: column;
             border: 1px solid #0f3460;
+            overflow: hidden;
         }
         .panel-header {
             background: #16213e;
-            padding: 6px 12px;
-            font-size: 0.8rem;
+            padding: 4px 12px;
+            font-size: 0.75rem;
             font-weight: 600;
             color: #888;
             text-transform: uppercase;
             letter-spacing: 0.05em;
+            flex-shrink: 0;
         }
-        textarea {
+        .editor-container {
             flex: 1;
-            background: #0d1117;
-            color: #c9d1d9;
-            border: none;
-            padding: 12px;
-            font-family: 'Fira Code', 'Cascadia Code', monospace;
-            font-size: 0.85rem;
-            line-height: 1.5;
-            resize: none;
-            tab-size: 4;
-            outline: none;
+            overflow: hidden;
         }
-        textarea::placeholder { color: #484f58; }
         #console {
             flex: 1;
             background: #0d1117;
             color: #c9d1d9;
-            padding: 12px;
+            padding: 8px 12px;
             font-family: 'Fira Code', 'Cascadia Code', monospace;
-            font-size: 0.85rem;
-            line-height: 1.5;
+            font-size: 0.8rem;
+            line-height: 1.4;
             overflow-y: auto;
             white-space: pre-wrap;
             word-wrap: break-word;
@@ -104,27 +98,39 @@
     <header>
         <h1>Celox Playground</h1>
         <select id="examples">
-            <option value="">-- Load Example --</option>
+            <option value="">-- Example --</option>
             <option value="adder">Adder</option>
             <option value="counter">Counter</option>
         </select>
         <button id="run-btn" disabled>Run</button>
-        <span class="status" id="status">Loading WASM...</span>
+        <span class="status" id="status">Loading...</span>
     </header>
     <div class="container">
         <div class="panel">
             <div class="panel-header">Veryl Source</div>
-            <textarea id="veryl-source" placeholder="Enter Veryl code here..." spellcheck="false"></textarea>
+            <div class="editor-container" id="veryl-editor-container"></div>
         </div>
         <div class="panel">
             <div class="panel-header">Testbench (JavaScript)</div>
-            <textarea id="testbench" placeholder="Write testbench JS here..." spellcheck="false"></textarea>
+            <div class="editor-container" id="tb-editor-container"></div>
         </div>
         <div class="panel" style="grid-column: 1 / -1;">
             <div class="panel-header">Console Output</div>
             <div id="console"></div>
         </div>
     </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+    <script>
+        // Configure Monaco loader
+        require.config({
+            paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' }
+        });
+
+        window.__monacoReady = new Promise(resolve => {
+            require(['vs/editor/editor.main'], resolve);
+        });
+    </script>
     <script type="module" src="./main.js"></script>
 </body>
 </html>

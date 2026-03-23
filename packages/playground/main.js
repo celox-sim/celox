@@ -3,7 +3,7 @@
 // Loads the celox-wasm module, compiles Veryl source, instantiates the
 // generated WASM simulation modules, and runs the user's testbench.
 
-import init, { SimHandle } from "./pkg/celox_wasm.js";
+import initCelox, { SimHandle } from "./pkg/celox_wasm.js";
 
 // ── Example sources ─────────────────────────────────────────────────
 
@@ -71,6 +71,214 @@ for (let i = 0; i < 5; i++) {
     },
 };
 
+// ── Monaco Editor setup ─────────────────────────────────────────────
+
+let verylEditor, tbEditor;
+
+async function setupEditors() {
+    await window.__monacoReady;
+    const monaco = window.monaco;
+
+    // Register Veryl language
+    monaco.languages.register({ id: "veryl" });
+
+    monaco.languages.setMonarchTokensProvider("veryl", {
+        keywords: [
+            "module", "interface", "package", "function", "import", "export",
+            "input", "output", "inout", "ref", "modport",
+            "logic", "bit", "clock", "reset", "reset_async_low", "reset_async_high",
+            "var", "let", "const", "param", "localparam", "type",
+            "assign", "always_ff", "always_comb", "initial", "final",
+            "if", "else", "if_reset", "for", "in", "case", "switch", "default",
+            "return", "break",
+            "pub", "proto", "embed", "include", "alias", "bind",
+            "inst", "enum", "struct", "union", "unsafe",
+            "step", "posedge", "negedge",
+            "as", "repeat", "inside",
+        ],
+        typeKeywords: [
+            "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool",
+        ],
+        operators: [
+            "=", "==", "!=", "<", ">", "<=", ">=",
+            "+", "-", "*", "/", "%",
+            "&", "|", "^", "~", "<<", ">>", ">>>",
+            "&&", "||", "!",
+            "+=", "-=", "*=", "/=",
+            "->", "=>",
+        ],
+        symbols: /[=><!~?:&|+\-*/^%]+/,
+        tokenizer: {
+            root: [
+                [/[a-zA-Z_]\w*/, {
+                    cases: {
+                        "@keywords": "keyword",
+                        "@typeKeywords": "type",
+                        "@default": "identifier",
+                    },
+                }],
+                [/'[a-zA-Z_]\w*/, "annotation"],  // clock domain annotations like '_ or 'a
+                [/[{}()\[\]]/, "@brackets"],
+                [/@symbols/, {
+                    cases: {
+                        "@operators": "operator",
+                        "@default": "",
+                    },
+                }],
+                [/\d[\d_]*/, "number"],
+                [/\d+'\s*[bodh][\da-fA-F_]+/, "number.hex"],
+                [/"([^"\\]|\\.)*$/, "string.invalid"],
+                [/"/, { token: "string.quote", bracket: "@open", next: "@string" }],
+                [/\/\/.*$/, "comment"],
+                [/\/\*/, "comment", "@comment"],
+            ],
+            string: [
+                [/[^\\"]+/, "string"],
+                [/"/, { token: "string.quote", bracket: "@close", next: "@pop" }],
+            ],
+            comment: [
+                [/[^/*]+/, "comment"],
+                [/\*\//, "comment", "@pop"],
+                [/[/*]/, "comment"],
+            ],
+        },
+    });
+
+    // Veryl completions
+    monaco.languages.registerCompletionItemProvider("veryl", {
+        provideCompletionItems(model, position) {
+            const word = model.getWordUntilPosition(position);
+            const range = {
+                startLineNumber: position.lineNumber,
+                endLineNumber: position.lineNumber,
+                startColumn: word.startColumn,
+                endColumn: word.endColumn,
+            };
+
+            const snippets = [
+                { label: "module", insertText: "module ${1:Name} (\n    ${2}\n) {\n    ${0}\n}", detail: "Module declaration" },
+                { label: "always_ff", insertText: "always_ff (${1:clk}, ${2:rst}) {\n    if_reset {\n        ${3}\n    } else {\n        ${0}\n    }\n}", detail: "Sequential always block" },
+                { label: "always_comb", insertText: "always_comb {\n    ${0}\n}", detail: "Combinational always block" },
+                { label: "assign", insertText: "assign ${1:out} = ${0};", detail: "Continuous assignment" },
+                { label: "if_reset", insertText: "if_reset {\n    ${1}\n} else {\n    ${0}\n}", detail: "Reset branch" },
+                { label: "input logic", insertText: "${1:name}: input logic<${2:8}>", detail: "Input port" },
+                { label: "output logic", insertText: "${1:name}: output logic<${2:8}>", detail: "Output port" },
+                { label: "var", insertText: "var ${1:name}: logic<${2:8}>;", detail: "Variable declaration" },
+                { label: "for", insertText: "for ${1:i} in 0..${2:N} {\n    ${0}\n}", detail: "For loop" },
+                { label: "case", insertText: "case ${1:expr} {\n    ${2:val}: {\n        ${0}\n    }\n    default: {\n    }\n}", detail: "Case statement" },
+                { label: "inst", insertText: "inst ${1:name}: ${2:Module};", detail: "Instance" },
+                { label: "clock", insertText: "${1:clk}: input '${2:_} clock", detail: "Clock port" },
+                { label: "reset", insertText: "${1:rst}: input '${2:_} reset", detail: "Reset port" },
+            ];
+
+            const keywords = [
+                "module", "interface", "package", "function", "import",
+                "input", "output", "inout", "logic", "bit", "clock", "reset",
+                "var", "let", "const", "param", "assign",
+                "always_ff", "always_comb", "if", "else", "if_reset",
+                "for", "in", "case", "default", "return",
+                "inst", "enum", "struct", "pub",
+            ];
+
+            return {
+                suggestions: [
+                    ...snippets.map(s => ({
+                        label: s.label,
+                        kind: monaco.languages.CompletionItemKind.Snippet,
+                        insertText: s.insertText,
+                        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                        detail: s.detail,
+                        range,
+                    })),
+                    ...keywords.map(kw => ({
+                        label: kw,
+                        kind: monaco.languages.CompletionItemKind.Keyword,
+                        insertText: kw,
+                        range,
+                    })),
+                ],
+            };
+        },
+    });
+
+    // Define dark theme
+    monaco.editor.defineTheme("celox-dark", {
+        base: "vs-dark",
+        inherit: true,
+        rules: [
+            { token: "keyword", foreground: "c678dd" },
+            { token: "type", foreground: "e5c07b" },
+            { token: "identifier", foreground: "abb2bf" },
+            { token: "number", foreground: "d19a66" },
+            { token: "number.hex", foreground: "d19a66" },
+            { token: "string", foreground: "98c379" },
+            { token: "comment", foreground: "5c6370", fontStyle: "italic" },
+            { token: "operator", foreground: "56b6c2" },
+            { token: "annotation", foreground: "61afef" },
+        ],
+        colors: {
+            "editor.background": "#0d1117",
+            "editor.foreground": "#c9d1d9",
+            "editorLineNumber.foreground": "#484f58",
+            "editorCursor.foreground": "#58a6ff",
+            "editor.selectionBackground": "#264f78",
+        },
+    });
+
+    const commonOpts = {
+        theme: "celox-dark",
+        fontSize: 13,
+        fontFamily: "'Fira Code', 'Cascadia Code', monospace",
+        fontLigatures: true,
+        minimap: { enabled: false },
+        scrollBeyondLastLine: false,
+        automaticLayout: true,
+        tabSize: 4,
+        renderLineHighlight: "line",
+        padding: { top: 8 },
+    };
+
+    verylEditor = monaco.editor.create(
+        document.getElementById("veryl-editor-container"),
+        { ...commonOpts, language: "veryl", value: "" },
+    );
+
+    tbEditor = monaco.editor.create(
+        document.getElementById("tb-editor-container"),
+        { ...commonOpts, language: "javascript", value: "" },
+    );
+
+    // Add testbench-specific completions for the sim API
+    monaco.languages.registerCompletionItemProvider("javascript", {
+        provideCompletionItems(model, position) {
+            const word = model.getWordUntilPosition(position);
+            const range = {
+                startLineNumber: position.lineNumber,
+                endLineNumber: position.lineNumber,
+                startColumn: word.startColumn,
+                endColumn: word.endColumn,
+            };
+            const textBefore = model.getValueInRange({
+                startLineNumber: position.lineNumber,
+                startColumn: 1,
+                endLineNumber: position.lineNumber,
+                endColumn: position.column,
+            });
+            if (!textBefore.match(/sim\.\s*$/)) return { suggestions: [] };
+
+            return {
+                suggestions: [
+                    { label: "set", insertText: 'set("${1:signal}", ${2:value})', insertTextRules: 4, detail: "Set signal value", kind: 1, range },
+                    { label: "get", insertText: 'get("${1:signal}")', insertTextRules: 4, detail: "Get signal value", kind: 1, range },
+                    { label: "evalComb", insertText: "evalComb()", detail: "Evaluate combinational logic", kind: 1, range },
+                    { label: "tickEvent", insertText: 'tickEvent("${1:clk}")', insertTextRules: 4, detail: "Trigger clock event", kind: 1, range },
+                ],
+            };
+        },
+        triggerCharacters: ["."],
+    });
+}
+
 // ── Console output helpers ──────────────────────────────────────────
 
 const consoleEl = document.getElementById("console");
@@ -89,10 +297,6 @@ function clearConsole() {
 
 // ── Simulation wrapper ──────────────────────────────────────────────
 
-/**
- * Wraps the raw WASM modules + memory into a simple simulation API
- * that the testbench can call.
- */
 class WasmSimulation {
     constructor(memory, layout, combInstance, eventInstances) {
         this._memory = memory;
@@ -102,18 +306,15 @@ class WasmSimulation {
         this._view = new DataView(memory.buffer);
     }
 
-    /** Set a signal value (up to 32 bits). */
     set(name, value) {
         const sig = this._layout[name];
         if (!sig) throw new Error(`Signal '${name}' not found in layout`);
         const { offset, byteSize } = sig;
-        // Write little-endian
         if (byteSize <= 4) {
             for (let i = 0; i < byteSize; i++) {
                 this._view.setUint8(offset + i, (value >> (i * 8)) & 0xff);
             }
         } else {
-            // BigInt path for wider signals
             let v = BigInt(value);
             for (let i = 0; i < byteSize; i++) {
                 this._view.setUint8(offset + i, Number(v & 0xffn));
@@ -122,7 +323,6 @@ class WasmSimulation {
         }
     }
 
-    /** Get a signal value (up to 32 bits returned as Number). */
     get(name) {
         const sig = this._layout[name];
         if (!sig) throw new Error(`Signal '${name}' not found in layout`);
@@ -131,14 +331,12 @@ class WasmSimulation {
         for (let i = Math.min(byteSize, 4) - 1; i >= 0; i--) {
             value = (value << 8) | this._view.getUint8(offset + i);
         }
-        // Mask to actual width
         if (width < 32) {
             value &= (1 << width) - 1;
         }
-        return value >>> 0; // unsigned
+        return value >>> 0;
     }
 
-    /** Evaluate combinational logic. */
     evalComb() {
         const rc = this._combRun();
         if (rc !== 0n && rc !== 0) {
@@ -146,7 +344,6 @@ class WasmSimulation {
         }
     }
 
-    /** Trigger a clock/reset event by name. */
     tickEvent(name) {
         const inst = this._events[name];
         if (!inst) throw new Error(`Event '${name}' not found`);
@@ -154,7 +351,6 @@ class WasmSimulation {
         if (rc !== 0n && rc !== 0) {
             throw new Error(`event '${name}' returned error code ${rc}`);
         }
-        // Re-evaluate comb after event
         this.evalComb();
     }
 }
@@ -164,37 +360,39 @@ class WasmSimulation {
 const statusEl = document.getElementById("status");
 const runBtn = document.getElementById("run-btn");
 const examplesSelect = document.getElementById("examples");
-const verylSource = document.getElementById("veryl-source");
-const testbench = document.getElementById("testbench");
 
 async function main() {
     try {
-        await init();
+        await Promise.all([initCelox(), setupEditors()]);
         statusEl.textContent = "Ready";
         runBtn.disabled = false;
     } catch (e) {
-        statusEl.textContent = "Failed to load WASM";
+        statusEl.textContent = "Failed to load";
         appendConsole("Failed to initialize: " + e.message, "log-error");
         return;
     }
 
-    // Load default example
     loadExample("adder");
 
     examplesSelect.addEventListener("change", () => {
-        if (examplesSelect.value) {
-            loadExample(examplesSelect.value);
-        }
+        if (examplesSelect.value) loadExample(examplesSelect.value);
     });
 
     runBtn.addEventListener("click", runSimulation);
+
+    // Ctrl+Enter to run
+    document.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !runBtn.disabled) {
+            runSimulation();
+        }
+    });
 }
 
 function loadExample(name) {
     const ex = EXAMPLES[name];
     if (ex) {
-        verylSource.value = ex.veryl;
-        testbench.value = ex.testbench;
+        verylEditor.setValue(ex.veryl);
+        tbEditor.setValue(ex.testbench);
     }
 }
 
@@ -204,56 +402,44 @@ async function runSimulation() {
     statusEl.textContent = "Compiling...";
 
     try {
-        const source = verylSource.value;
-        const tb = testbench.value;
+        const source = verylEditor.getValue();
+        const tb = tbEditor.getValue();
 
-        // 1. Compile Veryl to WASM
         appendConsole("[compile] Compiling Veryl source...", "log-info");
         const t0 = performance.now();
-        const handle = new SimHandle(source, verylSource.value.match(/module\s+(\w+)/)?.[1] || "Top");
+        const topName = source.match(/module\s+(\w+)/)?.[1] || "Top";
+        const handle = new SimHandle(source, topName);
         const t1 = performance.now();
         appendConsole(`[compile] Done in ${(t1 - t0).toFixed(1)}ms`, "log-success");
 
-        // 2. Get layout and metadata
         const layout = JSON.parse(handle.layoutJson());
         const events = JSON.parse(handle.eventsJson());
         const totalSize = handle.totalSize();
-        appendConsole(`[info] Memory: ${totalSize} bytes, Signals: ${Object.keys(layout).length}, Events: ${Object.keys(events).length}`, "log-info");
+        appendConsole(`[info] Memory: ${totalSize}B, Signals: ${Object.keys(layout).length}, Events: ${Object.keys(events).length}`, "log-info");
 
-        // 3. Create shared WASM memory
         const pages = Math.max(1, Math.ceil(totalSize / 65536));
         const memory = new WebAssembly.Memory({ initial: pages });
 
-        // 4. Instantiate eval_comb WASM module
         const combBytes = handle.combWasmBytes();
         const combModule = await WebAssembly.compile(combBytes);
-        const combInstance = await WebAssembly.instantiate(combModule, {
-            env: { memory },
-        });
+        const combInstance = await WebAssembly.instantiate(combModule, { env: { memory } });
 
-        // 5. Instantiate event WASM modules
         const eventInstances = {};
         for (const eventName of Object.keys(events)) {
             try {
                 const eventBytes = handle.eventWasmBytes(eventName);
                 const eventModule = await WebAssembly.compile(eventBytes);
-                const eventInstance = await WebAssembly.instantiate(eventModule, {
-                    env: { memory },
-                });
-                eventInstances[eventName] = eventInstance;
+                eventInstances[eventName] = await WebAssembly.instantiate(eventModule, { env: { memory } });
             } catch (e) {
-                appendConsole(`[warn] Could not compile event '${eventName}': ${e.message}`, "log-warn");
+                appendConsole(`[warn] Event '${eventName}': ${e.message}`, "log-warn");
             }
         }
 
-        // 6. Create simulation wrapper
         const sim = new WasmSimulation(memory, layout, combInstance, eventInstances);
 
-        // 7. Run testbench
         statusEl.textContent = "Running...";
         appendConsole("[run] Executing testbench...", "log-info");
 
-        // The testbench gets `sim` and a `log` function
         const log = (msg) => appendConsole(String(msg));
         const fn = new Function("sim", "log", tb);
         fn(sim, log);
@@ -262,9 +448,6 @@ async function runSimulation() {
         statusEl.textContent = "Done";
     } catch (e) {
         appendConsole("[error] " + e.message, "log-error");
-        if (e.stack) {
-            appendConsole(e.stack, "log-error");
-        }
         statusEl.textContent = "Error";
     } finally {
         runBtn.disabled = false;
