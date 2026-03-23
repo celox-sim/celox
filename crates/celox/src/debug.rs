@@ -34,11 +34,13 @@ pub struct CompilationTrace {
     pub native: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct CompilationTraceResult {
     pub res: Result<crate::simulator::Simulator, crate::simulator::SimulatorError>,
     pub trace: CompilationTrace,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl CompilationTraceResult {
     pub fn expect(self, msg: &str) -> crate::simulator::Simulator {
         match self.res {

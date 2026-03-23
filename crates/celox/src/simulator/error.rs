@@ -27,6 +27,7 @@ pub fn render_diagnostic(diag: &dyn miette::Diagnostic) -> String {
 pub enum SimulatorErrorKind {
     SIRParser(crate::ParserError),
     Analyzer(Vec<veryl_analyzer::AnalyzerError>),
+    #[cfg(not(target_arch = "wasm32"))]
     Runtime(crate::RuntimeErrorCode),
     Codegen(String),
 }
@@ -76,6 +77,7 @@ impl fmt::Display for SimulatorError {
                     f.write_str(&render_diagnostic(e))?;
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
             SimulatorErrorKind::Runtime(e) => write!(f, "Runtime error: {e}")?,
             SimulatorErrorKind::Codegen(msg) => write!(f, "JIT Code generation error: {msg}")?,
         }
@@ -96,12 +98,14 @@ impl std::error::Error for SimulatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self.kind.as_ref() {
             SimulatorErrorKind::SIRParser(e) => Some(e),
+            #[cfg(not(target_arch = "wasm32"))]
             SimulatorErrorKind::Runtime(e) => Some(e),
             _ => None,
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<crate::RuntimeErrorCode> for SimulatorError {
     fn from(e: crate::RuntimeErrorCode) -> Self {
         SimulatorError::new(SimulatorErrorKind::Runtime(e))

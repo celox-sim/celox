@@ -8,6 +8,7 @@ use crate::ir::*;
 /// - Any execution unit Loads from it (or Commits from it), OR
 /// - It has a dynamic offset (conservative), OR
 /// - The store has non-empty triggers (edge-detection side effect).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn eliminate_dead_stores(
     program: &mut Program,
     externally_live: &HashSet<AbsoluteAddr>,

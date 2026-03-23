@@ -7,11 +7,11 @@ use veryl_metadata::{ClockType, Metadata, ResetType};
 use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
-use super::Simulator;
 use crate::parser::BuildConfig;
 use crate::{
-    ParserError, SimulatorError, SimulatorErrorKind, backend::JitBackend, ir::Program, parser,
+    ParserError, SimulatorError, SimulatorErrorKind, ir::Program, parser,
 };
+
 fn analyze(
     sources: &[(&str, &Path)],
     top: &str,
@@ -101,7 +101,12 @@ fn analyze(
     );
     (sir, errors)
 }
-pub(crate) fn compile_to_sir(
+
+/// Compile Veryl source code to the SIR (Simulation IR) representation.
+///
+/// This is the shared compilation pipeline used by all backends.
+/// Returns the compiled Program and any analyzer warnings on success.
+pub fn compile_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
     ignored_loops: &[(
@@ -147,7 +152,16 @@ pub(crate) fn compile_to_sir(
         Err(e) => Err(SimulatorError::from(e).with_warnings(warnings)),
     }
 }
+
+// ── JIT-specific types and builders (native only) ────────────────────
+
+#[cfg(not(target_arch = "wasm32"))]
+use super::Simulator;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::backend::JitBackend;
+
 /// Controls which stores the dead store elimination pass preserves.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeadStorePolicy {
     /// Keep all stores (no dead store elimination). Default for user-facing builds.
@@ -159,6 +173,7 @@ pub enum DeadStorePolicy {
     PreserveAllPorts,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct SimulatorOptions {
     pub four_state: bool,
@@ -176,6 +191,7 @@ pub struct SimulatorOptions {
     pub dead_store_policy: DeadStorePolicy,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for SimulatorOptions {
     fn default() -> Self {
         Self {
@@ -196,6 +212,7 @@ impl Default for SimulatorOptions {
 /// Use [`Simulator::builder()`] or [`Simulation::builder()`](crate::Simulation::builder)
 /// to obtain the appropriate variant. Both share the same configuration methods;
 /// only `.build()` differs in return type.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SimulatorBuilder<'a, Target = Simulator> {
     sources: Vec<(&'a str, &'a Path)>,
     top: &'a str,
@@ -219,6 +236,7 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
 }
 
 /// Configuration methods shared by all builder variants.
+#[cfg(not(target_arch = "wasm32"))]
 impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Supply project metadata (clock/reset settings, etc.) instead of defaults.
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
@@ -239,10 +257,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Override a top-level module parameter value.
-    ///
-    /// The value is injected into the Veryl analyzer's `Context` before
-    /// analysis pass 2, so all downstream elaboration sees the overridden
-    /// constant.
     pub fn param(mut self, name: &str, value: u64) -> Self {
         self.param_overrides.push((name.to_string(), value));
         self
@@ -261,10 +275,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Enable or disable all SIRT optimization passes at once.
-    ///
-    /// `true` sets all passes to enabled, `false` disables all.
-    /// For per-pass control, use [`optimize_options`](Self::optimize_options)
-    /// or individual methods like [`commit_sinking`](Self::commit_sinking).
     pub fn optimize(mut self, enable: bool) -> Self {
         self.options.optimize_options = if enable {
             crate::optimizer::OptimizeOptions::all()
@@ -290,7 +300,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Set fine-grained Cranelift backend options.
     pub fn cranelift_options(mut self, options: crate::optimizer::CraneliftOptions) -> Self {
         self.options.cranelift_options = options;
-        // Keep cranelift_opt_level in sync
         self.options.cranelift_opt_level = options.opt_level;
         self
     }
@@ -374,9 +383,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Mark a signal as externally observable (live) for dead store elimination.
-    ///
-    /// When dead store elimination is enabled, stores to this signal will be
-    /// preserved even if no execution unit loads from it.
     pub fn live_signal(
         mut self,
         instance_path: Vec<(String, usize)>,
@@ -453,9 +459,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Explicitly ignore a dependency between two signals.
-    ///
-    /// Use this to break "false loops" where a combinational cycle exists
-    /// structurally but never occurs logically during execution.
     pub fn false_loop(
         mut self,
         from: (Vec<(String, usize)>, Vec<String>),
@@ -464,10 +467,8 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self.ignored_loops.push((from, to));
         self
     }
+
     /// Mark a dependency as a "true loop" and specify its convergence limit.
-    ///
-    /// The simulator will use a convergence-based repetition strategy (Dynamic Convergence)
-    /// to stabilize the combinational logic within this loop up to `max_iter` times.
     pub fn true_loop(
         mut self,
         from: (Vec<(String, usize)>, Vec<String>),
@@ -479,6 +480,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn new(code: &'a str, top: &'a str) -> Self {
         Self {
@@ -517,7 +519,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     /// Compiles the Veryl source and constructs the core logic simulator.
     pub fn build(self) -> Result<Simulator, SimulatorError> {
         let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
-        let phase_start = phase_timing.then(std::time::Instant::now);
+        let phase_start = phase_timing.then(crate::timing::now);
 
         let (mut program, warnings) = compile_to_sir(
             &self.sources,
@@ -534,10 +536,10 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.options.optimize_options,
         )?;
 
-        if phase_timing {
+        if let Some(s) = phase_start {
             eprintln!(
                 "[phase-timing] compile_to_sir (total): {:?}",
-                phase_start.unwrap().elapsed()
+                s.elapsed()
             );
         }
 
@@ -549,12 +551,12 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             );
         }
 
-        let jit_start = phase_timing.then(std::time::Instant::now);
+        let jit_start = phase_timing.then(crate::timing::now);
         let backend = JitBackend::new(&program, &self.options, None)?;
-        if phase_timing {
+        if let Some(s) = jit_start {
             eprintln!(
                 "[phase-timing] jit_backend: {:?}",
-                jit_start.unwrap().elapsed()
+                s.elapsed()
             );
         }
 
@@ -614,6 +616,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     pub(crate) fn new(code: &'a str, top: &'a str) -> Self {
         Self {
@@ -688,6 +691,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
 }
 
 /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
+#[cfg(not(target_arch = "wasm32"))]
 fn run_dead_store_elimination(
     program: &mut Program,
     live_signals: &[(Vec<(String, usize)>, Vec<String>)],

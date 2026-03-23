@@ -4,6 +4,31 @@ use crate::ir::{AbsoluteAddr, SignalRef};
 
 use super::MemoryLayout;
 
+// SimulatorErrorCode: on native it's defined in runtime.rs; on wasm32 we define it here.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_imports)]
+pub use super::runtime::SimulatorErrorCode;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimulatorErrorCode {
+    DetectedTrueLoop,
+    InternalError,
+    NotAnEvent(String),
+}
+#[cfg(target_arch = "wasm32")]
+impl std::fmt::Display for SimulatorErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DetectedTrueLoop => write!(f, "Detected True Loop"),
+            Self::InternalError => write!(f, "Internal Error"),
+            Self::NotAnEvent(name) => write!(f, "Not an event: {name}"),
+        }
+    }
+}
+#[cfg(target_arch = "wasm32")]
+impl std::error::Error for SimulatorErrorCode {}
+
 /// Marker trait for backend-specific event handles.
 ///
 /// An event handle is an opaque reference to a compiled clock or

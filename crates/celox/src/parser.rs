@@ -500,7 +500,7 @@ pub(crate) fn flatten(
     macro_rules! timed_sub {
         ($label:expr, $body:expr) => {{
             if flatten_timing {
-                let start = std::time::Instant::now();
+                let start = crate::timing::now();
                 let result = $body;
                 eprintln!("[flatten] {}: {:?}", $label, start.elapsed());
                 result
@@ -607,7 +607,7 @@ pub(crate) fn flatten(
         })
         .collect();
 
-    let sched_start = flatten_timing.then(std::time::Instant::now);
+    let sched_start = flatten_timing.then(crate::timing::now);
     let schduled = scheduler::sort(
         comb_blocks,
         &global_arena,
@@ -1164,7 +1164,7 @@ pub fn parse(
     macro_rules! timed_phase {
         ($label:expr, $body:expr) => {{
             if phase_timing {
-                let start = std::time::Instant::now();
+                let start = crate::timing::now();
                 let result = $body;
                 eprintln!("[phase-timing] {}: {:?}", $label, start.elapsed());
                 result
@@ -1597,7 +1597,7 @@ fn analyze_clock_dependencies(
 
     // 2. Build combinational dependency graph (target -> sources)
     let acd_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
-    let acd_start = acd_timing.then(std::time::Instant::now);
+    let acd_start = acd_timing.then(crate::timing::now);
     let mut comb_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     for path in comb_blocks {
         let target_abs = path.target.id;
@@ -1616,7 +1616,7 @@ fn analyze_clock_dependencies(
     }
 
     // 3. Propagate FF outputs through combinational graph to find all derived variables
-    let fp_start = acd_timing.then(std::time::Instant::now);
+    let fp_start = acd_timing.then(crate::timing::now);
     let mut derived_from_ff: BTreeSet<AbsoluteAddr> = ff_outputs.clone();
     let mut changed = true;
     let mut fp_rounds = 0u32;

@@ -150,7 +150,7 @@ impl WasmBackend {
         options: &SimulatorOptions,
     ) -> Result<Self, crate::SimulatorError> {
         let engine = Engine::default();
-        let layout = MemoryLayout::build(sir, options);
+        let layout = MemoryLayout::build(sir, options.four_state);
 
         // Compile eval_comb
         let comb_wasm = wasm_codegen::compile_units(

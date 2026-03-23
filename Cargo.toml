@@ -5,6 +5,7 @@ members = [
     "crates/celox-macros",
     "crates/celox-napi",
     "crates/celox-ts-gen",
+    "crates/celox-wasm",
 ]
 resolver = "2"
 

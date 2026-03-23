@@ -1,20 +1,26 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::{
     IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     ir::{InstancePath, Program, SignalRef, VariableInfo},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use num_bigint::BigUint;
 
 mod builder;
 mod error;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
+pub use builder::compile_to_sir;
 pub use error::render_diagnostic;
 pub use error::{SimulatorError, SimulatorErrorKind};
 
 /// Hierarchical instance tree with resolved signals.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct InstanceHierarchy {
     pub module_name: String,
@@ -23,6 +29,7 @@ pub struct InstanceHierarchy {
 }
 
 /// A named signal with its resolved memory reference and metadata.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct NamedSignal {
     pub name: String,
@@ -33,6 +40,7 @@ pub struct NamedSignal {
 }
 
 /// A named event with its resolved ID and event reference.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct NamedEvent<B: SimBackend = JitBackend> {
     pub name: String,
@@ -47,6 +55,7 @@ pub struct NamedEvent<B: SimBackend = JitBackend> {
 ///
 /// The default type parameter `B = JitBackend` means that bare `Simulator`
 /// is equivalent to `Simulator<JitBackend>` for backward compatibility.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Simulator<B: SimBackend = JitBackend> {
     pub(crate) backend: B,
     pub(crate) program: Program,
@@ -55,6 +64,7 @@ pub struct Simulator<B: SimBackend = JitBackend> {
     pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Simulator").finish()
@@ -62,7 +72,7 @@ impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
 }
 
 // ── Generic methods available for any backend ────────────────────────
-
+#[cfg(not(target_arch = "wasm32"))]
 impl<B: SimBackend> Simulator<B> {
     pub fn with_backend_and_program(
         backend: B,
@@ -467,7 +477,7 @@ impl<B: SimBackend> Simulator<B> {
 }
 
 // ── JitBackend-specific methods ──────────────────────────────────────
-
+#[cfg(not(target_arch = "wasm32"))]
 impl Simulator<JitBackend> {
     pub fn builder<'a>(code: &'a str, top: &'a str) -> SimulatorBuilder<'a, Simulator<JitBackend>> {
         SimulatorBuilder::<Simulator<JitBackend>>::new(code, top)

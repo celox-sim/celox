@@ -55,7 +55,10 @@ fn optimize_with_options(
     four_state: bool,
     opt: &crate::optimizer::OptimizeOptions,
 ) {
+    #[cfg(not(target_arch = "wasm32"))]
     let timing = std::env::var("CELOX_PASS_TIMING").is_ok();
+    #[cfg(target_arch = "wasm32")]
+    let timing = false;
     let options = PassOptions {
         max_inflight_loads,
         four_state,
@@ -63,7 +66,7 @@ fn optimize_with_options(
     };
 
     // 1. Unified Case (Fast Path): Full optimizations are safe.
-    let phase_start = timing.then(std::time::Instant::now);
+    let phase_start = timing.then(crate::timing::now);
     let mut ff_passes = ExecutionUnitPassManager::new();
     if opt.store_load_forwarding {
         ff_passes.add_pass(StoreLoadForwardingPass);
@@ -107,7 +110,7 @@ fn optimize_with_options(
 
     // 2. Logic-Only Cache (Split Path Phase 1):
     // MUST NOT use EliminateDeadWorkingStoresPass because the Commits are in Phase 2.
-    let phase_start = timing.then(std::time::Instant::now);
+    let phase_start = timing.then(crate::timing::now);
     let mut eval_only_passes = ExecutionUnitPassManager::new();
     if opt.store_load_forwarding {
         eval_only_passes.add_pass(StoreLoadForwardingPass);
@@ -138,7 +141,7 @@ fn optimize_with_options(
     }
 
     // 3. Commit-Only Cache (Split Path Phase 2):
-    let phase_start = timing.then(std::time::Instant::now);
+    let phase_start = timing.then(crate::timing::now);
     let mut apply_passes = ExecutionUnitPassManager::new();
     if opt.store_load_forwarding {
         apply_passes.add_pass(StoreLoadForwardingPass);
@@ -175,7 +178,7 @@ fn optimize_with_options(
     }
 
     // 4. Combinational Blocks:
-    let phase_start = timing.then(std::time::Instant::now);
+    let phase_start = timing.then(crate::timing::now);
     let mut comb_passes = ExecutionUnitPassManager::new();
     if opt.store_load_forwarding {
         comb_passes.add_pass(StoreLoadForwardingPass);
@@ -227,7 +230,7 @@ fn optimize_with_options(
             );
         }
     }
-    let split_start = timing.then(std::time::Instant::now);
+    let split_start = timing.then(crate::timing::now);
     if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state) {
         if timing {
             eprintln!(

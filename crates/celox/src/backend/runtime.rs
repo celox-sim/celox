@@ -127,7 +127,7 @@ impl JitBackend {
         options: &SimulatorOptions,
         mut trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<SharedJitCode, crate::SimulatorError> {
-        let layout = MemoryLayout::build(sir, options);
+        let layout = MemoryLayout::build(sir, options.four_state);
         let mut engine = JitEngine::new(layout, options).map_err(SimulatorError::from)?;
 
         let mut pre_clif_buf = String::new();

@@ -26,7 +26,7 @@ impl ExecutionUnitPassManager {
     pub(super) fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         let timing = std::env::var("CELOX_PASS_TIMING").is_ok();
         for pass in &self.passes {
-            let start = timing.then(std::time::Instant::now);
+            let start = timing.then(crate::timing::now);
             pass.run(eu, options);
             if let Some(start) = start {
                 let elapsed = start.elapsed();

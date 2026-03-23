@@ -406,6 +406,7 @@ dependencies = [
  "num-traits",
  "proptest",
  "serde",
+ "serde_json",
  "test-case",
  "thiserror 2.0.18",
  "toml 1.0.3+spec-1.1.0",
@@ -470,6 +471,17 @@ dependencies = [
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",
+]
+
+[[package]]
+name = "celox-wasm"
+version = "0.18.0"
+dependencies = [
+ "celox",
+ "console_error_panic_hook",
+ "serde_json",
+ "veryl-parser",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -631,6 +643,16 @@ dependencies = [
  "libc",
  "once_cell",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
 ]
 
 [[package]]

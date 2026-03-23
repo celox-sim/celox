@@ -1,5 +1,5 @@
 use crate::ir::{AbsoluteAddr, Program};
-use crate::{HashMap, SimulatorOptions};
+use crate::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {
@@ -29,7 +29,7 @@ pub struct MemoryLayout {
 }
 
 impl MemoryLayout {
-    pub fn build(program: &Program, options: &SimulatorOptions) -> Self {
+    pub fn build(program: &Program, four_state: bool) -> Self {
         let scratch_bytes = match &program.eval_comb_plan {
             Some(crate::ir::EvalCombPlan::MemorySpilled(plan)) => plan.scratch_bytes,
             _ => 0,
@@ -65,7 +65,7 @@ impl MemoryLayout {
             is_4states.insert(addr, is_4state);
 
             current_offset += size;
-            if options.four_state {
+            if four_state {
                 current_offset += size;
             }
         }
@@ -94,7 +94,7 @@ impl MemoryLayout {
             working_offsets.insert(addr, working_current_offset);
 
             working_current_offset += size;
-            if options.four_state {
+            if four_state {
                 working_current_offset += size;
             }
         }
