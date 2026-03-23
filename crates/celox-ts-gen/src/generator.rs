@@ -1166,4 +1166,160 @@ module Counter (
         assert_eq!(count_r.direction, "internal");
         assert_eq!(count_r.width, 8);
     }
+
+    /// Duplicate scoped variables in always_comb: `var tmp` declared in two
+    /// different for-loop scopes. These share the same VarPath in the Veryl
+    /// analyzer. The generator must not crash and must not emit duplicate
+    /// port entries.
+    #[test]
+    fn test_duplicate_scoped_var_no_crash() {
+        let code = r#"
+module Top (
+    a: input  logic<8>,
+    b: input  logic<8>,
+    o: output logic<8>,
+) {
+    var result: logic<8>;
+    always_comb {
+        result = 0;
+        for i: u32 in 0..2 {
+            var tmp: logic<8>;
+            tmp = a + i as 8;
+            if i == 1 { result = tmp; }
+        }
+        for j: u32 in 0..2 {
+            var tmp: logic<8>;
+            tmp = b + j as 8;
+            if j == 0 { result = result + tmp; }
+        }
+    }
+    assign o = result;
+}
+"#;
+        let modules = generate_from_source(code);
+        assert_eq!(modules.len(), 1);
+
+        // Ports must contain a, b, o, result — but NOT duplicate "tmp" entries
+        assert!(modules[0].ports.contains_key("a"));
+        assert!(modules[0].ports.contains_key("b"));
+        assert!(modules[0].ports.contains_key("o"));
+        assert!(modules[0].ports.contains_key("result"));
+
+        // DTS must be valid (no duplicate property names)
+        let dts = &modules[0].dts_content;
+        assert!(dts.contains("a: bigint"));
+        assert!(dts.contains("readonly o: bigint"));
+    }
+
+    /// Generate-for with scoped variables in always_comb inside the
+    /// generated block. Mirrors the original AdcGroup crash pattern.
+    #[test]
+    fn test_generate_for_with_scoped_vars() {
+        let code = r#"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    i_data: input logic<8>,
+    o_data: output logic<8> [2],
+) {
+    for g in 0..2 :g_ch {
+        var mem: logic<8>;
+
+        always_ff (clk, rst) {
+            if_reset { mem = 0; }
+            else     { mem = i_data + g as 8; }
+        }
+
+        always_comb {
+            o_data[g] = 0;
+            for k: u32 in 0..2 {
+                var flag: logic;
+                flag = k == g;
+                if flag {
+                    o_data[g] = mem;
+                }
+            }
+        }
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        let top = modules.iter().find(|m| m.module_name == "Top").unwrap();
+
+        // Must have ports
+        assert!(top.ports.contains_key("i_data"));
+        assert!(top.ports.contains_key("o_data"));
+
+        // DTS must not contain duplicate property names from scoped vars
+        assert!(top.dts_content.contains("i_data: bigint"));
+    }
+
+    /// Multiple always_comb blocks with same-named scoped vars across
+    /// different scopes, combined with generate-for instances.
+    #[test]
+    fn test_complex_scoped_vars_with_instances() {
+        let code = r#"
+module Sub (
+    clk: input '_ clock,
+    i_data: input logic<8>,
+    o_data: output logic<8>,
+) {
+    always_comb {
+        o_data = i_data;
+    }
+}
+
+module Top (
+    clk: input '_ clock,
+    rst: input reset,
+    sel: input logic,
+    a: input logic<8>[4],
+    o: output logic<8>[2],
+) {
+    var partial: logic<8>;
+    always_comb {
+        partial = 0;
+        for i: u32 in 0..4 {
+            var masked: logic<8>;
+            masked = a[i];
+            if sel { partial = partial | masked; }
+        }
+        for j: u32 in 0..4 {
+            var masked: logic<8>;
+            masked = a[j];
+            if !sel { partial = partial ^ masked; }
+        }
+    }
+
+    for g in 0..2 :g_pipe {
+        inst u_sub: Sub (
+            clk,
+            i_data: partial,
+            o_data: o[g],
+        );
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        let top = modules.iter().find(|m| m.module_name == "Top").unwrap();
+
+        // Ports
+        assert!(top.ports.contains_key("sel"));
+        assert!(top.ports.contains_key("a"));
+        assert!(top.ports.contains_key("o"));
+        assert!(top.ports.contains_key("partial"));
+
+        // For-loop instances must be grouped
+        assert_eq!(top.instances.len(), 1);
+        assert_eq!(top.instances[0].name, "u_sub");
+        assert_eq!(top.instances[0].count, 2);
+
+        // No port key collisions from scoped vars
+        let port_names: Vec<&String> = top.ports.keys().collect();
+        let unique_count = {
+            let mut s = std::collections::HashSet::new();
+            port_names.iter().filter(|n| s.insert(n.as_str())).count()
+        };
+        assert_eq!(port_names.len(), unique_count, "no duplicate port keys");
+    }
 }
