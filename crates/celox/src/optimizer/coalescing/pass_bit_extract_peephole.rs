@@ -47,7 +47,8 @@ fn optimize_bit_extracts(
             | SIRInstruction::Binary(dst, _, _, _)
             | SIRInstruction::Unary(dst, _, _)
             | SIRInstruction::Load(dst, _, _, _)
-            | SIRInstruction::Concat(dst, _) => {
+            | SIRInstruction::Concat(dst, _)
+            | SIRInstruction::Slice(dst, _, _, _) => {
                 def_map.insert(*dst, idx);
             }
             _ => {}

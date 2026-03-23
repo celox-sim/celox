@@ -74,7 +74,7 @@ impl Default for CraneliftOptions {
             opt_level: CraneliftOptLevel::default(),
             regalloc_algorithm: RegallocAlgorithm::default(),
             enable_alias_analysis: true,
-            enable_verifier: true,
+            enable_verifier: false,
         }
     }
 }
@@ -107,6 +107,7 @@ pub struct OptimizeOptions {
     pub inline_commit_forwarding: bool,
     pub eliminate_dead_working_stores: bool,
     pub reschedule: bool,
+    pub coalesce_stores: bool,
 }
 
 impl Default for OptimizeOptions {
@@ -121,6 +122,7 @@ impl Default for OptimizeOptions {
             inline_commit_forwarding: true,
             eliminate_dead_working_stores: true,
             reschedule: true,
+            coalesce_stores: true,
         }
     }
 }
@@ -143,6 +145,7 @@ impl OptimizeOptions {
             inline_commit_forwarding: false,
             eliminate_dead_working_stores: false,
             reschedule: false,
+            coalesce_stores: false,
         }
     }
 
@@ -157,6 +160,7 @@ impl OptimizeOptions {
             || self.inline_commit_forwarding
             || self.eliminate_dead_working_stores
             || self.reschedule
+            || self.coalesce_stores
     }
 }
 

@@ -29,6 +29,9 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
         }
         SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
         SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
+        SIRInstruction::Slice(_, src, _, _) => {
+            out.push(*src);
+        }
     }
 }
 

@@ -202,6 +202,11 @@ fn apply_aliases_to_inst(
                 }
             }
         }
+        SIRInstruction::Slice(_, src, _, _) => {
+            if let Some(&to) = aliases.get(src) {
+                *src = to;
+            }
+        }
     }
 }
 

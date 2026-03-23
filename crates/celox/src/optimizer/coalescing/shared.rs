@@ -20,7 +20,8 @@ pub(super) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Binary(dst, _, _, _)
         | SIRInstruction::Unary(dst, _, _)
         | SIRInstruction::Load(dst, _, _, _)
-        | SIRInstruction::Concat(dst, _) => Some(*dst),
+        | SIRInstruction::Concat(dst, _)
+        | SIRInstruction::Slice(dst, _, _, _) => Some(*dst),
         SIRInstruction::Store(_, _, _, _, _) | SIRInstruction::Commit(_, _, _, _, _) => None,
     }
 }
@@ -101,6 +102,9 @@ fn collect_used_regs_into(
         SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
         SIRInstruction::Concat(_, args) => {
             out.extend(args.iter().copied());
+        }
+        SIRInstruction::Slice(_, src, _, _) => {
+            out.insert(*src);
         }
     }
 }
@@ -377,6 +381,11 @@ pub(super) fn batch_replace_in_inst(
                 if let Some(&to) = map.get(arg) {
                     *arg = to;
                 }
+            }
+        }
+        SIRInstruction::Slice(_, src, _, _) => {
+            if let Some(&to) = map.get(src) {
+                *src = to;
             }
         }
     }

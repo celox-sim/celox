@@ -56,7 +56,6 @@ fn coalesce_block(
                         src_reg: *src,
                     });
             }
-            // Instructions that read from an address seal the group for that address.
             SIRInstruction::Load(_, addr, _, _) => {
                 seal_group(&mut groups, addr, &mut sealed_groups);
             }
@@ -79,21 +78,10 @@ fn coalesce_block(
         }
     }
 
-    // Build def map: register -> instruction index where it's defined
-    let mut def_map: HashMap<RegisterId, usize> = HashMap::default();
-    for (i, inst) in block.instructions.iter().enumerate() {
-        if let Some(reg) = super::shared::def_reg(inst) {
-            def_map.insert(reg, i);
-        }
-    }
-
     // Step 2: Find contiguous sub-runs in each group
     struct Replacement {
-        /// Indices of original Store instructions to remove
         removed_indices: Vec<usize>,
-        /// Instruction index at which to insert the replacement
         anchor_index: usize,
-        /// New instructions: Concat + wide Store
         new_instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
     }
 
@@ -104,10 +92,8 @@ fn coalesce_block(
             continue;
         }
 
-        // Sort by offset
         group.sort_by_key(|c| c.offset);
 
-        // Find maximal contiguous sub-runs
         let mut run_start = 0;
         while run_start < group.len() {
             let mut run_end = run_start;
@@ -119,36 +105,12 @@ fn coalesce_block(
 
             let run_len = run_end - run_start + 1;
             if run_len >= 2 {
-                let full_run = &group[run_start..=run_end];
-
-                // Anchor at the first (earliest) store index in the sub-run.
-                // Only include candidates whose src registers are defined before
-                // that anchor. This ensures the wide store executes no later than
-                // the earliest individual store, preventing interference with
-                // interleaved stores to other variables.
-                let first_store_index = full_run.iter().map(|c| c.inst_index).min().unwrap();
-
-                // Filter to candidates whose src is defined before the anchor
-                let eligible: Vec<&StoreCandidate> = full_run
-                    .iter()
-                    .filter(|c| {
-                        def_map
-                            .get(&c.src_reg)
-                            .map_or(true, |&def_idx| def_idx < first_store_index)
-                    })
-                    .collect();
-
-                // Re-find contiguous sub-runs within the eligible set
-                for sub_run in find_contiguous_subruns(&eligible) {
-                    if sub_run.len() < 2 {
-                        continue;
-                    }
-
-                    let merged_lsb = sub_run[0].offset;
-                    let total_width: usize = sub_run.iter().map(|c| c.width).sum();
-                    let anchor_index = first_store_index;
-                    let removed_indices: Vec<usize> =
-                        sub_run.iter().map(|c| c.inst_index).collect();
+                let sub_run = &group[run_start..=run_end];
+                let merged_lsb = sub_run[0].offset;
+                let total_width: usize = sub_run.iter().map(|c| c.width).sum();
+                let anchor_index = sub_run.iter().map(|c| c.inst_index).max().unwrap();
+                let removed_indices: Vec<usize> =
+                    sub_run.iter().map(|c| c.inst_index).collect();
 
                     // Allocate new register for Concat result
                     *reg_counter += 1;
@@ -193,7 +155,6 @@ fn coalesce_block(
                         anchor_index,
                         new_instructions,
                     });
-                }
             }
 
             run_start = run_end + 1;
@@ -236,33 +197,6 @@ fn coalesce_block(
     block.instructions = new_instructions;
 }
 
-/// Given an already-offset-sorted slice of candidates (possibly with gaps from filtering),
-/// find maximal contiguous sub-runs where each element's offset == prev.offset + prev.width.
-fn find_contiguous_subruns<'a>(
-    candidates: &[&'a StoreCandidate],
-) -> Vec<Vec<&'a StoreCandidate>> {
-    let mut result = Vec::new();
-    if candidates.is_empty() {
-        return result;
-    }
-    let mut run: Vec<&'a StoreCandidate> = vec![candidates[0]];
-    for c in &candidates[1..] {
-        let prev = *run.last().unwrap();
-        if c.offset == prev.offset + prev.width {
-            run.push(c);
-        } else {
-            if run.len() >= 2 {
-                result.push(run);
-            }
-            run = vec![c];
-        }
-    }
-    if run.len() >= 2 {
-        result.push(run);
-    }
-    result
-}
-
 fn seal_group(
     groups: &mut HashMap<RegionedAbsoluteAddr, Vec<StoreCandidate>>,
     addr: &RegionedAbsoluteAddr,
@@ -274,6 +208,7 @@ fn seal_group(
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {

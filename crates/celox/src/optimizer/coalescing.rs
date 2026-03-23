@@ -6,7 +6,9 @@ mod commit_ops;
 pub mod cost_model;
 mod dead_working_stores;
 mod pass_bit_extract_peephole;
+mod pass_coalesce_stores;
 mod pass_commit_sinking;
+mod pass_partial_forward;
 pub(crate) mod pass_dead_store_elimination;
 mod pass_eliminate_dead_working_stores;
 mod pass_hoist_common_branch_loads;
@@ -22,7 +24,9 @@ mod shared;
 pub use pass_tail_call_split::TailCallChunk;
 
 use pass_bit_extract_peephole::BitExtractPeepholePass;
+use pass_coalesce_stores::CoalesceStoresPass;
 use pass_commit_sinking::CommitSinkingPass;
+use pass_partial_forward::PartialForwardPass;
 use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
 use pass_inline_commit_forwarding::InlineCommitForwardingPass;
@@ -82,6 +86,9 @@ fn optimize_with_options(
             skip_final_schedule: opt.reschedule,
         });
     }
+    if opt.coalesce_stores {
+        ff_passes.add_pass(CoalesceStoresPass);
+    }
     if opt.split_wide_commits {
         ff_passes.add_pass(SplitWideCommitsPass);
     }
@@ -126,6 +133,9 @@ fn optimize_with_options(
             skip_final_schedule: opt.reschedule,
         });
     }
+    if opt.coalesce_stores {
+        eval_only_passes.add_pass(CoalesceStoresPass);
+    }
     if opt.reschedule {
         eval_only_passes.add_pass(ReschedulePass);
     }
@@ -157,6 +167,9 @@ fn optimize_with_options(
             skip_final_schedule: opt.reschedule,
         });
     } // Still useful for loading from working memory
+    if opt.coalesce_stores {
+        apply_passes.add_pass(CoalesceStoresPass);
+    }
     if opt.split_wide_commits {
         apply_passes.add_pass(SplitWideCommitsPass);
     }
@@ -182,6 +195,7 @@ fn optimize_with_options(
     let mut comb_passes = ExecutionUnitPassManager::new();
     if opt.store_load_forwarding {
         comb_passes.add_pass(StoreLoadForwardingPass);
+        comb_passes.add_pass(PartialForwardPass);
     }
     if opt.hoist_common_branch_loads {
         comb_passes.add_pass(HoistCommonBranchLoadsPass);
@@ -193,6 +207,9 @@ fn optimize_with_options(
         comb_passes.add_pass(OptimizeBlocksPass {
             skip_final_schedule: false, // eval_comb has no reschedule pass
         });
+    }
+    if opt.coalesce_stores {
+        comb_passes.add_pass(CoalesceStoresPass);
     }
 
     let eu_count = program.eval_comb.len();

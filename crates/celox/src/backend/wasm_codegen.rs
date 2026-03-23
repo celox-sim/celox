@@ -446,6 +446,9 @@ fn compile_instruction(
         SIRInstruction::Concat(dst, args) => {
             compile_concat(dst, args, unit, four_state, locals, instrs);
         }
+        SIRInstruction::Slice(_, _, _, _) => {
+            todo!("Slice WASM lowering")
+        }
     }
 }
 

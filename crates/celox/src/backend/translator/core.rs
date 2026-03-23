@@ -364,6 +364,170 @@ impl SIRTranslator {
             SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
                 self.translate_commit_inst(state, src_addr, dst_addr, offset, op_width, triggers);
             }
+            SIRInstruction::Slice(dst, src, bit_offset, width) => {
+                self.translate_slice_inst(state, dst, src, *bit_offset, *width);
+            }
+        }
+    }
+
+    /// Slice: extract bits [bit_offset, bit_offset+width) from src register.
+    /// O(1) CLIF instructions: directly index into the src's chunk array.
+    fn translate_slice_inst(
+        &self,
+        state: &mut TranslationState,
+        dst: &RegisterId,
+        src: &RegisterId,
+        bit_offset: usize,
+        width: usize,
+    ) {
+        use cranelift::prelude::*;
+
+        let src_val = &state.regs[src];
+        let four_state = self.options.four_state;
+
+        // Determine which chunk(s) we need
+        let chunk_lo = bit_offset / 64;
+        let chunk_hi = (bit_offset + width - 1) / 64;
+        let intra_off = bit_offset % 64;
+
+        let extract_from_chunks = |builder: &mut FunctionBuilder, chunks: &[Value]| -> Vec<Value> {
+            if chunk_lo == chunk_hi {
+                // Single chunk: shift right by intra_off, mask to width
+                let chunk = get_chunk_as_i64(builder, chunks, chunk_lo);
+                let mut v = chunk;
+                if intra_off > 0 {
+                    let shift = builder.ins().iconst(types::I64, intra_off as i64);
+                    v = builder.ins().ushr(v, shift);
+                }
+                if width < 64 {
+                    let mask = builder
+                        .ins()
+                        .iconst(types::I64, ((1u64 << width) - 1) as i64);
+                    v = builder.ins().band(v, mask);
+                }
+                if width <= 64 {
+                    vec![v]
+                } else {
+                    vec![v] // shouldn't happen for single chunk
+                }
+            } else {
+                // Multi-chunk: extract from each and combine
+                let num_dst_chunks = (width + 63) / 64;
+                let mut result = Vec::with_capacity(num_dst_chunks);
+                let mut remaining = width;
+                let mut pos = bit_offset;
+
+                for _ in 0..num_dst_chunks {
+                    let c_idx = pos / 64;
+                    let c_off = pos % 64;
+                    let bits_in_chunk = (64 - c_off).min(remaining);
+
+                    let chunk = get_chunk_as_i64(builder, chunks, c_idx);
+                    let mut v = chunk;
+                    if c_off > 0 {
+                        let shift = builder.ins().iconst(types::I64, c_off as i64);
+                        v = builder.ins().ushr(v, shift);
+                    }
+
+                    // If we need bits from the next chunk too
+                    if bits_in_chunk < 64 && bits_in_chunk < remaining {
+                        // Get remaining bits from next chunk
+                        let next_chunk = get_chunk_as_i64(builder, chunks, c_idx + 1);
+                        let next_shift =
+                            builder.ins().iconst(types::I64, bits_in_chunk as i64);
+                        let next_part = builder.ins().ishl(next_chunk, next_shift);
+                        v = builder.ins().bor(v, next_part);
+                    }
+
+                    // Mask to 64 bits (or remaining width if last chunk)
+                    let chunk_width = remaining.min(64);
+                    if chunk_width < 64 {
+                        let mask = builder
+                            .ins()
+                            .iconst(types::I64, ((1u64 << chunk_width) - 1) as i64);
+                        v = builder.ins().band(v, mask);
+                    }
+
+                    result.push(v);
+                    remaining -= chunk_width;
+                    pos += chunk_width;
+                }
+                result
+            }
+        };
+
+        match src_val.clone() {
+            TransValue::TwoState(chunks) => {
+                let result = extract_from_chunks(state.builder, &chunks);
+                state.regs.insert(*dst, TransValue::TwoState(result));
+            }
+            TransValue::FourState { values, masks } => {
+                let val_result = extract_from_chunks(state.builder, &values);
+                let mask_result = extract_from_chunks(state.builder, &masks);
+                state.regs.insert(
+                    *dst,
+                    TransValue::FourState {
+                        values: val_result,
+                        masks: mask_result,
+                    },
+                );
+            }
+            TransValue::MemBacked {
+                addr,
+                num_chunks,
+                mask_addr,
+            } => {
+                // Load the needed chunks from memory, then extract
+                let mut chunks = Vec::with_capacity(num_chunks);
+                for i in 0..num_chunks {
+                    let offset = (i * 8) as i32;
+                    let v =
+                        state
+                            .builder
+                            .ins()
+                            .load(types::I64, MemFlags::new(), addr, offset);
+                    chunks.push(v);
+                }
+                let val_result = extract_from_chunks(state.builder, &chunks);
+
+                if four_state {
+                    if let Some(m_addr) = mask_addr {
+                        let mut m_chunks = Vec::with_capacity(num_chunks);
+                        for i in 0..num_chunks {
+                            let offset = (i * 8) as i32;
+                            let v = state.builder.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                m_addr,
+                                offset,
+                            );
+                            m_chunks.push(v);
+                        }
+                        let mask_result = extract_from_chunks(state.builder, &m_chunks);
+                        state.regs.insert(
+                            *dst,
+                            TransValue::FourState {
+                                values: val_result,
+                                masks: mask_result,
+                            },
+                        );
+                    } else {
+                        let zero_masks: Vec<Value> = val_result
+                            .iter()
+                            .map(|_| state.builder.ins().iconst(types::I64, 0))
+                            .collect();
+                        state.regs.insert(
+                            *dst,
+                            TransValue::FourState {
+                                values: val_result,
+                                masks: zero_masks,
+                            },
+                        );
+                    }
+                } else {
+                    state.regs.insert(*dst, TransValue::TwoState(val_result));
+                }
+            }
         }
     }
 

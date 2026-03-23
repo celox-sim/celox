@@ -253,6 +253,12 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 .join(", ");
             format!("r{} = Concat({})", rd.0, rs_str)
         }
+        SIRInstruction::Slice(dst, src, offset, width) => {
+            format!(
+                "r{} = Slice(r{}, offset={}, width={})",
+                dst.0, src.0, offset, width
+            )
+        }
     }
 }
 

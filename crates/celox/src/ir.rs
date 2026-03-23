@@ -810,6 +810,9 @@ pub enum SIRInstruction<Addr> {
     /// Concatenates multiple registers into a single register.
     /// Order: [MSB, ..., LSB] (First element is most significant)
     Concat(RegisterId, Vec<RegisterId>),
+    /// Extracts a bit range from a register: dst = src[offset +: width].
+    /// Lowered to O(1) chunk-indexed loads in the CLIF backend.
+    Slice(RegisterId, RegisterId, usize, usize), // dst, src, bit_offset, width
 }
 
 impl<A: Display> fmt::Display for SIRInstruction<A> {
@@ -855,6 +858,13 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                 }
                 write!(f, "])")
             }
+            SIRInstruction::Slice(dst, src, offset, width) => {
+                write!(
+                    f,
+                    "r{} = Slice(r{}, offset={}, width={})",
+                    dst.0, src.0, offset, width
+                )
+            }
         }
     }
 }
@@ -874,6 +884,9 @@ impl<A> SIRInstruction<A> {
                 SIRInstruction::Commit(f(src), f(dst), offset, bits, triggers)
             }
             SIRInstruction::Concat(dst, args) => SIRInstruction::Concat(dst, args),
+            SIRInstruction::Slice(dst, src, offset, width) => {
+                SIRInstruction::Slice(dst, src, offset, width)
+            }
         }
     }
     pub fn map_addr<B>(&self, mut f: impl FnMut(&A) -> B) -> SIRInstruction<B> {
@@ -895,6 +908,9 @@ impl<A> SIRInstruction<A> {
                 SIRInstruction::Commit(f(src), f(dst), offset.clone(), *bits, triggers.clone())
             }
             SIRInstruction::Concat(dst, args) => SIRInstruction::Concat(*dst, args.clone()),
+            SIRInstruction::Slice(dst, src, offset, width) => {
+                SIRInstruction::Slice(*dst, *src, *offset, *width)
+            }
         }
     }
 }
