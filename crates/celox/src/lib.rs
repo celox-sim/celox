@@ -41,7 +41,7 @@ pub use debug::{CompilationTrace, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{AbsoluteAddr, AddrLookupError, PortTypeKind, SignalRef};
-pub use malachite_bigint::BigUint;
+pub use num_bigint::BigUint;
 pub use optimizer::CraneliftOptLevel;
 pub use optimizer::CraneliftOptions;
 pub use optimizer::OptimizeOptions;

@@ -1,9 +1,9 @@
 //! Serde helpers for types without native serde support.
 #![allow(dead_code)]
 
-/// Serialize/deserialize `malachite_bigint::BigUint` as little-endian bytes.
+/// Serialize/deserialize `num_bigint::BigUint` as little-endian bytes.
 pub mod biguint {
-    use malachite_bigint::BigUint;
+    use num_bigint::BigUint;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(val: &BigUint, s: S) -> Result<S::Ok, S::Error> {

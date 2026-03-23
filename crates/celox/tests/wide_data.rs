@@ -31,7 +31,7 @@ fn test_wide_int_memory_access() {
 
 #[test]
 fn test_wide_concatenation() {
-    use malachite_bigint::ToBigUint;
+    use num_bigint::ToBigUint;
 
     let code = r#"
         module Top (
@@ -69,7 +69,7 @@ fn test_wide_concatenation() {
 
 #[test]
 fn test_wide_partial_write() {
-    use malachite_bigint::ToBigUint;
+    use num_bigint::ToBigUint;
 
     let code = r#"
         module Top (

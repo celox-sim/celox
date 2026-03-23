@@ -5,7 +5,7 @@ use crate::{
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     ir::{InstancePath, Program, SignalRef, VariableInfo},
 };
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 
 mod builder;
 mod error;

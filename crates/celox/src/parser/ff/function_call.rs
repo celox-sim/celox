@@ -311,6 +311,14 @@ impl<'a> FfParser<'a> {
                     Some(&sc.comptime.token),
                 )),
                 Statement::FunctionCall(call) => parser.apply_function_call_to_state(call, state),
+                Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                    Err(ParserError::unsupported(
+                        LoweringPhase::FfLowering,
+                        "function body control flow",
+                        format!("{stmt}"),
+                        None,
+                    ))
+                }
             }
         }
 
@@ -450,6 +458,14 @@ impl<'a> FfParser<'a> {
                 Statement::FunctionCall(call) => {
                     let next_defs = parser.apply_function_call_to_state(call, defs)?;
                     resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
+                }
+                Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                    Err(ParserError::unsupported(
+                        LoweringPhase::FfLowering,
+                        "function body control flow",
+                        format!("{stmt}"),
+                        None,
+                    ))
                 }
             }
         }

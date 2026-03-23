@@ -17,7 +17,7 @@ syn               = { version = "2.0", features = ["full", "extra-traits"] }
 veryl-analyzer    = { workspace = true }
 veryl-metadata    = { workspace = true }
 veryl-parser      = { workspace = true }
-malachite-bigint  = "0.9.1"
+num-bigint        = "0.4"
 
 [dev-dependencies]
 prettyplease = "0.2.37"

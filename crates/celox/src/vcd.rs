@@ -1,5 +1,5 @@
 use crate::backend::get_byte_size;
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;

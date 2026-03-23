@@ -2,7 +2,7 @@ use crate::{
     HashMap,
     logic_tree::{LogicPath, SLTNodeArena, SymbolicStore},
 };
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::{collections::BTreeSet, fmt::Display};

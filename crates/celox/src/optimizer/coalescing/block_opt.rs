@@ -1,7 +1,7 @@
 use super::shared::{def_reg, replace_reg_in_terminator};
 use crate::ir::*;
 use crate::{HashMap, HashSet};
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 
 fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
     match inst {

@@ -304,6 +304,14 @@ impl<'a> FfParser<'a> {
                     call, targets, domain, convert, sources, ir_builder,
                 )?;
             }
+            Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                return Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "unsupported statement",
+                    format!("{stmt}"),
+                    None,
+                ));
+            }
         }
         Ok(())
     }

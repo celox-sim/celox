@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 
 use crate::{
     HashMap, SimulatorError, SimulatorOptions,

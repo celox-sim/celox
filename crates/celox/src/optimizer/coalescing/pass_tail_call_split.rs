@@ -1273,7 +1273,7 @@ fn make_sub_eu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use malachite_bigint::BigUint;
+    use num_bigint::BigUint;
 
     fn make_var_id(n: usize) -> veryl_analyzer::ir::VarId {
         let mut id = veryl_analyzer::ir::VarId::default();

@@ -14,7 +14,7 @@ use crate::{
         is_static_access,
     },
 };
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Comptime, Expression, Factor, IfStatement,
@@ -1467,6 +1467,14 @@ fn extract_function_return_expr(
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
+            Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    None,
+                ))
+            }
         }
     }
 

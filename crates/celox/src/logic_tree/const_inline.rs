@@ -9,7 +9,7 @@
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 
 use crate::ir::BitAccess;
 use crate::logic_tree::comb::{LogicPath, NodeId, SLTNode, SLTNodeArena};

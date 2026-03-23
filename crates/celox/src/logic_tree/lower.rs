@@ -1,6 +1,6 @@
 use crate::ir::{BinaryOp, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRValue, UnaryOp};
 use crate::logic_tree::{NodeId, SLTNode, SLTNodeArena};
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 use std::hash::Hash;
 
 /// Try to evaluate an SLT node as a compile-time constant.

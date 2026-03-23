@@ -194,7 +194,7 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
-    pub fn get(&mut self, signal: SignalRef) -> malachite_bigint::BigUint {
+    pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
         self.simulator.get(signal)
     }
 

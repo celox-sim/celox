@@ -1,4 +1,4 @@
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 
 use crate::ir::{AbsoluteAddr, SignalRef};
 

@@ -7,7 +7,7 @@ use crate::parser::{
     LoweringPhase, ParserError,
     bitaccess::{celox_value_from_comptime, eval_var_select, get_access_width, is_static_access},
 };
-use malachite_bigint::BigUint;
+use num_bigint::BigUint;
 
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignDestination, AssignStatement, Comptime, Expression, Factor, Op, Type,

@@ -18,7 +18,7 @@ fxhash                = { workspace = true }
 thiserror             = { workspace = true }
 clap                  = { workspace = true }
 miette                = { workspace = true }
-malachite-bigint      = "0.9.1"
+num-bigint            = "0.4"
 serde                 = { workspace = true }
 num-traits            = { workspace = true }
 bit-set               = { workspace = true }
