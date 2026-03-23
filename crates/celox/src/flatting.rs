@@ -98,38 +98,75 @@ fn atomize_logic_paths(
             let original_source_ids: crate::HashSet<_> =
                 path.sources.iter().map(|s| s.id).collect();
 
-            for atom_access in atoms {
-                // Calculate the relative bit range of the atom within the original expression's output.
+            // Compute per-atom source sets (with bit ranges), then coalesce
+            // consecutive atoms whose source sets are identical into wider paths.
+            let mut atom_infos: Vec<(BitAccess, crate::HashSet<VarAtomBase<AbsoluteAddr>>)> =
+                Vec::new();
+            for atom_access in &atoms {
                 let relative_atom_access = crate::ir::BitAccess::new(
                     atom_access.lsb - path.target.access.lsb,
                     atom_access.msb - path.target.access.lsb,
                 );
-
-                // Wrap the original expression in a Slice node to extract the required bits.
                 let new_expr = arena.alloc(SLTNode::Slice {
                     expr: path.expr,
                     access: relative_atom_access,
                 });
-
-                // Extract all potential inputs from the new expression tree.
                 let mut expr_inputs = crate::HashSet::default();
                 collect_inputs(new_expr, arena, &mut expr_inputs);
-                // Engineering Fix: Intersect expr_inputs with the original source IDs.
-                // This ensures that we only include dependencies that were already present
-                // in the original path, effectively stripping away accidental self-loops.
                 let filtered_sources: crate::HashSet<_> = expr_inputs
                     .into_iter()
                     .filter(|input_atom| original_source_ids.contains(&input_atom.id))
                     .collect();
+                atom_infos.push((*atom_access, filtered_sources));
+            }
 
-                let target = VarAtomBase::new(path.target.id, atom_access.lsb, atom_access.msb);
+            // Group consecutive atoms with the same source variable ID set.
+            let mut i = 0;
+            while i < atom_infos.len() {
+                let group_start = i;
+                let group_source_ids = &atom_infos[i].1;
+                while i + 1 < atom_infos.len() && atom_infos[i + 1].1 == *group_source_ids {
+                    i += 1;
+                }
+                let group_end = i;
+                i += 1;
 
-                let new_path = LogicPath {
+                let merged_lsb = atom_infos[group_start].0.lsb;
+                let merged_msb = atom_infos[group_end].0.msb;
+
+                // Build the merged path expression.
+                let relative_access = crate::ir::BitAccess::new(
+                    merged_lsb - path.target.access.lsb,
+                    merged_msb - path.target.access.lsb,
+                );
+                let merged_width = merged_msb - merged_lsb + 1;
+                let original_width =
+                    path.target.access.msb - path.target.access.lsb + 1;
+
+                let merged_expr = if merged_width == original_width {
+                    // Covers the full original range — use the expression directly.
+                    path.expr
+                } else {
+                    arena.alloc(SLTNode::Slice {
+                        expr: path.expr,
+                        access: relative_access,
+                    })
+                };
+
+                // Collect the actual bit-level sources for the merged range.
+                let mut merged_sources = crate::HashSet::default();
+                collect_inputs(merged_expr, arena, &mut merged_sources);
+                let filtered_sources: crate::HashSet<_> = merged_sources
+                    .into_iter()
+                    .filter(|input_atom| original_source_ids.contains(&input_atom.id))
+                    .collect();
+
+                let target = VarAtomBase::new(path.target.id, merged_lsb, merged_msb);
+                atomized_paths.push(LogicPath {
                     target,
                     sources: filtered_sources,
-                    expr: new_expr,
-                };
-                atomized_paths.push(new_path);
+                    expr: merged_expr,
+                });
             }
         } else {
             // No boundaries defined for this target, so just add it as is.

@@ -21,25 +21,13 @@ Execution Unit 0:
     r6: logic<32>
     r7: logic<32>
     r8: logic<32>
-    r9: bit<64>
-    r10: logic<32>
-    r11: bit<32>
-    r12: logic<32>
+    r9: logic<32>
+    r10: bit<32>
+    r11: logic<32>
+    r12: bit<32>
     r13: logic<32>
     r14: bit<32>
     r15: logic<32>
-    r16: bit<32>
-    r17: logic<32>
-    r18: bit<64>
-    r19: logic<32>
-    r20: bit<32>
-    r21: logic<32>
-    r22: bit<32>
-    r23: logic<32>
-    r24: bit<64>
-    r25: logic<32>
-    r26: bit<32>
-    r27: logic<32>
   b0:
     r0 = Load(addr=c (region=0), offset=0, bits=1)
     r1 = Load(addr=a (region=0), offset=0, bits=32)
@@ -50,19 +38,13 @@ Execution Unit 0:
     r6 = r4 And r1
     r7 = r5 And r2
     r8 = r6 Or r7
-    r11 = SIRValue(0xffffffff)
-    r12 = r8 And r11
-    Store(addr=m (region=0), offset=0, bits=32, src_reg = 12)
+    Store(addr=m (region=0), offset=0, bits=32, src_reg = 8)
+    r10 = SIRValue(0x1)
+    r11 = r8 Add r10
+    r12 = SIRValue(0x2)
+    r13 = r11 Or r12
+    Store(addr=y (region=0), offset=0, bits=32, src_reg = 13)
     r14 = SIRValue(0x1)
-    r15 = r12 Add r14
-    r16 = SIRValue(0x2)
-    r17 = r15 Or r16
-    r20 = SIRValue(0xffffffff)
-    r21 = r17 And r20
-    Store(addr=y (region=0), offset=0, bits=32, src_reg = 21)
-    r22 = SIRValue(0x1)
-    r23 = r15 And r22
-    r26 = SIRValue(0xffffffff)
-    r27 = r23 And r26
-    Store(addr=x (region=0), offset=0, bits=32, src_reg = 27)
+    r15 = r11 And r14
+    Store(addr=x (region=0), offset=0, bits=32, src_reg = 15)
     Return

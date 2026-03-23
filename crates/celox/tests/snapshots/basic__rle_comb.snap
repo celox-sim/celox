@@ -15,16 +15,10 @@ Execution Unit 0:
     r0: logic<32>
     r1: logic<32>
     r2: logic<32>
-    r3: bit<64>
-    r4: logic<32>
-    r5: bit<32>
-    r6: logic<32>
   b0:
     r0 = Load(addr=x (region=0), offset=0, bits=32)
     r1 = Load(addr=y (region=0), offset=0, bits=32)
     r2 = r0 Add r1
-    r5 = SIRValue(0xffffffff)
-    r6 = r2 And r5
-    Store(addr=temp (region=0), offset=0, bits=32, src_reg = 6)
-    Store(addr=z (region=0), offset=0, bits=32, src_reg = 6)
+    Store(addr=temp (region=0), offset=0, bits=32, src_reg = 2)
+    Store(addr=z (region=0), offset=0, bits=32, src_reg = 2)
     Return

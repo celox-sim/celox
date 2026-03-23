@@ -57,27 +57,7 @@ Execution Unit 0:
     r42: logic<32>
     r43: logic<32>
     r44: logic<32>
-    r45: bit<64>
-    r46: logic<8>
-    r47: bit<8>
-    r48: logic<8>
-    r49: bit<64>
-    r50: logic<8>
-    r51: bit<8>
-    r52: logic<8>
-    r53: logic<8>
-    r54: bit<64>
-    r55: logic<8>
-    r56: bit<8>
-    r57: logic<8>
-    r58: bit<64>
-    r59: logic<8>
-    r60: bit<8>
-    r61: logic<8>
-    r62: bit<64>
-    r63: logic<8>
-    r64: bit<8>
-    r65: logic<8>
+    r45: logic<8>
   b0:
     r31 = Load(addr=i (region=0), offset=0, bits=2)
     r38 = Load(addr=val (region=0), offset=0, bits=8)
@@ -114,25 +94,7 @@ Execution Unit 0:
     r42 = r38 Or r41
     r43 = r42 Shl r33
     r44 = r37 Or r43
-    r45 = SIRValue(0x18)
-    r46 = r44 Shr r45
-    r47 = SIRValue(0xff)
-    r48 = r46 And r47
-    Store(addr=a (region=0), offset=24, bits=8, src_reg = 48)
-    r49 = SIRValue(0x10)
-    r50 = r44 Shr r49
-    r51 = SIRValue(0xff)
-    r52 = r50 And r51
-    Store(addr=a (region=0), offset=16, bits=8, src_reg = 52)
-    r56 = SIRValue(0xff)
-    r57 = r52 And r56
-    Store(addr=o (region=0), offset=0, bits=8, src_reg = 57)
-    r58 = SIRValue(0x8)
-    r59 = r44 Shr r58
-    r60 = SIRValue(0xff)
-    r61 = r59 And r60
-    Store(addr=a (region=0), offset=8, bits=8, src_reg = 61)
-    r64 = SIRValue(0xff)
-    r65 = r44 And r64
-    Store(addr=a (region=0), offset=0, bits=8, src_reg = 65)
+    Store(addr=a (region=0), offset=0, bits=32, src_reg = 44)
+    r45 = Load(addr=a (region=0), offset=16, bits=8)
+    Store(addr=o (region=0), offset=0, bits=8, src_reg = 45)
     Return

@@ -19,181 +19,97 @@ Execution Unit 0:
     r4: bit<1>
     r5: bit<1>
     r6: logic<1>
-    r7: bit<64>
-    r8: logic<1>
+    r7: bit<1>
+    r8: bit<1>
     r9: bit<1>
     r10: logic<1>
     r11: bit<1>
     r12: bit<1>
     r13: bit<1>
     r14: logic<1>
-    r15: bit<64>
-    r16: logic<1>
+    r15: bit<1>
+    r16: bit<1>
     r17: bit<1>
     r18: logic<1>
     r19: bit<1>
     r20: bit<1>
     r21: bit<1>
     r22: logic<1>
-    r23: bit<64>
-    r24: logic<1>
+    r23: bit<1>
+    r24: bit<1>
     r25: bit<1>
     r26: logic<1>
     r27: bit<1>
     r28: bit<1>
     r29: bit<1>
     r30: logic<1>
-    r31: bit<64>
-    r32: logic<1>
+    r31: bit<1>
+    r32: bit<1>
     r33: bit<1>
     r34: logic<1>
     r35: bit<1>
     r36: bit<1>
     r37: bit<1>
     r38: logic<1>
-    r39: bit<64>
-    r40: logic<1>
+    r39: bit<1>
+    r40: bit<1>
     r41: bit<1>
     r42: logic<1>
     r43: bit<1>
     r44: bit<1>
     r45: bit<1>
     r46: logic<1>
-    r47: bit<64>
-    r48: logic<1>
+    r47: bit<1>
+    r48: bit<1>
     r49: bit<1>
     r50: logic<1>
     r51: bit<1>
     r52: bit<1>
     r53: bit<1>
     r54: logic<1>
-    r55: bit<64>
-    r56: logic<1>
+    r55: bit<1>
+    r56: bit<1>
     r57: bit<1>
     r58: logic<1>
     r59: bit<1>
     r60: bit<1>
     r61: bit<1>
     r62: logic<1>
-    r63: bit<64>
-    r64: logic<1>
+    r63: bit<1>
+    r64: bit<1>
     r65: bit<1>
     r66: logic<1>
     r67: bit<1>
     r68: bit<1>
     r69: bit<1>
     r70: logic<1>
-    r71: bit<64>
-    r72: logic<1>
+    r71: bit<1>
+    r72: bit<1>
     r73: bit<1>
     r74: logic<1>
-    r75: bit<1>
-    r76: bit<1>
+    r75: logic<1>
+    r76: logic<1>
     r77: bit<1>
-    r78: logic<1>
-    r79: bit<64>
+    r78: bit<1>
+    r79: bit<1>
     r80: logic<1>
     r81: bit<1>
-    r82: logic<1>
+    r82: bit<1>
     r83: bit<1>
-    r84: bit<1>
+    r84: logic<1>
     r85: bit<1>
-    r86: logic<1>
+    r86: bit<1>
     r87: bit<64>
-    r88: logic<1>
-    r89: bit<1>
-    r90: logic<1>
-    r91: bit<1>
-    r92: bit<1>
-    r93: bit<1>
-    r94: logic<1>
-    r95: bit<64>
-    r96: logic<1>
-    r97: bit<1>
-    r98: logic<1>
-    r99: bit<1>
-    r100: bit<1>
-    r101: bit<1>
-    r102: logic<1>
-    r103: bit<64>
-    r104: logic<1>
-    r105: bit<1>
-    r106: logic<1>
-    r107: bit<1>
-    r108: bit<1>
-    r109: bit<1>
-    r110: logic<1>
-    r111: bit<64>
-    r112: logic<1>
-    r113: bit<1>
-    r114: logic<1>
-    r115: bit<1>
-    r116: bit<1>
-    r117: bit<1>
-    r118: logic<1>
-    r119: bit<64>
-    r120: logic<1>
-    r121: bit<1>
-    r122: logic<1>
-    r123: bit<1>
-    r124: bit<1>
-    r125: bit<1>
-    r126: logic<1>
-    r127: bit<64>
-    r128: logic<1>
-    r129: bit<1>
-    r130: logic<1>
-    r131: bit<1>
-    r132: bit<1>
-    r133: bit<1>
-    r134: logic<1>
-    r135: bit<64>
-    r136: logic<1>
-    r137: bit<1>
-    r138: logic<1>
-    r139: bit<1>
-    r140: bit<1>
-    r141: bit<1>
-    r142: logic<1>
-    r143: logic<1>
-    r144: logic<1>
-    r145: bit<64>
-    r146: logic<1>
-    r147: bit<1>
-    r148: logic<1>
-    r149: bit<1>
-    r150: bit<1>
-    r151: bit<1>
-    r152: logic<1>
-    r153: bit<64>
-    r154: logic<1>
-    r155: bit<1>
-    r156: logic<1>
-    r157: bit<1>
-    r158: bit<1>
-    r159: bit<1>
-    r160: logic<1>
-    r161: bit<64>
-    r162: logic<1>
-    r163: bit<1>
-    r164: logic<1>
-    r165: bit<1>
-    r166: bit<1>
-    r167: bit<64>
-    r168: bit<64>
-    r169: logic<20>
-    r170: bit<64>
-    r171: logic<20>
-    r172: bit<20>
-    r173: logic<20>
-    r174: logic<64>
-    r175: logic<64>
-    r176: logic<64>
-    r177: logic<64>
-    r178: logic<64>
-    r179: logic<64>
-    r180: logic<64>
-    r181: logic<20>
+    r88: bit<64>
+    r89: logic<20>
+    r90: logic<64>
+    r91: logic<64>
+    r92: logic<64>
+    r93: logic<64>
+    r94: logic<64>
+    r95: logic<64>
+    r96: logic<64>
+    r97: logic<20>
   b0:
     r0 = SIRValue(0x0)
     r1 = SIRValue(0x3)
@@ -202,125 +118,83 @@ Execution Unit 0:
     r3 = r2 LtU r1
     Branch(r3 ? b2 : b4)
   b2:
-    r174 = Load(addr=v (region=0), offset=0, bits=64)
-    r13 = Load(addr=v (region=0), offset=4, bits=1)
-    r21 = Load(addr=v (region=0), offset=5, bits=1)
-    r29 = Load(addr=v (region=0), offset=6, bits=1)
-    r37 = Load(addr=v (region=0), offset=7, bits=1)
-    r45 = Load(addr=v (region=0), offset=8, bits=1)
-    r53 = Load(addr=v (region=0), offset=9, bits=1)
-    r61 = Load(addr=v (region=0), offset=10, bits=1)
-    r175 = SIRValue(0x3)
-    r176 = r174 Shr r175
-    r69 = Load(addr=v (region=0), offset=11, bits=1)
-    r177 = SIRValue(0x1)
-    r5 = r176 And r177
-    r178 = SIRValue(0x2)
-    r179 = r174 Shr r178
-    r180 = SIRValue(0x1)
-    r6 = r179 And r180
-    r9 = SIRValue(0x1)
-    r10 = r6 And r9
-    r11 = r5 Ne r10
-    r17 = SIRValue(0x1)
-    r18 = r10 And r17
-    r19 = r13 Ne r18
-    r77 = Load(addr=v (region=0), offset=12, bits=1)
-    r20 = r11 Or r19
-    r25 = SIRValue(0x1)
-    r26 = r18 And r25
-    r27 = r21 Ne r26
-    r85 = Load(addr=v (region=0), offset=13, bits=1)
-    r28 = r20 Or r27
-    r33 = SIRValue(0x1)
-    r34 = r26 And r33
-    r35 = r29 Ne r34
-    r93 = Load(addr=v (region=0), offset=14, bits=1)
-    r36 = r28 Or r35
-    r41 = SIRValue(0x1)
-    r42 = r34 And r41
-    r43 = r37 Ne r42
-    r101 = Load(addr=v (region=0), offset=15, bits=1)
-    r44 = r36 Or r43
-    r49 = SIRValue(0x1)
-    r50 = r42 And r49
-    r51 = r45 Ne r50
-    r109 = Load(addr=v (region=0), offset=16, bits=1)
-    r52 = r44 Or r51
-    r57 = SIRValue(0x1)
-    r58 = r50 And r57
-    r59 = r53 Ne r58
-    r117 = Load(addr=v (region=0), offset=17, bits=1)
-    r60 = r52 Or r59
-    r65 = SIRValue(0x1)
-    r66 = r58 And r65
-    r67 = r61 Ne r66
-    r125 = Load(addr=v (region=0), offset=18, bits=1)
-    r68 = r60 Or r67
-    r73 = SIRValue(0x1)
-    r74 = r66 And r73
-    r75 = r69 Ne r74
-    r133 = Load(addr=v (region=0), offset=19, bits=1)
-    r76 = r68 Or r75
-    r81 = SIRValue(0x1)
-    r82 = r74 And r81
-    r83 = r77 Ne r82
-    r141 = Load(addr=v (region=0), offset=0, bits=1)
-    r84 = r76 Or r83
-    r89 = SIRValue(0x1)
-    r90 = r82 And r89
-    r91 = r85 Ne r90
-    r143 = Load(addr=i (region=0), offset=0, bits=1)
-    r92 = r84 Or r91
-    r97 = SIRValue(0x1)
-    r98 = r90 And r97
-    r99 = r93 Ne r98
-    r151 = Load(addr=v (region=0), offset=1, bits=1)
-    r100 = r92 Or r99
-    r105 = SIRValue(0x1)
-    r106 = r98 And r105
-    r107 = r101 Ne r106
-    r159 = Load(addr=v (region=0), offset=2, bits=1)
-    r108 = r100 Or r107
-    r113 = SIRValue(0x1)
-    r114 = r106 And r113
-    r115 = r109 Ne r114
-    r116 = r108 Or r115
-    r121 = SIRValue(0x1)
-    r122 = r114 And r121
-    r123 = r117 Ne r122
-    r124 = r116 Or r123
-    r129 = SIRValue(0x1)
-    r130 = r122 And r129
-    r131 = r125 Ne r130
-    r132 = r124 Or r131
-    r137 = SIRValue(0x1)
-    r138 = r130 And r137
-    r139 = r133 Ne r138
-    r140 = r132 Or r139
-    r144 = r138 Xor r143
-    r147 = SIRValue(0x1)
-    r148 = r144 And r147
-    r149 = r141 Ne r148
-    r150 = r140 Or r149
-    r155 = SIRValue(0x1)
-    r156 = r148 And r155
-    r157 = r151 Ne r156
-    r158 = r150 Or r157
-    r163 = SIRValue(0x1)
-    r164 = r156 And r163
-    r165 = r159 Ne r164
-    r166 = r158 Or r165
-    r181 = Concat(r138, r130, r122, r114, r106, r98, r90, r82, r74, r66, r58, r50, r42, r34, r26, r18, r10, r164, r156, r148)
-    Store(addr=v (region=0), offset=0, bits=20, src_reg = 181)
-    r167 = SIRValue(0x1)
-    r168 = r2 Add r167
-    Branch(r166 ? b1 [r168] : b3)
+    r90 = Load(addr=v (region=0), offset=0, bits=64)
+    r9 = Load(addr=v (region=0), offset=4, bits=1)
+    r13 = Load(addr=v (region=0), offset=5, bits=1)
+    r17 = Load(addr=v (region=0), offset=6, bits=1)
+    r21 = Load(addr=v (region=0), offset=7, bits=1)
+    r25 = Load(addr=v (region=0), offset=8, bits=1)
+    r29 = Load(addr=v (region=0), offset=9, bits=1)
+    r33 = Load(addr=v (region=0), offset=10, bits=1)
+    r91 = SIRValue(0x3)
+    r92 = r90 Shr r91
+    r37 = Load(addr=v (region=0), offset=11, bits=1)
+    r93 = SIRValue(0x1)
+    r5 = r92 And r93
+    r94 = SIRValue(0x2)
+    r95 = r90 Shr r94
+    r96 = SIRValue(0x1)
+    r6 = r95 And r96
+    r7 = r5 Ne r6
+    r11 = r9 Ne r6
+    r41 = Load(addr=v (region=0), offset=12, bits=1)
+    r12 = r7 Or r11
+    r15 = r13 Ne r6
+    r45 = Load(addr=v (region=0), offset=13, bits=1)
+    r16 = r12 Or r15
+    r19 = r17 Ne r6
+    r49 = Load(addr=v (region=0), offset=14, bits=1)
+    r20 = r16 Or r19
+    r23 = r21 Ne r6
+    r53 = Load(addr=v (region=0), offset=15, bits=1)
+    r24 = r20 Or r23
+    r27 = r25 Ne r6
+    r57 = Load(addr=v (region=0), offset=16, bits=1)
+    r28 = r24 Or r27
+    r31 = r29 Ne r6
+    r61 = Load(addr=v (region=0), offset=17, bits=1)
+    r32 = r28 Or r31
+    r35 = r33 Ne r6
+    r65 = Load(addr=v (region=0), offset=18, bits=1)
+    r36 = r32 Or r35
+    r39 = r37 Ne r6
+    r69 = Load(addr=v (region=0), offset=19, bits=1)
+    r40 = r36 Or r39
+    r43 = r41 Ne r6
+    r73 = Load(addr=v (region=0), offset=0, bits=1)
+    r44 = r40 Or r43
+    r47 = r45 Ne r6
+    r75 = Load(addr=i (region=0), offset=0, bits=1)
+    r48 = r44 Or r47
+    r51 = r49 Ne r6
+    r79 = Load(addr=v (region=0), offset=1, bits=1)
+    r52 = r48 Or r51
+    r55 = r53 Ne r6
+    r83 = Load(addr=v (region=0), offset=2, bits=1)
+    r56 = r52 Or r55
+    r59 = r57 Ne r6
+    r60 = r56 Or r59
+    r63 = r61 Ne r6
+    r64 = r60 Or r63
+    r67 = r65 Ne r6
+    r68 = r64 Or r67
+    r71 = r69 Ne r6
+    r72 = r68 Or r71
+    r76 = r6 Xor r75
+    r77 = r73 Ne r76
+    r78 = r72 Or r77
+    r81 = r79 Ne r76
+    r82 = r78 Or r81
+    r85 = r83 Ne r76
+    r86 = r82 Or r85
+    r97 = Concat(r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r6, r76, r76, r76)
+    Store(addr=v (region=0), offset=0, bits=20, src_reg = 97)
+    r87 = SIRValue(0x1)
+    r88 = r2 Add r87
+    Branch(r86 ? b1 [r88] : b3)
   b3:
-    r169 = Load(addr=v (region=0), offset=0, bits=20)
-    r172 = SIRValue(0xfffff)
-    r173 = r169 And r172
-    Store(addr=o (region=0), offset=0, bits=20, src_reg = 173)
+    r89 = Load(addr=v (region=0), offset=0, bits=20)
+    Store(addr=o (region=0), offset=0, bits=20, src_reg = 89)
     Return
   b4:
     Error(1)
