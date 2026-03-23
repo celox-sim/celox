@@ -40,6 +40,8 @@ docs/api/
 
 # Benchmark output
 ts-output.json
+benches/verilator/obj_dir/
+linear_sec_p6_*.txt
 
 # OS
 .DS_Store
