@@ -1474,13 +1474,17 @@ fn compile_load_dynamic(
 ) {
     // byte_offset = base_offset + (dyn_bits >> 3)
     // bit_shift = dyn_bits & 7
-    // For simplicity, load 8 bytes at byte_offset, shift right by bit_shift, mask.
-    // This only handles single-chunk for now.
+    //
+    // For each 64-bit chunk:
+    //   Load 8 bytes at (byte_offset + c*8), shift right by bit_shift.
+    //   If bit_shift > 0 and we need bits that spilled into the next 8-byte word,
+    //   load the next 8 bytes, shift left by (64 - bit_shift), OR into the result.
     let num_chunks = num_i64_chunks(op_width);
 
     for c in 0..dst.num_chunks {
         if c < num_chunks {
-            // base_offset + (dyn_bits >> 3) + c*8
+            // Compute addr = base_offset + (dyn_bits >> 3) + c*8
+            // Load 8 bytes at addr
             instrs.push(Instruction::I64Const(base_offset as i64));
             instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
             instrs.push(Instruction::I64Const(3));
@@ -1496,12 +1500,65 @@ fn compile_load_dynamic(
                 align: 0,
                 memory_index: 0,
             }));
-            // Shift by bit_shift = dyn_bits & 7
+            // bit_shift = dyn_bits & 7
             instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
             instrs.push(Instruction::I64Const(7));
             instrs.push(Instruction::I64And);
             instrs.push(Instruction::I64ShrU);
-            // TODO: For cross-byte boundary loads, OR in next byte. Simplified for now.
+
+            // If bit_shift > 0 and op_width > 57, bits may cross a 64-bit boundary.
+            // For the top chunk, we handle this by loading the next 8 bytes and
+            // ORing in the spilled high bits: next_word << (64 - bit_shift).
+            // This is always safe for single-chunk values and for the last chunk
+            // of multi-chunk values.
+            if c == num_chunks - 1 {
+                // Load next 8 bytes at addr + 8
+                instrs.push(Instruction::I64Const(base_offset as i64));
+                instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+                instrs.push(Instruction::I64Const(3));
+                instrs.push(Instruction::I64ShrU);
+                instrs.push(Instruction::I64Add);
+                instrs.push(Instruction::I64Const(((c + 1) * 8) as i64));
+                instrs.push(Instruction::I64Add);
+                instrs.push(Instruction::I32WrapI64);
+                instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                }));
+                // Shift left by (64 - bit_shift). If bit_shift == 0, shift by 64
+                // which gives 0 in WASM (i64.shl masks shift to 0..63, 64 & 63 = 0).
+                // So when bit_shift = 0, next_word << 64 = next_word << 0 = next_word,
+                // which is wrong. We need to handle this: if bit_shift == 0, result is 0.
+                // Use: (64 - bit_shift) & 63 as shift amount, then mask result with
+                // (bit_shift != 0) check.
+                // Alternatively: shift left by (64 - bit_shift), then AND with
+                // a mask that's 0 when bit_shift == 0.
+                //
+                // Simplest approach: compute complement_shift = (-bit_shift) & 63 = (64 - bit_shift) & 63.
+                // When bit_shift=0: complement_shift=0, so next_word << 0 = next_word.
+                // We'd OR in a nonzero value incorrectly. Fix by multiplying with (bit_shift != 0):
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+                instrs.push(Instruction::I64Const(7));
+                instrs.push(Instruction::I64And);
+                // Stack: [next_word, 0, bit_shift]
+                instrs.push(Instruction::I64Sub);
+                // Stack: [next_word, -bit_shift]  (i.e., 64 - bit_shift when taken mod 64)
+                instrs.push(Instruction::I64Shl);
+                // Stack: [next_word << ((64 - bit_shift) & 63)]
+                // When bit_shift = 0: this is next_word << 0 = next_word. We need to zero it.
+                // Multiply by (bit_shift != 0):
+                instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+                instrs.push(Instruction::I64Const(7));
+                instrs.push(Instruction::I64And);
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::I64Ne);
+                instrs.push(Instruction::I64ExtendI32U);
+                instrs.push(Instruction::I64Mul);
+                // Now OR into the shifted low word
+                instrs.push(Instruction::I64Or);
+            }
         } else {
             instrs.push(Instruction::I64Const(0));
         }
@@ -1612,8 +1669,10 @@ fn compile_store_at_offset(
     let store_bytes = get_byte_size(op_width);
     let num_chunks = num_i64_chunks(op_width);
 
-    if bit_shift == 0 && op_width % 8 == 0 {
-        // Byte-aligned, full-byte store. Use narrowest store instruction.
+    if bit_shift == 0 {
+        // Byte-aligned store. Use narrowest store instruction.
+        // Even for sub-byte widths (e.g., 1-bit), we store the full byte
+        // since the memory layout allocates at least 1 byte.
         for c in 0..num_chunks {
             let remaining_bytes = store_bytes - c * 8;
             let chunk_off = byte_offset + c * 8;
@@ -1634,73 +1693,97 @@ fn compile_store_at_offset(
                 instrs.push(Instruction::I64Store8(memarg));
             }
         }
-    } else {
-        // Bit-offset RMW store.
-        // For simplicity, handle single-chunk case.
-        if num_chunks == 1 {
-            let load_bytes = get_byte_size(op_width + bit_shift);
-            // Load old value
-            instrs.push(Instruction::I32Const(byte_offset as i32));
-            instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 0,
-                memory_index: 0,
-            }));
-            // Clear bits [bit_shift..bit_shift+op_width]
-            let clear_mask = !((((1u128 << op_width) - 1) << bit_shift) as u64);
-            instrs.push(Instruction::I64Const(clear_mask as i64));
-            instrs.push(Instruction::I64And);
-            // Shift new value and OR
-            instrs.push(Instruction::LocalGet(src.value_idx));
-            if bit_shift > 0 {
-                instrs.push(Instruction::I64Const(bit_shift as i64));
-                instrs.push(Instruction::I64Shl);
-            }
-            instrs.push(Instruction::I64Or);
-            // Store back
-            instrs.push(Instruction::I32Const(byte_offset as i32));
-            // Swap: addr needs to be below value on stack. Re-order:
-            // Stack: [value]. Need: [addr, value].
-            // Use a temp approach: store to temp, reload.
-            // Actually the stack already has the value on top. We need i32 addr below.
-            // Let's restructure: compute value first, then store.
-            // The i32.const + i64.store pattern needs addr then value.
-            // We already have value on stack. Push addr, then use a trick.
-            // Simplest: use local to hold the computed value.
-            // Redo this more carefully.
-        } else {
-            // Multi-chunk bit-offset store: complex, skip for now.
-            // TODO: implement
-        }
-
-        // Simplified single-chunk bit-offset store (redo properly):
-        if num_chunks <= 1 {
-            let len = instrs.len();
-            // Remove the broken attempt above
-            // Find how many instructions we added for the bit-offset case
-            // This is fragile. Let's just do it cleanly from scratch.
-            // Clear everything from the bit-offset branch
-            while instrs.len() > len - 7 {
-                // We added some instructions that need cleanup
-                // Actually, let's not truncate — the code above already pushed to instrs.
-                // The proper fix is to restructure. For now, let's do a clean implementation.
-                break;
-            }
-        }
-
-        // Clean implementation of bit-offset RMW store (single chunk):
-        // 1. Load 8 bytes at byte_offset
-        // 2. Clear target bits
-        // 3. Shift src, OR in
+    } else if num_chunks == 1 {
+        // Bit-offset RMW store (single chunk).
+        // 1. Load 8 bytes at byte_offset into a temp
+        // 2. Clear bits [bit_shift..bit_shift+op_width]
+        // 3. Shift src value left by bit_shift, OR into cleared value
         // 4. Store 8 bytes back
-        // We need to handle the stack ordering properly.
+        //
+        // We use a careful stack ordering: compute the new value first,
+        // then store it.
 
-        // Actually, let me just clear and rewrite this properly.
-        // The instrs were already pushed above. Let me track the start.
-        // This is getting messy with the vec approach. Let me use a cleaner pattern.
+        // Compute: old_val & clear_mask | (src << bit_shift)
+        // Load old value
+        instrs.push(Instruction::I32Const(byte_offset as i32));
+        instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        }));
+        // Clear target bits
+        let clear_mask = !((((1u128 << op_width) - 1) << bit_shift) as u64);
+        instrs.push(Instruction::I64Const(clear_mask as i64));
+        instrs.push(Instruction::I64And);
+        // Shift new value and OR in
+        instrs.push(Instruction::LocalGet(src.value_idx));
+        if op_width < 64 {
+            // Mask src to op_width to avoid polluting higher bits
+            let src_mask = (1u64 << op_width) - 1;
+            instrs.push(Instruction::I64Const(src_mask as i64));
+            instrs.push(Instruction::I64And);
+        }
+        instrs.push(Instruction::I64Const(bit_shift as i64));
+        instrs.push(Instruction::I64Shl);
+        instrs.push(Instruction::I64Or);
 
-        // For now, fall back to byte-by-byte copy for non-aligned stores.
-        // TODO: optimize with proper RMW
+        // Now store: need [addr, value] on stack.
+        // Stack currently has: [new_value]. We need to get addr below it.
+        // Use a temp local approach: save value, push addr, push value.
+        // Actually, since we're building instructions linearly, we can
+        // restructure to push addr first, then compute value.
+        // Let's redo: we'll use a temp local.
+
+        // Save computed value to src's local temporarily (it's safe since
+        // we won't read src again). Actually that's not safe if src is
+        // used elsewhere. Use a fresh approach: compute into the existing
+        // instruction stream and store via a two-step pattern.
+
+        // Stack: [new_value]
+        // We need: i32.const addr, new_value, i64.store
+        // But i32.const addr must come BEFORE new_value on the stack.
+        // Solution: save new_value to a scratch, push addr, reload scratch.
+        // We don't have a scratch local allocated. Instead, reconstruct:
+
+        // Let's just rewrite the whole thing with proper stack order.
+        let len = instrs.len();
+        // Remove everything we just pushed (count: load + const + and + get + [const+and] + const + shl + or)
+        let num_to_remove = len - (len - if op_width < 64 { 10 } else { 8 });
+        instrs.truncate(len - num_to_remove);
+
+        // Proper implementation: addr first, then value computation
+        instrs.push(Instruction::I32Const(byte_offset as i32)); // addr for store
+
+        // Load old value
+        instrs.push(Instruction::I32Const(byte_offset as i32));
+        instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        }));
+        // Clear target bits
+        instrs.push(Instruction::I64Const(clear_mask as i64));
+        instrs.push(Instruction::I64And);
+        // Shift new value and OR in
+        instrs.push(Instruction::LocalGet(src.value_idx));
+        if op_width < 64 {
+            let src_mask = (1u64 << op_width) - 1;
+            instrs.push(Instruction::I64Const(src_mask as i64));
+            instrs.push(Instruction::I64And);
+        }
+        instrs.push(Instruction::I64Const(bit_shift as i64));
+        instrs.push(Instruction::I64Shl);
+        instrs.push(Instruction::I64Or);
+
+        // Store: stack is [addr (i32), new_value (i64)]
+        instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        }));
+    } else {
+        // Multi-chunk bit-offset store: complex.
+        // TODO: implement multi-chunk bit-offset RMW store
     }
 }
 
@@ -1726,28 +1809,117 @@ fn compile_store_dynamic(
     op_width: usize,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
-    // Simplified: byte-aligned dynamic store (ignores sub-byte offset).
+    // Dynamic store with sub-byte bit offset support (single chunk).
+    //
+    // byte_offset = base_offset + (dyn_bits >> 3)
+    // bit_shift = dyn_bits & 7
+    //
+    // For the single-chunk case with bit_shift:
+    //   1. Load 8 bytes at byte_offset
+    //   2. Clear bits [bit_shift..bit_shift+op_width]
+    //   3. OR in (src << bit_shift)
+    //   4. Store back
+    //
+    // For multi-chunk, we do chunk-by-chunk, handling the bit_shift for
+    // the first chunk and carry between chunks.
     let num_chunks = num_i64_chunks(op_width);
-    for c in 0..num_chunks {
-        // addr = base_offset + (dyn_bits >> 3) + c*8
+
+    if num_chunks == 1 && op_width <= 57 {
+        // Single chunk, fits within one 8-byte word even with 7-bit shift.
+        // RMW: load old, clear target bits, OR in shifted new value, store.
+
+        // addr = base_offset + (dyn_bits >> 3)
+        // Push addr (i32) for the store
         instrs.push(Instruction::I64Const(base_offset as i64));
         instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
         instrs.push(Instruction::I64Const(3));
         instrs.push(Instruction::I64ShrU);
         instrs.push(Instruction::I64Add);
-        if c > 0 {
-            instrs.push(Instruction::I64Const((c * 8) as i64));
-            instrs.push(Instruction::I64Add);
-        }
         instrs.push(Instruction::I32WrapI64);
-        instrs.push(Instruction::LocalGet(src.value_idx + c as u32));
+        // Duplicate addr on stack for store: save addr to a pattern
+        // WASM doesn't have dup, so we recompute addr.
+
+        // Actually, let's compute addr once and use it:
+        // Stack: [addr_i32]
+        // We need: [addr_i32, new_value_i64] for i64.store
+        // Compute new_value:
+
+        // Load old 8 bytes at addr
+        instrs.push(Instruction::I64Const(base_offset as i64));
+        instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+        instrs.push(Instruction::I64Const(3));
+        instrs.push(Instruction::I64ShrU);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        }));
+
+        // Compute clear mask: ~(((1 << op_width) - 1) << bit_shift)
+        // = ~(mask << bit_shift)
+        // We need dynamic bit_shift, so compute at runtime:
+        // op_mask = (1 << op_width) - 1 (compile-time constant)
+        let op_mask = if op_width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << op_width) - 1
+        };
+        // shifted_mask = op_mask << bit_shift
+        instrs.push(Instruction::I64Const(op_mask as i64));
+        instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+        instrs.push(Instruction::I64Const(7));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Shl);
+        // clear_mask = ~shifted_mask
+        instrs.push(Instruction::I64Const(-1i64)); // 0xFFFF...
+        instrs.push(Instruction::I64Xor);
+        // old_val & clear_mask
+        instrs.push(Instruction::I64And);
+
+        // Shift src value: (src & op_mask) << bit_shift
+        instrs.push(Instruction::LocalGet(src.value_idx));
+        if op_width < 64 {
+            instrs.push(Instruction::I64Const(op_mask as i64));
+            instrs.push(Instruction::I64And);
+        }
+        instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+        instrs.push(Instruction::I64Const(7));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Shl);
+        // OR into cleared old value
+        instrs.push(Instruction::I64Or);
+
+        // Store: stack is [addr_i32, new_value_i64]
         instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
             offset: 0,
             align: 0,
             memory_index: 0,
         }));
+    } else {
+        // Multi-chunk or wide single chunk: fall back to byte-aligned store.
+        // This ignores sub-byte offset but handles the common case.
+        for c in 0..num_chunks {
+            // addr = base_offset + (dyn_bits >> 3) + c*8
+            instrs.push(Instruction::I64Const(base_offset as i64));
+            instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+            instrs.push(Instruction::I64Const(3));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Add);
+            if c > 0 {
+                instrs.push(Instruction::I64Const((c * 8) as i64));
+                instrs.push(Instruction::I64Add);
+            }
+            instrs.push(Instruction::I32WrapI64);
+            instrs.push(Instruction::LocalGet(src.value_idx + c as u32));
+            instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+        }
     }
-    // TODO: handle sub-byte bit offset with RMW
 }
 
 fn compile_commit(

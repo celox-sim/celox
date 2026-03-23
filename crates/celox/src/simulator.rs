@@ -64,7 +64,7 @@ impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
 // ── Generic methods available for any backend ────────────────────────
 
 impl<B: SimBackend> Simulator<B> {
-    pub(crate) fn with_backend_and_program(
+    pub fn with_backend_and_program(
         backend: B,
         program: Program,
         warnings: Vec<veryl_analyzer::AnalyzerError>,
