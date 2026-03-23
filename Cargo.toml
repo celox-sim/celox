@@ -88,3 +88,11 @@ codegen-units = 1
 
 [profile.bench]
 debug = true
+
+# Profile for wasm-pack builds. LTO is disabled to avoid a known issue
+# where proc-macro dependencies (syn) get incorrectly compiled for the
+# wasm32 target under full LTO.
+[profile.wasm-release]
+inherits      = "release"
+lto           = false
+codegen-units = 16

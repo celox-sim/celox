@@ -45,8 +45,8 @@ log("a=255, b=1 => sum=" + sim.get("sum"));
         }
     }
 }`,
-        testbench: `// Reset the counter
-sim.set("rst", 1);
+        testbench: `// Reset the counter (active-low: rst=0 asserts reset)
+sim.set("rst", 0);
 sim.set("clk", 0);
 sim.evalComb();
 sim.set("clk", 1);
@@ -54,8 +54,8 @@ sim.evalComb();
 sim.tickEvent("clk");
 log("After reset: count=" + sim.get("count"));
 
-// Release reset
-sim.set("rst", 0);
+// Release reset (active-low: rst=1 de-asserts)
+sim.set("rst", 1);
 sim.evalComb();
 
 // Clock 5 times

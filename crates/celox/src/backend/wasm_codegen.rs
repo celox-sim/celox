@@ -1670,27 +1670,42 @@ fn compile_store_at_offset(
     let num_chunks = num_i64_chunks(op_width);
 
     if bit_shift == 0 {
-        // Byte-aligned store. Use narrowest store instruction.
-        // Even for sub-byte widths (e.g., 1-bit), we store the full byte
-        // since the memory layout allocates at least 1 byte.
+        // Byte-aligned store. Break remaining bytes into power-of-2
+        // sized stores (8/4/2/1) so every byte of the value is written.
         for c in 0..num_chunks {
             let remaining_bytes = store_bytes - c * 8;
-            let chunk_off = byte_offset + c * 8;
-            instrs.push(Instruction::I32Const(chunk_off as i32));
-            instrs.push(Instruction::LocalGet(src.value_idx + c as u32));
-            let memarg = wasm_encoder::MemArg {
-                offset: 0,
-                align: 0,
-                memory_index: 0,
-            };
-            if remaining_bytes >= 8 {
-                instrs.push(Instruction::I64Store(memarg));
-            } else if remaining_bytes >= 4 {
-                instrs.push(Instruction::I64Store32(memarg));
-            } else if remaining_bytes >= 2 {
-                instrs.push(Instruction::I64Store16(memarg));
-            } else {
-                instrs.push(Instruction::I64Store8(memarg));
+            let src_local = src.value_idx + c as u32;
+            let mut written = 0usize;
+            while written < remaining_bytes {
+                let left = remaining_bytes - written;
+                let chunk_off = byte_offset + c * 8 + written;
+                let memarg = wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                };
+                instrs.push(Instruction::I32Const(chunk_off as i32));
+                if written == 0 {
+                    instrs.push(Instruction::LocalGet(src_local));
+                } else {
+                    // Shift the source value right to get the next portion
+                    instrs.push(Instruction::LocalGet(src_local));
+                    instrs.push(Instruction::I64Const((written * 8) as i64));
+                    instrs.push(Instruction::I64ShrU);
+                }
+                if left >= 8 {
+                    instrs.push(Instruction::I64Store(memarg));
+                    written += 8;
+                } else if left >= 4 {
+                    instrs.push(Instruction::I64Store32(memarg));
+                    written += 4;
+                } else if left >= 2 {
+                    instrs.push(Instruction::I64Store16(memarg));
+                    written += 2;
+                } else {
+                    instrs.push(Instruction::I64Store8(memarg));
+                    written += 1;
+                }
             }
         }
     } else if num_chunks == 1 {
