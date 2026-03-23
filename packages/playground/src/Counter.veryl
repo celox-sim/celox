@@ -1,0 +1,20 @@
+module Counter (
+    clk: input clock,
+    rst: input reset,
+    en: input logic,
+    count: output logic<8>,
+) {
+    var count_r: logic<8>;
+
+    always_ff (clk, rst) {
+        if_reset {
+            count_r = 0;
+        } else if en {
+            count_r = count_r + 1;
+        }
+    }
+
+    always_comb {
+        count = count_r;
+    }
+}
