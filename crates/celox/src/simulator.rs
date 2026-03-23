@@ -157,14 +157,26 @@ impl Simulator {
     /// Resolves a signal path into a performance-optimized [`SignalRef`].
     /// This handle allows for direct memory access without `HashMap` lookups.
     pub fn signal(&self, path: &str) -> SignalRef {
-        let addr = self.program.get_addr(&[], &[path]);
+        let addr = self.program.get_addr(&[], &[path]).unwrap();
         self.backend.resolve_signal(&addr)
     }
 
     /// Resolve a port name to an [`EventRef`] handle.
     pub fn event(&self, port: &str) -> EventRef {
-        let addr = self.program.get_addr(&[], &[port]);
+        let addr = self.program.get_addr(&[], &[port]).unwrap();
         self.backend.resolve_event(&addr)
+    }
+
+    /// Try to resolve a signal path. Returns `Err` if the path is not found or ambiguous.
+    pub fn try_signal(&self, path: &str) -> Result<SignalRef, crate::ir::AddrLookupError> {
+        let addr = self.program.get_addr(&[], &[path])?;
+        Ok(self.backend.resolve_signal(&addr))
+    }
+
+    /// Try to resolve a port name to an [`EventRef`] handle.
+    pub fn try_event(&self, port: &str) -> Result<EventRef, crate::ir::AddrLookupError> {
+        let addr = self.program.get_addr(&[], &[port])?;
+        Ok(self.backend.resolve_event(&addr))
     }
 
     /// Retrieves the current value as a fixed-size type without `BigUint` allocation.
@@ -236,9 +248,13 @@ impl Simulator {
 
         for (instance_id, module_id) in sorted_instances {
             let variables = &self.program.module_variables[module_id];
+            let path_index = &self.program.module_var_path_index[module_id];
             let scope = format!("{}", instance_id);
 
-            let mut sorted_vars: Vec<_> = variables.values().collect();
+            let mut sorted_vars: Vec<_> = variables
+                .values()
+                .filter(|info| path_index.get(&info.path) != Some(&None))
+                .collect();
             sorted_vars.sort_by(|a, b| {
                 let name_a = a.path.to_string();
                 let name_b = b.path.to_string();
@@ -307,12 +323,21 @@ impl Simulator {
     }
 
     /// Builds the list of named signals for a given instance.
+    ///
+    /// Variables with ambiguous VarPaths (multiple scoped locals sharing the
+    /// same name) are excluded — they cannot be addressed by path and would
+    /// cause silent overwrites in name-keyed maps such as the layout JSON.
     fn build_signals_for_instance(&self, instance_id: crate::ir::InstanceId) -> Vec<NamedSignal> {
         let module_id = &self.program.instance_module[&instance_id];
         let module_vars = &self.program.module_variables[module_id];
+        let path_index = &self.program.module_var_path_index[module_id];
 
         let mut result = Vec::new();
         for info in module_vars.values() {
+            // Skip variables whose VarPath is ambiguous (None in the path index).
+            if path_index.get(&info.path) == Some(&None) {
+                continue;
+            }
             let name = info
                 .path
                 .0
@@ -381,8 +406,18 @@ impl Simulator {
 
     /// Resolves a signal inside a child instance.
     pub fn child_signal(&self, instance_path: &[(&str, usize)], var: &str) -> SignalRef {
-        let addr = self.program.get_addr(instance_path, &[var]);
+        let addr = self.program.get_addr(instance_path, &[var]).unwrap();
         self.backend.resolve_signal(&addr)
+    }
+
+    /// Try to resolve a signal inside a child instance.
+    pub fn try_child_signal(
+        &self,
+        instance_path: &[(&str, usize)],
+        var: &str,
+    ) -> Result<SignalRef, crate::ir::AddrLookupError> {
+        let addr = self.program.get_addr(instance_path, &[var])?;
+        Ok(self.backend.resolve_signal(&addr))
     }
 
     /// Returns the full instance hierarchy starting from the top module.

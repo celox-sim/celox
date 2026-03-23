@@ -702,7 +702,7 @@ fn run_dead_store_elimination(
         let inst_refs: Vec<(&str, usize)> =
             inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();
         let var_refs: Vec<&str> = var_path.iter().map(|s| s.as_str()).collect();
-        let addr = program.get_addr(&inst_refs, &var_refs);
+        let addr = program.get_addr(&inst_refs, &var_refs).unwrap();
         externally_live.insert(addr);
     }
 

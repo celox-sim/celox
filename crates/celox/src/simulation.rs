@@ -182,7 +182,7 @@ impl Simulation {
     /// `initial_delay` specifies when the first rising edge occurs.
     pub fn add_clock(&mut self, port: &str, period: u64, initial_delay: u64) {
         let signal = self.simulator.signal(port);
-        let addr = self.simulator.program.get_addr(&[], &[port]);
+        let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
             if ev.id >= self.scheduler.clocks.len() {
                 self.scheduler.clocks.resize(ev.id + 1, None);
@@ -202,7 +202,7 @@ impl Simulation {
     /// The signal must be registered as an event (clock or async reset) in the backend.
     pub fn schedule(&mut self, port: &str, time: u64, value: u64) -> Result<(), RuntimeErrorCode> {
         let signal = self.simulator.signal(port);
-        let addr = self.simulator.program.get_addr(&[], &[port]);
+        let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         let ev_opt = self.simulator.backend.resolve_event_opt(&addr);
         if let Some(ev) = ev_opt {
             self.scheduler.push(SimEvent {

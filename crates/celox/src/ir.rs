@@ -7,6 +7,18 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::{collections::BTreeSet, fmt::Display};
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
+
+/// Error returned by [`Program::get_addr`] when a path-based variable lookup fails.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AddrLookupError {
+    #[error("Instance not found: {path}")]
+    InstanceNotFound { path: String },
+    #[error("Variable not found: {path}")]
+    VariableNotFound { path: String },
+    #[error("Ambiguous variable path: {path} — multiple variables share this path")]
+    AmbiguousPath { path: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DomainKind {
     ClockPosedge,
@@ -100,13 +112,26 @@ pub struct Program {
     pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
 }
 impl Program {
-    pub fn get_addr(&self, instance_path: &[(&str, usize)], var_path: &[&str]) -> AbsoluteAddr {
+    pub fn get_addr(
+        &self,
+        instance_path: &[(&str, usize)],
+        var_path: &[&str],
+    ) -> Result<AbsoluteAddr, AddrLookupError> {
         let mut instance_path_str_id = Vec::new();
         for path in instance_path {
             let id = veryl_parser::resource_table::insert_str(path.0);
             instance_path_str_id.push((id, path.1));
         }
-        let instance_id = self.instance_ids[&InstancePath(instance_path_str_id)];
+        let instance_id = *self
+            .instance_ids
+            .get(&InstancePath(instance_path_str_id))
+            .ok_or_else(|| AddrLookupError::InstanceNotFound {
+                path: instance_path
+                    .iter()
+                    .map(|(s, i)| format!("{}[{}]", s, i))
+                    .collect::<Vec<_>>()
+                    .join("."),
+            })?;
         let module_id = self.instance_module[&instance_id];
         let mut var_path_str_id = Vec::new();
         for path in var_path {
@@ -115,19 +140,17 @@ impl Program {
         }
 
         let target_path = VarPath(var_path_str_id);
+        let path_str = var_path.join(".");
         let entry = self.module_var_path_index[&module_id]
             .get(&target_path)
-            .unwrap_or_else(|| panic!("Variable not found: {:?}", target_path));
-        let var_id = entry.unwrap_or_else(|| {
-            panic!(
-                "Ambiguous variable path: {:?} — multiple variables share this path",
-                target_path
-            )
-        });
-        AbsoluteAddr {
+            .ok_or_else(|| AddrLookupError::VariableNotFound {
+                path: path_str.clone(),
+            })?;
+        let var_id = entry.ok_or_else(|| AddrLookupError::AmbiguousPath { path: path_str })?;
+        Ok(AbsoluteAddr {
             instance_id,
             var_id,
-        }
+        })
     }
 
     pub fn get_path(&self, addr: &AbsoluteAddr) -> String {
