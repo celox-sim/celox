@@ -65,6 +65,70 @@ impl SIRTranslator {
         }
     }
 
+    /// Try to fold a SIR Concat of all-constant (imm_constants-tracked) args
+    /// into a single Cranelift iconst (or multi-chunk iconst for wide values).
+    pub(super) fn try_fold_const_sir_concat(
+        &self,
+        state: &mut TranslationState,
+        dst: &RegisterId,
+        args: &[RegisterId],
+    ) -> Option<TransValue> {
+        if self.options.four_state {
+            return None; // Conservative: skip 4-state for now.
+        }
+
+        // Check if all args are tracked constants.
+        let mut const_vals: Vec<(u64, usize)> = Vec::with_capacity(args.len());
+        for arg in args {
+            let val = state.imm_constants.get(arg)?;
+            let width = state.register_map[arg].width();
+            if width > 64 {
+                return None; // Wide arg — bail.
+            }
+            const_vals.push((*val, width));
+        }
+
+        let dst_width = state.register_map[dst].width();
+        let num_chunks = dst_width.div_ceil(64).max(1);
+
+        // Build combined value (args are MSB-first, reverse for LSB-first).
+        let mut combined = vec![0u64; num_chunks];
+        let mut bit_offset = 0usize;
+        for &(val, width) in const_vals.iter().rev() {
+            let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let masked_val = val & mask;
+            let chunk_idx = bit_offset / 64;
+            let bit_in_chunk = bit_offset % 64;
+            if chunk_idx < num_chunks {
+                combined[chunk_idx] |= masked_val << bit_in_chunk;
+                // Handle cross-chunk boundary
+                if bit_in_chunk + width > 64 && chunk_idx + 1 < num_chunks {
+                    combined[chunk_idx + 1] |= masked_val >> (64 - bit_in_chunk);
+                }
+            }
+            bit_offset += width;
+        }
+
+        // Emit Cranelift iconst for each chunk.
+        let cl_chunks: Vec<Value> = combined
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                if num_chunks == 1 {
+                    let ty = get_cl_type(dst_width);
+                    state.builder.ins().iconst(ty, v as i64)
+                } else {
+                    // For the last chunk, mask to the remaining width
+                    let remaining = dst_width - i * 64;
+                    let _ty = if remaining >= 64 { types::I64 } else { get_cl_type(remaining) };
+                    state.builder.ins().iconst(types::I64, v as i64)
+                }
+            })
+            .collect();
+
+        Some(TransValue::TwoState(cl_chunks))
+    }
+
     pub(super) fn translate_concat_inst(
         &self,
         state: &mut TranslationState,

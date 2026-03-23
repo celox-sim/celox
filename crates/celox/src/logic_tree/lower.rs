@@ -3,6 +3,71 @@ use crate::logic_tree::{NodeId, SLTNode, SLTNodeArena};
 use malachite_bigint::BigUint;
 use std::hash::Hash;
 
+/// Try to evaluate an SLT node as a compile-time constant.
+/// Returns `Some((value, mask))` if the entire subtree is constant, `None` otherwise.
+fn try_const_eval<A>(node_id: NodeId, arena: &SLTNodeArena<A>) -> Option<(BigUint, BigUint)> {
+    match arena.get(node_id) {
+        SLTNode::Constant(val, mask, _width, _signed) => Some((val.clone(), mask.clone())),
+        SLTNode::Binary(lhs, op, rhs) => {
+            let (lv, lm) = try_const_eval(*lhs, arena)?;
+            let (rv, rm) = try_const_eval(*rhs, arena)?;
+            // Only fold 2-state (no X/Z) constants for safety.
+            if lm != BigUint::from(0u32) || rm != BigUint::from(0u32) {
+                return None;
+            }
+            let result = match op {
+                BinaryOp::And => &lv & &rv,
+                BinaryOp::Or => &lv | &rv,
+                BinaryOp::Xor => &lv ^ &rv,
+                BinaryOp::Add => &lv + &rv,
+                BinaryOp::Sub => {
+                    if lv >= rv {
+                        &lv - &rv
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
+            };
+            Some((result, BigUint::from(0u32)))
+        }
+        SLTNode::Unary(_, _) => None,
+        SLTNode::Concat(parts) => {
+            let mut combined_val = BigUint::from(0u32);
+            let mut total_width = 0usize;
+            for (part_node, part_width) in parts.iter().rev() {
+                let (v, m) = try_const_eval(*part_node, arena)?;
+                if m != BigUint::from(0u32) {
+                    return None;
+                }
+                let width_mask = if *part_width >= 64 {
+                    (BigUint::from(1u64) << part_width) - 1u64
+                } else {
+                    BigUint::from((1u64 << part_width) - 1)
+                };
+                combined_val |= (&v & &width_mask) << total_width;
+                total_width += part_width;
+            }
+            Some((combined_val, BigUint::from(0u32)))
+        }
+        SLTNode::Slice { expr, access } => {
+            let (v, m) = try_const_eval(*expr, arena)?;
+            if m != BigUint::from(0u32) {
+                return None;
+            }
+            let width = access.msb - access.lsb + 1;
+            let shifted = &v >> access.lsb;
+            let width_mask = if width >= 64 {
+                (BigUint::from(1u64) << width) - 1u64
+            } else {
+                BigUint::from((1u64 << width) - 1)
+            };
+            Some((shifted & width_mask, BigUint::from(0u32)))
+        }
+        _ => None, // Input, Mux — not constant
+    }
+}
+
 pub struct SLTToSIRLowerer;
 
 impl SLTToSIRLowerer {
@@ -217,6 +282,11 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
     ) -> RegisterId {
+        // Fast path: if all parts are constants, fold into a single wide Imm.
+        if let Some(reg) = self.try_fold_const_concat(builder, parts, arena) {
+            return reg;
+        }
+
         let mut total_width = 0;
         let mut acc_reg = None;
 
@@ -260,6 +330,43 @@ impl SLTToSIRLowerer {
             }
         }
         acc_reg.expect("Empty Concat")
+    }
+
+    /// Try to fold a Concat of all-constant parts into a single wide Imm.
+    /// Recursively evaluates each part to check if it's a compile-time constant.
+    fn try_fold_const_concat<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        parts: &[(NodeId, usize)],
+        arena: &SLTNodeArena<A>,
+    ) -> Option<RegisterId> {
+        let mut const_parts: Vec<(BigUint, BigUint, usize)> = Vec::with_capacity(parts.len());
+        for (node_id, width) in parts {
+            let (val, mask) = try_const_eval(*node_id, arena)?;
+            const_parts.push((val, mask, *width));
+        }
+
+        // Build the combined value and mask (parts are MSB-first, reverse for LSB-first).
+        let mut combined_val = BigUint::from(0u32);
+        let mut combined_mask = BigUint::from(0u32);
+        let mut total_width = 0usize;
+        for (val, mask, width) in const_parts.iter().rev() {
+            let width_mask = if *width >= 64 {
+                (BigUint::from(1u64) << width) - 1u64
+            } else {
+                BigUint::from((1u64 << width) - 1)
+            };
+            combined_val |= (&*val & &width_mask) << total_width;
+            combined_mask |= (&*mask & &width_mask) << total_width;
+            total_width += *width;
+        }
+
+        let reg = builder.alloc_bit(total_width, false);
+        builder.emit(SIRInstruction::Imm(
+            reg,
+            SIRValue::new_four_state(combined_val, combined_mask),
+        ));
+        Some(reg)
     }
 
     fn lower_mux<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(

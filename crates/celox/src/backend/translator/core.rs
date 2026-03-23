@@ -299,7 +299,22 @@ impl SIRTranslator {
                 }
             }
             SIRInstruction::Concat(dst, args) => {
-                self.translate_concat_inst(state, dst, args);
+                // Fast path: fold Concat of all-constant arguments into a single Imm.
+                if let Some(folded) = self.try_fold_const_sir_concat(state, dst, args) {
+                    let d_width = state.register_map[dst].width();
+                    state.regs.insert(*dst, folded);
+                    // Track as constant if it fits in u64
+                    if d_width <= 64 {
+                        if let super::core::TransValue::TwoState(ref chunks) = state.regs[dst] {
+                            if chunks.len() == 1 {
+                                // Extract the constant value from the Cranelift iconst
+                                // We can't easily get the value back, so skip tracking.
+                            }
+                        }
+                    }
+                } else {
+                    self.translate_concat_inst(state, dst, args);
+                }
             }
             SIRInstruction::Binary(dst, lhs, op, rhs) => {
                 if matches!(op, BinaryOp::Shr | BinaryOp::Shl | BinaryOp::Sar)
