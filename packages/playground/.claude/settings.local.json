@@ -9,7 +9,8 @@
       "WebFetch(domain:ssw.jku.at)",
       "WebFetch(domain:www.themoonlight.io)",
       "WebFetch(domain:who.rocq.inria.fr)",
-      "WebFetch(domain:blog.llvm.org)"
+      "WebFetch(domain:blog.llvm.org)",
+      "Bash(grep -E \"\\\\.rs$|^d\")"
     ]
   }
 }

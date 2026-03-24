@@ -17,7 +17,9 @@ const __wasi = new __WASI({
   },
 })
 
-const __wasmUrl = '/celox.wasm32-wasi.wasm'
+const __wasmUrl = import.meta.env?.BASE_URL
+  ? `${import.meta.env.BASE_URL}celox.wasm32-wasi.wasm`
+  : '/celox.wasm32-wasi.wasm'
 const __emnapiContext = __emnapiGetDefaultContext()
 
 
