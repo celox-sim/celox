@@ -44,14 +44,13 @@ bb0:
   0x0000000c  mov edx,[r15+8]
   0x00000010  add rax,rdx
   0x00000013  mov edx,2
-  0x00000018  mov rdx,rax
-  0x0000001b  or rdx,rdx
-  0x0000001e  mov [r15+0Ch],edx
-  0x00000022  mov edx,1
-  0x00000027  and rax,rdx
-  0x0000002a  mov [r15+4],eax
-  0x0000002e  xor eax,eax
-  0x00000030  jmp short 0000000000000032h
-  0x00000032  add rsp,8
-  0x00000036  pop r15
-  0x00000038  ret
+  0x00000018  or rdx,rax
+  0x0000001b  mov [r15+0Ch],edx
+  0x0000001f  mov edx,1
+  0x00000024  and rax,rdx
+  0x00000027  mov [r15+4],eax
+  0x0000002b  xor eax,eax
+  0x0000002d  jmp short 000000000000002Fh
+  0x0000002f  add rsp,8
+  0x00000033  pop r15
+  0x00000035  ret

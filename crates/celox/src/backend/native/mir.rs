@@ -241,6 +241,22 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
+    /// dst = load [base + offset + index]  (register-indexed memory access)
+    LoadIndexed {
+        dst: VReg,
+        base: BaseReg,
+        offset: i32,
+        index: VReg,
+        size: OpSize,
+    },
+    /// store [base + offset + index] = src  (register-indexed memory access)
+    StoreIndexed {
+        base: BaseReg,
+        offset: i32,
+        index: VReg,
+        src: VReg,
+        size: OpSize,
+    },
 
     // ── ALU (3-operand SSA) ────────────────────────────────────
     /// dst = lhs + rhs
@@ -338,6 +354,20 @@ impl fmt::Display for MInst {
                 src,
                 size,
             } => write!(f, "store.{size} [{base} + {offset}], {src}"),
+            MInst::LoadIndexed {
+                dst,
+                base,
+                offset,
+                index,
+                size,
+            } => write!(f, "{dst} = load.{size} [{base} + {offset} + {index}]"),
+            MInst::StoreIndexed {
+                base,
+                offset,
+                index,
+                src,
+                size,
+            } => write!(f, "store.{size} [{base} + {offset} + {index}], {src}"),
             MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
             MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
             MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
@@ -422,6 +452,7 @@ impl MInst {
             MInst::Mov { dst, .. }
             | MInst::LoadImm { dst, .. }
             | MInst::Load { dst, .. }
+            | MInst::LoadIndexed { dst, .. }
             | MInst::Add { dst, .. }
             | MInst::Sub { dst, .. }
             | MInst::Mul { dst, .. }
@@ -441,7 +472,11 @@ impl MInst {
             | MInst::BitFieldInsert { dst, .. }
             | MInst::Select { dst, .. } => Some(*dst),
 
-            MInst::Store { .. } | MInst::Branch { .. } | MInst::Jump { .. } | MInst::Return => None,
+            MInst::Store { .. }
+            | MInst::StoreIndexed { .. }
+            | MInst::Branch { .. }
+            | MInst::Jump { .. }
+            | MInst::Return => None,
         }
     }
 
@@ -452,6 +487,8 @@ impl MInst {
             MInst::LoadImm { .. } => vec![],
             MInst::Load { .. } => vec![],
             MInst::Store { src, .. } => vec![*src],
+            MInst::LoadIndexed { index, .. } => vec![*index],
+            MInst::StoreIndexed { index, src, .. } => vec![*index, *src],
             MInst::Add { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
             | MInst::Mul { lhs, rhs, .. }

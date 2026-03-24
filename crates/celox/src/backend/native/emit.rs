@@ -94,6 +94,14 @@ fn mem_operand(base: BaseReg, offset: i32) -> AsmMemoryOperand {
     base_reg + offset
 }
 
+fn mem_operand_indexed(base: BaseReg, offset: i32, index: AsmRegister64) -> AsmMemoryOperand {
+    let base_reg = match base {
+        BaseReg::SimState => SIM_BASE,
+        BaseReg::StackFrame => rsp,
+    };
+    base_reg + index + offset
+}
+
 // ────────────────────────────────────────────────────────────────
 // Callee-saved register tracking
 // ────────────────────────────────────────────────────────────────
@@ -318,6 +326,46 @@ fn emit_inst(
             }
         }
 
+        MInst::LoadIndexed { dst, base, offset, index, size } => {
+            let d_preg = resolve(assignment, *dst);
+            let idx = preg_to_reg64(resolve(assignment, *index));
+            let mem = mem_operand_indexed(*base, *offset, idx);
+            match size {
+                OpSize::S8 => {
+                    asm.movzx(preg_to_reg32(d_preg), byte_ptr(mem))?;
+                }
+                OpSize::S16 => {
+                    asm.movzx(preg_to_reg32(d_preg), word_ptr(mem))?;
+                }
+                OpSize::S32 => {
+                    asm.mov(preg_to_reg32(d_preg), dword_ptr(mem))?;
+                }
+                OpSize::S64 => {
+                    asm.mov(preg_to_reg64(d_preg), qword_ptr(mem))?;
+                }
+            }
+        }
+
+        MInst::StoreIndexed { base, offset, index, src, size } => {
+            let s_preg = resolve(assignment, *src);
+            let idx = preg_to_reg64(resolve(assignment, *index));
+            let mem = mem_operand_indexed(*base, *offset, idx);
+            match size {
+                OpSize::S8 => {
+                    asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
+                }
+                OpSize::S16 => {
+                    asm.mov(word_ptr(mem), preg_to_reg64(s_preg))?;
+                }
+                OpSize::S32 => {
+                    asm.mov(dword_ptr(mem), preg_to_reg32(s_preg))?;
+                }
+                OpSize::S64 => {
+                    asm.mov(qword_ptr(mem), preg_to_reg64(s_preg))?;
+                }
+            }
+        }
+
         // ── ALU 3-operand → 2-operand ──
         // x86: dst = dst OP src. If dst != lhs, insert mov dst, lhs first.
         MInst::Add { dst, lhs, rhs } => {
@@ -473,24 +521,21 @@ fn emit_inst(
             let bw = preg_to_reg64(resolve(assignment, *base_word));
             let v = preg_to_reg64(resolve(assignment, *val));
 
-            // Step 1: dst = base_word
-            if d != bw {
-                asm.mov(d, bw)?;
-            }
-            // Step 2: clear the field: dst &= ~(mask << shift)
-            let clear_mask = !((*mask) << *shift) as i64;
-            if clear_mask >= i32::MIN as i64 && clear_mask <= i32::MAX as i64 {
-                asm.and(d, clear_mask as i32)?;
-            } else {
-                // For 64-bit mask, we'd need a scratch register.
-                // Most bit fields are < 32 bits, so this is rare.
-                unimplemented!("64-bit BitFieldInsert clear mask requires scratch");
-            }
-            // Step 3: prepare val: shifted_val = (val & mask) << shift
-            // We need a temporary. If val register != dst, we can use val's register.
-            // Otherwise we need a scratch. For now, assume val != dst.
             if v != d {
-                // Use val's register as scratch (we'll clobber it, but it's dead after this)
+                // Common case: val is in a separate register from dst.
+                // 1. dst = base_word (may be no-op if d == bw)
+                if d != bw {
+                    asm.mov(d, bw)?;
+                }
+                // 2. Clear the field in dst
+                let clear_mask = !((*mask) << *shift) as i64;
+                if clear_mask >= i32::MIN as i64 && clear_mask <= i32::MAX as i64 {
+                    asm.and(d, clear_mask as i32)?;
+                } else {
+                    let d32 = preg_to_reg32(resolve(assignment, *dst));
+                    asm.and(d32, clear_mask as i32)?;
+                }
+                // 3. Prepare and insert val (clobbers v, which is dead after this use)
                 if *mask != u64::MAX {
                     asm.and(v, *mask as i32)?;
                 }
@@ -499,8 +544,32 @@ fn emit_inst(
                 }
                 asm.or(d, v)?;
             } else {
-                // val == dst, tricky case. Skip for now.
-                unimplemented!("BitFieldInsert with val == dst");
+                // v == d: val and dst alias (val dies here, dst is born).
+                // bw must be different since val and base_word are both live uses.
+                // Use XOR-based bitfield insert: result = bw ^ ((shifted_val ^ bw) & F)
+                // This formula doesn't clobber bw.
+                debug_assert!(bw != d, "val and base_word should not alias in BFI");
+                // 1. d = (val & mask) << shift
+                if *mask != u64::MAX {
+                    asm.and(d, *mask as i32)?;
+                }
+                if *shift > 0 {
+                    asm.shl(d, *shift as u32)?;
+                }
+                // 2. d ^= bw
+                asm.xor(d, bw)?;
+                // 3. d &= field_mask
+                let field_mask = (*mask) << *shift;
+                if field_mask <= i32::MAX as u64 {
+                    asm.and(d, field_mask as i32)?;
+                } else if field_mask <= u32::MAX as u64 {
+                    let d32 = preg_to_reg32(resolve(assignment, *dst));
+                    asm.and(d32, field_mask as i32)?;
+                } else {
+                    unimplemented!("64-bit field mask in BitFieldInsert XOR path");
+                }
+                // 4. d ^= bw → result
+                asm.xor(d, bw)?;
             }
         }
 

@@ -1,7 +1,6 @@
 //! Integration tests: execute native backend output and verify correctness.
 
-use celox::{MemoryLayout, NativeBackend, Program, Simulator, SimulatorBuilder};
-use num_bigint::BigUint;
+use celox::{MemoryLayout, Program, Simulator, SimulatorBuilder};
 
 /// Helper: compile Veryl, run native backend on eval_comb[0], execute, return state.
 fn compile_and_run(
