@@ -196,8 +196,9 @@ monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
   noEmit: true,
 });
 
+const tbModel = monaco.editor.createModel("", "typescript", monaco.Uri.parse("file:///testbench.ts"));
 const tbEditor = monaco.editor.create(document.getElementById("tb-editor")!, {
-  ...editorOpts, language: "typescript", value: "",
+  ...editorOpts, model: tbModel,
 });
 
 // ── DUT type injection ──────────────────────────────────
@@ -223,7 +224,7 @@ ${portEntries}
 };
 declare function log(msg: any): void;
 `;
-  currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(dts, "celox-sim.d.ts");
+  currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(dts, "file:///celox-sim.d.ts");
 }
 
 // Extract port names from Veryl source with regex (works without WASM)
