@@ -239,27 +239,86 @@ function extractPortsFromSource(source: string): Record<string, { direction: str
   return ports;
 }
 
-// Update types when Veryl source changes (works before WASM loads)
+// Parse error messages from genTsFromSource/NativeSimulatorHandle into Monaco markers
+function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
+  const markers: monaco.editor.IMarkerData[] = [];
+  // Match patterns like: ╭─[main.veryl:1:35]  or  ╭─[test.veryl:3:10]
+  const locRe = /╭─\[(?:[\w./]+):(\d+):(\d+)\]/g;
+  // Match error descriptions like: × "a" can't be assigned because it is input
+  const msgRe = /[×✕]\s+(.+)/g;
+
+  const messages: string[] = [];
+  let m;
+  while ((m = msgRe.exec(errorMsg)) !== null) messages.push(m[1].trim());
+
+  let i = 0;
+  while ((m = locRe.exec(errorMsg)) !== null) {
+    const line = parseInt(m[1]);
+    const col = parseInt(m[2]);
+    markers.push({
+      severity: monaco.MarkerSeverity.Error,
+      message: messages[i] || "Veryl error",
+      startLineNumber: line,
+      startColumn: col,
+      endLineNumber: line,
+      endColumn: col + 1,
+    });
+    i++;
+  }
+
+  // Fallback: if no location found but there's an error message
+  if (markers.length === 0 && errorMsg) {
+    // Try to extract a simpler message
+    const simple = errorMsg.match(/(?:Parse error|Unexpected token|Error):\s*(.+?)(?:\n|$)/);
+    if (simple) {
+      markers.push({
+        severity: monaco.MarkerSeverity.Error,
+        message: simple[1],
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: 1,
+        endColumn: 1,
+      });
+    }
+  }
+
+  return markers;
+}
+
+// Update types + diagnostics when Veryl source changes
 let updateTimer: ReturnType<typeof setTimeout>;
 function onVerylChange() {
   clearTimeout(updateTimer);
   updateTimer = setTimeout(() => {
-    // Try WASM-based analysis first (more accurate)
+    const source = verylEditor.getValue();
+    const model = verylEditor.getModel();
+
+    // Try WASM-based analysis (accurate types + diagnostics)
     if (celox) {
       try {
-        const result = JSON.parse(celox.genTsFromSource([{ content: verylEditor.getValue(), path: "main.veryl" }]));
+        const result = JSON.parse(celox.genTsFromSource([{ content: source, path: "main.veryl" }]));
         if (result.modules?.[0]?.ports) {
           updateDutTypes(result.modules[0].ports);
-          return;
         }
-      } catch {}
+        // Clear errors on success
+        if (model) monaco.editor.setModelMarkers(model, "veryl", []);
+        return;
+      } catch (e: any) {
+        // Analysis failed — show diagnostics
+        if (model) {
+          const markers = parseVerylErrors(e.message || String(e));
+          monaco.editor.setModelMarkers(model, "veryl", markers);
+        }
+        // Still try regex fallback for types
+      }
     }
+
     // Fallback: regex-based port extraction (no WASM needed)
-    const ports = extractPortsFromSource(verylEditor.getValue());
+    const ports = extractPortsFromSource(source);
     if (Object.keys(ports).length > 0) {
       updateDutTypes(ports);
     }
-  }, 300);
+  }, 500);
 }
 verylEditor.onDidChangeModelContent(onVerylChange);
 
