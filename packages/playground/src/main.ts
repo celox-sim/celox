@@ -251,17 +251,32 @@ function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
   let m;
   while ((m = msgRe.exec(errorMsg)) !== null) messages.push(m[1].trim());
 
+  // Get source lines for token length detection
+  const sourceLines = verylEditor.getValue().split("\n");
+
   let i = 0;
   while ((m = locRe.exec(errorMsg)) !== null) {
     const line = parseInt(m[1]);
     const col = parseInt(m[2]);
+
+    // Try to determine token length from source
+    let endCol = col + 1;
+    const srcLine = sourceLines[line - 1];
+    if (srcLine) {
+      const rest = srcLine.substring(col - 1);
+      const tok = rest.match(/^\w+/);
+      if (tok) {
+        endCol = col + tok[0].length;
+      }
+    }
+
     markers.push({
       severity: monaco.MarkerSeverity.Error,
       message: messages[i] || "Veryl error",
       startLineNumber: line,
       startColumn: col,
       endLineNumber: line,
-      endColumn: col + 1,
+      endColumn: endCol,
     });
     i++;
   }
