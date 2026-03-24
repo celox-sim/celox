@@ -1093,10 +1093,14 @@ fn lower_instruction(
                     });
                 }
                 UnaryOp::BitNot => {
-                    block.push(MInst::BitNot {
-                        dst: dst_vreg,
-                        src: src_vreg,
-                    });
+                    let width = ctx.sir_width(src);
+                    if width < 64 {
+                        let tmp = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::BitNot { dst: tmp, src: src_vreg });
+                        block.push(MInst::AndImm { dst: dst_vreg, src: tmp, imm: mask_for_width(width) });
+                    } else {
+                        block.push(MInst::BitNot { dst: dst_vreg, src: src_vreg });
+                    }
                 }
                 UnaryOp::LogicNot => {
                     // dst = (src == 0) ? 1 : 0

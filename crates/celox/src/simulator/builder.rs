@@ -598,9 +598,15 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn build_native(
         self,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-        let (program, warnings, options, _vcd_path) = self.into_sir()?;
+        let (program, warnings, options, vcd_path) = self.into_sir()?;
         let backend = crate::backend::native::NativeBackend::new(&program, &options)?;
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+        if let Some(path) = vcd_path {
+            let descs = sim.build_vcd_descs(options.four_state);
+            let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+            sim.vcd_writer = Some(vcd_writer);
+        }
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
         Ok(sim)
     }

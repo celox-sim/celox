@@ -65,7 +65,9 @@ fn test_case_in_always_ff() {
 
     println!("{}", trace.format_slt().unwrap());
     println!("{}", trace.format_post_optimized_sir().unwrap());
-    println!("{}", trace.post_optimized_clif.unwrap());
+    if let Some(clif) = &trace.post_optimized_clif {
+        println!("{}", clif);
+    }
 
     let mut sim = sim.unwrap();
     let clk = sim.event("clk");

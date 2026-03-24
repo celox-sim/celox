@@ -416,7 +416,7 @@ fn emit_inst(
                     asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
                 }
                 OpSize::S16 => {
-                    asm.mov(word_ptr(mem), preg_to_reg64(s_preg))?;
+                    asm.mov(word_ptr(mem), preg_to_reg16(s_preg))?;
                 }
                 OpSize::S32 => {
                     asm.mov(dword_ptr(mem), preg_to_reg32(s_preg))?;
@@ -436,14 +436,7 @@ fn emit_inst(
             emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Sub)?;
         }
         MInst::Mul { dst, lhs, rhs } => {
-            // imul r64, r64 (2-operand form, result in first operand)
-            let d = preg_to_reg64(resolve(assignment, *dst));
-            let l = preg_to_reg64(resolve(assignment, *lhs));
-            let r = preg_to_reg64(resolve(assignment, *rhs));
-            if d != l {
-                asm.mov(d, l)?;
-            }
-            asm.imul_2(d, r)?;
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Mul)?;
         }
         MInst::And { dst, lhs, rhs } => {
             emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::And)?;
@@ -753,6 +746,7 @@ fn emit_divrem(
 enum BinOp {
     Add,
     Sub,
+    Mul,
     And,
     Or,
     Xor,
@@ -761,7 +755,7 @@ enum BinOp {
 impl BinOp {
     /// Whether the operation is commutative (a op b == b op a).
     fn is_commutative(&self) -> bool {
-        matches!(self, BinOp::Add | BinOp::And | BinOp::Or | BinOp::Xor)
+        matches!(self, BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or | BinOp::Xor)
     }
 }
 
@@ -800,6 +794,7 @@ fn emit_binop_rr(
     match op {
         BinOp::Add => asm.add(d, eff_r)?,
         BinOp::Sub => asm.sub(d, eff_r)?,
+        BinOp::Mul => asm.imul_2(d, eff_r)?,
         BinOp::And => asm.and(d, eff_r)?,
         BinOp::Or => asm.or(d, eff_r)?,
         BinOp::Xor => asm.xor(d, eff_r)?,
