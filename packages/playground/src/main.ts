@@ -300,8 +300,13 @@ function onVerylChange() {
         if (result.modules?.[0]?.ports) {
           updateDutTypes(result.modules[0].ports);
         }
-        // Clear errors on success
-        if (model) monaco.editor.setModelMarkers(model, "veryl", []);
+        // Show warnings (if any) as Monaco markers
+        if (model) {
+          const warnings: monaco.editor.IMarkerData[] = (result.warnings || [])
+            .flatMap((w: string) => parseVerylErrors(w))
+            .map((m: monaco.editor.IMarkerData) => ({ ...m, severity: monaco.MarkerSeverity.Warning }));
+          monaco.editor.setModelMarkers(model, "veryl", warnings);
+        }
         return;
       } catch (e: any) {
         // Analysis failed — show diagnostics
