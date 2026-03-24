@@ -1,0 +1,1 @@
+../../../crates/celox-napi/wasi-worker-browser.mjs

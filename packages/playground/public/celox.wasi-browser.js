@@ -1,0 +1,1 @@
+../../../crates/celox-napi/celox.wasi-browser.js

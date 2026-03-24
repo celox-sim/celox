@@ -1755,6 +1755,139 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         .map_err(|e| Error::from_reason(format!("Failed to serialize JSON: {e}")))
 }
 
+/// Generate TypeScript type information from in-memory Veryl sources.
+///
+/// Like `gen_ts()` but does not require a Veryl.toml or filesystem access.
+/// Works on both native and wasm32 targets.
+#[napi]
+pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
+    use celox_ts_gen::{JsonModuleEntry, JsonOutput, generate_all};
+
+    if sources.is_empty() {
+        return Err(Error::from_reason("No source files provided"));
+    }
+
+    let metadata = Metadata::create_default("playground")
+        .map_err(|e| Error::from_reason(format!("Failed to create default metadata: {e}")))?;
+
+    // Parse and analyze pass 1
+    symbol_table::clear();
+    attribute_table::clear();
+
+    let analyzer = Analyzer::new(&metadata);
+    let mut parsers = Vec::new();
+    let mut all_warnings = Vec::new();
+
+    for src in &sources {
+        let path = std::path::PathBuf::from(&src.path);
+        let parser = Parser::parse(&src.content, &path)
+            .map_err(|e| Error::from_reason(format!("Parse error: {e}")))?;
+
+        let prj = "playground".to_string();
+        let results = analyzer.analyze_pass1(&prj, &parser.veryl);
+        let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
+        if !real_errors.is_empty() {
+            return Err(Error::from_reason(format_errors_with_warnings(
+                "analysis pass 1",
+                &real_errors,
+                &all_warnings,
+            )));
+        }
+        all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
+
+        parsers.push((prj, path, parser));
+    }
+
+    let results = Analyzer::analyze_post_pass1();
+    let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
+    if !real_errors.is_empty() {
+        return Err(Error::from_reason(format_errors_with_warnings(
+            "post-pass 1 analysis",
+            &real_errors,
+            &all_warnings,
+        )));
+    }
+    all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
+
+    // Pass 2: per-file IR → generate
+    let all_source_files: Vec<String> = parsers.iter().map(|(_, p, _)| {
+        p.to_string_lossy().replace('\\', "/")
+    }).collect();
+    let source_file_refs: Vec<&str> = all_source_files.iter().map(|s| s.as_str()).collect();
+
+    let mut all_modules = Vec::new();
+    let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (i, (prj, _path, parser)) in parsers.iter().enumerate() {
+        let mut analyzer_context = Context::default();
+        let mut ir = Ir::default();
+        let results = analyzer.analyze_pass2(
+            prj,
+            &parser.veryl,
+            &mut analyzer_context,
+            Some(&mut ir),
+        );
+        let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
+        if !real_errors.is_empty() {
+            return Err(Error::from_reason(format_errors_with_warnings(
+                "analysis pass 2",
+                &real_errors,
+                &all_warnings,
+            )));
+        }
+        all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
+
+        let modules = generate_all(&ir, &source_file_refs);
+        let source_file = all_source_files[i].clone();
+
+        let module_names: Vec<String> = modules.iter().map(|m| m.module_name.clone()).collect();
+        if !module_names.is_empty() {
+            file_modules.insert(source_file.clone(), module_names);
+        }
+
+        for m in modules {
+            all_modules.push(JsonModuleEntry {
+                module_name: m.module_name,
+                source_file: source_file.clone(),
+                dts_content: m.dts_content,
+                md_content: m.md_content,
+                ports: m.ports,
+                events: m.events,
+                instances: m.instances,
+            });
+        }
+    }
+
+    let results = Analyzer::analyze_post_pass2();
+    let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
+    if !real_errors.is_empty() {
+        return Err(Error::from_reason(format_errors_with_warnings(
+            "post-pass 2 analysis",
+            &real_errors,
+            &all_warnings,
+        )));
+    }
+    all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
+
+    // Sort for deterministic output
+    all_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+
+    let warning_msgs: Vec<String> = all_warnings
+        .iter()
+        .map(|w| celox::render_diagnostic(w))
+        .collect();
+
+    let output = JsonOutput {
+        project_path: String::new(),
+        modules: all_modules,
+        file_modules,
+        warnings: warning_msgs,
+    };
+
+    serde_json::to_string(&output)
+        .map_err(|e| Error::from_reason(format!("Failed to serialize JSON: {e}")))
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
