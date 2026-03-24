@@ -2,7 +2,11 @@ import { describe, test, expect } from "vitest";
 import { Simulation } from "@celox-sim/celox";
 import { Counter } from "../src/Counter.veryl";
 
-describe("Counter", () => {
+// Time-based Simulation is not supported in WASM mode (no NativeSimulationHandle).
+// Skip these tests when running with NAPI_RS_FORCE_WASI.
+const isWasm = !!process.env.NAPI_RS_FORCE_WASI;
+
+describe.skipIf(isWasm)("Counter", () => {
   test("counts up on each clock edge when enabled", () => {
     const sim = Simulation.create(Counter);
 

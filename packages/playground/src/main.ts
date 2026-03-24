@@ -126,7 +126,7 @@ let celox: any;
 
 async function init() {
   try {
-    celox = await import("/celox.wasi-browser.js");
+    celox = await import("./celox-wasm-loader.js");
     statusEl.textContent = "Ready";
     runBtn.disabled = false;
   } catch (e: any) {
