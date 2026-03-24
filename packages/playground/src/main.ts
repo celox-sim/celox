@@ -15,7 +15,12 @@ const EXAMPLES: Record<string, { veryl: string; testbench: string }> = {
         sum = a + b;
     }
 }`,
-    testbench: `sim.dut.a = 100n;
+    testbench: `import { Simulator } from "@celox-sim/celox";
+import { Adder } from "./Adder.veryl";
+
+const sim = Simulator.create(Adder);
+
+sim.dut.a = 100n;
 sim.dut.b = 200n;
 sim.tick();
 log("a=100, b=200 => sum=" + sim.dut.sum);
@@ -24,6 +29,8 @@ sim.dut.a = 0xFFFFn;
 sim.dut.b = 1n;
 sim.tick();
 log("a=65535, b=1 => sum=" + sim.dut.sum);
+
+sim.dispose();
 `,
   },
   counter: {
@@ -45,7 +52,12 @@ log("a=65535, b=1 => sum=" + sim.dut.sum);
         count = count_r;
     }
 }`,
-    testbench: `// Reset (active-low)
+    testbench: `import { Simulator } from "@celox-sim/celox";
+import { Counter } from "./Counter.veryl";
+
+const sim = Simulator.create(Counter);
+
+// Reset (active-low)
 sim.dut.rst = 0n;
 sim.tick();
 log("After reset: count=" + sim.dut.count);
@@ -58,6 +70,8 @@ for (let i = 0; i < 5; i++) {
     sim.tick();
     log(\`Cycle \${i + 1}: count=\${sim.dut.count}\`);
 }
+
+sim.dispose();
 `,
   },
 };
@@ -208,21 +222,45 @@ let currentExtraLib: monaco.IDisposable | null = null;
 function updateDutTypes(ports: Record<string, { direction: string; width: number }>) {
   if (currentExtraLib) currentExtraLib.dispose();
 
+  // Extract module name from Veryl source
+  const topMatch = verylEditor.getValue().match(/module\s+(\w+)/);
+  const moduleName = topMatch?.[1] || "Top";
+
   const portEntries = Object.entries(ports)
     .filter(([_, p]) => p.direction === "input" || p.direction === "output")
     .map(([name, _]) => `    ${name}: bigint;`)
     .join("\n");
 
   const dts = `
-declare const sim: {
-  readonly dut: {
+declare module "@celox-sim/celox" {
+  interface Dut {
 ${portEntries}
+  }
+  interface Sim {
+    readonly dut: Dut;
+    tick(): void;
+    evalComb(): void;
+    dispose(): void;
+  }
+  export const Simulator: {
+    create(module: any): Sim;
   };
-  tick(): void;
-  evalComb(): void;
-  dispose(): void;
-};
+  export const Simulation: {
+    create(module: any): Sim;
+  };
+  export type ModuleDefinition<T = any> = { __celox_module: true; name: string };
+}
+
+declare module "./${moduleName}.veryl" {
+  import type { ModuleDefinition } from "@celox-sim/celox";
+  interface ${moduleName}Ports {
+${portEntries}
+  }
+  export const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
+}
+
 declare function log(msg: any): void;
+declare function expect(actual: any): { toBe(expected: any): void; toBeGreaterThan(expected: any): void; };
 `;
   currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(dts, "file:///celox-sim.d.ts");
 }
@@ -382,6 +420,12 @@ async function run() {
     const topName = topMatch[1];
 
     const t0 = performance.now();
+    const genTsResult = (() => {
+      try {
+        return JSON.parse(celox.genTsFromSource([{ content: verylSource, path: "main.veryl" }]));
+      } catch { return null; }
+    })();
+
     const handle = new celox.NativeSimulatorHandle(
       [{ content: verylSource, path: "main.veryl" }], topName
     );
@@ -435,16 +479,51 @@ async function run() {
 
     // Transpile TS → JS via Monaco's TS worker
     statusEl.textContent = "Running…";
-    const tsSource = tbEditor.getValue();
     const tsWorker = await monaco.languages.typescript.getTypeScriptWorker();
-    const model = tbEditor.getModel()!;
-    const client = await tsWorker(model.uri);
-    const output = await client.getEmitOutput(model.uri.toString());
-    const jsCode = output.outputFiles[0]?.text ?? tsSource;
+    const tbModel = tbEditor.getModel()!;
+    const client = await tsWorker(tbModel.uri);
+    const output = await client.getEmitOutput(tbModel.uri.toString());
+    let jsCode = output.outputFiles[0]?.text ?? tbEditor.getValue();
+
+    // Strip import statements and resolve module references.
+    // import { Simulator } from "@celox-sim/celox"  → provided via injected globals
+    // import { Adder } from "./Adder.veryl"          → provided as module definition
+    jsCode = jsCode
+      .replace(/^(?:import|export)\s+.*(?:from\s+)?["'][^"']*["'];?\s*$/gm, "")
+      .replace(/^(?:const|let|var)\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\);?\s*$/gm, "");
+
+    // Build module definitions from genTsFromSource result for .veryl imports
+    const moduleNames = (genTsResult?.modules || []).map((m: any) => m.moduleName).filter(Boolean);
+
+    // Create a Simulator-like factory that uses the WASM bridge
+    const Simulator = {
+      create(_module: any) { return sim; },
+    };
+    const Simulation = {
+      create(_module: any) { return sim; },
+    };
+
+    // Build module definition objects (matching ModuleDefinition shape)
+    const moduleBindings: Record<string, any> = {};
+    for (const name of moduleNames) {
+      moduleBindings[name] = { __celox_module: true, name };
+    }
 
     appendConsole("[run] Executing…", "log-info");
     const log = (msg: any) => appendConsole(String(msg));
-    new Function("sim", "log", jsCode)(sim, log);
+    const expect = (actual: any) => ({
+      toBe(expected: any) {
+        if (actual !== expected) throw new Error(`Expected ${expected}, got ${actual}`);
+      },
+      toBeGreaterThan(expected: any) {
+        if (!(actual > expected)) throw new Error(`Expected > ${expected}, got ${actual}`);
+      },
+    });
+
+    // Inject all bindings: Simulator, Simulation, log, expect, and module names
+    const argNames = ["Simulator", "Simulation", "log", "expect", ...moduleNames];
+    const argValues = [Simulator, Simulation, log, expect, ...moduleNames.map((n: string) => moduleBindings[n])];
+    new Function(...argNames, jsCode)(...argValues);
     appendConsole("[run] Done.", "log-success");
     statusEl.textContent = "Done";
   } catch (e: any) {
