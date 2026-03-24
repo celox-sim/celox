@@ -23,12 +23,12 @@ const sim = Simulator.create(Adder);
 sim.dut.a = 100n;
 sim.dut.b = 200n;
 sim.tick();
-log("a=100, b=200 => sum=" + sim.dut.sum);
+console.log("a=100, b=200 => sum=" + sim.dut.sum);
 
 sim.dut.a = 0xFFFFn;
 sim.dut.b = 1n;
 sim.tick();
-log("a=65535, b=1 => sum=" + sim.dut.sum);
+console.log("a=65535, b=1 => sum=" + sim.dut.sum);
 
 sim.dispose();
 `,
@@ -60,7 +60,7 @@ const sim = Simulator.create(Counter);
 // Reset (active-low)
 sim.dut.rst = 0n;
 sim.tick();
-log("After reset: count=" + sim.dut.count);
+console.log("After reset: count=" + sim.dut.count);
 
 // Release reset, enable counting
 sim.dut.rst = 1n;
@@ -68,7 +68,7 @@ sim.dut.en = 1n;
 
 for (let i = 0; i < 5; i++) {
     sim.tick();
-    log(\`Cycle \${i + 1}: count=\${sim.dut.count}\`);
+    console.log(\`Cycle \${i + 1}: count=\${sim.dut.count}\`);
 }
 
 sim.dispose();
@@ -272,7 +272,6 @@ ${portEntries}
   export const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
 }
 
-declare function log(msg: any): void;
 declare function expect(actual: any): { toBe(expected: any): void; toBeGreaterThan(expected: any): void; };
 `;
   currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(dts, "file:///celox-sim.d.ts");
@@ -545,9 +544,17 @@ async function run() {
       },
     });
 
-    // Inject all bindings: Simulator, Simulation, log, expect, and module names
-    const argNames = ["Simulator", "Simulation", "log", "expect", ...moduleNames];
-    const argValues = [Simulator, Simulation, log, expect, ...moduleNames.map((n: string) => moduleBindings[n])];
+    // Proxy console so console.log/warn/error go to playground console
+    const playgroundConsole = {
+      log: (...args: any[]) => appendConsole(args.map(String).join(" ")),
+      warn: (...args: any[]) => appendConsole(args.map(String).join(" "), "log-warn"),
+      error: (...args: any[]) => appendConsole(args.map(String).join(" "), "log-error"),
+      info: (...args: any[]) => appendConsole(args.map(String).join(" "), "log-info"),
+    };
+
+    // Inject all bindings: Simulator, Simulation, console, log, expect, and module names
+    const argNames = ["Simulator", "Simulation", "console", "log", "expect", ...moduleNames];
+    const argValues = [Simulator, Simulation, playgroundConsole, log, expect, ...moduleNames.map((n: string) => moduleBindings[n])];
     new Function(...argNames, jsCode)(...argValues);
     appendConsole("[run] Done.", "log-success");
     statusEl.textContent = "Done";
