@@ -33,13 +33,13 @@ fn compile_and_run_inner(
         eprintln!("=== MIR ===\n{mfunc}");
     }
 
-    let assignment = regalloc::run_regalloc(&mut mfunc);
+    let ra = regalloc::run_regalloc(&mut mfunc);
 
     if debug {
-        eprintln!("=== Assignment ===\n{assignment:?}");
+        eprintln!("=== Assignment ===\n{:?}", ra.assignment);
     }
 
-    let emit_result = emit::emit(&mfunc, &assignment, 0).expect("emit failed");
+    let emit_result = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
 
     if debug {
         eprintln!("=== Disassembly ===\n{}", emit::disassemble(&emit_result.code, 0));
@@ -230,6 +230,60 @@ fn test_native_shl_register() {
         write_u32_at(state, sir, layout, "shift_amt", 16);
     });
     assert_eq!(read_u32_at(&state, &sir, &layout, "z"), 0x00FF0000);
+}
+
+// Debug: dump SIR + MIR + disassembly for failing test
+#[test]
+fn test_debug_let_bitslice_write() {
+    let code = r#"
+        module Top (
+            o_lo: output logic<32>,
+            o_hi: output logic<32>
+        ) {
+            var data: logic<64> [4];
+            always_comb {
+                for i: u32 in 0..4 {
+                    data[i] = 64'd0;
+                }
+                for g: u32 in 0..2 {
+                    for s: u32 in 0..2 {
+                        let idx: u32 = g * 2 + s;
+                        data[idx][63:32] = (g * 2 + s) as u32;
+                        data[idx][31:0]  = (g * 2 + s + 100) as u32;
+                    }
+                }
+                o_hi = data[2][63:32];
+                o_lo = data[2][31:0];
+            }
+        }
+    "#;
+    let trace = SimulatorBuilder::new(code, "Top")
+        .optimize(true)
+        .trace_post_optimized_sir()
+        .build_with_trace();
+    let sir_text = trace.trace.format_program().unwrap();
+    eprintln!("{sir_text}");
+    let sir = trace.trace.post_optimized_sir.unwrap();
+
+    use celox::native_backend::{emit, isel, regalloc};
+    let layout = celox::MemoryLayout::build(&sir, false);
+
+    for (eu_idx, eu) in sir.eval_comb.iter().enumerate() {
+        let mut mfunc = isel::lower_execution_unit(eu, &layout);
+        eprintln!("=== EU {eu_idx} MIR ===\n{mfunc}");
+        let ra = regalloc::run_regalloc(&mut mfunc);
+        eprintln!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);
+        let emit_result = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
+        eprintln!("=== EU {eu_idx} Disassembly ===\n{}", emit::disassemble(&emit_result.code, 0));
+    }
+
+    // Also run and check the result
+    let mut sim = SimulatorBuilder::new(code, "Top").build_native().unwrap();
+    let o_hi = sim.signal("o_hi");
+    let o_lo = sim.signal("o_lo");
+    eprintln!("Native: o_hi={:?}, o_lo={:?}", sim.get(o_hi), sim.get(o_lo));
+    assert_eq!(sim.get(o_hi), 2u64.into());
+    assert_eq!(sim.get(o_lo), 102u64.into());
 }
 
 // Regression: dynamic index write pattern (shl + bitnot + and + or with multiple shift amounts)

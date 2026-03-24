@@ -98,8 +98,8 @@ fn compile_units(
     // For now, compile only the first EU (multi-EU support needs chaining)
     let eu = &units[0];
     let mut mfunc = isel::lower_execution_unit(eu, layout);
-    let assignment = regalloc::run_regalloc(&mut mfunc);
-    let emit_result = emit::emit(&mfunc, &assignment, 0)
+    let regalloc_result = regalloc::run_regalloc(&mut mfunc);
+    let emit_result = emit::emit(&mfunc, &regalloc_result.assignment, regalloc_result.spill_frame_size)
         .map_err(|e| codegen_err(format!("emit error: {e}")))?;
     jit_mem::JitCode::new(&emit_result.code)
         .map_err(|e| codegen_err(format!("mmap error: {e}")))

@@ -644,14 +644,14 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                     let mut mfunc = isel::lower_execution_unit(eu, &layout);
                     mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}\n"));
-                    let assignment = regalloc::run_regalloc(&mut mfunc);
+                    let ra = regalloc::run_regalloc(&mut mfunc);
                     mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}"));
                     mir_output.push_str("  Register assignment:\n");
-                    for (vreg, preg) in &assignment.map {
+                    for (vreg, preg) in &ra.assignment.map {
                         mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
                     }
-                    if let Ok(result) = emit::emit(&mfunc, &assignment, 0) {
+                    if let Ok(result) = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {
                         mir_output.push_str("  x86-64 disassembly:\n");
                         mir_output.push_str(&emit::disassemble(&result.code, 0));
                     }

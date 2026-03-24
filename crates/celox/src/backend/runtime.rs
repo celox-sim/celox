@@ -235,15 +235,15 @@ impl JitBackend {
                     let mut mfunc = lower_execution_unit(eu, layout_ref);
                     mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}\n"));
-                    let assignment = run_regalloc(&mut mfunc);
+                    let ra = run_regalloc(&mut mfunc);
                     mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}"));
                     mir_output.push_str("  Register assignment:\n");
-                    for (vreg, preg) in &assignment.map {
+                    for (vreg, preg) in &ra.assignment.map {
                         mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
                     }
                     // Emit x86-64 and disassemble
-                    match super::native::emit::emit(&mfunc, &assignment, 0) {
+                    match super::native::emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {
                         Ok(result) => {
                             mir_output.push_str("  x86-64 disassembly:\n");
                             mir_output.push_str(&super::native::emit::disassemble(&result.code, 0));
@@ -263,11 +263,11 @@ impl JitBackend {
                         let mut mfunc = lower_execution_unit(eu, layout_ref);
                         mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                         mir_output.push_str(&format!("{mfunc}\n"));
-                        let assignment = run_regalloc(&mut mfunc);
+                        let ra = run_regalloc(&mut mfunc);
                         mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
                         mir_output.push_str(&format!("{mfunc}"));
                         mir_output.push_str("  Register assignment:\n");
-                        for (vreg, preg) in &assignment.map {
+                        for (vreg, preg) in &ra.assignment.map {
                             mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
                         }
                         mir_output.push('\n');

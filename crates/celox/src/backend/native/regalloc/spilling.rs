@@ -46,7 +46,6 @@ impl SpillSlotAllocator {
     }
 
     /// Total bytes of spill slots allocated.
-    #[allow(dead_code)]
     fn total_size(&self) -> i32 {
         self.next_offset
     }
@@ -153,7 +152,8 @@ fn make_reload(
 
 /// Run the spilling phase on an MFunction.
 /// After this, every program point has at most `k` simultaneously live VRegs.
-pub fn spill(func: &mut MFunction, analysis: &AnalysisResult, k: usize) {
+/// Returns the total spill frame size in bytes.
+pub fn spill(func: &mut MFunction, analysis: &AnalysisResult, k: usize) -> u32 {
     let num_blocks = func.blocks.len();
     let mut slots = SpillSlotAllocator::new();
 
@@ -179,6 +179,8 @@ pub fn spill(func: &mut MFunction, analysis: &AnalysisResult, k: usize) {
         w_exit[bi] = new_w_exit;
         s_exit[bi] = new_s_exit;
     }
+
+    slots.total_size() as u32
 }
 
 // ────────────────────────────────────────────────────────────────

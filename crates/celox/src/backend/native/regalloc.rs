@@ -14,12 +14,23 @@ pub use assignment::AssignmentMap;
 /// x86-64: 16 GPRs - RSP - RBP - SimState base = 13
 pub const NUM_REGS: usize = 13;
 
+/// Result of register allocation: assignment map + spill frame size.
+pub struct RegallocResult {
+    pub assignment: AssignmentMap,
+    /// Bytes of stack frame needed for spill slots.
+    pub spill_frame_size: u32,
+}
+
 /// Run the full register allocation pipeline on an MFunction.
-/// Returns the assignment map (VReg → PhysReg).
-pub fn run_regalloc(func: &mut MFunction) -> AssignmentMap {
+/// Returns the assignment map and required spill frame size.
+pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
     let analysis = analysis::analyze(func);
-    spilling::spill(func, &analysis, NUM_REGS);
+    let spill_frame_size = spilling::spill(func, &analysis, NUM_REGS);
     // Re-analyze after spilling (spill/reload instructions change liveness)
     let analysis = analysis::analyze(func);
-    assignment::assign(func, &analysis)
+    let assignment = assignment::assign(func, &analysis);
+    RegallocResult {
+        assignment,
+        spill_frame_size,
+    }
 }
