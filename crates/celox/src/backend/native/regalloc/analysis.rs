@@ -88,6 +88,7 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
 
             // Compute exit distances by joining successor entry distances
             let mut new_exit: BTreeMap<VReg, u32> = BTreeMap::new();
+            let my_block_id = block_order[bi];
             for &succ_idx in &successors[bi] {
                 // Edge length: 0 for normal edges, LOOP_EXIT_LENGTH for back edges
                 let edge_len = if succ_idx <= bi {
@@ -99,6 +100,19 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
                     let new_dist = dist.saturating_add(edge_len);
                     let entry = new_exit.entry(vreg).or_insert(u32::MAX);
                     *entry = (*entry).min(new_dist);
+                }
+                // Phi sources: if the successor has phi nodes, the source VRegs
+                // from this predecessor are "used" at the edge (distance 0 from
+                // successor entry).
+                let succ_block = &func.blocks[succ_idx];
+                for phi in &succ_block.phis {
+                    for (pred_id, src_vreg) in &phi.sources {
+                        if *pred_id == my_block_id {
+                            let new_dist = 0u32.saturating_add(edge_len);
+                            let entry = new_exit.entry(*src_vreg).or_insert(u32::MAX);
+                            *entry = (*entry).min(new_dist);
+                        }
+                    }
                 }
             }
 
@@ -124,6 +138,11 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
                 if let Some(def) = inst.def() {
                     new_entry.remove(&def);
                 }
+            }
+
+            // Phi defs: phi dst VRegs are defined at block entry
+            for phi in &block.phis {
+                new_entry.remove(&phi.dst);
             }
 
             // Check if anything changed

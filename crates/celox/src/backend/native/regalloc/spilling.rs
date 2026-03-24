@@ -164,7 +164,7 @@ pub fn spill(func: &mut MFunction, analysis: &AnalysisResult, k: usize) -> u32 {
 
     // Process blocks in reverse post order (layout order for now)
     for bi in 0..num_blocks {
-        let w_entry = compute_w_entry(analysis, bi, k, &w_exit);
+        let w_entry = compute_w_entry(func, analysis, bi, k, &w_exit);
         let s_entry = compute_s_entry(analysis, bi, &s_exit, &w_entry);
 
         // Insert coupling code on incoming edges
@@ -190,6 +190,7 @@ pub fn spill(func: &mut MFunction, analysis: &AnalysisResult, k: usize) -> u32 {
 /// Compute W^entry for a block (which VRegs should be in registers at entry).
 /// Braun & Hack Section 4.2.
 fn compute_w_entry(
+    func: &MFunction,
     analysis: &AnalysisResult,
     block_idx: usize,
     k: usize,
@@ -220,6 +221,12 @@ fn compute_w_entry(
 
     let all = all.unwrap_or_default();
     let mut w_entry = all.clone();
+
+    // Phi defs: phi dst VRegs are defined at block entry and must be in
+    // registers. Always include them in W^entry.
+    for phi in &func.blocks[block_idx].phis {
+        w_entry.insert(phi.dst);
+    }
 
     // Fill remaining slots sorted by next-use distance (closest first)
     if w_entry.len() < k {
@@ -282,7 +289,11 @@ fn insert_coupling_code(
         }
 
         let pred_w = &w_exit[pred_idx];
-        let need_reload: Vec<VReg> = w_entry.difference(pred_w).copied().collect();
+        // Exclude phi dsts — they are resolved by emit-time Movs, not spill reloads.
+        let phi_dsts: BTreeSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
+        let need_reload: Vec<VReg> = w_entry.difference(pred_w).copied()
+            .filter(|v| !phi_dsts.contains(v))
+            .collect();
 
         if !need_reload.is_empty() {
             let term_idx = func.blocks[pred_idx].insts.len().saturating_sub(1);

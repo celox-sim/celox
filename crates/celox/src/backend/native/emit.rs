@@ -169,6 +169,47 @@ pub fn disassemble(code: &[u8], base_addr: u64) -> String {
 }
 
 // ────────────────────────────────────────────────────────────────
+// Phi resolution
+// ────────────────────────────────────────────────────────────────
+
+/// Emit Mov instructions to resolve phi nodes when jumping to a target block.
+/// For each phi in the target block, if the source (from this predecessor) and
+/// the dst are assigned to different physical registers, emit `mov dst, src`.
+fn emit_phi_moves(
+    asm: &mut CodeAssembler,
+    terminator: &MInst,
+    pred_block_id: BlockId,
+    func: &MFunction,
+    assignment: &AssignmentMap,
+) -> Result<(), IcedError> {
+    // Collect target block IDs from the terminator
+    let targets: Vec<BlockId> = match terminator {
+        MInst::Jump { target } => vec![*target],
+        MInst::Branch { true_bb, false_bb, .. } => vec![*true_bb, *false_bb],
+        _ => return Ok(()),
+    };
+
+    for target_id in targets {
+        let target_block = func.blocks.iter().find(|b| b.id == target_id);
+        let Some(target_block) = target_block else { continue };
+        for phi in &target_block.phis {
+            for (source_pred, source_vreg) in &phi.sources {
+                if *source_pred == pred_block_id {
+                    let src_preg = resolve(assignment, *source_vreg);
+                    let dst_preg = resolve(assignment, phi.dst);
+                    if src_preg != dst_preg {
+                        let src_reg = preg_to_reg64(src_preg);
+                        let dst_reg = preg_to_reg64(dst_preg);
+                        asm.mov(dst_reg, src_reg)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────
 // Main emit function
 // ────────────────────────────────────────────────────────────────
 
@@ -228,10 +269,20 @@ pub fn emit(
         asm.set_label(label)?;
 
         for inst in &block.insts {
+            // Before terminators that jump to blocks with phis, emit phi Movs
+            if inst.is_terminator() {
+                emit_phi_moves(&mut asm, inst, block.id, func, assignment)?;
+            }
+
             match inst {
                 MInst::Return => {
                     // Return 0 (success) and jump to shared epilogue
                     asm.xor(eax, eax)?;
+                    asm.jmp(epilogue_label)?;
+                }
+                MInst::ReturnError { code } => {
+                    // Return error code (non-zero) and jump to shared epilogue
+                    asm.mov(eax, *code as u32)?;
                     asm.jmp(epilogue_label)?;
                 }
                 _ => {
@@ -564,9 +615,16 @@ fn emit_inst(
             asm.jmp(*label)?;
         }
 
-        MInst::Return => {
+        MInst::UDiv { dst, lhs, rhs } => {
+            emit_divrem(asm, assignment, *dst, *lhs, *rhs, DivOp::Div)?;
+        }
+        MInst::URem { dst, lhs, rhs } => {
+            emit_divrem(asm, assignment, *dst, *lhs, *rhs, DivOp::Rem)?;
+        }
+
+        MInst::Return | MInst::ReturnError { .. } => {
             // Handled in the main emit loop (jumps to shared epilogue)
-            unreachable!("Return should be handled by the main emit loop");
+            unreachable!("Return/ReturnError should be handled by the main emit loop");
         }
     }
     Ok(())
@@ -636,6 +694,64 @@ fn emit_shift(
         }
         do_shift(asm, d)?;
     }
+    Ok(())
+}
+
+/// Division operation kind.
+enum DivOp {
+    Div, // quotient in RAX
+    Rem, // remainder in RDX
+}
+
+/// Emit unsigned division/remainder: `div r64`
+/// x86-64 `div r64`: RDX:RAX / operand → RAX = quotient, RDX = remainder.
+/// The caller (ISel) has already inserted a zero-division guard (Select).
+///
+/// Strategy: save/restore RAX and RDX as needed around the div instruction,
+/// similar to how emit_shift handles RCX for shifts.
+fn emit_divrem(
+    asm: &mut CodeAssembler,
+    assignment: &AssignmentMap,
+    dst: VReg,
+    lhs: VReg,
+    rhs: VReg,
+    op: DivOp,
+) -> Result<(), IcedError> {
+    let d = preg_to_reg64(resolve(assignment, dst));
+    let l = preg_to_reg64(resolve(assignment, lhs));
+    let r = preg_to_reg64(resolve(assignment, rhs));
+
+    // Result register: RAX for div, RDX for rem
+    let result_reg: AsmRegister64 = match op {
+        DivOp::Div => rax,
+        DivOp::Rem => rdx,
+    };
+
+    // The divisor cannot be RAX or RDX (they are clobbered by div).
+    // If rhs is in RAX or RDX, we need to move it elsewhere first.
+    // We use RCX as a scratch register for this case.
+    let effective_rhs = if r == rax || r == rdx {
+        asm.mov(rcx, r)?;
+        rcx
+    } else {
+        r
+    };
+
+    // Move lhs into RAX (the dividend low half)
+    if l != rax {
+        asm.mov(rax, l)?;
+    }
+    // Zero-extend dividend into RDX:RAX (unsigned division)
+    asm.xor(edx, edx)?;
+
+    // Perform unsigned division: RDX:RAX / effective_rhs
+    asm.div(effective_rhs)?;
+
+    // Move result to destination
+    if d != result_reg {
+        asm.mov(d, result_reg)?;
+    }
+
     Ok(())
 }
 

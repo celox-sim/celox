@@ -169,6 +169,25 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
             }
         }
 
+        // Process phi nodes: assign phi dst VRegs at block entry.
+        // Prefer the same register as one of the sources (for copy coalescing).
+        for phi in &block.phis {
+            let mut preferred: Option<PhysReg> = None;
+            for (_pred_id, src_vreg) in &phi.sources {
+                if let Some(preg) = result.get(*src_vreg) {
+                    if !active.contains_key(&preg) || active.get(&preg) == Some(&phi.dst) {
+                        preferred = Some(preg);
+                        break;
+                    }
+                }
+            }
+            let preg = preferred
+                .or_else(|| find_free_reg(&active, None))
+                .expect("no free register for phi dst");
+            active.insert(preg, phi.dst);
+            result.set(phi.dst, preg);
+        }
+
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             let uses = inst.uses();
             let constraints = use_constraints(inst);

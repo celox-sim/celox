@@ -96,6 +96,58 @@ pub fn lower_execution_unit(
         func.blocks.push(mblock);
     }
 
+    // Build phi nodes from SIR block params and predecessor terminators.
+    // For each SIR block with params, find all predecessors that pass args.
+    {
+        use std::collections::HashMap;
+        // Collect phi sources: target_block → [(pred_block, param_idx, arg_vreg)]
+        let mut phi_sources: HashMap<BlockId, Vec<(BlockId, usize, VReg)>> = HashMap::new();
+        for &sir_block_id in &block_ids {
+            let sir_block = &eu.blocks[&sir_block_id];
+            let pred_mir_id = BlockId(sir_block_id.0 as u32);
+            // Collect (target_sir_id, args) from terminator
+            let edges: Vec<(crate::ir::BlockId, &[RegisterId])> = match &sir_block.terminator {
+                SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
+                SIRTerminator::Branch { true_block, false_block, .. } => vec![
+                    (true_block.0, true_block.1.as_slice()),
+                    (false_block.0, false_block.1.as_slice()),
+                ],
+                _ => vec![],
+            };
+            for (target_sir_id, args) in edges {
+                if args.is_empty() {
+                    continue;
+                }
+                let target_mir_id = BlockId(target_sir_id.0 as u32);
+                for (i, arg_reg) in args.iter().enumerate() {
+                    let arg_vreg = reg_map.get(*arg_reg);
+                    phi_sources
+                        .entry(target_mir_id)
+                        .or_default()
+                        .push((pred_mir_id, i, arg_vreg));
+                }
+            }
+        }
+        // Build phi nodes on target blocks
+        for mblock in &mut func.blocks {
+            if let Some(sources) = phi_sources.remove(&mblock.id) {
+                let sir_block_id = crate::ir::BlockId(mblock.id.0 as usize);
+                let sir_block = &eu.blocks[&sir_block_id];
+                for (param_idx, param_reg) in sir_block.params.iter().enumerate() {
+                    let dst = reg_map.get(*param_reg);
+                    let phi_srcs: Vec<(BlockId, VReg)> = sources
+                        .iter()
+                        .filter(|(_, idx, _)| *idx == param_idx)
+                        .map(|(pred, _, vreg)| (*pred, *vreg))
+                        .collect();
+                    if !phi_srcs.is_empty() {
+                        mblock.phis.push(PhiNode { dst, sources: phi_srcs });
+                    }
+                }
+            }
+        }
+    }
+
     // Update spill_descs to match final vreg count
     while func.spill_descs.len() < func.vregs.count() as usize {
         func.spill_descs.push(SpillDesc::transient());
@@ -898,13 +950,43 @@ fn lower_instruction(
                         true_val: one,
                         false_val: rhs_vreg,
                     });
-                    // TODO: Div MIR instruction not yet defined, using Sub as placeholder
-                    // This needs a proper UDiv instruction in MInst
-                    let _ = (dst_vreg, lhs_vreg, safe_rhs);
-                    unimplemented!("div instruction not yet in MInst");
+                    block.push(MInst::UDiv {
+                        dst: dst_vreg,
+                        lhs: lhs_vreg,
+                        rhs: safe_rhs,
+                    });
                 }
                 BinaryOp::Rem => {
-                    unimplemented!("rem instruction not yet in MInst");
+                    // rem with zero guard: dst = rhs == 0 ? 0 : lhs % rhs
+                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                    block.push(MInst::LoadImm {
+                        dst: zero,
+                        value: 0,
+                    });
+                    let one = ctx.alloc_vreg(SpillDesc::remat(1));
+                    block.push(MInst::LoadImm {
+                        dst: one,
+                        value: 1,
+                    });
+                    let is_zero = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp {
+                        dst: is_zero,
+                        lhs: rhs_vreg,
+                        rhs: zero,
+                        kind: CmpKind::Eq,
+                    });
+                    let safe_rhs = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Select {
+                        dst: safe_rhs,
+                        cond: is_zero,
+                        true_val: one,
+                        false_val: rhs_vreg,
+                    });
+                    block.push(MInst::URem {
+                        dst: dst_vreg,
+                        lhs: lhs_vreg,
+                        rhs: safe_rhs,
+                    });
                 }
                 BinaryOp::LogicAnd => {
                     // dst = (lhs != 0) && (rhs != 0) ? 1 : 0
@@ -1054,10 +1136,36 @@ fn lower_instruction(
                 }
                 UnaryOp::Xor => {
                     // Reduction XOR: dst = popcount(src) & 1
-                    // TODO: proper popcount. For now, use a simple XOR fold?
-                    // This is correct but not optimal for wide values.
-                    // For ≤64 bit, we can use popcnt instruction later.
-                    unimplemented!("reduction XOR not yet supported in native backend");
+                    // XOR-fold the value down to 1 bit:
+                    // val ^= val >> 32; val ^= val >> 16; val ^= val >> 8;
+                    // val ^= val >> 4; val ^= val >> 2; val ^= val >> 1; val & 1
+                    let width = ctx.sir_width(src);
+                    let mut cur = src_vreg;
+
+                    // Fold progressively: for width ≤ N, skip shifts ≥ N
+                    for shift in [32u8, 16, 8, 4, 2, 1] {
+                        if width as u8 > shift {
+                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::ShrImm {
+                                dst: shifted,
+                                src: cur,
+                                imm: shift,
+                            });
+                            let folded = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Xor {
+                                dst: folded,
+                                lhs: cur,
+                                rhs: shifted,
+                            });
+                            cur = folded;
+                        }
+                    }
+                    // Extract bit 0
+                    block.push(MInst::AndImm {
+                        dst: dst_vreg,
+                        src: cur,
+                        imm: 1,
+                    });
                 }
             }
         }
@@ -1407,8 +1515,7 @@ fn lower_terminator(
 ) {
     match term {
         SIRTerminator::Jump(target, _args) => {
-            // Block arguments are handled via phi-like register mapping
-            // For now, ignore block args (they become mov's or are already handled)
+            // Block args are handled via phi nodes (built in a second pass).
             block.push(MInst::Jump {
                 target: BlockId(target.0 as u32),
             });
@@ -1428,9 +1535,8 @@ fn lower_terminator(
         SIRTerminator::Return => {
             block.push(MInst::Return);
         }
-        SIRTerminator::Error(_code) => {
-            // TODO: error handling
-            block.push(MInst::Return);
+        SIRTerminator::Error(code) => {
+            block.push(MInst::ReturnError { code: *code });
         }
     }
 }

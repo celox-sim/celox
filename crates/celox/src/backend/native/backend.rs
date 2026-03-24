@@ -253,10 +253,10 @@ impl NativeBackend {
     ) -> Result<(), SimulatorErrorCode> {
         let ptr = memory.as_mut_ptr() as *mut u8;
         let ret = unsafe { func(ptr) };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(SimulatorErrorCode::InternalError)
+        match ret {
+            0 => Ok(()),
+            1 => Err(SimulatorErrorCode::DetectedTrueLoop),
+            _ => Err(SimulatorErrorCode::InternalError),
         }
     }
 }

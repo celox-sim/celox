@@ -297,6 +297,12 @@ pub enum MInst {
         kind: CmpKind,
     },
 
+    // ── Division (uses RAX/RDX, handled at emit time) ────────
+    /// dst = lhs / rhs (unsigned)
+    UDiv { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = lhs % rhs (unsigned)
+    URem { dst: VReg, lhs: VReg, rhs: VReg },
+
     // ── Unary ──────────────────────────────────────────────────
     /// dst = ~src (bitwise NOT)
     BitNot { dst: VReg, src: VReg },
@@ -333,8 +339,10 @@ pub enum MInst {
     },
     /// Unconditional jump
     Jump { target: BlockId },
-    /// Return from function
+    /// Return from function (success, code 0)
     Return,
+    /// Return with error code (non-zero)
+    ReturnError { code: i64 },
 }
 
 impl fmt::Display for MInst {
@@ -377,6 +385,8 @@ impl fmt::Display for MInst {
             MInst::Shr { dst, lhs, rhs } => write!(f, "{dst} = shr {lhs}, {rhs}"),
             MInst::Shl { dst, lhs, rhs } => write!(f, "{dst} = shl {lhs}, {rhs}"),
             MInst::Sar { dst, lhs, rhs } => write!(f, "{dst} = sar {lhs}, {rhs}"),
+            MInst::UDiv { dst, lhs, rhs } => write!(f, "{dst} = udiv {lhs}, {rhs}"),
+            MInst::URem { dst, lhs, rhs } => write!(f, "{dst} = urem {lhs}, {rhs}"),
             MInst::AndImm { dst, src, imm } => write!(f, "{dst} = and {src}, {imm:#x}"),
             MInst::OrImm { dst, src, imm } => write!(f, "{dst} = or {src}, {imm:#x}"),
             MInst::ShrImm { dst, src, imm } => write!(f, "{dst} = shr {src}, {imm}"),
@@ -409,6 +419,7 @@ impl fmt::Display for MInst {
             } => write!(f, "br {cond}, {true_bb}, {false_bb}"),
             MInst::Jump { target } => write!(f, "jmp {target}"),
             MInst::Return => write!(f, "ret"),
+            MInst::ReturnError { code } => write!(f, "ret_error {code}"),
         }
     }
 }
@@ -437,6 +448,10 @@ impl fmt::Display for MFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for block in &self.blocks {
             writeln!(f, "{}:", block.id)?;
+            for phi in &block.phis {
+                let srcs: Vec<String> = phi.sources.iter().map(|(bid, v)| format!("{bid}: {v}")).collect();
+                writeln!(f, "  {} = phi({})", phi.dst, srcs.join(", "))?;
+            }
             for inst in &block.insts {
                 writeln!(f, "  {inst}")?;
             }
@@ -467,6 +482,8 @@ impl MInst {
             | MInst::ShrImm { dst, .. }
             | MInst::ShlImm { dst, .. }
             | MInst::Cmp { dst, .. }
+            | MInst::UDiv { dst, .. }
+            | MInst::URem { dst, .. }
             | MInst::BitNot { dst, .. }
             | MInst::Neg { dst, .. }
             | MInst::BitFieldInsert { dst, .. }
@@ -476,7 +493,8 @@ impl MInst {
             | MInst::StoreIndexed { .. }
             | MInst::Branch { .. }
             | MInst::Jump { .. }
-            | MInst::Return => None,
+            | MInst::Return
+            | MInst::ReturnError { .. } => None,
         }
     }
 
@@ -498,7 +516,9 @@ impl MInst {
             | MInst::Shr { lhs, rhs, .. }
             | MInst::Shl { lhs, rhs, .. }
             | MInst::Sar { lhs, rhs, .. } => vec![*lhs, *rhs],
-            MInst::Cmp { lhs, rhs, .. } => vec![*lhs, *rhs],
+            MInst::Cmp { lhs, rhs, .. }
+            | MInst::UDiv { lhs, rhs, .. }
+            | MInst::URem { lhs, rhs, .. } => vec![*lhs, *rhs],
             MInst::AndImm { src, .. }
             | MInst::OrImm { src, .. }
             | MInst::ShrImm { src, .. }
@@ -512,7 +532,7 @@ impl MInst {
                 ..
             } => vec![*cond, *true_val, *false_val],
             MInst::Branch { cond, .. } => vec![*cond],
-            MInst::Jump { .. } | MInst::Return => vec![],
+            MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => vec![],
         }
     }
 
@@ -520,7 +540,7 @@ impl MInst {
     pub fn is_terminator(&self) -> bool {
         matches!(
             self,
-            MInst::Branch { .. } | MInst::Jump { .. } | MInst::Return
+            MInst::Branch { .. } | MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. }
         )
     }
 }
@@ -529,11 +549,21 @@ impl MInst {
 // Basic block
 // ────────────────────────────────────────────────────────────────
 
+/// A phi node at block entry: `dst = phi(pred1: src1, pred2: src2, ...)`.
+/// Maintains SSA: each VReg has exactly one definition point.
+#[derive(Debug, Clone)]
+pub struct PhiNode {
+    pub dst: VReg,
+    pub sources: Vec<(BlockId, VReg)>,
+}
+
 /// A basic block containing a sequence of MIR instructions.
 /// The last instruction must be a terminator.
 #[derive(Debug, Clone)]
 pub struct MBlock {
     pub id: BlockId,
+    /// Phi nodes at block entry (SSA merge points).
+    pub phis: Vec<PhiNode>,
     pub insts: Vec<MInst>,
 }
 
@@ -541,6 +571,7 @@ impl MBlock {
     pub fn new(id: BlockId) -> Self {
         Self {
             id,
+            phis: Vec::new(),
             insts: Vec::new(),
         }
     }
