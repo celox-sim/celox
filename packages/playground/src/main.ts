@@ -244,8 +244,8 @@ function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
   const markers: monaco.editor.IMarkerData[] = [];
   // Match patterns like: ╭─[main.veryl:1:35]  or  ╭─[test.veryl:3:10]
   const locRe = /╭─\[(?:[\w./]+):(\d+):(\d+)\]/g;
-  // Match error descriptions like: × "a" can't be assigned because it is input
-  const msgRe = /[×✕]\s+(.+)/g;
+  // Match error/warning descriptions: × "..." or ⚠ "..."
+  const msgRe = /[×✕⚠]\s+(.+)/g;
 
   const messages: string[] = [];
   let m;
@@ -267,9 +267,9 @@ function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
   }
 
   // Fallback: if no location found but there's an error message
-  if (markers.length === 0 && errorMsg) {
+  if (markers.length === 0 && errorMsg.trim()) {
     // Try to extract a simpler message
-    const simple = errorMsg.match(/(?:Parse error|Unexpected token|Error):\s*(.+?)(?:\n|$)/);
+    const simple = errorMsg.match(/(?:Parse error|Unexpected token):\s*(.+?)(?:\n|$)/);
     if (simple) {
       markers.push({
         severity: monaco.MarkerSeverity.Error,
@@ -280,6 +280,7 @@ function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
         endColumn: 1,
       });
     }
+    // Don't add generic "Veryl error" — if we can't parse it, skip it
   }
 
   return markers;
