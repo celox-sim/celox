@@ -519,11 +519,19 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         }
     }
 
-    /// Compiles the Veryl source and constructs the core logic simulator.
-    pub fn build(self) -> Result<Simulator, SimulatorError> {
-        let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
-        let phase_start = phase_timing.then(crate::timing::now);
-
+    /// Compile SIR and return it along with the remaining builder state.
+    /// Consumes self.
+    fn into_sir(
+        self,
+    ) -> Result<
+        (
+            crate::ir::Program,
+            Vec<veryl_analyzer::AnalyzerError>,
+            SimulatorOptions,
+            Option<std::path::PathBuf>,
+        ),
+        SimulatorError,
+    > {
         let (mut program, warnings) = compile_to_sir(
             &self.sources,
             self.top,
@@ -539,10 +547,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.options.optimize_options,
         )?;
 
-        if let Some(s) = phase_start {
-            eprintln!("[phase-timing] compile_to_sir (total): {:?}", s.elapsed());
-        }
-
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             run_dead_store_elimination(
                 &mut program,
@@ -551,15 +555,35 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             );
         }
 
+        Ok((program, warnings, self.options, self.vcd_path))
+    }
+
+    /// Compiles the Veryl source and constructs the simulator.
+    /// Default backend is Cranelift.
+    pub fn build(self) -> Result<Simulator, SimulatorError> {
+        self.build_cranelift()
+    }
+
+    /// Compiles using the Cranelift JIT backend.
+    pub fn build_cranelift(self) -> Result<Simulator, SimulatorError> {
+        let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
+        let phase_start = phase_timing.then(crate::timing::now);
+
+        let (program, warnings, options, vcd_path) = self.into_sir()?;
+
+        if let Some(s) = phase_start {
+            eprintln!("[phase-timing] compile_to_sir (total): {:?}", s.elapsed());
+        }
+
         let jit_start = phase_timing.then(crate::timing::now);
-        let backend = JitBackend::new(&program, &self.options, None)?;
+        let backend = JitBackend::new(&program, &options, None)?;
         if let Some(s) = jit_start {
             eprintln!("[phase-timing] jit_backend: {:?}", s.elapsed());
         }
 
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
-        if let Some(path) = self.vcd_path {
-            let descs = sim.build_vcd_descs(self.options.four_state);
+        if let Some(path) = vcd_path {
+            let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
             sim.vcd_writer = Some(vcd_writer);
@@ -568,34 +592,12 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         Ok(sim)
     }
 
-    /// Compiles using the native x86-64 backend instead of Cranelift.
+    /// Compiles using the native x86-64 backend.
     pub fn build_native(
         self,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-        let (mut program, warnings) = compile_to_sir(
-            &self.sources,
-            self.top,
-            &self.ignored_loops,
-            &self.true_loops,
-            self.options.four_state,
-            &self.options.trace,
-            None,
-            self.metadata,
-            self.clock_type,
-            self.reset_type,
-            &self.param_overrides,
-            &self.options.optimize_options,
-        )?;
-
-        if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(
-                &mut program,
-                &self.live_signals,
-                self.options.dead_store_policy,
-            );
-        }
-
-        let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
+        let (program, warnings, options, _vcd_path) = self.into_sir()?;
+        let backend = crate::backend::native::NativeBackend::new(&program, &options)?;
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
         Ok(sim)
