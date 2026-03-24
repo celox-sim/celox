@@ -60,6 +60,16 @@ jobs:
         env:
           PLAYGROUND_BASE: /celox/playground/
 
+      # Monaco editor plugin outputs workers under {base}/monacoeditorwork/ inside dist,
+      # creating a nested celox/playground/ subdirectory. Flatten it so the files sit at
+      # dist/monacoeditorwork/ (which maps to /celox/playground/monacoeditorwork/ after deploy).
+      - name: Flatten Monaco worker path in dist
+        run: |
+          if [ -d packages/playground/dist/celox/playground/monacoeditorwork ]; then
+            mv packages/playground/dist/celox/playground/monacoeditorwork packages/playground/dist/
+            rm -rf packages/playground/dist/celox
+          fi
+
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
