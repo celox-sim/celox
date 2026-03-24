@@ -226,19 +226,39 @@ declare function log(msg: any): void;
   currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(dts, "celox-sim.d.ts");
 }
 
-// Update types when Veryl source changes
+// Extract port names from Veryl source with regex (works without WASM)
+function extractPortsFromSource(source: string): Record<string, { direction: string; width: number }> {
+  const ports: Record<string, { direction: string; width: number }> = {};
+  // Match: name: input/output logic<N> or clock/reset
+  const portRe = /(\w+)\s*:\s*(input|output|inout)\s+(?:'[_a-zA-Z]*\s+)?(logic|bit|clock|reset)(?:<(\d+)>)?/g;
+  let m;
+  while ((m = portRe.exec(source)) !== null) {
+    ports[m[1]] = { direction: m[2], width: m[4] ? parseInt(m[4]) : 1 };
+  }
+  return ports;
+}
+
+// Update types when Veryl source changes (works before WASM loads)
 let updateTimer: ReturnType<typeof setTimeout>;
 function onVerylChange() {
   clearTimeout(updateTimer);
   updateTimer = setTimeout(() => {
-    if (!celox) return;
-    try {
-      const result = JSON.parse(celox.genTsFromSource([{ content: verylEditor.getValue(), path: "main.veryl" }]));
-      if (result.modules?.[0]?.ports) {
-        updateDutTypes(result.modules[0].ports);
-      }
-    } catch {}
-  }, 500);
+    // Try WASM-based analysis first (more accurate)
+    if (celox) {
+      try {
+        const result = JSON.parse(celox.genTsFromSource([{ content: verylEditor.getValue(), path: "main.veryl" }]));
+        if (result.modules?.[0]?.ports) {
+          updateDutTypes(result.modules[0].ports);
+          return;
+        }
+      } catch {}
+    }
+    // Fallback: regex-based port extraction (no WASM needed)
+    const ports = extractPortsFromSource(verylEditor.getValue());
+    if (Object.keys(ports).length > 0) {
+      updateDutTypes(ports);
+    }
+  }, 300);
 }
 verylEditor.onDidChangeModelContent(onVerylChange);
 
@@ -357,4 +377,5 @@ runBtn.addEventListener("click", run);
 document.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !runBtn.disabled) run(); });
 
 loadExample("adder");
+onVerylChange(); // Inject types immediately from regex (no WASM needed)
 init();
