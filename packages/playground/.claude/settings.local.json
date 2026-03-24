@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:cfallin.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:pp.ipd.kit.edu)",
+      "WebFetch(domain:ssw.jku.at)",
+      "WebFetch(domain:www.themoonlight.io)",
+      "WebFetch(domain:who.rocq.inria.fr)",
+      "WebFetch(domain:blog.llvm.org)"
+    ]
+  }
+}

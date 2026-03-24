@@ -55,12 +55,6 @@ jobs:
       - name: Build NAPI WASM
         run: pnpm --filter @celox-sim/celox-napi exec napi build --platform --target wasm32-wasip1-threads --manifest-path ../../Cargo.toml -p celox-napi
 
-      - name: Copy WASM artifacts to playground public
-        run: |
-          cp crates/celox-napi/celox.wasi-browser.js packages/playground/public/
-          cp crates/celox-napi/celox.wasm32-wasi.wasm packages/playground/public/
-          cp crates/celox-napi/wasi-worker-browser.mjs packages/playground/public/
-
       - name: Build Playground
         run: pnpm --filter @celox-sim/playground build
         env:
