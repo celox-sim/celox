@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:wasm": "NAPI_RS_FORCE_WASI=1 vitest run --config vitest.wasm.config.ts"
@@ -21,6 +23,7 @@
   },
   "dependencies": {
     "@vitest/expect": "^4.1.1",
-    "@vitest/runner": "^4.1.1"
+    "@vitest/runner": "^4.1.1",
+    "coi-serviceworker": "^0.1.7"
   }
 }

@@ -1,0 +1,68 @@
+name: Deploy Playground
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "packages/playground/**"
+      - "packages/celox/dist/**"
+      - "crates/celox-napi/**"
+      - ".github/workflows/playground.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1-threads
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build NAPI (native, for TS package build)
+        run: pnpm build:napi
+
+      - name: Build TS package
+        run: pnpm --filter @celox-sim/celox build
+
+      - name: Build NAPI WASM
+        run: pnpm --filter @celox-sim/celox-napi exec napi build --platform --target wasm32-wasip1-threads --manifest-path ../../Cargo.toml -p celox-napi
+
+      - name: Copy WASM artifacts to playground public
+        run: |
+          cp crates/celox-napi/celox.wasi-browser.js packages/playground/public/
+          cp crates/celox-napi/celox.wasm32-wasi.wasm packages/playground/public/
+          cp crates/celox-napi/wasi-worker-browser.mjs packages/playground/public/
+
+      - name: Build Playground
+        run: pnpm --filter @celox-sim/playground build
+        env:
+          PLAYGROUND_BASE: /celox/playground/
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: packages/playground/dist
+          destination_dir: playground
+          keep_files: false

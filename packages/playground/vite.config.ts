@@ -19,10 +19,15 @@ function crossOriginIsolation(): Plugin {
 }
 
 export default defineConfig({
+  base: process.env.PLAYGROUND_BASE ?? "/",
   plugins: [
     crossOriginIsolation(),
     monacoPlugin({
       languageWorkers: ["editorWorkerService", "typescript"],
     }),
   ],
+  build: {
+    target: "esnext",
+    outDir: "dist",
+  },
 });

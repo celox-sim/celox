@@ -1,5 +1,9 @@
 # Getting Started
 
+::: tip Try without installing
+Want to try Celox before setting up a project? The [Celox Playground](https://celox-sim.github.io/celox/playground/) runs entirely in the browser.
+:::
+
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) (v18+)
@@ -146,5 +150,6 @@ npm test
 
 ## Next Steps
 
+- [Playground](https://celox-sim.github.io/celox/playground/) -- Try Celox in the browser.
 - [Writing Tests](./writing-tests.md) -- Event-based and time-based simulation patterns.
 - [Introduction](./introduction.md) -- Architecture overview.

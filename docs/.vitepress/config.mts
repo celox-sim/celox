@@ -23,6 +23,10 @@ export default defineConfig({
           { text: "内部構造", link: "/internals/architecture" },
           { text: "ベンチマーク", link: "/ja/benchmarks/" },
           {
+            text: "Playground",
+            link: "https://celox-sim.github.io/celox/playground/",
+          },
+          {
             text: "GitHub",
             link: "https://github.com/celox-sim/celox",
           },
@@ -92,6 +96,10 @@ export default defineConfig({
       { text: "API", link: "/api/" },
       { text: "Internals", link: "/internals/architecture" },
       { text: "Benchmarks", link: "/benchmarks/" },
+      {
+        text: "Playground",
+        link: "https://celox-sim.github.io/celox/playground/",
+      },
       {
         text: "GitHub",
         link: "https://github.com/celox-sim/celox",

@@ -2,6 +2,10 @@
 
 Celox is a JIT (Just-In-Time) simulator for [Veryl HDL](https://veryl-lang.org/). It compiles Veryl designs using [Cranelift](https://cranelift.dev/) to produce native machine code, enabling high-speed RTL simulation.
 
+::: tip Try it in your browser
+The [Celox Playground](https://celox-sim.github.io/celox/playground/) lets you write Veryl modules and run simulations directly in the browser -- no installation required.
+:::
+
 ## Key Features
 
 - **JIT Compilation** -- Veryl designs are compiled through a multi-stage pipeline (Veryl &rarr; SLT &rarr; SIR &rarr; native code) for near-native execution speed.
