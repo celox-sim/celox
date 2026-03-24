@@ -55,7 +55,6 @@ describe("Adder", () => {
         const sim = Simulator.create(Adder);
         sim.dut.a = 100n;
         sim.dut.b = 200n;
-        sim.tick();
         expect(sim.dut.sum).toBe(300n);
         sim.dispose();
     });
@@ -64,7 +63,6 @@ describe("Adder", () => {
         const sim = Simulator.create(Adder);
         sim.dut.a = 0xFFFFn;
         sim.dut.b = 1n;
-        sim.tick();
         expect(sim.dut.sum).toBe(0x10000n);
         sim.dispose();
     });
@@ -1130,6 +1128,11 @@ async function run() {
 				get(_, prop: string) {
 					const sig = layout[prop];
 					if (!sig) return undefined;
+					// Lazy evalComb on output reads (matches real Simulator DUT behavior)
+					if (dirty && sig.direction !== "input") {
+						(combInst.exports.run as Function)();
+						dirty = false;
+					}
 					let v = 0n;
 					for (let i = sig.byte_size - 1; i >= 0; i--)
 						v = (v << 8n) | BigInt(view.getUint8(sig.offset + i));
@@ -1373,11 +1376,16 @@ async function run() {
 				return currentTime;
 			}
 
-			// DUT proxy
+			// DUT proxy with lazy evalComb on output reads
+			let simDirty = false;
 			const dut = new Proxy({} as Record<string, bigint>, {
 				get(_, prop: string) {
 					const sig = layout[prop];
 					if (!sig) return undefined;
+					if (simDirty && sig.direction !== "input") {
+						(combInst.exports.run as Function)();
+						simDirty = false;
+					}
 					let v = 0n;
 					for (let i = sig.byte_size - 1; i >= 0; i--)
 						v = (v << 8n) | BigInt(view.getUint8(sig.offset + i));
@@ -1392,6 +1400,7 @@ async function run() {
 						view.setUint8(sig.offset + i, Number(v & 0xffn));
 						v >>= 8n;
 					}
+					simDirty = true;
 					return true;
 				},
 			});
