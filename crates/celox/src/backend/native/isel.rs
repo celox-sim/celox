@@ -858,11 +858,31 @@ fn lower_instruction(
                         });
                     }
                 }
-                BinaryOp::Sar => block.push(MInst::Sar {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                }),
+                BinaryOp::Sar => {
+                    // Arithmetic shift right: sign-extend lhs to 64 bits, shift, mask result.
+                    let width = ctx.sir_width(lhs);
+                    if width < 64 {
+                        let sext_shift = (64 - width) as u8;
+                        let shifted_up = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShlImm { dst: shifted_up, src: lhs_vreg, imm: sext_shift });
+                        let sext_shift_vreg = ctx.alloc_vreg(SpillDesc::remat(sext_shift as u64));
+                        block.push(MInst::LoadImm { dst: sext_shift_vreg, value: sext_shift as u64 });
+                        let sign_extended = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Sar { dst: sign_extended, lhs: shifted_up, rhs: sext_shift_vreg });
+                        // Now do the actual shift
+                        let sar_result = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Sar { dst: sar_result, lhs: sign_extended, rhs: rhs_vreg });
+                        // Mask to output width
+                        let mask = (1u64 << width) - 1;
+                        block.push(MInst::AndImm { dst: dst_vreg, src: sar_result, imm: mask });
+                    } else {
+                        block.push(MInst::Sar {
+                            dst: dst_vreg,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                        });
+                    }
+                }
                 BinaryOp::Eq => block.push(MInst::Cmp {
                     dst: dst_vreg,
                     lhs: lhs_vreg,
@@ -881,48 +901,60 @@ fn lower_instruction(
                     rhs: rhs_vreg,
                     kind: CmpKind::LtU,
                 }),
-                BinaryOp::LtS => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::LtS,
-                }),
+                BinaryOp::LtS => {
+                    let (sl, sr) = sign_extend_pair(ctx, block, lhs, rhs, lhs_vreg, rhs_vreg);
+                    block.push(MInst::Cmp {
+                        dst: dst_vreg,
+                        lhs: sl,
+                        rhs: sr,
+                        kind: CmpKind::LtS,
+                    });
+                }
                 BinaryOp::LeU => block.push(MInst::Cmp {
                     dst: dst_vreg,
                     lhs: lhs_vreg,
                     rhs: rhs_vreg,
                     kind: CmpKind::LeU,
                 }),
-                BinaryOp::LeS => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::LeS,
-                }),
+                BinaryOp::LeS => {
+                    let (sl, sr) = sign_extend_pair(ctx, block, lhs, rhs, lhs_vreg, rhs_vreg);
+                    block.push(MInst::Cmp {
+                        dst: dst_vreg,
+                        lhs: sl,
+                        rhs: sr,
+                        kind: CmpKind::LeS,
+                    });
+                }
                 BinaryOp::GtU => block.push(MInst::Cmp {
                     dst: dst_vreg,
                     lhs: lhs_vreg,
                     rhs: rhs_vreg,
                     kind: CmpKind::GtU,
                 }),
-                BinaryOp::GtS => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::GtS,
-                }),
+                BinaryOp::GtS => {
+                    let (sl, sr) = sign_extend_pair(ctx, block, lhs, rhs, lhs_vreg, rhs_vreg);
+                    block.push(MInst::Cmp {
+                        dst: dst_vreg,
+                        lhs: sl,
+                        rhs: sr,
+                        kind: CmpKind::GtS,
+                    });
+                }
                 BinaryOp::GeU => block.push(MInst::Cmp {
                     dst: dst_vreg,
                     lhs: lhs_vreg,
                     rhs: rhs_vreg,
                     kind: CmpKind::GeU,
                 }),
-                BinaryOp::GeS => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::GeS,
-                }),
+                BinaryOp::GeS => {
+                    let (sl, sr) = sign_extend_pair(ctx, block, lhs, rhs, lhs_vreg, rhs_vreg);
+                    block.push(MInst::Cmp {
+                        dst: dst_vreg,
+                        lhs: sl,
+                        rhs: sr,
+                        kind: CmpKind::GeS,
+                    });
+                }
                 BinaryOp::Div => {
                     // div with zero guard: dst = rhs == 0 ? 0 : lhs / rhs
                     let zero = ctx.alloc_vreg(SpillDesc::remat(0));
@@ -1506,6 +1538,42 @@ fn lower_wide_extract(
         block.push(MInst::LoadImm { dst: zero, value: 0 });
         block.push(MInst::Mov { dst: dst_vreg, src: zero });
     }
+}
+
+/// Sign-extend a pair of operands for signed comparison.
+/// For widths < 64, shifts left then arithmetic-shifts right to propagate the sign bit.
+fn sign_extend_pair(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    lhs_sir: &RegisterId,
+    rhs_sir: &RegisterId,
+    lhs_vreg: VReg,
+    rhs_vreg: VReg,
+) -> (VReg, VReg) {
+    let lw = ctx.sir_width(lhs_sir);
+    let rw = ctx.sir_width(rhs_sir);
+    let width = lw.max(rw);
+
+    if width >= 64 {
+        return (lhs_vreg, rhs_vreg);
+    }
+
+    let shift = (64 - width) as u8;
+
+    let sign_extend_with_imm = |ctx: &mut ISelContext, block: &mut MBlock, src: VReg| -> VReg {
+        let shifted_up = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShlImm { dst: shifted_up, src, imm: shift });
+        // Need arithmetic shift right by `shift`. No SarImm, use Sar with constant.
+        let shift_vreg = ctx.alloc_vreg(SpillDesc::remat(shift as u64));
+        block.push(MInst::LoadImm { dst: shift_vreg, value: shift as u64 });
+        let sign_extended = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Sar { dst: sign_extended, lhs: shifted_up, rhs: shift_vreg });
+        sign_extended
+    };
+
+    let sl = sign_extend_with_imm(ctx, block, lhs_vreg);
+    let sr = sign_extend_with_imm(ctx, block, rhs_vreg);
+    (sl, sr)
 }
 
 fn lower_terminator(
