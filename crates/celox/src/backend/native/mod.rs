@@ -9,4 +9,4 @@ pub mod jit_mem;
 pub mod mir;
 pub mod regalloc;
 
-pub use backend::NativeBackend;
+pub use backend::{NativeBackend, SharedNativeCode};

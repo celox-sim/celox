@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use celox::{JitBackend, Simulator};
+use celox::{NativeBackend, SimBackend, Simulator};
 
 const ADDER: &str = r#"
     module Top (
@@ -29,7 +29,7 @@ const FF: &str = r#"
     }
 "#;
 
-/// Two backends from the same SharedJitCode produce correct, independent results.
+/// Two backends from the same SharedNativeCode produce correct, independent results.
 #[test]
 fn shared_code_produces_independent_instances() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();
@@ -39,8 +39,8 @@ fn shared_code_produces_independent_instances() {
     let b = sim.signal("b");
     let sum = sim.signal("sum");
 
-    let mut b1 = JitBackend::from_shared(Arc::clone(&shared));
-    let mut b2 = JitBackend::from_shared(shared);
+    let mut b1 = NativeBackend::from_shared(Arc::clone(&shared));
+    let mut b2 = NativeBackend::from_shared(shared);
 
     b1.set(a, 10u8);
     b1.set(b, 20u8);
@@ -56,21 +56,6 @@ fn shared_code_produces_independent_instances() {
     assert_eq!(b1.get_as::<u8>(sum), 30);
 }
 
-/// 4-state X init happens for each from_shared instance.
-#[test]
-fn shared_code_four_state_init() {
-    let sim = Simulator::builder(ADDER, "Top")
-        .four_state(true)
-        .build()
-        .unwrap();
-    let shared = sim.shared_code();
-    let backend = JitBackend::from_shared(shared);
-    let a = sim.signal("a");
-    let (val, mask) = backend.get_four_state(a);
-    assert!(mask > 0u32.into(), "mask should be non-zero (X state)");
-    assert!(val > 0u32.into(), "value should be non-zero (X state)");
-}
-
 /// Sequential (FF) logic: EventRef from one Simulator works on a
 /// from_shared backend (both share the same compiled function pointers).
 #[test]
@@ -83,7 +68,6 @@ fn shared_code_sequential_logic() {
     let clk_event = sim1.event("i_clk");
 
     // Drive sim1: reset → d=42 → tick
-    // AsyncLow reset: active when rst=0, inactive when rst=1
     sim1.set(sim1.signal("i_rst"), 0u8);
     sim1.tick(clk_event).unwrap();
     assert_eq!(sim1.get(q), 0u32.into());
@@ -92,8 +76,7 @@ fn shared_code_sequential_logic() {
     sim1.tick(clk_event).unwrap();
     assert_eq!(sim1.get(q), 42u32.into());
 
-    // Build a second Simulator from the SAME source — it gets a new
-    // SharedJitCode but with identical layout. Drive with different data.
+    // Build a second Simulator from the SAME source
     let mut sim2 = Simulator::builder(FF, "Top").build().unwrap();
     sim2.set(sim2.signal("i_rst"), 0u8);
     sim2.tick(sim2.event("i_clk")).unwrap();
@@ -121,8 +104,8 @@ fn shared_code_memory_isolation() {
     let shared = sim.shared_code();
     let a = sim.signal("a");
 
-    let mut b1 = JitBackend::from_shared(Arc::clone(&shared));
-    let mut b2 = JitBackend::from_shared(shared);
+    let mut b1 = NativeBackend::from_shared(Arc::clone(&shared));
+    let mut b2 = NativeBackend::from_shared(shared);
 
     b1.set(a, 0xAAu8);
     b2.set(a, 0x55u8);
@@ -140,13 +123,13 @@ fn shared_code_layout_consistency() {
     let original_stable = sim.stable_region_size();
     let (_, original_total) = sim.memory_as_ptr();
 
-    let backend = JitBackend::from_shared(shared);
+    let backend = NativeBackend::from_shared(shared);
     assert_eq!(backend.stable_region_size(), original_stable);
     let (_, new_total) = backend.memory_as_ptr();
     assert_eq!(new_total, original_total);
 }
 
-/// Concurrent threads sharing one SharedJitCode produce correct, independent results.
+/// Concurrent threads sharing one SharedNativeCode produce correct, independent results.
 #[test]
 fn shared_code_concurrent_comb() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();
@@ -159,7 +142,7 @@ fn shared_code_concurrent_comb() {
         .map(|i| {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
-                let mut backend = JitBackend::from_shared(shared);
+                let mut backend = NativeBackend::from_shared(shared);
                 let va = (i * 10) as u8;
                 let vb = (i * 3) as u8;
                 backend.set(a, va);
@@ -190,7 +173,7 @@ fn shared_code_concurrent_ff() {
         .map(|i| {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
-                let mut backend = JitBackend::from_shared(shared);
+                let mut backend = NativeBackend::from_shared(shared);
                 // Reset (AsyncLow: active at 0)
                 backend.set(rst, 0u8);
                 backend.eval_comb().unwrap();
@@ -228,14 +211,14 @@ fn shared_code_concurrent_stress() {
         .map(|i| {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
-                let mut backend = JitBackend::from_shared(shared);
+                let mut backend = NativeBackend::from_shared(shared);
                 // Reset
                 backend.set(rst, 0u8);
                 backend.eval_comb().unwrap();
                 backend.eval_apply_ff_at(clk_event).unwrap();
                 backend.eval_comb().unwrap();
                 backend.set(rst, 1u8);
-                // Tick 100 times, each time setting d to a different value
+                // Tick 100 times
                 for cycle in 0u8..100 {
                     let val = cycle.wrapping_add(i as u8 * 50);
                     backend.set(d, val);

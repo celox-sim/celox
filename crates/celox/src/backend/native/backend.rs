@@ -54,7 +54,10 @@ impl super::super::EventHandle for NativeEventRef {
 // Shared compiled code
 // ────────────────────────────────────────────────────────────────
 
-struct CompiledCode {
+/// Shared compiled code for the native backend.
+/// Can be cloned (via Arc) to create multiple simulator instances
+/// that share the same compiled machine code.
+pub struct SharedNativeCode {
     comb_func: NativeSimFunc,
     /// Keep JitCode alive so the mmap regions remain valid.
     _jit_codes: Vec<jit_mem::JitCode>,
@@ -65,11 +68,19 @@ struct CompiledCode {
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventRef>,
     layout: MemoryLayout,
+    options: SimulatorOptions,
 }
 
 // Safety: JitCode contains Mmap which is Send+Sync after creation.
-unsafe impl Send for CompiledCode {}
-unsafe impl Sync for CompiledCode {}
+unsafe impl Send for SharedNativeCode {}
+unsafe impl Sync for SharedNativeCode {}
+
+impl SharedNativeCode {
+    /// Returns a reference to the memory layout.
+    pub fn layout(&self) -> &MemoryLayout {
+        &self.layout
+    }
+}
 
 // ────────────────────────────────────────────────────────────────
 // Compilation
@@ -107,8 +118,8 @@ fn compile_units(
 
 fn compile_program(
     sir: &Program,
-    _options: &SimulatorOptions,
-) -> Result<CompiledCode, SimulatorError> {
+    options: &SimulatorOptions,
+) -> Result<SharedNativeCode, SimulatorError> {
     let layout = MemoryLayout::build(sir, false); // TODO: four_state support
     let mut all_jit_codes: Vec<jit_mem::JitCode> = Vec::new();
 
@@ -171,7 +182,7 @@ fn compile_program(
         &mut next_id, &mut id_to_addr, &mut id_to_event,
     )?;
 
-    Ok(CompiledCode {
+    Ok(SharedNativeCode {
         comb_func,
         _jit_codes: all_jit_codes,
         event_map,
@@ -180,6 +191,7 @@ fn compile_program(
         id_to_addr,
         id_to_event,
         layout,
+        options: options.clone(),
     })
 }
 
@@ -188,7 +200,7 @@ fn compile_program(
 // ────────────────────────────────────────────────────────────────
 
 pub struct NativeBackend {
-    compiled: Arc<CompiledCode>,
+    compiled: Arc<SharedNativeCode>,
     memory: Vec<u64>,
 }
 
@@ -197,11 +209,22 @@ impl NativeBackend {
         sir: &Program,
         options: &SimulatorOptions,
     ) -> Result<Self, SimulatorError> {
-        let compiled = Arc::new(compile_program(sir, options)?);
+        let shared = Arc::new(compile_program(sir, options)?);
+        Ok(Self::from_shared(shared))
+    }
+
+    /// Create a new backend instance from shared compiled code.
+    /// Each instance gets its own simulation state memory.
+    pub fn from_shared(shared: Arc<SharedNativeCode>) -> Self {
         let mem_size_words =
-            (compiled.layout.merged_total_size + compiled.layout.triggered_bits_total_size + 7) / 8;
+            (shared.layout.merged_total_size + shared.layout.triggered_bits_total_size + 7) / 8;
         let memory = vec![0u64; mem_size_words + 1]; // +1 for safety
-        Ok(Self { compiled, memory })
+        Self { compiled: shared, memory }
+    }
+
+    /// Get the shared compiled code handle.
+    pub fn shared_code(&self) -> Arc<SharedNativeCode> {
+        Arc::clone(&self.compiled)
     }
 
     fn mem_ptr(&self) -> *const u8 {

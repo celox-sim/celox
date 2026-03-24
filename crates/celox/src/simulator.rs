@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::{
     IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
+    backend::native::{NativeBackend, SharedNativeCode},
     ir::{InstancePath, Program, SignalRef, VariableInfo},
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -500,6 +501,28 @@ impl Simulator<JitBackend> {
 
     /// Consume the simulator and return the inner JIT backend.
     pub fn into_backend(self) -> JitBackend {
+        self.backend
+    }
+}
+
+impl Simulator<NativeBackend> {
+    /// Returns the shared compiled native code, allowing it to be reused
+    /// for creating additional simulator instances without recompilation.
+    pub fn shared_code(&self) -> Arc<SharedNativeCode> {
+        self.backend.shared_code()
+    }
+
+    /// Create a simulator from pre-compiled shared native code.
+    pub fn from_shared(
+        shared: Arc<SharedNativeCode>,
+        program: crate::ir::Program,
+    ) -> Self {
+        let backend = NativeBackend::from_shared(shared);
+        Self::with_backend_and_program(backend, program, vec![])
+    }
+
+    /// Consume the simulator and return the inner native backend.
+    pub fn into_backend(self) -> NativeBackend {
         self.backend
     }
 }

@@ -59,7 +59,7 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
             }
 
             if is_clk {
-                fields.extend(quote! { pub #port_ident: celox::EventRef, });
+                fields.extend(quote! { pub #port_ident: celox::NativeEventRef, });
                 init_ports.extend(quote! { #port_ident: sim.event(#name), });
                 continue; // Do not generate read/write accessors for clk
             } else {

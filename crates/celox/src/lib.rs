@@ -23,7 +23,7 @@ pub use vcd::{VcdSignalDesc, VcdWriter};
 pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub struct IOContext<'a, B: backend::SimBackend = backend::JitBackend> {
+pub struct IOContext<'a, B: backend::SimBackend = backend::native::NativeBackend> {
     pub(crate) backend: &'a mut B,
 }
 
@@ -62,7 +62,8 @@ pub mod native_backend {
     pub use crate::backend::native::*;
 }
 #[cfg(not(target_arch = "wasm32"))]
-pub use backend::native::NativeBackend;
+pub use backend::native::{NativeBackend, SharedNativeCode};
+pub use backend::native::backend::NativeEventRef;
 pub use num_bigint::BigUint;
 #[cfg(not(target_arch = "wasm32"))]
 pub use optimizer::CraneliftOptLevel;
