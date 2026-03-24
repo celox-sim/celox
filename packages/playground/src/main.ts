@@ -206,8 +206,13 @@ const verylEditor = monaco.editor.create(document.getElementById("veryl-editor")
 monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
   target: monaco.languages.typescript.ScriptTarget.ESNext,
   moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+  allowArbitraryExtensions: true,
   strict: false,
   noEmit: true,
+});
+monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+  // Don't flag unresolved modules as errors — we handle imports at runtime
+  diagnosticsOptions: { noSemanticValidation: false, noSyntaxValidation: false },
 });
 
 const tbModel = monaco.editor.createModel("", "typescript", monaco.Uri.parse("file:///testbench.ts"));
@@ -259,10 +264,30 @@ ${portEntries}
   export const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
 }
 
+declare module "file:///${moduleName}.veryl" {
+  import type { ModuleDefinition } from "@celox-sim/celox";
+  interface ${moduleName}Ports {
+${portEntries}
+  }
+  export const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
+}
+
 declare function log(msg: any): void;
 declare function expect(actual: any): { toBe(expected: any): void; toBeGreaterThan(expected: any): void; };
 `;
   currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(dts, "file:///celox-sim.d.ts");
+
+  // Also register the .veryl module as a virtual file so TS can resolve the import
+  const verylModuleDts = `
+import type { ModuleDefinition } from "@celox-sim/celox";
+interface ${moduleName}Ports {
+${portEntries}
+}
+export declare const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
+`;
+  // Register under multiple paths to ensure resolution works
+  monaco.languages.typescript.typescriptDefaults.addExtraLib(verylModuleDts, `file:///${moduleName}.veryl`);
+  monaco.languages.typescript.typescriptDefaults.addExtraLib(verylModuleDts, `file:///${moduleName}.d.veryl.ts`);
 }
 
 // Extract port names from Veryl source with regex (works without WASM)
