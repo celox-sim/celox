@@ -853,3 +853,78 @@ fn emit_and_imm64(
     }
     Ok(())
 }
+
+// ────────────────────────────────────────────────────────────────
+// Multi-EU chained emission
+// ────────────────────────────────────────────────────────────────
+
+/// Compile multiple EUs into a single JIT function.
+///
+/// Each EU is independently compiled (ISel + regalloc + emit) producing
+/// a self-contained function. We then concatenate their machine code,
+/// patching each EU's `ret` instruction to jump to the next EU's entry.
+/// Only the last EU actually returns to the caller.
+///
+/// Each EU has its own prologue/epilogue (callee-saved register save/restore,
+/// R15 setup, stack frame allocation). This is slightly redundant but correct
+/// and simple — the overhead is just a few pushes/pops between EUs.
+pub fn emit_chained_eus(
+    units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &crate::backend::MemoryLayout,
+) -> Result<Vec<u8>, IcedError> {
+    use super::{isel, regalloc};
+
+    // Compile each EU independently
+    let mut eu_codes: Vec<Vec<u8>> = Vec::new();
+    for eu in units {
+        let mut mfunc = isel::lower_execution_unit(eu, layout);
+        let ra = regalloc::run_regalloc(&mut mfunc);
+        let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
+        eu_codes.push(result.code);
+    }
+
+    // Concatenate code segments, patching `ret` in all but the last EU.
+    // Each EU's epilogue ends with `ret` (0xC3). We find the last `ret`
+    // in each non-final EU and replace it with a `jmp rel32` to the next EU.
+    //
+    // Note: `ret` = 1 byte (0xC3), `jmp rel32` = 5 bytes. We need to
+    // expand the code to make room. Simplest: pad each non-final EU with
+    // 4 extra bytes (nops) before the ret, then overwrite ret+nops with jmp.
+    //
+    // Actually, even simpler: assemble all EUs, concatenate, then patch.
+    // Since ret is the very last byte, we can replace it with a 2-byte
+    // `jmp short` (0xEB, offset) if the next EU starts within 127 bytes,
+    // or use a 5-byte `jmp near` by inserting padding.
+
+    // Strategy: for non-final EUs, replace the trailing `ret` with 5-byte
+    // jmp near. To do this, we replace the `ret` (1 byte) with a jmp (5 bytes),
+    // which means we need 4 extra bytes. We pad with nops before concatenating.
+    let mut combined: Vec<u8> = Vec::new();
+    let mut eu_offsets: Vec<usize> = Vec::new();
+
+    for (i, code) in eu_codes.iter().enumerate() {
+        eu_offsets.push(combined.len());
+        if i < eu_codes.len() - 1 {
+            // Non-final EU: append code without the trailing ret,
+            // then append 5 bytes placeholder for jmp
+            assert_eq!(*code.last().unwrap(), 0xC3, "EU code should end with ret");
+            combined.extend_from_slice(&code[..code.len() - 1]);
+            // Placeholder for jmp rel32 (will be patched below)
+            combined.extend_from_slice(&[0xE9, 0x00, 0x00, 0x00, 0x00]);
+        } else {
+            // Final EU: keep as-is (including ret)
+            combined.extend_from_slice(code);
+        }
+    }
+
+    // Patch jmp targets
+    for i in 0..(eu_codes.len() - 1) {
+        let jmp_offset = eu_offsets[i] + eu_codes[i].len() - 1; // position of the jmp opcode
+        let next_eu_offset = eu_offsets[i + 1];
+        let rel = (next_eu_offset as i64) - (jmp_offset as i64 + 5); // relative to end of jmp
+        combined[jmp_offset] = 0xE9; // jmp near rel32
+        combined[jmp_offset + 1..jmp_offset + 5].copy_from_slice(&(rel as i32).to_le_bytes());
+    }
+
+    Ok(combined)
+}

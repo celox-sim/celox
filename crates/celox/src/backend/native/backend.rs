@@ -106,13 +106,12 @@ fn compile_units(
             .map_err(|e| codegen_err(format!("mmap error: {e}")));
     }
 
-    // For now, compile only the first EU (multi-EU support needs chaining)
-    let eu = &units[0];
-    let mut mfunc = isel::lower_execution_unit(eu, layout);
-    let regalloc_result = regalloc::run_regalloc(&mut mfunc);
-    let emit_result = emit::emit(&mfunc, &regalloc_result.assignment, regalloc_result.spill_frame_size)
+    // Multi-EU: compile each EU independently (ISel + regalloc), then
+    // chain their machine code into a single function. Each EU's return
+    // is patched to fall through to the next EU. One prologue/epilogue.
+    let chained_code = emit::emit_chained_eus(units, layout)
         .map_err(|e| codegen_err(format!("emit error: {e}")))?;
-    jit_mem::JitCode::new(&emit_result.code)
+    jit_mem::JitCode::new(&chained_code)
         .map_err(|e| codegen_err(format!("mmap error: {e}")))
 }
 
