@@ -156,6 +156,13 @@ pub fn lower_execution_unit(
     func
 }
 
+/// Compute a bitmask of `width` bits (e.g., width=8 → 0xFF).
+/// Returns u64::MAX for width >= 64 to avoid shift overflow.
+#[inline]
+fn mask_for_width(width: usize) -> u64 {
+    if width >= 64 { u64::MAX } else { (1u64 << width) - 1 }
+}
+
 /// Tracks wide (>64-bit) register values as multiple 64-bit chunks.
 /// Key: SIR RegisterId, Value: chunks in LSB-first order (vreg, width_bits).
 /// Used for Concat results and multi-word arithmetic (Shl/And/Or/BitNot on >64-bit values).
@@ -328,7 +335,7 @@ fn lower_instruction(
                                 src: tmp,
                                 imm: intra_byte as u8,
                             });
-                            let mask = (1u64 << width_bits) - 1;
+                            let mask = mask_for_width(*width_bits);
                             block.push(MInst::AndImm {
                                 dst: vreg,
                                 src: shifted,
@@ -336,7 +343,7 @@ fn lower_instruction(
                             });
                         } else {
                             // Byte-aligned but non-native width: just mask
-                            let mask = (1u64 << width_bits) - 1;
+                            let mask = mask_for_width(*width_bits);
                             block.push(MInst::AndImm {
                                 dst: vreg,
                                 src: tmp,
@@ -388,7 +395,7 @@ fn lower_instruction(
 
                     // Mask to width
                     if *width_bits < 64 {
-                        let mask = (1u64 << width_bits) - 1;
+                        let mask = mask_for_width(*width_bits);
                         block.push(MInst::AndImm {
                             dst: vreg,
                             src: shifted,
@@ -437,7 +444,7 @@ fn lower_instruction(
                                         offset: containing_off,
                                         size: load_size,
                                     });
-                                    let mask = (1u64 << chunk_width) - 1;
+                                    let mask = mask_for_width(*chunk_width);
                                     let new = ctx.alloc_vreg(SpillDesc::transient());
                                     block.push(MInst::BitFieldInsert {
                                         dst: new,
@@ -507,7 +514,7 @@ fn lower_instruction(
                                 size: load_size,
                             });
 
-                            let mask = (1u64 << width_bits) - 1;
+                            let mask = mask_for_width(*width_bits);
                             let new_word = ctx.alloc_vreg(SpillDesc::transient());
                             block.push(MInst::BitFieldInsert {
                                 dst: new_word,
@@ -559,7 +566,7 @@ fn lower_instruction(
 
                     // Build mask and shifted value
                     let mask_val = if *width_bits < 64 {
-                        (1u64 << width_bits) - 1
+                        mask_for_width(*width_bits)
                     } else {
                         u64::MAX
                     };
@@ -763,7 +770,7 @@ fn lower_instruction(
                     _ => None,
                 };
                 if let Some(val) = result {
-                    let mask = if d_width < 64 { (1u64 << d_width) - 1 } else { u64::MAX };
+                    let mask = mask_for_width(d_width);
                     let val = val & mask;
                     let dst_vreg = ctx.reg_map.get(*dst);
                     ctx.spill_descs[dst_vreg.0 as usize] = SpillDesc::remat(val);
@@ -824,7 +831,7 @@ fn lower_instruction(
                     });
                     // Mask to destination width
                     if d_width < 64 {
-                        let mask = (1u64 << d_width) - 1;
+                        let mask = mask_for_width(d_width);
                         block.push(MInst::AndImm {
                             dst: dst_vreg,
                             src: shifted,
@@ -845,7 +852,7 @@ fn lower_instruction(
                         rhs: rhs_vreg,
                     });
                     if d_width < 64 {
-                        let mask = (1u64 << d_width) - 1;
+                        let mask = mask_for_width(d_width);
                         block.push(MInst::AndImm {
                             dst: dst_vreg,
                             src: shifted,
@@ -873,7 +880,7 @@ fn lower_instruction(
                         let sar_result = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Sar { dst: sar_result, lhs: sign_extended, rhs: rhs_vreg });
                         // Mask to output width
-                        let mask = (1u64 << width) - 1;
+                        let mask = mask_for_width(width);
                         block.push(MInst::AndImm { dst: dst_vreg, src: sar_result, imm: mask });
                     } else {
                         block.push(MInst::Sar {
@@ -1108,7 +1115,7 @@ fn lower_instruction(
                     let mask = if width >= 64 {
                         u64::MAX
                     } else {
-                        (1u64 << width) - 1
+                        mask_for_width(width)
                     };
                     let mask_vreg = ctx.alloc_vreg(SpillDesc::remat(mask));
                     block.push(MInst::LoadImm {
@@ -1248,7 +1255,7 @@ fn lower_instruction(
                     });
                 } else if *bit_offset == 0 {
                     // Just mask
-                    let mask = (1u64 << width) - 1;
+                    let mask = mask_for_width(*width);
                     block.push(MInst::AndImm {
                         dst: dst_vreg,
                         src: src_vreg,
@@ -1262,7 +1269,7 @@ fn lower_instruction(
                         src: src_vreg,
                         imm: *bit_offset as u8,
                     });
-                    let mask = (1u64 << width) - 1;
+                    let mask = mask_for_width(*width);
                     block.push(MInst::AndImm {
                         dst: dst_vreg,
                         src: shifted,
@@ -1472,7 +1479,7 @@ fn lower_wide_extract(
 
         if is == 0 {
             if d_width < 64 {
-                let mask = (1u64 << d_width) - 1;
+                let mask = mask_for_width(d_width);
                 block.push(MInst::AndImm { dst: dst_vreg, src: main_vreg, imm: mask });
             } else {
                 block.push(MInst::Mov { dst: dst_vreg, src: main_vreg });
@@ -1489,13 +1496,13 @@ fn lower_wide_extract(
                 let combined = ctx.alloc_vreg(SpillDesc::transient());
                 block.push(MInst::Or { dst: combined, lhs: shifted, rhs: carry });
                 if d_width < 64 {
-                    let mask = (1u64 << d_width) - 1;
+                    let mask = mask_for_width(d_width);
                     block.push(MInst::AndImm { dst: dst_vreg, src: combined, imm: mask });
                 } else {
                     block.push(MInst::Mov { dst: dst_vreg, src: combined });
                 }
             } else if d_width < 64 {
-                let mask = (1u64 << d_width) - 1;
+                let mask = mask_for_width(d_width);
                 block.push(MInst::AndImm { dst: dst_vreg, src: shifted, imm: mask });
             } else {
                 block.push(MInst::Mov { dst: dst_vreg, src: shifted });
