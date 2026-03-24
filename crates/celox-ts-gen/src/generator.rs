@@ -38,8 +38,38 @@ pub struct JsonOutput {
     pub project_path: String,
     pub modules: Vec<JsonModuleEntry>,
     pub file_modules: HashMap<String, Vec<String>>,
+    /// Human-readable warning strings (for vitest/vite-plugin import warnings).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Structured diagnostics with location info (for playground/editor markers).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<JsonDiagnostic>,
+}
+
+/// A structured diagnostic with source location, for editor integration.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonDiagnostic {
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
 }
 
 /// Per-module entry in JSON output.

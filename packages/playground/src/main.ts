@@ -316,12 +316,21 @@ function onVerylChange() {
         if (result.modules?.[0]?.ports) {
           updateDutTypes(result.modules[0].ports);
         }
-        // Show warnings (if any) as Monaco markers
+        // Show structured diagnostics (if any) as Monaco markers
         if (model) {
-          const warnings: monaco.editor.IMarkerData[] = (result.warnings || [])
+          const diags: monaco.editor.IMarkerData[] = (result.diagnostics || []).map((d: any) => ({
+            severity: d.severity === "error" ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+            message: d.message + (d.help ? `\n${d.help}` : "") + (d.url ? `\n${d.url}` : ""),
+            startLineNumber: d.line,
+            startColumn: d.column,
+            endLineNumber: d.endLine ?? d.line,
+            endColumn: d.endColumn ?? d.column + 1,
+          }));
+          // Fallback to string-based parsing for warnings field
+          const legacyWarnings: monaco.editor.IMarkerData[] = (result.warnings || [])
             .flatMap((w: string) => parseVerylErrors(w))
             .map((m: monaco.editor.IMarkerData) => ({ ...m, severity: monaco.MarkerSeverity.Warning }));
-          monaco.editor.setModelMarkers(model, "veryl", warnings);
+          monaco.editor.setModelMarkers(model, "veryl", [...diags, ...legacyWarnings]);
         }
         return;
       } catch (e: any) {
