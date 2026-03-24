@@ -54,6 +54,24 @@ fn preg_to_reg32(preg: PhysReg) -> AsmRegister32 {
     }
 }
 
+fn preg_to_reg16(preg: PhysReg) -> AsmRegister16 {
+    match preg {
+        PhysReg::RAX => ax,
+        PhysReg::RCX => cx,
+        PhysReg::RDX => dx,
+        PhysReg::RBX => bx,
+        PhysReg::RSI => si,
+        PhysReg::RDI => di,
+        PhysReg::R8 => r8w,
+        PhysReg::R9 => r9w,
+        PhysReg::R10 => r10w,
+        PhysReg::R11 => r11w,
+        PhysReg::R12 => r12w,
+        PhysReg::R13 => r13w,
+        PhysReg::R14 => r14w,
+    }
+}
+
 fn preg_to_reg8(preg: PhysReg) -> AsmRegister8 {
     match preg {
         PhysReg::RAX => al,
@@ -304,18 +322,7 @@ fn emit_inst(
                     asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
                 }
                 OpSize::S16 => {
-                    // movzx doesn't apply to stores; use 16-bit register
-                    // iced-x86 doesn't have direct AsmRegister16 helpers for all,
-                    // so we'll use the 32-bit store masked. Actually, just use word store.
-                    // For simplicity, store the low 16 bits via 32-bit reg.
-                    // This works because we only care about the low bytes.
-                    let s32 = preg_to_reg32(s_preg);
-                    // Actually we need a proper 16-bit store to avoid overwriting.
-                    // Use dword_ptr would write 4 bytes. Use word_ptr.
-                    // iced-x86 code_asm: mov(word_ptr(mem), reg16)
-                    // We need AsmRegister16. Let's convert.
-                    let _ = s32; // unused
-                    asm.mov(word_ptr(mem), preg_to_reg64(s_preg))?;
+                    asm.mov(word_ptr(mem), preg_to_reg16(s_preg))?;
                 }
                 OpSize::S32 => {
                     asm.mov(dword_ptr(mem), preg_to_reg32(s_preg))?;
@@ -394,33 +401,17 @@ fn emit_inst(
             emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Xor)?;
         }
 
-        // Shifts: rhs must be in CL (guaranteed by assignment constraint)
+        // Shifts: rhs must be in CL. The emit phase moves rhs to RCX
+        // rather than relying on assignment constraints, to avoid conflicts
+        // when multiple shifts with different amounts coexist.
         MInst::Shr { dst, lhs, rhs } => {
-            let d = preg_to_reg64(resolve(assignment, *dst));
-            let l = preg_to_reg64(resolve(assignment, *lhs));
-            let _r = resolve(assignment, *rhs); // should be RCX
-            if d != l {
-                asm.mov(d, l)?;
-            }
-            asm.shr(d, cl)?;
+            emit_shift(asm, assignment, *dst, *lhs, *rhs, ShiftOp::Shr)?;
         }
         MInst::Shl { dst, lhs, rhs } => {
-            let d = preg_to_reg64(resolve(assignment, *dst));
-            let l = preg_to_reg64(resolve(assignment, *lhs));
-            let _r = resolve(assignment, *rhs);
-            if d != l {
-                asm.mov(d, l)?;
-            }
-            asm.shl(d, cl)?;
+            emit_shift(asm, assignment, *dst, *lhs, *rhs, ShiftOp::Shl)?;
         }
         MInst::Sar { dst, lhs, rhs } => {
-            let d = preg_to_reg64(resolve(assignment, *dst));
-            let l = preg_to_reg64(resolve(assignment, *lhs));
-            let _r = resolve(assignment, *rhs);
-            if d != l {
-                asm.mov(d, l)?;
-            }
-            asm.sar(d, cl)?;
+            emit_shift(asm, assignment, *dst, *lhs, *rhs, ShiftOp::Sar)?;
         }
 
         // Immediate ALU
@@ -430,24 +421,7 @@ fn emit_inst(
             if d != s {
                 asm.mov(d, s)?;
             }
-            if *imm <= i32::MAX as u64 {
-                asm.and(d, *imm as i32)?;
-            } else {
-                // Need 64-bit immediate — use mov to temp then and
-                // Actually x86 AND r64, imm32 sign-extends. For large masks,
-                // we need a different approach.
-                // For now, load imm to a scratch and AND.
-                // This is a limitation — we'd need a scratch register.
-                // Workaround: if imm fits in 32-bit unsigned, use 32-bit operation.
-                let d32 = preg_to_reg32(resolve(assignment, *dst));
-                if *imm <= u32::MAX as u64 {
-                    asm.and(d32, *imm as i32)?;
-                } else {
-                    // Full 64-bit: we'd need a scratch. For now, use rax if available.
-                    // This is a known limitation.
-                    unimplemented!("64-bit AND immediate > 32 bits requires scratch register");
-                }
-            }
+            emit_and_imm64(asm, d, *imm)?;
         }
         MInst::OrImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
@@ -528,13 +502,8 @@ fn emit_inst(
                     asm.mov(d, bw)?;
                 }
                 // 2. Clear the field in dst
-                let clear_mask = !((*mask) << *shift) as i64;
-                if clear_mask >= i32::MIN as i64 && clear_mask <= i32::MAX as i64 {
-                    asm.and(d, clear_mask as i32)?;
-                } else {
-                    let d32 = preg_to_reg32(resolve(assignment, *dst));
-                    asm.and(d32, clear_mask as i32)?;
-                }
+                let clear_mask = !((*mask) << *shift);
+                emit_and_imm64(asm, d, clear_mask)?;
                 // 3. Prepare and insert val (clobbers v, which is dead after this use)
                 if *mask != u64::MAX {
                     asm.and(v, *mask as i32)?;
@@ -560,14 +529,7 @@ fn emit_inst(
                 asm.xor(d, bw)?;
                 // 3. d &= field_mask
                 let field_mask = (*mask) << *shift;
-                if field_mask <= i32::MAX as u64 {
-                    asm.and(d, field_mask as i32)?;
-                } else if field_mask <= u32::MAX as u64 {
-                    let d32 = preg_to_reg32(resolve(assignment, *dst));
-                    asm.and(d32, field_mask as i32)?;
-                } else {
-                    unimplemented!("64-bit field mask in BitFieldInsert XOR path");
-                }
+                emit_and_imm64(asm, d, field_mask)?;
                 // 4. d ^= bw → result
                 asm.xor(d, bw)?;
             }
@@ -606,6 +568,73 @@ fn emit_inst(
             // Handled in the main emit loop (jumps to shared epilogue)
             unreachable!("Return should be handled by the main emit loop");
         }
+    }
+    Ok(())
+}
+
+/// Shift operation kind.
+enum ShiftOp {
+    Shr,
+    Shl,
+    Sar,
+}
+
+/// Emit a shift instruction, moving rhs to RCX if needed.
+/// Handles all aliasing cases between dst, lhs, rhs, and RCX.
+fn emit_shift(
+    asm: &mut CodeAssembler,
+    assignment: &AssignmentMap,
+    dst: VReg,
+    lhs: VReg,
+    rhs: VReg,
+    op: ShiftOp,
+) -> Result<(), IcedError> {
+    let d = preg_to_reg64(resolve(assignment, dst));
+    let l = preg_to_reg64(resolve(assignment, lhs));
+    let r = preg_to_reg64(resolve(assignment, rhs));
+
+    let do_shift = |asm: &mut CodeAssembler, reg: AsmRegister64| -> Result<(), IcedError> {
+        match op {
+            ShiftOp::Shr => asm.shr(reg, cl),
+            ShiftOp::Shl => asm.shl(reg, cl),
+            ShiftOp::Sar => asm.sar(reg, cl),
+        }
+    };
+
+    if r == rcx {
+        // rhs already in CL
+        if d != l {
+            asm.mov(d, l)?;
+        }
+        do_shift(asm, d)?;
+    } else if d == rcx && l == rcx {
+        // d == l == rcx, r is elsewhere.
+        // xchg rcx, r → rcx=rhs, r=lhs. Shift r by cl. mov rcx, r.
+        asm.xchg(rcx, r)?;
+        do_shift(asm, r)?;
+        asm.mov(rcx, r)?;
+    } else if d == rcx {
+        // d == rcx, l != rcx, r != rcx.
+        // mov d(=rcx), l first, then xchg rcx, r, shift d... no.
+        // Strategy: xchg rcx, r → rcx=rhs, r=old_dst_garbage.
+        // mov r, l (put lhs into r). shift r. mov rcx, r.
+        asm.xchg(rcx, r)?; // rcx = rhs_val, r = whatever was in rcx
+        asm.mov(r, l)?;     // r = lhs
+        do_shift(asm, r)?;  // r = lhs shift_by cl
+        asm.mov(rcx, r)?;   // result to dst (rcx)
+    } else if l == rcx {
+        // l == rcx, d != rcx, r != rcx.
+        // Save lhs to d before clobbering rcx.
+        asm.mov(d, l)?;    // d = lhs
+        asm.mov(rcx, r)?;  // rcx = rhs
+        do_shift(asm, d)?;
+    } else {
+        // No operand in rcx.
+        asm.mov(rcx, r)?;  // rcx = rhs
+        if d != l {
+            asm.mov(d, l)?;
+        }
+        do_shift(asm, d)?;
     }
     Ok(())
 }
@@ -664,6 +693,53 @@ fn emit_binop_rr(
         BinOp::And => asm.and(d, eff_r)?,
         BinOp::Or => asm.or(d, eff_r)?,
         BinOp::Xor => asm.xor(d, eff_r)?,
+    }
+    Ok(())
+}
+
+/// Emit AND with a potentially 64-bit immediate.
+/// Uses the most efficient encoding available.
+fn emit_and_imm64(
+    asm: &mut CodeAssembler,
+    d: AsmRegister64,
+    imm: u64,
+) -> Result<(), IcedError> {
+    if imm == u64::MAX {
+        // AND with all-ones is a no-op
+        return Ok(());
+    }
+    let signed = imm as i64;
+    if signed >= i32::MIN as i64 && signed <= i32::MAX as i64 {
+        // Fits in sign-extended imm32
+        asm.and(d, signed as i32)?;
+    } else if imm <= u32::MAX as u64 {
+        // Fits in zero-extended 32-bit: use 32-bit AND (clears upper 32 bits)
+        let d32 = match d {
+            _ if d == rax => eax,
+            _ if d == rcx => ecx,
+            _ if d == rdx => edx,
+            _ if d == rbx => ebx,
+            _ if d == rsi => esi,
+            _ if d == rdi => edi,
+            _ if d == r8 => r8d,
+            _ if d == r9 => r9d,
+            _ if d == r10 => r10d,
+            _ if d == r11 => r11d,
+            _ if d == r12 => r12d,
+            _ if d == r13 => r13d,
+            _ if d == r14 => r14d,
+            _ => unreachable!(),
+        };
+        asm.and(d32, imm as i32)?;
+    } else {
+        // Full 64-bit: load into scratch via push/pop trick or movabs.
+        // Use RAX as scratch if d != rax, otherwise use RDX.
+        // We save/restore the scratch via push/pop.
+        let scratch = if d != rax { rax } else { rdx };
+        asm.push(scratch)?;
+        asm.mov(scratch, imm as i64)?; // movabs scratch, imm64
+        asm.and(d, scratch)?;
+        asm.pop(scratch)?;
     }
     Ok(())
 }

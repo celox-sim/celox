@@ -102,14 +102,11 @@ pub enum RegConstraint {
 /// Return the register constraint for each use operand of an instruction.
 /// The returned vec has the same length and order as `inst.uses()`.
 pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
-    match inst {
-        // Shift with register operand: rhs must be RCX
-        MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. } => {
-            vec![RegConstraint::Any, RegConstraint::Fixed(PhysReg::RCX)]
-        }
-        // All other instructions: no constraints
-        _ => inst.uses().iter().map(|_| RegConstraint::Any).collect(),
-    }
+    // Shift rhs → RCX is handled in the emit phase (mov rcx, rhs) rather
+    // than as an assignment constraint, because multiple shifts with different
+    // amounts would all compete for RCX and clobber each other.
+    let _ = inst;
+    inst.uses().iter().map(|_| RegConstraint::Any).collect()
 }
 
 /// Return the register constraint for the def operand of an instruction.
