@@ -120,7 +120,7 @@ impl LocalAllocator {
 }
 
 fn num_i64_chunks(width: usize) -> usize {
-    if width == 0 { 1 } else { (width + 63) / 64 }
+    if width == 0 { 1 } else { width.div_ceil(64) }
 }
 
 /// Build a WASM module from a set of execution units.
@@ -143,7 +143,7 @@ pub fn compile_units(
 
     // Import section: memory from "env"
     let mut imports = ImportSection::new();
-    let mem_pages = (layout.merged_total_size + 65535) / 65536;
+    let mem_pages = layout.merged_total_size.div_ceil(65536);
     imports.import(
         "env",
         "memory",
@@ -309,7 +309,7 @@ fn compile_unit(
     let num_blocks = block_ids.len();
 
     // Pre-allocate all registers for this unit.
-    for (&reg, &ref ty) in &unit.register_map {
+    for (&reg, ty) in &unit.register_map {
         locals.alloc_reg(reg, ty.width(), four_state);
     }
 
@@ -1097,19 +1097,8 @@ fn emit_wide_shift(
         instrs.push(Instruction::I64Const(0)); // accumulator
         for j in 0..l.num_chunks {
             // Check if j is the right source chunk
-            let src_idx = if matches!(op, BinaryOp::Shr) {
-                // cur: j == i + word_off
-                j as i64
-            } else {
-                // cur: j == i - word_off
-                j as i64
-            };
-
-            let target_idx = if matches!(op, BinaryOp::Shr) {
-                i as i64 // word_off + i
-            } else {
-                i as i64
-            };
+            let src_idx = j as i64;
+            let target_idx = i as i64;
 
             // Check: j == target + word_off (Shr) or j == target - word_off (Shl)
             instrs.push(Instruction::I64Const(target_idx));
@@ -1855,7 +1844,7 @@ fn compile_store_at_offset(
 
 fn compile_store_zero(byte_offset: usize, op_width: usize, instrs: &mut Vec<Instruction<'static>>) {
     let store_bytes = get_byte_size(op_width);
-    let num_chunks = (store_bytes + 7) / 8;
+    let num_chunks = store_bytes.div_ceil(8);
     for c in 0..num_chunks {
         let off = byte_offset + c * 8;
         instrs.push(Instruction::I32Const(off as i32));
@@ -2013,7 +2002,7 @@ fn compile_commit(
 
             if bit_shift == 0 {
                 // Byte-aligned copy
-                let num_chunks = (copy_bytes + 7) / 8;
+                let num_chunks = copy_bytes.div_ceil(8);
                 for c in 0..num_chunks {
                     let src_off = src_base + byte_off + c * 8;
                     let dst_off = dst_base + byte_off + c * 8;

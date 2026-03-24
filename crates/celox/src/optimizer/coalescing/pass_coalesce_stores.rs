@@ -46,15 +46,12 @@ fn coalesce_block(
             SIRInstruction::Store(addr, SIROffset::Static(off), width, src, triggers)
                 if triggers.is_empty() =>
             {
-                groups
-                    .entry(addr.clone())
-                    .or_default()
-                    .push(StoreCandidate {
-                        inst_index: i,
-                        offset: *off,
-                        width: *width,
-                        src_reg: *src,
-                    });
+                groups.entry(*addr).or_default().push(StoreCandidate {
+                    inst_index: i,
+                    offset: *off,
+                    width: *width,
+                    src_reg: *src,
+                });
             }
             SIRInstruction::Load(_, addr, _, _) => {
                 seal_group(&mut groups, addr, &mut sealed_groups);
@@ -133,20 +130,21 @@ fn coalesce_block(
                 let addr = if let SIRInstruction::Store(addr, _, _, _, _) =
                     &block.instructions[sub_run[0].inst_index]
                 {
-                    addr.clone()
+                    *addr
                 } else {
                     unreachable!()
                 };
 
-                let mut new_instructions = Vec::with_capacity(2);
-                new_instructions.push(SIRInstruction::Concat(concat_reg, concat_args));
-                new_instructions.push(SIRInstruction::Store(
-                    addr,
-                    SIROffset::Static(merged_lsb),
-                    total_width,
-                    concat_reg,
-                    Vec::new(),
-                ));
+                let new_instructions = vec![
+                    SIRInstruction::Concat(concat_reg, concat_args),
+                    SIRInstruction::Store(
+                        addr,
+                        SIROffset::Static(merged_lsb),
+                        total_width,
+                        concat_reg,
+                        Vec::new(),
+                    ),
+                ];
 
                 replacements.push(Replacement {
                     removed_indices,
@@ -264,27 +262,9 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(0),
-                1,
-                RegisterId(0),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(1),
-                1,
-                RegisterId(1),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(2),
-                1,
-                RegisterId(2),
-                Vec::new(),
-            ),
+            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
+            SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), Vec::new()),
+            SIRInstruction::Store(addr, SIROffset::Static(2), 1, RegisterId(2), Vec::new()),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -332,34 +312,10 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(
-                addr0.clone(),
-                SIROffset::Static(0),
-                1,
-                RegisterId(0),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr1.clone(),
-                SIROffset::Static(0),
-                1,
-                RegisterId(2),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr0.clone(),
-                SIROffset::Static(1),
-                1,
-                RegisterId(1),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr1.clone(),
-                SIROffset::Static(1),
-                1,
-                RegisterId(3),
-                Vec::new(),
-            ),
+            SIRInstruction::Store(addr0, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
+            SIRInstruction::Store(addr1, SIROffset::Static(0), 1, RegisterId(2), Vec::new()),
+            SIRInstruction::Store(addr0, SIROffset::Static(1), 1, RegisterId(1), Vec::new()),
+            SIRInstruction::Store(addr1, SIROffset::Static(1), 1, RegisterId(3), Vec::new()),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -387,21 +343,9 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(0),
-                1,
-                RegisterId(0),
-                Vec::new(),
-            ),
-            SIRInstruction::Load(RegisterId(2), addr.clone(), SIROffset::Static(0), 1),
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(1),
-                1,
-                RegisterId(1),
-                Vec::new(),
-            ),
+            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
+            SIRInstruction::Load(RegisterId(2), addr, SIROffset::Static(0), 1),
+            SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), Vec::new()),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -429,20 +373,8 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(0),
-                1,
-                RegisterId(0),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(2),
-                1,
-                RegisterId(1),
-                Vec::new(),
-            ),
+            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
+            SIRInstruction::Store(addr, SIROffset::Static(2), 1, RegisterId(1), Vec::new()),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -473,20 +405,8 @@ mod tests {
         };
 
         let instructions = vec![
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(0),
-                1,
-                RegisterId(0),
-                vec![trigger.clone()],
-            ),
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(1),
-                1,
-                RegisterId(1),
-                vec![trigger],
-            ),
+            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), vec![trigger]),
+            SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), vec![trigger]),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -514,34 +434,10 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(0),
-                1,
-                RegisterId(0),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(1),
-                1,
-                RegisterId(1),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(2),
-                1,
-                RegisterId(2),
-                Vec::new(),
-            ),
-            SIRInstruction::Store(
-                addr.clone(),
-                SIROffset::Static(5),
-                1,
-                RegisterId(3),
-                Vec::new(),
-            ),
+            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
+            SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), Vec::new()),
+            SIRInstruction::Store(addr, SIROffset::Static(2), 1, RegisterId(2), Vec::new()),
+            SIRInstruction::Store(addr, SIROffset::Static(5), 1, RegisterId(3), Vec::new()),
         ];
 
         let mut eu = make_eu(instructions, register_map);

@@ -281,7 +281,7 @@ impl WasmBackend {
 
         // Create store and shared memory
         let mut store = Store::new(&engine, ());
-        let mem_pages = ((layout.merged_total_size + 65535) / 65536) as u64;
+        let mem_pages = layout.merged_total_size.div_ceil(65536) as u64;
         let mem_pages = mem_pages.max(1);
         let memory = Memory::new(
             &mut store,
@@ -343,10 +343,8 @@ impl WasmBackend {
             apply_funcs.insert(*addr, func);
         }
 
-        let id_to_event: Vec<WasmEventRef> = id_to_addr
-            .iter()
-            .map(|addr| event_map[addr].clone())
-            .collect();
+        let id_to_event: Vec<WasmEventRef> =
+            id_to_addr.iter().map(|addr| event_map[addr]).collect();
 
         Ok(Self {
             store,
@@ -415,7 +413,7 @@ impl WasmBackend {
     }
 
     pub fn resolve_event(&self, addr: &AbsoluteAddr) -> WasmEventRef {
-        self.event_map[addr].clone()
+        self.event_map[addr]
     }
 
     pub fn resolve_event_opt(&self, addr: &AbsoluteAddr) -> Option<WasmEventRef> {

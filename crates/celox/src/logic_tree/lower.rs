@@ -356,8 +356,8 @@ impl SLTToSIRLowerer {
             } else {
                 BigUint::from((1u64 << width) - 1)
             };
-            combined_val |= (&*val & &width_mask) << total_width;
-            combined_mask |= (&*mask & &width_mask) << total_width;
+            combined_val |= (val & &width_mask) << total_width;
+            combined_mask |= (mask & &width_mask) << total_width;
             total_width += *width;
         }
 

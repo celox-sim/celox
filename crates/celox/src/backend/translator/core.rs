@@ -405,14 +405,10 @@ impl SIRTranslator {
                         .iconst(types::I64, ((1u64 << width) - 1) as i64);
                     v = builder.ins().band(v, mask);
                 }
-                if width <= 64 {
-                    vec![v]
-                } else {
-                    vec![v] // shouldn't happen for single chunk
-                }
+                vec![v]
             } else {
                 // Multi-chunk: extract from each and combine
-                let num_dst_chunks = (width + 63) / 64;
+                let num_dst_chunks = width.div_ceil(64);
                 let mut result = Vec::with_capacity(num_dst_chunks);
                 let mut remaining = width;
                 let mut pos = bit_offset;
