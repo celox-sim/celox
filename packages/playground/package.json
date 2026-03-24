@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:wasm": "NAPI_RS_FORCE_WASI=1 vitest run --config vitest.wasm.config.ts"
@@ -12,7 +12,9 @@
   "devDependencies": {
     "@celox-sim/celox": "workspace:*",
     "@celox-sim/vite-plugin": "workspace:*",
-    "vitest": "^3.0.0",
-    "vite": "^6.0.0"
+    "monaco-editor": "^0.55.1",
+    "sucrase": "^3.35.1",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
   }
 }

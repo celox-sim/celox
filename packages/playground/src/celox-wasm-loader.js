@@ -24,7 +24,7 @@ const __emnapiContext = __emnapiGetDefaultContext()
 const __sharedMemory = new WebAssembly.Memory({
   initial: 4000,
   maximum: 65536,
-  shared: true,
+  shared: typeof SharedArrayBuffer !== 'undefined',
 })
 
 const __wasmFile = await fetch(__wasmUrl).then((res) => res.arrayBuffer())
@@ -35,7 +35,7 @@ const {
   napiModule: __napiModule,
 } = __emnapiInstantiateNapiModuleSync(__wasmFile, {
   context: __emnapiContext,
-  asyncWorkPoolSize: 4,
+  asyncWorkPoolSize: typeof SharedArrayBuffer !== 'undefined' ? 4 : 0,
   wasi: __wasi,
   onCreateWorker() {
     const worker = new Worker(new URL('./wasi-worker-browser.mjs', import.meta.url).href, {
