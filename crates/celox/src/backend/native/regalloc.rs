@@ -33,6 +33,7 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
     // Re-analyze after spilling (spill/reload instructions change liveness)
     let analysis = analysis::analyze(func);
     let assignment = assignment::assign(func, &analysis);
+
     RegallocResult {
         assignment,
         spill_frame_size,

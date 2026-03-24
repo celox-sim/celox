@@ -11,7 +11,15 @@
       "WebFetch(domain:who.rocq.inria.fr)",
       "WebFetch(domain:blog.llvm.org)",
       "Bash(grep -E \"\\\\.rs$|^d\")",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo insta:*)",
+      "Bash(cargo search:*)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:lib.rs)",
+      "Bash(grep -B2 \"unused variable: \\\\`d\\\\`\")",
+      "Bash(grep -n 'enum SimulatorError' /workspaces/celox/crates/celox/src/*.rs /workspaces/celox/crates/celox/src/**/*.rs)"
     ]
   }
 }
