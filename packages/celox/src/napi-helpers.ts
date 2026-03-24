@@ -22,10 +22,7 @@ import type {
 	SourceFile,
 	TrueLoopSpec,
 } from "./types.js";
-import {
-	isWasmHandle,
-	createWasmSimulatorBridge,
-} from "./wasm-bridge.js";
+import { createWasmSimulatorBridge, isWasmHandle } from "./wasm-bridge.js";
 
 // ---------------------------------------------------------------------------
 // Raw NAPI handle shapes (what the .node addon actually exports)

@@ -25,10 +25,7 @@ import type {
 	SimulatorOptions,
 	SourceFile,
 } from "./types.js";
-import {
-	isWasmHandle,
-	createWasmSimulatorBridge,
-} from "./wasm-bridge.js";
+import { createWasmSimulatorBridge, isWasmHandle } from "./wasm-bridge.js";
 
 /**
  * Placeholder for the NAPI binding's `createSimulator()`.
@@ -209,8 +206,7 @@ export class Simulator<P = Record<string, unknown>> {
 		// When hierarchy is populated, use its signals for port detection.
 		// When hierarchy is empty (e.g. WASM-compiled addon), fall back to
 		// the flat layout signals which always have full signal info.
-		const hasHierarchySignals =
-			Object.keys(hierarchy.signals).length > 0;
+		const hasHierarchySignals = Object.keys(hierarchy.signals).length > 0;
 		const ports = hasHierarchySignals
 			? buildPortsFromLayout(hierarchy.signals, events)
 			: buildPortsFromLayout(layout.signals, events);
@@ -282,8 +278,7 @@ export class Simulator<P = Record<string, unknown>> {
 			options?.deadStorePolicy,
 		);
 
-		const hasHierarchySignals =
-			Object.keys(hierarchy.signals).length > 0;
+		const hasHierarchySignals = Object.keys(hierarchy.signals).length > 0;
 		const ports = hasHierarchySignals
 			? buildPortsFromLayout(hierarchy.signals, events)
 			: buildPortsFromLayout(layout.signals, events);

@@ -15,7 +15,6 @@ import {
 	parseNapiLayout,
 	wrapDirectSimulationHandle,
 } from "./napi-helpers.js";
-import { isWasmHandle } from "./wasm-bridge.js";
 import type {
 	CreateResult,
 	FourStateValue,
@@ -26,6 +25,7 @@ import type {
 	SourceFile,
 } from "./types.js";
 import { SimulationTimeoutError } from "./types.js";
+import { isWasmHandle } from "./wasm-bridge.js";
 
 /**
  * Placeholder for the NAPI binding's `createSimulation()`.
