@@ -8,6 +8,15 @@ fn compile_and_run(
     top: &str,
     setup: impl Fn(&mut [u8], &Program, &MemoryLayout),
 ) -> (Vec<u8>, Program, MemoryLayout) {
+    compile_and_run_inner(code, top, setup, false)
+}
+
+fn compile_and_run_inner(
+    code: &str,
+    top: &str,
+    setup: impl Fn(&mut [u8], &Program, &MemoryLayout),
+    debug: bool,
+) -> (Vec<u8>, Program, MemoryLayout) {
     let trace = SimulatorBuilder::new(code, top)
         .optimize(true)
         .trace_post_optimized_sir()
@@ -19,8 +28,23 @@ fn compile_and_run(
 
     let eu = &sir.eval_comb[0];
     let mut mfunc = isel::lower_execution_unit(eu, &layout);
+
+    if debug {
+        eprintln!("=== MIR ===\n{mfunc}");
+    }
+
     let assignment = regalloc::run_regalloc(&mut mfunc);
+
+    if debug {
+        eprintln!("=== Assignment ===\n{assignment:?}");
+    }
+
     let emit_result = emit::emit(&mfunc, &assignment, 0).expect("emit failed");
+
+    if debug {
+        eprintln!("=== Disassembly ===\n{}", emit::disassemble(&emit_result.code, 0));
+    }
+
     let jit = jit_mem::JitCode::new(&emit_result.code).expect("mmap failed");
 
     let mut state = vec![0u8; layout.merged_total_size.max(256)];
@@ -188,3 +212,52 @@ fn test_simulator_native_dependency_chain() {
     sim.modify(|io| io.set(a, 0x12345678u32)).unwrap();
     assert_eq!(sim.get(c), 0x12345678u32.into());
 }
+
+// Debug test: register-based shift (used by dynamic index write pattern)
+#[test]
+fn test_native_shl_register() {
+    let code = r#"
+        module Top (
+            val: input logic<32>,
+            shift_amt: input logic<32>,
+            z: output logic<32>,
+        ) {
+            assign z = val << shift_amt;
+        }
+    "#;
+    let (state, sir, layout) = compile_and_run(code, "Top", |state, sir, layout| {
+        write_u32_at(state, sir, layout, "val", 0xFF);
+        write_u32_at(state, sir, layout, "shift_amt", 16);
+    });
+    assert_eq!(read_u32_at(&state, &sir, &layout, "z"), 0x00FF0000);
+}
+
+// Regression: dynamic index write pattern (shl + bitnot + and + or with multiple shift amounts)
+#[test]
+fn test_native_dynamic_index_pattern() {
+    let code = r#"
+        module Top (
+            packed: input logic<32>,
+            idx: input logic<2>,
+            val: input logic<8>,
+            z: output logic<32>,
+        ) {
+            var mask: logic<32>;
+            var shift: logic<32>;
+            assign shift = idx as u32 * 8;
+            assign mask = 32'hFF << shift;
+            assign z = (packed & ~mask) | ((val as u32) << shift);
+        }
+    "#;
+    let (state, sir, layout) = compile_and_run(code, "Top", |state, sir, layout| {
+        write_u32_at(state, sir, layout, "packed", 0x04030201);
+        let idx_addr = sir.get_addr(&[], &["idx"]).unwrap();
+        let idx_off = layout.offsets[&idx_addr];
+        state[idx_off] = 2;
+        let val_addr = sir.get_addr(&[], &["val"]).unwrap();
+        let val_off = layout.offsets[&val_addr];
+        state[val_off] = 0x55;
+    });
+    assert_eq!(read_u32_at(&state, &sir, &layout, "z"), 0x04550201);
+}
+
