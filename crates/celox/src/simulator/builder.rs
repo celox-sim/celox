@@ -568,6 +568,39 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         Ok(sim)
     }
 
+    /// Compiles using the native x86-64 backend instead of Cranelift.
+    pub fn build_native(
+        self,
+    ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+        let (mut program, warnings) = compile_to_sir(
+            &self.sources,
+            self.top,
+            &self.ignored_loops,
+            &self.true_loops,
+            self.options.four_state,
+            &self.options.trace,
+            None,
+            self.metadata,
+            self.clock_type,
+            self.reset_type,
+            &self.param_overrides,
+            &self.options.optimize_options,
+        )?;
+
+        if self.options.dead_store_policy != DeadStorePolicy::Off {
+            run_dead_store_elimination(
+                &mut program,
+                &self.live_signals,
+                self.options.dead_store_policy,
+            );
+        }
+
+        let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
+        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+        sim.modify(|_| {}).map_err(SimulatorError::from)?;
+        Ok(sim)
+    }
+
     /// Compiles the Veryl source and constructs the core logic simulator,
     /// while capturing compilation trace data as configured by TraceOptions.
     pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {

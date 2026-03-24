@@ -1,6 +1,6 @@
 //! Integration tests: execute native backend output and verify correctness.
 
-use celox::{MemoryLayout, Program, SimulatorBuilder};
+use celox::{MemoryLayout, Program, Simulator, SimulatorBuilder};
 
 /// Helper: compile Veryl, run native backend on eval_comb[0], execute, return state.
 fn compile_and_run(
@@ -130,4 +130,61 @@ fn test_native_mul() {
         write_u32_at(state, sir, layout, "b", 6);
     });
     assert_eq!(read_u32_at(&state, &sir, &layout, "z"), 42);
+}
+
+// ────────────────────────────────────────────────────────────────
+// Tests using Simulator<NativeBackend> via build_native()
+// ────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_simulator_native_simple_assignment() {
+    let code = r#"
+        module Top (a: input logic<32>, b: output logic<32>) {
+            assign b = a;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build_native().unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    sim.modify(|io| io.set(a, 0xDEADBEEFu32)).unwrap();
+    assert_eq!(sim.get(b), 0xDEADBEEFu32.into());
+}
+
+#[test]
+fn test_simulator_native_add() {
+    let code = r#"
+        module Top (
+            x: input logic<32>,
+            y: input logic<32>,
+            z: output logic<32>,
+        ) {
+            assign z = x + y;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build_native().unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    let z = sim.signal("z");
+    sim.modify(|io| {
+        io.set(x, 100u32);
+        io.set(y, 200u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(z), 300u32.into());
+}
+
+#[test]
+fn test_simulator_native_dependency_chain() {
+    let code = r#"
+        module Top (a: input logic<32>, b: output logic<32>) {
+            var c: logic<32>;
+            assign c = b;
+            assign b = a;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build_native().unwrap();
+    let a = sim.signal("a");
+    let c = sim.signal("c");
+    sim.modify(|io| io.set(a, 0x12345678u32)).unwrap();
+    assert_eq!(sim.get(c), 0x12345678u32.into());
 }

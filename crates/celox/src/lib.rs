@@ -61,6 +61,8 @@ pub mod native_backend {
     //! Re-exports for the native x86-64 backend (for testing/integration).
     pub use crate::backend::native::*;
 }
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::native::NativeBackend;
 pub use num_bigint::BigUint;
 #[cfg(not(target_arch = "wasm32"))]
 pub use optimizer::CraneliftOptLevel;
