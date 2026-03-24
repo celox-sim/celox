@@ -111,19 +111,32 @@ pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
 
 /// Return the register constraint for the def operand of an instruction.
 pub fn def_constraint(inst: &MInst) -> RegConstraint {
-    // Currently no def constraints. Future: div → RAX, etc.
     let _ = inst;
     RegConstraint::Any
+}
+
+/// Returns physical registers clobbered by this instruction (besides dst).
+/// These registers are destroyed as a side-effect and must not hold live values.
+pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
+    match inst {
+        // x86-64 `div r64` writes quotient to RAX and remainder to RDX.
+        MInst::UDiv { .. } | MInst::URem { .. } => &[PhysReg::RAX, PhysReg::RDX],
+        _ => &[],
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
 // Assignment result
 // ────────────────────────────────────────────────────────────────
 
-/// The result of register assignment: a mapping from VReg → PhysReg.
+/// The result of register assignment: a mapping from VReg → PhysReg,
+/// plus any pre-instruction moves needed for clobber eviction.
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: BTreeMap<VReg, PhysReg>,
+    /// Pre-instruction register moves for clobber eviction.
+    /// Key: (block_index, instruction_index). Value: list of (dst_preg, src_preg) moves.
+    pub pre_moves: BTreeMap<(usize, usize), Vec<(PhysReg, PhysReg)>>,
 }
 
 impl AssignmentMap {
@@ -248,6 +261,32 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                 .collect();
             for (preg, _vreg) in &dead_regs {
                 active.remove(preg);
+            }
+
+            // 2.5. Evict live values from clobbered registers.
+            //      e.g., UDiv/URem clobber RAX and RDX via x86-64 `div`.
+            //      Generates pre-instruction moves to save live values.
+            let clobber_set = clobbers(inst);
+            if !clobber_set.is_empty() {
+                let mut moves = Vec::new();
+                for &clobbered_preg in clobber_set {
+                    if let Some(&occupant) = active.get(&clobbered_preg) {
+                        // Don't evict the def vreg — it's about to be assigned.
+                        if Some(occupant) != def {
+                            if let Some(new_reg) = find_free_reg(&active, None) {
+                                moves.push((new_reg, clobbered_preg));
+                                active.remove(&clobbered_preg);
+                                active.insert(new_reg, occupant);
+                                result.set(occupant, new_reg);
+                            } else {
+                                active.remove(&clobbered_preg);
+                            }
+                        }
+                    }
+                }
+                if !moves.is_empty() {
+                    result.pre_moves.insert((bi, inst_idx), moves);
+                }
             }
 
             // 3. Allocate def

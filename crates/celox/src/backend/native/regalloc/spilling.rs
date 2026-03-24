@@ -344,9 +344,10 @@ fn run_min_on_block(
             new_insts.push(make_reload(*vreg, func, slots));
         }
 
-        // 2. Make room for def
+        // 2. Make room for def + clobbers
         if let Some(def_vreg) = def {
-            let needed = w.len() + 1;
+            let clobber_extra = super::assignment::clobbers(inst).len();
+            let needed = w.len() + 1 + clobber_extra;
             if needed > k {
                 limit(
                     &mut w, &mut s, &mut new_insts,

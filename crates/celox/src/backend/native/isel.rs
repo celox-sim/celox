@@ -955,51 +955,13 @@ fn lower_instruction(
                         kind: CmpKind::GeS,
                     });
                 }
-                BinaryOp::Div => {
-                    // div with zero guard: dst = rhs == 0 ? 0 : lhs / rhs
+                BinaryOp::Div | BinaryOp::Rem => {
+                    // div/rem with zero guard: dst = rhs == 0 ? 0 : lhs op rhs
+                    // Regalloc handles RAX/RDX clobber via clobbers() in assignment.
                     let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm {
-                        dst: zero,
-                        value: 0,
-                    });
+                    block.push(MInst::LoadImm { dst: zero, value: 0 });
                     let one = ctx.alloc_vreg(SpillDesc::remat(1));
-                    block.push(MInst::LoadImm {
-                        dst: one,
-                        value: 1,
-                    });
-                    let is_zero = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Cmp {
-                        dst: is_zero,
-                        lhs: rhs_vreg,
-                        rhs: zero,
-                        kind: CmpKind::Eq,
-                    });
-                    // Use 1 as safe divisor when rhs is 0
-                    let safe_rhs = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Select {
-                        dst: safe_rhs,
-                        cond: is_zero,
-                        true_val: one,
-                        false_val: rhs_vreg,
-                    });
-                    block.push(MInst::UDiv {
-                        dst: dst_vreg,
-                        lhs: lhs_vreg,
-                        rhs: safe_rhs,
-                    });
-                }
-                BinaryOp::Rem => {
-                    // rem with zero guard: dst = rhs == 0 ? 0 : lhs % rhs
-                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm {
-                        dst: zero,
-                        value: 0,
-                    });
-                    let one = ctx.alloc_vreg(SpillDesc::remat(1));
-                    block.push(MInst::LoadImm {
-                        dst: one,
-                        value: 1,
-                    });
+                    block.push(MInst::LoadImm { dst: one, value: 1 });
                     let is_zero = ctx.alloc_vreg(SpillDesc::transient());
                     block.push(MInst::Cmp {
                         dst: is_zero,
@@ -1014,11 +976,19 @@ fn lower_instruction(
                         true_val: one,
                         false_val: rhs_vreg,
                     });
-                    block.push(MInst::URem {
-                        dst: dst_vreg,
-                        lhs: lhs_vreg,
-                        rhs: safe_rhs,
-                    });
+                    if matches!(op, BinaryOp::Div) {
+                        block.push(MInst::UDiv {
+                            dst: dst_vreg,
+                            lhs: lhs_vreg,
+                            rhs: safe_rhs,
+                        });
+                    } else {
+                        block.push(MInst::URem {
+                            dst: dst_vreg,
+                            lhs: lhs_vreg,
+                            rhs: safe_rhs,
+                        });
+                    }
                 }
                 BinaryOp::LogicAnd => {
                     // dst = (lhs != 0) && (rhs != 0) ? 1 : 0

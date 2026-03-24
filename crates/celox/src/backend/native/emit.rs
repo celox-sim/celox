@@ -264,11 +264,20 @@ pub fn emit(
     let mut epilogue_label = asm.create_label();
 
     // ── Blocks ──
-    for block in &func.blocks {
+    for (bi, block) in func.blocks.iter().enumerate() {
         let label = block_labels.get_mut(&block.id).unwrap();
         asm.set_label(label)?;
 
-        for inst in &block.insts {
+        for (inst_idx, inst) in block.insts.iter().enumerate() {
+            // Emit pre-instruction moves (clobber eviction)
+            if let Some(moves) = assignment.pre_moves.get(&(bi, inst_idx)) {
+                for &(dst_preg, src_preg) in moves {
+                    let d = preg_to_reg64(dst_preg);
+                    let s = preg_to_reg64(src_preg);
+                    asm.mov(d, s)?;
+                }
+            }
+
             // Before terminators that jump to blocks with phis, emit phi Movs
             if inst.is_terminator() {
                 emit_phi_moves(&mut asm, inst, block.id, func, assignment)?;
@@ -709,6 +718,12 @@ enum DivOp {
 ///
 /// Strategy: save/restore RAX and RDX as needed around the div instruction,
 /// similar to how emit_shift handles RCX for shifts.
+/// Emit unsigned division/remainder: `div r64`
+/// x86-64 `div r64`: RDX:RAX / operand → RAX = quotient, RDX = remainder.
+///
+/// This function saves/restores any live values in RAX/RDX that would be
+/// clobbered by the div instruction. Uses push/pop to avoid needing a
+/// scratch register.
 fn emit_divrem(
     asm: &mut CodeAssembler,
     assignment: &AssignmentMap,
@@ -726,10 +741,11 @@ fn emit_divrem(
         DivOp::Div => rax,
         DivOp::Rem => rdx,
     };
+    // The assignment phase has already emitted pre-instruction moves to
+    // evict any live values from RAX/RDX before this instruction.
 
     // The divisor cannot be RAX or RDX (they are clobbered by div).
     // If rhs is in RAX or RDX, we need to move it elsewhere first.
-    // We use RCX as a scratch register for this case.
     let effective_rhs = if r == rax || r == rdx {
         asm.mov(rcx, r)?;
         rcx
