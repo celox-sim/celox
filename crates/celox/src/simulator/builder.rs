@@ -8,9 +8,7 @@ use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
-use crate::{
-    ParserError, SimulatorError, SimulatorErrorKind, ir::Program, parser,
-};
+use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::Program, parser};
 
 fn analyze(
     sources: &[(&str, &Path)],
@@ -537,10 +535,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         )?;
 
         if let Some(s) = phase_start {
-            eprintln!(
-                "[phase-timing] compile_to_sir (total): {:?}",
-                s.elapsed()
-            );
+            eprintln!("[phase-timing] compile_to_sir (total): {:?}", s.elapsed());
         }
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
@@ -554,10 +549,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let jit_start = phase_timing.then(crate::timing::now);
         let backend = JitBackend::new(&program, &self.options, None)?;
         if let Some(s) = jit_start {
-            eprintln!(
-                "[phase-timing] jit_backend: {:?}",
-                s.elapsed()
-            );
+            eprintln!("[phase-timing] jit_backend: {:?}", s.elapsed());
         }
 
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);

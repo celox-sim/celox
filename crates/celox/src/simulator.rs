@@ -13,9 +13,9 @@ use num_bigint::BigUint;
 mod builder;
 mod error;
 
+pub use builder::compile_to_sir;
 #[cfg(not(target_arch = "wasm32"))]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
-pub use builder::compile_to_sir;
 pub use error::render_diagnostic;
 pub use error::{SimulatorError, SimulatorErrorKind};
 

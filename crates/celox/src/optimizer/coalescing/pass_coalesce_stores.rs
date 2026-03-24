@@ -109,52 +109,50 @@ fn coalesce_block(
                 let merged_lsb = sub_run[0].offset;
                 let total_width: usize = sub_run.iter().map(|c| c.width).sum();
                 let anchor_index = sub_run.iter().map(|c| c.inst_index).max().unwrap();
-                let removed_indices: Vec<usize> =
-                    sub_run.iter().map(|c| c.inst_index).collect();
+                let removed_indices: Vec<usize> = sub_run.iter().map(|c| c.inst_index).collect();
 
-                    // Allocate new register for Concat result
+                // Allocate new register for Concat result
+                *reg_counter += 1;
+                while register_map.contains_key(&RegisterId(*reg_counter)) {
                     *reg_counter += 1;
-                    while register_map.contains_key(&RegisterId(*reg_counter)) {
-                        *reg_counter += 1;
-                    }
-                    let concat_reg = RegisterId(*reg_counter);
-                    register_map.insert(
-                        concat_reg,
-                        RegisterType::Bit {
-                            width: total_width,
-                            signed: false,
-                        },
-                    );
+                }
+                let concat_reg = RegisterId(*reg_counter);
+                register_map.insert(
+                    concat_reg,
+                    RegisterType::Bit {
+                        width: total_width,
+                        signed: false,
+                    },
+                );
 
-                    // Concat order: MSB first, so reverse the LSB-sorted order
-                    let concat_args: Vec<RegisterId> =
-                        sub_run.iter().rev().map(|c| c.src_reg).collect();
+                // Concat order: MSB first, so reverse the LSB-sorted order
+                let concat_args: Vec<RegisterId> =
+                    sub_run.iter().rev().map(|c| c.src_reg).collect();
 
-                    // Get the addr from the first candidate (all share the same addr)
-                    let addr = if let SIRInstruction::Store(addr, _, _, _, _) =
-                        &block.instructions[sub_run[0].inst_index]
-                    {
-                        addr.clone()
-                    } else {
-                        unreachable!()
-                    };
+                // Get the addr from the first candidate (all share the same addr)
+                let addr = if let SIRInstruction::Store(addr, _, _, _, _) =
+                    &block.instructions[sub_run[0].inst_index]
+                {
+                    addr.clone()
+                } else {
+                    unreachable!()
+                };
 
-                    let mut new_instructions = Vec::with_capacity(2);
-                    new_instructions
-                        .push(SIRInstruction::Concat(concat_reg, concat_args));
-                    new_instructions.push(SIRInstruction::Store(
-                        addr,
-                        SIROffset::Static(merged_lsb),
-                        total_width,
-                        concat_reg,
-                        Vec::new(),
-                    ));
+                let mut new_instructions = Vec::with_capacity(2);
+                new_instructions.push(SIRInstruction::Concat(concat_reg, concat_args));
+                new_instructions.push(SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(merged_lsb),
+                    total_width,
+                    concat_reg,
+                    Vec::new(),
+                ));
 
-                    replacements.push(Replacement {
-                        removed_indices,
-                        anchor_index,
-                        new_instructions,
-                    });
+                replacements.push(Replacement {
+                    removed_indices,
+                    anchor_index,
+                    new_instructions,
+                });
             }
 
             run_start = run_end + 1;
@@ -208,7 +206,6 @@ fn seal_group(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -10,10 +10,10 @@ pub(crate) mod portable;
 #[cfg(not(target_arch = "wasm32"))]
 mod scheduler;
 pub(crate) mod serde_helpers;
-pub(crate) mod timing;
 #[cfg(not(target_arch = "wasm32"))]
 mod simulation;
 mod simulator;
+pub(crate) mod timing;
 #[cfg(not(target_arch = "wasm32"))]
 mod vcd;
 #[cfg(not(target_arch = "wasm32"))]
@@ -46,9 +46,9 @@ pub use backend::EventRef;
 pub use backend::SharedJitCode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::wasm_runtime::WasmBackend;
+pub use backend::{EventHandle, MemoryLayout, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::{JitBackend, SimBackend};
-pub use backend::{EventHandle, MemoryLayout, get_byte_size};
 pub use celox_macros::veryl_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub use debug::CompilationTraceResult;

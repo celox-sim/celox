@@ -16,9 +16,9 @@ use crate::{
     HashMap,
     backend::MemoryLayout,
     ir::{
-        AbsoluteAddr, BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr,
-        RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator, SIRValue,
-        STABLE_REGION, TriggerIdWithKind, UnaryOp,
+        AbsoluteAddr, BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId,
+        RegisterType, SIRInstruction, SIROffset, SIRTerminator, SIRValue, STABLE_REGION,
+        TriggerIdWithKind, UnaryOp,
     },
 };
 
@@ -74,12 +74,7 @@ impl LocalAllocator {
         idx
     }
 
-    fn alloc_reg(
-        &mut self,
-        reg: RegisterId,
-        width: usize,
-        four_state: bool,
-    ) -> RegLocal {
+    fn alloc_reg(&mut self, reg: RegisterId, width: usize, four_state: bool) -> RegLocal {
         let num_chunks = num_i64_chunks(width);
         let value_idx = self.alloc(num_chunks);
         let mask_idx = if four_state {
@@ -125,11 +120,7 @@ impl LocalAllocator {
 }
 
 fn num_i64_chunks(width: usize) -> usize {
-    if width == 0 {
-        1
-    } else {
-        (width + 63) / 64
-    }
+    if width == 0 { 1 } else { (width + 63) / 64 }
 }
 
 /// Build a WASM module from a set of execution units.
@@ -246,7 +237,14 @@ fn compile_function(
     // Control flow: each unit is a sequence of blocks.
     // We use a dispatch loop: a local `block_id` determines which block to execute.
     for unit in units {
-        compile_unit(unit, layout, four_state, emit_triggers, &mut locals, &mut instrs);
+        compile_unit(
+            unit,
+            layout,
+            four_state,
+            emit_triggers,
+            &mut locals,
+            &mut instrs,
+        );
     }
 
     // Successful return
@@ -381,7 +379,15 @@ fn compile_unit(
 
         // Translate instructions.
         for inst in &block.instructions {
-            compile_instruction(inst, unit, layout, four_state, emit_triggers, locals, instrs);
+            compile_instruction(
+                inst,
+                unit,
+                layout,
+                four_state,
+                emit_triggers,
+                locals,
+                instrs,
+            );
         }
 
         // Translate terminator.
@@ -429,18 +435,36 @@ fn compile_instruction(
             compile_unary(dst, op, src, unit, four_state, locals, instrs);
         }
         SIRInstruction::Load(dst, addr, offset, op_width) => {
-            compile_load(dst, addr, offset, *op_width, layout, four_state, locals, instrs);
+            compile_load(
+                dst, addr, offset, *op_width, layout, four_state, locals, instrs,
+            );
         }
         SIRInstruction::Store(addr, offset, op_width, src, triggers) => {
             compile_store(
-                addr, offset, *op_width, src, triggers, layout, four_state, emit_triggers, locals,
+                addr,
+                offset,
+                *op_width,
+                src,
+                triggers,
+                layout,
+                four_state,
+                emit_triggers,
+                locals,
                 instrs,
             );
         }
         SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
             compile_commit(
-                src_addr, dst_addr, offset, *op_width, triggers, layout, four_state,
-                emit_triggers, locals, instrs,
+                src_addr,
+                dst_addr,
+                offset,
+                *op_width,
+                triggers,
+                layout,
+                four_state,
+                emit_triggers,
+                locals,
+                instrs,
             );
         }
         SIRInstruction::Concat(dst, args) => {
@@ -808,8 +832,16 @@ fn compile_binary_wide(
             instrs.push(Instruction::LocalSet(result));
             // Compare from top chunk down. First difference determines result.
             for c in (0..l.num_chunks.max(r.num_chunks)).rev() {
-                let lc = if c < l.num_chunks { l.value_idx + c as u32 } else { u32::MAX };
-                let rc = if c < r.num_chunks { r.value_idx + c as u32 } else { u32::MAX };
+                let lc = if c < l.num_chunks {
+                    l.value_idx + c as u32
+                } else {
+                    u32::MAX
+                };
+                let rc = if c < r.num_chunks {
+                    r.value_idx + c as u32
+                } else {
+                    u32::MAX
+                };
 
                 // Get chunks (0 if out of range)
                 if lc != u32::MAX {
@@ -1257,7 +1289,11 @@ fn compile_unary(
                     instrs.push(Instruction::LocalGet(s.value_idx + c as u32));
                     let expected = if c == s.num_chunks - 1 {
                         let top_bits = s_width % 64;
-                        if top_bits == 0 { u64::MAX } else { (1u64 << top_bits) - 1 }
+                        if top_bits == 0 {
+                            u64::MAX
+                        } else {
+                            (1u64 << top_bits) - 1
+                        }
                     } else {
                         u64::MAX
                     };
@@ -1349,9 +1385,7 @@ fn compile_load(
             let bit_shift = bit_off % 8;
             let load_offset = base_offset + byte_off;
 
-            compile_load_at_offset(
-                d, load_offset, bit_shift, op_width, instrs,
-            );
+            compile_load_at_offset(d, load_offset, bit_shift, op_width, instrs);
 
             // 4-state: load mask
             if four_state {
@@ -1366,7 +1400,11 @@ fn compile_load(
                             mask_idx: None,
                         };
                         compile_load_at_offset(
-                            &mask_local, mask_load_offset, bit_shift, op_width, instrs,
+                            &mask_local,
+                            mask_load_offset,
+                            bit_shift,
+                            op_width,
+                            instrs,
                         );
                     } else {
                         // Not a 4-state var: mask is 0
@@ -1383,9 +1421,7 @@ fn compile_load(
             // Dynamic bit offset is in offset_reg.value_idx (i64).
             // byte_offset = base_offset + (dynamic_bits / 8)
             // bit_shift = dynamic_bits % 8
-            compile_load_dynamic(
-                d, base_offset, offset_reg.value_idx, op_width, instrs,
-            );
+            compile_load_dynamic(d, base_offset, offset_reg.value_idx, op_width, instrs);
 
             if four_state {
                 if let Some(mask_idx) = d.mask_idx {
@@ -1398,7 +1434,11 @@ fn compile_load(
                             mask_idx: None,
                         };
                         compile_load_dynamic(
-                            &mask_local, mask_base, offset_reg.value_idx, op_width, instrs,
+                            &mask_local,
+                            mask_base,
+                            offset_reg.value_idx,
+                            op_width,
+                            instrs,
                         );
                     } else {
                         for c in 0..d.num_chunks {
@@ -1620,7 +1660,11 @@ fn compile_store(
                         };
                         let mask_store_offset = base_offset + var_byte_size + byte_off;
                         compile_store_at_offset(
-                            &mask_local, mask_store_offset, bit_shift, op_width, instrs,
+                            &mask_local,
+                            mask_store_offset,
+                            bit_shift,
+                            op_width,
+                            instrs,
                         );
                     } else {
                         // Source is 2-state, clear mask
@@ -1645,7 +1689,11 @@ fn compile_store(
                         };
                         let mask_base = base_offset + var_byte_size;
                         compile_store_dynamic(
-                            &mask_local, mask_base, offset_reg.value_idx, op_width, instrs,
+                            &mask_local,
+                            mask_base,
+                            offset_reg.value_idx,
+                            op_width,
+                            instrs,
                         );
                     } else {
                         // Clear mask: store zeros at dynamic offset
@@ -2082,16 +2130,12 @@ fn compile_concat(
 
                     // If the shift causes overflow into next chunk
                     if dst_bit > 0 && dst_chunk + 1 < d.num_chunks {
-                        instrs.push(Instruction::LocalGet(
-                            d.value_idx + (dst_chunk + 1) as u32,
-                        ));
+                        instrs.push(Instruction::LocalGet(d.value_idx + (dst_chunk + 1) as u32));
                         instrs.push(Instruction::LocalGet(a.value_idx + ac as u32));
                         instrs.push(Instruction::I64Const((64 - dst_bit) as i64));
                         instrs.push(Instruction::I64ShrU);
                         instrs.push(Instruction::I64Or);
-                        instrs.push(Instruction::LocalSet(
-                            d.value_idx + (dst_chunk + 1) as u32,
-                        ));
+                        instrs.push(Instruction::LocalSet(d.value_idx + (dst_chunk + 1) as u32));
                     }
                 }
             }

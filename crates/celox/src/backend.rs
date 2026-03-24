@@ -19,10 +19,10 @@ pub(crate) use jit_engine::JitEngine;
 pub use memory_layout::{MemoryLayout, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::SharedJitCode;
-pub use traits::SimulatorErrorCode;
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 pub use runtime::{BatchFunc, EventRef, JitBackend};
+pub use traits::SimulatorErrorCode;
 #[allow(unused_imports)]
 pub use traits::{EventHandle, SimBackend};
 #[cfg(not(target_arch = "wasm32"))]

@@ -57,7 +57,10 @@ pub trait SimBackend {
     /// Execute a full eval-apply-ff cycle for the given event and then
     /// evaluate combinational logic in a single merged call.
     /// Returns `Err` if the backend does not support merged calls.
-    fn eval_apply_ff_and_comb(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;
+    fn eval_apply_ff_and_comb(
+        &mut self,
+        event: Self::Event,
+    ) -> Result<(), super::SimulatorErrorCode>;
 
     /// Evaluate and apply a flip-flop domain for the given event.
     fn eval_apply_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;

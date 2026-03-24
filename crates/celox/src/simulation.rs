@@ -61,7 +61,10 @@ impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
 // ── JitBackend-specific constructors ────────────────────────────────
 
 impl Simulation<JitBackend> {
-    pub fn builder<'a>(code: &'a str, top: &'a str) -> crate::SimulatorBuilder<'a, Simulation<JitBackend>> {
+    pub fn builder<'a>(
+        code: &'a str,
+        top: &'a str,
+    ) -> crate::SimulatorBuilder<'a, Simulation<JitBackend>> {
         crate::SimulatorBuilder::<Simulation<JitBackend>>::new(code, top)
     }
 

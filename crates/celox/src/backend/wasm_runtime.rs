@@ -49,7 +49,10 @@ impl super::traits::SimBackend for WasmBackend {
     fn eval_comb(&mut self) -> Result<(), super::SimulatorErrorCode> {
         WasmBackend::eval_comb(self)
     }
-    fn eval_apply_ff_and_comb(&mut self, event: WasmEventRef) -> Result<(), super::SimulatorErrorCode> {
+    fn eval_apply_ff_and_comb(
+        &mut self,
+        event: WasmEventRef,
+    ) -> Result<(), super::SimulatorErrorCode> {
         WasmBackend::eval_apply_ff_at(self, &event)?;
         WasmBackend::eval_comb(self)
     }
@@ -145,10 +148,7 @@ pub struct WasmBackend {
 }
 
 impl WasmBackend {
-    pub fn new(
-        sir: &Program,
-        options: &SimulatorOptions,
-    ) -> Result<Self, crate::SimulatorError> {
+    pub fn new(sir: &Program, options: &SimulatorOptions) -> Result<Self, crate::SimulatorError> {
         let engine = Engine::default();
         let layout = MemoryLayout::build(sir, options.four_state);
 
@@ -159,10 +159,9 @@ impl WasmBackend {
             options.four_state,
             options.emit_triggers,
         );
-        let comb_module = Module::new(&engine, &comb_wasm.bytes)
-            .map_err(|e| crate::SimulatorError::from(
-                format!("WASM compilation failed (eval_comb): {e}"),
-            ))?;
+        let comb_module = Module::new(&engine, &comb_wasm.bytes).map_err(|e| {
+            crate::SimulatorError::from(format!("WASM compilation failed (eval_comb): {e}"))
+        })?;
 
         // Compile event functions
         let mut event_modules = Vec::new();
@@ -179,11 +178,11 @@ impl WasmBackend {
             AbsoluteAddr,
             Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
         >,
-                               modules: &mut Vec<(AbsoluteAddr, Module)>,
-                               emap: &mut HashMap<AbsoluteAddr, WasmEventRef>,
-                               addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
-                               next_id: &mut usize,
-                               id_to_addr: &mut Vec<AbsoluteAddr>|
+                           modules: &mut Vec<(AbsoluteAddr, Module)>,
+                           emap: &mut HashMap<AbsoluteAddr, WasmEventRef>,
+                           addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
+                           next_id: &mut usize,
+                           id_to_addr: &mut Vec<AbsoluteAddr>|
          -> Result<(), crate::SimulatorError> {
             for (clock, units) in ff_map {
                 let id = *addr_to_id.entry(*clock).or_insert_with(|| {
@@ -199,10 +198,9 @@ impl WasmBackend {
                     options.four_state,
                     options.emit_triggers,
                 );
-                let module = Module::new(&engine, &wasm.bytes)
-                    .map_err(|e| crate::SimulatorError::from(
-                        format!("WASM compilation failed (ff): {e}"),
-                    ))?;
+                let module = Module::new(&engine, &wasm.bytes).map_err(|e| {
+                    crate::SimulatorError::from(format!("WASM compilation failed (ff): {e}"))
+                })?;
                 let idx = modules.len();
                 modules.push((*clock, module));
                 emap.insert(
@@ -289,9 +287,7 @@ impl WasmBackend {
             &mut store,
             wasmtime::MemoryType::new(mem_pages as u32, None),
         )
-        .map_err(|e| crate::SimulatorError::from(
-            format!("WASM memory creation failed: {e}"),
-        ))?;
+        .map_err(|e| crate::SimulatorError::from(format!("WASM memory creation failed: {e}")))?;
 
         // Initialize 4-state regions to X
         {
@@ -317,9 +313,11 @@ impl WasmBackend {
             memory: &Memory,
         ) -> Result<TypedFunc<(), i64>, crate::SimulatorError> {
             let mut linker = Linker::new(engine);
-            linker.define(&mut *store, "env", "memory", *memory)
+            linker
+                .define(&mut *store, "env", "memory", *memory)
                 .map_err(|e| format!("WASM linker error: {e}"))?;
-            let instance = linker.instantiate(&mut *store, module)
+            let instance = linker
+                .instantiate(&mut *store, module)
                 .map_err(|e| format!("WASM instantiation error: {e}"))?;
             let func = instance
                 .get_typed_func::<(), i64>(&mut *store, "run")
@@ -524,8 +522,7 @@ impl WasmBackend {
         let mut v_val = BigUint::from_bytes_le(v_slice);
 
         let mut m_val = if self.options.four_state && signal.is_4state {
-            let m_slice =
-                &mem[signal.offset + byte_size..signal.offset + 2 * byte_size];
+            let m_slice = &mem[signal.offset + byte_size..signal.offset + 2 * byte_size];
             BigUint::from_bytes_le(m_slice)
         } else {
             BigUint::from(0u32)

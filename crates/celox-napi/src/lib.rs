@@ -1293,8 +1293,16 @@ impl NativeSimulatorHandle {
         let (program, warnings) = celox::compile_to_sir(
             &source_refs,
             &top,
-            &opts.false_loops.iter().map(|(f, t)| (f.clone(), t.clone())).collect::<Vec<_>>(),
-            &opts.true_loops.iter().map(|(f, t, m)| (f.clone(), t.clone(), *m)).collect::<Vec<_>>(),
+            &opts
+                .false_loops
+                .iter()
+                .map(|(f, t)| (f.clone(), t.clone()))
+                .collect::<Vec<_>>(),
+            &opts
+                .true_loops
+                .iter()
+                .map(|(f, t, m)| (f.clone(), t.clone(), *m))
+                .collect::<Vec<_>>(),
             opts.four_state,
             &trace_opts,
             None,
@@ -1349,8 +1357,16 @@ impl NativeSimulatorHandle {
         let (program, warnings) = celox::compile_to_sir(
             &source_refs,
             &top,
-            &opts.false_loops.iter().map(|(f, t)| (f.clone(), t.clone())).collect::<Vec<_>>(),
-            &opts.true_loops.iter().map(|(f, t, m)| (f.clone(), t.clone(), *m)).collect::<Vec<_>>(),
+            &opts
+                .false_loops
+                .iter()
+                .map(|(f, t)| (f.clone(), t.clone()))
+                .collect::<Vec<_>>(),
+            &opts
+                .true_loops
+                .iter()
+                .map(|(f, t, m)| (f.clone(), t.clone(), *m))
+                .collect::<Vec<_>>(),
             opts.four_state,
             &trace_opts,
             None,
@@ -1441,12 +1457,8 @@ impl NativeSimulatorHandle {
         for (addr, units) in &self.program.eval_apply_ffs {
             let event_path = self.program.get_path(addr);
             if event_path == event_name {
-                let wasm = celox::wasm_codegen::compile_units(
-                    units,
-                    &self.layout,
-                    self.four_state,
-                    false,
-                );
+                let wasm =
+                    celox::wasm_codegen::compile_units(units, &self.layout, self.four_state, false);
                 return Ok(wasm.bytes);
             }
         }
@@ -1559,10 +1571,7 @@ fn analyzer_error_to_diagnostics(
     let help = err.help().map(|h| h.to_string());
     let url = err.url().map(|u| u.to_string());
 
-    let labels: Vec<_> = err
-        .labels()
-        .map(|l| l.collect())
-        .unwrap_or_default();
+    let labels: Vec<_> = err.labels().map(|l| l.collect()).unwrap_or_default();
 
     if labels.is_empty() {
         return vec![celox_ts_gen::JsonDiagnostic {
@@ -1929,9 +1938,10 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
     all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
 
     // Pass 2: per-file IR → generate
-    let all_source_files: Vec<String> = parsers.iter().map(|(_, p, _)| {
-        p.to_string_lossy().replace('\\', "/")
-    }).collect();
+    let all_source_files: Vec<String> = parsers
+        .iter()
+        .map(|(_, p, _)| p.to_string_lossy().replace('\\', "/"))
+        .collect();
     let source_file_refs: Vec<&str> = all_source_files.iter().map(|s| s.as_str()).collect();
 
     let mut all_modules = Vec::new();
@@ -1940,12 +1950,8 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
     for (i, (prj, _path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let results = analyzer.analyze_pass2(
-            prj,
-            &parser.veryl,
-            &mut analyzer_context,
-            Some(&mut ir),
-        );
+        let results =
+            analyzer.analyze_pass2(prj, &parser.veryl, &mut analyzer_context, Some(&mut ir));
         let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
         if !real_errors.is_empty() {
             return Err(Error::from_reason(format_errors_with_warnings(

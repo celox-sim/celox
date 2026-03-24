@@ -653,13 +653,10 @@ impl JitEngine {
             // Loop header: check i < count
             builder.switch_to_block(loop_header);
             let i = builder.use_var(counter_var);
-            let done =
-                builder
-                    .ins()
-                    .icmp(IntCC::UnsignedGreaterThanOrEqual, i, count);
-            builder
+            let done = builder
                 .ins()
-                .brif(done, exit_block, &[], loop_body, &[]);
+                .icmp(IntCC::UnsignedGreaterThanOrEqual, i, count);
+            builder.ins().brif(done, exit_block, &[], loop_body, &[]);
 
             // Loop body: copy input to memory, then inline eval_comb
             builder.switch_to_block(loop_body);
@@ -701,14 +698,7 @@ impl JitEngine {
             .declare_anonymous_function(&ctx.func.signature)
             .map_err(|e| format!("Failed to declare batch eval function: {e}"))?;
 
-        self.optimize_and_define(
-            &mut ctx,
-            func_id,
-            "=== batch_eval ===",
-            None,
-            None,
-            None,
-        )?;
+        self.optimize_and_define(&mut ctx, func_id, "=== batch_eval ===", None, None, None)?;
 
         self.module
             .finalize_definitions()

@@ -299,9 +299,9 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
         sorted_by_lsb.sort_by_key(|&idx| input[idx].target.access.lsb);
 
         // Check contiguity: every next path's lsb == previous path's msb + 1
-        let contiguous = sorted_by_lsb.windows(2).all(|w| {
-            input[w[1]].target.access.lsb == input[w[0]].target.access.msb + 1
-        });
+        let contiguous = sorted_by_lsb
+            .windows(2)
+            .all(|w| input[w[1]].target.access.lsb == input[w[0]].target.access.msb + 1);
 
         // Check total merged width doesn't exceed variable's declared width.
         let target_addr = input[sorted_by_lsb[0]].target.id;

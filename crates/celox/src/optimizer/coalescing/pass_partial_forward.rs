@@ -56,8 +56,7 @@ fn partial_forward_block(
                         && *width == state.base_width
                         && !state.overlays.is_empty()
                     {
-                        let synth =
-                            synthesize_load(*dst, *addr, state, register_map, reg_counter);
+                        let synth = synthesize_load(*dst, *addr, state, register_map, reg_counter);
                         new_instructions.extend(synth);
 
                         let state = var_states.get_mut(addr).unwrap();
@@ -82,8 +81,7 @@ fn partial_forward_block(
                 if triggers.is_empty() =>
             {
                 if let Some(state) = var_states.get_mut(addr) {
-                    if *off >= state.base_off
-                        && *off + *width <= state.base_off + state.base_width
+                    if *off >= state.base_off && *off + *width <= state.base_off + state.base_width
                     {
                         let rel_off = *off - state.base_off;
                         let store_end = rel_off + *width;
@@ -135,9 +133,16 @@ fn synthesize_load(
     for &(rel_off, width, reg) in &overlays {
         if rel_off > cursor {
             emit_gap(
-                addr, state.base_off, state.base_width, state.base_reg,
-                cursor, rel_off - cursor,
-                &mut concat_args, register_map, reg_counter, &mut instructions,
+                addr,
+                state.base_off,
+                state.base_width,
+                state.base_reg,
+                cursor,
+                rel_off - cursor,
+                &mut concat_args,
+                register_map,
+                reg_counter,
+                &mut instructions,
             );
         }
         concat_args.push(reg);
@@ -146,9 +151,16 @@ fn synthesize_load(
 
     if cursor < state.base_width {
         emit_gap(
-            addr, state.base_off, state.base_width, state.base_reg,
-            cursor, state.base_width - cursor,
-            &mut concat_args, register_map, reg_counter, &mut instructions,
+            addr,
+            state.base_off,
+            state.base_width,
+            state.base_reg,
+            cursor,
+            state.base_width - cursor,
+            &mut concat_args,
+            register_map,
+            reg_counter,
+            &mut instructions,
         );
     }
 
@@ -185,7 +197,12 @@ fn emit_gap(
     instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
 ) {
     let reg = alloc_reg(register_map, reg_counter, gap_width);
-    instructions.push(SIRInstruction::Slice(reg, base_reg, gap_rel_start, gap_width));
+    instructions.push(SIRInstruction::Slice(
+        reg,
+        base_reg,
+        gap_rel_start,
+        gap_width,
+    ));
     concat_args.push(reg);
 }
 

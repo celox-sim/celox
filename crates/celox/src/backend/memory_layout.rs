@@ -1,5 +1,5 @@
-use crate::ir::{AbsoluteAddr, Program};
 use crate::HashMap;
+use crate::ir::{AbsoluteAddr, Program};
 
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {

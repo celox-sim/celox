@@ -601,7 +601,13 @@ pub(crate) fn flatten(
             let module = module_ir[&mod_id];
             module.variables.iter().filter_map(move |(var_id, var)| {
                 resolve_total_width(module, var).ok().map(|w| {
-                    (AbsoluteAddr { instance_id: inst_id, var_id: *var_id }, w)
+                    (
+                        AbsoluteAddr {
+                            instance_id: inst_id,
+                            var_id: *var_id,
+                        },
+                        w,
+                    )
                 })
             })
         })

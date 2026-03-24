@@ -76,12 +76,7 @@ impl SimHandle {
         for (addr, units) in &self.program.eval_apply_ffs {
             let event_path = self.program.get_path(addr);
             if event_path == event_name {
-                let wasm = wasm_codegen::compile_units(
-                    units,
-                    &self.layout,
-                    self.four_state,
-                    false,
-                );
+                let wasm = wasm_codegen::compile_units(units, &self.layout, self.four_state, false);
                 return Ok(wasm.bytes);
             }
         }

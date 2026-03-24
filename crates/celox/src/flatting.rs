@@ -140,8 +140,7 @@ fn atomize_logic_paths(
                     merged_msb - path.target.access.lsb,
                 );
                 let merged_width = merged_msb - merged_lsb + 1;
-                let original_width =
-                    path.target.access.msb - path.target.access.lsb + 1;
+                let original_width = path.target.access.msb - path.target.access.lsb + 1;
 
                 let merged_expr = if merged_width == original_width {
                     // Covers the full original range — use the expression directly.

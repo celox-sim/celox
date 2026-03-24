@@ -5,10 +5,7 @@ use celox::{BigUint, SimulatorOptions, WasmBackend};
 
 /// Build a Simulator (JIT) and a WasmBackend from the same Veryl code.
 /// Returns (jit_simulator, wasm_backend).
-fn build_both(
-    code: &str,
-    top: &str,
-) -> (celox::Simulator, WasmBackend) {
+fn build_both(code: &str, top: &str) -> (celox::Simulator, WasmBackend) {
     let sim = celox::Simulator::builder(code, top).build().unwrap();
     let program = sim.program().clone();
     let opts = SimulatorOptions::default();
@@ -124,9 +121,21 @@ fn wasm_reg_arithmetic() {
         })
         .unwrap();
 
-        assert_eq!(wasm.get(w_add), sim.get(j_add), "add mismatch for a={av}, b={bv}");
-        assert_eq!(wasm.get(w_sub), sim.get(j_sub), "sub mismatch for a={av}, b={bv}");
-        assert_eq!(wasm.get(w_mul), sim.get(j_mul), "mul mismatch for a={av}, b={bv}");
+        assert_eq!(
+            wasm.get(w_add),
+            sim.get(j_add),
+            "add mismatch for a={av}, b={bv}"
+        );
+        assert_eq!(
+            wasm.get(w_sub),
+            sim.get(j_sub),
+            "sub mismatch for a={av}, b={bv}"
+        );
+        assert_eq!(
+            wasm.get(w_mul),
+            sim.get(j_mul),
+            "mul mismatch for a={av}, b={bv}"
+        );
     }
 }
 
@@ -198,10 +207,26 @@ fn wasm_reg_comparisons() {
         })
         .unwrap();
 
-        assert_eq!(wasm.get(w_lt), sim.get(j_lt), "lt mismatch for a={av}, b={bv}");
-        assert_eq!(wasm.get(w_ge), sim.get(j_ge), "ge mismatch for a={av}, b={bv}");
-        assert_eq!(wasm.get(w_eq), sim.get(j_eq), "eq mismatch for a={av}, b={bv}");
-        assert_eq!(wasm.get(w_ne), sim.get(j_ne), "ne mismatch for a={av}, b={bv}");
+        assert_eq!(
+            wasm.get(w_lt),
+            sim.get(j_lt),
+            "lt mismatch for a={av}, b={bv}"
+        );
+        assert_eq!(
+            wasm.get(w_ge),
+            sim.get(j_ge),
+            "ge mismatch for a={av}, b={bv}"
+        );
+        assert_eq!(
+            wasm.get(w_eq),
+            sim.get(j_eq),
+            "eq mismatch for a={av}, b={bv}"
+        );
+        assert_eq!(
+            wasm.get(w_ne),
+            sim.get(j_ne),
+            "ne mismatch for a={av}, b={bv}"
+        );
     }
 }
 
@@ -261,7 +286,11 @@ fn wasm_reg_ternary() {
         })
         .unwrap();
 
-        assert_eq!(wasm.get(w_o), sim.get(j_o), "ternary mismatch for sel={sel_v}");
+        assert_eq!(
+            wasm.get(w_o),
+            sim.get(j_o),
+            "ternary mismatch for sel={sel_v}"
+        );
     }
 }
 
@@ -469,7 +498,11 @@ fn wasm_reg_reduction_ops() {
         wasm.eval_comb().unwrap();
         sim.modify(|io| io.set(ja, av)).unwrap();
 
-        assert_eq!(wasm.get(w_and), sim.get(j_and), "and mismatch for a={av:#x}");
+        assert_eq!(
+            wasm.get(w_and),
+            sim.get(j_and),
+            "and mismatch for a={av:#x}"
+        );
         assert_eq!(wasm.get(w_or), sim.get(j_or), "or mismatch for a={av:#x}");
     }
 }
@@ -641,7 +674,11 @@ fn wasm_reg_counter() {
 
         sim.tick(j_clk).unwrap();
 
-        assert_eq!(wasm.get(w_cnt), sim.get(j_cnt), "counter mismatch at tick {i}");
+        assert_eq!(
+            wasm.get(w_cnt),
+            sim.get(j_cnt),
+            "counter mismatch at tick {i}"
+        );
     }
 }
 
@@ -687,7 +724,11 @@ fn wasm_reg_wide_add_128() {
         })
         .unwrap();
 
-        assert_eq!(wasm.get(ws), sim.get(js), "wide add mismatch for a={av}, b={bv}");
+        assert_eq!(
+            wasm.get(ws),
+            sim.get(js),
+            "wide add mismatch for a={av}, b={bv}"
+        );
     }
 }
 
@@ -944,8 +985,16 @@ fn wasm_reg_logical_ops() {
         })
         .unwrap();
 
-        assert_eq!(wasm.get(w_and), sim.get(j_and), "and mismatch for a={av:#x}, b={bv:#x}");
-        assert_eq!(wasm.get(w_or), sim.get(j_or), "or mismatch for a={av:#x}, b={bv:#x}");
+        assert_eq!(
+            wasm.get(w_and),
+            sim.get(j_and),
+            "and mismatch for a={av:#x}, b={bv:#x}"
+        );
+        assert_eq!(
+            wasm.get(w_or),
+            sim.get(j_or),
+            "or mismatch for a={av:#x}, b={bv:#x}"
+        );
     }
 }
 
@@ -1177,7 +1226,10 @@ fn wasm_reg_vcd_output() {
 
     // Verify VCD file was written
     let content = std::fs::read_to_string(vcd_path).unwrap();
-    assert!(content.contains("$var wire"), "VCD should contain signal declarations");
+    assert!(
+        content.contains("$var wire"),
+        "VCD should contain signal declarations"
+    );
     assert!(content.contains("#0"), "VCD should contain timestamp 0");
     assert!(content.contains("#50"), "VCD should contain timestamp 50");
 

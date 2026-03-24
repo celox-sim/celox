@@ -433,8 +433,7 @@ impl SIRTranslator {
                     if bits_in_chunk < 64 && bits_in_chunk < remaining {
                         // Get remaining bits from next chunk
                         let next_chunk = get_chunk_as_i64(builder, chunks, c_idx + 1);
-                        let next_shift =
-                            builder.ins().iconst(types::I64, bits_in_chunk as i64);
+                        let next_shift = builder.ins().iconst(types::I64, bits_in_chunk as i64);
                         let next_part = builder.ins().ishl(next_chunk, next_shift);
                         v = builder.ins().bor(v, next_part);
                     }
@@ -481,11 +480,10 @@ impl SIRTranslator {
                 let mut chunks = Vec::with_capacity(num_chunks);
                 for i in 0..num_chunks {
                     let offset = (i * 8) as i32;
-                    let v =
-                        state
-                            .builder
-                            .ins()
-                            .load(types::I64, MemFlags::new(), addr, offset);
+                    let v = state
+                        .builder
+                        .ins()
+                        .load(types::I64, MemFlags::new(), addr, offset);
                     chunks.push(v);
                 }
                 let val_result = extract_from_chunks(state.builder, &chunks);

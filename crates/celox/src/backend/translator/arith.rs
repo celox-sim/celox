@@ -95,7 +95,11 @@ impl SIRTranslator {
         let mut combined = vec![0u64; num_chunks];
         let mut bit_offset = 0usize;
         for &(val, width) in const_vals.iter().rev() {
-            let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let mask = if width >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
             let masked_val = val & mask;
             let chunk_idx = bit_offset / 64;
             let bit_in_chunk = bit_offset % 64;
@@ -120,7 +124,11 @@ impl SIRTranslator {
                 } else {
                     // For the last chunk, mask to the remaining width
                     let remaining = dst_width - i * 64;
-                    let _ty = if remaining >= 64 { types::I64 } else { get_cl_type(remaining) };
+                    let _ty = if remaining >= 64 {
+                        types::I64
+                    } else {
+                        get_cl_type(remaining)
+                    };
                     state.builder.ins().iconst(types::I64, v as i64)
                 }
             })
