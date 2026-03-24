@@ -536,6 +536,65 @@ impl MInst {
         }
     }
 
+    /// Replace all occurrences of `old` with `new` in the use operands.
+    pub fn rewrite_use(&mut self, old: VReg, new: VReg) {
+        match self {
+            MInst::Mov { src, .. } => {
+                if *src == old { *src = new; }
+            }
+            MInst::Store { src, .. } => {
+                if *src == old { *src = new; }
+            }
+            MInst::LoadIndexed { index, .. } => {
+                if *index == old { *index = new; }
+            }
+            MInst::StoreIndexed { index, src, .. } => {
+                if *index == old { *index = new; }
+                if *src == old { *src = new; }
+            }
+            MInst::Add { lhs, rhs, .. }
+            | MInst::Sub { lhs, rhs, .. }
+            | MInst::Mul { lhs, rhs, .. }
+            | MInst::And { lhs, rhs, .. }
+            | MInst::Or { lhs, rhs, .. }
+            | MInst::Xor { lhs, rhs, .. }
+            | MInst::Shr { lhs, rhs, .. }
+            | MInst::Shl { lhs, rhs, .. }
+            | MInst::Sar { lhs, rhs, .. }
+            | MInst::Cmp { lhs, rhs, .. }
+            | MInst::UDiv { lhs, rhs, .. }
+            | MInst::URem { lhs, rhs, .. } => {
+                if *lhs == old { *lhs = new; }
+                if *rhs == old { *rhs = new; }
+            }
+            MInst::AndImm { src, .. }
+            | MInst::OrImm { src, .. }
+            | MInst::ShrImm { src, .. }
+            | MInst::ShlImm { src, .. }
+            | MInst::BitNot { src, .. }
+            | MInst::Neg { src, .. } => {
+                if *src == old { *src = new; }
+            }
+            MInst::BitFieldInsert { base_word, val, .. } => {
+                if *base_word == old { *base_word = new; }
+                if *val == old { *val = new; }
+            }
+            MInst::Select { cond, true_val, false_val, .. } => {
+                if *cond == old { *cond = new; }
+                if *true_val == old { *true_val = new; }
+                if *false_val == old { *false_val = new; }
+            }
+            MInst::Branch { cond, .. } => {
+                if *cond == old { *cond = new; }
+            }
+            MInst::LoadImm { .. }
+            | MInst::Load { .. }
+            | MInst::Jump { .. }
+            | MInst::Return
+            | MInst::ReturnError { .. } => {}
+        }
+    }
+
     /// Returns true if this instruction is a terminator (branch/jump/return).
     pub fn is_terminator(&self) -> bool {
         matches!(

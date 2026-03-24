@@ -239,7 +239,6 @@ pub fn emit(
         if total_push % 16 != 0 { 8 } else { 0 }
     } else {
         let needed = spill_frame_size;
-        // Round up to maintain 16-byte alignment
         let misalign = (total_push + needed) % 16;
         if misalign == 0 { needed } else { needed + (16 - misalign) }
     };
@@ -264,20 +263,11 @@ pub fn emit(
     let mut epilogue_label = asm.create_label();
 
     // ── Blocks ──
-    for (bi, block) in func.blocks.iter().enumerate() {
+    for (_bi, block) in func.blocks.iter().enumerate() {
         let label = block_labels.get_mut(&block.id).unwrap();
         asm.set_label(label)?;
 
-        for (inst_idx, inst) in block.insts.iter().enumerate() {
-            // Emit pre-instruction moves (clobber eviction)
-            if let Some(moves) = assignment.pre_moves.get(&(bi, inst_idx)) {
-                for &(dst_preg, src_preg) in moves {
-                    let d = preg_to_reg64(dst_preg);
-                    let s = preg_to_reg64(src_preg);
-                    asm.mov(d, s)?;
-                }
-            }
-
+        for (_inst_idx, inst) in block.insts.iter().enumerate() {
             // Before terminators that jump to blocks with phis, emit phi Movs
             if inst.is_terminator() {
                 emit_phi_moves(&mut asm, inst, block.id, func, assignment)?;
@@ -285,14 +275,18 @@ pub fn emit(
 
             match inst {
                 MInst::Return => {
-                    // Return 0 (success) and jump to shared epilogue
                     asm.xor(eax, eax)?;
                     asm.jmp(epilogue_label)?;
                 }
                 MInst::ReturnError { code } => {
-                    // Return error code (non-zero) and jump to shared epilogue
                     asm.mov(eax, *code as u32)?;
                     asm.jmp(epilogue_label)?;
+                }
+                MInst::UDiv { dst, lhs, rhs } => {
+                    emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Div)?;
+                }
+                MInst::URem { dst, lhs, rhs } => {
+                    emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Rem)?;
                 }
                 _ => {
                     emit_inst(&mut asm, inst, assignment, &mut block_labels)?;
@@ -714,16 +708,9 @@ enum DivOp {
 
 /// Emit unsigned division/remainder: `div r64`
 /// x86-64 `div r64`: RDX:RAX / operand → RAX = quotient, RDX = remainder.
-/// The caller (ISel) has already inserted a zero-division guard (Select).
 ///
-/// Strategy: save/restore RAX and RDX as needed around the div instruction,
-/// similar to how emit_shift handles RCX for shifts.
-/// Emit unsigned division/remainder: `div r64`
-/// x86-64 `div r64`: RDX:RAX / operand → RAX = quotient, RDX = remainder.
-///
-/// This function saves/restores any live values in RAX/RDX that would be
-/// clobbered by the div instruction. Uses push/pop to avoid needing a
-/// scratch register.
+/// The assignment phase avoids placing live-across VRegs in RAX/RDX around
+/// div/rem instructions, so no save/restore is needed here.
 fn emit_divrem(
     asm: &mut CodeAssembler,
     assignment: &AssignmentMap,
@@ -736,16 +723,12 @@ fn emit_divrem(
     let l = preg_to_reg64(resolve(assignment, lhs));
     let r = preg_to_reg64(resolve(assignment, rhs));
 
-    // Result register: RAX for div, RDX for rem
     let result_reg: AsmRegister64 = match op {
         DivOp::Div => rax,
         DivOp::Rem => rdx,
     };
-    // The assignment phase has already emitted pre-instruction moves to
-    // evict any live values from RAX/RDX before this instruction.
 
-    // The divisor cannot be RAX or RDX (they are clobbered by div).
-    // If rhs is in RAX or RDX, we need to move it elsewhere first.
+    // Divisor cannot be in RAX or RDX (clobbered by div).
     let effective_rhs = if r == rax || r == rdx {
         asm.mov(rcx, r)?;
         rcx
@@ -753,17 +736,12 @@ fn emit_divrem(
         r
     };
 
-    // Move lhs into RAX (the dividend low half)
     if l != rax {
         asm.mov(rax, l)?;
     }
-    // Zero-extend dividend into RDX:RAX (unsigned division)
     asm.xor(edx, edx)?;
-
-    // Perform unsigned division: RDX:RAX / effective_rhs
     asm.div(effective_rhs)?;
 
-    // Move result to destination
     if d != result_reg {
         asm.mov(d, result_reg)?;
     }

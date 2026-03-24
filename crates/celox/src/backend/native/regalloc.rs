@@ -24,6 +24,10 @@ pub struct RegallocResult {
 /// Run the full register allocation pipeline on an MFunction.
 /// Returns the assignment map and required spill frame size.
 pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
+    // Split live ranges at clobber points (e.g., div/rem clobbering RAX/RDX).
+    // This inserts Mov instructions so the rest of the pipeline sees clean SSA.
+    assignment::split_live_ranges_at_clobbers(func);
+
     let analysis = analysis::analyze(func);
     let spill_frame_size = spilling::spill(func, &analysis, NUM_REGS);
     // Re-analyze after spilling (spill/reload instructions change liveness)

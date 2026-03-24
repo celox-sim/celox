@@ -5,8 +5,10 @@
 //! interference graph.
 //!
 //! Handles x86-64 register constraints:
-//! - Shift instructions (Shr, Shl, Sar) with register rhs require RCX.
-//! - Future: Div/Rem require RAX/RDX.
+//! - Shift instructions (Shr, Shl, Sar) with register rhs require RCX
+//!   (handled at emit time).
+//! - UDiv/URem clobber RAX and RDX. Live values in clobbered registers
+//!   are saved via live-range splitting (Mov insertion + use rewriting).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -19,9 +21,6 @@ use super::analysis::AnalysisResult;
 // Physical registers
 // ────────────────────────────────────────────────────────────────
 
-/// x86-64 general-purpose registers available for allocation.
-/// Excludes RSP (stack pointer), RBP (frame pointer), and
-/// one register reserved for the simulation state base pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum PhysReg {
@@ -29,8 +28,6 @@ pub enum PhysReg {
     RCX = 1,
     RDX = 2,
     RBX = 3,
-    // RSP = 4, // reserved: stack pointer
-    // RBP = 5, // reserved: frame pointer
     RSI = 6,
     RDI = 7,
     R8 = 8,
@@ -40,7 +37,6 @@ pub enum PhysReg {
     R12 = 12,
     R13 = 13,
     R14 = 14,
-    // R15 = 15, // reserved: simulation state base pointer
 }
 
 impl fmt::Display for PhysReg {
@@ -64,10 +60,7 @@ impl fmt::Display for PhysReg {
     }
 }
 
-/// All allocatable registers, in preference order.
-/// Caller-saved first (cheaper to use — no save/restore needed).
 pub const ALLOCATABLE_REGS: &[PhysReg] = &[
-    // Caller-saved (volatile)
     PhysReg::RAX,
     PhysReg::RDX,
     PhysReg::RSI,
@@ -76,10 +69,7 @@ pub const ALLOCATABLE_REGS: &[PhysReg] = &[
     PhysReg::R9,
     PhysReg::R10,
     PhysReg::R11,
-    // RCX is caller-saved but we put it last among volatiles
-    // so it's only used when needed (shift constraint) or when others are exhausted
     PhysReg::RCX,
-    // Callee-saved (need save/restore in prologue/epilogue)
     PhysReg::RBX,
     PhysReg::R12,
     PhysReg::R13,
@@ -90,36 +80,25 @@ pub const ALLOCATABLE_REGS: &[PhysReg] = &[
 // Register constraints
 // ────────────────────────────────────────────────────────────────
 
-/// Constraint on a particular operand of an instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegConstraint {
-    /// Any allocatable register.
     Any,
-    /// Must be this specific physical register.
     Fixed(PhysReg),
 }
 
-/// Return the register constraint for each use operand of an instruction.
-/// The returned vec has the same length and order as `inst.uses()`.
 pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
-    // Shift rhs → RCX is handled in the emit phase (mov rcx, rhs) rather
-    // than as an assignment constraint, because multiple shifts with different
-    // amounts would all compete for RCX and clobber each other.
     let _ = inst;
     inst.uses().iter().map(|_| RegConstraint::Any).collect()
 }
 
-/// Return the register constraint for the def operand of an instruction.
 pub fn def_constraint(inst: &MInst) -> RegConstraint {
     let _ = inst;
     RegConstraint::Any
 }
 
 /// Returns physical registers clobbered by this instruction (besides dst).
-/// These registers are destroyed as a side-effect and must not hold live values.
 pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
     match inst {
-        // x86-64 `div r64` writes quotient to RAX and remainder to RDX.
         MInst::UDiv { .. } | MInst::URem { .. } => &[PhysReg::RAX, PhysReg::RDX],
         _ => &[],
     }
@@ -129,14 +108,9 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
 // Assignment result
 // ────────────────────────────────────────────────────────────────
 
-/// The result of register assignment: a mapping from VReg → PhysReg,
-/// plus any pre-instruction moves needed for clobber eviction.
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: BTreeMap<VReg, PhysReg>,
-    /// Pre-instruction register moves for clobber eviction.
-    /// Key: (block_index, instruction_index). Value: list of (dst_preg, src_preg) moves.
-    pub pre_moves: BTreeMap<(usize, usize), Vec<(PhysReg, PhysReg)>>,
 }
 
 impl AssignmentMap {
@@ -150,40 +124,125 @@ impl AssignmentMap {
 }
 
 // ────────────────────────────────────────────────────────────────
+// Live-range splitting for clobbers
+// ────────────────────────────────────────────────────────────────
+
+/// Pre-pass: split live ranges at clobber points (O(n) per block).
+///
+/// For each clobber instruction (UDiv/URem), VRegs used by the clobber that
+/// are also used later get split: a Mov copies the value to a fresh VReg,
+/// and all subsequent references use the fresh VReg.
+///
+/// Single-pass algorithm using a rename map:
+/// 1. Scan forward, applying accumulated renames to each instruction's uses.
+/// 2. At clobber points, determine which uses need splitting (via a precomputed
+///    last-use table), allocate fresh VRegs, and record renames.
+/// 3. Insert Mov instructions at the appropriate positions.
+pub fn split_live_ranges_at_clobbers(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        // Quick check: any clobbers in this block?
+        if !block.insts.iter().any(|inst| !clobbers(inst).is_empty()) {
+            continue;
+        }
+
+        // Precompute last-use position for each VReg (O(n)).
+        let mut last_use: BTreeMap<VReg, usize> = BTreeMap::new();
+        for (i, inst) in block.insts.iter().enumerate() {
+            for vreg in inst.uses() {
+                last_use.insert(vreg, i);
+            }
+        }
+
+        // Single forward pass: collect splits and apply renames.
+        let mut rename: BTreeMap<VReg, VReg> = BTreeMap::new();
+        // (insert_before_idx, Mov instruction) — collected, applied after
+        let mut splits: Vec<(usize, MInst)> = Vec::new();
+        // Offset: how many Movs have been scheduled before this point
+        // (needed to adjust insertion indices)
+        let mut offset = 0usize;
+
+        for i in 0..block.insts.len() {
+            // Apply accumulated renames to this instruction's uses.
+            for (&old, &new) in &rename {
+                block.insts[i].rewrite_use(old, new);
+            }
+
+            // If this is a clobber instruction, split uses that are live past it.
+            if !clobbers(&block.insts[i]).is_empty() {
+                let uses = block.insts[i].uses();
+                for use_vreg in uses {
+                    // Look up last use. For renamed VRegs, the last_use was
+                    // inherited from the original at rename time.
+                    if last_use.get(&use_vreg).copied().unwrap_or(0) > i {
+                        let fresh = func.vregs.alloc();
+                        while func.spill_descs.len() <= fresh.0 as usize {
+                            func.spill_descs.push(SpillDesc::transient());
+                        }
+                        splits.push((i + offset, MInst::Mov { dst: fresh, src: use_vreg }));
+                        offset += 1;
+                        // Inherit last_use from the current VReg to the fresh one
+                        if let Some(&lu) = last_use.get(&use_vreg) {
+                            last_use.insert(fresh, lu);
+                        }
+                        rename.insert(use_vreg, fresh);
+                    }
+                }
+            }
+        }
+
+        // Apply splits: insert Mov instructions at collected positions.
+        // Process in reverse so indices stay valid.
+        for (idx, mov) in splits.into_iter().rev() {
+            block.insts.insert(idx, mov);
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
 // Assignment algorithm
 // ────────────────────────────────────────────────────────────────
 
-/// Assign physical registers to all VRegs in the function.
-///
-/// Greedy coloring on SSA interference graph. Processes instructions in
-/// program order, maintaining a set of "active" allocations (VRegs currently
-/// occupying physical registers). When a VReg dies (no more uses), its
-/// physical register is freed.
-///
-/// Constraints (e.g., shift rhs → RCX) are handled by:
-/// 1. Reserving the constrained register before allocating.
-/// 2. If the constrained register is occupied by another live VReg,
-///    inserting a swap (emit phase handles this with mov+xchg).
 pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
     let mut result = AssignmentMap::default();
 
-    // Per-block assignment to handle control flow
-    // For simplicity, we process blocks in layout order and propagate
-    // assignments through the CFG.
+    // Pre-compute clobber points per block.
+    let block_clobber_points: Vec<Vec<(usize, &'static [PhysReg])>> = func
+        .blocks
+        .iter()
+        .map(|block| {
+            block.insts.iter().enumerate()
+                .filter_map(|(idx, inst)| {
+                    let c = clobbers(inst);
+                    if c.is_empty() { None } else { Some((idx, c)) }
+                })
+                .collect()
+        })
+        .collect();
+
     for (bi, block) in func.blocks.iter().enumerate() {
-        // Track which physical registers are currently in use
         let mut active: BTreeMap<PhysReg, VReg> = BTreeMap::new();
 
-        // Initialize active set from live-in VRegs that already have assignments
-        // (from predecessor blocks)
+        // Pre-compute last-use position for each VReg (O(n)).
+        let mut last_use_in_block: BTreeMap<VReg, usize> = BTreeMap::new();
+        for (i, inst) in block.insts.iter().enumerate() {
+            for vreg in inst.uses() {
+                last_use_in_block.insert(vreg, i);
+            }
+        }
+        for &vreg in analysis.exit_distances[bi].keys() {
+            last_use_in_block
+                .entry(vreg)
+                .and_modify(|v| *v = (*v).max(block.insts.len()))
+                .or_insert(block.insts.len());
+        }
+
         for vreg in analysis.entry_distances[bi].keys() {
             if let Some(preg) = result.get(*vreg) {
                 active.insert(preg, *vreg);
             }
         }
 
-        // Process phi nodes: assign phi dst VRegs at block entry.
-        // Prefer the same register as one of the sources (for copy coalescing).
+        // Phi nodes
         for phi in &block.phis {
             let mut preferred: Option<PhysReg> = None;
             for (_pred_id, src_vreg) in &phi.sources {
@@ -206,40 +265,28 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
             let constraints = use_constraints(inst);
             let def = inst.def();
 
-            // 1. Handle use constraints: ensure constrained operands are in
-            //    the right physical register
+            // 1. Handle use constraints
             for (use_vreg, constraint) in uses.iter().zip(constraints.iter()) {
                 if let RegConstraint::Fixed(required_preg) = constraint {
                     let current_preg = result.get(*use_vreg);
                     if current_preg != Some(*required_preg) {
-                        // Need to move this vreg to the required register.
-                        // If the required register is occupied, evict its current owner.
                         if let Some(&occupant) = active.get(required_preg) {
                             if occupant != *use_vreg {
-                                // Evict occupant to a different register
                                 let new_reg = find_free_reg(&active, None);
                                 if let Some(new_reg) = new_reg {
                                     active.remove(required_preg);
                                     active.insert(new_reg, occupant);
                                     result.set(occupant, new_reg);
                                 }
-                                // If no free reg, the occupant must be dead soon.
-                                // The emit phase will handle the swap.
                             }
                         }
-
-                        // Remove vreg from its old location
                         if let Some(old_preg) = current_preg {
                             active.remove(&old_preg);
                         }
-
-                        // Assign vreg to required register
                         active.insert(*required_preg, *use_vreg);
                         result.set(*use_vreg, *required_preg);
                     }
                 } else if result.get(*use_vreg).is_none() {
-                    // First time seeing this vreg (e.g., block parameter or reload)
-                    // Assign any free register
                     let preg = find_free_reg(&active, None)
                         .expect("no free register for use (spilling should prevent this)");
                     active.insert(preg, *use_vreg);
@@ -247,46 +294,16 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                 }
             }
 
-            // 2. Free dead values: any VReg in active whose next use is infinity
-            //    This includes dead uses of this instruction AND any other VRegs
-            //    that happen to die at this point (e.g., values kept alive across
-            //    spill stores).
-            let dead_regs: Vec<(PhysReg, VReg)> = active
+            // 2. Free dead values
+            let dead_regs: Vec<PhysReg> = active
                 .iter()
                 .filter(|&(_, &v)| {
-                    super::analysis::next_use_at(func, analysis, bi, inst_idx + 1, v)
-                        == u32::MAX
+                    super::analysis::next_use_at(func, analysis, bi, inst_idx + 1, v) == u32::MAX
                 })
-                .map(|(&p, &v)| (p, v))
+                .map(|(&p, _)| p)
                 .collect();
-            for (preg, _vreg) in &dead_regs {
+            for preg in &dead_regs {
                 active.remove(preg);
-            }
-
-            // 2.5. Evict live values from clobbered registers.
-            //      e.g., UDiv/URem clobber RAX and RDX via x86-64 `div`.
-            //      Generates pre-instruction moves to save live values.
-            let clobber_set = clobbers(inst);
-            if !clobber_set.is_empty() {
-                let mut moves = Vec::new();
-                for &clobbered_preg in clobber_set {
-                    if let Some(&occupant) = active.get(&clobbered_preg) {
-                        // Don't evict the def vreg — it's about to be assigned.
-                        if Some(occupant) != def {
-                            if let Some(new_reg) = find_free_reg(&active, None) {
-                                moves.push((new_reg, clobbered_preg));
-                                active.remove(&clobbered_preg);
-                                active.insert(new_reg, occupant);
-                                result.set(occupant, new_reg);
-                            } else {
-                                active.remove(&clobbered_preg);
-                            }
-                        }
-                    }
-                }
-                if !moves.is_empty() {
-                    result.pre_moves.insert((bi, inst_idx), moves);
-                }
             }
 
             // 3. Allocate def
@@ -294,7 +311,6 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                 let def_cons = def_constraint(inst);
                 let preg = match def_cons {
                     RegConstraint::Fixed(required) => {
-                        // Evict if occupied
                         if let Some(&occupant) = active.get(&required) {
                             if occupant != def_vreg {
                                 let new_reg = find_free_reg(&active, Some(required));
@@ -303,7 +319,6 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                                     active.insert(new_reg, occupant);
                                     result.set(occupant, new_reg);
                                 } else {
-                                    // No free reg; occupant will be reassigned later
                                     active.remove(&required);
                                 }
                             }
@@ -311,11 +326,18 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                         required
                     }
                     RegConstraint::Any => {
-                        match find_free_reg(&active, None) {
-                            Some(r) => r,
-                            None => {
-                                // All registers occupied. Evict the VReg with
-                                // furthest next-use (it will be reloaded later).
+                        // Avoid clobbered registers during this VReg's live range.
+                        let last_use_pos = last_use_in_block
+                            .get(&def_vreg).copied().unwrap_or(inst_idx);
+                        let blocked: BTreeSet<PhysReg> = block_clobber_points[bi]
+                            .iter()
+                            .filter(|(pos, _)| *pos > inst_idx && *pos <= last_use_pos)
+                            .flat_map(|(_, regs)| regs.iter().copied())
+                            .collect();
+
+                        find_free_reg_excluding(&active, &blocked)
+                            .or_else(|| find_free_reg(&active, None))
+                            .unwrap_or_else(|| {
                                 let victim = active
                                     .iter()
                                     .max_by_key(|&(_, &v)| {
@@ -324,11 +346,10 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                                         )
                                     })
                                     .map(|(&p, _)| p)
-                                    .expect("active set is non-empty but no victim found");
+                                    .expect("no victim found");
                                 active.remove(&victim);
                                 victim
-                            }
-                        }
+                            })
                     }
                 };
                 active.insert(preg, def_vreg);
@@ -340,8 +361,6 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
     result
 }
 
-/// Find a free physical register not in the active set.
-/// If `exclude` is Some, also avoid that register.
 fn find_free_reg(
     active: &BTreeMap<PhysReg, VReg>,
     exclude: Option<PhysReg>,
@@ -351,4 +370,15 @@ fn find_free_reg(
         .iter()
         .copied()
         .find(|r| !used.contains(r) && Some(*r) != exclude)
+}
+
+fn find_free_reg_excluding(
+    active: &BTreeMap<PhysReg, VReg>,
+    blocked: &BTreeSet<PhysReg>,
+) -> Option<PhysReg> {
+    let used: BTreeSet<PhysReg> = active.keys().copied().collect();
+    ALLOCATABLE_REGS
+        .iter()
+        .copied()
+        .find(|r| !used.contains(r) && !blocked.contains(r))
 }

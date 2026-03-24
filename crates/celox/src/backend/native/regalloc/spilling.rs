@@ -344,9 +344,11 @@ fn run_min_on_block(
             new_insts.push(make_reload(*vreg, func, slots));
         }
 
-        // 2. Make room for def + clobbers
+        // 2. Make room for def (+ clobber headroom)
         if let Some(def_vreg) = def {
-            let clobber_extra = super::assignment::clobbers(inst).len();
+            // Clobber headroom: div/rem clobbers {RAX,RDX}, but the def
+            // occupies one of them, so we only need 1 extra free register.
+            let clobber_extra = super::assignment::clobbers(inst).len().saturating_sub(1);
             let needed = w.len() + 1 + clobber_extra;
             if needed > k {
                 limit(
