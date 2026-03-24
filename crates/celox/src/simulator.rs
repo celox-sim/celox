@@ -53,10 +53,10 @@ pub struct NamedEvent<B: SimBackend = JitBackend> {
 /// Encapsulates the backend, the original SIR program,
 /// and an optional VCD writer. Provides low-level, event-driven control.
 ///
-/// The default type parameter `B = JitBackend` means that bare `Simulator`
-/// is equivalent to `Simulator<JitBackend>` for backward compatibility.
+/// The default type parameter `B = NativeBackend` means that bare `Simulator`
+/// uses the native x86-64 backend.
 #[cfg(not(target_arch = "wasm32"))]
-pub struct Simulator<B: SimBackend = JitBackend> {
+pub struct Simulator<B: SimBackend = crate::backend::native::NativeBackend> {
     pub(crate) backend: B,
     pub(crate) program: Program,
     pub(crate) vcd_writer: Option<crate::vcd::VcdWriter>,
@@ -478,18 +478,20 @@ impl<B: SimBackend> Simulator<B> {
 
 // ── JitBackend-specific methods ──────────────────────────────────────
 #[cfg(not(target_arch = "wasm32"))]
-impl Simulator<JitBackend> {
-    pub fn builder<'a>(code: &'a str, top: &'a str) -> SimulatorBuilder<'a, Simulator<JitBackend>> {
-        SimulatorBuilder::<Simulator<JitBackend>>::new(code, top)
+impl Simulator {
+    pub fn builder<'a>(code: &'a str, top: &'a str) -> SimulatorBuilder<'a, Simulator> {
+        SimulatorBuilder::<Simulator>::new(code, top)
     }
 
     pub fn from_sources<'a>(
         sources: Vec<(&'a str, &'a std::path::Path)>,
         top: &'a str,
-    ) -> SimulatorBuilder<'a, Simulator<JitBackend>> {
-        SimulatorBuilder::<Simulator<JitBackend>>::from_sources(sources, top)
+    ) -> SimulatorBuilder<'a, Simulator> {
+        SimulatorBuilder::<Simulator>::from_sources(sources, top)
     }
+}
 
+impl Simulator<JitBackend> {
     /// Returns the shared compiled JIT code, allowing it to be reused
     /// for creating additional simulator instances without recompilation.
     pub fn shared_code(&self) -> Arc<SharedJitCode> {

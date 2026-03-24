@@ -559,13 +559,15 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     }
 
     /// Compiles the Veryl source and constructs the simulator.
-    /// Default backend is Cranelift.
-    pub fn build(self) -> Result<Simulator, SimulatorError> {
-        self.build_cranelift()
+    /// Uses the native x86-64 backend.
+    pub fn build(
+        self,
+    ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+        self.build_native()
     }
 
     /// Compiles using the Cranelift JIT backend.
-    pub fn build_cranelift(self) -> Result<Simulator, SimulatorError> {
+    pub fn build_cranelift(self) -> Result<Simulator<JitBackend>, SimulatorError> {
         let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
         let phase_start = phase_timing.then(crate::timing::now);
 
@@ -630,7 +632,37 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                     self.options.dead_store_policy,
                 );
             }
-            let backend = JitBackend::new(&program, &self.options, Some(&mut trace))?;
+
+            // Run MIR trace if requested (generates MIR output before/after regalloc)
+            if self.options.trace.mir {
+                use crate::backend::native::{emit, isel, regalloc};
+                let layout = crate::backend::MemoryLayout::build(&program, false);
+                let mut mir_output = String::new();
+
+                mir_output.push_str("=== MIR (eval_comb) ===\n");
+                for (idx, eu) in program.eval_comb.iter().enumerate() {
+                    let mut mfunc = isel::lower_execution_unit(eu, &layout);
+                    mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
+                    mir_output.push_str(&format!("{mfunc}\n"));
+                    let assignment = regalloc::run_regalloc(&mut mfunc);
+                    mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
+                    mir_output.push_str(&format!("{mfunc}"));
+                    mir_output.push_str("  Register assignment:\n");
+                    for (vreg, preg) in &assignment.map {
+                        mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
+                    }
+                    if let Ok(result) = emit::emit(&mfunc, &assignment, 0) {
+                        mir_output.push_str("  x86-64 disassembly:\n");
+                        mir_output.push_str(&emit::disassemble(&result.code, 0));
+                    }
+                    mir_output.push('\n');
+                }
+                trace.mir = Some(mir_output);
+            }
+
+            let backend = crate::backend::native::NativeBackend::new(
+                &program, &self.options,
+            )?;
 
             let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
             sim.modify(|_| {}).map_err(SimulatorError::from)?;
