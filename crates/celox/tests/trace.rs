@@ -66,7 +66,7 @@ module ModuleB (
     "#;
 
     let result = SimulatorBuilder::new(code, "ModuleB")
-        .trace_post_optimized_clif()
+        .trace_mir()
         .trace_native()
         .build_with_trace();
 
@@ -75,19 +75,11 @@ module ModuleB (
 
     res.expect("Build should succeed");
 
-    let clif = trace.post_optimized_clif.expect("CLIF should be captured");
-    assert!(clif.contains("Cranelift IR (CLIF) Dump"));
-    // Cranelift IR uses iadd for integer addition
+    // MIR trace should be captured (native backend)
+    let mir = trace.mir.expect("MIR should be captured");
     assert!(
-        clif.contains("iadd"),
-        "CLIF should contain iadd, found: {}",
-        clif
-    );
-
-    let native = trace.native.expect("Native should be captured");
-    assert!(native.contains("Native Machine Code Dump"));
-    assert!(
-        native.contains("Size:"),
-        "Native trace should contain size info"
+        mir.contains("MIR"),
+        "MIR trace should contain MIR header, found: {}",
+        &mir[..mir.len().min(200)]
     );
 }

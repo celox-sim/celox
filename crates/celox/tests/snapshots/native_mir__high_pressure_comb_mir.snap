@@ -13,29 +13,44 @@ bb0:
   v28 = load.i32 [sim + 16]
   v17 = load.i32 [sim + 60]
   v6 = load.i32 [sim + 36]
-  v20 = add v0, v10
+  v31 = add v0, v10
+  v20 = and v31, 0xffffffff
   v26 = load.i32 [sim + 12]
   v15 = load.i32 [sim + 56]
-  v9 = add v20, v30
+  v32 = add v20, v30
+  v9 = and v32, 0xffffffff
   v4 = load.i32 [sim + 32]
-  v29 = add v9, v19
+  v33 = add v9, v19
+  v29 = and v33, 0xffffffff
   v24 = load.i32 [sim + 8]
-  v18 = add v29, v8
+  v34 = add v29, v8
+  v18 = and v34, 0xffffffff
   v13 = load.i32 [sim + 52]
-  v7 = add v18, v28
+  v35 = add v18, v28
+  v7 = and v35, 0xffffffff
   v2 = load.i32 [sim + 28]
-  v27 = add v7, v17
+  v36 = add v7, v17
+  v27 = and v36, 0xffffffff
   v22 = load.i32 [sim + 4]
-  v16 = add v27, v6
+  v37 = add v27, v6
+  v16 = and v37, 0xffffffff
   v11 = load.i32 [sim + 48]
-  v5 = add v16, v26
-  v25 = add v5, v15
-  v14 = add v25, v4
-  v3 = add v14, v24
-  v23 = add v3, v13
-  v12 = add v23, v2
-  v1 = add v12, v22
-  v21 = add v1, v11
+  v38 = add v16, v26
+  v5 = and v38, 0xffffffff
+  v39 = add v5, v15
+  v25 = and v39, 0xffffffff
+  v40 = add v25, v4
+  v14 = and v40, 0xffffffff
+  v41 = add v14, v24
+  v3 = and v41, 0xffffffff
+  v42 = add v3, v13
+  v23 = and v42, 0xffffffff
+  v43 = add v23, v2
+  v12 = and v43, 0xffffffff
+  v44 = add v12, v22
+  v1 = and v44, 0xffffffff
+  v45 = add v1, v11
+  v21 = and v45, 0xffffffff
   store.i32 [sim + 24], v21
   ret
 
@@ -49,29 +64,44 @@ bb0:
   v28 = load.i32 [sim + 16]
   v17 = load.i32 [sim + 60]
   v6 = load.i32 [sim + 36]
-  v20 = add v0, v10
+  v31 = add v0, v10
+  v20 = and v31, 0xffffffff
   v26 = load.i32 [sim + 12]
   v15 = load.i32 [sim + 56]
-  v9 = add v20, v30
+  v32 = add v20, v30
+  v9 = and v32, 0xffffffff
   v4 = load.i32 [sim + 32]
-  v29 = add v9, v19
+  v33 = add v9, v19
+  v29 = and v33, 0xffffffff
   v24 = load.i32 [sim + 8]
-  v18 = add v29, v8
+  v34 = add v29, v8
+  v18 = and v34, 0xffffffff
   v13 = load.i32 [sim + 52]
-  v7 = add v18, v28
+  v35 = add v18, v28
+  v7 = and v35, 0xffffffff
   v2 = load.i32 [sim + 28]
-  v27 = add v7, v17
+  v36 = add v7, v17
+  v27 = and v36, 0xffffffff
   v22 = load.i32 [sim + 4]
-  v16 = add v27, v6
+  v37 = add v27, v6
+  v16 = and v37, 0xffffffff
   v11 = load.i32 [sim + 48]
-  v5 = add v16, v26
-  v25 = add v5, v15
-  v14 = add v25, v4
-  v3 = add v14, v24
-  v23 = add v3, v13
-  v12 = add v23, v2
-  v1 = add v12, v22
-  v21 = add v1, v11
+  v38 = add v16, v26
+  v5 = and v38, 0xffffffff
+  v39 = add v5, v15
+  v25 = and v39, 0xffffffff
+  v40 = add v25, v4
+  v14 = and v40, 0xffffffff
+  v41 = add v14, v24
+  v3 = and v41, 0xffffffff
+  v42 = add v3, v13
+  v23 = and v42, 0xffffffff
+  v43 = add v23, v2
+  v12 = and v43, 0xffffffff
+  v44 = add v12, v22
+  v1 = and v44, 0xffffffff
+  v45 = add v1, v11
+  v21 = and v45, 0xffffffff
   store.i32 [sim + 24], v21
   ret
   Register assignment:
@@ -106,6 +136,21 @@ bb0:
     v28 -> r9
     v29 -> rax
     v30 -> rsi
+    v31 -> rax
+    v32 -> rax
+    v33 -> rax
+    v34 -> rax
+    v35 -> rax
+    v36 -> rax
+    v37 -> rax
+    v38 -> rax
+    v39 -> rax
+    v40 -> rax
+    v41 -> rax
+    v42 -> rax
+    v43 -> rax
+    v44 -> rax
+    v45 -> rax
   x86-64 disassembly:
   0x00000000  push r15
   0x00000002  sub rsp,8
@@ -119,31 +164,46 @@ bb0:
   0x00000020  mov r10d,[r15+3Ch]
   0x00000024  mov r11d,[r15+24h]
   0x00000028  add rax,rdx
-  0x0000002b  mov edx,[r15+0Ch]
-  0x0000002f  mov ecx,[r15+38h]
-  0x00000033  add rax,rsi
-  0x00000036  mov esi,[r15+20h]
-  0x0000003a  add rax,rdi
-  0x0000003d  mov edi,[r15+8]
-  0x00000041  add rax,r8
-  0x00000044  mov r8d,[r15+34h]
-  0x00000048  add rax,r9
-  0x0000004b  mov r9d,[r15+1Ch]
-  0x0000004f  add rax,r10
-  0x00000052  mov r10d,[r15+4]
-  0x00000056  add rax,r11
-  0x00000059  mov r11d,[r15+30h]
-  0x0000005d  add rax,rdx
-  0x00000060  add rax,rcx
-  0x00000063  add rax,rsi
-  0x00000066  add rax,rdi
-  0x00000069  add rax,r8
-  0x0000006c  add rax,r9
-  0x0000006f  add rax,r10
-  0x00000072  add rax,r11
-  0x00000075  mov [r15+18h],eax
-  0x00000079  xor eax,eax
-  0x0000007b  jmp short 000000000000007Dh
-  0x0000007d  add rsp,8
-  0x00000081  pop r15
-  0x00000083  ret
+  0x0000002b  and eax,0FFFFFFFFh
+  0x00000030  mov edx,[r15+0Ch]
+  0x00000034  mov ecx,[r15+38h]
+  0x00000038  add rax,rsi
+  0x0000003b  and eax,0FFFFFFFFh
+  0x00000040  mov esi,[r15+20h]
+  0x00000044  add rax,rdi
+  0x00000047  and eax,0FFFFFFFFh
+  0x0000004c  mov edi,[r15+8]
+  0x00000050  add rax,r8
+  0x00000053  and eax,0FFFFFFFFh
+  0x00000058  mov r8d,[r15+34h]
+  0x0000005c  add rax,r9
+  0x0000005f  and eax,0FFFFFFFFh
+  0x00000064  mov r9d,[r15+1Ch]
+  0x00000068  add rax,r10
+  0x0000006b  and eax,0FFFFFFFFh
+  0x00000070  mov r10d,[r15+4]
+  0x00000074  add rax,r11
+  0x00000077  and eax,0FFFFFFFFh
+  0x0000007c  mov r11d,[r15+30h]
+  0x00000080  add rax,rdx
+  0x00000083  and eax,0FFFFFFFFh
+  0x00000088  add rax,rcx
+  0x0000008b  and eax,0FFFFFFFFh
+  0x00000090  add rax,rsi
+  0x00000093  and eax,0FFFFFFFFh
+  0x00000098  add rax,rdi
+  0x0000009b  and eax,0FFFFFFFFh
+  0x000000a0  add rax,r8
+  0x000000a3  and eax,0FFFFFFFFh
+  0x000000a8  add rax,r9
+  0x000000ab  and eax,0FFFFFFFFh
+  0x000000b0  add rax,r10
+  0x000000b3  and eax,0FFFFFFFFh
+  0x000000b8  add rax,r11
+  0x000000bb  and eax,0FFFFFFFFh
+  0x000000c0  mov [r15+18h],eax
+  0x000000c4  xor eax,eax
+  0x000000c6  jmp short 00000000000000C8h
+  0x000000c8  add rsp,8
+  0x000000cc  pop r15
+  0x000000ce  ret

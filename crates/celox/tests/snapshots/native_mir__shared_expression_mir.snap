@@ -7,7 +7,8 @@ Execution Unit 0 (before regalloc):
 bb0:
   v0 = load.i32 [sim + 0]
   v4 = load.i32 [sim + 8]
-  v2 = add v0, v4
+  v7 = add v0, v4
+  v2 = and v7, 0xffffffff
   v6 = imm 0x2
   v3 = or v2, v6
   store.i32 [sim + 12], v3
@@ -20,7 +21,8 @@ Execution Unit 0 (after regalloc):
 bb0:
   v0 = load.i32 [sim + 0]
   v4 = load.i32 [sim + 8]
-  v2 = add v0, v4
+  v7 = add v0, v4
+  v2 = and v7, 0xffffffff
   v6 = imm 0x2
   v3 = or v2, v6
   store.i32 [sim + 12], v3
@@ -36,6 +38,7 @@ bb0:
     v4 -> rdx
     v5 -> rax
     v6 -> rdx
+    v7 -> rax
   x86-64 disassembly:
   0x00000000  push r15
   0x00000002  sub rsp,8
@@ -43,14 +46,15 @@ bb0:
   0x00000009  mov eax,[r15]
   0x0000000c  mov edx,[r15+8]
   0x00000010  add rax,rdx
-  0x00000013  mov edx,2
-  0x00000018  or rdx,rax
-  0x0000001b  mov [r15+0Ch],edx
-  0x0000001f  mov edx,1
-  0x00000024  and rax,rdx
-  0x00000027  mov [r15+4],eax
-  0x0000002b  xor eax,eax
-  0x0000002d  jmp short 000000000000002Fh
-  0x0000002f  add rsp,8
-  0x00000033  pop r15
-  0x00000035  ret
+  0x00000013  and eax,0FFFFFFFFh
+  0x00000018  mov edx,2
+  0x0000001d  or rdx,rax
+  0x00000020  mov [r15+0Ch],edx
+  0x00000024  mov edx,1
+  0x00000029  and rax,rdx
+  0x0000002c  mov [r15+4],eax
+  0x00000030  xor eax,eax
+  0x00000032  jmp short 0000000000000034h
+  0x00000034  add rsp,8
+  0x00000038  pop r15
+  0x0000003a  ret

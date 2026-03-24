@@ -785,21 +785,24 @@ fn lower_instruction(
             let rhs_vreg = ctx.reg_map.get(*rhs);
 
             match op {
-                BinaryOp::Add => block.push(MInst::Add {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                }),
-                BinaryOp::Sub => block.push(MInst::Sub {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                }),
-                BinaryOp::Mul => block.push(MInst::Mul {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                }),
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+                    // 64-bit arithmetic may produce upper bits; mask to output width.
+                    let raw = if d_width < 64 {
+                        let tmp = ctx.alloc_vreg(SpillDesc::transient());
+                        tmp
+                    } else {
+                        dst_vreg
+                    };
+                    match op {
+                        BinaryOp::Add => block.push(MInst::Add { dst: raw, lhs: lhs_vreg, rhs: rhs_vreg }),
+                        BinaryOp::Sub => block.push(MInst::Sub { dst: raw, lhs: lhs_vreg, rhs: rhs_vreg }),
+                        BinaryOp::Mul => block.push(MInst::Mul { dst: raw, lhs: lhs_vreg, rhs: rhs_vreg }),
+                        _ => unreachable!(),
+                    }
+                    if d_width < 64 {
+                        block.push(MInst::AndImm { dst: dst_vreg, src: raw, imm: mask_for_width(d_width) });
+                    }
+                }
                 BinaryOp::And => block.push(MInst::And {
                     dst: dst_vreg,
                     lhs: lhs_vreg,
