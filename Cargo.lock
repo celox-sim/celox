@@ -449,6 +449,7 @@ version = "0.18.0"
 dependencies = [
  "celox",
  "celox-ts-gen",
+ "miette",
  "napi",
  "napi-build",
  "napi-derive",

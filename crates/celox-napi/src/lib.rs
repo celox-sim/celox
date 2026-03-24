@@ -1512,8 +1512,8 @@ impl NativeSimulatorHandle {
                             "width": width,
                             "byte_size": byte_size,
                             "is_4state": false,
-                            "direction": "input",
-                            "type_kind": "logic",
+                            "direction": layout::direction_str(info.var_kind),
+                            "type_kind": layout::type_kind_str(info.type_kind),
                         }),
                     );
                 }

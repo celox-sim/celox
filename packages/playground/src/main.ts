@@ -1,8 +1,40 @@
 import * as monaco from "monaco-editor";
+import { chai, JestChaiExpect, JestAsymmetricMatchers } from "@vitest/expect";
+
+// Import real .d.ts files from @celox-sim/celox for Monaco type injection
+import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
+import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
+import celoxSimulationDts from "../../celox/dist/simulation.d.ts?raw";
+import celoxIndexDts from "../../celox/dist/index.d.ts?raw";
+import celoxDutDts from "../../celox/dist/dut.d.ts?raw";
+import celoxNapiHelpersDts from "../../celox/dist/napi-helpers.d.ts?raw";
+import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
+import celoxNapiBridgeDts from "../../celox/dist/napi-bridge.d.ts?raw";
 
 // ── Examples ────────────────────────────────────────────
 
-const EXAMPLES: Record<string, { veryl: string; testbench: string }> = {
+const DEFAULT_VERYL_TOML = `[project]
+name    = "playground"
+version = "0.1.0"
+
+[build]
+clock_type = "posedge"
+reset_type = "async_low"
+sources    = ["src"]
+`;
+
+const DEFAULT_CELOX_TOML = `[simulation]
+max_steps = 100
+`;
+
+interface Example {
+  veryl: string;
+  testbench: string;
+  verylToml?: string;
+  celoxToml?: string;
+}
+
+const EXAMPLES: Record<string, Example> = {
   adder: {
     veryl: `module Adder (
     clk: input clock,
@@ -15,22 +47,29 @@ const EXAMPLES: Record<string, { veryl: string; testbench: string }> = {
         sum = a + b;
     }
 }`,
-    testbench: `import { Simulator } from "@celox-sim/celox";
-import { Adder } from "./Adder.veryl";
+    testbench: `import { describe, it, expect } from "vitest";
+import { Simulator } from "@celox-sim/celox";
+import { Adder } from "../src/Adder.veryl";
 
-const sim = Simulator.create(Adder);
+describe("Adder", () => {
+    it("adds two small numbers", () => {
+        const sim = Simulator.create(Adder);
+        sim.dut.a = 100n;
+        sim.dut.b = 200n;
+        sim.tick();
+        expect(sim.dut.sum).toBe(300n);
+        sim.dispose();
+    });
 
-sim.dut.a = 100n;
-sim.dut.b = 200n;
-sim.tick();
-console.log("a=100, b=200 => sum=" + sim.dut.sum);
-
-sim.dut.a = 0xFFFFn;
-sim.dut.b = 1n;
-sim.tick();
-console.log("a=65535, b=1 => sum=" + sim.dut.sum);
-
-sim.dispose();
+    it("handles overflow", () => {
+        const sim = Simulator.create(Adder);
+        sim.dut.a = 0xFFFFn;
+        sim.dut.b = 1n;
+        sim.tick();
+        expect(sim.dut.sum).toBe(0x10000n);
+        sim.dispose();
+    });
+});
 `,
   },
   counter: {
@@ -52,32 +91,123 @@ sim.dispose();
         count = count_r;
     }
 }`,
-    testbench: `import { Simulator } from "@celox-sim/celox";
-import { Counter } from "./Counter.veryl";
+    testbench: `import { describe, it, expect } from "vitest";
+import { Simulator } from "@celox-sim/celox";
+import { Counter } from "../src/Counter.veryl";
 
-const sim = Simulator.create(Counter);
+describe("Counter", () => {
+    it("resets to zero", () => {
+        const sim = Simulator.create(Counter);
+        const rst = sim.event("rst");
 
-// Reset (active-low)
-sim.dut.rst = 0n;
-sim.tick();
-console.log("After reset: count=" + sim.dut.count);
+        // Assert async reset (active-low)
+        sim.dut.rst = 0n;
+        sim.tick(rst);
+        expect(sim.dut.count).toBe(0n);
+        sim.dispose();
+    });
 
-// Release reset, enable counting
-sim.dut.rst = 1n;
-sim.dut.en = 1n;
+    it("counts up when enabled", () => {
+        const sim = Simulator.create(Counter);
+        const rst = sim.event("rst");
 
-for (let i = 0; i < 5; i++) {
-    sim.tick();
-    console.log(\`Cycle \${i + 1}: count=\${sim.dut.count}\`);
-}
+        // Assert async reset
+        sim.dut.rst = 0n;
+        sim.tick(rst);
 
-sim.dispose();
+        // Release reset, enable counting
+        sim.dut.rst = 1n;
+        sim.dut.en = 1n;
+        for (let i = 0; i < 5; i++) sim.tick();
+
+        expect(sim.dut.count).toBe(5n);
+        sim.dispose();
+    });
+});
+`,
+  },
+  counter_sim: {
+    veryl: `module Counter (
+    clk: input clock,
+    rst: input reset,
+    en:  input logic,
+    count: output logic<8>,
+) {
+    var count_r: logic<8>;
+    always_ff (clk, rst) {
+        if_reset {
+            count_r = 0;
+        } else if en {
+            count_r = count_r + 1;
+        }
+    }
+    always_comb {
+        count = count_r;
+    }
+}`,
+    testbench: `import { describe, it, expect } from "vitest";
+import { Simulation } from "@celox-sim/celox";
+import { Counter } from "../src/Counter.veryl";
+
+describe("Counter (Simulation)", () => {
+    it("resets and counts with time-based simulation", () => {
+        const sim = Simulation.create(Counter);
+        sim.addClock("clk", { period: 10 });
+
+        // Assert and release async reset automatically
+        sim.reset("rst");
+
+        // Enable counting
+        sim.dut.en = 1n;
+
+        // Wait for 5 rising clock edges
+        sim.waitForCycles("clk", 5);
+        expect(sim.dut.count).toBe(5n);
+
+        // Run for 30 more time units (3 more cycles)
+        const t = sim.time();
+        sim.runUntil(t + 30);
+        expect(sim.dut.count).toBe(8n);
+
+        sim.dispose();
+    });
+
+    it("stays at zero when disabled", () => {
+        const sim = Simulation.create(Counter);
+        sim.addClock("clk", { period: 10 });
+        sim.reset("rst");
+
+        sim.dut.en = 0n;
+        sim.waitForCycles("clk", 5);
+        expect(sim.dut.count).toBe(0n);
+
+        sim.dispose();
+    });
+});
 `,
   },
 };
 
-// ── Veryl language definition ───────────────────────────
+// ── Language definitions ─────────────────────────────────
 
+// TOML
+monaco.languages.register({ id: "toml" });
+monaco.languages.setMonarchTokensProvider("toml", {
+  tokenizer: {
+    root: [
+      [/\[[^\]]*\]/, "keyword"],
+      [/#.*$/, "comment"],
+      [/[a-zA-Z_][\w-]*(?=\s*=)/, "variable"],
+      [/"[^"]*"/, "string"],
+      [/'[^']*'/, "string"],
+      [/\b(?:true|false)\b/, "keyword"],
+      [/\d[\d._]*/, "number"],
+      [/=/, "operator"],
+    ],
+  },
+});
+
+// Veryl
 monaco.languages.register({ id: "veryl" });
 monaco.languages.setMonarchTokensProvider("veryl", {
   keywords: [
@@ -157,29 +287,48 @@ document.getElementById("app")!.innerHTML = `
   button:hover { background: #c73e54; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .status { margin-left: auto; font-size: 0.8rem; color: #888; }
-  .panels { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 180px; height: calc(100vh - 42px); }
+  .panels { display: grid; grid-template-columns: 1fr 1fr; height: calc(100vh - 42px); }
   .panel { display: flex; flex-direction: column; border: 1px solid #0f3460; overflow: hidden; }
-  .panel-hdr { background: #16213e; padding: 3px 10px; font-size: 0.7rem; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
+  .tab-bar { display: flex; background: #16213e; border-bottom: 1px solid #0f3460; flex-shrink: 0; overflow-x: auto; }
+  .tab-bar::-webkit-scrollbar { height: 0; }
+  .tab { padding: 5px 14px; font-size: 0.75rem; font-family: system-ui, sans-serif; color: #666; cursor: pointer; border-right: 1px solid #0f3460; white-space: nowrap; display: flex; align-items: center; gap: 6px; user-select: none; }
+  .tab:hover { background: #1a1a2e; color: #999; }
+  .tab.active { background: #0d1117; color: #c9d1d9; }
+  .tab .folder { color: #555; }
+  .tab-add { padding: 5px 10px; font-size: 0.85rem; color: #555; cursor: pointer; border-right: none; display: flex; align-items: center; user-select: none; flex-shrink: 0; }
+  .tab-add:hover { color: #c9d1d9; background: #1a1a2e; }
+  .tab-rename { background: #0d1117; color: #c9d1d9; border: 1px solid #e94560; outline: none; font-size: 0.75rem; font-family: system-ui, sans-serif; padding: 0 4px; width: 160px; }
   .editor-container { flex: 1; }
+  .panel-hdr { background: #16213e; padding: 3px 10px; font-size: 0.7rem; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
   #console { flex: 1; background: #0d1117; color: #c9d1d9; padding: 8px 10px; font-family: 'Fira Code', monospace; font-size: 0.8rem; line-height: 1.4; overflow-y: auto; white-space: pre-wrap; }
   .log-info { color: #58a6ff; } .log-error { color: #f85149; } .log-success { color: #3fb950; }
 </style>
 <header>
   <h1>Celox Playground</h1>
-  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter</option></select>
+  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option></select>
+  <select id="run-target"></select>
+  <input id="run-args" type="text" placeholder="vitest args (e.g. --grep &quot;add&quot;)" style="width: 180px; font-size: 0.8rem;" />
   <button id="run" disabled>Run</button>
   <span class="status" id="status">Loading WASM…</span>
 </header>
 <div class="panels">
-  <div class="panel"><div class="panel-hdr">Veryl Source</div><div class="editor-container" id="veryl-editor"></div></div>
-  <div class="panel"><div class="panel-hdr">Testbench (TypeScript)</div><div class="editor-container" id="tb-editor"></div></div>
-  <div class="panel" style="grid-column:1/-1"><div class="panel-hdr">Console</div><div id="console"></div></div>
+  <div class="panel">
+    <div class="tab-bar" id="tab-bar"></div>
+    <div class="editor-container" id="editor"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-hdr">Console</div>
+    <div id="console"></div>
+  </div>
 </div>`;
 
 const consoleEl = document.getElementById("console")!;
 const runBtn = document.getElementById("run") as HTMLButtonElement;
 const statusEl = document.getElementById("status")!;
 const examplesEl = document.getElementById("examples") as HTMLSelectElement;
+const runTargetEl = document.getElementById("run-target") as HTMLSelectElement;
+const runArgsEl = document.getElementById("run-args") as HTMLInputElement;
+const tabBarEl = document.getElementById("tab-bar")!;
 
 function appendConsole(msg: string, cls = "") {
   const span = document.createElement("span");
@@ -190,7 +339,7 @@ function appendConsole(msg: string, cls = "") {
 }
 function clearConsole() { consoleEl.innerHTML = ""; }
 
-// ── Monaco editors ──────────────────────────────────────
+// ── Monaco editor (single instance, model switching) ────
 
 const editorOpts: monaco.editor.IStandaloneEditorConstructionOptions = {
   theme: "celox-dark", fontSize: 13, fontFamily: "'Fira Code', monospace",
@@ -198,11 +347,7 @@ const editorOpts: monaco.editor.IStandaloneEditorConstructionOptions = {
   tabSize: 4, padding: { top: 8 },
 };
 
-const verylEditor = monaco.editor.create(document.getElementById("veryl-editor")!, {
-  ...editorOpts, language: "veryl", value: "",
-});
-
-// Configure TS compiler options for the testbench editor
+// Configure TS compiler options for testbench files
 monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
   target: monaco.languages.typescript.ScriptTarget.ESNext,
   moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
@@ -211,24 +356,319 @@ monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
   noEmit: true,
 });
 monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
-  // Don't flag unresolved modules as errors — we handle imports at runtime
   diagnosticsOptions: { noSemanticValidation: false, noSyntaxValidation: false },
 });
 
-const tbModel = monaco.editor.createModel("", "typescript", monaco.Uri.parse("file:///testbench.ts"));
-const tbEditor = monaco.editor.create(document.getElementById("tb-editor")!, {
-  ...editorOpts, model: tbModel,
+const editor = monaco.editor.create(document.getElementById("editor")!, {
+  ...editorOpts, language: "veryl", value: "",
 });
 
-// ── DUT type injection ──────────────────────────────────
+// ── File / Tab management ───────────────────────────────
+
+interface PlaygroundFile {
+  path: string;
+  model: monaco.editor.ITextModel;
+  viewState: monaco.editor.ICodeEditorViewState | null;
+}
+
+const files = new Map<string, PlaygroundFile>();
+let activeFilePath: string | null = null;
+
+function langForPath(path: string): string {
+  if (path.endsWith(".veryl")) return "veryl";
+  if (path.endsWith(".ts") || path.endsWith(".tsx")) return "typescript";
+  if (path.endsWith(".js")) return "javascript";
+  if (path.endsWith(".toml")) return "toml";
+  return "plaintext";
+}
+
+function createFile(path: string, content: string): PlaygroundFile {
+  const existing = files.get(path);
+  if (existing) {
+    existing.model.setValue(content);
+    return existing;
+  }
+  const lang = langForPath(path);
+  const uri = monaco.Uri.parse("file:///" + path);
+  const model = monaco.editor.createModel(content, lang, uri);
+  const file: PlaygroundFile = { path, model, viewState: null };
+  files.set(path, file);
+
+  // Listen for changes on .veryl files
+  if (lang === "veryl") {
+    model.onDidChangeContent(() => onVerylChange());
+  }
+
+  return file;
+}
+
+function removeAllFiles() {
+  for (const f of files.values()) f.model.dispose();
+  files.clear();
+  activeFilePath = null;
+}
+
+function activateFile(path: string) {
+  const file = files.get(path);
+  if (!file) return;
+
+  // Save current view state
+  if (activeFilePath) {
+    const prev = files.get(activeFilePath);
+    if (prev) prev.viewState = editor.saveViewState();
+  }
+
+  activeFilePath = path;
+  editor.setModel(file.model);
+  if (file.viewState) editor.restoreViewState(file.viewState);
+  editor.focus();
+  renderTabs();
+}
+
+function renderTabs() {
+  tabBarEl.innerHTML = "";
+  for (const [path] of files) {
+    const tab = document.createElement("div");
+    tab.className = "tab" + (path === activeFilePath ? " active" : "");
+
+    // Show folder/file split
+    const lastSlash = path.lastIndexOf("/");
+    if (lastSlash >= 0) {
+      const folderSpan = document.createElement("span");
+      folderSpan.className = "folder";
+      folderSpan.textContent = path.substring(0, lastSlash + 1);
+      tab.appendChild(folderSpan);
+      tab.appendChild(document.createTextNode(path.substring(lastSlash + 1)));
+    } else {
+      tab.textContent = path;
+    }
+
+    tab.addEventListener("click", () => activateFile(path));
+    tab.addEventListener("dblclick", (e) => { e.stopPropagation(); startRename(path, tab); });
+    tabBarEl.appendChild(tab);
+  }
+
+  // "+" button for new file
+  const addBtn = document.createElement("div");
+  addBtn.className = "tab-add";
+  addBtn.textContent = "+";
+  addBtn.title = "New file";
+  addBtn.addEventListener("click", promptNewFile);
+  tabBarEl.appendChild(addBtn);
+
+  updateRunTargets();
+}
+
+function isTestFile(path: string): boolean {
+  return /\.test\.[tj]sx?$/.test(path);
+}
+
+function updateRunTargets() {
+  const prev = runTargetEl.value;
+  runTargetEl.innerHTML = "";
+
+  // "All tests" runs every .test.ts file
+  const allOpt = document.createElement("option");
+  allOpt.value = "*";
+  allOpt.textContent = "All tests";
+  runTargetEl.appendChild(allOpt);
+
+  for (const [path] of files) {
+    if (!isTestFile(path)) continue;
+    const opt = document.createElement("option");
+    opt.value = path;
+    opt.textContent = path;
+    runTargetEl.appendChild(opt);
+  }
+  // Restore previous selection if still valid
+  if (prev && [...runTargetEl.options].some(o => o.value === prev)) {
+    runTargetEl.value = prev;
+  }
+}
+
+function startRename(oldPath: string, tabEl: HTMLElement) {
+  const input = document.createElement("input");
+  input.className = "tab-rename";
+  input.value = oldPath;
+  // Select just the filename part
+  const lastSlash = oldPath.lastIndexOf("/");
+  tabEl.innerHTML = "";
+  tabEl.appendChild(input);
+  input.focus();
+  input.setSelectionRange(lastSlash + 1, oldPath.length);
+
+  const commit = () => {
+    const newPath = input.value.trim();
+    if (newPath && newPath !== oldPath) {
+      renameFile(oldPath, newPath);
+    } else {
+      renderTabs();
+    }
+  };
+  input.addEventListener("blur", commit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+    if (e.key === "Escape") { input.removeEventListener("blur", commit); renderTabs(); }
+  });
+}
+
+function renameFile(oldPath: string, newPath: string) {
+  if (files.has(newPath)) { renderTabs(); return; } // Don't overwrite existing
+  const file = files.get(oldPath);
+  if (!file) { renderTabs(); return; }
+
+  const content = file.model.getValue();
+  const viewState = file.viewState;
+  const wasActive = activeFilePath === oldPath;
+
+  // Remove old
+  file.model.dispose();
+  files.delete(oldPath);
+
+  // Create new
+  const newFile = createFile(newPath, content);
+  newFile.viewState = viewState;
+
+  if (wasActive) {
+    activeFilePath = newPath;
+    editor.setModel(newFile.model);
+    if (newFile.viewState) editor.restoreViewState(newFile.viewState);
+  }
+  renderTabs();
+}
+
+function promptNewFile() {
+  // Insert a temporary input in the tab bar
+  const input = document.createElement("input");
+  input.className = "tab-rename";
+  input.value = "src/";
+  input.placeholder = "path/to/file.veryl";
+
+  // Insert before the "+" button
+  const addBtn = tabBarEl.querySelector(".tab-add")!;
+  tabBarEl.insertBefore(input, addBtn);
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+
+  const commit = () => {
+    const path = input.value.trim();
+    if (path && !files.has(path)) {
+      createFile(path, "");
+      activateFile(path);
+    } else {
+      renderTabs();
+    }
+  };
+  input.addEventListener("blur", commit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+    if (e.key === "Escape") { input.removeEventListener("blur", commit); renderTabs(); }
+  });
+}
+
+// ── vitest type declarations for Monaco ─────────────────
+
+monaco.languages.typescript.typescriptDefaults.addExtraLib(`
+declare module "vitest" {
+  export function describe(name: string, fn: () => void): void;
+  export namespace describe { export function skip(name: string, fn: () => void): void; }
+  export function it(name: string, fn: () => void | Promise<void>): void;
+  export namespace it { export function skip(name: string, fn: () => void | Promise<void>): void; }
+  export const test: typeof it;
+  export function beforeEach(fn: () => void | Promise<void>): void;
+  export function afterEach(fn: () => void | Promise<void>): void;
+  export function beforeAll(fn: () => void | Promise<void>): void;
+  export function afterAll(fn: () => void | Promise<void>): void;
+  interface Assertion<T = any> {
+    toBe(expected: T): void;
+    toEqual(expected: T): void;
+    toStrictEqual(expected: T): void;
+    toBeTruthy(): void;
+    toBeFalsy(): void;
+    toBeNull(): void;
+    toBeUndefined(): void;
+    toBeDefined(): void;
+    toBeNaN(): void;
+    toBeGreaterThan(expected: number | bigint): void;
+    toBeGreaterThanOrEqual(expected: number | bigint): void;
+    toBeLessThan(expected: number | bigint): void;
+    toBeLessThanOrEqual(expected: number | bigint): void;
+    toContain(expected: any): void;
+    toHaveLength(expected: number): void;
+    toMatch(expected: string | RegExp): void;
+    toThrow(expected?: string | RegExp): void;
+    toThrowError(expected?: string | RegExp): void;
+    toHaveProperty(key: string, value?: any): void;
+    not: Assertion<T>;
+  }
+  export function expect<T>(actual: T): Assertion<T>;
+}
+`, "file:///vitest.d.ts");
+
+// ── @celox-sim/celox type registration (from real .d.ts) ──
+
+// Rewrite relative imports in .d.ts to match Monaco's virtual FS paths
+function fixDtsImports(content: string): string {
+  return content.replace(/from\s+["']\.\/(\w+)\.js["']/g, 'from "@celox-sim/celox/$1"');
+}
+
+// Register all @celox-sim/celox .d.ts files so Monaco resolves imports
+const celoxDtsFiles: Record<string, string> = {
+  "types": celoxTypesDts,
+  "simulator": celoxSimulatorDts,
+  "simulation": celoxSimulationDts,
+  "index": celoxIndexDts,
+  "dut": celoxDutDts,
+  "napi-helpers": celoxNapiHelpersDts,
+  "wasm-bridge": celoxWasmBridgeDts,
+  "napi-bridge": celoxNapiBridgeDts,
+};
+for (const [name, content] of Object.entries(celoxDtsFiles)) {
+  const fixed = fixDtsImports(content);
+  // Register as both the sub-module path and the node_modules-style path
+  monaco.languages.typescript.typescriptDefaults.addExtraLib(fixed, `file:///node_modules/@celox-sim/celox/dist/${name}.d.ts`);
+  // Also register as a bare module specifier for "from '@celox-sim/celox/xxx'" resolution
+  monaco.languages.typescript.typescriptDefaults.addExtraLib(fixed, `file:///node_modules/@celox-sim/celox/${name}.d.ts`);
+}
+
+// ── DUT type injection (.veryl module declarations) ─────
 
 let currentExtraLib: monaco.IDisposable | null = null;
+
+function getVerylSource(): string {
+  for (const f of files.values()) {
+    if (f.path.endsWith(".veryl")) return f.model.getValue();
+  }
+  return "";
+}
+
+function getVerylModel(): monaco.editor.ITextModel | null {
+  for (const f of files.values()) {
+    if (f.path.endsWith(".veryl")) return f.model;
+  }
+  return null;
+}
+
+function getTestModels(): { path: string; model: monaco.editor.ITextModel }[] {
+  const target = runTargetEl.value;
+  if (target === "*") {
+    // All test files
+    const result: { path: string; model: monaco.editor.ITextModel }[] = [];
+    for (const [path, f] of files) {
+      if (isTestFile(path)) result.push({ path, model: f.model });
+    }
+    return result;
+  }
+  const f = files.get(target);
+  if (f) return [{ path: target, model: f.model }];
+  return [];
+}
 
 function updateDutTypes(ports: Record<string, { direction: string; width: number }>) {
   if (currentExtraLib) currentExtraLib.dispose();
 
   // Extract module name from Veryl source
-  const topMatch = verylEditor.getValue().match(/module\s+(\w+)/);
+  const topMatch = getVerylSource().match(/module\s+(\w+)/);
   const moduleName = topMatch?.[1] || "Top";
 
   const portEntries = Object.entries(ports)
@@ -236,57 +676,39 @@ function updateDutTypes(ports: Record<string, { direction: string; width: number
     .map(([name, _]) => `    ${name}: bigint;`)
     .join("\n");
 
+  // Only generate .veryl module declarations — @celox-sim/celox types are
+  // registered once at startup from the real .d.ts files.
   const dts = `
-declare module "@celox-sim/celox" {
-  interface Dut {
-${portEntries}
-  }
-  interface Sim {
-    readonly dut: Dut;
-    tick(): void;
-    evalComb(): void;
-    dispose(): void;
-  }
-  export const Simulator: {
-    create(module: any): Sim;
-  };
-  export const Simulation: {
-    create(module: any): Sim;
-  };
-  export type ModuleDefinition<T = any> = { __celox_module: true; name: string };
-}
-
 declare module "./${moduleName}.veryl" {
   import type { ModuleDefinition } from "@celox-sim/celox";
-  interface ${moduleName}Ports {
+  export interface ${moduleName}Ports {
 ${portEntries}
   }
   export const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
 }
 
-declare module "file:///${moduleName}.veryl" {
+declare module "../src/${moduleName}.veryl" {
   import type { ModuleDefinition } from "@celox-sim/celox";
-  interface ${moduleName}Ports {
+  export interface ${moduleName}Ports {
 ${portEntries}
   }
   export const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
 }
-
-declare function expect(actual: any): { toBe(expected: any): void; toBeGreaterThan(expected: any): void; };
 `;
   currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(dts, "file:///celox-sim.d.ts");
 
   // Also register the .veryl module as a virtual file so TS can resolve the import
   const verylModuleDts = `
 import type { ModuleDefinition } from "@celox-sim/celox";
-interface ${moduleName}Ports {
+export interface ${moduleName}Ports {
 ${portEntries}
 }
 export declare const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
 `;
   // Register under multiple paths to ensure resolution works
-  monaco.languages.typescript.typescriptDefaults.addExtraLib(verylModuleDts, `file:///${moduleName}.veryl`);
-  monaco.languages.typescript.typescriptDefaults.addExtraLib(verylModuleDts, `file:///${moduleName}.d.veryl.ts`);
+  // test/foo.test.ts imports "../src/Adder.veryl" → resolves to file:///src/Adder.veryl
+  monaco.languages.typescript.typescriptDefaults.addExtraLib(verylModuleDts, `file:///src/${moduleName}.veryl`);
+  monaco.languages.typescript.typescriptDefaults.addExtraLib(verylModuleDts, `file:///src/${moduleName}.d.veryl.ts`);
 }
 
 // Extract port names from Veryl source with regex (works without WASM)
@@ -314,7 +736,7 @@ function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
   while ((m = msgRe.exec(errorMsg)) !== null) messages.push(m[1].trim());
 
   // Get source lines for token length detection
-  const sourceLines = verylEditor.getValue().split("\n");
+  const sourceLines = getVerylSource().split("\n");
 
   let i = 0;
   while ((m = locRe.exec(errorMsg)) !== null) {
@@ -368,8 +790,8 @@ let updateTimer: ReturnType<typeof setTimeout>;
 function onVerylChange() {
   clearTimeout(updateTimer);
   updateTimer = setTimeout(() => {
-    const source = verylEditor.getValue();
-    const model = verylEditor.getModel();
+    const source = getVerylSource();
+    const model = getVerylModel();
 
     // Try WASM-based analysis (accurate types + diagnostics)
     if (celox) {
@@ -412,7 +834,6 @@ function onVerylChange() {
     }
   }, 500);
 }
-verylEditor.onDidChangeModelContent(onVerylChange);
 
 // ── WASM loading ────────────────────────────────────────
 
@@ -430,6 +851,12 @@ async function init() {
   }
 }
 
+// ── vitest expect setup ─────────────────────────────────
+
+chai.use(JestChaiExpect);
+chai.use(JestAsymmetricMatchers);
+const expect = chai.expect as any;
+
 // ── Run ─────────────────────────────────────────────────
 
 async function run() {
@@ -437,8 +864,16 @@ async function run() {
   runBtn.disabled = true;
   statusEl.textContent = "Compiling…";
 
+  const targetPath = runTargetEl.value;
+  if (!targetPath) {
+    appendConsole("[error] No test file selected", "log-error");
+    statusEl.textContent = "Error";
+    runBtn.disabled = false;
+    return;
+  }
+
   try {
-    const verylSource = verylEditor.getValue();
+    const verylSource = getVerylSource();
     const topMatch = verylSource.match(/module\s+(\w+)/);
     if (!topMatch) throw new Error("No module found in Veryl source");
     const topName = topMatch[1];
@@ -459,92 +894,403 @@ async function run() {
     const t1 = performance.now();
     appendConsole(`[compile] ${(t1 - t0).toFixed(0)}ms — ${Object.keys(layout).length} signals, ${Object.keys(events).length} events`, "log-success");
 
-    // Instantiate WASM simulation modules
-    const pages = Math.max(1, Math.ceil(totalSize / 65536));
-    const memory = new WebAssembly.Memory({ initial: pages });
-    const combInst = await WebAssembly.instantiate(new Uint8Array(handle.combWasmBytes()), { env: { memory } });
-    const eventInsts: Record<string, WebAssembly.Instance> = {};
-    for (const name of Object.keys(events)) {
-      try {
-        const { instance } = await WebAssembly.instantiate(new Uint8Array(handle.eventWasmBytes(name)), { env: { memory } });
-        eventInsts[name] = instance;
-      } catch {}
+    // Build simulation factory (creates fresh instance per call)
+    function createSim() {
+      const pages = Math.max(1, Math.ceil(totalSize / 65536));
+      const memory = new WebAssembly.Memory({ initial: pages });
+      const combModule = new WebAssembly.Module(new Uint8Array(handle.combWasmBytes()));
+      const combInst = new WebAssembly.Instance(combModule, { env: { memory } });
+
+      // Build event instances and id→name mapping (mirrors real Simulator)
+      const eventNames = Object.keys(events);
+      const eventInsts: Record<number, WebAssembly.Instance> = {};
+      for (const name of eventNames) {
+        const id: number = events[name];
+        try {
+          const mod = new WebAssembly.Module(new Uint8Array(handle.eventWasmBytes(name)));
+          eventInsts[id] = new WebAssembly.Instance(mod, { env: { memory } });
+        } catch {}
+      }
+      const defaultEventId = eventNames.length > 0 ? events[eventNames[0]] : -1;
+
+      const view = new DataView(memory.buffer);
+      let dirty = false;
+
+      const dut = new Proxy({} as Record<string, bigint>, {
+        get(_, prop: string) {
+          const sig = layout[prop];
+          if (!sig) return undefined;
+          let v = 0n;
+          for (let i = sig.byte_size - 1; i >= 0; i--) v = (v << 8n) | BigInt(view.getUint8(sig.offset + i));
+          if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
+          return v;
+        },
+        set(_, prop: string, value: bigint) {
+          const sig = layout[prop];
+          if (!sig) throw new Error(`Signal '${prop}' not found`);
+          let v = BigInt(value);
+          for (let i = 0; i < sig.byte_size; i++) { view.setUint8(sig.offset + i, Number(v & 0xFFn)); v >>= 8n; }
+          dirty = true;
+          return true;
+        },
+      });
+
+      function evalComb() {
+        (combInst.exports.run as Function)();
+        dirty = false;
+      }
+
+      function tickOne(eventId: number) {
+        if (dirty) evalComb();
+        const inst = eventInsts[eventId];
+        if (inst) (inst.exports.run as Function)();
+        (combInst.exports.run as Function)();
+        dirty = false;
+      }
+
+      return {
+        dut,
+        warnings: [] as readonly string[],
+        evalComb,
+        tick(eventOrCount?: { name: string; id: number } | number, count?: number) {
+          let eventId: number;
+          let ticks: number;
+          if (typeof eventOrCount === "object" && eventOrCount !== null) {
+            eventId = eventOrCount.id;
+            ticks = count ?? 1;
+          } else if (typeof eventOrCount === "number") {
+            eventId = defaultEventId;
+            ticks = eventOrCount;
+          } else {
+            eventId = defaultEventId;
+            ticks = 1;
+          }
+          for (let i = 0; i < ticks; i++) tickOne(eventId);
+        },
+        event(name: string): { name: string; id: number } {
+          const id = events[name];
+          if (id === undefined) {
+            throw new Error(`Unknown event '${name}'. Available: ${eventNames.join(", ")}`);
+          }
+          return { name, id };
+        },
+        fourState(portName: string): { __fourState: true; value: bigint; mask: bigint } {
+          const sig = layout[portName];
+          if (!sig) {
+            throw new Error(`Unknown port '${portName}'. Available: ${Object.keys(layout).join(", ")}`);
+          }
+          let value = 0n;
+          for (let i = sig.byte_size - 1; i >= 0; i--) value = (value << 8n) | BigInt(view.getUint8(sig.offset + i));
+          if (sig.width < 64) value &= (1n << BigInt(sig.width)) - 1n;
+          // 4-state mask lives immediately after value bytes
+          let mask = 0n;
+          if (sig.is_4state) {
+            for (let i = sig.byte_size - 1; i >= 0; i--) mask = (mask << 8n) | BigInt(view.getUint8(sig.offset + sig.byte_size + i));
+            if (sig.width < 64) mask &= (1n << BigInt(sig.width)) - 1n;
+          }
+          return { __fourState: true, value, mask };
+        },
+        dump(_timestamp: number) {
+          throw new Error("VCD dump is not supported in the playground");
+        },
+        dispose() {},
+      };
     }
-
-    const view = new DataView(memory.buffer);
-    const dut = new Proxy({} as Record<string, bigint>, {
-      get(_, prop: string) {
-        const sig = layout[prop];
-        if (!sig) return undefined;
-        let v = 0n;
-        for (let i = sig.byte_size - 1; i >= 0; i--) v = (v << 8n) | BigInt(view.getUint8(sig.offset + i));
-        if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
-        return v;
-      },
-      set(_, prop: string, value: bigint) {
-        const sig = layout[prop];
-        if (!sig) throw new Error(`Signal '${prop}' not found`);
-        let v = BigInt(value);
-        for (let i = 0; i < sig.byte_size; i++) { view.setUint8(sig.offset + i, Number(v & 0xFFn)); v >>= 8n; }
-        return true;
-      },
-    });
-
-    const sim = {
-      dut,
-      evalComb() { (combInst.instance.exports.run as Function)(); },
-      tick(eventName?: string) {
-        if (eventName) { const inst = eventInsts[eventName]; if (inst) (inst.exports.run as Function)(); }
-        else { for (const inst of Object.values(eventInsts)) (inst.exports.run as Function)(); }
-        (combInst.instance.exports.run as Function)();
-      },
-      dispose() {},
-    };
-
-    // Transpile TS → JS via Monaco's TS worker
-    statusEl.textContent = "Running…";
-    const tsWorker = await monaco.languages.typescript.getTypeScriptWorker();
-    const tbModel = tbEditor.getModel()!;
-    const client = await tsWorker(tbModel.uri);
-    const output = await client.getEmitOutput(tbModel.uri.toString());
-    let jsCode = output.outputFiles[0]?.text ?? tbEditor.getValue();
-
-    // Strip import statements and resolve module references.
-    // import { Simulator } from "@celox-sim/celox"  → provided via injected globals
-    // import { Adder } from "./Adder.veryl"          → provided as module definition
-    jsCode = jsCode
-      .replace(/^(?:import|export)\s+.*(?:from\s+)?["'][^"']*["'];?\s*$/gm, "")
-      .replace(/^(?:const|let|var)\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\);?\s*$/gm, "");
 
     // Build module definitions from genTsFromSource result for .veryl imports
     const moduleNames = (genTsResult?.modules || []).map((m: any) => m.moduleName).filter(Boolean);
 
-    // Create a Simulator-like factory that uses the WASM bridge
-    const Simulator = {
-      create(_module: any) { return sim; },
-    };
-    const Simulation = {
-      create(_module: any) { return sim; },
-    };
+    const Simulator = { create(_module: any) { return createSim(); } };
 
-    // Build module definition objects (matching ModuleDefinition shape)
+    // Time-based Simulation: event queue with signal toggling on top of WASM bridge
+    // Mirrors the native Simulation's step() logic:
+    //   1. Pop all events at current time
+    //   2. Write signal values to memory
+    //   3. Detect edges (posedge/negedge) and fire triggered FF handlers
+    //   4. Evaluate combinational logic
+    //   5. Reschedule recurring clocks with toggled value
+    function createSimulation() {
+      const pages = Math.max(1, Math.ceil(totalSize / 65536));
+      const memory = new WebAssembly.Memory({ initial: pages });
+      const combModule = new WebAssembly.Module(new Uint8Array(handle.combWasmBytes()));
+      const combInst = new WebAssembly.Instance(combModule, { env: { memory } });
+
+      const eventNames = Object.keys(events);
+      const eventInsts: Record<number, WebAssembly.Instance> = {};
+      for (const name of eventNames) {
+        const id: number = events[name];
+        try {
+          const mod = new WebAssembly.Module(new Uint8Array(handle.eventWasmBytes(name)));
+          eventInsts[id] = new WebAssembly.Instance(mod, { env: { memory } });
+        } catch {}
+      }
+
+      const view = new DataView(memory.buffer);
+
+      // Determine edge type for each event from layout type_kind
+      const edgeType: Record<number, "posedge" | "negedge"> = {};
+      for (const name of eventNames) {
+        const id: number = events[name];
+        const sig = layout[name];
+        if (!sig) continue;
+        const tk: string = sig.type_kind ?? "logic";
+        if (tk === "reset_async_low" || tk === "reset_sync_low") {
+          edgeType[id] = "negedge";
+        } else {
+          edgeType[id] = "posedge"; // clock, reset_async_high, etc.
+        }
+      }
+
+      // Event queue entry: carries the signal name, next value, and optional clock reschedule info
+      type QueueEntry = {
+        time: number;
+        eventId: number;
+        signalName: string;
+        nextVal: number;
+        clockHalfPeriod?: number; // if set, reschedule with toggled value
+      };
+      const queue: QueueEntry[] = [];
+      const clocks = new Map<string, { period: number; eventId: number }>();
+      let currentTime = 0;
+      // Track last signal values for edge detection
+      const lastValues: Record<number, number> = {};
+
+      function enqueue(entry: QueueEntry) {
+        let lo = 0, hi = queue.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >>> 1;
+          if (queue[mid].time <= entry.time) lo = mid + 1; else hi = mid;
+        }
+        queue.splice(lo, 0, entry);
+      }
+
+      function writeSignal(name: string, val: number) {
+        const sig = layout[name];
+        if (sig) view.setUint8(sig.offset, val);
+      }
+
+      function resolveEvent(name: string): number {
+        const id = events[name];
+        if (id === undefined) {
+          throw new Error(`Unknown event '${name}'. Available: ${eventNames.join(", ")}`);
+        }
+        return id;
+      }
+
+      // Process one time step: pop all events at next time, write values, detect edges, fire FFs
+      function processStep(): number | null {
+        if (queue.length === 0) return null;
+        const t = queue[0].time;
+        // Collect all events at this time
+        const batch: QueueEntry[] = [];
+        while (queue.length > 0 && queue[0].time === t) {
+          batch.push(queue.shift()!);
+        }
+        currentTime = t;
+
+        // Phase 1: Write signal values to memory
+        for (const ev of batch) {
+          writeSignal(ev.signalName, ev.nextVal);
+        }
+
+        // Phase 2: Edge detection + fire triggered FFs
+        for (const ev of batch) {
+          const prevVal = lastValues[ev.eventId] ?? 0;
+          const curVal = ev.nextVal;
+          const edge = edgeType[ev.eventId] ?? "posedge";
+          const triggered = edge === "posedge"
+            ? (prevVal === 0 && curVal !== 0)
+            : (prevVal !== 0 && curVal === 0);
+          if (triggered) {
+            const inst = eventInsts[ev.eventId];
+            if (inst) (inst.exports.run as Function)();
+          }
+          lastValues[ev.eventId] = curVal;
+        }
+
+        // Phase 3: Evaluate combinational logic
+        (combInst.exports.run as Function)();
+
+        // Phase 4: Reschedule clocks with toggled value
+        for (const ev of batch) {
+          if (ev.clockHalfPeriod != null) {
+            enqueue({
+              time: currentTime + ev.clockHalfPeriod,
+              eventId: ev.eventId,
+              signalName: ev.signalName,
+              nextVal: 1 - ev.nextVal,
+              clockHalfPeriod: ev.clockHalfPeriod,
+            });
+          }
+        }
+
+        return currentTime;
+      }
+
+      // DUT proxy
+      const dut = new Proxy({} as Record<string, bigint>, {
+        get(_, prop: string) {
+          const sig = layout[prop];
+          if (!sig) return undefined;
+          let v = 0n;
+          for (let i = sig.byte_size - 1; i >= 0; i--) v = (v << 8n) | BigInt(view.getUint8(sig.offset + i));
+          if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
+          return v;
+        },
+        set(_, prop: string, value: bigint) {
+          const sig = layout[prop];
+          if (!sig) throw new Error(`Signal '${prop}' not found`);
+          let v = BigInt(value);
+          for (let i = 0; i < sig.byte_size; i++) { view.setUint8(sig.offset + i, Number(v & 0xFFn)); v >>= 8n; }
+          return true;
+        },
+      });
+
+      const sim = {
+        dut,
+        warnings: [] as readonly string[],
+
+        addClock(name: string, opts: { period: number; initialDelay?: number }) {
+          const eventId = resolveEvent(name);
+          clocks.set(name, { period: opts.period, eventId });
+          const delay = opts.initialDelay ?? 0;
+          const halfPeriod = opts.period / 2;
+          // Schedule first edge (0→1) at delay, then toggles every half-period
+          enqueue({
+            time: currentTime + delay,
+            eventId,
+            signalName: name,
+            nextVal: 1,
+            clockHalfPeriod: halfPeriod,
+          });
+        },
+
+        schedule(name: string, opts: { time: number; value: number }) {
+          const eventId = resolveEvent(name);
+          enqueue({ time: opts.time, eventId, signalName: name, nextVal: opts.value });
+        },
+
+        step: processStep,
+
+        time(): number { return currentTime; },
+
+        nextEventTime(): number | null {
+          return queue.length > 0 ? queue[0].time : null;
+        },
+
+        runUntil(endTime: number, opts?: { maxSteps?: number }) {
+          const max = opts?.maxSteps;
+          let steps = 0;
+          while (queue.length > 0 && queue[0].time <= endTime) {
+            processStep();
+            steps++;
+            if (max != null && steps >= max) {
+              throw new Error(`runUntil: exceeded ${max} steps at time ${currentTime} (target ${endTime})`);
+            }
+          }
+          currentTime = endTime;
+        },
+
+        waitUntil(condition: () => boolean, opts?: { maxSteps?: number }): number {
+          const max = opts?.maxSteps ?? 100_000;
+          let steps = 0;
+          while (!condition()) {
+            if (queue.length === 0) break;
+            processStep();
+            steps++;
+            if (steps >= max) {
+              throw new Error(`waitUntil: condition not met after ${max} steps at time ${currentTime}`);
+            }
+          }
+          return currentTime;
+        },
+
+        waitForCycles(clock: string, count: number, opts?: { maxSteps?: number }): number {
+          const clkInfo = clocks.get(clock);
+          if (!clkInfo) throw new Error(`No clock registered for '${clock}'. Call addClock() first.`);
+          const sig = layout[clock];
+          if (!sig) throw new Error(`No layout entry for clock '${clock}'.`);
+          const readClk = () => view.getUint8(sig.offset);
+          let prev = readClk();
+          let remaining = count;
+          return sim.waitUntil(() => {
+            const curr = readClk();
+            if (prev === 0 && curr !== 0) remaining--;
+            prev = curr;
+            return remaining <= 0;
+          }, opts);
+        },
+
+        reset(signal: string, opts?: { activeCycles?: number; duration?: number }) {
+          const sig = layout[signal];
+          if (!sig) throw new Error(`Unknown port '${signal}'. Available: ${Object.keys(layout).join(", ")}`);
+          const typeKind: string = sig.type_kind ?? "";
+          if (!typeKind.startsWith("reset")) {
+            throw new Error(`Port '${signal}' is not a reset signal (type_kind: '${typeKind}').`);
+          }
+          const isActiveLow = typeKind === "reset_async_low" || typeKind === "reset_sync_low";
+          const activeValue = isActiveLow ? 0n : 1n;
+          const inactiveValue = isActiveLow ? 1n : 0n;
+
+          dut[signal] = activeValue;
+
+          if (opts?.duration != null) {
+            sim.runUntil(currentTime + opts.duration);
+          } else {
+            const cycles = opts?.activeCycles ?? 2;
+            const firstClock = clocks.keys().next().value;
+            if (firstClock) {
+              sim.waitForCycles(firstClock, cycles);
+            } else {
+              // No clock registered — fire the reset event directly
+              const eventId = events[signal];
+              if (eventId !== undefined) {
+                writeSignal(signal, Number(activeValue));
+                const inst = eventInsts[eventId];
+                if (inst) (inst.exports.run as Function)();
+                (combInst.exports.run as Function)();
+              }
+            }
+          }
+
+          dut[signal] = inactiveValue;
+        },
+
+        event(name: string): { name: string; id: number } {
+          return { name, id: resolveEvent(name) };
+        },
+
+        fourState(portName: string): { __fourState: true; value: bigint; mask: bigint } {
+          const sig = layout[portName];
+          if (!sig) throw new Error(`Unknown port '${portName}'. Available: ${Object.keys(layout).join(", ")}`);
+          let value = 0n;
+          for (let i = sig.byte_size - 1; i >= 0; i--) value = (value << 8n) | BigInt(view.getUint8(sig.offset + i));
+          if (sig.width < 64) value &= (1n << BigInt(sig.width)) - 1n;
+          let mask = 0n;
+          if (sig.is_4state) {
+            for (let i = sig.byte_size - 1; i >= 0; i--) mask = (mask << 8n) | BigInt(view.getUint8(sig.offset + sig.byte_size + i));
+            if (sig.width < 64) mask &= (1n << BigInt(sig.width)) - 1n;
+          }
+          return { __fourState: true, value, mask };
+        },
+
+        dump(_timestamp: number) {
+          throw new Error("VCD dump is not supported in the playground");
+        },
+
+        dispose() {},
+      };
+      return sim;
+    }
+
+    const Simulation = { create(_module: any) { return createSimulation(); } };
+
     const moduleBindings: Record<string, any> = {};
     for (const name of moduleNames) {
       moduleBindings[name] = { __celox_module: true, name };
     }
 
-    appendConsole("[run] Executing…", "log-info");
-    const log = (msg: any) => appendConsole(String(msg));
-    const expect = (actual: any) => ({
-      toBe(expected: any) {
-        if (actual !== expected) throw new Error(`Expected ${expected}, got ${actual}`);
-      },
-      toBeGreaterThan(expected: any) {
-        if (!(actual > expected)) throw new Error(`Expected > ${expected}, got ${actual}`);
-      },
-    });
-
-    // Proxy console so console.log/warn/error go to playground console
+    // Proxy console to playground console panel
     const playgroundConsole = {
       log: (...args: any[]) => appendConsole(args.map(String).join(" ")),
       warn: (...args: any[]) => appendConsole(args.map(String).join(" "), "log-warn"),
@@ -552,12 +1298,109 @@ async function run() {
       info: (...args: any[]) => appendConsole(args.map(String).join(" "), "log-info"),
     };
 
-    // Inject all bindings: Simulator, Simulation, console, log, expect, and module names
-    const argNames = ["Simulator", "Simulation", "console", "log", "expect", ...moduleNames];
-    const argValues = [Simulator, Simulation, playgroundConsole, log, expect, ...moduleNames.map((n: string) => moduleBindings[n])];
-    new Function(...argNames, jsCode)(...argValues);
-    appendConsole("[run] Done.", "log-success");
-    statusEl.textContent = "Done";
+    // Parse vitest-style args (--grep "pattern")
+    const argsStr = runArgsEl.value.trim();
+    let grepPattern: RegExp | null = null;
+    if (argsStr) {
+      const grepMatch = argsStr.match(/(?:--grep|-t)\s+(?:"([^"]+)"|'([^']+)'|(\S+))/);
+      if (grepMatch) {
+        grepPattern = new RegExp(grepMatch[1] || grepMatch[2] || grepMatch[3], "i");
+      }
+    }
+
+    // Collect tests from all target test files
+    type TestEntry = { name: string; fn: () => void | Promise<void>; suite: string[]; file: string };
+    const tests: TestEntry[] = [];
+
+    statusEl.textContent = "Running…";
+    const tsWorker = await monaco.languages.typescript.getTypeScriptWorker();
+    const testModels = getTestModels();
+    if (testModels.length === 0) throw new Error("No test files found");
+
+    for (const { path: testPath, model: tbMdl } of testModels) {
+      const client = await tsWorker(tbMdl.uri);
+      const output = await client.getEmitOutput(tbMdl.uri.toString());
+      let jsCode = output.outputFiles[0]?.text ?? tbMdl.getValue();
+
+      // Strip import/export/require — we inject all bindings
+      jsCode = jsCode
+        .replace(/^(?:import|export)\s+.*(?:from\s+)?["'][^"']*["'];?\s*$/gm, "")
+        .replace(/^(?:const|let|var)\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\);?\s*$/gm, "");
+
+      const suiteStack: string[] = [];
+      function _describe(name: string, fn: () => void) {
+        suiteStack.push(name);
+        fn();
+        suiteStack.pop();
+      }
+      function _it(name: string, fn: () => void | Promise<void>) {
+        tests.push({ name, fn, suite: [...suiteStack], file: testPath });
+      }
+      _it.skip = (_name: string, _fn: () => void | Promise<void>) => {};
+      _describe.skip = (_name: string, _fn: () => void) => {};
+
+      const argNames = [
+        "describe", "it", "test", "expect", "beforeEach", "afterEach",
+        "Simulator", "Simulation", "console",
+        ...moduleNames,
+      ];
+      const argValues = [
+        _describe, _it, _it, expect, () => {}, () => {},
+        Simulator, Simulation, playgroundConsole,
+        ...moduleNames.map((n: string) => moduleBindings[n]),
+      ];
+      new Function(...argNames, jsCode)(...argValues);
+    }
+
+    // Filter tests by grep pattern
+    const filteredTests = grepPattern
+      ? tests.filter(t => {
+          const label = [...t.suite, t.name].join(" > ");
+          return grepPattern!.test(label);
+        })
+      : tests;
+
+    // Run collected tests and display vitest-style results
+    let passed = 0;
+    let failed = 0;
+    let skipped = tests.length - filteredTests.length;
+    let lastFile = "";
+    const t2 = performance.now();
+
+    for (const t of filteredTests) {
+      if (t.file !== lastFile) {
+        appendConsole(`\n ${t.file}`, "log-info");
+        lastFile = t.file;
+      }
+      const label = [...t.suite, t.name].join(" > ");
+      try {
+        await t.fn();
+        passed++;
+        appendConsole(`   PASS  ${label}`, "log-success");
+      } catch (e: any) {
+        failed++;
+        appendConsole(`   FAIL  ${label}`, "log-error");
+        appendConsole(`         ${e.message}`, "log-error");
+      }
+    }
+
+    const t3 = performance.now();
+    appendConsole("", "");
+    const fileParts: string[] = [];
+    const fileSet = new Set(filteredTests.map(t => t.file));
+    if (failed > 0) fileParts.push(`${fileSet.size} files`);
+    const testParts: string[] = [];
+    if (passed > 0) testParts.push(`${passed} passed`);
+    if (failed > 0) testParts.push(`${failed} failed`);
+    if (skipped > 0) testParts.push(`${skipped} skipped`);
+    const summary = [
+      `Test Files  ${fileSet.size} files`,
+      `Tests       ${testParts.join(", ")} (${tests.length})`,
+      `Time        ${(t3 - t2).toFixed(0)}ms`,
+    ];
+    appendConsole(summary.join("\n"), failed > 0 ? "log-error" : "log-success");
+
+    statusEl.textContent = failed > 0 ? `${failed} failed` : "Done";
   } catch (e: any) {
     appendConsole("[error] " + e.message, "log-error");
     statusEl.textContent = "Error";
@@ -570,7 +1413,21 @@ async function run() {
 
 function loadExample(name: string) {
   const ex = EXAMPLES[name];
-  if (ex) { verylEditor.setValue(ex.veryl); tbEditor.setValue(ex.testbench); }
+  if (!ex) return;
+
+  // Derive module name from the Veryl source
+  const topMatch = ex.veryl.match(/module\s+(\w+)/);
+  const moduleName = topMatch?.[1] ?? name.charAt(0).toUpperCase() + name.slice(1);
+  // Use example key for test file name (e.g. "counter_sim" → "counter_sim.test.ts")
+  const testFileName = name;
+
+  removeAllFiles();
+  createFile("Veryl.toml", ex.verylToml ?? DEFAULT_VERYL_TOML);
+  createFile("celox.toml", ex.celoxToml ?? DEFAULT_CELOX_TOML);
+  createFile(`src/${moduleName}.veryl`, ex.veryl);
+  createFile(`test/${testFileName}.test.ts`, ex.testbench);
+  activateFile(`test/${testFileName}.test.ts`);
+  onVerylChange();
 }
 
 examplesEl.addEventListener("change", () => { if (examplesEl.value) loadExample(examplesEl.value); });

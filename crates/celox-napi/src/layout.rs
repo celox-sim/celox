@@ -1,5 +1,6 @@
+use celox::PortTypeKind;
 #[cfg(not(target_arch = "wasm32"))]
-use celox::{InstanceHierarchy, NamedEvent, NamedSignal, PortTypeKind, get_byte_size};
+use celox::{InstanceHierarchy, NamedEvent, NamedSignal, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 use serde::Serialize;
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,8 +31,7 @@ pub struct HierarchyNode {
     pub children: HashMap<String, Vec<HierarchyNode>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn direction_str(var_kind: veryl_analyzer::ir::VarKind) -> &'static str {
+pub fn direction_str(var_kind: veryl_analyzer::ir::VarKind) -> &'static str {
     match var_kind {
         veryl_analyzer::ir::VarKind::Input => "input",
         veryl_analyzer::ir::VarKind::Output => "output",
@@ -40,8 +40,7 @@ fn direction_str(var_kind: veryl_analyzer::ir::VarKind) -> &'static str {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn type_kind_str(type_kind: PortTypeKind) -> &'static str {
+pub fn type_kind_str(type_kind: PortTypeKind) -> &'static str {
     match type_kind {
         PortTypeKind::Clock => "clock",
         PortTypeKind::ResetAsyncHigh => "reset_async_high",
