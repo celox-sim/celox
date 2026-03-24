@@ -22,6 +22,10 @@ import type {
 	SourceFile,
 	TrueLoopSpec,
 } from "./types.js";
+import {
+	isWasmHandle,
+	createWasmSimulatorBridge,
+} from "./wasm-bridge.js";
 
 // ---------------------------------------------------------------------------
 // Raw NAPI handle shapes (what the .node addon actually exports)
@@ -527,6 +531,19 @@ export function parseHierarchyLayout(
 	events: Record<string, number>,
 ): HierarchyNode {
 	const raw: RawHierarchyNode = JSON.parse(json);
+
+	// WASM-compiled addon may return an empty object `{}` for hierarchy.
+	// Treat it as an empty hierarchy node.
+	if (!raw.signals && !raw.module_name) {
+		return {
+			moduleName: "",
+			signals: {},
+			forDut: {},
+			ports: {},
+			children: {},
+		};
+	}
+
 	return convertHierarchyNode(raw, events);
 }
 
@@ -709,8 +726,17 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 
-		const buf = raw.sharedMemory!().buffer;
-		const handle = wrapDirectSimulatorHandle(raw);
+		// Detect WASM-compiled addon and use the bridge
+		let buf: ArrayBuffer | SharedArrayBuffer;
+		let handle: NativeSimulatorHandle;
+		if (isWasmHandle(raw)) {
+			const bridge = createWasmSimulatorBridge(raw);
+			buf = bridge.sharedMemory.buffer;
+			handle = bridge.handle;
+		} else {
+			buf = raw.sharedMemory!().buffer;
+			handle = wrapDirectSimulatorHandle(raw);
+		}
 
 		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
@@ -730,6 +756,14 @@ export function createSimulationBridge(
 		moduleName: string,
 		options: SimulatorOptions,
 	): CreateResult<NativeSimulationHandle> => {
+		// WASM addon does not export NativeSimulationHandle
+		if (!addon.NativeSimulationHandle) {
+			throw new Error(
+				"Simulation is not supported in WASM mode. " +
+					"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation.",
+			);
+		}
+
 		const napiOpts = buildNapiOpts(options);
 		const napiSources = sources.map((s) => ({
 			content: s.content,

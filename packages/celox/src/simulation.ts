@@ -15,6 +15,7 @@ import {
 	parseNapiLayout,
 	wrapDirectSimulationHandle,
 } from "./napi-helpers.js";
+import { isWasmHandle } from "./wasm-bridge.js";
 import type {
 	CreateResult,
 	FourStateValue,
@@ -190,11 +191,30 @@ export class Simulation<P = Record<string, unknown>> {
 	): Simulation<P> {
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const napiOpts = buildNapiOpts(options);
+		// WASM addon does not support time-based Simulation (no NativeSimulationHandle).
+		// Check before attempting to construct the handle.
+		if (!addon.NativeSimulationHandle) {
+			throw new Error(
+				"Simulation is not supported in WASM mode. " +
+					"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation. " +
+					"Use Simulator.fromSource() instead.",
+			);
+		}
+
 		const raw = new addon.NativeSimulationHandle(
 			[{ content: source, path: "" }],
 			top,
 			napiOpts,
 		);
+
+		if (isWasmHandle(raw)) {
+			raw.dispose();
+			throw new Error(
+				"Simulation is not supported in WASM mode. " +
+					"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation. " +
+					"Use Simulator.fromSource() instead.",
+			);
+		}
 
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -251,11 +271,30 @@ export class Simulation<P = Record<string, unknown>> {
 	): Simulation<P> {
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const napiOpts = buildNapiOpts(options);
+
+		// WASM addon does not support time-based Simulation (no NativeSimulationHandle).
+		if (!addon.NativeSimulationHandle) {
+			throw new Error(
+				"Simulation is not supported in WASM mode. " +
+					"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation. " +
+					"Use Simulator.fromProject() instead.",
+			);
+		}
+
 		const raw = addon.NativeSimulationHandle.fromProject(
 			projectPath,
 			top,
 			napiOpts,
 		);
+
+		if (isWasmHandle(raw)) {
+			raw.dispose();
+			throw new Error(
+				"Simulation is not supported in WASM mode. " +
+					"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation. " +
+					"Use Simulator.fromProject() instead.",
+			);
+		}
 
 		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);

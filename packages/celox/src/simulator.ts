@@ -206,7 +206,14 @@ export class Simulator<P = Record<string, unknown>> {
 			options?.deadStorePolicy,
 		);
 
-		const ports = buildPortsFromLayout(hierarchy.signals, events);
+		// When hierarchy is populated, use its signals for port detection.
+		// When hierarchy is empty (e.g. WASM-compiled addon), fall back to
+		// the flat layout signals which always have full signal info.
+		const hasHierarchySignals =
+			Object.keys(hierarchy.signals).length > 0;
+		const ports = hasHierarchySignals
+			? buildPortsFromLayout(hierarchy.signals, events)
+			: buildPortsFromLayout(layout.signals, events);
 
 		// Detect WASM-compiled addon and use the bridge
 		let buf: ArrayBuffer | SharedArrayBuffer;
@@ -227,7 +234,7 @@ export class Simulator<P = Record<string, unknown>> {
 			ports,
 			handle,
 			state,
-			hierarchy,
+			hasHierarchySignals ? hierarchy : undefined,
 		);
 
 		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
@@ -275,7 +282,11 @@ export class Simulator<P = Record<string, unknown>> {
 			options?.deadStorePolicy,
 		);
 
-		const ports = buildPortsFromLayout(hierarchy.signals, events);
+		const hasHierarchySignals =
+			Object.keys(hierarchy.signals).length > 0;
+		const ports = hasHierarchySignals
+			? buildPortsFromLayout(hierarchy.signals, events)
+			: buildPortsFromLayout(layout.signals, events);
 
 		// Detect WASM-compiled addon and use the bridge
 		let buf: ArrayBuffer | SharedArrayBuffer;
@@ -296,7 +307,7 @@ export class Simulator<P = Record<string, unknown>> {
 			ports,
 			handle,
 			state,
-			hierarchy,
+			hasHierarchySignals ? hierarchy : undefined,
 		);
 
 		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");

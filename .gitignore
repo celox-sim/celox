@@ -15,6 +15,13 @@ crates/celox-napi/npm/
 crates/celox-napi/index.js
 crates/celox-napi/index.d.ts
 
+# NAPI WASM build artifacts
+crates/celox-napi/*.wasm
+crates/celox-napi/celox.wasi.cjs
+crates/celox-napi/celox.wasi-browser.js
+crates/celox-napi/wasi-worker.mjs
+crates/celox-napi/wasi-worker-browser.mjs
+
 # Generated Veryl type sidecars
 .celox/
 
