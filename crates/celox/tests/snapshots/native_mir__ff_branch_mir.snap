@@ -1,0 +1,122 @@
+---
+source: crates/celox/tests/native_mir.rs
+expression: output
+---
+=== MIR (eval_comb) ===
+Execution Unit 0 (before regalloc):
+bb0:
+  ret
+
+Execution Unit 0 (after regalloc):
+bb0:
+  ret
+  Register assignment:
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  xor eax,eax
+  0x0000000b  jmp short 000000000000000Dh
+  0x0000000d  add rsp,8
+  0x00000011  pop r15
+  0x00000013  ret
+
+=== MIR (eval_apply_ffs) Trigger: clk ===
+Execution Unit 0 (before regalloc):
+bb0:
+  v6 = load.i8 [sim + 2]
+  v0 = and v6, 0x1
+  v7 = imm 0x0
+  v4 = cmp.Eq v0, v7
+  br v4, bb1, bb2
+bb1:
+  v2 = imm 0x0
+  v5 = imm 0xff
+  v3 = and v2, v5
+  store.i8 [sim + 3], v3
+  jmp bb3
+bb2:
+  v1 = load.i8 [sim + 1]
+  store.i8 [sim + 3], v1
+  jmp bb3
+bb3:
+  ret
+
+Execution Unit 0 (after regalloc):
+bb0:
+  v6 = load.i8 [sim + 2]
+  v0 = and v6, 0x1
+  v7 = imm 0x0
+  v4 = cmp.Eq v0, v7
+  br v4, bb1, bb2
+bb1:
+  v2 = imm 0x0
+  v5 = imm 0xff
+  v3 = and v2, v5
+  store.i8 [sim + 3], v3
+  jmp bb3
+bb2:
+  v1 = load.i8 [sim + 1]
+  store.i8 [sim + 3], v1
+  jmp bb3
+bb3:
+  ret
+  Register assignment:
+    v0 -> rax
+    v1 -> rax
+    v2 -> rax
+    v3 -> rax
+    v4 -> rax
+    v5 -> rdx
+    v6 -> rax
+    v7 -> rdx
+
+=== MIR (eval_apply_ffs) Trigger: rst ===
+Execution Unit 0 (before regalloc):
+bb0:
+  v6 = load.i8 [sim + 2]
+  v0 = and v6, 0x1
+  v7 = imm 0x0
+  v4 = cmp.Eq v0, v7
+  br v4, bb1, bb2
+bb1:
+  v2 = imm 0x0
+  v5 = imm 0xff
+  v3 = and v2, v5
+  store.i8 [sim + 3], v3
+  jmp bb3
+bb2:
+  v1 = load.i8 [sim + 1]
+  store.i8 [sim + 3], v1
+  jmp bb3
+bb3:
+  ret
+
+Execution Unit 0 (after regalloc):
+bb0:
+  v6 = load.i8 [sim + 2]
+  v0 = and v6, 0x1
+  v7 = imm 0x0
+  v4 = cmp.Eq v0, v7
+  br v4, bb1, bb2
+bb1:
+  v2 = imm 0x0
+  v5 = imm 0xff
+  v3 = and v2, v5
+  store.i8 [sim + 3], v3
+  jmp bb3
+bb2:
+  v1 = load.i8 [sim + 1]
+  store.i8 [sim + 3], v1
+  jmp bb3
+bb3:
+  ret
+  Register assignment:
+    v0 -> rax
+    v1 -> rax
+    v2 -> rax
+    v3 -> rax
+    v4 -> rax
+    v5 -> rdx
+    v6 -> rax
+    v7 -> rdx

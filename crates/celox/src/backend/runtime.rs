@@ -160,6 +160,11 @@ impl JitBackend {
             }
         }
 
+        let layout_for_mir = if options.trace.mir {
+            Some(layout.clone())
+        } else {
+            None
+        };
         let mut engine = JitEngine::new(layout, &options).map_err(SimulatorError::from)?;
 
         let mut pre_clif_buf = String::new();
@@ -218,6 +223,57 @@ impl JitBackend {
                 full_native.push_str("=========================================\n\n");
                 full_native.push_str(&native_buf);
                 t.native = Some(full_native);
+            }
+            if options.trace.mir {
+                use super::native::isel::lower_execution_unit;
+                use super::native::regalloc::run_regalloc;
+                let mut mir_output = String::new();
+                let layout_ref = layout_for_mir.as_ref().unwrap();
+
+                mir_output.push_str("=== MIR (eval_comb) ===\n");
+                for (idx, eu) in sir.eval_comb.iter().enumerate() {
+                    let mut mfunc = lower_execution_unit(eu, layout_ref);
+                    mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
+                    mir_output.push_str(&format!("{mfunc}\n"));
+                    let assignment = run_regalloc(&mut mfunc);
+                    mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
+                    mir_output.push_str(&format!("{mfunc}"));
+                    mir_output.push_str("  Register assignment:\n");
+                    for (vreg, preg) in &assignment.map {
+                        mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
+                    }
+                    // Emit x86-64 and disassemble
+                    match super::native::emit::emit(&mfunc, &assignment, 0) {
+                        Ok(result) => {
+                            mir_output.push_str("  x86-64 disassembly:\n");
+                            mir_output.push_str(&super::native::emit::disassemble(&result.code, 0));
+                        }
+                        Err(e) => {
+                            mir_output.push_str(&format!("  emit error: {e}\n"));
+                        }
+                    }
+                    mir_output.push('\n');
+                }
+                for (addr, units) in &sir.eval_apply_ffs {
+                    mir_output.push_str(&format!(
+                        "=== MIR (eval_apply_ffs) Trigger: {} ===\n",
+                        sir.get_path(addr)
+                    ));
+                    for (idx, eu) in units.iter().enumerate() {
+                        let mut mfunc = lower_execution_unit(eu, layout_ref);
+                        mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
+                        mir_output.push_str(&format!("{mfunc}\n"));
+                        let assignment = run_regalloc(&mut mfunc);
+                        mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
+                        mir_output.push_str(&format!("{mfunc}"));
+                        mir_output.push_str("  Register assignment:\n");
+                        for (vreg, preg) in &assignment.map {
+                            mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
+                        }
+                        mir_output.push('\n');
+                    }
+                }
+                t.mir = Some(mir_output);
             }
         }
 

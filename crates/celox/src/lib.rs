@@ -55,7 +55,12 @@ pub use debug::CompilationTraceResult;
 pub use debug::{CompilationTrace, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
-pub use ir::{AbsoluteAddr, AddrLookupError, PortTypeKind, SignalRef};
+pub use ir::{AbsoluteAddr, AddrLookupError, PortTypeKind, Program, SignalRef};
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_backend {
+    //! Re-exports for the native x86-64 backend (for testing/integration).
+    pub use crate::backend::native::*;
+}
 pub use num_bigint::BigUint;
 #[cfg(not(target_arch = "wasm32"))]
 pub use optimizer::CraneliftOptLevel;
@@ -86,7 +91,6 @@ pub use veryl_metadata::{ClockType, ResetType};
 
 // Re-exports needed for wasm32 builds
 pub use backend::wasm_codegen;
-pub use ir::Program;
 
 // Public compilation API (available on all targets)
 pub use simulator::compile_to_sir;

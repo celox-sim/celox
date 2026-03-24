@@ -1,0 +1,57 @@
+---
+source: crates/celox/tests/native_mir.rs
+expression: output
+---
+=== MIR (eval_comb) ===
+Execution Unit 0 (before regalloc):
+bb0:
+  v0 = load.i32 [sim + 0]
+  v4 = load.i32 [sim + 8]
+  v2 = add v0, v4
+  v6 = imm 0x2
+  v3 = or v2, v6
+  store.i32 [sim + 12], v3
+  v1 = imm 0x1
+  v5 = and v2, v1
+  store.i32 [sim + 4], v5
+  ret
+
+Execution Unit 0 (after regalloc):
+bb0:
+  v0 = load.i32 [sim + 0]
+  v4 = load.i32 [sim + 8]
+  v2 = add v0, v4
+  v6 = imm 0x2
+  v3 = or v2, v6
+  store.i32 [sim + 12], v3
+  v1 = imm 0x1
+  v5 = and v2, v1
+  store.i32 [sim + 4], v5
+  ret
+  Register assignment:
+    v0 -> rax
+    v1 -> rdx
+    v2 -> rax
+    v3 -> rdx
+    v4 -> rdx
+    v5 -> rax
+    v6 -> rdx
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  mov eax,[r15]
+  0x0000000c  mov edx,[r15+8]
+  0x00000010  add rax,rdx
+  0x00000013  mov edx,2
+  0x00000018  mov rdx,rax
+  0x0000001b  or rdx,rdx
+  0x0000001e  mov [r15+0Ch],edx
+  0x00000022  mov edx,1
+  0x00000027  and rax,rdx
+  0x0000002a  mov [r15+4],eax
+  0x0000002e  xor eax,eax
+  0x00000030  jmp short 0000000000000032h
+  0x00000032  add rsp,8
+  0x00000036  pop r15
+  0x00000038  ret

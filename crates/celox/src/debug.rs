@@ -15,6 +15,7 @@ pub struct TraceOptions {
     pub pre_optimized_clif: bool,
     pub post_optimized_clif: bool,
     pub native: bool,
+    pub mir: bool,
     pub output_to_stdout: bool,
 }
 
@@ -32,6 +33,7 @@ pub struct CompilationTrace {
     pub pre_optimized_clif: Option<String>,
     pub post_optimized_clif: Option<String>,
     pub native: Option<String>,
+    pub mir: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

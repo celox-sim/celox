@@ -1,0 +1,149 @@
+---
+source: crates/celox/tests/native_mir.rs
+expression: output
+---
+=== MIR (eval_comb) ===
+Execution Unit 0 (before regalloc):
+bb0:
+  v0 = load.i32 [sim + 0]
+  v10 = load.i32 [sim + 44]
+  v30 = load.i32 [sim + 20]
+  v19 = load.i32 [sim + 64]
+  v8 = load.i32 [sim + 40]
+  v28 = load.i32 [sim + 16]
+  v17 = load.i32 [sim + 60]
+  v6 = load.i32 [sim + 36]
+  v20 = add v0, v10
+  v26 = load.i32 [sim + 12]
+  v15 = load.i32 [sim + 56]
+  v9 = add v20, v30
+  v4 = load.i32 [sim + 32]
+  v29 = add v9, v19
+  v24 = load.i32 [sim + 8]
+  v18 = add v29, v8
+  v13 = load.i32 [sim + 52]
+  v7 = add v18, v28
+  v2 = load.i32 [sim + 28]
+  v27 = add v7, v17
+  v22 = load.i32 [sim + 4]
+  v16 = add v27, v6
+  v11 = load.i32 [sim + 48]
+  v5 = add v16, v26
+  v25 = add v5, v15
+  v14 = add v25, v4
+  v3 = add v14, v24
+  v23 = add v3, v13
+  v12 = add v23, v2
+  v1 = add v12, v22
+  v21 = add v1, v11
+  store.i32 [sim + 24], v21
+  ret
+
+Execution Unit 0 (after regalloc):
+bb0:
+  v0 = load.i32 [sim + 0]
+  v10 = load.i32 [sim + 44]
+  v30 = load.i32 [sim + 20]
+  v19 = load.i32 [sim + 64]
+  v8 = load.i32 [sim + 40]
+  v28 = load.i32 [sim + 16]
+  v17 = load.i32 [sim + 60]
+  v6 = load.i32 [sim + 36]
+  v20 = add v0, v10
+  v26 = load.i32 [sim + 12]
+  v15 = load.i32 [sim + 56]
+  v9 = add v20, v30
+  v4 = load.i32 [sim + 32]
+  v29 = add v9, v19
+  v24 = load.i32 [sim + 8]
+  v18 = add v29, v8
+  v13 = load.i32 [sim + 52]
+  v7 = add v18, v28
+  v2 = load.i32 [sim + 28]
+  v27 = add v7, v17
+  v22 = load.i32 [sim + 4]
+  v16 = add v27, v6
+  v11 = load.i32 [sim + 48]
+  v5 = add v16, v26
+  v25 = add v5, v15
+  v14 = add v25, v4
+  v3 = add v14, v24
+  v23 = add v3, v13
+  v12 = add v23, v2
+  v1 = add v12, v22
+  v21 = add v1, v11
+  store.i32 [sim + 24], v21
+  ret
+  Register assignment:
+    v0 -> rax
+    v1 -> rax
+    v2 -> r9
+    v3 -> rax
+    v4 -> rsi
+    v5 -> rax
+    v6 -> r11
+    v7 -> rax
+    v8 -> r8
+    v9 -> rax
+    v10 -> rdx
+    v11 -> r11
+    v12 -> rax
+    v13 -> r8
+    v14 -> rax
+    v15 -> rcx
+    v16 -> rax
+    v17 -> r10
+    v18 -> rax
+    v19 -> rdi
+    v20 -> rax
+    v21 -> rax
+    v22 -> r10
+    v23 -> rax
+    v24 -> rdi
+    v25 -> rax
+    v26 -> rdx
+    v27 -> rax
+    v28 -> r9
+    v29 -> rax
+    v30 -> rsi
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  mov eax,[r15]
+  0x0000000c  mov edx,[r15+2Ch]
+  0x00000010  mov esi,[r15+14h]
+  0x00000014  mov edi,[r15+40h]
+  0x00000018  mov r8d,[r15+28h]
+  0x0000001c  mov r9d,[r15+10h]
+  0x00000020  mov r10d,[r15+3Ch]
+  0x00000024  mov r11d,[r15+24h]
+  0x00000028  add rax,rdx
+  0x0000002b  mov edx,[r15+0Ch]
+  0x0000002f  mov ecx,[r15+38h]
+  0x00000033  add rax,rsi
+  0x00000036  mov esi,[r15+20h]
+  0x0000003a  add rax,rdi
+  0x0000003d  mov edi,[r15+8]
+  0x00000041  add rax,r8
+  0x00000044  mov r8d,[r15+34h]
+  0x00000048  add rax,r9
+  0x0000004b  mov r9d,[r15+1Ch]
+  0x0000004f  add rax,r10
+  0x00000052  mov r10d,[r15+4]
+  0x00000056  add rax,r11
+  0x00000059  mov r11d,[r15+30h]
+  0x0000005d  add rax,rdx
+  0x00000060  add rax,rcx
+  0x00000063  add rax,rsi
+  0x00000066  add rax,rdi
+  0x00000069  add rax,r8
+  0x0000006c  add rax,r9
+  0x0000006f  add rax,r10
+  0x00000072  add rax,r11
+  0x00000075  mov [r15+18h],eax
+  0x00000079  xor eax,eax
+  0x0000007b  jmp short 000000000000007Dh
+  0x0000007d  add rsp,8
+  0x00000081  pop r15
+  0x00000083  ret

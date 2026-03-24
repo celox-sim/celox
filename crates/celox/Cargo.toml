@@ -34,6 +34,8 @@ cranelift-jit         = "0.128.0"
 cranelift-frontend    = "0.128.0"
 cranelift-native      = "0.128.0"
 wasmtime              = "43"
+iced-x86              = { version = "1.21", default-features = false, features = ["std", "encoder", "block_encoder", "decoder", "nasm", "op_code_info", "code_asm"] }
+memmap2               = "0.9"
 
 [dev-dependencies]
 insta      = "1.46"

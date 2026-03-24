@@ -451,6 +451,11 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    pub fn trace_mir(mut self) -> Self {
+        self.options.trace.mir = true;
+        self
+    }
+
     pub fn trace_on_build(mut self) -> Self {
         self.options.trace.output_to_stdout = true;
         self

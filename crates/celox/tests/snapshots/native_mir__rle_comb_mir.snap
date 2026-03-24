@@ -1,0 +1,40 @@
+---
+source: crates/celox/tests/native_mir.rs
+expression: output
+---
+=== MIR (eval_comb) ===
+Execution Unit 0 (before regalloc):
+bb0:
+  v0 = load.i32 [sim + 0]
+  v1 = load.i32 [sim + 8]
+  v2 = add v0, v1
+  store.i32 [sim + 12], v2
+  store.i32 [sim + 4], v2
+  ret
+
+Execution Unit 0 (after regalloc):
+bb0:
+  v0 = load.i32 [sim + 0]
+  v1 = load.i32 [sim + 8]
+  v2 = add v0, v1
+  store.i32 [sim + 12], v2
+  store.i32 [sim + 4], v2
+  ret
+  Register assignment:
+    v0 -> rax
+    v1 -> rdx
+    v2 -> rax
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  mov eax,[r15]
+  0x0000000c  mov edx,[r15+8]
+  0x00000010  add rax,rdx
+  0x00000013  mov [r15+0Ch],eax
+  0x00000017  mov [r15+4],eax
+  0x0000001b  xor eax,eax
+  0x0000001d  jmp short 000000000000001Fh
+  0x0000001f  add rsp,8
+  0x00000023  pop r15
+  0x00000025  ret

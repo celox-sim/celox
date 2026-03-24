@@ -52,6 +52,9 @@ impl CompilationTrace {
         if let Some(native) = &self.native {
             println!("=== Native Machine Code ===\n{}", native);
         }
+        if let Some(mir) = &self.mir {
+            println!("=== MIR (Native Backend) ===\n{}", mir);
+        }
     }
 }
 
