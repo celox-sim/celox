@@ -550,6 +550,13 @@ enum BinOp {
     Xor,
 }
 
+impl BinOp {
+    /// Whether the operation is commutative (a op b == b op a).
+    fn is_commutative(&self) -> bool {
+        matches!(self, BinOp::Add | BinOp::And | BinOp::Or | BinOp::Xor)
+    }
+}
+
 fn emit_binop_rr(
     asm: &mut CodeAssembler,
     assignment: &AssignmentMap,
@@ -562,15 +569,32 @@ fn emit_binop_rr(
     let l = preg_to_reg64(resolve(assignment, lhs));
     let r = preg_to_reg64(resolve(assignment, rhs));
 
-    if d != l {
-        asm.mov(d, l)?;
-    }
+    // x86 2-operand: dst = dst OP src.
+    // If dst == rhs && dst != lhs, we'd clobber rhs with `mov dst, lhs`.
+    // For commutative ops, swap operands. For non-commutative, use xchg.
+    let (eff_l, eff_r) = if d == r && d != l {
+        if op.is_commutative() {
+            (r, l) // swap: dst already has rhs, just OP with lhs
+        } else {
+            // Non-commutative (sub): need to save rhs, mov lhs to dst, then OP
+            // Use xchg to swap dst(=rhs) and lhs
+            asm.xchg(d, l)?;
+            (d, l) // after xchg: d has original lhs, l has original rhs
+        }
+    } else {
+        if d != l {
+            asm.mov(d, l)?;
+        }
+        (d, r)
+    };
+
+    let _ = eff_l; // dst already contains the left operand
     match op {
-        BinOp::Add => asm.add(d, r)?,
-        BinOp::Sub => asm.sub(d, r)?,
-        BinOp::And => asm.and(d, r)?,
-        BinOp::Or => asm.or(d, r)?,
-        BinOp::Xor => asm.xor(d, r)?,
+        BinOp::Add => asm.add(d, eff_r)?,
+        BinOp::Sub => asm.sub(d, eff_r)?,
+        BinOp::And => asm.and(d, eff_r)?,
+        BinOp::Or => asm.or(d, eff_r)?,
+        BinOp::Xor => asm.xor(d, eff_r)?,
     }
     Ok(())
 }
