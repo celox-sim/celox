@@ -91,8 +91,9 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
     let spill_frame_size = spilling::spill(func, &analysis, NUM_REGS);
 
     // Isolate Fixed-constrained uses (e.g., shift rhs → RCX) to 1-instruction
-    // lifetimes. This prevents the assignment's constraint handling from
-    // retroactively changing a VReg's global register across its entire lifetime.
+    // lifetimes. Runs post-spilling because spilling may insert instructions
+    // that extend the constrained use's lifetime. The spiller uses k_eff = k - 2
+    // at shift points to leave room for the extra Mov VReg this pass adds.
     assignment::split_live_ranges_at_fixed_constraints(func);
 
     // Re-analyze after spilling + constraint splitting

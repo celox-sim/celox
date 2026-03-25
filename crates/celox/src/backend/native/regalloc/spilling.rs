@@ -346,14 +346,11 @@ fn run_min_on_block(
         // Constraint-aware capacity: reduce effective k at instructions
         // that reserve physical registers (e.g., shift → RCX). This
         // guarantees the assignment never needs to displace live VRegs
-        // for constraint resolution.  If the constrained use is already
-        // in W, it will occupy the reserved register itself — no extra
-        // slot is consumed.
+        // for constraint resolution. headroom accounts for both the
+        // constrained register (RCX) and the post-spilling Mov copy
+        // that split_live_ranges_at_fixed_constraints will insert.
         let constraint_headroom = super::assignment::constraint_headroom(inst);
-        let constrained_already_in_w = uses.iter()
-            .zip(super::assignment::use_constraints(inst))
-            .any(|(v, c)| matches!(c, super::assignment::RegConstraint::Fixed(_)) && w.contains(v));
-        let k_eff = k - if constrained_already_in_w { 0 } else { constraint_headroom };
+        let k_eff = k - constraint_headroom;
 
         // If W is too large after adding uses, evict to make room.
         // Pin only the uses of the CURRENT instruction (not reload copies)

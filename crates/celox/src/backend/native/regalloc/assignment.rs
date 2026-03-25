@@ -113,11 +113,16 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
 /// Number of physical registers reserved by constraints at this program point.
 /// The spilling phase uses this to reduce effective k, guaranteeing the
 /// assignment never needs to displace live VRegs for constraint resolution.
+///
+/// Returns 2 for Fixed constraints (not 1) because the post-spilling
+/// `split_live_ranges_at_fixed_constraints` pass inserts a Mov that
+/// temporarily increases live count by 1 at the split point.
 pub fn constraint_headroom(inst: &MInst) -> usize {
-    use_constraints(inst)
+    let fixed = use_constraints(inst)
         .iter()
         .filter(|c| matches!(c, RegConstraint::Fixed(_)))
-        .count()
+        .count();
+    if fixed > 0 { fixed + 1 } else { 0 }
 }
 
 /// Returns true if the instruction is a register-register shift (needs RCX).
@@ -455,9 +460,8 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                         find_free_reg_excluding(&active, &blocked)
                             .or_else(|| find_free_reg(&active, None))
                             .unwrap_or_else(|| {
-                                // Spilling should ensure pressure ≤ k, but edge cases
-                                // (reload pinning, clobber headroom) can cause overflow.
-                                // Fall back to eviction with a debug warning.
+                                // Spilling should ensure pressure ≤ k_eff.
+                                // Eviction here indicates a spilling bug.
                                 result.had_eviction = true;
                                 let victim = active
                                     .iter()
