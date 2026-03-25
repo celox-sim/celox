@@ -1477,23 +1477,8 @@ fn lower_wide_binary(
                 }
                 ctx.set_wide_chunks(dst, dst_chunks);
             } else {
-                // Non-constant shift: fall back to per-chunk scalar shift.
-                // This loses cross-chunk carry bits but avoids select chain explosion.
-                // TODO: implement full runtime multi-word shift when spilling is robust.
-                let amount_vreg = ctx.reg_map.get(rhs);
-                let chunk_shift_v = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::ShrImm { dst: chunk_shift_v, src: amount_vreg, imm: 6 });
-                let intra_shift_v = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::AndImm { dst: intra_shift_v, src: amount_vreg, imm: 63 });
-                let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                block.push(MInst::LoadImm { dst: zero, value: 0 });
-
-                let mut dst_chunks = Vec::with_capacity(n_chunks);
-                for _i in 0..n_chunks {
-                    // Simplified: just emit zero for now
-                    dst_chunks.push((zero, 64));
-                }
-                ctx.set_wide_chunks(dst, dst_chunks);
+                // Runtime left shift: select chain + carry propagation.
+                lower_wide_runtime_shift(ctx, block, dst, &lhs, &rhs, n_chunks, ShiftDir::Left, false);
             }
         }
 
@@ -1771,74 +1756,9 @@ fn lower_wide_binary(
                 }
                 ctx.set_wide_chunks(dst, dst_chunks);
             } else {
-                // Runtime shift: use select chain per chunk
-                let amount_vreg = ctx.reg_map.get(rhs);
-                let chunk_shift = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::ShrImm { dst: chunk_shift, src: amount_vreg, imm: 6 });
-                let intra_shift = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::AndImm { dst: intra_shift, src: amount_vreg, imm: 63 });
-                let sixty_four = ctx.alloc_vreg(SpillDesc::remat(64));
-                block.push(MInst::LoadImm { dst: sixty_four, value: 64 });
-                let inv_shift = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Sub { dst: inv_shift, lhs: sixty_four, rhs: intra_shift });
-                let zero_for_cmp = ctx.alloc_vreg(SpillDesc::remat(0));
-                block.push(MInst::LoadImm { dst: zero_for_cmp, value: 0 });
-                let has_intra = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Cmp { dst: has_intra, lhs: intra_shift, rhs: zero_for_cmp, kind: CmpKind::Ne });
-
-                // Sign fill for SAR
-                let sign_fill = if is_sar {
-                    let msb = src_chunks[n_src - 1].0;
-                    let sf = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::SarImm { dst: sf, src: msb, imm: 63 });
-                    sf
-                } else {
-                    let z = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm { dst: z, value: 0 });
-                    z
-                };
-
-                let mut dst_chunks = Vec::with_capacity(n_chunks);
-                for i in 0..n_chunks {
-                    // Select source chunk based on chunk_shift offset
-                    let mut val = sign_fill;
-                    for j in (0..n_src).rev() {
-                        let offset_vreg = ctx.alloc_vreg(SpillDesc::remat(j as u64));
-                        block.push(MInst::LoadImm { dst: offset_vreg, value: j as u64 });
-                        let idx_vreg = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Add { dst: idx_vreg, lhs: offset_vreg, rhs: chunk_shift });
-                        let is_match = ctx.alloc_vreg(SpillDesc::transient());
-                        let i_vreg = ctx.alloc_vreg(SpillDesc::remat(i as u64));
-                        block.push(MInst::LoadImm { dst: i_vreg, value: i as u64 });
-                        block.push(MInst::Cmp { dst: is_match, lhs: idx_vreg, rhs: i_vreg, kind: CmpKind::Eq });
-                        let selected = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Select { dst: selected, cond: is_match, true_val: src_chunks[j].0, false_val: val });
-                        val = selected;
-                    }
-
-                    // Apply intra-chunk shift
-                    let main_shifted = ctx.alloc_vreg(SpillDesc::transient());
-                    if is_sar && i == n_chunks - 1 {
-                        // ISel doesn't have variable SAR easily; use Sar with copy
-                        let copy = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Mov { dst: copy, src: intra_shift });
-                        block.push(MInst::Sar { dst: main_shifted, lhs: val, rhs: copy });
-                    } else {
-                        let copy = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Mov { dst: copy, src: intra_shift });
-                        block.push(MInst::Shr { dst: main_shifted, lhs: val, rhs: copy });
-                    }
-
-                    // Carry from upper chunk (val at i+1)
-                    // For simplicity with select chain: compute upper chunk similarly
-                    // Actually, we need the NEXT source chunk. Use a simpler approach:
-                    // shifted = (selected_chunk >> intra) | (upper_chunk << inv_shift) if has_intra
-                    // This is complex with select chains. For now, use the simpler approach
-                    // of just the shifted value without cross-chunk carry for runtime shifts.
-                    // TODO: full cross-chunk carry for runtime shifts
-                    dst_chunks.push((main_shifted, 64));
-                }
-                ctx.set_wide_chunks(dst, dst_chunks);
+                // Runtime right shift: select chain + carry propagation.
+                let dir = if is_sar { ShiftDir::ArithRight } else { ShiftDir::Right };
+                lower_wide_runtime_shift(ctx, block, dst, &lhs, &rhs, n_chunks, dir, is_sar);
             }
         }
 
@@ -1893,6 +1813,162 @@ fn lower_wide_binary(
             }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ShiftDir { Left, Right, ArithRight }
+
+/// Runtime multi-word shift via select chain + cross-chunk carry.
+///
+/// For each output chunk, a select chain picks the source chunk based on
+/// `shift_amt >> 6` (word offset), then applies the intra-chunk bit shift
+/// with carry from the adjacent chunk.
+fn lower_wide_runtime_shift(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    lhs: &RegisterId,
+    rhs: &RegisterId,
+    n_chunks: usize,
+    dir: ShiftDir,
+    _is_sar: bool,
+) {
+    let src_chunks = ctx.get_wide_chunks(lhs, block);
+    let n_src = src_chunks.len();
+    let amount_vreg = ctx.reg_map.get(*rhs);
+
+    let chunk_shift = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShrImm { dst: chunk_shift, src: amount_vreg, imm: 6 });
+    let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::AndImm { dst: bit_shift, src: amount_vreg, imm: 63 });
+    let sixty_four = ctx.alloc_vreg(SpillDesc::remat(64));
+    block.push(MInst::LoadImm { dst: sixty_four, value: 64 });
+    let inv_bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Sub { dst: inv_bit_shift, lhs: sixty_four, rhs: bit_shift });
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm { dst: zero, value: 0 });
+    let has_bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Cmp { dst: has_bit_shift, lhs: bit_shift, rhs: zero, kind: CmpKind::Ne });
+
+    // Fill value: 0 for SHL/SHR, sign-extension for SAR
+    let fill = if matches!(dir, ShiftDir::ArithRight) {
+        let msb = src_chunks[n_src - 1].0;
+        let sf = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::SarImm { dst: sf, src: msb, imm: 63 });
+        sf
+    } else {
+        zero
+    };
+
+    let mut dst_chunks = Vec::with_capacity(n_chunks);
+    for i in 0..n_chunks {
+        // Select the "main" source chunk via word_offset.
+        // For SHL: src_index = i - word_offset → select where j + word_offset == i
+        // For SHR/SAR: src_index = i + word_offset → select where j == i + word_offset
+        let main_chunk = {
+            let mut val = fill;
+            for j in (0..n_src).rev() {
+                // Compute the effective index this source chunk maps to
+                let j_vreg = ctx.alloc_vreg(SpillDesc::remat(j as u64));
+                block.push(MInst::LoadImm { dst: j_vreg, value: j as u64 });
+                let eff_idx = ctx.alloc_vreg(SpillDesc::transient());
+                match dir {
+                    ShiftDir::Left => {
+                        // src[j] goes to dst[j + word_offset]
+                        block.push(MInst::Add { dst: eff_idx, lhs: j_vreg, rhs: chunk_shift });
+                    }
+                    ShiftDir::Right | ShiftDir::ArithRight => {
+                        // src[j + word_offset] goes to dst[j], i.e., src[j] goes to dst[j - word_offset]
+                        // Check: j >= word_offset, then eff = j - word_offset
+                        // Simpler: for dst[i], source is src[i + word_offset]
+                        // So we select j if j == i + word_offset
+                        block.push(MInst::Sub { dst: eff_idx, lhs: j_vreg, rhs: chunk_shift });
+                    }
+                }
+                let i_vreg = ctx.alloc_vreg(SpillDesc::remat(i as u64));
+                block.push(MInst::LoadImm { dst: i_vreg, value: i as u64 });
+                let is_match = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp { dst: is_match, lhs: eff_idx, rhs: i_vreg, kind: CmpKind::Eq });
+                let selected = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select { dst: selected, cond: is_match, true_val: src_chunks[j].0, false_val: val });
+                val = selected;
+            }
+            val
+        };
+
+        // Select the "carry" source chunk (adjacent in shift direction)
+        let carry_chunk = {
+            let mut val = fill;
+            for j in (0..n_src).rev() {
+                let j_vreg = ctx.alloc_vreg(SpillDesc::remat(j as u64));
+                block.push(MInst::LoadImm { dst: j_vreg, value: j as u64 });
+                let eff_idx = ctx.alloc_vreg(SpillDesc::transient());
+                let carry_i = match dir {
+                    ShiftDir::Left => {
+                        // carry comes from chunk below: i-1
+                        if i == 0 { usize::MAX } else { i - 1 }
+                    }
+                    ShiftDir::Right | ShiftDir::ArithRight => {
+                        // carry comes from chunk above: i+1
+                        i + 1
+                    }
+                };
+                match dir {
+                    ShiftDir::Left => {
+                        block.push(MInst::Add { dst: eff_idx, lhs: j_vreg, rhs: chunk_shift });
+                    }
+                    ShiftDir::Right | ShiftDir::ArithRight => {
+                        block.push(MInst::Sub { dst: eff_idx, lhs: j_vreg, rhs: chunk_shift });
+                    }
+                }
+                let ci_vreg = ctx.alloc_vreg(SpillDesc::remat(carry_i as u64));
+                block.push(MInst::LoadImm { dst: ci_vreg, value: carry_i as u64 });
+                let is_match = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp { dst: is_match, lhs: eff_idx, rhs: ci_vreg, kind: CmpKind::Eq });
+                let selected = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select { dst: selected, cond: is_match, true_val: src_chunks[j].0, false_val: val });
+                val = selected;
+            }
+            val
+        };
+
+        // Apply intra-chunk shift: result = (main_chunk SHIFT bit_shift) | (carry_chunk INVSHIFT inv_bit_shift)
+        let bit_shift_copy = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Mov { dst: bit_shift_copy, src: bit_shift });
+        let inv_copy = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Mov { dst: inv_copy, src: inv_bit_shift });
+
+        let main_shifted = ctx.alloc_vreg(SpillDesc::transient());
+        let carry_shifted = ctx.alloc_vreg(SpillDesc::transient());
+
+        match dir {
+            ShiftDir::Left => {
+                block.push(MInst::Shl { dst: main_shifted, lhs: main_chunk, rhs: bit_shift_copy });
+                block.push(MInst::Shr { dst: carry_shifted, lhs: carry_chunk, rhs: inv_copy });
+            }
+            ShiftDir::Right => {
+                block.push(MInst::Shr { dst: main_shifted, lhs: main_chunk, rhs: bit_shift_copy });
+                block.push(MInst::Shl { dst: carry_shifted, lhs: carry_chunk, rhs: inv_copy });
+            }
+            ShiftDir::ArithRight => {
+                if i == n_chunks - 1 {
+                    block.push(MInst::Sar { dst: main_shifted, lhs: main_chunk, rhs: bit_shift_copy });
+                } else {
+                    block.push(MInst::Shr { dst: main_shifted, lhs: main_chunk, rhs: bit_shift_copy });
+                }
+                block.push(MInst::Shl { dst: carry_shifted, lhs: carry_chunk, rhs: inv_copy });
+            }
+        }
+
+        // Combine: if has_bit_shift then (main | carry) else main
+        let combined = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or { dst: combined, lhs: main_shifted, rhs: carry_shifted });
+        let result = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Select { dst: result, cond: has_bit_shift, true_val: combined, false_val: main_chunk });
+
+        dst_chunks.push((result, 64));
+    }
+    ctx.set_wide_chunks(dst, dst_chunks);
 }
 
 /// Reduce a wide value to a boolean (any chunk non-zero → 1, else 0).
