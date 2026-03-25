@@ -308,13 +308,31 @@ fn lower_instruction(
                         SpillDesc::sim_state(addr.clone(), *bit_off, *width_bits, false);
 
                     if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
-                        // Word-aligned, native size: single load
-                        block.push(MInst::Load {
-                            dst: vreg,
-                            base: BaseReg::SimState,
-                            offset: byte_off,
-                            size: op_size,
-                        });
+                        // Word-aligned, native size: single load.
+                        // If the load is wider than the variable (SIR optimizer widening),
+                        // mask the result to the variable's actual width.
+                        let var_width = ctx.layout.widths.get(&addr.absolute_addr()).copied().unwrap_or(*width_bits);
+                        if var_width < *width_bits && var_width < 64 {
+                            let raw = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Load {
+                                dst: raw,
+                                base: BaseReg::SimState,
+                                offset: byte_off,
+                                size: op_size,
+                            });
+                            block.push(MInst::AndImm {
+                                dst: vreg,
+                                src: raw,
+                                imm: mask_for_width(var_width),
+                            });
+                        } else {
+                            block.push(MInst::Load {
+                                dst: vreg,
+                                base: BaseReg::SimState,
+                                offset: byte_off,
+                                size: op_size,
+                            });
+                        }
                     } else {
                         // Unaligned or non-native width: load containing word + shift + mask
                         let containing_byte_off = ctx.byte_offset(addr, 0) + (bit_off / 8) as i32;
@@ -808,21 +826,25 @@ fn lower_instruction(
                         block.push(MInst::AndImm { dst: dst_vreg, src: raw, imm: mask_for_width(d_width) });
                     }
                 }
-                BinaryOp::And => block.push(MInst::And {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                }),
-                BinaryOp::Or => block.push(MInst::Or {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                }),
-                BinaryOp::Xor => block.push(MInst::Xor {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                }),
+                BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
+                    // Operands may be wider than d_width (SIR optimizer widens
+                    // Loads). Mask result to d_width to prevent upper-bit garbage
+                    // from propagating to comparisons and stores.
+                    let raw = if d_width < 64 {
+                        ctx.alloc_vreg(SpillDesc::transient())
+                    } else {
+                        dst_vreg
+                    };
+                    match op {
+                        BinaryOp::And => block.push(MInst::And { dst: raw, lhs: lhs_vreg, rhs: rhs_vreg }),
+                        BinaryOp::Or => block.push(MInst::Or { dst: raw, lhs: lhs_vreg, rhs: rhs_vreg }),
+                        BinaryOp::Xor => block.push(MInst::Xor { dst: raw, lhs: lhs_vreg, rhs: rhs_vreg }),
+                        _ => unreachable!(),
+                    }
+                    if d_width < 64 {
+                        block.push(MInst::AndImm { dst: dst_vreg, src: raw, imm: mask_for_width(d_width) });
+                    }
+                }
                 BinaryOp::Shr => {
                     // Check for wide-to-narrow extraction: lhs is >64 bits, dst is ≤64 bits
                     let lhs_width = ctx.sir_width(lhs);
@@ -899,22 +921,13 @@ fn lower_instruction(
                     }
                 }
                 BinaryOp::Eq => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::Eq,
+                    dst: dst_vreg, lhs: lhs_vreg, rhs: rhs_vreg, kind: CmpKind::Eq,
                 }),
                 BinaryOp::Ne => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::Ne,
+                    dst: dst_vreg, lhs: lhs_vreg, rhs: rhs_vreg, kind: CmpKind::Ne,
                 }),
                 BinaryOp::LtU => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::LtU,
+                    dst: dst_vreg, lhs: lhs_vreg, rhs: rhs_vreg, kind: CmpKind::LtU,
                 }),
                 BinaryOp::LtS => {
                     let (sl, sr) = sign_extend_pair(ctx, block, lhs, rhs, lhs_vreg, rhs_vreg);
@@ -926,10 +939,7 @@ fn lower_instruction(
                     });
                 }
                 BinaryOp::LeU => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::LeU,
+                    dst: dst_vreg, lhs: lhs_vreg, rhs: rhs_vreg, kind: CmpKind::LeU,
                 }),
                 BinaryOp::LeS => {
                     let (sl, sr) = sign_extend_pair(ctx, block, lhs, rhs, lhs_vreg, rhs_vreg);
@@ -941,10 +951,7 @@ fn lower_instruction(
                     });
                 }
                 BinaryOp::GtU => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::GtU,
+                    dst: dst_vreg, lhs: lhs_vreg, rhs: rhs_vreg, kind: CmpKind::GtU,
                 }),
                 BinaryOp::GtS => {
                     let (sl, sr) = sign_extend_pair(ctx, block, lhs, rhs, lhs_vreg, rhs_vreg);
@@ -956,10 +963,7 @@ fn lower_instruction(
                     });
                 }
                 BinaryOp::GeU => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::GeU,
+                    dst: dst_vreg, lhs: lhs_vreg, rhs: rhs_vreg, kind: CmpKind::GeU,
                 }),
                 BinaryOp::GeS => {
                     let (sl, sr) = sign_extend_pair(ctx, block, lhs, rhs, lhs_vreg, rhs_vreg);
