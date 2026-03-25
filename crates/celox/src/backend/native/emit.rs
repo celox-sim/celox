@@ -750,10 +750,12 @@ fn emit_binop_rr(
         if op.is_commutative() {
             (r, l) // swap: dst already has rhs, just OP with lhs
         } else {
-            // Non-commutative (sub): need to save rhs, mov lhs to dst, then OP
-            // Use xchg to swap dst(=rhs) and lhs
-            asm.xchg(d, l)?;
-            (d, l) // after xchg: d has original lhs, l has original rhs
+            // Non-commutative (sub): d == rhs, d != lhs.
+            // Cannot xchg (would clobber lhs which may be live).
+            // Use NEG + ADD: d = -d + lhs = lhs - rhs.
+            asm.neg(d)?;
+            asm.add(d, l)?;
+            return Ok(());
         }
     } else {
         if d != l {
