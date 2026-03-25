@@ -343,11 +343,23 @@ fn run_min_on_block(
             }
         }
 
+        // Constraint-aware capacity: reduce effective k at instructions
+        // that reserve physical registers (e.g., shift → RCX). This
+        // guarantees the assignment never needs to displace live VRegs
+        // for constraint resolution.  If the constrained use is already
+        // in W, it will occupy the reserved register itself — no extra
+        // slot is consumed.
+        let constraint_headroom = super::assignment::constraint_headroom(inst);
+        let constrained_already_in_w = uses.iter()
+            .zip(super::assignment::use_constraints(inst))
+            .any(|(v, c)| matches!(c, super::assignment::RegConstraint::Fixed(_)) && w.contains(v));
+        let k_eff = k - if constrained_already_in_w { 0 } else { constraint_headroom };
+
         // If W is too large after adding uses, evict to make room.
         // Pin only the uses of the CURRENT instruction (not reload copies)
         // to allow limit to evict long-lived VRegs that were displaced by reloads.
         let pinned_uses: BTreeSet<VReg> = uses.iter().copied().collect();
-        limit(&mut w, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, k, slots, &pinned_uses);
+        limit(&mut w, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, k_eff, slots, &pinned_uses);
 
         // Insert reload instructions (with fresh VRegs)
         for (original, fresh) in &reloads {
@@ -361,11 +373,11 @@ fn run_min_on_block(
             new_insts.push(reload_inst);
         }
 
-        // After reloads, W may exceed k (pinned uses prevented eviction).
-        // Run limit again without pinning to bring W back to k.
-        if w.len() > k {
+        // After reloads, W may exceed k_eff (pinned uses prevented eviction).
+        // Run limit again without pinning to bring W back to k_eff.
+        if w.len() > k_eff {
             let empty = BTreeSet::new();
-            limit(&mut w, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, k, slots, &empty);
+            limit(&mut w, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, k_eff, slots, &empty);
         }
 
         // Rewrite the current instruction's uses: original → fresh
@@ -380,11 +392,11 @@ fn run_min_on_block(
             // occupies one of them, so we only need 1 extra free register.
             let clobber_extra = super::assignment::clobbers(inst).len().saturating_sub(1);
             let needed = w.len() + 1 + clobber_extra;
-            if needed > k {
+            if needed > k_eff {
                 let empty = BTreeSet::new();
                 limit(
                     &mut w, &mut s, &mut new_insts,
-                    func, analysis, block_idx, inst_idx + 1, k, slots, &empty,
+                    func, analysis, block_idx, inst_idx + 1, k_eff, slots, &empty,
                 );
             }
             w.insert(def_vreg);

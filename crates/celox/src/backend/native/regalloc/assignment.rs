@@ -110,6 +110,96 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
     }
 }
 
+/// Number of physical registers reserved by constraints at this program point.
+/// The spilling phase uses this to reduce effective k, guaranteeing the
+/// assignment never needs to displace live VRegs for constraint resolution.
+pub fn constraint_headroom(inst: &MInst) -> usize {
+    use_constraints(inst)
+        .iter()
+        .filter(|c| matches!(c, RegConstraint::Fixed(_)))
+        .count()
+}
+
+/// Returns true if the instruction is a register-register shift (needs RCX).
+pub fn is_reg_shift(inst: &MInst) -> bool {
+    matches!(inst, MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. })
+}
+
+// ────────────────────────────────────────────────────────────────
+// Live-range splitting for Fixed constraints
+// ────────────────────────────────────────────────────────────────
+
+/// Post-spilling pass: isolate Fixed-constrained uses to 1-instruction
+/// lifetimes by inserting Mov copies.
+///
+/// When a Fixed-constrained use (e.g., shift rhs → RCX) has a multi-
+/// instruction lifetime, the assignment's constraint handling changes
+/// its global register to the constrained PhysReg. This retroactive
+/// change can conflict with other VRegs that occupied that PhysReg
+/// earlier in the lifetime. The fix: insert a Mov copy right before
+/// the constraint instruction so only the short-lived copy gets the
+/// constrained register.
+pub fn split_live_ranges_at_fixed_constraints(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        // Quick check: any Fixed constraints in this block?
+        if !block.insts.iter().any(|inst| {
+            use_constraints(inst).iter().any(|c| matches!(c, RegConstraint::Fixed(_)))
+        }) {
+            continue;
+        }
+
+        // Compute def position for each VReg (phis count as position 0).
+        let mut def_pos: BTreeMap<VReg, usize> = BTreeMap::new();
+        for phi in &block.phis {
+            def_pos.insert(phi.dst, 0);
+        }
+        for (i, inst) in block.insts.iter().enumerate() {
+            if let Some(def) = inst.def() {
+                def_pos.insert(def, i);
+            }
+        }
+
+        // Collect splits needed: (inst_idx, old_vreg, fresh_vreg)
+        let mut splits: Vec<(usize, VReg, VReg)> = Vec::new();
+
+        for i in 0..block.insts.len() {
+            let constraints = use_constraints(&block.insts[i]);
+            let uses = block.insts[i].uses();
+
+            for (use_vreg, constraint) in uses.iter().zip(constraints.iter()) {
+                if let RegConstraint::Fixed(_) = constraint {
+                    // Split unless the def is at the immediately preceding
+                    // instruction (lifetime = 1). A 1-instruction lifetime is
+                    // safe because the constraint handling's result.set only
+                    // spans that single instruction — no earlier VReg can
+                    // conflict at the constrained PhysReg.
+                    let needs_split = i == 0
+                        || def_pos.get(use_vreg) != Some(&(i - 1));
+                    if needs_split {
+                        let fresh = func.vregs.alloc();
+                        while func.spill_descs.len() <= fresh.0 as usize {
+                            func.spill_descs.push(SpillDesc::transient());
+                        }
+                        splits.push((i, *use_vreg, fresh));
+                    }
+                }
+            }
+        }
+
+        if splits.is_empty() {
+            continue;
+        }
+
+        // Apply splits in reverse order to preserve indices.
+        for (inst_idx, old, fresh) in splits.into_iter().rev() {
+            // Insert Mov(fresh, old) before the constraint instruction.
+            block.insts.insert(inst_idx, MInst::Mov { dst: fresh, src: old });
+            // Rewrite the constraint instruction's use (now at inst_idx + 1).
+            block.insts[inst_idx + 1].rewrite_use(old, fresh);
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Assignment result
 // ────────────────────────────────────────────────────────────────
@@ -223,6 +313,20 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                     let c = clobbers(inst);
                     if c.is_empty() { None } else { Some((idx, c)) }
                 })
+                .collect()
+        })
+        .collect();
+
+    // Pre-compute shift points per block. VRegs whose lifetime spans a
+    // shift point must avoid RCX so it is free for the constrained rhs.
+    // Uses `>=` so the shift dst itself also avoids RCX (x86 `shr rcx, cl`
+    // would alias result and count).
+    let block_shift_points: Vec<Vec<usize>> = func
+        .blocks
+        .iter()
+        .map(|block| {
+            block.insts.iter().enumerate()
+                .filter_map(|(idx, inst)| if is_reg_shift(inst) { Some(idx) } else { None })
                 .collect()
         })
         .collect();
@@ -341,6 +445,11 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                             .iter()
                             .filter(|(pos, _)| *pos > inst_idx && *pos <= last_use_pos)
                             .flat_map(|(_, regs)| regs.iter().copied())
+                            .chain(
+                                block_shift_points[bi].iter()
+                                    .filter(|&&pos| pos >= inst_idx && pos <= last_use_pos)
+                                    .map(|_| PhysReg::RCX)
+                            )
                             .collect();
 
                         find_free_reg_excluding(&active, &blocked)

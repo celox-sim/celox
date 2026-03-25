@@ -89,7 +89,13 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
 
     let analysis = analysis::analyze(func);
     let spill_frame_size = spilling::spill(func, &analysis, NUM_REGS);
-    // Re-analyze after spilling (spill/reload instructions change liveness)
+
+    // Isolate Fixed-constrained uses (e.g., shift rhs → RCX) to 1-instruction
+    // lifetimes. This prevents the assignment's constraint handling from
+    // retroactively changing a VReg's global register across its entire lifetime.
+    assignment::split_live_ranges_at_fixed_constraints(func);
+
+    // Re-analyze after spilling + constraint splitting
     let analysis = analysis::analyze(func);
     let assignment = assignment::assign(func, &analysis);
 
