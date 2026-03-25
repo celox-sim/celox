@@ -655,7 +655,27 @@ fn emit_shift(
         }
     };
 
-    if r == rcx {
+    if r == rcx && d == rcx && l == rcx {
+        // All three in rcx: shift rcx by cl = shift by own low byte. Unusual.
+        do_shift(asm, d)?;
+    } else if r == rcx && d == rcx {
+        // d == r == rcx, l elsewhere.
+        // mov rcx, l would clobber the shift amount in CL.
+        // Use xchg: rcx ↔ l → rcx=lhs, l=shift_amt.
+        // Then shift l by... no, x86 shift only uses CL.
+        // Instead: shift l in-place, then swap result to rcx.
+        // xchg rcx, l → rcx=lhs, l=shift_amt
+        // But CL no longer has shift amount (rcx changed).
+        //
+        // Correct approach: save shift amount to l, load lhs to rcx.
+        // xchg rcx, l → rcx=lhs, l=shift_amt. CL=lhs's low byte. WRONG.
+        //
+        // Only correct approach without extra temp:
+        // Compute in l: copy lhs is l (already), shift amount in cl (rcx).
+        // do_shift(l) → shift l by cl. l = lhs >> shift_amt. Then mov rcx, l.
+        do_shift(asm, l)?;
+        asm.mov(d, l)?;
+    } else if r == rcx {
         // rhs already in CL
         if d != l {
             asm.mov(d, l)?;
