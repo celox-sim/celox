@@ -494,6 +494,14 @@ fn emit_inst(
             }
             asm.shl(d, *imm as u32)?;
         }
+        MInst::SarImm { dst, src, imm } => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            if d != s {
+                asm.mov(d, s)?;
+            }
+            asm.sar(d, *imm as u32)?;
+        }
 
         MInst::Cmp { dst, lhs, rhs, kind } => {
             let _d = resolve(assignment, *dst);

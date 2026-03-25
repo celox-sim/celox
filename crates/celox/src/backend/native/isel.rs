@@ -925,26 +925,28 @@ fn lower_instruction(
                         let sext_shift = (64 - width) as u8;
                         let shifted_up = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::ShlImm { dst: shifted_up, src: lhs_vreg, imm: sext_shift });
-                        let sext_shift_vreg = ctx.alloc_vreg(SpillDesc::remat(sext_shift as u64));
-                        block.push(MInst::LoadImm { dst: sext_shift_vreg, value: sext_shift as u64 });
                         let sign_extended = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Sar { dst: sign_extended, lhs: shifted_up, rhs: sext_shift_vreg });
+                        block.push(MInst::SarImm { dst: sign_extended, src: shifted_up, imm: sext_shift });
                         // Now do the actual shift
-                        let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
                         let sar_result = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Sar { dst: sar_result, lhs: sign_extended, rhs: rhs_copy });
+                        if let Some(&shift_amt) = ctx.consts.get(rhs) {
+                            block.push(MInst::SarImm { dst: sar_result, src: sign_extended, imm: shift_amt as u8 });
+                        } else {
+                            let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
+                            block.push(MInst::Sar { dst: sar_result, lhs: sign_extended, rhs: rhs_copy });
+                        }
                         // Mask to output width
                         let mask = mask_for_width(width);
                         block.push(MInst::AndImm { dst: dst_vreg, src: sar_result, imm: mask });
                     } else {
-                        let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
-                        block.push(MInst::Sar {
-                            dst: dst_vreg,
-                            lhs: lhs_vreg,
-                            rhs: rhs_copy,
-                        });
+                        if let Some(&shift_amt) = ctx.consts.get(rhs) {
+                            block.push(MInst::SarImm { dst: dst_vreg, src: lhs_vreg, imm: shift_amt as u8 });
+                        } else {
+                            let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
+                            block.push(MInst::Sar { dst: dst_vreg, lhs: lhs_vreg, rhs: rhs_copy });
+                        }
                     }
                 }
                 BinaryOp::Eq => block.push(MInst::Cmp {
@@ -1583,11 +1585,8 @@ fn sign_extend_pair(
     let sign_extend_with_imm = |ctx: &mut ISelContext, block: &mut MBlock, src: VReg| -> VReg {
         let shifted_up = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::ShlImm { dst: shifted_up, src, imm: shift });
-        // Need arithmetic shift right by `shift`. No SarImm, use Sar with constant.
-        let shift_vreg = ctx.alloc_vreg(SpillDesc::remat(shift as u64));
-        block.push(MInst::LoadImm { dst: shift_vreg, value: shift as u64 });
         let sign_extended = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Sar { dst: sign_extended, lhs: shifted_up, rhs: shift_vreg });
+        block.push(MInst::SarImm { dst: sign_extended, src: shifted_up, imm: shift });
         sign_extended
     };
 

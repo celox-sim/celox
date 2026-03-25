@@ -287,6 +287,8 @@ pub enum MInst {
     ShrImm { dst: VReg, src: VReg, imm: u8 },
     /// dst = src << imm
     ShlImm { dst: VReg, src: VReg, imm: u8 },
+    /// dst = src >> imm (arithmetic)
+    SarImm { dst: VReg, src: VReg, imm: u8 },
 
     // ── Comparison ─────────────────────────────────────────────
     /// dst = (lhs cmp rhs) ? 1 : 0
@@ -391,6 +393,7 @@ impl fmt::Display for MInst {
             MInst::OrImm { dst, src, imm } => write!(f, "{dst} = or {src}, {imm:#x}"),
             MInst::ShrImm { dst, src, imm } => write!(f, "{dst} = shr {src}, {imm}"),
             MInst::ShlImm { dst, src, imm } => write!(f, "{dst} = shl {src}, {imm}"),
+            MInst::SarImm { dst, src, imm } => write!(f, "{dst} = sar {src}, {imm}"),
             MInst::Cmp {
                 dst, lhs, rhs, kind,
             } => write!(f, "{dst} = cmp.{kind:?} {lhs}, {rhs}"),
@@ -481,6 +484,7 @@ impl MInst {
             | MInst::OrImm { dst, .. }
             | MInst::ShrImm { dst, .. }
             | MInst::ShlImm { dst, .. }
+            | MInst::SarImm { dst, .. }
             | MInst::Cmp { dst, .. }
             | MInst::UDiv { dst, .. }
             | MInst::URem { dst, .. }
@@ -522,7 +526,8 @@ impl MInst {
             MInst::AndImm { src, .. }
             | MInst::OrImm { src, .. }
             | MInst::ShrImm { src, .. }
-            | MInst::ShlImm { src, .. } => vec![*src],
+            | MInst::ShlImm { src, .. }
+            | MInst::SarImm { src, .. } => vec![*src],
             MInst::BitNot { src, .. } | MInst::Neg { src, .. } => vec![*src],
             MInst::BitFieldInsert { base_word, val, .. } => vec![*base_word, *val],
             MInst::Select {
@@ -571,6 +576,7 @@ impl MInst {
             | MInst::OrImm { src, .. }
             | MInst::ShrImm { src, .. }
             | MInst::ShlImm { src, .. }
+            | MInst::SarImm { src, .. }
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. } => {
                 if *src == old { *src = new; }
