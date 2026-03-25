@@ -257,6 +257,20 @@ impl<'a> ISelContext<'a> {
     fn set_wide_chunks(&mut self, reg: RegisterId, chunks: Vec<(VReg, usize)>) {
         self.wide_regs.insert(reg, chunks);
     }
+
+    /// Get chunk `i` from a wide value, or emit a zero constant if missing.
+    fn wide_chunk_or_zero(
+        &mut self,
+        chunks: &[(VReg, usize)],
+        i: usize,
+        block: &mut MBlock,
+    ) -> VReg {
+        chunks.get(i).map(|c| c.0).unwrap_or_else(|| {
+            let z = self.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: z, value: 0 });
+            z
+        })
+    }
 }
 
 fn lower_instruction(
@@ -299,6 +313,36 @@ fn lower_instruction(
 
             match offset {
                 SIROffset::Static(bit_off) => {
+                    // Wide load (>64 bits): chunk-by-chunk
+                    if *width_bits > 64 {
+                        let n_chunks = ISelContext::num_chunks(*width_bits);
+                        let mut chunks = Vec::with_capacity(n_chunks);
+                        let mut remaining = *width_bits;
+                        let mut bit_pos = *bit_off;
+                        for _ in 0..n_chunks {
+                            let chunk_bits = remaining.min(64);
+                            let chunk_byte_off = ctx.byte_offset(addr, bit_pos);
+                            let chunk_size = ISelContext::op_size_for_width(chunk_bits);
+                            let chunk_vreg = ctx.alloc_vreg(SpillDesc::sim_state(
+                                addr.clone(), bit_pos, chunk_bits, false,
+                            ));
+                            block.push(MInst::Load {
+                                dst: chunk_vreg,
+                                base: BaseReg::SimState,
+                                offset: chunk_byte_off,
+                                size: chunk_size,
+                            });
+                            chunks.push((chunk_vreg, chunk_bits));
+                            bit_pos += chunk_bits;
+                            remaining -= chunk_bits;
+                        }
+                        // Also store chunk[0] in reg_map scalar slot for
+                        // fallback paths that read the scalar VReg.
+                        block.push(MInst::Mov { dst: vreg, src: chunks[0].0 });
+                        ctx.wide_regs.insert(*dst, chunks);
+                        return;
+                    }
+
                     let byte_off = ctx.byte_offset(addr, *bit_off);
                     let intra_byte = bit_off % 8;
                     let op_size = ISelContext::op_size_for_width(*width_bits);
@@ -770,9 +814,18 @@ fn lower_instruction(
 
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
             let d_width = ctx.sir_width(dst);
+            let lhs_width = ctx.sir_width(lhs);
 
-            // Wide (>64-bit) binary operations: dispatch to multi-word handler
-            if d_width > 64 {
+            // Wide (>64-bit) binary operations: dispatch to multi-word handler.
+            // For comparisons/logic, the result may be narrow (1 bit) but the
+            // operands can be wide — dispatch based on operand width too.
+            if d_width > 64 || lhs_width > 64 {
+                lower_wide_binary(ctx, block, *dst, *lhs, op, *rhs);
+                return;
+            }
+            // Also check if operands have wide chunks (may have been loaded wide
+            // even if sir_width reports ≤64 due to optimizer width changes).
+            if ctx.wide_regs.contains_key(lhs) || ctx.wide_regs.contains_key(rhs) {
                 lower_wide_binary(ctx, block, *dst, *lhs, op, *rhs);
                 return;
             }
@@ -1444,7 +1497,215 @@ fn lower_wide_binary(
             }
         }
 
-        // For other binary ops on wide values (Add, Sub, Mul, etc.),
+        // Wide addition with carry chain
+        BinaryOp::Add => {
+            let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
+            let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+            let mut dst_chunks = Vec::with_capacity(n_chunks);
+            let mut carry: Option<VReg> = None;
+
+            for i in 0..n_chunks {
+                let l = ctx.wide_chunk_or_zero(&lhs_chunks, i, block);
+                let r = ctx.wide_chunk_or_zero(&rhs_chunks, i, block);
+
+                if let Some(cin) = carry {
+                    // s1 = l + r
+                    let s1 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Add { dst: s1, lhs: l, rhs: r });
+                    // c1 = (s1 < l) unsigned
+                    let c1 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: c1, lhs: s1, rhs: l, kind: CmpKind::LtU });
+                    // s2 = s1 + cin
+                    let s2 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Add { dst: s2, lhs: s1, rhs: cin });
+                    // c2 = (s2 < s1) unsigned
+                    let c2 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: c2, lhs: s2, rhs: s1, kind: CmpKind::LtU });
+                    // carry = c1 | c2
+                    let cout = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or { dst: cout, lhs: c1, rhs: c2 });
+                    carry = Some(cout);
+                    dst_chunks.push((s2, 64));
+                } else {
+                    // s = l + r
+                    let s = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Add { dst: s, lhs: l, rhs: r });
+                    // carry = (s < l) unsigned
+                    let cout = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: cout, lhs: s, rhs: l, kind: CmpKind::LtU });
+                    carry = Some(cout);
+                    dst_chunks.push((s, 64));
+                }
+            }
+            ctx.set_wide_chunks(dst, dst_chunks);
+        }
+
+        // Wide subtraction with borrow chain
+        BinaryOp::Sub => {
+            let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
+            let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+            let mut dst_chunks = Vec::with_capacity(n_chunks);
+            let mut borrow: Option<VReg> = None;
+
+            for i in 0..n_chunks {
+                let l = ctx.wide_chunk_or_zero(&lhs_chunks, i, block);
+                let r = ctx.wide_chunk_or_zero(&rhs_chunks, i, block);
+
+                if let Some(bin) = borrow {
+                    // d1 = l - r
+                    let d1 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Sub { dst: d1, lhs: l, rhs: r });
+                    // b1 = (r > l) unsigned
+                    let b1 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: b1, lhs: r, rhs: l, kind: CmpKind::GtU });
+                    // d2 = d1 - bin
+                    let d2 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Sub { dst: d2, lhs: d1, rhs: bin });
+                    // b2 = (bin > d1) unsigned
+                    let b2 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: b2, lhs: bin, rhs: d1, kind: CmpKind::GtU });
+                    // borrow = b1 | b2
+                    let bout = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or { dst: bout, lhs: b1, rhs: b2 });
+                    borrow = Some(bout);
+                    dst_chunks.push((d2, 64));
+                } else {
+                    // d = l - r
+                    let d = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Sub { dst: d, lhs: l, rhs: r });
+                    // borrow = (r > l) unsigned
+                    let bout = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: bout, lhs: r, rhs: l, kind: CmpKind::GtU });
+                    borrow = Some(bout);
+                    dst_chunks.push((d, 64));
+                }
+            }
+            ctx.set_wide_chunks(dst, dst_chunks);
+        }
+
+        // Wide equality/inequality: chunk-wise AND/OR of per-chunk comparisons
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+            let is_eq = matches!(op, BinaryOp::Eq | BinaryOp::EqWildcard);
+            let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
+            let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+
+            let init = ctx.alloc_vreg(SpillDesc::remat(if is_eq { 1 } else { 0 }));
+            block.push(MInst::LoadImm { dst: init, value: if is_eq { 1 } else { 0 } });
+            let mut cond = init;
+
+            for i in 0..n_chunks {
+                let l = ctx.wide_chunk_or_zero(&lhs_chunks, i, block);
+                let r = ctx.wide_chunk_or_zero(&rhs_chunks, i, block);
+                let eq = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp { dst: eq, lhs: l, rhs: r, kind: CmpKind::Eq });
+                let next = ctx.alloc_vreg(SpillDesc::transient());
+                if is_eq {
+                    block.push(MInst::And { dst: next, lhs: cond, rhs: eq });
+                } else {
+                    // ne: accumulate OR of (chunk != chunk)
+                    let neq = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: neq, lhs: l, rhs: r, kind: CmpKind::Ne });
+                    block.push(MInst::Or { dst: next, lhs: cond, rhs: neq });
+                }
+                cond = next;
+            }
+            // Result is a 1-bit value in chunk 0, rest zero
+            let mut dst_chunks = Vec::with_capacity(n_chunks);
+            dst_chunks.push((cond, 64));
+            for _ in 1..n_chunks {
+                let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: z, value: 0 });
+                dst_chunks.push((z, 64));
+            }
+            ctx.set_wide_chunks(dst, dst_chunks);
+        }
+
+        // Wide unsigned comparisons: compare from MSB chunk down
+        BinaryOp::LtU | BinaryOp::LeU | BinaryOp::GtU | BinaryOp::GeU => {
+            let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
+            let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+
+            // Init: Le/Ge → 1 (true when equal), Lt/Gt → 0 (false when equal)
+            let init_val = if matches!(op, BinaryOp::LeU | BinaryOp::GeU) { 1u64 } else { 0u64 };
+            let init = ctx.alloc_vreg(SpillDesc::remat(init_val));
+            block.push(MInst::LoadImm { dst: init, value: init_val });
+            let mut res = init;
+
+            let cmp_kind = match op {
+                BinaryOp::LtU | BinaryOp::LeU => CmpKind::LtU,
+                BinaryOp::GtU | BinaryOp::GeU => CmpKind::GtU,
+                _ => unreachable!(),
+            };
+
+            // Process from LSB to MSB; each chunk: if equal keep previous, else use this chunk's cmp
+            for i in 0..n_chunks {
+                let l = ctx.wide_chunk_or_zero(&lhs_chunks, i, block);
+                let r = ctx.wide_chunk_or_zero(&rhs_chunks, i, block);
+                let eq = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp { dst: eq, lhs: l, rhs: r, kind: CmpKind::Eq });
+                let cmp = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp { dst: cmp, lhs: l, rhs: r, kind: cmp_kind });
+                let next = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select { dst: next, cond: eq, true_val: res, false_val: cmp });
+                res = next;
+            }
+
+            let mut dst_chunks = Vec::with_capacity(n_chunks);
+            dst_chunks.push((res, 64));
+            for _ in 1..n_chunks {
+                let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: z, value: 0 });
+                dst_chunks.push((z, 64));
+            }
+            ctx.set_wide_chunks(dst, dst_chunks);
+        }
+
+        // Wide signed comparisons: compare MSB chunk signed, lower chunks unsigned
+        BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS => {
+            let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
+            let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+
+            let init_val = if matches!(op, BinaryOp::LeS | BinaryOp::GeS) { 1u64 } else { 0u64 };
+            let init = ctx.alloc_vreg(SpillDesc::remat(init_val));
+            block.push(MInst::LoadImm { dst: init, value: init_val });
+            let mut res = init;
+
+            let unsigned_kind = match op {
+                BinaryOp::LtS | BinaryOp::LeS => CmpKind::LtU,
+                BinaryOp::GtS | BinaryOp::GeS => CmpKind::GtU,
+                _ => unreachable!(),
+            };
+            let signed_kind = match op {
+                BinaryOp::LtS | BinaryOp::LeS => CmpKind::LtS,
+                BinaryOp::GtS | BinaryOp::GeS => CmpKind::GtS,
+                _ => unreachable!(),
+            };
+
+            for i in 0..n_chunks {
+                let l = ctx.wide_chunk_or_zero(&lhs_chunks, i, block);
+                let r = ctx.wide_chunk_or_zero(&rhs_chunks, i, block);
+                let eq = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp { dst: eq, lhs: l, rhs: r, kind: CmpKind::Eq });
+                // MSB chunk uses signed comparison, lower chunks use unsigned
+                let kind = if i == n_chunks - 1 { signed_kind } else { unsigned_kind };
+                let cmp = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp { dst: cmp, lhs: l, rhs: r, kind: kind });
+                let next = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select { dst: next, cond: eq, true_val: res, false_val: cmp });
+                res = next;
+            }
+
+            let mut dst_chunks = Vec::with_capacity(n_chunks);
+            dst_chunks.push((res, 64));
+            for _ in 1..n_chunks {
+                let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: z, value: 0 });
+                dst_chunks.push((z, 64));
+            }
+            ctx.set_wide_chunks(dst, dst_chunks);
+        }
+
+        // For remaining wide ops (Mul, Div, Rem, LogicAnd, etc.),
         // fall back to scalar (truncated to 64-bit). This is incorrect but
         // prevents panics for unsupported operations.
         _ => {
@@ -1453,6 +1714,19 @@ fn lower_wide_binary(
             let dst_vreg = ctx.reg_map.get(dst);
             block.push(MInst::Mov { dst: dst_vreg, src: lhs_vreg });
             let _ = rhs_vreg;
+        }
+    }
+
+    // When the result is narrow (≤64 bits, e.g. comparison result),
+    // sync chunk[0] back to the scalar reg_map so scalar Store paths
+    // can read it.
+    if d_width <= 64 {
+        if let Some(chunks) = ctx.wide_regs.get(&dst) {
+            let chunk0 = chunks[0].0;
+            let scalar = ctx.reg_map.get(dst);
+            if chunk0 != scalar {
+                block.push(MInst::Mov { dst: scalar, src: chunk0 });
+            }
         }
     }
 }
