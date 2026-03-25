@@ -117,6 +117,8 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: BTreeMap<VReg, PhysReg>,
+    /// True if assignment had to evict a VReg (indicates spilling bug).
+    pub had_eviction: bool,
 }
 
 impl AssignmentMap {
@@ -301,15 +303,10 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
             }
 
             // 2. Free dead values
-            let trace_vreg: Option<u32> = std::env::var("CELOX_TRACE_VREG").ok().and_then(|s| s.parse().ok());
             let dead_regs: Vec<PhysReg> = active
                 .iter()
                 .filter(|&(_, &v)| {
-                    let nu = super::analysis::next_use_at(func, analysis, bi, inst_idx + 1, v);
-                    if trace_vreg == Some(v.0) && nu == u32::MAX {
-                        eprintln!("[DEAD] {v} freed at [{bi}:{inst_idx}] | inst: {inst}");
-                    }
-                    nu == u32::MAX
+                    super::analysis::next_use_at(func, analysis, bi, inst_idx + 1, v) == u32::MAX
                 })
                 .map(|(&p, _)| p)
                 .collect();
@@ -349,6 +346,10 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                         find_free_reg_excluding(&active, &blocked)
                             .or_else(|| find_free_reg(&active, None))
                             .unwrap_or_else(|| {
+                                // Spilling should ensure pressure ≤ k, but edge cases
+                                // (reload pinning, clobber headroom) can cause overflow.
+                                // Fall back to eviction with a debug warning.
+                                result.had_eviction = true;
                                 let victim = active
                                     .iter()
                                     .max_by_key(|&(_, &v)| {
@@ -358,20 +359,11 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                                     })
                                     .map(|(&p, _)| p)
                                     .expect("no victim found");
-                                let evicted = active.get(&victim).copied();
-                                if let Some(ev) = evicted {
-                                    if trace_vreg == Some(ev.0) {
-                                        eprintln!("[EVICT] {ev} from {victim} at [{bi}:{inst_idx}] for {def_vreg}");
-                                    }
-                                }
                                 active.remove(&victim);
                                 victim
                             })
                     }
                 };
-                if trace_vreg == Some(def_vreg.0) {
-                    eprintln!("[DEF] {def_vreg} -> {preg} at [{bi}:{inst_idx}] | active: {:?}", active.iter().map(|(p,v)| format!("{v}@{p}")).collect::<Vec<_>>());
-                }
                 active.insert(preg, def_vreg);
                 result.set(def_vreg, preg);
             }

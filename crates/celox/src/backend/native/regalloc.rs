@@ -39,8 +39,8 @@ fn verify_assignment(
         for &vreg in analysis.entry_distances[bi].keys() {
             if let Some(preg) = assignment.get(vreg) {
                 if let Some((&existing_vreg, _)) = live.iter().find(|&(_, &p)| p == preg) {
-                    eprintln!(
-                        "[REGALLOC CONFLICT] block {bi} entry: {vreg} and {existing_vreg} both assigned to {preg}"
+                    panic!(
+                        "regalloc conflict: block {bi} entry: {vreg} and {existing_vreg} both assigned to {preg}"
                     );
                 }
                 live.insert(vreg, preg);
@@ -54,8 +54,8 @@ fn verify_assignment(
                     // Check if another live VReg has the same PhysReg
                     for (&other_vreg, &other_preg) in &live {
                         if other_vreg != use_vreg && other_preg == preg {
-                            eprintln!(
-                                "[REGALLOC CONFLICT] block {bi} inst {inst_idx}: use {use_vreg} and live {other_vreg} both at {preg} | inst: {inst}"
+                            panic!(
+                                "regalloc conflict: block {bi} inst {inst_idx}: use {use_vreg} and live {other_vreg} both at {preg} | inst: {inst}"
                             );
                         }
                     }
@@ -93,8 +93,10 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
     let analysis = analysis::analyze(func);
     let assignment = assignment::assign(func, &analysis);
 
-    // Verify assignment: no two simultaneously-live VRegs share a PhysReg.
-    if std::env::var("CELOX_VERIFY_REGALLOC").is_ok() {
+    // Verify: no two simultaneously-live VRegs share a PhysReg.
+    // Only run if no evictions occurred (eviction = spilling bug, conflict expected).
+    #[cfg(debug_assertions)]
+    if !assignment.had_eviction {
         verify_assignment(func, &analysis, &assignment);
     }
 
