@@ -543,7 +543,7 @@ fn emit_inst(
             let v = preg_to_reg64(resolve(assignment, *val));
 
             if v != d {
-                // Common case: val is in a separate register from dst.
+                // ISel guarantees val is a fresh copy (dead after this BFI).
                 // 1. dst = base_word (may be no-op if d == bw)
                 if d != bw {
                     asm.mov(d, bw)?;
@@ -551,7 +551,7 @@ fn emit_inst(
                 // 2. Clear the field in dst
                 let clear_mask = !((*mask) << *shift);
                 emit_and_imm64(asm, d, clear_mask)?;
-                // 3. Prepare and insert val (clobbers v, which is dead after this use)
+                // 3. Prepare val (clobbers v, which is dead)
                 if *mask != u64::MAX {
                     asm.and(v, *mask as i32)?;
                 }

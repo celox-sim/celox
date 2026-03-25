@@ -445,11 +445,13 @@ fn lower_instruction(
                                         size: load_size,
                                     });
                                     let mask = mask_for_width(*chunk_width);
+                                    let val_copy = ctx.alloc_vreg(SpillDesc::transient());
+                                    block.push(MInst::Mov { dst: val_copy, src: *chunk_vreg });
                                     let new = ctx.alloc_vreg(SpillDesc::transient());
                                     block.push(MInst::BitFieldInsert {
                                         dst: new,
                                         base_word: old,
-                                        val: *chunk_vreg,
+                                        val: val_copy,
                                         shift: intra as u8,
                                         mask,
                                     });
@@ -515,11 +517,14 @@ fn lower_instruction(
                             });
 
                             let mask = mask_for_width(*width_bits);
+                            // Copy val to fresh VReg so BFI emit can clobber it freely.
+                            let val_copy = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Mov { dst: val_copy, src: src_vreg });
                             let new_word = ctx.alloc_vreg(SpillDesc::transient());
                             block.push(MInst::BitFieldInsert {
                                 dst: new_word,
                                 base_word: old_word,
-                                val: src_vreg,
+                                val: val_copy,
                                 shift: intra_byte as u8,
                                 mask,
                             });
