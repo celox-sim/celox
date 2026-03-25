@@ -344,14 +344,9 @@ fn run_min_on_block(
         }
 
         // If W is too large after adding uses, evict to make room.
-        // Pin the just-reloaded VRegs so they aren't immediately evicted.
-        let pinned_uses: BTreeSet<VReg> = {
-            let mut p: BTreeSet<VReg> = uses.iter().copied().collect();
-            for (_, fresh) in &reloads {
-                p.insert(*fresh);
-            }
-            p
-        };
+        // Pin only the uses of the CURRENT instruction (not reload copies)
+        // to allow limit to evict long-lived VRegs that were displaced by reloads.
+        let pinned_uses: BTreeSet<VReg> = uses.iter().copied().collect();
         limit(&mut w, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, k, slots, &pinned_uses);
 
         // Insert reload instructions (with fresh VRegs)
@@ -364,6 +359,13 @@ fn run_min_on_block(
                 _ => {}
             }
             new_insts.push(reload_inst);
+        }
+
+        // After reloads, W may exceed k (pinned uses prevented eviction).
+        // Run limit again without pinning to bring W back to k.
+        if w.len() > k {
+            let empty = BTreeSet::new();
+            limit(&mut w, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, k, slots, &empty);
         }
 
         // Rewrite the current instruction's uses: original → fresh
