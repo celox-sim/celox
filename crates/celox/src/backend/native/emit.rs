@@ -595,14 +595,16 @@ fn emit_inst(
             let c = preg_to_reg64(resolve(assignment, *cond));
             let tv = preg_to_reg64(resolve(assignment, *true_val));
             let fv = preg_to_reg64(resolve(assignment, *false_val));
-            // test cond, cond
             asm.test(c, c)?;
-            // mov dst, false_val
-            if d != fv {
-                asm.mov(d, fv)?;
+            if d == tv {
+                // dst already holds true_val; conditionally overwrite with false_val
+                asm.cmove(d, fv)?;
+            } else {
+                if d != fv {
+                    asm.mov(d, fv)?;
+                }
+                asm.cmovne(d, tv)?;
             }
-            // cmovne dst, true_val (if cond != 0, select true_val)
-            asm.cmovne(d, tv)?;
         }
 
         MInst::Branch { cond, true_bb, false_bb } => {
