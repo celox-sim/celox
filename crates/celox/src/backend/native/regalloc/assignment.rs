@@ -113,16 +113,11 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
 /// Number of physical registers reserved by constraints at this program point.
 /// The spilling phase uses this to reduce effective k, guaranteeing the
 /// assignment never needs to displace live VRegs for constraint resolution.
-///
-/// Returns 2 for Fixed constraints (not 1) because the post-spilling
-/// `split_live_ranges_at_fixed_constraints` pass inserts a Mov that
-/// temporarily increases live count by 1 at the split point.
 pub fn constraint_headroom(inst: &MInst) -> usize {
-    let fixed = use_constraints(inst)
+    use_constraints(inst)
         .iter()
         .filter(|c| matches!(c, RegConstraint::Fixed(_)))
-        .count();
-    if fixed > 0 { fixed + 1 } else { 0 }
+        .count()
 }
 
 /// Returns true if the instruction is a register-register shift (needs RCX).

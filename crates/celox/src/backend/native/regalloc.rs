@@ -83,20 +83,18 @@ fn verify_assignment(
 /// Run the full register allocation pipeline on an MFunction.
 /// Returns the assignment map and required spill frame size.
 pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
-    // Split live ranges at clobber points (e.g., div/rem clobbering RAX/RDX).
-    // This inserts Mov instructions so the rest of the pipeline sees clean SSA.
+    // Pre-spilling live-range splits.
     assignment::split_live_ranges_at_clobbers(func);
+    assignment::split_live_ranges_at_fixed_constraints(func);
 
     let analysis = analysis::analyze(func);
     let spill_frame_size = spilling::spill(func, &analysis, NUM_REGS);
 
-    // Isolate Fixed-constrained uses (e.g., shift rhs → RCX) to 1-instruction
-    // lifetimes. Runs post-spilling because spilling may insert instructions
-    // that extend the constrained use's lifetime. The spiller uses k_eff = k - 2
-    // at shift points to leave room for the extra Mov VReg this pass adds.
+    // Post-spilling re-split: spilling may have inserted reloads between
+    // the Mov and the shift, breaking the 1-instruction lifetime. Re-split
+    // any Fixed-constrained uses whose def is no longer at i-1.
     assignment::split_live_ranges_at_fixed_constraints(func);
 
-    // Re-analyze after spilling + constraint splitting
     let analysis = analysis::analyze(func);
     let assignment = assignment::assign(func, &analysis);
 
