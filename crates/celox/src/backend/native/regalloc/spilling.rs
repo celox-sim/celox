@@ -311,7 +311,7 @@ fn insert_coupling_code(
 
 /// Run the MIN algorithm on a single basic block.
 fn run_min_on_block(
-    func: &MFunction,
+    func: &mut MFunction,
     analysis: &AnalysisResult,
     block_idx: usize,
     mut w: BTreeSet<VReg>,
@@ -327,21 +327,49 @@ fn run_min_on_block(
         let def = inst.def();
 
         // 1. Ensure all uses are in W. If not, insert reloads.
-        let mut reloads_needed: Vec<VReg> = Vec::new();
+        // Reloads use FRESH VRegs to preserve SSA: the original VReg keeps
+        // its first assignment in the global map, and the reloaded value
+        // gets a new VReg with its own assignment.
+        let mut reloads: Vec<(VReg, VReg)> = Vec::new(); // (original, fresh)
         for &use_vreg in &uses {
             if !w.contains(&use_vreg) {
-                reloads_needed.push(use_vreg);
-                w.insert(use_vreg);
-                s.insert(use_vreg);
+                let fresh = func.vregs.alloc();
+                while func.spill_descs.len() <= fresh.0 as usize {
+                    func.spill_descs.push(func.spill_desc(use_vreg).cloned().unwrap_or(SpillDesc::transient()));
+                }
+                reloads.push((use_vreg, fresh));
+                w.insert(fresh);
+                s.insert(fresh);
             }
         }
 
-        // If W is too large after adding uses, evict to make room
-        limit(&mut w, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, k, slots);
+        // If W is too large after adding uses, evict to make room.
+        // Pin the just-reloaded VRegs so they aren't immediately evicted.
+        let pinned_uses: BTreeSet<VReg> = {
+            let mut p: BTreeSet<VReg> = uses.iter().copied().collect();
+            for (_, fresh) in &reloads {
+                p.insert(*fresh);
+            }
+            p
+        };
+        limit(&mut w, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, k, slots, &pinned_uses);
 
-        // Insert reload instructions
-        for vreg in &reloads_needed {
-            new_insts.push(make_reload(*vreg, func, slots));
+        // Insert reload instructions (with fresh VRegs)
+        for (original, fresh) in &reloads {
+            let mut reload_inst = make_reload(*original, func, slots);
+            // Rewrite the reload's dst from original to fresh
+            match &mut reload_inst {
+                MInst::LoadImm { dst, .. }
+                | MInst::Load { dst, .. } => *dst = *fresh,
+                _ => {}
+            }
+            new_insts.push(reload_inst);
+        }
+
+        // Rewrite the current instruction's uses: original → fresh
+        let mut rewritten_inst = inst.clone();
+        for (original, fresh) in &reloads {
+            rewritten_inst.rewrite_use(*original, *fresh);
         }
 
         // 2. Make room for def (+ clobber headroom)
@@ -351,16 +379,17 @@ fn run_min_on_block(
             let clobber_extra = super::assignment::clobbers(inst).len().saturating_sub(1);
             let needed = w.len() + 1 + clobber_extra;
             if needed > k {
+                let empty = BTreeSet::new();
                 limit(
                     &mut w, &mut s, &mut new_insts,
-                    func, analysis, block_idx, inst_idx + 1, k, slots,
+                    func, analysis, block_idx, inst_idx + 1, k, slots, &empty,
                 );
             }
             w.insert(def_vreg);
         }
 
-        // Emit the original instruction
-        new_insts.push(inst.clone());
+        // Emit the (possibly rewritten) instruction
+        new_insts.push(rewritten_inst);
 
         // Remove dead values
         let dead: Vec<VReg> = w
@@ -383,6 +412,7 @@ fn run_min_on_block(
 // ────────────────────────────────────────────────────────────────
 
 /// Evict variables from W until |W| ≤ m.
+/// `pinned` VRegs are protected from eviction (e.g., just-reloaded uses).
 fn limit(
     w: &mut BTreeSet<VReg>,
     s: &mut BTreeSet<VReg>,
@@ -393,9 +423,10 @@ fn limit(
     inst_idx: usize,
     m: usize,
     slots: &mut SpillSlotAllocator,
+    pinned: &BTreeSet<VReg>,
 ) {
     while w.len() > m {
-        let victim = choose_victim(w, s, func, analysis, block_idx, inst_idx);
+        let victim = choose_victim_excluding(w, s, func, analysis, block_idx, inst_idx, pinned);
 
         // Insert spill if not already spilled
         if !s.contains(&victim) {
@@ -415,6 +446,20 @@ fn limit(
 /// 1. Rematerializable (cost 0) → always evict first
 /// 2. Store-back-only + aligned (spill_cost 0) → free eviction
 /// 3. Furthest next-use / lowest reload cost
+fn choose_victim_excluding(
+    w: &BTreeSet<VReg>,
+    s: &BTreeSet<VReg>,
+    func: &MFunction,
+    analysis: &AnalysisResult,
+    block_idx: usize,
+    inst_idx: usize,
+    pinned: &BTreeSet<VReg>,
+) -> VReg {
+    let candidates: BTreeSet<VReg> = w.difference(pinned).copied().collect();
+    let w_effective = if candidates.is_empty() { w } else { &candidates };
+    choose_victim(w_effective, s, func, analysis, block_idx, inst_idx)
+}
+
 fn choose_victim(
     w: &BTreeSet<VReg>,
     s: &BTreeSet<VReg>,

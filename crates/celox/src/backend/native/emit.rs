@@ -564,7 +564,7 @@ fn emit_inst(
                 // bw must be different since val and base_word are both live uses.
                 // Use XOR-based bitfield insert: result = bw ^ ((shifted_val ^ bw) & F)
                 // This formula doesn't clobber bw.
-                debug_assert!(bw != d, "val, base_word, and dst all alias in BFI (regalloc bug)");
+                debug_assert!(bw != d, "BFI: val and base_word should not alias");
                 // 1. d = (val & mask) << shift
                 if *mask != u64::MAX {
                     asm.and(d, *mask as i32)?;
@@ -874,6 +874,7 @@ pub fn emit_chained_eus(
     for eu in units {
         let mut mfunc = isel::lower_execution_unit(eu, layout);
         let ra = regalloc::run_regalloc(&mut mfunc);
+
         let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
         eu_codes.push(result.code);
     }
