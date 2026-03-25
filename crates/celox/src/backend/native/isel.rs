@@ -1432,6 +1432,7 @@ fn lower_wide_binary(
         // If the shift amount is a known constant (common after loop unrolling),
         // compute chunk assignments directly without runtime select chains.
         BinaryOp::Shl => {
+            // (debug removed)
             let src_chunks = ctx.get_wide_chunks(&lhs, block);
             let n_src = src_chunks.len();
 
@@ -1933,6 +1934,7 @@ fn lower_wide_runtime_shift(
         };
 
         // Apply intra-chunk shift: result = (main_chunk SHIFT bit_shift) | (carry_chunk INVSHIFT inv_bit_shift)
+        // (debug removed)
         let bit_shift_copy = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Mov { dst: bit_shift_copy, src: bit_shift });
         let inv_copy = ctx.alloc_vreg(SpillDesc::transient());
