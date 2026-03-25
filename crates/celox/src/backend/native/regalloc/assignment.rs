@@ -87,8 +87,14 @@ pub enum RegConstraint {
 }
 
 pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
-    let _ = inst;
-    inst.uses().iter().map(|_| RegConstraint::Any).collect()
+    match inst {
+        // x86 variable shifts require shift amount in CL (low byte of RCX).
+        MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. } => {
+            // uses() = [lhs, rhs]. rhs must be in RCX.
+            vec![RegConstraint::Any, RegConstraint::Fixed(PhysReg::RCX)]
+        }
+        _ => inst.uses().iter().map(|_| RegConstraint::Any).collect(),
+    }
 }
 
 pub fn def_constraint(inst: &MInst) -> RegConstraint {

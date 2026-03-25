@@ -655,61 +655,13 @@ fn emit_shift(
         }
     };
 
-    if r == rcx && d == rcx && l == rcx {
-        // All three in rcx: shift rcx by cl = shift by own low byte. Unusual.
-        do_shift(asm, d)?;
-    } else if r == rcx && d == rcx {
-        // d == r == rcx, l elsewhere.
-        // mov rcx, l would clobber the shift amount in CL.
-        // Use xchg: rcx ↔ l → rcx=lhs, l=shift_amt.
-        // Then shift l by... no, x86 shift only uses CL.
-        // Instead: shift l in-place, then swap result to rcx.
-        // xchg rcx, l → rcx=lhs, l=shift_amt
-        // But CL no longer has shift amount (rcx changed).
-        //
-        // Correct approach: save shift amount to l, load lhs to rcx.
-        // xchg rcx, l → rcx=lhs, l=shift_amt. CL=lhs's low byte. WRONG.
-        //
-        // Only correct approach without extra temp:
-        // Compute in l: copy lhs is l (already), shift amount in cl (rcx).
-        // do_shift(l) → shift l by cl. l = lhs >> shift_amt. Then mov rcx, l.
-        do_shift(asm, l)?;
+    // ISel guarantees rhs is a fresh copy (dead after this shift).
+    // Assignment places it in RCX via Fixed constraint.
+    debug_assert!(r == rcx, "shift rhs must be in RCX");
+    if d != l {
         asm.mov(d, l)?;
-    } else if r == rcx {
-        // rhs already in CL
-        if d != l {
-            asm.mov(d, l)?;
-        }
-        do_shift(asm, d)?;
-    } else if d == rcx && l == rcx {
-        // d == l == rcx, r is elsewhere.
-        // xchg rcx, r → rcx=rhs, r=lhs. Shift r by cl. mov rcx, r.
-        asm.xchg(rcx, r)?;
-        do_shift(asm, r)?;
-        asm.mov(rcx, r)?;
-    } else if d == rcx {
-        // d == rcx, l != rcx, r != rcx.
-        // mov d(=rcx), l first, then xchg rcx, r, shift d... no.
-        // Strategy: xchg rcx, r → rcx=rhs, r=old_dst_garbage.
-        // mov r, l (put lhs into r). shift r. mov rcx, r.
-        asm.xchg(rcx, r)?; // rcx = rhs_val, r = whatever was in rcx
-        asm.mov(r, l)?;     // r = lhs
-        do_shift(asm, r)?;  // r = lhs shift_by cl
-        asm.mov(rcx, r)?;   // result to dst (rcx)
-    } else if l == rcx {
-        // l == rcx, d != rcx, r != rcx.
-        // Save lhs to d before clobbering rcx.
-        asm.mov(d, l)?;    // d = lhs
-        asm.mov(rcx, r)?;  // rcx = rhs
-        do_shift(asm, d)?;
-    } else {
-        // No operand in rcx.
-        asm.mov(rcx, r)?;  // rcx = rhs
-        if d != l {
-            asm.mov(d, l)?;
-        }
-        do_shift(asm, d)?;
     }
+    do_shift(asm, d)?;
     Ok(())
 }
 

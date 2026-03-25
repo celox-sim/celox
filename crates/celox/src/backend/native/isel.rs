@@ -854,11 +854,24 @@ fn lower_instruction(
                     }
 
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Shr {
-                        dst: shifted,
-                        lhs: lhs_vreg,
-                        rhs: rhs_vreg,
-                    });
+                    // Use ShrImm if shift amount is a known constant (avoids CL clobber issues)
+                    if let Some(&shift_amt) = ctx.consts.get(rhs) {
+                        block.push(MInst::ShrImm {
+                            dst: shifted,
+                            src: lhs_vreg,
+                            imm: shift_amt as u8,
+                        });
+                    } else {
+                        // Copy rhs to fresh VReg so assignment can place it in RCX
+                        // without clobbering the original (which may be live).
+                        let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
+                        block.push(MInst::Shr {
+                            dst: shifted,
+                            lhs: lhs_vreg,
+                            rhs: rhs_copy,
+                        });
+                    }
                     // Mask to destination width
                     if d_width < 64 {
                         let mask = mask_for_width(d_width);
@@ -876,11 +889,21 @@ fn lower_instruction(
                 }
                 BinaryOp::Shl => {
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Shl {
-                        dst: shifted,
-                        lhs: lhs_vreg,
-                        rhs: rhs_vreg,
-                    });
+                    if let Some(&shift_amt) = ctx.consts.get(rhs) {
+                        block.push(MInst::ShlImm {
+                            dst: shifted,
+                            src: lhs_vreg,
+                            imm: shift_amt as u8,
+                        });
+                    } else {
+                        let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
+                        block.push(MInst::Shl {
+                            dst: shifted,
+                            lhs: lhs_vreg,
+                            rhs: rhs_copy,
+                        });
+                    }
                     if d_width < 64 {
                         let mask = mask_for_width(d_width);
                         block.push(MInst::AndImm {
@@ -907,16 +930,20 @@ fn lower_instruction(
                         let sign_extended = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Sar { dst: sign_extended, lhs: shifted_up, rhs: sext_shift_vreg });
                         // Now do the actual shift
+                        let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
                         let sar_result = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Sar { dst: sar_result, lhs: sign_extended, rhs: rhs_vreg });
+                        block.push(MInst::Sar { dst: sar_result, lhs: sign_extended, rhs: rhs_copy });
                         // Mask to output width
                         let mask = mask_for_width(width);
                         block.push(MInst::AndImm { dst: dst_vreg, src: sar_result, imm: mask });
                     } else {
+                        let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
                         block.push(MInst::Sar {
                             dst: dst_vreg,
                             lhs: lhs_vreg,
-                            rhs: rhs_vreg,
+                            rhs: rhs_copy,
                         });
                     }
                 }

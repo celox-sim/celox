@@ -10,10 +10,12 @@ bb0:
   v7 = add v0, v4
   v2 = and v7, 0xffffffff
   v6 = imm 0x2
-  v3 = or v2, v6
+  v8 = or v2, v6
+  v3 = and v8, 0xffffffff
   store.i32 [sim + 12], v3
   v1 = imm 0x1
-  v5 = and v2, v1
+  v9 = and v2, v1
+  v5 = and v9, 0xffffffff
   store.i32 [sim + 4], v5
   ret
 
@@ -24,10 +26,12 @@ bb0:
   v7 = add v0, v4
   v2 = and v7, 0xffffffff
   v6 = imm 0x2
-  v3 = or v2, v6
+  v8 = or v2, v6
+  v3 = and v8, 0xffffffff
   store.i32 [sim + 12], v3
   v1 = imm 0x1
-  v5 = and v2, v1
+  v9 = and v2, v1
+  v5 = and v9, 0xffffffff
   store.i32 [sim + 4], v5
   ret
   Register assignment:
@@ -39,6 +43,8 @@ bb0:
     v5 -> rax
     v6 -> rdx
     v7 -> rax
+    v8 -> rdx
+    v9 -> rax
   x86-64 disassembly:
   0x00000000  push r15
   0x00000002  sub rsp,8
@@ -49,12 +55,14 @@ bb0:
   0x00000013  and eax,0FFFFFFFFh
   0x00000018  mov edx,2
   0x0000001d  or rdx,rax
-  0x00000020  mov [r15+0Ch],edx
-  0x00000024  mov edx,1
-  0x00000029  and rax,rdx
-  0x0000002c  mov [r15+4],eax
-  0x00000030  xor eax,eax
-  0x00000032  jmp short 0000000000000034h
-  0x00000034  add rsp,8
-  0x00000038  pop r15
-  0x0000003a  ret
+  0x00000020  and edx,0FFFFFFFFh
+  0x00000023  mov [r15+0Ch],edx
+  0x00000027  mov edx,1
+  0x0000002c  and rax,rdx
+  0x0000002f  and eax,0FFFFFFFFh
+  0x00000034  mov [r15+4],eax
+  0x00000038  xor eax,eax
+  0x0000003a  jmp short 000000000000003Ch
+  0x0000003c  add rsp,8
+  0x00000040  pop r15
+  0x00000042  ret
