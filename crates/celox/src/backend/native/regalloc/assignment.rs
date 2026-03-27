@@ -139,7 +139,8 @@ pub fn is_reg_shift(inst: &MInst) -> bool {
 /// earlier in the lifetime. The fix: insert a Mov copy right before
 /// the constraint instruction so only the short-lived copy gets the
 /// constrained register.
-pub fn split_live_ranges_at_fixed_constraints(func: &mut MFunction) {
+pub fn split_live_ranges_at_fixed_constraints(func: &mut MFunction) -> bool {
+    let mut any_split = false;
     for block in &mut func.blocks {
         // Quick check: any Fixed constraints in this block?
         if !block.insts.iter().any(|inst| {
@@ -190,6 +191,8 @@ pub fn split_live_ranges_at_fixed_constraints(func: &mut MFunction) {
             continue;
         }
 
+        any_split = true;
+
         // Apply splits in reverse order to preserve indices.
         for (inst_idx, old, fresh) in splits.into_iter().rev() {
             // Insert Mov(fresh, old) before the constraint instruction.
@@ -198,6 +201,7 @@ pub fn split_live_ranges_at_fixed_constraints(func: &mut MFunction) {
             block.insts[inst_idx + 1].rewrite_use(old, fresh);
         }
     }
+    any_split
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -207,7 +211,9 @@ pub fn split_live_ranges_at_fixed_constraints(func: &mut MFunction) {
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: BTreeMap<VReg, PhysReg>,
-    /// True if assignment had to evict a VReg (indicates spilling bug).
+    /// True if assignment had to evict a VReg. Eviction produces
+    /// incorrect code — investigate and fix the spilling/constraint
+    /// interaction that caused it.
     pub had_eviction: bool,
 }
 
@@ -455,8 +461,10 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                         find_free_reg_excluding(&active, &blocked)
                             .or_else(|| find_free_reg(&active, None))
                             .unwrap_or_else(|| {
-                                // Spilling should ensure pressure ≤ k_eff.
-                                // Eviction here indicates a spilling bug.
+                                // All registers occupied. This should not happen if
+                                // spilling is correct, but constraint handling can
+                                // cause transient pressure spikes. Evict the farthest-
+                                // use VReg as a safety net.
                                 result.had_eviction = true;
                                 let victim = active
                                     .iter()

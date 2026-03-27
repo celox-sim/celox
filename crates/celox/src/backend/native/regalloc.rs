@@ -73,6 +73,14 @@ fn verify_assignment(
             // Add def
             if let Some(def) = inst.def() {
                 if let Some(preg) = assignment.get(def) {
+                    // Check for conflict with existing live VRegs
+                    for (&other_vreg, &other_preg) in &live {
+                        if other_vreg != def && other_preg == preg {
+                            panic!(
+                                "regalloc conflict: block {bi} inst {inst_idx}: def {def} and live {other_vreg} both at {preg} | inst: {inst}"
+                            );
+                        }
+                    }
                     live.insert(def, preg);
                 }
             }
@@ -85,25 +93,41 @@ fn verify_assignment(
 pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
     // Pre-spilling live-range splits.
     assignment::split_live_ranges_at_clobbers(func);
-    assignment::split_live_ranges_at_fixed_constraints(func);
+    let _ = assignment::split_live_ranges_at_fixed_constraints(func);
 
     let analysis = analysis::analyze(func);
-    let spill_frame_size = spilling::spill(func, &analysis, NUM_REGS);
+    let mut spill_frame_size = spilling::spill(func, &analysis, NUM_REGS - 1);
 
     // Post-spilling re-split: spilling may have inserted reloads between
-    // the Mov and the shift, breaking the 1-instruction lifetime. Re-split
-    // any Fixed-constrained uses whose def is no longer at i-1.
+    // the Mov and the shift, breaking the 1-instruction lifetime.
     assignment::split_live_ranges_at_fixed_constraints(func);
+
+    // Iterate split + re-spill until stable: each spilling pass may insert
+    // reloads that break the 1-instruction lifetime of split Movs. Re-split
+    // and re-spill until no new splits are needed.
+    loop {
+        let changed = assignment::split_live_ranges_at_fixed_constraints(func);
+        if !changed { break; }
+        let analysis = analysis::analyze(func);
+        spill_frame_size += spilling::spill(func, &analysis, NUM_REGS - 1);
+    }
 
     let analysis = analysis::analyze(func);
     let assignment = assignment::assign(func, &analysis);
 
-    // Verify: no two simultaneously-live VRegs share a PhysReg.
-    // Only run if no evictions occurred (eviction = spilling bug, conflict expected).
-    #[cfg(debug_assertions)]
-    if !assignment.had_eviction {
-        verify_assignment(func, &analysis, &assignment);
+    if std::env::var("CELOX_DUMP_MIR").is_ok() {
+        for (bi, block) in func.blocks.iter().enumerate() {
+            for (ii, inst) in block.insts.iter().enumerate() {
+                let r = inst.def().and_then(|d| assignment.get(d));
+                eprintln!("  [{ii:3}] {inst}  => {r:?}");
+            }
+            let _ = bi;
+        }
     }
+
+    // Verify: no two simultaneously-live VRegs share a PhysReg.
+    #[cfg(debug_assertions)]
+    verify_assignment(func, &analysis, &assignment);
 
     RegallocResult {
         assignment,
