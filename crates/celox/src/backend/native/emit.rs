@@ -665,11 +665,23 @@ fn emit_shift(
         }
     };
 
-    // ISel guarantees rhs is a fresh copy (dead after this shift).
-    // Assignment places it in RCX via Fixed constraint.
-    debug_assert!(r == rcx, "shift rhs must be in RCX");
-    if d != l {
+    // The assignment preferentially places rhs in RCX. If it couldn't
+    // (pressure), we move rhs to RCX here. The blocked set keeps RCX
+    // free from other long-lived VRegs, so this mov is safe.
+    // The shift dst must not be RCX (blocked set with pos >= inst_idx).
+    debug_assert!(d != rcx, "shift dst must not be RCX");
+    if d == r && d != l {
+        // d holds rhs. Moving lhs to d would clobber rhs.
+        // Save rhs to RCX first, then move lhs to d.
+        if r != rcx { asm.mov(rcx, r)?; }
         asm.mov(d, l)?;
+    } else {
+        if d != l {
+            asm.mov(d, l)?;
+        }
+        if r != rcx {
+            asm.mov(rcx, r)?;
+        }
     }
     do_shift(asm, d)?;
     Ok(())
