@@ -153,9 +153,19 @@ fn make_reload(
 /// Run the spilling phase on an MFunction.
 /// After this, every program point has at most `k` simultaneously live VRegs.
 /// Returns the total spill frame size in bytes.
-pub fn spill(func: &mut MFunction, analysis: &AnalysisResult, k: usize) -> u32 {
+/// Result of a spilling pass.
+pub struct SpillResult {
+    /// Total bytes of spill slots allocated in this pass.
+    pub frame_size: u32,
+    /// True if any spill/reload instructions were inserted.
+    pub changed: bool,
+}
+
+pub fn spill(func: &mut MFunction, analysis: &AnalysisResult, k: usize) -> SpillResult {
     let num_blocks = func.blocks.len();
     let mut slots = SpillSlotAllocator::new();
+
+    let inst_count_before: usize = func.blocks.iter().map(|b| b.insts.len()).sum();
 
     // W^exit for each block (VRegs in registers at block exit)
     let mut w_exit: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); num_blocks];
@@ -180,7 +190,11 @@ pub fn spill(func: &mut MFunction, analysis: &AnalysisResult, k: usize) -> u32 {
         s_exit[bi] = new_s_exit;
     }
 
-    slots.total_size() as u32
+    let inst_count_after: usize = func.blocks.iter().map(|b| b.insts.len()).sum();
+    SpillResult {
+        frame_size: slots.total_size() as u32,
+        changed: inst_count_after > inst_count_before,
+    }
 }
 
 // ────────────────────────────────────────────────────────────────

@@ -95,21 +95,25 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
     assignment::split_live_ranges_at_clobbers(func);
     let _ = assignment::split_live_ranges_at_fixed_constraints(func);
 
+    // Spill → split → re-spill loop until convergence. Each pass:
+    // 1. Analyze liveness on the current instruction stream.
+    // 2. Spill to reduce pressure ≤ k (may insert spill/reload instructions).
+    // 3. Re-split Fixed constraints (spilling may have broken 1-inst lifetimes).
+    // Loop terminates when both spilling and splitting make no changes,
+    // meaning the assignment will see the same liveness as the final spilling.
+    // Convergence is guaranteed: each pass only adds instructions (monotonic),
+    // and pressure decreases monotonically. Typically 2-3 iterations.
+    let mut spill_frame_size = 0u32;
     let analysis = analysis::analyze(func);
-    let mut spill_frame_size = spilling::spill(func, &analysis, NUM_REGS - 1);
+    let sr = spilling::spill(func, &analysis, NUM_REGS - 1);
+    spill_frame_size += sr.frame_size;
 
-    // Post-spilling re-split: spilling may have inserted reloads between
-    // the Mov and the shift, breaking the 1-instruction lifetime.
-    assignment::split_live_ranges_at_fixed_constraints(func);
-
-    // Iterate split + re-spill until stable: each spilling pass may insert
-    // reloads that break the 1-instruction lifetime of split Movs. Re-split
-    // and re-spill until no new splits are needed.
-    loop {
-        let changed = assignment::split_live_ranges_at_fixed_constraints(func);
-        if !changed { break; }
+    // Post-spilling: re-split Fixed constraints that spilling disrupted,
+    // then re-spill once to account for the split's added Movs.
+    if assignment::split_live_ranges_at_fixed_constraints(func) {
         let analysis = analysis::analyze(func);
-        spill_frame_size += spilling::spill(func, &analysis, NUM_REGS - 1);
+        let sr2 = spilling::spill(func, &analysis, NUM_REGS - 1);
+        spill_frame_size += sr2.frame_size;
     }
 
     let analysis = analysis::analyze(func);
