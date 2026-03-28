@@ -1033,8 +1033,67 @@ fn lower_instruction(
                             }
                         }
                     }
-                    SIROffset::Dynamic(_offset_reg) => {
-                        unimplemented!("dynamic offset 4-state mask Store not yet supported in native backend");
+                    SIROffset::Dynamic(offset_reg) => {
+                        // Dynamic mask store: same RMW pattern as value store,
+                        // but targeting the mask memory region.
+                        let offset_vreg = ctx.reg_map.get(*offset_reg);
+                        let mask_base_off = ctx.mask_byte_offset(addr, 0);
+
+                        let m_byte_off = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShrImm { dst: m_byte_off, src: offset_vreg, imm: 3 });
+                        let m_bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::AndImm { dst: m_bit_shift, src: offset_vreg, imm: 7 });
+
+                        let rw_size = ISelContext::op_size_for_width(*width_bits + 7);
+
+                        // Load old mask word
+                        let old_mask_word = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::LoadIndexed {
+                            dst: old_mask_word,
+                            base: BaseReg::SimState,
+                            offset: mask_base_off,
+                            index: m_byte_off,
+                            size: rw_size,
+                        });
+
+                        let width_mask = if *width_bits < 64 { mask_for_width(*width_bits) } else { u64::MAX };
+
+                        // masked_m = mask_vreg & width_mask
+                        let masked_m = ctx.alloc_vreg(SpillDesc::transient());
+                        if width_mask != u64::MAX {
+                            block.push(MInst::AndImm { dst: masked_m, src: mask_vreg, imm: width_mask });
+                        } else {
+                            block.push(MInst::Mov { dst: masked_m, src: mask_vreg });
+                        }
+
+                        // shifted_m = masked_m << bit_shift
+                        let shifted_m = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Shl { dst: shifted_m, lhs: masked_m, rhs: m_bit_shift });
+
+                        // Create clearing mask
+                        let clear_mask_imm = ctx.alloc_vreg(SpillDesc::remat(width_mask));
+                        block.push(MInst::LoadImm { dst: clear_mask_imm, value: width_mask });
+                        let shifted_clear = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Shl { dst: shifted_clear, lhs: clear_mask_imm, rhs: m_bit_shift });
+                        let not_clear = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::BitNot { dst: not_clear, src: shifted_clear });
+
+                        // cleared = old_mask_word & ~shifted_clear
+                        let cleared = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::And { dst: cleared, lhs: old_mask_word, rhs: not_clear });
+
+                        // result = cleared | shifted_m
+                        let m_result = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or { dst: m_result, lhs: cleared, rhs: shifted_m });
+
+                        // Store back
+                        block.push(MInst::StoreIndexed {
+                            base: BaseReg::SimState,
+                            offset: mask_base_off,
+                            index: m_byte_off,
+                            src: m_result,
+                            size: rw_size,
+                        });
                     }
                 }
             } else if ctx.four_state {
