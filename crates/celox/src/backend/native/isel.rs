@@ -1034,8 +1034,7 @@ fn lower_instruction(
                         }
                     }
                     SIROffset::Dynamic(_offset_reg) => {
-                        // Dynamic mask store — same RMW pattern as value store
-                        // TODO: implement when needed
+                        unimplemented!("dynamic offset 4-state mask Store not yet supported in native backend");
                     }
                 }
             } else if ctx.four_state {
@@ -3130,11 +3129,7 @@ fn lower_wide_extract(
             }
         }
     } else {
-        // Non-constant: fall back to loading 0 (lossy but no crash)
-        // TODO: implement runtime extraction when spilling is robust
-        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-        block.push(MInst::LoadImm { dst: zero, value: 0 });
-        block.push(MInst::Mov { dst: dst_vreg, src: zero });
+        unimplemented!("wide Slice with non-constant bit_offset is not yet supported in the native backend");
     }
 }
 
@@ -3380,9 +3375,9 @@ fn lower_binary_mask(
             res
         }
         BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
-            // TODO: full wildcard mask logic
-            // For now: conservative — any X → result X
-            conservative_mask(ctx, block, lm, rm, d_width)
+            // Wildcard mask is handled inline in the Binary handler;
+            // this arm should never be reached.
+            unreachable!("wildcard mask is computed inline, not via lower_binary_mask")
         }
         _ => {
             // Conservative: any X in either operand → all-X result

@@ -915,6 +915,10 @@ pub fn emit_chained_eus(
         let jmp_offset = eu_offsets[i] + eu_codes[i].len() - 1; // position of the jmp opcode
         let next_eu_offset = eu_offsets[i + 1];
         let rel = (next_eu_offset as i64) - (jmp_offset as i64 + 5); // relative to end of jmp
+        assert!(
+            (i32::MIN as i64..=i32::MAX as i64).contains(&rel),
+            "EU chaining jmp offset {rel} overflows i32 (combined code too large)"
+        );
         combined[jmp_offset] = 0xE9; // jmp near rel32
         combined[jmp_offset + 1..jmp_offset + 5].copy_from_slice(&(rel as i32).to_le_bytes());
     }

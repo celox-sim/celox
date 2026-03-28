@@ -50,7 +50,7 @@ impl RegFile {
     }
 
     fn assign(&mut self, vreg: VReg, preg: PhysReg) {
-        debug_assert!(
+        assert!(
             !self.preg_to_vreg.contains_key(&preg),
             "PhysReg {preg} already occupied by {:?} when assigning {vreg}",
             self.preg_to_vreg.get(&preg)
@@ -159,10 +159,11 @@ fn compute_entry_regfile(
 
     let all = all.unwrap_or_default();
 
-    // Start with intersection: VRegs in registers in ALL predecessors
+    // Start with intersection: VRegs in registers in ALL predecessors.
+    // If the preferred PhysReg is already taken, skip — the VReg will be
+    // reloaded on demand by process_block when actually used.
     for vreg in &all {
         if rf.occupancy() >= k { break; }
-        // Use existing PhysReg assignment if available
         if let Some(preg) = result.get(*vreg) {
             if !rf.preg_to_vreg.contains_key(&preg) {
                 rf.assign(*vreg, preg);
@@ -206,8 +207,9 @@ fn compute_entry_regfile(
                     rf.assign(vreg, preg);
                     continue;
                 }
-            }
-            if let Some(preg) = rf.find_free_excluding(&BTreeSet::new()) {
+                // PhysReg conflict — skip; process_block will reload on demand
+            } else if let Some(preg) = rf.find_free_excluding(&BTreeSet::new()) {
+                // No prior assignment — first time this VReg is assigned
                 rf.assign(vreg, preg);
             }
         }
@@ -316,8 +318,9 @@ fn process_block(
                     // Need to get use_vreg into required_preg
                     // First, free required_preg if occupied
                     if let Some(occupant) = rf.get_vreg(*required_preg) {
-                        // Spill the occupant first (so it can be reloaded later
-                        // if needed by subsequent instructions).
+                        // Spill the occupant first so it can be reloaded later.
+                        // emit_spill is idempotent (checks s.contains), so calling
+                        // it on an already-spilled VReg is a no-op.
                         emit_spill(&mut new_insts, occupant, &mut s, func, slots, result);
 
                         if pinned.contains(&occupant) {
