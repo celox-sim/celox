@@ -38,6 +38,14 @@ fn verify_assignment(
         // Track live VRegs and their PhysRegs at each program point
         let mut live: BTreeMap<VReg, PhysReg> = BTreeMap::new();
 
+        // Pre-compute use positions for O(log n) dead check
+        let mut use_positions: BTreeMap<VReg, Vec<usize>> = BTreeMap::new();
+        for (i, inst) in block.insts.iter().enumerate() {
+            for vreg in inst.uses() {
+                use_positions.entry(vreg).or_default().push(i);
+            }
+        }
+
         // Initialize from entry_distances.
         // Only include VRegs that have assignments AND don't conflict.
         // VRegs that were spilled in a predecessor may still appear in
@@ -68,9 +76,18 @@ fn verify_assignment(
                 }
             }
 
-            // Remove dead VRegs
+            // Remove dead VRegs (O(log n) per VReg via binary search)
             let dead: Vec<VReg> = live.keys().copied().filter(|&v| {
-                analysis::next_use_at(func, analysis, bi, inst_idx + 1, v) == u32::MAX
+                let from = inst_idx + 1;
+                let has_future_use = if let Some(positions) = use_positions.get(&v) {
+                    match positions.binary_search(&from) {
+                        Ok(_) => true,
+                        Err(idx) => idx < positions.len(),
+                    }
+                } else {
+                    false
+                };
+                !has_future_use && !analysis.exit_distances[bi].contains_key(&v)
             }).collect();
             for v in dead {
                 live.remove(&v);
