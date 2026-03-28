@@ -27,8 +27,6 @@ pub struct AnalysisResult {
     pub predecessors: Vec<Vec<usize>>,
     /// Successor list for each block (by index).
     pub successors: Vec<Vec<usize>>,
-    /// Maximum register pressure within each block.
-    pub max_pressure: Vec<usize>,
 }
 
 /// Compute liveness and next-use distances for the entire MFunction.
@@ -154,35 +152,6 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
         }
     }
 
-    // Compute max register pressure per block
-    let mut max_pressure = vec![0usize; num_blocks];
-    for (bi, block) in func.blocks.iter().enumerate() {
-        let mut live: std::collections::BTreeSet<VReg> = BTreeSet::new();
-
-        // Start with live-in (variables with entry distance < infinity)
-        for &vreg in entry_distances[bi].keys() {
-            live.insert(vreg);
-        }
-
-        let mut max_p = live.len();
-
-        for inst in &block.insts {
-            // Add defs
-            if let Some(def) = inst.def() {
-                live.insert(def);
-            }
-            max_p = max_p.max(live.len());
-
-            // Remove dead values (last use in this instruction)
-            // A vreg is dead after this instruction if its next use distance
-            // from the *next* instruction is infinity
-            // For simplicity, we just track the max of |live| which is an
-            // upper bound on pressure
-        }
-
-        max_pressure[bi] = max_p;
-    }
-
     AnalysisResult {
         entry_distances,
         exit_distances,
@@ -190,7 +159,6 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
         block_index,
         predecessors,
         successors,
-        max_pressure,
     }
 }
 
