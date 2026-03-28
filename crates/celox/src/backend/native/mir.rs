@@ -351,6 +351,8 @@ pub enum MInst {
     BitNot { dst: VReg, src: VReg },
     /// dst = -src (negate)
     Neg { dst: VReg, src: VReg },
+    /// dst = popcnt(src) (population count — number of set bits)
+    Popcnt { dst: VReg, src: VReg },
 
     // ── Select (for div-by-zero guard, etc.) ───────────────────
     /// dst = cond ? true_val : false_val
@@ -429,6 +431,7 @@ impl fmt::Display for MInst {
             } => write!(f, "{dst} = cmp.{kind:?} {lhs}, {rhs}"),
             MInst::BitNot { dst, src } => write!(f, "{dst} = not {src}"),
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
+            MInst::Popcnt { dst, src } => write!(f, "{dst} = popcnt {src}"),
             MInst::Select {
                 dst,
                 cond,
@@ -511,6 +514,7 @@ impl MInst {
             | MInst::URem { dst, .. }
             | MInst::BitNot { dst, .. }
             | MInst::Neg { dst, .. }
+            | MInst::Popcnt { dst, .. }
             | MInst::Select { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
@@ -550,7 +554,8 @@ impl MInst {
             | MInst::ShlImm { src, .. }
             | MInst::SarImm { src, .. }
             | MInst::BitNot { src, .. }
-            | MInst::Neg { src, .. } => Uses::one(*src),
+            | MInst::Neg { src, .. }
+            | MInst::Popcnt { src, .. } => Uses::one(*src),
             MInst::Select { cond, true_val, false_val, .. } => Uses::three(*cond, *true_val, *false_val),
             MInst::Branch { cond, .. } => Uses::one(*cond),
             MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => Uses::none(),
@@ -595,7 +600,8 @@ impl MInst {
             | MInst::ShlImm { src, .. }
             | MInst::SarImm { src, .. }
             | MInst::BitNot { src, .. }
-            | MInst::Neg { src, .. } => {
+            | MInst::Neg { src, .. }
+            | MInst::Popcnt { src, .. } => {
                 if *src == old { *src = new; }
             }
             MInst::Select { cond, true_val, false_val, .. } => {

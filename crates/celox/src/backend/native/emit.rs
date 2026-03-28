@@ -633,6 +633,12 @@ fn emit_inst(
             asm.neg(d)?;
         }
 
+        MInst::Popcnt { dst, src } => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            asm.popcnt(d, s)?;
+        }
+
         MInst::Select { dst, cond, true_val, false_val } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let c = preg_to_reg64(resolve(assignment, *cond));

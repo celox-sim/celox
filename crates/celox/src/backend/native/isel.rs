@@ -1831,32 +1831,11 @@ fn lower_instruction(
                 }
                 UnaryOp::Xor => {
                     // Reduction XOR: dst = popcount(src) & 1
-                    // XOR-fold the value down to 1 bit:
-                    // val ^= val >> 32; val ^= val >> 16; val ^= val >> 8;
-                    // val ^= val >> 4; val ^= val >> 2; val ^= val >> 1; val & 1
-                    let width = ctx.sir_width(src);
-                    let mut cur = src_vreg;
-
-                    // Fold progressively: for width ≤ N, skip shifts ≥ N
-                    for shift in [32u8, 16, 8, 4, 2, 1] {
-                        if width as u8 > shift {
-                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::ShrImm {
-                                dst: shifted,
-                                src: cur,
-                                imm: shift,
-                            });
-                            let folded = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Xor {
-                                dst: folded,
-                                lhs: cur,
-                                rhs: shifted,
-                            });
-                            cur = folded;
-                        }
-                    }
-                    // Extract bit 0
-                    ctx.emit_and_imm(block, dst_vreg, cur, 1);
+                    // Uses x86 POPCNT (SSE4.2) for single-instruction parity.
+                    let pc = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Popcnt { dst: pc, src: src_vreg });
+                    ctx.emit_and_imm(block, dst_vreg, pc, 1);
+                    ctx.known_bits.insert(dst_vreg, 1);
                 }
             }
 
