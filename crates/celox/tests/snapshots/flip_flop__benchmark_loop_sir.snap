@@ -57,16 +57,7 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       Branch(r1 ? b1 : b2)
     b1:
       r2 = SIRValue(0x0)
-      r3 = SIRValue(0x0)
-      r4 = SIRValue(0x0)
-      r5 = SIRValue(0x0)
-      r6 = SIRValue(0x0)
-      r7 = SIRValue(0x0)
-      r8 = SIRValue(0x0)
-      r9 = SIRValue(0x0)
-      r10 = SIRValue(0x0)
-      r11 = SIRValue(0x0)
-      r43 = Concat(r11, r10, r9, r8, r7, r6, r5, r4, r3, r2)
+      r43 = Concat(r2, r2, r2, r2, r2, r2, r2, r2, r2, r2)
       Store(addr=cnt (region=0), offset=0, bits=320, src_reg = 43)
       Jump(b3)
     b2:
@@ -81,25 +72,16 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r13 = SIRValue(0x1)
       r14 = r12 Add r13
       r36 = Load(addr=cnt (region=0), offset=256, bits=32)
-      r16 = SIRValue(0x1)
-      r17 = r15 Add r16
+      r17 = r15 Add r13
       r39 = Load(addr=cnt (region=0), offset=288, bits=32)
-      r19 = SIRValue(0x1)
-      r20 = r18 Add r19
-      r22 = SIRValue(0x1)
-      r23 = r21 Add r22
-      r25 = SIRValue(0x1)
-      r26 = r24 Add r25
-      r28 = SIRValue(0x1)
-      r29 = r27 Add r28
-      r31 = SIRValue(0x1)
-      r32 = r30 Add r31
-      r34 = SIRValue(0x1)
-      r35 = r33 Add r34
-      r37 = SIRValue(0x1)
-      r38 = r36 Add r37
-      r40 = SIRValue(0x1)
-      r41 = r39 Add r40
+      r20 = r18 Add r13
+      r23 = r21 Add r13
+      r26 = r24 Add r13
+      r29 = r27 Add r13
+      r32 = r30 Add r13
+      r35 = r33 Add r13
+      r38 = r36 Add r13
+      r41 = r39 Add r13
       r42 = Concat(r41, r38, r35, r32, r29, r26, r23, r20, r17, r14)
       Store(addr=cnt (region=0), offset=0, bits=320, src_reg = 42)
       Jump(b3)
@@ -159,16 +141,7 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       Branch(r1 ? b1 : b2)
     b1:
       r2 = SIRValue(0x0)
-      r3 = SIRValue(0x0)
-      r4 = SIRValue(0x0)
-      r5 = SIRValue(0x0)
-      r6 = SIRValue(0x0)
-      r7 = SIRValue(0x0)
-      r8 = SIRValue(0x0)
-      r9 = SIRValue(0x0)
-      r10 = SIRValue(0x0)
-      r11 = SIRValue(0x0)
-      r43 = Concat(r11, r10, r9, r8, r7, r6, r5, r4, r3, r2)
+      r43 = Concat(r2, r2, r2, r2, r2, r2, r2, r2, r2, r2)
       Store(addr=cnt (region=0), offset=0, bits=320, src_reg = 43)
       Jump(b3)
     b2:
@@ -183,25 +156,16 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r13 = SIRValue(0x1)
       r14 = r12 Add r13
       r36 = Load(addr=cnt (region=0), offset=256, bits=32)
-      r16 = SIRValue(0x1)
-      r17 = r15 Add r16
+      r17 = r15 Add r13
       r39 = Load(addr=cnt (region=0), offset=288, bits=32)
-      r19 = SIRValue(0x1)
-      r20 = r18 Add r19
-      r22 = SIRValue(0x1)
-      r23 = r21 Add r22
-      r25 = SIRValue(0x1)
-      r26 = r24 Add r25
-      r28 = SIRValue(0x1)
-      r29 = r27 Add r28
-      r31 = SIRValue(0x1)
-      r32 = r30 Add r31
-      r34 = SIRValue(0x1)
-      r35 = r33 Add r34
-      r37 = SIRValue(0x1)
-      r38 = r36 Add r37
-      r40 = SIRValue(0x1)
-      r41 = r39 Add r40
+      r20 = r18 Add r13
+      r23 = r21 Add r13
+      r26 = r24 Add r13
+      r29 = r27 Add r13
+      r32 = r30 Add r13
+      r35 = r33 Add r13
+      r38 = r36 Add r13
+      r41 = r39 Add r13
       r42 = Concat(r41, r38, r35, r32, r29, r26, r23, r20, r17, r14)
       Store(addr=cnt (region=0), offset=0, bits=320, src_reg = 42)
       Jump(b3)
@@ -264,16 +228,7 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       Branch(r1 ? b1 : b2)
     b1:
       r2 = SIRValue(0x0)
-      r3 = SIRValue(0x0)
-      r4 = SIRValue(0x0)
-      r5 = SIRValue(0x0)
-      r6 = SIRValue(0x0)
-      r7 = SIRValue(0x0)
-      r8 = SIRValue(0x0)
-      r9 = SIRValue(0x0)
-      r10 = SIRValue(0x0)
-      r11 = SIRValue(0x0)
-      r43 = Concat(r11, r10, r9, r8, r7, r6, r5, r4, r3, r2)
+      r43 = Concat(r2, r2, r2, r2, r2, r2, r2, r2, r2, r2)
       Store(addr=cnt (region=1), offset=0, bits=320, src_reg = 43)
       Jump(b3)
     b2:
@@ -288,25 +243,16 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r13 = SIRValue(0x1)
       r14 = r12 Add r13
       r36 = Load(addr=cnt (region=0), offset=256, bits=32)
-      r16 = SIRValue(0x1)
-      r17 = r15 Add r16
+      r17 = r15 Add r13
       r39 = Load(addr=cnt (region=0), offset=288, bits=32)
-      r19 = SIRValue(0x1)
-      r20 = r18 Add r19
-      r22 = SIRValue(0x1)
-      r23 = r21 Add r22
-      r25 = SIRValue(0x1)
-      r26 = r24 Add r25
-      r28 = SIRValue(0x1)
-      r29 = r27 Add r28
-      r31 = SIRValue(0x1)
-      r32 = r30 Add r31
-      r34 = SIRValue(0x1)
-      r35 = r33 Add r34
-      r37 = SIRValue(0x1)
-      r38 = r36 Add r37
-      r40 = SIRValue(0x1)
-      r41 = r39 Add r40
+      r20 = r18 Add r13
+      r23 = r21 Add r13
+      r26 = r24 Add r13
+      r29 = r27 Add r13
+      r32 = r30 Add r13
+      r35 = r33 Add r13
+      r38 = r36 Add r13
+      r41 = r39 Add r13
       r42 = Concat(r41, r38, r35, r32, r29, r26, r23, r20, r17, r14)
       Store(addr=cnt (region=1), offset=0, bits=320, src_reg = 42)
       Jump(b3)
@@ -367,16 +313,7 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       Branch(r1 ? b1 : b2)
     b1:
       r2 = SIRValue(0x0)
-      r3 = SIRValue(0x0)
-      r4 = SIRValue(0x0)
-      r5 = SIRValue(0x0)
-      r6 = SIRValue(0x0)
-      r7 = SIRValue(0x0)
-      r8 = SIRValue(0x0)
-      r9 = SIRValue(0x0)
-      r10 = SIRValue(0x0)
-      r11 = SIRValue(0x0)
-      r43 = Concat(r11, r10, r9, r8, r7, r6, r5, r4, r3, r2)
+      r43 = Concat(r2, r2, r2, r2, r2, r2, r2, r2, r2, r2)
       Store(addr=cnt (region=1), offset=0, bits=320, src_reg = 43)
       Jump(b3)
     b2:
@@ -391,25 +328,16 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r13 = SIRValue(0x1)
       r14 = r12 Add r13
       r36 = Load(addr=cnt (region=0), offset=256, bits=32)
-      r16 = SIRValue(0x1)
-      r17 = r15 Add r16
+      r17 = r15 Add r13
       r39 = Load(addr=cnt (region=0), offset=288, bits=32)
-      r19 = SIRValue(0x1)
-      r20 = r18 Add r19
-      r22 = SIRValue(0x1)
-      r23 = r21 Add r22
-      r25 = SIRValue(0x1)
-      r26 = r24 Add r25
-      r28 = SIRValue(0x1)
-      r29 = r27 Add r28
-      r31 = SIRValue(0x1)
-      r32 = r30 Add r31
-      r34 = SIRValue(0x1)
-      r35 = r33 Add r34
-      r37 = SIRValue(0x1)
-      r38 = r36 Add r37
-      r40 = SIRValue(0x1)
-      r41 = r39 Add r40
+      r20 = r18 Add r13
+      r23 = r21 Add r13
+      r26 = r24 Add r13
+      r29 = r27 Add r13
+      r32 = r30 Add r13
+      r35 = r33 Add r13
+      r38 = r36 Add r13
+      r41 = r39 Add r13
       r42 = Concat(r41, r38, r35, r32, r29, r26, r23, r20, r17, r14)
       Store(addr=cnt (region=1), offset=0, bits=320, src_reg = 42)
       Jump(b3)

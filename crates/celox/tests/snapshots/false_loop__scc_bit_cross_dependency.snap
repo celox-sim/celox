@@ -67,25 +67,14 @@ Execution Unit 0:
     Store(addr=v (region=0), offset=1, bits=1, src_reg = 8)
     r36 = SIRValue(0x1)
     r9 = r32 And r36
-    r11 = SIRValue(0x0)
-    r12 = r11 Sub r0
-    r13 = BitNot r12
-    r14 = r12 And r9
-    r15 = r13 And r8
+    r14 = r4 And r9
+    r15 = r5 And r8
     r16 = r14 Or r15
     Store(addr=v (region=0), offset=0, bits=1, src_reg = 16)
-    r18 = SIRValue(0x0)
-    r19 = r18 Sub r0
-    r20 = BitNot r19
-    r21 = r19 And r16
-    r22 = r20 And r2
-    r23 = r21 Or r22
-    r25 = SIRValue(0x0)
-    r26 = r25 Sub r0
-    r27 = BitNot r26
-    r28 = r26 And r9
-    r29 = r27 And r23
-    r30 = r28 Or r29
+    r21 = r4 And r16
+    r23 = r21 Or r7
+    r29 = r5 And r23
+    r30 = r14 Or r29
     r37 = Concat(r23, r30)
     Store(addr=v (region=0), offset=0, bits=2, src_reg = 37)
     Store(addr=o (region=0), offset=0, bits=2, src_reg = 37)

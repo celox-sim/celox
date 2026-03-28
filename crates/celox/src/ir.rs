@@ -689,6 +689,24 @@ pub enum BinaryOp {
     NeWildcard,
 }
 
+impl BinaryOp {
+    /// Whether the operation is commutative (a op b == b op a).
+    pub fn is_commutative(&self) -> bool {
+        matches!(
+            self,
+            BinaryOp::Add
+                | BinaryOp::Mul
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::LogicAnd
+                | BinaryOp::LogicOr
+        )
+    }
+}
+
 impl fmt::Display for BinaryOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let op_str = match self {
