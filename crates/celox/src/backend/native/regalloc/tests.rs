@@ -4,12 +4,16 @@ use super::analysis;
 use crate::backend::native::mir::*;
 
     /// Build a simple MFunction with one block, run regalloc, verify.
-    fn run_and_verify(insts: Vec<MInst>, spill_descs: Vec<SpillDesc>) -> AssignmentMap {
-        let mut vregs = VRegAllocator::new();
-        // Pre-allocate VRegs to match spill_descs length
-        while (vregs.count() as usize) < spill_descs.len() {
-            vregs.alloc();
+    fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> AssignmentMap {
+        // Find the max VReg number used in instructions
+        let mut max_vreg = spill_descs.len() as u32;
+        for inst in &insts {
+            if let Some(d) = inst.def() { max_vreg = max_vreg.max(d.0 + 1); }
+            for u in inst.uses() { max_vreg = max_vreg.max(u.0 + 1); }
         }
+        let mut vregs = VRegAllocator::new();
+        while vregs.count() < max_vreg { vregs.alloc(); }
+        while spill_descs.len() < max_vreg as usize { spill_descs.push(SpillDesc::transient()); }
         let mut func = MFunction::new(vregs, spill_descs);
         let mut block = MBlock::new(BlockId(0));
         for inst in insts {
@@ -106,13 +110,12 @@ use crate::backend::native::mir::*;
     }
 
     #[test]
-    #[ignore = "unified allocator has edge case with shift + high pressure — to fix"]
     fn test_shift_with_pressure() {
         // Many live VRegs + shift instruction = tests RCX blocked set + spilling
         let mut insts = Vec::new();
         let mut descs = Vec::new();
         // Create 10 live values (leaving room for shift overhead)
-        for i in 0..10 {
+        for i in 0..10u32 {
             insts.push(MInst::LoadImm { dst: VReg(i), value: i as u64 });
             descs.push(SpillDesc::remat(i as u64));
         }
@@ -123,8 +126,8 @@ use crate::backend::native::mir::*;
 
         // Use remaining values after the shift (so they're live across it)
         let mut acc = shift_dst;
-        for i in 2..10 {
-            let dst = VReg(11 + i as u32);
+        for i in 2..10u32 {
+            let dst = VReg(11 + i);
             insts.push(MInst::Add { dst, lhs: acc, rhs: VReg(i) });
             descs.push(SpillDesc::transient());
             acc = dst;
@@ -133,11 +136,29 @@ use crate::backend::native::mir::*;
             base: BaseReg::SimState, offset: 0, src: acc, size: OpSize::S64,
         });
 
-        let asgn = run_and_verify(insts, descs);
-        // Shift rhs should be in RCX
-        // (might be a fresh copy if unified allocator created one)
-        // The verifier passing is the main assertion.
-        let _ = asgn;
+        // Build function. Ensure VReg counter is past all used VRegs.
+        let max_vreg = 21u32; // v0..v20 used in the test
+        let mut vregs = VRegAllocator::new();
+        while (vregs.count()) < max_vreg { vregs.alloc(); }
+        while descs.len() < max_vreg as usize { descs.push(SpillDesc::transient()); }
+        let mut func = MFunction::new(vregs, descs);
+        let mut block = MBlock::new(BlockId(0));
+        for inst in insts { block.push(inst); }
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let analysis_pre = analysis::analyze(&func);
+        let (assignment, _) = super::unified::unified_alloc(&mut func, &analysis_pre);
+
+        // Dump
+        for (ii, inst) in func.blocks[0].insts.iter().enumerate() {
+            let r = inst.def().and_then(|d| assignment.get(d));
+            eprintln!("  [{ii:3}] {inst}  => {r:?}");
+        }
+
+        // Verify
+        let analysis = analysis::analyze(&func);
+        super::verify_assignment(&func, &analysis, &assignment);
     }
 
     #[test]
