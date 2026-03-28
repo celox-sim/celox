@@ -1323,7 +1323,6 @@ fn lower_instruction(
                     }
 
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                    // Use ShrImm if shift amount is a known constant (avoids CL clobber issues)
                     if let Some(&shift_amt) = ctx.consts.get(rhs) {
                         block.push(MInst::ShrImm {
                             dst: shifted,
@@ -1331,8 +1330,6 @@ fn lower_instruction(
                             imm: shift_amt as u8,
                         });
                     } else {
-                        // Copy rhs to fresh VReg so assignment can place it in RCX
-                        // without clobbering the original (which may be live).
                         let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
                         block.push(MInst::Shr {
