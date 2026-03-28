@@ -77,6 +77,7 @@ pub fn lower_execution_unit(
         register_types: &eu.register_map,
         layout,
         wide_regs: WideRegMap::default(),
+        reg_addrs: crate::HashMap::default(),
         consts: ConstMap::default(),
     };
 
@@ -84,6 +85,18 @@ pub fn lower_execution_unit(
         let sir_block = &eu.blocks[&sir_block_id];
         let mir_block_id = BlockId(sir_block_id.0 as u32);
         let mut mblock = MBlock::new(mir_block_id);
+
+        // Pre-scan: record Store target addresses for Slice memory fallback.
+        // When SIR does Store(addr, ..., src_reg, ...) followed by
+        // Slice(dst, var_reg, ...), we need to know var_reg's addr.
+        // SIR Load(var_reg, addr, ...) gives us var_reg → addr.
+        // But if there's no Load (only Store + Slice), we scan for
+        // Store instructions that write to the same addr as a Slice's src.
+        for inst in &sir_block.instructions {
+            if let SIRInstruction::Load(dst, addr, _, _) = inst {
+                ctx.reg_addrs.insert(*dst, addr.clone());
+            }
+        }
 
         // Lower instructions
         for inst in &sir_block.instructions {
@@ -180,6 +193,9 @@ struct ISelContext<'a> {
     wide_regs: WideRegMap,
     /// Known constant values for SIR registers (from Imm, Mul of constants, etc.)
     consts: ConstMap,
+    /// RegisterId → sim state address, recorded at Store instructions.
+    /// Used by Slice to load directly from memory instead of stale VRegs.
+    reg_addrs: crate::HashMap<RegisterId, RegionedAbsoluteAddr>,
 }
 
 impl<'a> ISelContext<'a> {
@@ -309,6 +325,7 @@ fn lower_instruction(
         }
 
         SIRInstruction::Load(dst, addr, offset, width_bits) => {
+            ctx.reg_addrs.insert(*dst, addr.clone());
             let vreg = ctx.reg_map.get(*dst);
 
             match offset {
@@ -1346,6 +1363,42 @@ fn lower_instruction(
         SIRInstruction::Slice(dst, src, bit_offset, width) => {
             let dst_vreg = ctx.reg_map.get(*dst);
             let src_width = ctx.sir_width(src);
+
+            // If src has a known sim-state address (from a preceding Load/Store)
+            // and no wide_regs entry, load directly from memory. This handles
+            // the case where partial Stores updated memory but not VRegs.
+            if *width <= 64 && !ctx.wide_regs.contains_key(src) {
+                if let Some(addr) = ctx.reg_addrs.get(src).cloned() {
+                    let byte_off = ctx.byte_offset(&addr, *bit_offset);
+                    let intra_byte = *bit_offset % 8;
+                    if intra_byte == 0 && OpSize::from_bits(*width).is_some() {
+                        block.push(MInst::Load {
+                            dst: dst_vreg,
+                            base: BaseReg::SimState,
+                            offset: byte_off,
+                            size: OpSize::from_bits(*width).unwrap(),
+                        });
+                    } else {
+                        let load_width = *width + intra_byte;
+                        let load_size = ISelContext::op_size_for_width(load_width);
+                        let tmp = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Load {
+                            dst: tmp, base: BaseReg::SimState,
+                            offset: byte_off, size: load_size,
+                        });
+                        if intra_byte > 0 {
+                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::ShrImm { dst: shifted, src: tmp, imm: intra_byte as u8 });
+                            let mask = mask_for_width(*width);
+                            block.push(MInst::AndImm { dst: dst_vreg, src: shifted, imm: mask });
+                        } else {
+                            let mask = mask_for_width(*width);
+                            block.push(MInst::AndImm { dst: dst_vreg, src: tmp, imm: mask });
+                        }
+                    }
+                    return;
+                }
+            }
 
             if *width <= 64 && src_width <= 64 {
                 let src_vreg = ctx.reg_map.get(*src);

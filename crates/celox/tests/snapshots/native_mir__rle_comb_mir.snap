@@ -26,19 +26,21 @@ bb0:
     v0 -> rax
     v1 -> rdx
     v2 -> rax
-    v3 -> rax
+    v3 -> rsi
   x86-64 disassembly:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
   0x00000009  mov eax,[r15]
   0x0000000c  mov edx,[r15+8]
-  0x00000010  add rax,rdx
-  0x00000013  and eax,0FFFFFFFFh
-  0x00000018  mov [r15+0Ch],eax
-  0x0000001c  mov [r15+4],eax
-  0x00000020  xor eax,eax
-  0x00000022  jmp short 0000000000000024h
-  0x00000024  add rsp,8
-  0x00000028  pop r15
-  0x0000002a  ret
+  0x00000010  mov rsi,rax
+  0x00000013  add rsi,rdx
+  0x00000016  mov rax,rsi
+  0x00000019  and eax,0FFFFFFFFh
+  0x0000001e  mov [r15+0Ch],eax
+  0x00000022  mov [r15+4],eax
+  0x00000026  xor eax,eax
+  0x00000028  jmp short 000000000000002Ah
+  0x0000002a  add rsp,8
+  0x0000002e  pop r15
+  0x00000030  ret

@@ -42,27 +42,33 @@ bb0:
     v4 -> rdx
     v5 -> rax
     v6 -> rdx
-    v7 -> rax
-    v8 -> rdx
-    v9 -> rax
+    v7 -> rsi
+    v8 -> rsi
+    v9 -> rsi
   x86-64 disassembly:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
   0x00000009  mov eax,[r15]
   0x0000000c  mov edx,[r15+8]
-  0x00000010  add rax,rdx
-  0x00000013  and eax,0FFFFFFFFh
-  0x00000018  mov edx,2
-  0x0000001d  or rdx,rax
-  0x00000020  and edx,0FFFFFFFFh
-  0x00000023  mov [r15+0Ch],edx
-  0x00000027  mov edx,1
-  0x0000002c  and rax,rdx
-  0x0000002f  and eax,0FFFFFFFFh
-  0x00000034  mov [r15+4],eax
-  0x00000038  xor eax,eax
-  0x0000003a  jmp short 000000000000003Ch
-  0x0000003c  add rsp,8
-  0x00000040  pop r15
-  0x00000042  ret
+  0x00000010  mov rsi,rax
+  0x00000013  add rsi,rdx
+  0x00000016  mov rax,rsi
+  0x00000019  and eax,0FFFFFFFFh
+  0x0000001e  mov edx,2
+  0x00000023  mov rsi,rax
+  0x00000026  or rsi,rdx
+  0x00000029  mov rdx,rsi
+  0x0000002c  and edx,0FFFFFFFFh
+  0x0000002f  mov [r15+0Ch],edx
+  0x00000033  mov edx,1
+  0x00000038  mov rsi,rax
+  0x0000003b  and rsi,rdx
+  0x0000003e  mov rax,rsi
+  0x00000041  and eax,0FFFFFFFFh
+  0x00000046  mov [r15+4],eax
+  0x0000004a  xor eax,eax
+  0x0000004c  jmp short 000000000000004Eh
+  0x0000004e  add rsp,8
+  0x00000052  pop r15
+  0x00000054  ret
