@@ -7,6 +7,8 @@ mod analysis;
 pub mod assignment;
 mod spilling;
 mod unified;
+#[cfg(test)]
+mod tests;
 
 use super::mir::MFunction;
 pub use assignment::AssignmentMap;
