@@ -10,6 +10,45 @@ use std::fmt;
 use crate::ir::RegionedAbsoluteAddr;
 
 // ────────────────────────────────────────────────────────────────
+// Uses: stack-allocated list of VReg operands (no heap allocation)
+// ────────────────────────────────────────────────────────────────
+
+/// Stack-allocated list of up to 3 VReg uses. Avoids Vec heap allocation
+/// in the regalloc inner loop.
+pub struct Uses {
+    buf: [VReg; 3],
+    len: u8,
+}
+
+impl Uses {
+    #[inline] pub fn none() -> Self { Self { buf: [VReg(0); 3], len: 0 } }
+    #[inline] pub fn one(a: VReg) -> Self { Self { buf: [a, VReg(0), VReg(0)], len: 1 } }
+    #[inline] pub fn two(a: VReg, b: VReg) -> Self { Self { buf: [a, b, VReg(0)], len: 2 } }
+    #[inline] pub fn three(a: VReg, b: VReg, c: VReg) -> Self { Self { buf: [a, b, c], len: 3 } }
+    #[inline] pub fn len(&self) -> usize { self.len as usize }
+    #[inline] pub fn is_empty(&self) -> bool { self.len == 0 }
+    #[inline] pub fn contains(&self, v: &VReg) -> bool { self.iter().any(|u| u == v) }
+    #[inline] pub fn iter(&self) -> impl Iterator<Item = &VReg> { self.buf[..self.len as usize].iter() }
+}
+
+impl std::ops::Deref for Uses {
+    type Target = [VReg];
+    fn deref(&self) -> &[VReg] { &self.buf[..self.len as usize] }
+}
+
+impl<'a> IntoIterator for &'a Uses {
+    type Item = &'a VReg;
+    type IntoIter = std::slice::Iter<'a, VReg>;
+    fn into_iter(self) -> Self::IntoIter { self.buf[..self.len as usize].iter() }
+}
+
+impl IntoIterator for Uses {
+    type Item = VReg;
+    type IntoIter = std::iter::Take<std::array::IntoIter<VReg, 3>>;
+    fn into_iter(self) -> Self::IntoIter { self.buf.into_iter().take(self.len as usize) }
+}
+
+// ────────────────────────────────────────────────────────────────
 // Virtual register
 // ────────────────────────────────────────────────────────────────
 
@@ -484,14 +523,14 @@ impl MInst {
     }
 
     /// Returns all VRegs used (read) by this instruction.
-    pub fn uses(&self) -> Vec<VReg> {
+    /// Returns the VRegs used by this instruction (max 3, no heap allocation).
+    pub fn uses(&self) -> Uses {
         match self {
-            MInst::Mov { src, .. } => vec![*src],
-            MInst::LoadImm { .. } => vec![],
-            MInst::Load { .. } => vec![],
-            MInst::Store { src, .. } => vec![*src],
-            MInst::LoadIndexed { index, .. } => vec![*index],
-            MInst::StoreIndexed { index, src, .. } => vec![*index, *src],
+            MInst::Mov { src, .. } => Uses::one(*src),
+            MInst::LoadImm { .. } | MInst::Load { .. } => Uses::none(),
+            MInst::Store { src, .. } => Uses::one(*src),
+            MInst::LoadIndexed { index, .. } => Uses::one(*index),
+            MInst::StoreIndexed { index, src, .. } => Uses::two(*index, *src),
             MInst::Add { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
             | MInst::Mul { lhs, rhs, .. }
@@ -501,24 +540,20 @@ impl MInst {
             | MInst::Xor { lhs, rhs, .. }
             | MInst::Shr { lhs, rhs, .. }
             | MInst::Shl { lhs, rhs, .. }
-            | MInst::Sar { lhs, rhs, .. } => vec![*lhs, *rhs],
-            MInst::Cmp { lhs, rhs, .. }
+            | MInst::Sar { lhs, rhs, .. }
+            | MInst::Cmp { lhs, rhs, .. }
             | MInst::UDiv { lhs, rhs, .. }
-            | MInst::URem { lhs, rhs, .. } => vec![*lhs, *rhs],
+            | MInst::URem { lhs, rhs, .. } => Uses::two(*lhs, *rhs),
             MInst::AndImm { src, .. }
             | MInst::OrImm { src, .. }
             | MInst::ShrImm { src, .. }
             | MInst::ShlImm { src, .. }
-            | MInst::SarImm { src, .. } => vec![*src],
-            MInst::BitNot { src, .. } | MInst::Neg { src, .. } => vec![*src],
-            MInst::Select {
-                cond,
-                true_val,
-                false_val,
-                ..
-            } => vec![*cond, *true_val, *false_val],
-            MInst::Branch { cond, .. } => vec![*cond],
-            MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => vec![],
+            | MInst::SarImm { src, .. }
+            | MInst::BitNot { src, .. }
+            | MInst::Neg { src, .. } => Uses::one(*src),
+            MInst::Select { cond, true_val, false_val, .. } => Uses::three(*cond, *true_val, *false_val),
+            MInst::Branch { cond, .. } => Uses::one(*cond),
+            MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => Uses::none(),
         }
     }
 

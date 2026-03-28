@@ -854,7 +854,6 @@ fn emit_and_imm64(
         };
         asm.and(d32, imm as i32)?;
     } else {
-        
         panic!(
             "AndImm {imm:#x} exceeds u32: ISel should emit LoadImm + And instead"
         );

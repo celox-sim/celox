@@ -74,10 +74,10 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
     while changed {
         changed = false;
         iteration += 1;
-        if iteration > 100 {
-            // Safety valve — should converge quickly for reducible CFGs
-            break;
-        }
+        assert!(
+            iteration <= 100,
+            "liveness analysis did not converge after {iteration} iterations ({num_blocks} blocks)"
+        );
 
         // Process blocks in reverse post order (we iterate backwards)
         for bi in (0..num_blocks).rev() {
