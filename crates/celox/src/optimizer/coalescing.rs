@@ -17,6 +17,7 @@ mod pass_optimize_blocks;
 mod pass_partial_forward;
 mod pass_reschedule;
 mod pass_split_wide_commits;
+mod pass_concat_folding;
 mod pass_gvn;
 mod pass_store_load_forwarding;
 pub(crate) mod pass_tail_call_split;
@@ -35,6 +36,7 @@ use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_partial_forward::PartialForwardPass;
 use pass_reschedule::ReschedulePass;
 use pass_split_wide_commits::SplitWideCommitsPass;
+use pass_concat_folding::ConcatFoldingPass;
 use pass_gvn::GvnPass;
 use pass_store_load_forwarding::StoreLoadForwardingPass;
 
@@ -78,6 +80,7 @@ fn optimize_with_options(
         ff_passes.add_pass(StoreLoadForwardingPass);
     }
     ff_passes.add_pass(GvnPass);
+    ff_passes.add_pass(ConcatFoldingPass);
     if opt.hoist_common_branch_loads {
         ff_passes.add_pass(HoistCommonBranchLoadsPass);
     }
@@ -126,6 +129,7 @@ fn optimize_with_options(
         eval_only_passes.add_pass(StoreLoadForwardingPass);
     }
     eval_only_passes.add_pass(GvnPass);
+    eval_only_passes.add_pass(ConcatFoldingPass);
     if opt.hoist_common_branch_loads {
         eval_only_passes.add_pass(HoistCommonBranchLoadsPass);
     }
@@ -202,6 +206,7 @@ fn optimize_with_options(
         comb_passes.add_pass(PartialForwardPass);
     }
     comb_passes.add_pass(GvnPass);
+    comb_passes.add_pass(ConcatFoldingPass);
     if opt.hoist_common_branch_loads {
         comb_passes.add_pass(HoistCommonBranchLoadsPass);
     }
