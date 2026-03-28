@@ -905,6 +905,7 @@ pub fn emit_chained_eus(
     let mut eu_codes: Vec<Vec<u8>> = Vec::new();
     for eu in units {
         let mut mfunc = isel::lower_execution_unit(eu, layout, four_state);
+        super::mir_opt::optimize(&mut mfunc);
         let ra = regalloc::run_regalloc(&mut mfunc);
 
         let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
