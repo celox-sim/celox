@@ -438,6 +438,18 @@ fn emit_inst(
         MInst::Mul { dst, lhs, rhs } => {
             emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Mul)?;
         }
+        MInst::UMulHi { dst, lhs, rhs } => {
+            // x86-64: mul r64 → RDX:RAX = RAX × r64. We want RDX (high 64).
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let l = preg_to_reg64(resolve(assignment, *lhs));
+            let r = preg_to_reg64(resolve(assignment, *rhs));
+            // mov rax, lhs
+            if rax != l { asm.mov(rax, l)?; }
+            // mul rhs → RDX:RAX
+            asm.mul(r)?;
+            // mov dst, rdx (high 64 bits)
+            if d != rdx { asm.mov(d, rdx)?; }
+        }
         MInst::And { dst, lhs, rhs } => {
             emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::And)?;
         }

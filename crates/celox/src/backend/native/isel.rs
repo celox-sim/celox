@@ -1796,7 +1796,63 @@ fn lower_wide_binary(
             ctx.set_wide_chunks(dst, dst_chunks);
         }
 
-        // For remaining wide ops (Mul, Div, Rem, etc.),
+        // Wide multiplication: schoolbook O(n²) using UMulHi for 64×64→128.
+        BinaryOp::Mul => {
+            let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
+            let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+
+            // Accumulator: n_chunks of VRegs initialized to 0
+            let mut acc: Vec<VReg> = (0..n_chunks).map(|_| {
+                let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: z, value: 0 });
+                z
+            }).collect();
+
+            for i in 0..n_chunks {
+                let a_i = ctx.wide_chunk_or_zero(&lhs_chunks, i, block);
+                let mut carry = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: carry, value: 0 });
+
+                for j in 0..n_chunks {
+                    let k = i + j;
+                    if k >= n_chunks { break; }
+
+                    let b_j = ctx.wide_chunk_or_zero(&rhs_chunks, j, block);
+
+                    // lo = a_i * b_j, hi = umulhi(a_i, b_j)
+                    let lo = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Mul { dst: lo, lhs: a_i, rhs: b_j });
+                    let hi = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::UMulHi { dst: hi, lhs: a_i, rhs: b_j });
+
+                    // sum1 = acc[k] + lo
+                    let sum1 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Add { dst: sum1, lhs: acc[k], rhs: lo });
+                    let c1 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: c1, lhs: sum1, rhs: acc[k], kind: CmpKind::LtU });
+
+                    // sum2 = sum1 + carry
+                    let sum2 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Add { dst: sum2, lhs: sum1, rhs: carry });
+                    let c2 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: c2, lhs: sum2, rhs: sum1, kind: CmpKind::LtU });
+
+                    acc[k] = sum2;
+
+                    // carry = hi + c1 + c2
+                    let carry1 = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Add { dst: carry1, lhs: hi, rhs: c1 });
+                    let new_carry = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Add { dst: new_carry, lhs: carry1, rhs: c2 });
+                    carry = new_carry;
+                }
+            }
+
+            let dst_chunks: Vec<(VReg, usize)> = acc.into_iter().map(|v| (v, 64)).collect();
+            ctx.set_wide_chunks(dst, dst_chunks);
+        }
+
+        // For remaining wide ops (Div, Rem, etc.),
         // fall back to scalar (truncated to 64-bit). This is incorrect but
         // prevents panics for unsupported operations.
         _ => {

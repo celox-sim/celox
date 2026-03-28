@@ -263,8 +263,10 @@ pub enum MInst {
     Add { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs - rhs
     Sub { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = lhs * rhs
+    /// dst = lhs * rhs (lower 64 bits)
     Mul { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = upper 64 bits of lhs * rhs (unsigned)
+    UMulHi { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs & rhs
     And { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs | rhs
@@ -381,6 +383,7 @@ impl fmt::Display for MInst {
             MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
             MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
             MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
+            MInst::UMulHi { dst, lhs, rhs } => write!(f, "{dst} = umulhi {lhs}, {rhs}"),
             MInst::And { dst, lhs, rhs } => write!(f, "{dst} = and {lhs}, {rhs}"),
             MInst::Or { dst, lhs, rhs } => write!(f, "{dst} = or {lhs}, {rhs}"),
             MInst::Xor { dst, lhs, rhs } => write!(f, "{dst} = xor {lhs}, {rhs}"),
@@ -474,6 +477,7 @@ impl MInst {
             | MInst::Add { dst, .. }
             | MInst::Sub { dst, .. }
             | MInst::Mul { dst, .. }
+            | MInst::UMulHi { dst, .. }
             | MInst::And { dst, .. }
             | MInst::Or { dst, .. }
             | MInst::Xor { dst, .. }
@@ -514,6 +518,7 @@ impl MInst {
             MInst::Add { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
             | MInst::Mul { lhs, rhs, .. }
+            | MInst::UMulHi { lhs, rhs, .. }
             | MInst::And { lhs, rhs, .. }
             | MInst::Or { lhs, rhs, .. }
             | MInst::Xor { lhs, rhs, .. }
@@ -560,6 +565,7 @@ impl MInst {
             MInst::Add { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
             | MInst::Mul { lhs, rhs, .. }
+            | MInst::UMulHi { lhs, rhs, .. }
             | MInst::And { lhs, rhs, .. }
             | MInst::Or { lhs, rhs, .. }
             | MInst::Xor { lhs, rhs, .. }
