@@ -182,7 +182,6 @@ fn emit_phi_moves(
     func: &MFunction,
     assignment: &AssignmentMap,
 ) -> Result<(), IcedError> {
-    // Collect target block IDs from the terminator
     let targets: Vec<BlockId> = match terminator {
         MInst::Jump { target } => vec![*target],
         MInst::Branch { true_bb, false_bb, .. } => vec![*true_bb, *false_bb],
@@ -192,16 +191,60 @@ fn emit_phi_moves(
     for target_id in targets {
         let target_block = func.blocks.iter().find(|b| b.id == target_id);
         let Some(target_block) = target_block else { continue };
+
+        // Collect parallel copies: (dst_preg, src_preg)
+        let mut copies: Vec<(PhysReg, PhysReg)> = Vec::new();
         for phi in &target_block.phis {
             for (source_pred, source_vreg) in &phi.sources {
                 if *source_pred == pred_block_id {
                     let src_preg = resolve(assignment, *source_vreg);
                     let dst_preg = resolve(assignment, phi.dst);
                     if src_preg != dst_preg {
-                        let src_reg = preg_to_reg64(src_preg);
-                        let dst_reg = preg_to_reg64(dst_preg);
-                        asm.mov(dst_reg, src_reg)?;
+                        copies.push((dst_preg, src_preg));
                     }
+                }
+            }
+        }
+
+        // Sequentialize parallel copies, handling cycles with xchg.
+        //
+        // Algorithm: repeatedly emit copies whose dst is not a src of any
+        // remaining copy (safe to overwrite). When only cycles remain,
+        // break them with xchg.
+        let mut done = vec![false; copies.len()];
+        let mut progress = true;
+        while progress {
+            progress = false;
+            for i in 0..copies.len() {
+                if done[i] { continue; }
+                let (dst, _src) = copies[i];
+                // Check if dst is used as src by any other pending copy
+                let dst_is_src = copies.iter().enumerate().any(|(j, (_, s))| {
+                    j != i && !done[j] && *s == dst
+                });
+                if !dst_is_src {
+                    // Safe to emit: no other copy reads from dst
+                    let (d, s) = copies[i];
+                    asm.mov(preg_to_reg64(d), preg_to_reg64(s))?;
+                    done[i] = true;
+                    progress = true;
+                }
+            }
+        }
+
+        // Remaining undone copies form cycles; break with xchg
+        for i in 0..copies.len() {
+            if done[i] { continue; }
+            let (d, s) = copies[i];
+            asm.xchg(preg_to_reg64(d), preg_to_reg64(s))?;
+            done[i] = true;
+            // Update remaining copies that reference d or s
+            for j in (i + 1)..copies.len() {
+                if done[j] { continue; }
+                if copies[j].1 == d {
+                    copies[j].1 = s; // src was in d, now in s after xchg
+                } else if copies[j].1 == s {
+                    copies[j].1 = d; // src was in s, now in d after xchg
                 }
             }
         }
@@ -440,14 +483,25 @@ fn emit_inst(
         }
         MInst::UMulHi { dst, lhs, rhs } => {
             // x86-64: mul r64 → RDX:RAX = RAX × r64. We want RDX (high 64).
+            // Must handle aliasing: lhs/rhs may be in RAX or RDX.
             let d = preg_to_reg64(resolve(assignment, *dst));
             let l = preg_to_reg64(resolve(assignment, *lhs));
             let r = preg_to_reg64(resolve(assignment, *rhs));
-            // mov rax, lhs
-            if rax != l { asm.mov(rax, l)?; }
-            // mul rhs → RDX:RAX
-            asm.mul(r)?;
-            // mov dst, rdx (high 64 bits)
+
+            if r == rax && l != rax {
+                // rhs is in RAX; mov rax, lhs would clobber rhs.
+                // mul is commutative: swap operands → mul l
+                asm.mov(rax, r)?; // nop if r==rax, but l!=rax
+                // Actually r==rax already, so just mul l
+                asm.mul(l)?;
+            } else if r == rax && l == rax {
+                // Both in RAX: mul rax = rax*rax
+                asm.mul(rax)?;
+            } else {
+                // Normal case: mov rax, lhs; mul rhs
+                if rax != l { asm.mov(rax, l)?; }
+                asm.mul(r)?;
+            }
             if d != rdx { asm.mov(d, rdx)?; }
         }
         MInst::And { dst, lhs, rhs } => {
@@ -488,7 +542,7 @@ fn emit_inst(
             if d != s {
                 asm.mov(d, s)?;
             }
-            asm.or(d, *imm as i32)?;
+            emit_or_imm64(asm, d, *imm)?;
         }
         MInst::ShrImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
@@ -800,6 +854,31 @@ fn emit_binop_rr(
 
 /// Emit AND with a potentially 64-bit immediate.
 /// Uses the most efficient encoding available.
+fn emit_or_imm64(
+    asm: &mut CodeAssembler,
+    d: AsmRegister64,
+    imm: u64,
+) -> Result<(), IcedError> {
+    if imm == 0 {
+        return Ok(());
+    }
+    let signed = imm as i64;
+    if signed >= i32::MIN as i64 && signed <= i32::MAX as i64 {
+        asm.or(d, signed as i32)?;
+    } else {
+        // Full 64-bit immediate: currently unreachable from ISel.
+        // If this path becomes reachable, replace push/pop with a
+        // dedicated scratch slot in the frame to avoid corrupting
+        // spill slots.
+        let scratch = if d != rax { rax } else { rdx };
+        asm.push(scratch)?;
+        asm.mov(scratch, imm as i64)?;
+        asm.or(d, scratch)?;
+        asm.pop(scratch)?;
+    }
+    Ok(())
+}
+
 fn emit_and_imm64(
     asm: &mut CodeAssembler,
     d: AsmRegister64,
@@ -833,12 +912,14 @@ fn emit_and_imm64(
         };
         asm.and(d32, imm as i32)?;
     } else {
-        // Full 64-bit: load into scratch via push/pop trick or movabs.
-        // Use RAX as scratch if d != rax, otherwise use RDX.
-        // We save/restore the scratch via push/pop.
+        // Full 64-bit: currently unreachable from ISel (mask_for_width
+        // produces values that fit in i32, and u64::MAX is handled above).
+        // If this path becomes reachable, replace push/pop with a
+        // dedicated scratch slot in the frame to avoid corrupting
+        // spill slots.
         let scratch = if d != rax { rax } else { rdx };
         asm.push(scratch)?;
-        asm.mov(scratch, imm as i64)?; // movabs scratch, imm64
+        asm.mov(scratch, imm as i64)?;
         asm.and(d, scratch)?;
         asm.pop(scratch)?;
     }

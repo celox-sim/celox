@@ -1,7 +1,7 @@
 //! Instruction Selection: lowers SIR (bit-level SSA) to MIR (word-level SSA).
 //!
-//! Current scope: 2-state, ≤64-bit values only. 4-state and multi-word
-//! support will be added incrementally.
+//! Supports 2-state and 4-state (IEEE 1800) with full mask propagation.
+//! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 
 use crate::ir::{
     BinaryOp, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,

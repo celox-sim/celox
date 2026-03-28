@@ -512,7 +512,7 @@ fn evict_farthest(
             let effective_class = if s.contains(&v) { eviction_class.max(1) } else { eviction_class };
             (effective_class, next_use)
         })
-        .expect("no eviction victim");
+        .expect("no eviction victim: all VRegs in RegFile are pinned (used by current instruction)");
 
     emit_spill(new_insts, victim, s, func, slots, result);
     rf.evict(victim);
