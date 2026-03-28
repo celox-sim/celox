@@ -3129,7 +3129,11 @@ fn lower_wide_extract(
             }
         }
     } else {
-        unimplemented!("wide Slice with non-constant bit_offset is not yet supported in the native backend");
+        // Wide Shr with non-constant amount is handled by lower_wide_binary's
+        // runtime shift path. This code is only reachable if the narrow Binary
+        // handler's Shr detects lhs_width > 64, which is pre-empted by the wide
+        // dispatch at the top of the Binary handler.
+        unreachable!("wide extract with non-constant shift: should be handled by lower_wide_binary");
     }
 }
 
