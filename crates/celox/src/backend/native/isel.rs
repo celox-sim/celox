@@ -2024,7 +2024,18 @@ fn lower_wide_unary(
         }
         UnaryOp::Ident => {
             let src_chunks = ctx.get_wide_chunks(&src, block);
-            ctx.set_wide_chunks(dst, src_chunks);
+            // Zero-pad to n_chunks if source has fewer chunks (narrow→wide cast)
+            let mut dst_chunks = Vec::with_capacity(n_chunks);
+            for i in 0..n_chunks {
+                if i < src_chunks.len() {
+                    dst_chunks.push(src_chunks[i]);
+                } else {
+                    let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                    block.push(MInst::LoadImm { dst: z, value: 0 });
+                    dst_chunks.push((z, 64));
+                }
+            }
+            ctx.set_wide_chunks(dst, dst_chunks);
         }
         // Wide negation: two's complement = ~x + 1
         UnaryOp::Minus => {
