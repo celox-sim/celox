@@ -274,16 +274,16 @@ pub fn emit(
     let callee_saved = used_callee_saved(assignment);
     let callee_push_size = (callee_saved.len() as u32) * 8;
 
-    // Align frame: total = spill_frame_size + callee_push_size + 8 (return addr)
-    // Must be 16-byte aligned before any CALL (but we don't call anything).
-    // After push rbp + callee saves, RSP must be 16-byte aligned for SSE loads.
-    let total_push = callee_push_size + 8; // +8 for the return address on stack
-    let frame_size = if spill_frame_size == 0 {
-        if total_push % 16 != 0 { 8 } else { 0 }
-    } else {
-        let needed = spill_frame_size;
-        let misalign = (total_push + needed) % 16;
-        if misalign == 0 { needed } else { needed + (16 - misalign) }
+    // Reserve 8 bytes at the top of the frame as a scratch slot for
+    // emit_and_imm64 when the immediate exceeds i32/u32.
+    let scratch_frame_offset = spill_frame_size;
+    let needed_frame = spill_frame_size + 8;
+
+    // Align frame
+    let total_push = callee_push_size + 8;
+    let frame_size = {
+        let misalign = (total_push + needed_frame) % 16;
+        if misalign == 0 { needed_frame } else { needed_frame + (16 - misalign) }
     };
 
     // ── Prologue ──
@@ -332,7 +332,7 @@ pub fn emit(
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Rem)?;
                 }
                 _ => {
-                    emit_inst(&mut asm, inst, assignment, &mut block_labels)?;
+                    emit_inst(&mut asm, inst, assignment, &mut block_labels, scratch_frame_offset)?;
                 }
             }
         }
@@ -363,6 +363,7 @@ fn emit_inst(
     inst: &MInst,
     assignment: &AssignmentMap,
     block_labels: &mut BTreeMap<BlockId, CodeLabel>,
+    scratch_frame_offset: u32,
 ) -> Result<(), IcedError> {
     match inst {
         MInst::Mov { dst, src } => {
@@ -534,7 +535,7 @@ fn emit_inst(
             if d != s {
                 asm.mov(d, s)?;
             }
-            emit_and_imm64(asm, d, *imm)?;
+            emit_and_imm64(asm, d, *imm, scratch_frame_offset)?;
         }
         MInst::OrImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
@@ -612,20 +613,18 @@ fn emit_inst(
 
         MInst::BitFieldInsert { dst, base_word, val, shift, mask } => {
             // dst = (base_word & ~(mask << shift)) | ((val & mask) << shift)
+            // ISel guarantees: val is a fresh copy, mask << shift fits u32.
             let d = preg_to_reg64(resolve(assignment, *dst));
             let bw = preg_to_reg64(resolve(assignment, *base_word));
             let v = preg_to_reg64(resolve(assignment, *val));
 
             if v != d {
-                // ISel guarantees val is a fresh copy (dead after this BFI).
-                // 1. dst = base_word (may be no-op if d == bw)
-                if d != bw {
-                    asm.mov(d, bw)?;
-                }
+                // 1. dst = base_word
+                if d != bw { asm.mov(d, bw)?; }
                 // 2. Clear the field in dst
                 let clear_mask = !((*mask) << *shift);
-                emit_and_imm64(asm, d, clear_mask)?;
-                // 3. Prepare val (clobbers v, which is dead)
+                emit_and_imm64(asm, d, clear_mask, scratch_frame_offset)?;
+                // 3. Prepare val (clobbers v)
                 if *mask != u64::MAX {
                     asm.and(v, *mask as i32)?;
                 }
@@ -634,24 +633,17 @@ fn emit_inst(
                 }
                 asm.or(d, v)?;
             } else {
-                // v == d: val and dst alias (val dies here, dst is born).
-                // bw must be different since val and base_word are both live uses.
-                // Use XOR-based bitfield insert: result = bw ^ ((shifted_val ^ bw) & F)
-                // This formula doesn't clobber bw.
+                // v == d: use XOR-based bitfield insert.
                 debug_assert!(bw != d, "BFI: val and base_word should not alias");
-                // 1. d = (val & mask) << shift
                 if *mask != u64::MAX {
                     asm.and(d, *mask as i32)?;
                 }
                 if *shift > 0 {
                     asm.shl(d, *shift as u32)?;
                 }
-                // 2. d ^= bw
                 asm.xor(d, bw)?;
-                // 3. d &= field_mask
                 let field_mask = (*mask) << *shift;
-                emit_and_imm64(asm, d, field_mask)?;
-                // 4. d ^= bw → result
+                emit_and_imm64(asm, d, field_mask, scratch_frame_offset)?;
                 asm.xor(d, bw)?;
             }
         }
@@ -863,19 +855,12 @@ fn emit_or_imm64(
         return Ok(());
     }
     let signed = imm as i64;
-    if signed >= i32::MIN as i64 && signed <= i32::MAX as i64 {
-        asm.or(d, signed as i32)?;
-    } else {
-        // Full 64-bit immediate: currently unreachable from ISel.
-        // If this path becomes reachable, replace push/pop with a
-        // dedicated scratch slot in the frame to avoid corrupting
-        // spill slots.
-        let scratch = if d != rax { rax } else { rdx };
-        asm.push(scratch)?;
-        asm.mov(scratch, imm as i64)?;
-        asm.or(d, scratch)?;
-        asm.pop(scratch)?;
-    }
+    // ISel must decompose 64-bit OR immediates into LoadImm + Or.
+    assert!(
+        signed >= i32::MIN as i64 && signed <= i32::MAX as i64,
+        "OrImm {imm:#x} exceeds i32: ISel should emit LoadImm + Or instead"
+    );
+    asm.or(d, signed as i32)?;
     Ok(())
 }
 
@@ -883,6 +868,7 @@ fn emit_and_imm64(
     asm: &mut CodeAssembler,
     d: AsmRegister64,
     imm: u64,
+    scratch_frame_offset: u32,
 ) -> Result<(), IcedError> {
     if imm == u64::MAX {
         // AND with all-ones is a no-op
@@ -912,16 +898,12 @@ fn emit_and_imm64(
         };
         asm.and(d32, imm as i32)?;
     } else {
-        // Full 64-bit: currently unreachable from ISel (mask_for_width
-        // produces values that fit in i32, and u64::MAX is handled above).
-        // If this path becomes reachable, replace push/pop with a
-        // dedicated scratch slot in the frame to avoid corrupting
-        // spill slots.
+        // 64-bit immediate: save scratch reg to frame slot, use it as tmp.
         let scratch = if d != rax { rax } else { rdx };
-        asm.push(scratch)?;
+        asm.mov(qword_ptr(rsp + scratch_frame_offset as i32), scratch)?;
         asm.mov(scratch, imm as i64)?;
         asm.and(d, scratch)?;
-        asm.pop(scratch)?;
+        asm.mov(scratch, qword_ptr(rsp + scratch_frame_offset as i32))?;
     }
     Ok(())
 }
