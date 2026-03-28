@@ -306,12 +306,15 @@ fn process_block(
                     // Need to get use_vreg into required_preg
                     // First, free required_preg if occupied
                     if let Some(occupant) = rf.get_vreg(*required_preg) {
+                        // Spill the occupant first (so it can be reloaded later
+                        // if needed by subsequent instructions).
+                        emit_spill(&mut new_insts, occupant, &mut s, func, slots, result);
+
                         if pinned.contains(&occupant) {
-                            // Occupant is used by current instruction — can't spill.
-                            // Move it to a different register via a fresh VReg copy.
+                            // Occupant is used by current instruction — keep it
+                            // in a different register for this instruction only.
                             let move_blocked: BTreeSet<PhysReg> = [*required_preg].into();
                             if rf.occupancy() >= k {
-                                // Make room for the move target
                                 evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis,
                                     block_idx, inst_idx, slots, &pinned, &BTreeSet::new(), result);
                             }
@@ -329,8 +332,6 @@ fn process_block(
                             pinned.remove(&occupant);
                             pinned.insert(fresh_occ);
                         } else {
-                            // Occupant is not used by current instruction — spill it.
-                            emit_spill(&mut new_insts, occupant, &mut s, func, slots, result);
                             rf.evict(occupant);
                         }
                     }
