@@ -27,7 +27,7 @@ fn compile_and_run_inner(
     use celox::native_backend::{emit, isel, jit_mem, regalloc};
 
     let eu = &sir.eval_comb[0];
-    let mut mfunc = isel::lower_execution_unit(eu, &layout);
+    let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
 
     if debug {
         eprintln!("=== MIR ===\n{mfunc}");
@@ -269,7 +269,7 @@ fn test_debug_let_bitslice_write() {
     let layout = celox::MemoryLayout::build(&sir, false);
 
     for (eu_idx, eu) in sir.eval_comb.iter().enumerate() {
-        let mut mfunc = isel::lower_execution_unit(eu, &layout);
+        let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
         eprintln!("=== EU {eu_idx} MIR ===\n{mfunc}");
         let ra = regalloc::run_regalloc(&mut mfunc);
         eprintln!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);

@@ -40,6 +40,7 @@ impl RegMap {
 pub fn lower_execution_unit(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
+    four_state: bool,
 ) -> MFunction {
     let mut vregs = VRegAllocator::new();
     let mut spill_descs: Vec<SpillDesc> = Vec::new();
@@ -70,6 +71,16 @@ pub fn lower_execution_unit(
         }
     }
 
+    let mut mask_map = RegMap::new(max_sir_regs);
+    // Pre-allocate mask VRegs for 4-state
+    if four_state {
+        for sir_reg_id in eu.register_map.keys() {
+            let mvreg = func.vregs.alloc();
+            mask_map.set(*sir_reg_id, mvreg);
+            func.spill_descs.push(SpillDesc::transient());
+        }
+    }
+
     let mut ctx = ISelContext {
         vregs: &mut func.vregs,
         spill_descs: &mut func.spill_descs,
@@ -79,7 +90,14 @@ pub fn lower_execution_unit(
         wide_regs: WideRegMap::default(),
         reg_addrs: crate::HashMap::default(),
         consts: ConstMap::default(),
+        four_state,
+        mask_map,
+        wide_masks: WideRegMap::default(),
     };
+
+    // Collect mask phi sources per-block (captures mask state at each terminator)
+    let mut mask_phi_sources: std::collections::HashMap<BlockId, Vec<(BlockId, usize, Option<VReg>)>> =
+        std::collections::HashMap::new();
 
     for &sir_block_id in &block_ids {
         let sir_block = &eu.blocks[&sir_block_id];
@@ -106,8 +124,33 @@ pub fn lower_execution_unit(
         // Lower terminator
         lower_terminator(&mut ctx, &mut mblock, &sir_block.terminator);
 
+        // Capture mask phi sources from this block's terminator (before mask_map changes)
+        if four_state {
+            let pred_mir_id = BlockId(sir_block_id.0 as u32);
+            let edges: Vec<(crate::ir::BlockId, &[RegisterId])> = match &sir_block.terminator {
+                SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
+                SIRTerminator::Branch { true_block, false_block, .. } => vec![
+                    (true_block.0, true_block.1.as_slice()),
+                    (false_block.0, false_block.1.as_slice()),
+                ],
+                _ => vec![],
+            };
+            for (target_sir_id, args) in edges {
+                if args.is_empty() { continue; }
+                let target_mir_id = BlockId(target_sir_id.0 as u32);
+                for (i, arg_reg) in args.iter().enumerate() {
+                    let mask_vreg = ctx.mask_map.map.get(arg_reg.0).copied().flatten();
+                    mask_phi_sources.entry(target_mir_id).or_default().push((pred_mir_id, i, mask_vreg));
+                }
+            }
+        }
+
         func.blocks.push(mblock);
     }
+
+    // Extract mask_map for phi node construction (ctx borrows func fields)
+    let saved_mask_map = std::mem::replace(&mut ctx.mask_map, RegMap::new(0));
+    drop(ctx); // Release borrows on func
 
     // Build phi nodes from SIR block params and predecessor terminators.
     // For each SIR block with params, find all predecessors that pass args.
@@ -118,7 +161,6 @@ pub fn lower_execution_unit(
         for &sir_block_id in &block_ids {
             let sir_block = &eu.blocks[&sir_block_id];
             let pred_mir_id = BlockId(sir_block_id.0 as u32);
-            // Collect (target_sir_id, args) from terminator
             let edges: Vec<(crate::ir::BlockId, &[RegisterId])> = match &sir_block.terminator {
                 SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
                 SIRTerminator::Branch { true_block, false_block, .. } => vec![
@@ -155,6 +197,22 @@ pub fn lower_execution_unit(
                         .collect();
                     if !phi_srcs.is_empty() {
                         mblock.phis.push(PhiNode { dst, sources: phi_srcs });
+                    }
+
+                    // 4-state: add mask phi node
+                    if four_state {
+                        if let Some(mask_dst) = saved_mask_map.map.get(param_reg.0).copied().flatten() {
+                            if let Some(m_sources) = mask_phi_sources.get(&mblock.id) {
+                                let mask_phi_srcs: Vec<(BlockId, VReg)> = m_sources
+                                    .iter()
+                                    .filter(|(_, idx, _)| *idx == param_idx)
+                                    .filter_map(|(pred, _, m)| m.map(|mv| (*pred, mv)))
+                                    .collect();
+                                if !mask_phi_srcs.is_empty() {
+                                    mblock.phis.push(PhiNode { dst: mask_dst, sources: mask_phi_srcs });
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -196,6 +254,12 @@ struct ISelContext<'a> {
     /// RegisterId → sim state address, recorded at Store instructions.
     /// Used by Slice to load directly from memory instead of stale VRegs.
     reg_addrs: crate::HashMap<RegisterId, RegionedAbsoluteAddr>,
+    /// Whether 4-state simulation is enabled.
+    four_state: bool,
+    /// Maps SIR RegisterId → mask VReg (parallel to reg_map).
+    mask_map: RegMap,
+    /// Wide mask chunks (parallel to wide_regs).
+    wide_masks: WideRegMap,
 }
 
 impl<'a> ISelContext<'a> {
@@ -213,6 +277,49 @@ impl<'a> ISelContext<'a> {
     /// Get the bit width of a SIR register.
     fn sir_width(&self, reg: &RegisterId) -> usize {
         self.register_types[reg].width()
+    }
+
+    /// Get the mask VReg for a SIR register (zero constant if not 4-state).
+    fn get_mask(&mut self, reg: RegisterId, block: &mut MBlock) -> VReg {
+        if self.four_state {
+            self.mask_map.map[reg.0].unwrap_or_else(|| {
+                // Not yet defined — return zero
+                let z = self.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: z, value: 0 });
+                z
+            })
+        } else {
+            let z = self.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: z, value: 0 });
+            z
+        }
+    }
+
+    /// Set the mask VReg for a SIR register.
+    fn set_mask(&mut self, reg: RegisterId, vreg: VReg) {
+        if self.four_state {
+            self.mask_map.set(reg, vreg);
+        }
+    }
+
+    /// Resolve the mask byte offset for a variable.
+    /// The mask is stored immediately after the value in memory.
+    fn mask_byte_offset(&self, addr: &RegionedAbsoluteAddr, bit_offset: usize) -> i32 {
+        let abs_addr = addr.absolute_addr();
+        let width = self.layout.widths.get(&abs_addr).copied().unwrap_or(0);
+        let byte_size = crate::backend::get_byte_size(width);
+        self.byte_offset(addr, bit_offset) + byte_size as i32
+    }
+
+    /// Whether the given address refers to a 4-state variable.
+    fn is_4state_var(&self, addr: &RegionedAbsoluteAddr) -> bool {
+        self.four_state
+            && self
+                .layout
+                .is_4states
+                .get(&addr.absolute_addr())
+                .copied()
+                .unwrap_or(false)
     }
 
     /// Resolve byte offset for a regioned address + bit offset.
@@ -321,6 +428,28 @@ fn lower_instruction(
                     }
                 }
                 ctx.set_wide_chunks(*dst, chunks);
+            }
+
+            // 4-state: load mask immediate
+            if ctx.four_state {
+                let mask_digits = val.mask.to_u64_digits();
+                let mask_val = mask_digits.first().copied().unwrap_or(0);
+                let mvreg = ctx.alloc_vreg(SpillDesc::remat(mask_val));
+                block.push(MInst::LoadImm { dst: mvreg, value: mask_val });
+                ctx.set_mask(*dst, mvreg);
+
+                if d_width > 64 {
+                    let n_chunks = ISelContext::num_chunks(d_width);
+                    let mut mchunks = Vec::with_capacity(n_chunks);
+                    mchunks.push((mvreg, 64));
+                    for i in 1..n_chunks {
+                        let cv = mask_digits.get(i).copied().unwrap_or(0);
+                        let mv = ctx.alloc_vreg(SpillDesc::remat(cv));
+                        block.push(MInst::LoadImm { dst: mv, value: cv });
+                        mchunks.push((mv, 64));
+                    }
+                    ctx.wide_masks.insert(*dst, mchunks);
+                }
             }
         }
 
@@ -487,6 +616,103 @@ fn lower_instruction(
                         });
                     }
                 }
+            }
+
+            // 4-state: load mask from memory
+            if ctx.is_4state_var(addr) {
+                match offset {
+                    SIROffset::Static(bit_off) => {
+                        if *width_bits > 64 {
+                            let n_chunks = ISelContext::num_chunks(*width_bits);
+                            let mut mchunks = Vec::with_capacity(n_chunks);
+                            let mut remaining = *width_bits;
+                            let mut bit_pos = *bit_off;
+                            for _ in 0..n_chunks {
+                                let chunk_bits = remaining.min(64);
+                                let chunk_byte_off = ctx.mask_byte_offset(addr, bit_pos);
+                                let chunk_size = ISelContext::op_size_for_width(chunk_bits);
+                                let mv = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Load {
+                                    dst: mv,
+                                    base: BaseReg::SimState,
+                                    offset: chunk_byte_off,
+                                    size: chunk_size,
+                                });
+                                mchunks.push((mv, chunk_bits));
+                                bit_pos += chunk_bits;
+                                remaining -= chunk_bits;
+                            }
+                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Mov { dst: mvreg, src: mchunks[0].0 });
+                            ctx.set_mask(*dst, mvreg);
+                            ctx.wide_masks.insert(*dst, mchunks);
+                        } else {
+                            let mask_off = ctx.mask_byte_offset(addr, *bit_off);
+                            let intra_byte = bit_off % 8;
+                            let op_size = ISelContext::op_size_for_width(*width_bits);
+                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
+
+                            if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
+                                block.push(MInst::Load {
+                                    dst: mvreg,
+                                    base: BaseReg::SimState,
+                                    offset: mask_off,
+                                    size: op_size,
+                                });
+                            } else {
+                                let containing_off = ctx.mask_byte_offset(addr, 0) + (bit_off / 8) as i32;
+                                let load_size = ISelContext::op_size_for_width(*width_bits + intra_byte);
+                                let tmp = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Load {
+                                    dst: tmp,
+                                    base: BaseReg::SimState,
+                                    offset: containing_off,
+                                    size: load_size,
+                                });
+                                if intra_byte > 0 {
+                                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                                    block.push(MInst::ShrImm { dst: shifted, src: tmp, imm: intra_byte as u8 });
+                                    block.push(MInst::AndImm { dst: mvreg, src: shifted, imm: mask_for_width(*width_bits) });
+                                } else {
+                                    block.push(MInst::AndImm { dst: mvreg, src: tmp, imm: mask_for_width(*width_bits) });
+                                }
+                            }
+                            ctx.set_mask(*dst, mvreg);
+                        }
+                    }
+                    SIROffset::Dynamic(offset_reg) => {
+                        // Dynamic: load mask similarly with indexed addressing
+                        let offset_vreg = ctx.reg_map.get(*offset_reg);
+                        let mask_base_off = ctx.mask_byte_offset(addr, 0);
+                        let byte_off = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShrImm { dst: byte_off, src: offset_vreg, imm: 3 });
+                        let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::AndImm { dst: bit_shift, src: offset_vreg, imm: 7 });
+                        let load_size = ISelContext::op_size_for_width(*width_bits + 7);
+                        let raw = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::LoadIndexed {
+                            dst: raw,
+                            base: BaseReg::SimState,
+                            offset: mask_base_off,
+                            index: byte_off,
+                            size: load_size,
+                        });
+                        let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Shr { dst: shifted, lhs: raw, rhs: bit_shift });
+                        let mvreg = ctx.alloc_vreg(SpillDesc::transient());
+                        if *width_bits < 64 {
+                            block.push(MInst::AndImm { dst: mvreg, src: shifted, imm: mask_for_width(*width_bits) });
+                        } else {
+                            block.push(MInst::Mov { dst: mvreg, src: shifted });
+                        }
+                        ctx.set_mask(*dst, mvreg);
+                    }
+                }
+            } else if ctx.four_state {
+                // Non-4-state variable in 4-state mode: mask is always 0
+                let mvreg = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: mvreg, value: 0 });
+                ctx.set_mask(*dst, mvreg);
             }
         }
 
@@ -726,6 +952,81 @@ fn lower_instruction(
                     });
                 }
             }
+
+            // 4-state: store mask to memory
+            if ctx.is_4state_var(addr) {
+                let mask_vreg = ctx.get_mask(*src_reg, block);
+                match offset {
+                    SIROffset::Static(bit_off) => {
+                        if *width_bits > 64 {
+                            // Wide mask store: chunk-by-chunk
+                            if let Some(mchunks) = ctx.wide_masks.get(src_reg).cloned() {
+                                let mut bit_pos = 0usize;
+                                for (mv, cw) in &mchunks {
+                                    let off = ctx.mask_byte_offset(addr, *bit_off + bit_pos);
+                                    if let Some(sz) = OpSize::from_bits(*cw) {
+                                        block.push(MInst::Store {
+                                            base: BaseReg::SimState,
+                                            offset: off,
+                                            src: *mv,
+                                            size: sz,
+                                        });
+                                    }
+                                    bit_pos += cw;
+                                }
+                            }
+                        } else {
+                            let mask_off = ctx.mask_byte_offset(addr, *bit_off);
+                            let intra_byte = bit_off % 8;
+                            if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
+                                block.push(MInst::Store {
+                                    base: BaseReg::SimState,
+                                    offset: mask_off,
+                                    src: mask_vreg,
+                                    size: OpSize::from_bits(*width_bits).unwrap(),
+                                });
+                            } else {
+                                let containing_off = ctx.mask_byte_offset(addr, 0) + (bit_off / 8) as i32;
+                                let load_size = ISelContext::op_size_for_width(*width_bits + intra_byte);
+                                let old = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Load {
+                                    dst: old,
+                                    base: BaseReg::SimState,
+                                    offset: containing_off,
+                                    size: load_size,
+                                });
+                                let val_copy = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Mov { dst: val_copy, src: mask_vreg });
+                                let new_word = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::BitFieldInsert {
+                                    dst: new_word,
+                                    base_word: old,
+                                    val: val_copy,
+                                    shift: intra_byte as u8,
+                                    mask: mask_for_width(*width_bits),
+                                });
+                                block.push(MInst::Store {
+                                    base: BaseReg::SimState,
+                                    offset: containing_off,
+                                    src: new_word,
+                                    size: load_size,
+                                });
+                            }
+                        }
+                    }
+                    SIROffset::Dynamic(_offset_reg) => {
+                        // Dynamic mask store — same RMW pattern as value store
+                        // TODO: implement when needed
+                    }
+                }
+            } else if ctx.four_state {
+                // Store to non-4state (bit) variable: zero the source register's mask.
+                // This is critical because SIR optimizer inlines intermediate variables,
+                // so subsequent uses of src_reg must see mask=0.
+                let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: zero, value: 0 });
+                ctx.set_mask(*src_reg, zero);
+            }
         }
 
         SIRInstruction::Commit(src_addr, dst_addr, offset, width_bits, _triggers) => {
@@ -824,6 +1125,73 @@ fn lower_instruction(
                             size: chunk_size,
                         });
                         copied += chunk_size.bytes() as usize;
+                    }
+                }
+            }
+
+            // 4-state: also commit mask
+            if ctx.is_4state_var(src_addr) && ctx.is_4state_var(dst_addr) {
+                match offset {
+                    SIROffset::Static(bit_off) => {
+                        let src_mask_off = ctx.mask_byte_offset(src_addr, *bit_off);
+                        let dst_mask_off = ctx.mask_byte_offset(dst_addr, *bit_off);
+                        if *width_bits <= 64 {
+                            let op_size = ISelContext::op_size_for_width(*width_bits);
+                            let tmp = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Load {
+                                dst: tmp,
+                                base: BaseReg::SimState,
+                                offset: src_mask_off,
+                                size: op_size,
+                            });
+                            block.push(MInst::Store {
+                                base: BaseReg::SimState,
+                                offset: dst_mask_off,
+                                src: tmp,
+                                size: op_size,
+                            });
+                        } else {
+                            let mut remaining = *width_bits;
+                            let mut s_off = src_mask_off;
+                            let mut d_off = dst_mask_off;
+                            while remaining > 0 {
+                                let cb = remaining.min(64);
+                                let cs = ISelContext::op_size_for_width(cb);
+                                let tmp = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Load { dst: tmp, base: BaseReg::SimState, offset: s_off, size: cs });
+                                block.push(MInst::Store { base: BaseReg::SimState, offset: d_off, src: tmp, size: cs });
+                                let adv = (cb + 7) / 8;
+                                s_off += adv as i32;
+                                d_off += adv as i32;
+                                remaining -= cb;
+                            }
+                        }
+                    }
+                    SIROffset::Dynamic(offset_reg) => {
+                        let offset_vreg = ctx.reg_map.get(*offset_reg);
+                        let src_mask_base = ctx.mask_byte_offset(src_addr, 0);
+                        let dst_mask_base = ctx.mask_byte_offset(dst_addr, 0);
+                        let byte_off = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShrImm { dst: byte_off, src: offset_vreg, imm: 3 });
+                        let phys_bytes = (*width_bits + 7) / 8;
+                        let mut copied = 0usize;
+                        while copied < phys_bytes {
+                            let remaining = phys_bytes - copied;
+                            let cs = if remaining >= 8 { OpSize::S64 }
+                                else if remaining >= 4 { OpSize::S32 }
+                                else if remaining >= 2 { OpSize::S16 }
+                                else { OpSize::S8 };
+                            let tmp = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::LoadIndexed {
+                                dst: tmp, base: BaseReg::SimState,
+                                offset: src_mask_base + copied as i32, index: byte_off, size: cs,
+                            });
+                            block.push(MInst::StoreIndexed {
+                                base: BaseReg::SimState,
+                                offset: dst_mask_base + copied as i32, index: byte_off, src: tmp, size: cs,
+                            });
+                            copied += cs.bytes() as usize;
+                        }
                     }
                 }
             }
@@ -1176,6 +1544,14 @@ fn lower_instruction(
                     });
                 }
             }
+
+            // 4-state: compute result mask
+            if ctx.four_state {
+                let l_m = ctx.get_mask(*lhs, block);
+                let r_m = ctx.get_mask(*rhs, block);
+                let res_m = lower_binary_mask(ctx, block, op, lhs_vreg, rhs_vreg, l_m, r_m, d_width);
+                ctx.set_mask(*dst, res_m);
+            }
         }
 
         SIRInstruction::Unary(dst, op, src) => {
@@ -1295,6 +1671,13 @@ fn lower_instruction(
                     });
                 }
             }
+
+            // 4-state: compute result mask for unary ops
+            if ctx.four_state {
+                let s_m = ctx.get_mask(*src, block);
+                let res_m = lower_unary_mask(ctx, block, op, src_vreg, s_m, d_width, src_width);
+                ctx.set_mask(*dst, res_m);
+            }
         }
 
         SIRInstruction::Concat(dst, args) => {
@@ -1344,6 +1727,30 @@ fn lower_instruction(
                             dst: dst_vreg,
                             src: result,
                         });
+                    }
+                }
+
+                // 4-state: concat masks the same way
+                if ctx.four_state {
+                    let mut m_acc: Option<VReg> = None;
+                    let mut m_shift = 0usize;
+                    for arg in args.iter().rev() {
+                        let m = ctx.get_mask(*arg, block);
+                        let aw = ctx.sir_width(arg);
+                        match m_acc {
+                            None => { m_acc = Some(m); }
+                            Some(a) => {
+                                let sh = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::ShlImm { dst: sh, src: m, imm: m_shift as u8 });
+                                let mg = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Or { dst: mg, lhs: a, rhs: sh });
+                                m_acc = Some(mg);
+                            }
+                        }
+                        m_shift += aw;
+                    }
+                    if let Some(m_res) = m_acc {
+                        ctx.set_mask(*dst, m_res);
                     }
                 }
             } else {
@@ -2657,4 +3064,310 @@ fn lower_terminator(
             block.push(MInst::ReturnError { code: *code });
         }
     }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 4-state mask computation
+// ────────────────────────────────────────────────────────────────
+
+/// Compute result mask for a binary operation.
+///
+/// Mask formulas (from IEEE 1800 / Cranelift backend):
+/// - AND: m = (lm & rm) | (lm & rv) | (rm & lv)  ... but dominant-0 cancels X
+///   Simplified: any X bit where the other operand's corresponding bit is not
+///   definite-0 propagates as X. If the other bit is definite-0, AND = 0 regardless.
+///   Formula: res_m = (lm | rm) & ~(~lv & ~lm) & ~(~rv & ~rm)
+///     equivalently: res_m = (lm & rm) | (lm & rv) | (rm & lv)
+/// - OR:  dual of AND — dominant-1 cancels X
+///   res_m = (lm & rm) | (lm & ~rv) | (rm & ~lv)
+/// - XOR: res_m = lm | rm
+/// - Shift: if shift amount has X → all-X; else shift mask normally
+/// - Arithmetic (Add/Sub/Mul/Div/Rem): conservative — any X → all-X
+/// - Comparison: any X → result X (1-bit mask)
+/// - LogicAnd: dominant-false (v|m==0) → mask=0; else if any X → mask=all-X
+/// - LogicOr: dominant-true (v&~m!=0) → mask=0; else if any X → mask=all-X
+fn lower_binary_mask(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    op: &BinaryOp,
+    lv: VReg,
+    rv: VReg,
+    lm: VReg,
+    rm: VReg,
+    d_width: usize,
+) -> VReg {
+    match op {
+        BinaryOp::And => {
+            // res_m = (lm & rm) | (lm & rv) | (rm & lv)
+            let t1 = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: t1, lhs: lm, rhs: rm });
+            let t2 = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: t2, lhs: lm, rhs: rv });
+            let t3 = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: t3, lhs: rm, rhs: lv });
+            let t4 = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: t4, lhs: t1, rhs: t2 });
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: res, lhs: t4, rhs: t3 });
+            if d_width < 64 {
+                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::AndImm { dst: masked, src: res, imm: mask_for_width(d_width) });
+                masked
+            } else {
+                res
+            }
+        }
+        BinaryOp::Or => {
+            // res_m = (lm & rm) | (lm & ~rv) | (rm & ~lv)
+            let t1 = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: t1, lhs: lm, rhs: rm });
+            let not_rv = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::BitNot { dst: not_rv, src: rv });
+            let t2 = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: t2, lhs: lm, rhs: not_rv });
+            let not_lv = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::BitNot { dst: not_lv, src: lv });
+            let t3 = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: t3, lhs: rm, rhs: not_lv });
+            let t4 = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: t4, lhs: t1, rhs: t2 });
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: res, lhs: t4, rhs: t3 });
+            if d_width < 64 {
+                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::AndImm { dst: masked, src: res, imm: mask_for_width(d_width) });
+                masked
+            } else {
+                res
+            }
+        }
+        BinaryOp::Xor => {
+            // res_m = lm | rm
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: res, lhs: lm, rhs: rm });
+            if d_width < 64 {
+                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::AndImm { dst: masked, src: res, imm: mask_for_width(d_width) });
+                masked
+            } else {
+                res
+            }
+        }
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
+            // If shift amount has X → all-X; else shift mask by same amount
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: zero, value: 0 });
+            let has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: has_x, lhs: rm, rhs: zero, kind: CmpKind::Ne });
+            // Shift mask by value
+            let shifted_m = ctx.alloc_vreg(SpillDesc::transient());
+            match op {
+                BinaryOp::Shl => block.push(MInst::Shl { dst: shifted_m, lhs: lm, rhs: rv }),
+                BinaryOp::Shr => block.push(MInst::Shr { dst: shifted_m, lhs: lm, rhs: rv }),
+                BinaryOp::Sar => block.push(MInst::Sar { dst: shifted_m, lhs: lm, rhs: rv }),
+                _ => unreachable!(),
+            }
+            let all_x = ctx.alloc_vreg(SpillDesc::remat(u64::MAX));
+            block.push(MInst::LoadImm { dst: all_x, value: u64::MAX });
+            let raw = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: raw, cond: has_x, true_val: all_x, false_val: shifted_m });
+            if d_width < 64 {
+                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::AndImm { dst: masked, src: raw, imm: mask_for_width(d_width) });
+                masked
+            } else {
+                raw
+            }
+        }
+        BinaryOp::LogicAnd => {
+            // Dominant false: if either operand is definite false (v|m == 0) → mask=0
+            // else if any X → mask = all-X
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: zero, value: 0 });
+            let l_vm = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: l_vm, lhs: lv, rhs: lm });
+            let r_vm = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: r_vm, lhs: rv, rhs: rm });
+            let l_def_false = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: l_def_false, lhs: l_vm, rhs: zero, kind: CmpKind::Eq });
+            let r_def_false = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: r_def_false, lhs: r_vm, rhs: zero, kind: CmpKind::Eq });
+            let either_false = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: either_false, lhs: l_def_false, rhs: r_def_false });
+            // any X?
+            let l_has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: l_has_x, lhs: lm, rhs: zero, kind: CmpKind::Ne });
+            let r_has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: r_has_x, lhs: rm, rhs: zero, kind: CmpKind::Ne });
+            let any_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: any_x, lhs: l_has_x, rhs: r_has_x });
+            let all_ones = ctx.alloc_vreg(SpillDesc::remat(mask_for_width(d_width)));
+            block.push(MInst::LoadImm { dst: all_ones, value: mask_for_width(d_width) });
+            let conservative = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: conservative, cond: any_x, true_val: all_ones, false_val: zero });
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: res, cond: either_false, true_val: zero, false_val: conservative });
+            res
+        }
+        BinaryOp::LogicOr => {
+            // Dominant true: if either operand is definite true → mask=0
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: zero, value: 0 });
+            let not_lm = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::BitNot { dst: not_lm, src: lm });
+            let l_def_v = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: l_def_v, lhs: lv, rhs: not_lm });
+            let not_rm = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::BitNot { dst: not_rm, src: rm });
+            let r_def_v = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: r_def_v, lhs: rv, rhs: not_rm });
+            let l_def_true = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: l_def_true, lhs: l_def_v, rhs: zero, kind: CmpKind::Ne });
+            let r_def_true = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: r_def_true, lhs: r_def_v, rhs: zero, kind: CmpKind::Ne });
+            let either_true = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: either_true, lhs: l_def_true, rhs: r_def_true });
+            let l_has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: l_has_x, lhs: lm, rhs: zero, kind: CmpKind::Ne });
+            let r_has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: r_has_x, lhs: rm, rhs: zero, kind: CmpKind::Ne });
+            let any_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or { dst: any_x, lhs: l_has_x, rhs: r_has_x });
+            let all_ones = ctx.alloc_vreg(SpillDesc::remat(mask_for_width(d_width)));
+            block.push(MInst::LoadImm { dst: all_ones, value: mask_for_width(d_width) });
+            let conservative = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: conservative, cond: any_x, true_val: all_ones, false_val: zero });
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: res, cond: either_true, true_val: zero, false_val: conservative });
+            res
+        }
+        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+            // TODO: full wildcard mask logic
+            // For now: conservative — any X → result X
+            conservative_mask(ctx, block, lm, rm, d_width)
+        }
+        _ => {
+            // Conservative: any X in either operand → all-X result
+            // Covers: Add, Sub, Mul, Div, Rem, comparisons (Eq/Ne/Lt/Le/Gt/Ge)
+            conservative_mask(ctx, block, lm, rm, d_width)
+        }
+    }
+}
+
+/// Compute result mask for a unary operation.
+fn lower_unary_mask(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    op: &UnaryOp,
+    src_v: VReg,
+    src_m: VReg,
+    d_width: usize,
+    src_width: usize,
+) -> VReg {
+    match op {
+        UnaryOp::Ident => {
+            // Mask passes through
+            src_m
+        }
+        UnaryOp::BitNot => {
+            // ~X = X, mask passes through
+            if d_width < 64 {
+                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::AndImm { dst: masked, src: src_m, imm: mask_for_width(d_width) });
+                masked
+            } else {
+                src_m
+            }
+        }
+        UnaryOp::Minus | UnaryOp::LogicNot => {
+            // Conservative: any X → all-X
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: zero, value: 0 });
+            let has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: has_x, lhs: src_m, rhs: zero, kind: CmpKind::Ne });
+            let all_ones = ctx.alloc_vreg(SpillDesc::remat(mask_for_width(d_width)));
+            block.push(MInst::LoadImm { dst: all_ones, value: mask_for_width(d_width) });
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: res, cond: has_x, true_val: all_ones, false_val: zero });
+            res
+        }
+        UnaryOp::And => {
+            // Reduction AND: dominant-0. If any definite 0 → result definite (mask=0).
+            // definite_zeros = ~src_v & ~src_m (bits that are definitely 0)
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: zero, value: 0 });
+            let not_v = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::BitNot { dst: not_v, src: src_v });
+            let not_m = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::BitNot { dst: not_m, src: src_m });
+            let def_zeros = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: def_zeros, lhs: not_v, rhs: not_m });
+            // Mask to src_width
+            let def_zeros_masked = if src_width < 64 {
+                let m = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::AndImm { dst: m, src: def_zeros, imm: mask_for_width(src_width) });
+                m
+            } else { def_zeros };
+            let has_def_zero = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: has_def_zero, lhs: def_zeros_masked, rhs: zero, kind: CmpKind::Ne });
+            let has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: has_x, lhs: src_m, rhs: zero, kind: CmpKind::Ne });
+            // If definite 0 → mask=0; else if X → mask=1; else mask=0
+            let x_mask = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: x_mask, cond: has_x, true_val: has_x, false_val: zero });
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: res, cond: has_def_zero, true_val: zero, false_val: x_mask });
+            res
+        }
+        UnaryOp::Or => {
+            // Reduction OR: dominant-1. If any definite 1 → result definite (mask=0).
+            // definite_ones = src_v & ~src_m (bits that are definitely 1)
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: zero, value: 0 });
+            let not_m = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::BitNot { dst: not_m, src: src_m });
+            let def_ones = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And { dst: def_ones, lhs: src_v, rhs: not_m });
+            let has_def_one = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: has_def_one, lhs: def_ones, rhs: zero, kind: CmpKind::Ne });
+            let has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: has_x, lhs: src_m, rhs: zero, kind: CmpKind::Ne });
+            let x_mask = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: x_mask, cond: has_x, true_val: has_x, false_val: zero });
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select { dst: res, cond: has_def_one, true_val: zero, false_val: x_mask });
+            res
+        }
+        UnaryOp::Xor => {
+            // Reduction XOR: any X → result X
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm { dst: zero, value: 0 });
+            let has_x = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp { dst: has_x, lhs: src_m, rhs: zero, kind: CmpKind::Ne });
+            has_x
+        }
+    }
+}
+
+/// Conservative mask: if either operand has any X bits, result is all-X.
+fn conservative_mask(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    lm: VReg,
+    rm: VReg,
+    d_width: usize,
+) -> VReg {
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm { dst: zero, value: 0 });
+    let l_has_x = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Cmp { dst: l_has_x, lhs: lm, rhs: zero, kind: CmpKind::Ne });
+    let r_has_x = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Cmp { dst: r_has_x, lhs: rm, rhs: zero, kind: CmpKind::Ne });
+    let any_x = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Or { dst: any_x, lhs: l_has_x, rhs: r_has_x });
+    let all_ones = ctx.alloc_vreg(SpillDesc::remat(mask_for_width(d_width)));
+    block.push(MInst::LoadImm { dst: all_ones, value: mask_for_width(d_width) });
+    let res = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Select { dst: res, cond: any_x, true_val: all_ones, false_val: zero });
+    res
 }

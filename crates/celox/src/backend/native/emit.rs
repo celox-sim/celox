@@ -862,13 +862,14 @@ fn emit_and_imm64(
 pub fn emit_chained_eus(
     units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &crate::backend::MemoryLayout,
+    four_state: bool,
 ) -> Result<Vec<u8>, IcedError> {
     use super::{isel, regalloc};
 
     // Compile each EU independently
     let mut eu_codes: Vec<Vec<u8>> = Vec::new();
     for eu in units {
-        let mut mfunc = isel::lower_execution_unit(eu, layout);
+        let mut mfunc = isel::lower_execution_unit(eu, layout, four_state);
         let ra = regalloc::run_regalloc(&mut mfunc);
 
         let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;

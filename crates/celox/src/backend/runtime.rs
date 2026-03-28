@@ -232,7 +232,7 @@ impl JitBackend {
 
                 mir_output.push_str("=== MIR (eval_comb) ===\n");
                 for (idx, eu) in sir.eval_comb.iter().enumerate() {
-                    let mut mfunc = lower_execution_unit(eu, layout_ref);
+                    let mut mfunc = lower_execution_unit(eu, layout_ref, options.four_state);
                     mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}\n"));
                     let ra = run_regalloc(&mut mfunc);
@@ -260,7 +260,7 @@ impl JitBackend {
                         sir.get_path(addr)
                     ));
                     for (idx, eu) in units.iter().enumerate() {
-                        let mut mfunc = lower_execution_unit(eu, layout_ref);
+                        let mut mfunc = lower_execution_unit(eu, layout_ref, options.four_state);
                         mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                         mir_output.push_str(&format!("{mfunc}\n"));
                         let ra = run_regalloc(&mut mfunc);

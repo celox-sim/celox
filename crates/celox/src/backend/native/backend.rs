@@ -69,6 +69,8 @@ pub struct SharedNativeCode {
     id_to_event: Vec<NativeEventRef>,
     layout: MemoryLayout,
     options: SimulatorOptions,
+    /// (offset, byte_size) pairs for 4-state variables that need X initialization.
+    four_state_inits: Vec<(usize, usize)>,
 }
 
 // Safety: JitCode contains Mmap which is Send+Sync after creation.
@@ -93,6 +95,7 @@ fn codegen_err(msg: String) -> SimulatorError {
 fn compile_units(
     units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
+    four_state: bool,
 ) -> Result<jit_mem::JitCode, SimulatorError> {
     if units.is_empty() {
         // Empty function: just return 0
@@ -109,7 +112,7 @@ fn compile_units(
     // Multi-EU: compile each EU independently (ISel + regalloc), then
     // chain their machine code into a single function. Each EU's return
     // is patched to fall through to the next EU. One prologue/epilogue.
-    let chained_code = emit::emit_chained_eus(units, layout)
+    let chained_code = emit::emit_chained_eus(units, layout, four_state)
         .map_err(|e| codegen_err(format!("emit error: {e}")))?;
     jit_mem::JitCode::new(&chained_code)
         .map_err(|e| codegen_err(format!("mmap error: {e}")))
@@ -119,11 +122,11 @@ fn compile_program(
     sir: &Program,
     options: &SimulatorOptions,
 ) -> Result<SharedNativeCode, SimulatorError> {
-    let layout = MemoryLayout::build(sir, false); // TODO: four_state support
+    let layout = MemoryLayout::build(sir, options.four_state);
     let mut all_jit_codes: Vec<jit_mem::JitCode> = Vec::new();
 
     // Compile eval_comb
-    let comb_jit = compile_units(&sir.eval_comb, &layout)?;
+    let comb_jit = compile_units(&sir.eval_comb, &layout, options.four_state)?;
     let comb_func = comb_jit.fn_ptr;
     all_jit_codes.push(comb_jit);
 
@@ -146,7 +149,7 @@ fn compile_program(
                                  id_to_event: &mut Vec<NativeEventRef>|
      -> Result<(), SimulatorError> {
         for (addr, units) in ff_map {
-            let code = compile_units(units, &layout)?;
+            let code = compile_units(units, &layout, options.four_state)?;
             let func = code.fn_ptr;
             all_codes.push(code);
 
@@ -181,6 +184,28 @@ fn compile_program(
         &mut next_id, &mut id_to_addr, &mut id_to_event,
     )?;
 
+    // Pre-compute 4-state initialization regions
+    let mut four_state_inits = Vec::new();
+    if options.four_state {
+        for (addr, &offset) in &layout.offsets {
+            let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
+            if is_4state {
+                let width = layout.widths[addr];
+                let allocated_size = get_byte_size(width);
+                four_state_inits.push((offset, allocated_size));
+            }
+        }
+        for (addr, &rel_offset) in &layout.working_offsets {
+            let offset = layout.working_base_offset + rel_offset;
+            let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
+            if is_4state {
+                let width = layout.widths[addr];
+                let allocated_size = get_byte_size(width);
+                four_state_inits.push((offset, allocated_size));
+            }
+        }
+    }
+
     Ok(SharedNativeCode {
         comb_func,
         _jit_codes: all_jit_codes,
@@ -191,6 +216,7 @@ fn compile_program(
         id_to_event,
         layout,
         options: options.clone(),
+        four_state_inits,
     })
 }
 
@@ -217,7 +243,18 @@ impl NativeBackend {
     pub fn from_shared(shared: Arc<SharedNativeCode>) -> Self {
         let mem_size_words =
             (shared.layout.merged_total_size + shared.layout.triggered_bits_total_size + 7) / 8;
-        let memory = vec![0u64; mem_size_words + 1]; // +1 for safety
+        let mut memory = vec![0u64; mem_size_words + 1]; // +1 for safety
+
+        // Initialize 4-state regions to X (v=1, m=1)
+        for &(offset, allocated_size) in &shared.four_state_inits {
+            unsafe {
+                let base_ptr = (memory.as_mut_ptr() as *mut u8).add(offset);
+                std::ptr::write_bytes(base_ptr, 0xFF, allocated_size);
+                let mask_ptr = base_ptr.add(allocated_size);
+                std::ptr::write_bytes(mask_ptr, 0xFF, allocated_size);
+            }
+        }
+
         Self { compiled: shared, memory }
     }
 
@@ -291,10 +328,11 @@ impl super::super::SimBackend for NativeBackend {
         let layout = &self.compiled.layout;
         let offset = layout.offsets.get(addr).copied().unwrap_or(0);
         let width = layout.widths.get(addr).copied().unwrap_or(0);
+        let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
         SignalRef {
             offset,
             width,
-            is_4state: false,
+            is_4state,
         }
     }
 
@@ -320,24 +358,50 @@ impl super::super::SimBackend for NativeBackend {
 
     fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
         let bs = get_byte_size(signal.width);
+        let clear_mask = self.compiled.options.four_state && signal.is_4state;
         let bytes = self.mem_bytes_mut();
         let val_bytes =
             unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, std::mem::size_of::<T>()) };
         let copy_len = val_bytes.len().min(bs);
         bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
+        if clear_mask {
+            bytes[signal.offset + bs..signal.offset + bs + bs].fill(0);
+        }
     }
 
     fn set_wide(&mut self, signal: SignalRef, val: BigUint) {
         let bs = get_byte_size(signal.width);
+        let clear_mask = self.compiled.options.four_state && signal.is_4state;
         let bytes = self.mem_bytes_mut();
         let val_bytes = val.to_bytes_le();
         let copy_len = val_bytes.len().min(bs);
         bytes[signal.offset..signal.offset + bs].fill(0);
         bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
+        if clear_mask {
+            bytes[signal.offset + bs..signal.offset + bs + bs].fill(0);
+        }
     }
 
-    fn set_four_state(&mut self, signal: SignalRef, val: BigUint, _mask: BigUint) {
-        self.set_wide(signal, val);
+    fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint) {
+        let bs = get_byte_size(signal.width);
+        let write_mask = self.compiled.options.four_state && signal.is_4state;
+        let bytes = self.mem_bytes_mut();
+
+        // Write value
+        let val_bytes = val.to_bytes_le();
+        let copy_len = val_bytes.len().min(bs);
+        bytes[signal.offset..signal.offset + bs].fill(0);
+        bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
+
+        // Write mask (immediately after value)
+        if write_mask {
+            let mask_offset = signal.offset + bs;
+            let mask_bytes = mask.to_bytes_le();
+            let mask_copy_len = mask_bytes.len().min(bs);
+            bytes[mask_offset..mask_offset + bs].fill(0);
+            bytes[mask_offset..mask_offset + mask_copy_len]
+                .copy_from_slice(&mask_bytes[..mask_copy_len]);
+        }
     }
 
     fn get(&self, signal: SignalRef) -> BigUint {
@@ -359,7 +423,26 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
-        (self.get(signal), BigUint::from(0u32))
+        let bs = get_byte_size(signal.width);
+        let bytes = self.mem_bytes();
+        let mut val = BigUint::from_bytes_le(&bytes[signal.offset..signal.offset + bs]);
+
+        let mut mask = if self.compiled.options.four_state && signal.is_4state {
+            let mask_offset = signal.offset + bs;
+            BigUint::from_bytes_le(&bytes[mask_offset..mask_offset + bs])
+        } else {
+            BigUint::from(0u32)
+        };
+
+        // Mask off extra bits beyond signal width
+        let extra_bits = bs * 8 - signal.width;
+        if extra_bits > 0 {
+            let width_mask = (BigUint::from(1u32) << signal.width) - BigUint::from(1u32);
+            val &= &width_mask;
+            mask &= &width_mask;
+        }
+
+        (val, mask)
     }
 
     fn memory_as_ptr(&self) -> (*const u8, usize) {
