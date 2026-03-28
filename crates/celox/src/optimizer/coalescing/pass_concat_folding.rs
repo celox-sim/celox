@@ -1,14 +1,20 @@
-//! Concat folding: merge consecutive Slices in Concat args into wider Slices.
-//!
-//! When a Concat has multiple consecutive args that are Slices from the same
-//! source with adjacent bit ranges, they are merged into a single wider Slice.
-//! This reduces ISel's shl+or expansion from N instructions to 1 per batch.
+//! Concat folding: merge consecutive Slices/Loads in Concat args into
+//! wider operations, reducing ISel's shl+or expansion.
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{collect_all_used_registers, def_reg};
 use crate::HashMap;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
+
+/// Tracks a bit-extraction source: either Slice(reg, off, w) or Load(addr, off, w).
+#[derive(Clone, Copy)]
+struct BitSource {
+    /// For Slice: the source RegisterId. For Load: a hash of the address.
+    addr: RegionedAbsoluteAddr,
+    bit_offset: usize,
+    width: usize,
+}
 
 pub(super) struct ConcatFoldingPass;
 
@@ -18,34 +24,41 @@ impl ExecutionUnitPass for ConcatFoldingPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        // Find max register ID for generating fresh ones
-        let mut max_reg = 0usize;
-        for &r in eu.register_map.keys() {
-            max_reg = max_reg.max(r.0);
-        }
-        let mut next_reg = max_reg + 1;
-
+        let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
         let mut changed = false;
 
-        // Build Slice def map
-        let mut slice_defs: HashMap<RegisterId, (RegisterId, usize, usize)> = HashMap::default();
+        // Build Load def map: RegisterId → (addr, static_offset, width)
+        let mut load_defs: HashMap<RegisterId, BitSource> = HashMap::default();
         for block in eu.blocks.values() {
             for inst in &block.instructions {
-                if let SIRInstruction::Slice(dst, src, off, width) = inst {
-                    slice_defs.insert(*dst, (*src, *off, *width));
+                match inst {
+                    SIRInstruction::Load(dst, addr, SIROffset::Static(off), width) => {
+                        load_defs.insert(*dst, BitSource { addr: *addr, bit_offset: *off, width: *width });
+                    }
+                    SIRInstruction::Slice(dst, src, off, width) => {
+                        // If src was loaded from a known addr, compute the effective addr+offset
+                        if let Some(src_info) = load_defs.get(src) {
+                            load_defs.insert(*dst, BitSource {
+                                addr: src_info.addr,
+                                bit_offset: src_info.bit_offset + *off,
+                                width: *width,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        // Collect new Slice instructions to insert (before Concat)
-        let mut new_slices: Vec<(BlockId, usize, SIRInstruction<RegionedAbsoluteAddr>)> = Vec::new();
+        // Process each block
+        for block in eu.blocks.values_mut() {
+            let mut new_insts_to_insert: Vec<(usize, SIRInstruction<RegionedAbsoluteAddr>)> = Vec::new();
 
-        for (&block_id, block) in &eu.blocks {
-            for (inst_idx, inst) in block.instructions.iter().enumerate() {
+            for (inst_idx, inst) in block.instructions.iter_mut().enumerate() {
                 let SIRInstruction::Concat(_dst, args) = inst else { continue };
                 if args.len() < 3 { continue; }
 
-                // Walk args LSB-first, detect consecutive Slice runs
+                // Walk LSB-first, find consecutive Load runs from same addr
                 let mut new_args: Vec<RegisterId> = Vec::new();
                 let mut i = args.len();
                 let mut any_merged = false;
@@ -54,19 +67,19 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                     i -= 1;
                     let arg = args[i];
 
-                    if let Some(&(src, off, width)) = slice_defs.get(&arg) {
-                        // Start of a potential run
-                        let run_src = src;
-                        let run_start_off = off;
-                        let mut run_width = width;
+                    if let Some(&info) = load_defs.get(&arg) {
+                        let run_addr = info.addr;
+                        let run_start = info.bit_offset;
+                        let mut run_width = info.width;
                         let mut run_count = 1usize;
 
-                        // Try to extend: preceding args (higher bit positions) from same source
                         while i > 0 {
                             let prev = args[i - 1];
-                            if let Some(&(ps, po, pw)) = slice_defs.get(&prev) {
-                                if ps == run_src && po == run_start_off + run_width {
-                                    run_width += pw;
+                            if let Some(&prev_info) = load_defs.get(&prev) {
+                                if prev_info.addr == run_addr
+                                    && prev_info.bit_offset == run_start + run_width
+                                {
+                                    run_width += prev_info.width;
                                     run_count += 1;
                                     i -= 1;
                                 } else {
@@ -78,22 +91,14 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                         }
 
                         if run_count >= 2 {
-                            // Merged! Create a new wider Slice instruction.
-                            let new_reg = RegisterId(next_reg);
-                            next_reg += 1;
+                            // Create a new wider Load
+                            max_reg += 1;
+                            let new_reg = RegisterId(max_reg);
+                            eu.register_map.insert(new_reg, RegisterType::Bit { width: run_width, signed: false });
 
-                            // Determine the type: Logic or Bit based on source
-                            let src_type = eu.register_map.get(&run_src);
-                            let new_type = match src_type {
-                                Some(RegisterType::Logic { .. }) => RegisterType::Logic { width: run_width },
-                                _ => RegisterType::Bit { width: run_width, signed: false },
-                            };
-                            eu.register_map.insert(new_reg, new_type);
-
-                            new_slices.push((
-                                block_id,
-                                inst_idx, // insert before the Concat
-                                SIRInstruction::Slice(new_reg, run_src, run_start_off, run_width),
+                            new_insts_to_insert.push((
+                                inst_idx,
+                                SIRInstruction::Load(new_reg, run_addr, SIROffset::Static(run_start), run_width),
                             ));
                             new_args.push(new_reg);
                             any_merged = true;
@@ -106,101 +111,20 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                 }
 
                 if any_merged {
-                    // new_args was built LSB-first, but Concat expects [MSB, ..., LSB]
                     new_args.reverse();
-                    // We'll replace the Concat's args below
-                    // Mark for replacement
+                    *args = new_args;
                     changed = true;
                 }
             }
-        }
 
-        if !changed {
-            return;
-        }
-
-        // Insert new Slice instructions and update Concat args
-        // Re-process: simpler to rebuild
-        let mut slice_defs2: HashMap<RegisterId, (RegisterId, usize, usize)> = slice_defs;
-        for (_, _, inst) in &new_slices {
-            if let SIRInstruction::Slice(dst, src, off, width) = inst {
-                slice_defs2.insert(*dst, (*src, *off, *width));
-            }
-        }
-
-        for (&block_id, block) in &mut eu.blocks {
-            // Insert new slices before their Concat
-            let mut insertions: Vec<(usize, SIRInstruction<RegionedAbsoluteAddr>)> = Vec::new();
-            for &(bid, idx, ref inst) in &new_slices {
-                if bid == block_id {
-                    insertions.push((idx, inst.clone()));
-                }
-            }
-            // Insert in reverse order to preserve indices
-            insertions.sort_by(|a, b| b.0.cmp(&a.0));
-            for (idx, inst) in insertions {
+            // Insert new Load instructions before Concats (reverse to preserve indices)
+            for (idx, inst) in new_insts_to_insert.into_iter().rev() {
                 block.instructions.insert(idx, inst);
             }
-
-            // Update Concat args
-            for inst in &mut block.instructions {
-                let SIRInstruction::Concat(_, args) = inst else { continue };
-                if args.len() < 3 { continue; }
-
-                let mut new_args: Vec<RegisterId> = Vec::new();
-                let mut i = args.len();
-
-                while i > 0 {
-                    i -= 1;
-                    let arg = args[i];
-
-                    if let Some(&(src, off, width)) = slice_defs2.get(&arg) {
-                        let run_src = src;
-                        let mut run_width = width;
-                        let mut run_count = 1usize;
-
-                        while i > 0 {
-                            let prev = args[i - 1];
-                            if let Some(&(ps, po, pw)) = slice_defs2.get(&prev) {
-                                if ps == run_src && po == off + run_width {
-                                    run_width += pw;
-                                    run_count += 1;
-                                    i -= 1;
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-
-                        if run_count >= 2 {
-                            // Find the new_slice register for this run
-                            let merged = new_slices.iter().find(|(bid, _, s)| {
-                                *bid == block_id && matches!(s,
-                                    SIRInstruction::Slice(_, s2, o2, w2)
-                                    if *s2 == run_src && *o2 == off && *w2 == run_width
-                                )
-                            });
-                            if let Some((_, _, SIRInstruction::Slice(reg, _, _, _))) = merged {
-                                new_args.push(*reg);
-                            } else {
-                                new_args.push(arg); // fallback
-                            }
-                        } else {
-                            new_args.push(arg);
-                        }
-                    } else {
-                        new_args.push(arg);
-                    }
-                }
-
-                new_args.reverse();
-                *args = new_args;
-            }
         }
 
-        // DCE
+        if !changed { return; }
+
         let used = collect_all_used_registers(eu);
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {

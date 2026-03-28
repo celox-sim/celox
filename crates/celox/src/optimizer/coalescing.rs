@@ -20,6 +20,7 @@ mod pass_split_wide_commits;
 mod pass_concat_folding;
 mod pass_gvn;
 mod pass_store_load_forwarding;
+mod pass_xor_chain_folding;
 pub(crate) mod pass_tail_call_split;
 mod shared;
 
@@ -39,6 +40,7 @@ use pass_split_wide_commits::SplitWideCommitsPass;
 use pass_concat_folding::ConcatFoldingPass;
 use pass_gvn::GvnPass;
 use pass_store_load_forwarding::StoreLoadForwardingPass;
+use pass_xor_chain_folding::XorChainFoldingPass;
 
 pub struct CoalescingPass;
 
@@ -81,6 +83,7 @@ fn optimize_with_options(
     }
     ff_passes.add_pass(GvnPass);
     ff_passes.add_pass(ConcatFoldingPass);
+    ff_passes.add_pass(XorChainFoldingPass);
     if opt.hoist_common_branch_loads {
         ff_passes.add_pass(HoistCommonBranchLoadsPass);
     }
@@ -130,6 +133,7 @@ fn optimize_with_options(
     }
     eval_only_passes.add_pass(GvnPass);
     eval_only_passes.add_pass(ConcatFoldingPass);
+    eval_only_passes.add_pass(XorChainFoldingPass);
     if opt.hoist_common_branch_loads {
         eval_only_passes.add_pass(HoistCommonBranchLoadsPass);
     }
@@ -207,6 +211,7 @@ fn optimize_with_options(
     }
     comb_passes.add_pass(GvnPass);
     comb_passes.add_pass(ConcatFoldingPass);
+    comb_passes.add_pass(XorChainFoldingPass);
     if opt.hoist_common_branch_loads {
         comb_passes.add_pass(HoistCommonBranchLoadsPass);
     }
