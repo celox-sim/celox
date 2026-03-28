@@ -87,30 +87,14 @@ pub enum RegConstraint {
 }
 
 pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
-    // No Fixed constraints. Shift-RCX is handled via preferred register
-    // allocation at def time + emit-time fallback mov. This eliminates
-    // the displacement path (result.set retroactive change) that caused
-    // regalloc conflicts.
-    inst.uses().iter().map(|_| RegConstraint::Any).collect()
-}
-
-/// For each VReg used with a Fixed constraint (shift rhs → RCX), return
-/// the preferred physical register. The assignment tries to allocate
-/// the VReg to this register at def time, avoiding displacement.
-pub fn preferred_phys_reg(func: &MFunction) -> BTreeMap<VReg, PhysReg> {
-    let mut prefs = BTreeMap::new();
-    for block in &func.blocks {
-        for inst in &block.insts {
-            if is_reg_shift(inst) {
-                let uses = inst.uses();
-                if uses.len() >= 2 {
-                    // rhs (index 1) should go to RCX
-                    prefs.insert(uses[1], PhysReg::RCX);
-                }
-            }
+    match inst {
+        // x86 variable shifts require shift amount in CL (low byte of RCX).
+        MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. } => {
+            // uses() = [lhs, rhs]. rhs must be in RCX.
+            vec![RegConstraint::Any, RegConstraint::Fixed(PhysReg::RCX)]
         }
+        _ => inst.uses().iter().map(|_| RegConstraint::Any).collect(),
     }
-    prefs
 }
 
 pub fn def_constraint(inst: &MInst) -> RegConstraint {
@@ -227,6 +211,10 @@ pub fn split_live_ranges_at_fixed_constraints(func: &mut MFunction) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: BTreeMap<VReg, PhysReg>,
+    /// True if assignment had to evict a VReg. Eviction produces
+    /// incorrect code — investigate and fix the spilling/constraint
+    /// interaction that caused it.
+    pub had_eviction: bool,
 }
 
 impl AssignmentMap {
@@ -320,7 +308,6 @@ pub fn split_live_ranges_at_clobbers(func: &mut MFunction) {
 
 pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
     let mut result = AssignmentMap::default();
-    let preferred = preferred_phys_reg(func);
 
     // Pre-compute clobber points per block.
     let block_clobber_points: Vec<Vec<(usize, &'static [PhysReg])>> = func
@@ -425,7 +412,7 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                 }
             }
 
-            // 2. Free dead values (before def — ensures room for the new def)
+            // 2. Free dead values
             let dead_regs: Vec<PhysReg> = active
                 .iter()
                 .filter(|&(_, &v)| {
@@ -457,7 +444,7 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                         required
                     }
                     RegConstraint::Any => {
-                        // Avoid clobbered/shift-constrained registers.
+                        // Avoid clobbered registers during this VReg's live range.
                         let last_use_pos = last_use_in_block
                             .get(&def_vreg).copied().unwrap_or(inst_idx);
                         let blocked: BTreeSet<PhysReg> = block_clobber_points[bi]
@@ -465,40 +452,37 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
                             .filter(|(pos, _)| *pos > inst_idx && *pos <= last_use_pos)
                             .flat_map(|(_, regs)| regs.iter().copied())
                             .chain(
-                                // Block RCX for VRegs that DON'T prefer RCX.
-                                // VRegs with preferred RCX (shift rhs) skip this.
-                                if preferred.get(&def_vreg) == Some(&PhysReg::RCX) {
-                                    None
-                                } else {
-                                    Some(
-                                        block_shift_points[bi].iter()
-                                            .filter(|&&pos| pos >= inst_idx && pos <= last_use_pos)
-                                            .map(|_| PhysReg::RCX)
-                                    )
-                                }.into_iter().flatten()
+                                block_shift_points[bi].iter()
+                                    .filter(|&&pos| pos >= inst_idx && pos <= last_use_pos)
+                                    .map(|_| PhysReg::RCX)
                             )
                             .collect();
 
-                        // Try preferred register first (shift rhs → RCX).
-                        preferred.get(&def_vreg)
-                            .and_then(|&pref| {
-                                if !active.contains_key(&pref) { Some(pref) } else { None }
-                            })
-                            .or_else(|| find_free_reg_excluding(&active, &blocked))
+                        find_free_reg_excluding(&active, &blocked)
                             .or_else(|| find_free_reg(&active, None))
                             .unwrap_or_else(|| {
-                                panic!(
-                                    "regalloc: no free register at block {bi} inst {inst_idx} \
-                                     (active={}, blocked={})",
-                                    active.len(), blocked.len()
-                                )
+                                // All registers occupied. This should not happen if
+                                // spilling is correct, but constraint handling can
+                                // cause transient pressure spikes. Evict the farthest-
+                                // use VReg as a safety net.
+                                result.had_eviction = true;
+                                let victim = active
+                                    .iter()
+                                    .max_by_key(|&(_, &v)| {
+                                        super::analysis::next_use_at(
+                                            func, analysis, bi, inst_idx + 1, v,
+                                        )
+                                    })
+                                    .map(|(&p, _)| p)
+                                    .expect("no victim found");
+                                active.remove(&victim);
+                                victim
                             })
                     }
                 };
                 active.insert(preg, def_vreg);
                 result.set(def_vreg, preg);
             }
-
         }
     }
 
