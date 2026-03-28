@@ -177,77 +177,65 @@ pub fn disassemble(code: &[u8], base_addr: u64) -> String {
 /// Emit Mov instructions to resolve phi nodes when jumping to a target block.
 /// For each phi in the target block, if the source (from this predecessor) and
 /// the dst are assigned to different physical registers, emit `mov dst, src`.
-fn emit_phi_moves(
+/// Emit phi moves for a single target block.
+fn emit_phi_moves_for_target(
     asm: &mut CodeAssembler,
-    terminator: &MInst,
     pred_block_id: BlockId,
+    target_id: BlockId,
     func: &MFunction,
     assignment: &AssignmentMap,
 ) -> Result<(), IcedError> {
-    let targets: Vec<BlockId> = match terminator {
-        MInst::Jump { target } => vec![*target],
-        MInst::Branch { true_bb, false_bb, .. } => vec![*true_bb, *false_bb],
-        _ => return Ok(()),
-    };
+    let target_block = func.blocks.iter().find(|b| b.id == target_id);
+    let Some(target_block) = target_block else { return Ok(()) };
 
-    for target_id in targets {
-        let target_block = func.blocks.iter().find(|b| b.id == target_id);
-        let Some(target_block) = target_block else { continue };
-
-        // Collect parallel copies: (dst_preg, src_preg)
-        let mut copies: Vec<(PhysReg, PhysReg)> = Vec::new();
-        for phi in &target_block.phis {
-            for (source_pred, source_vreg) in &phi.sources {
-                if *source_pred == pred_block_id {
-                    let src_preg = resolve(assignment, *source_vreg);
-                    let dst_preg = resolve(assignment, phi.dst);
-                    if src_preg != dst_preg {
-                        copies.push((dst_preg, src_preg));
-                    }
+    // Collect parallel copies: (dst_preg, src_preg)
+    let mut copies: Vec<(PhysReg, PhysReg)> = Vec::new();
+    for phi in &target_block.phis {
+        for (source_pred, source_vreg) in &phi.sources {
+            if *source_pred == pred_block_id {
+                let src_preg = resolve(assignment, *source_vreg);
+                let dst_preg = resolve(assignment, phi.dst);
+                if src_preg != dst_preg {
+                    copies.push((dst_preg, src_preg));
                 }
             }
         }
+    }
 
-        // Sequentialize parallel copies, handling cycles with xchg.
-        //
-        // Algorithm: repeatedly emit copies whose dst is not a src of any
-        // remaining copy (safe to overwrite). When only cycles remain,
-        // break them with xchg.
-        let mut done = vec![false; copies.len()];
-        let mut progress = true;
-        while progress {
-            progress = false;
-            for i in 0..copies.len() {
-                if done[i] { continue; }
-                let (dst, _src) = copies[i];
-                // Check if dst is used as src by any other pending copy
-                let dst_is_src = copies.iter().enumerate().any(|(j, (_, s))| {
-                    j != i && !done[j] && *s == dst
-                });
-                if !dst_is_src {
-                    // Safe to emit: no other copy reads from dst
-                    let (d, s) = copies[i];
-                    asm.mov(preg_to_reg64(d), preg_to_reg64(s))?;
-                    done[i] = true;
-                    progress = true;
-                }
-            }
-        }
+    if copies.is_empty() { return Ok(()); }
 
-        // Remaining undone copies form cycles; break with xchg
+    // Sequentialize parallel copies, handling cycles with xchg.
+    let mut done = vec![false; copies.len()];
+    let mut progress = true;
+    while progress {
+        progress = false;
         for i in 0..copies.len() {
             if done[i] { continue; }
-            let (d, s) = copies[i];
-            asm.xchg(preg_to_reg64(d), preg_to_reg64(s))?;
-            done[i] = true;
-            // Update remaining copies that reference d or s
-            for j in (i + 1)..copies.len() {
-                if done[j] { continue; }
-                if copies[j].1 == d {
-                    copies[j].1 = s; // src was in d, now in s after xchg
-                } else if copies[j].1 == s {
-                    copies[j].1 = d; // src was in s, now in d after xchg
-                }
+            let (dst, _src) = copies[i];
+            let dst_is_src = copies.iter().enumerate().any(|(j, (_, s))| {
+                j != i && !done[j] && *s == dst
+            });
+            if !dst_is_src {
+                let (d, s) = copies[i];
+                asm.mov(preg_to_reg64(d), preg_to_reg64(s))?;
+                done[i] = true;
+                progress = true;
+            }
+        }
+    }
+
+    // Remaining undone copies form cycles; break with xchg
+    for i in 0..copies.len() {
+        if done[i] { continue; }
+        let (d, s) = copies[i];
+        asm.xchg(preg_to_reg64(d), preg_to_reg64(s))?;
+        done[i] = true;
+        for j in (i + 1)..copies.len() {
+            if done[j] { continue; }
+            if copies[j].1 == d {
+                copies[j].1 = s;
+            } else if copies[j].1 == s {
+                copies[j].1 = d;
             }
         }
     }
@@ -308,11 +296,6 @@ pub fn emit(
         asm.set_label(label)?;
 
         for (_inst_idx, inst) in block.insts.iter().enumerate() {
-            // Before terminators that jump to blocks with phis, emit phi Movs
-            if inst.is_terminator() {
-                emit_phi_moves(&mut asm, inst, block.id, func, assignment)?;
-            }
-
             match inst {
                 MInst::Return => {
                     asm.xor(eax, eax)?;
@@ -321,6 +304,54 @@ pub fn emit(
                 MInst::ReturnError { code } => {
                     asm.mov(eax, *code as u32)?;
                     asm.jmp(epilogue_label)?;
+                }
+                MInst::Jump { target } => {
+                    // Emit phi moves, then jump
+                    emit_phi_moves_for_target(&mut asm, block.id, *target, func, assignment)?;
+                    let label = block_labels.get_mut(target).unwrap();
+                    asm.jmp(*label)?;
+                }
+                MInst::Branch { cond, true_bb, false_bb } => {
+                    // Branch phi moves must be split: each target's phi
+                    // is emitted on its respective execution path.
+                    let c = preg_to_reg64(resolve(assignment, *cond));
+                    asm.test(c, c)?;
+                    // True path: emit true_bb phi moves, then jne
+                    // But jne is a conditional jump — phi moves must be
+                    // on the taken path. Use a scratch label for the
+                    // true path phi moves.
+                    let true_has_phis = func.blocks.iter()
+                        .find(|b| b.id == *true_bb)
+                        .is_some_and(|b| !b.phis.is_empty());
+                    let false_has_phis = func.blocks.iter()
+                        .find(|b| b.id == *false_bb)
+                        .is_some_and(|b| !b.phis.is_empty());
+
+                    if !true_has_phis && !false_has_phis {
+                        // No phis: simple branch
+                        let true_label = block_labels.get_mut(true_bb).unwrap();
+                        asm.jne(*true_label)?;
+                        let false_label = block_labels.get_mut(false_bb).unwrap();
+                        asm.jmp(*false_label)?;
+                    } else {
+                        // Emit: jne true_phi_block
+                        //       <false phi moves>
+                        //       jmp false_bb
+                        //   true_phi_block:
+                        //       <true phi moves>
+                        //       jmp true_bb
+                        let mut true_phi_label = asm.create_label();
+                        asm.jne(true_phi_label)?;
+                        // False path (fallthrough)
+                        emit_phi_moves_for_target(&mut asm, block.id, *false_bb, func, assignment)?;
+                        let false_label = block_labels.get_mut(false_bb).unwrap();
+                        asm.jmp(*false_label)?;
+                        // True path
+                        asm.set_label(&mut true_phi_label)?;
+                        emit_phi_moves_for_target(&mut asm, block.id, *true_bb, func, assignment)?;
+                        let true_label = block_labels.get_mut(true_bb).unwrap();
+                        asm.jmp(*true_label)?;
+                    }
                 }
                 MInst::UDiv { dst, lhs, rhs } => {
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Div)?;
@@ -486,13 +517,9 @@ fn emit_inst(
             let r = preg_to_reg64(resolve(assignment, *rhs));
 
             if r == rax && l != rax {
-                // rhs is in RAX; mov rax, lhs would clobber rhs.
-                // mul is commutative: swap operands → mul l
-                asm.mov(rax, r)?; // nop if r==rax, but l!=rax
-                // Actually r==rax already, so just mul l
+                // rhs is in RAX; mul is commutative, so mul l instead
                 asm.mul(l)?;
             } else if r == rax && l == rax {
-                // Both in RAX: mul rax = rax*rax
                 asm.mul(rax)?;
             } else {
                 // Normal case: mov rax, lhs; mul rhs
@@ -624,18 +651,9 @@ fn emit_inst(
             }
         }
 
-        MInst::Branch { cond, true_bb, false_bb } => {
-            let c = preg_to_reg64(resolve(assignment, *cond));
-            asm.test(c, c)?;
-            let true_label = block_labels.get_mut(true_bb).unwrap();
-            asm.jne(*true_label)?;
-            let false_label = block_labels.get_mut(false_bb).unwrap();
-            asm.jmp(*false_label)?;
-        }
-
-        MInst::Jump { target } => {
-            let label = block_labels.get_mut(target).unwrap();
-            asm.jmp(*label)?;
+        // Branch and Jump are handled in the main emit loop (with phi moves).
+        MInst::Branch { .. } | MInst::Jump { .. } => {
+            unreachable!("Branch/Jump should be handled in main emit loop");
         }
 
         MInst::UDiv { dst, lhs, rhs } => {
