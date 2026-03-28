@@ -270,10 +270,20 @@ fn process_block(
     let block = &func.blocks[block_idx];
     let mut new_insts: Vec<MInst> = Vec::with_capacity(block.insts.len());
 
-    // Pre-compute shift points for blocked set
+    // Pre-compute next-use table: for each VReg, sorted list of use positions.
+    // This replaces O(n) forward scans in next_use_at with O(log n) binary search.
+    let mut use_positions: BTreeMap<VReg, Vec<usize>> = BTreeMap::new();
+    for (i, inst) in block.insts.iter().enumerate() {
+        for vreg in inst.uses() {
+            use_positions.entry(vreg).or_default().push(i);
+        }
+    }
+
+    // Pre-compute shift and clobber points for blocked set
     let shift_points: Vec<usize> = block.insts.iter().enumerate()
         .filter_map(|(idx, inst)| if is_reg_shift(inst) { Some(idx) } else { None })
         .collect();
+    let clobber_points = super::assignment::block_clobber_points_for(block);
 
     // Pre-compute last-use positions for blocked set
     let mut last_use_in_block: BTreeMap<VReg, usize> = BTreeMap::new();
@@ -315,8 +325,7 @@ fn process_block(
                             // in a different register for this instruction only.
                             let move_blocked: BTreeSet<PhysReg> = [*required_preg].into();
                             if rf.occupancy() >= k {
-                                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis,
-                                    block_idx, inst_idx, slots, &pinned, &BTreeSet::new(), result);
+                                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &BTreeSet::new(), result);
                             }
                             let new_preg = rf.find_free_excluding(&move_blocked)
                                 .expect("no free register for occupant move");
@@ -377,7 +386,7 @@ fn process_block(
 
                     // Evict if needed to make room
                     if rf.occupancy() >= k {
-                        evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, slots, &pinned, &BTreeSet::new(), result);
+                        evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &BTreeSet::new(), result);
                     }
 
                     // Find a free register (respecting shift blocked set)
@@ -407,7 +416,7 @@ fn process_block(
 
         // Step C: Evict to pressure ≤ k
         while rf.occupancy() > k {
-            evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, slots, &pinned, &BTreeSet::new(), result);
+            evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &BTreeSet::new(), result);
         }
 
         // Step D: Handle def
@@ -416,14 +425,14 @@ fn process_block(
 
             // Make room: need occupancy + 1 + clobber_extra ≤ k
             while rf.occupancy() + 1 + clobber_extra > k {
-                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx + 1, slots, &pinned, &BTreeSet::new(), result);
+                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx + 1, block.insts.len(), &use_positions, slots, &pinned, &BTreeSet::new(), result);
             }
 
             // Pick a PhysReg for the def
             let last_use_pos = last_use_in_block.get(&def_vreg).copied().unwrap_or(inst_idx);
             let blocked = compute_blocked_for_def(
                 inst_idx, last_use_pos, &shift_points,
-                &super::assignment::block_clobber_points_for(block),
+                &clobber_points,
             );
 
             let preg = rf.find_free_excluding(&blocked)
@@ -438,8 +447,9 @@ fn process_block(
         new_insts.push(rewritten_inst);
 
         // Step E: Remove dead VRegs
+        let block_len = block.insts.len();
         let dead: Vec<VReg> = rf.vregs()
-            .filter(|&v| analysis::next_use_at(func, analysis, block_idx, inst_idx + 1, v) == u32::MAX)
+            .filter(|&v| fast_next_use(&use_positions, analysis, block_idx, block_len, inst_idx + 1, v) == u32::MAX)
             .collect();
         for v in dead {
             rf.evict(v);
@@ -477,6 +487,8 @@ fn evict_farthest(
     analysis: &AnalysisResult,
     block_idx: usize,
     inst_idx: usize,
+    block_len: usize,
+    use_positions: &BTreeMap<VReg, Vec<usize>>,
     slots: &mut SpillSlotAllocator,
     pinned: &BTreeSet<VReg>,
     _blocked_pregs: &BTreeSet<PhysReg>,
@@ -486,7 +498,7 @@ fn evict_farthest(
     let victim = rf.vregs()
         .filter(|v| !pinned.contains(v))
         .max_by_key(|&v| {
-            let next_use = analysis::next_use_at(func, analysis, block_idx, inst_idx, v);
+            let next_use = fast_next_use(use_positions, analysis, block_idx, block_len, inst_idx, v);
             let desc = func.spill_desc(v);
             let eviction_class = match desc {
                 Some(d) if matches!(d.kind, SpillKind::Remat { .. }) => 3,
@@ -501,6 +513,43 @@ fn evict_farthest(
 
     emit_spill(new_insts, victim, s, func, slots, result);
     rf.evict(victim);
+}
+
+/// O(log n) next-use lookup using pre-computed use position lists.
+fn fast_next_use(
+    use_positions: &BTreeMap<VReg, Vec<usize>>,
+    analysis: &AnalysisResult,
+    block_idx: usize,
+    block_len: usize,
+    inst_idx: usize,
+    vreg: VReg,
+) -> u32 {
+    if let Some(positions) = use_positions.get(&vreg) {
+        // Binary search for first position >= inst_idx
+        match positions.binary_search(&inst_idx) {
+            Ok(_) => 0, // Used at exactly inst_idx
+            Err(idx) => {
+                if idx < positions.len() {
+                    (positions[idx] - inst_idx) as u32
+                } else {
+                    // No more uses in this block; check exit distance
+                    let remaining = (block_len - inst_idx) as u32;
+                    analysis.exit_distances[block_idx]
+                        .get(&vreg)
+                        .map(|d| remaining + d)
+                        .unwrap_or(u32::MAX)
+                }
+            }
+        }
+    } else {
+        // VReg not used in this block at all (fresh VReg from spilling)
+        // Check exit distances
+        let remaining = (block_len - inst_idx) as u32;
+        analysis.exit_distances[block_idx]
+            .get(&vreg)
+            .map(|d| remaining + d)
+            .unwrap_or(u32::MAX)
+    }
 }
 
 fn compute_blocked_for_vreg(
