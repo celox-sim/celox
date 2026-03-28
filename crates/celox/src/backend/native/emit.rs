@@ -639,6 +639,13 @@ fn emit_inst(
             asm.popcnt(d, s)?;
         }
 
+        MInst::Pext { dst, src, mask } => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            let m = preg_to_reg64(resolve(assignment, *mask));
+            asm.pext(d, s, m)?;
+        }
+
         MInst::Select { dst, cond, true_val, false_val } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let c = preg_to_reg64(resolve(assignment, *cond));

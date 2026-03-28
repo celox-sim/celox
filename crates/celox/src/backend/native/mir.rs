@@ -353,6 +353,10 @@ pub enum MInst {
     Neg { dst: VReg, src: VReg },
     /// dst = popcnt(src) (population count — number of set bits)
     Popcnt { dst: VReg, src: VReg },
+    /// dst = pext(src, mask) — parallel bit extract (BMI2).
+    /// Extracts bits from src at positions where mask has 1s,
+    /// and packs them contiguously starting at bit 0.
+    Pext { dst: VReg, src: VReg, mask: VReg },
 
     // ── Select (for div-by-zero guard, etc.) ───────────────────
     /// dst = cond ? true_val : false_val
@@ -432,6 +436,7 @@ impl fmt::Display for MInst {
             MInst::BitNot { dst, src } => write!(f, "{dst} = not {src}"),
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
             MInst::Popcnt { dst, src } => write!(f, "{dst} = popcnt {src}"),
+            MInst::Pext { dst, src, mask } => write!(f, "{dst} = pext {src}, {mask}"),
             MInst::Select {
                 dst,
                 cond,
@@ -515,6 +520,7 @@ impl MInst {
             | MInst::BitNot { dst, .. }
             | MInst::Neg { dst, .. }
             | MInst::Popcnt { dst, .. }
+            | MInst::Pext { dst, .. }
             | MInst::Select { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
@@ -548,6 +554,7 @@ impl MInst {
             | MInst::Cmp { lhs, rhs, .. }
             | MInst::UDiv { lhs, rhs, .. }
             | MInst::URem { lhs, rhs, .. } => Uses::two(*lhs, *rhs),
+            MInst::Pext { src, mask, .. } => Uses::two(*src, *mask),
             MInst::AndImm { src, .. }
             | MInst::OrImm { src, .. }
             | MInst::ShrImm { src, .. }
@@ -603,6 +610,10 @@ impl MInst {
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. } => {
                 if *src == old { *src = new; }
+            }
+            MInst::Pext { src, mask, .. } => {
+                if *src == old { *src = new; }
+                if *mask == old { *mask = new; }
             }
             MInst::Select { cond, true_val, false_val, .. } => {
                 if *cond == old { *cond = new; }
