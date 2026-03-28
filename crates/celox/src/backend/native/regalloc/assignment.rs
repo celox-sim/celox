@@ -211,10 +211,6 @@ pub fn split_live_ranges_at_fixed_constraints(func: &mut MFunction) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: BTreeMap<VReg, PhysReg>,
-    /// True if assignment had to evict a VReg. Eviction produces
-    /// incorrect code — investigate and fix the spilling/constraint
-    /// interaction that caused it.
-    pub had_eviction: bool,
 }
 
 impl AssignmentMap {
@@ -460,24 +456,7 @@ pub fn assign(func: &MFunction, analysis: &AnalysisResult) -> AssignmentMap {
 
                         find_free_reg_excluding(&active, &blocked)
                             .or_else(|| find_free_reg(&active, None))
-                            .unwrap_or_else(|| {
-                                // All registers occupied. This should not happen if
-                                // spilling is correct, but constraint handling can
-                                // cause transient pressure spikes. Evict the farthest-
-                                // use VReg as a safety net.
-                                result.had_eviction = true;
-                                let victim = active
-                                    .iter()
-                                    .max_by_key(|&(_, &v)| {
-                                        super::analysis::next_use_at(
-                                            func, analysis, bi, inst_idx + 1, v,
-                                        )
-                                    })
-                                    .map(|(&p, _)| p)
-                                    .expect("no victim found");
-                                active.remove(&victim);
-                                victim
-                            })
+                            .expect("regalloc: no free register (spilling bug)")
                     }
                 };
                 active.insert(preg, def_vreg);

@@ -108,28 +108,12 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
     let sr = spilling::spill(func, &analysis, NUM_REGS - 1);
     spill_frame_size += sr.frame_size;
 
-    // Post-spilling: re-split Fixed constraints that spilling disrupted,
-    // then re-spill once to account for the split's added Movs.
-    if assignment::split_live_ranges_at_fixed_constraints(func) {
-        let analysis = analysis::analyze(func);
-        let sr2 = spilling::spill(func, &analysis, NUM_REGS - 1);
-        spill_frame_size += sr2.frame_size;
-    }
+    // Post-spilling: re-split Fixed constraints that spilling disrupted.
+    let _ = assignment::split_live_ranges_at_fixed_constraints(func);
 
     let analysis = analysis::analyze(func);
     let assignment = assignment::assign(func, &analysis);
 
-    if std::env::var("CELOX_DUMP_MIR").is_ok() {
-        for (bi, block) in func.blocks.iter().enumerate() {
-            for (ii, inst) in block.insts.iter().enumerate() {
-                let r = inst.def().and_then(|d| assignment.get(d));
-                eprintln!("  [{ii:3}] {inst}  => {r:?}");
-            }
-            let _ = bi;
-        }
-    }
-
-    // Verify: no two simultaneously-live VRegs share a PhysReg.
     #[cfg(debug_assertions)]
     verify_assignment(func, &analysis, &assignment);
 
