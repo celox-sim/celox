@@ -9,8 +9,63 @@ use super::mir::*;
 
 /// Run all MIR optimization passes.
 pub fn optimize(func: &mut MFunction) {
+    constant_dedup(func);
     copy_propagate(func);
     dead_code_eliminate(func);
+}
+
+/// Constant deduplication: merge LoadImm instructions with the same value
+/// into a single VReg. Reduces register pressure and instruction count.
+fn constant_dedup(func: &mut MFunction) {
+    let mut aliases: HashMap<VReg, VReg> = HashMap::new();
+    // Map from constant value → canonical VReg
+    let mut const_map: HashMap<u64, VReg> = HashMap::new();
+
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let MInst::LoadImm { dst, value } = inst {
+                if let Some(&canonical) = const_map.get(value) {
+                    aliases.insert(*dst, canonical);
+                } else {
+                    const_map.insert(*value, *dst);
+                }
+            }
+        }
+    }
+
+    if aliases.is_empty() {
+        return;
+    }
+
+    // Apply aliases
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            let current_uses = inst.uses();
+            for u in current_uses {
+                if let Some(&target) = aliases.get(&u) {
+                    inst.rewrite_use(u, target);
+                }
+            }
+        }
+        for phi in &mut block.phis {
+            for (_, src) in &mut phi.sources {
+                if let Some(&a) = aliases.get(src) {
+                    *src = a;
+                }
+            }
+        }
+    }
+
+    // Remove duplicated LoadImm
+    for block in &mut func.blocks {
+        block.insts.retain(|inst| {
+            if let MInst::LoadImm { dst, .. } = inst {
+                !aliases.contains_key(dst)
+            } else {
+                true
+            }
+        });
+    }
 }
 
 /// Copy propagation: for each `Mov { dst, src }`, replace all uses of dst
