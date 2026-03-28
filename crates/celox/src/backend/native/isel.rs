@@ -92,6 +92,7 @@ pub fn lower_execution_unit(
         consts: ConstMap::default(),
         four_state,
         mask_map,
+        known_bits: crate::HashMap::default(),
         wide_masks: WideRegMap::default(),
     };
 
@@ -119,6 +120,24 @@ pub fn lower_execution_unit(
         // Lower instructions
         for inst in &sir_block.instructions {
             lower_instruction(&mut ctx, &mut mblock, inst);
+
+            // Track known bit width for redundant mask elimination.
+            let dst_reg = match inst {
+                SIRInstruction::Imm(d, _)
+                | SIRInstruction::Binary(d, _, _, _)
+                | SIRInstruction::Unary(d, _, _)
+                | SIRInstruction::Load(d, _, _, _)
+                | SIRInstruction::Concat(d, _)
+                | SIRInstruction::Slice(d, _, _, _) => Some(*d),
+                SIRInstruction::Store(..) | SIRInstruction::Commit(..) => None,
+            };
+            if let Some(dr) = dst_reg {
+                let w = ctx.sir_width(&dr);
+                if w <= 64 {
+                    let vreg = ctx.reg_map.get(dr);
+                    ctx.known_bits.insert(vreg, w);
+                }
+            }
         }
 
         // Lower terminator
@@ -258,6 +277,10 @@ struct ISelContext<'a> {
     four_state: bool,
     /// Maps SIR RegisterId → mask VReg (parallel to reg_map).
     mask_map: RegMap,
+    /// Known effective bit width per VReg. If a VReg is known to have at most
+    /// `w` significant bits (upper bits guaranteed zero), AND masking to `w`
+    /// bits can be elided. Populated by Load (movzx), Cmp (0/1), AndImm, etc.
+    known_bits: crate::HashMap<VReg, usize>,
     /// Wide mask chunks (parallel to wide_regs).
     wide_masks: WideRegMap,
 }
@@ -346,7 +369,8 @@ impl<'a> ISelContext<'a> {
     }
 
     /// Emit AND with immediate, handling 64-bit values that don't fit i32.
-    /// For small immediates, emits AndImm. For large ones, emits LoadImm + And.
+    /// Elides the AND entirely if the source is already known to fit within
+    /// the mask (redundant mask elimination).
     fn emit_and_imm(
         &mut self,
         block: &mut MBlock,
@@ -360,7 +384,35 @@ impl<'a> ISelContext<'a> {
             if dst != src {
                 block.push(MInst::Mov { dst, src });
             }
-        } else if (signed >= i32::MIN as i64 && signed <= i32::MAX as i64)
+            return;
+        }
+
+        // Check if src is already known to fit within the mask.
+        // mask_for_width(w) = (1 << w) - 1. If src's known_bits <= w,
+        // the AND is redundant.
+        if let Some(&src_bits) = self.known_bits.get(&src) {
+            // imm = mask_for_width(w) means all bits above w are 0.
+            // If src_bits <= w, src already has zeros above w.
+            let mask_width = 64 - imm.leading_zeros() as usize; // bits needed to represent imm
+            if imm == mask_for_width(mask_width) && src_bits <= mask_width {
+                // Redundant AND: src is already within mask
+                if dst != src {
+                    block.push(MInst::Mov { dst, src });
+                    self.known_bits.insert(dst, src_bits);
+                } else {
+                    // dst == src: complete no-op
+                }
+                return;
+            }
+        }
+
+        // Track output known bits
+        let out_bits = 64 - imm.leading_zeros() as usize;
+        if imm == mask_for_width(out_bits) {
+            self.known_bits.insert(dst, out_bits);
+        }
+
+        if (signed >= i32::MIN as i64 && signed <= i32::MAX as i64)
             || imm <= u32::MAX as u64
         {
             block.push(MInst::AndImm { dst, src, imm });
@@ -1360,10 +1412,14 @@ fn lower_instruction(
                     }
                 }
                 BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
-                    // Operands may be wider than d_width (SIR optimizer widens
-                    // Loads). Mask result to d_width to prevent upper-bit garbage
-                    // from propagating to comparisons and stores.
-                    let raw = if d_width < 64 {
+                    // For bitwise ops, result width = max(lhs_bits, rhs_bits).
+                    // If both inputs fit within d_width, AND mask is redundant.
+                    let lhs_bits = ctx.known_bits.get(&lhs_vreg).copied().unwrap_or(64);
+                    let rhs_bits = ctx.known_bits.get(&rhs_vreg).copied().unwrap_or(64);
+                    let result_bits = lhs_bits.max(rhs_bits);
+                    let needs_mask = d_width < 64 && result_bits > d_width;
+
+                    let raw = if needs_mask {
                         ctx.alloc_vreg(SpillDesc::transient())
                     } else {
                         dst_vreg
@@ -1374,7 +1430,7 @@ fn lower_instruction(
                         BinaryOp::Xor => block.push(MInst::Xor { dst: raw, lhs: lhs_vreg, rhs: rhs_vreg }),
                         _ => unreachable!(),
                     }
-                    if d_width < 64 {
+                    if needs_mask {
                         ctx.emit_and_imm(block, dst_vreg, raw, mask_for_width(d_width));
                     }
                 }
