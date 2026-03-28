@@ -107,14 +107,11 @@ x86-64 の不規則なレジスタ制約（shift の RCX 固定、div/rem の RA
 ```
 k_eff(inst) = k - constraint_headroom(inst)
 
-constraint_headroom(inst) =
-  if is_shift(inst) && shift_rhs ∉ W:
-    1    // RCX を制約用に確保
-  else:
-    0    // rhs が既に W にいれば追加の確保は不要
+constraint_headroom(inst) = |{Fixed constraints in inst}|
+  // shift → 1 (RCX), div/rem → clobber で別途対処
 ```
 
-rhs が既に working set W に含まれている場合、RCX への移動は W のサイズを増やさないため headroom = 0 で十分。これにより shift が多い RTL シミュレーションでの過剰な eviction を防ぐ。
+**spilling は k-1 で実行する**。spilling の W tracking（def 前の live count）と assignment の active tracking（def 割り当て時の live count）に構造的な差分 1 が生じるため、k-1 で spilling して assignment に常に 1 slot の余裕を持たせる。
 
 ##### Live-range splitting at clobbers
 
@@ -182,7 +179,7 @@ Braun & Hack Section 4.4 に準拠。reload の挿入で壊れた SSA を φ-fun
 
 Spilling 後、各プログラムポイントの同時 live register 数が k_eff 以下であることが保証される。SSA-form の interference graph は chordal であるため、greedy coloring で最適解が O(n) で得られる。
 
-Assignment は eviction safety net を持つが、これは spilling のバグ検出用であり、正常動作では発動しない。
+Assignment は eviction を行わない。register 不足は spilling のバグとして panic する。
 
 ### Phase 4: Code Emission
 
