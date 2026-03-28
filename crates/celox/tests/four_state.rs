@@ -256,11 +256,11 @@ fn test_four_state_arithmetic_ops() {
         BigUint::from(0xFFu32),
         "Arithmetic addition with X input should yield all X mask"
     );
-    // 10 + 1 = 11, but all bits are X
+    // All bits are X, so value is normalized: v |= m → 0xFF
     assert_eq!(
         v_add,
-        BigUint::from(11u32),
-        "Value is actual computation result (10+1), but masked as all-X"
+        BigUint::from(0xFFu32),
+        "Value is normalized at X positions (v |= m)"
     );
 }
 
@@ -1152,8 +1152,8 @@ fn test_four_state_mul_with_x() {
     );
     assert_eq!(
         v,
-        BigUint::from(0u32),
-        "Value should be 0 after normalization"
+        BigUint::from(0xFFu32),
+        "Value normalized at X positions (v |= m)"
     );
 }
 
@@ -1198,7 +1198,7 @@ fn test_four_state_div_with_x() {
         BigUint::from(0xFFu32),
         "DIV with X dividend should yield all-X"
     );
-    assert_eq!(v, BigUint::from(0u32));
+    assert_eq!(v, BigUint::from(0xFFu32), "Value normalized at X positions (v |= m)");
 }
 
 #[test]
@@ -1242,7 +1242,7 @@ fn test_four_state_mod_with_x() {
         BigUint::from(0xFFu32),
         "MOD with X divisor should yield all-X"
     );
-    assert_eq!(v, BigUint::from(0u32));
+    assert_eq!(v, BigUint::from(0xFFu32), "Value normalized at X positions (v |= m)");
 }
 
 // ==========================================================================
@@ -1672,10 +1672,8 @@ fn test_four_state_sar_x_shift_amount() {
         BigUint::from(0xFFu32),
         "SAR by X amount should yield all-X"
     );
-    // Without normalization, v contains Cranelift's actual shift result: shift amount
-    // (v=1) is masked by width-1 (7), giving 1. So 0x80 (signed) >>> 1 = 0xC0.
-    // The mask marks all bits as unknown, so v is don't-care semantically.
-    assert_eq!(v, BigUint::from(0xC0u32));
+    // Value is normalized at X positions: v |= m → 0xFF
+    assert_eq!(v, BigUint::from(0xFFu32));
 }
 
 // ==========================================================================
@@ -1712,12 +1710,12 @@ fn test_four_state_concat_three_elements() {
     .unwrap();
 
     let (v, m) = sim.get_four_state(id_y);
-    // y = {a, b, c} = {XXXX, 0101, 0011} → mask = 0xF00, value = 0xA53 (a value preserved)
+    // y = {a, b, c} = {XXXX, 0101, 0011} → mask = 0xF00, value normalized: 0xA53 | 0xF00 = 0xF53
     assert_eq!(m, BigUint::from(0xF00u32), "Only high nibble should be X");
     assert_eq!(
         v,
-        BigUint::from(0xA53u32),
-        "Defined parts: b=5, c=3; a value preserved at 0xA"
+        BigUint::from(0xF53u32),
+        "Defined parts: b=5, c=3; X positions normalized (v |= m)"
     );
 }
 
@@ -1902,8 +1900,8 @@ fn test_four_state_width_widening_with_x() {
     );
     assert_eq!(
         v,
-        BigUint::from(0xA5u32),
-        "Value preserved at 0xA5 (no normalization)"
+        BigUint::from(0xAFu32),
+        "Value normalized at X positions: 0xA5 | 0x0F = 0xAF"
     );
 }
 
@@ -2017,13 +2015,13 @@ fn test_four_state_concat_odd_width() {
     // y = {a, b} = {101, 10011} → 8'b101_10011
     // mask: a's bit 1 X → in y that's bit 6 → mask = 0b0100_0000 = 0x40
     assert_eq!(m, BigUint::from(0x40u32), "X in a[1] should appear at y[6]");
-    // value: a = 0b101 (bit 1 is X but val=0), b = 0x13
+    // value: a = 0b101 (bit 1 is X), b = 0x13
     // y_val = (0b101 << 5) | 0b10011 = 0b10110011 = 0xB3
-    // Normalization: bit 6 val is already 0, so 0xB3 & ~0x40 = 0xB3
+    // Normalization: v |= m → 0xB3 | 0x40 = 0xF3
     assert_eq!(
         v,
-        BigUint::from(0xB3u32),
-        "Concat value with X bit at position 6"
+        BigUint::from(0xF3u32),
+        "Concat value normalized at X positions: 0xB3 | 0x40 = 0xF3"
     );
 }
 
@@ -2243,7 +2241,7 @@ fn test_four_state_mux_both_branches_x() {
         BigUint::from(0xFFu32),
         "sel=1 selecting X branch → all-X"
     );
-    assert_eq!(v, BigUint::from(0u32));
+    assert_eq!(v, BigUint::from(0xFFu32), "Value normalized at X positions (v |= m)");
 
     // sel=0 (defined), still selects b which is X
     sim.modify(|io: &mut IOContext| {
@@ -2369,10 +2367,8 @@ fn test_four_state_shift_both_x() {
         BigUint::from(0xFFu32),
         "Shift with X in both data and amount → all-X"
     );
-    // Without normalization, v contains Cranelift's actual shift result: shift amount
-    // (v=3) is masked by width-1 (7), giving 3. So 0xFF >> 3 = 0x1F.
-    // The mask marks all bits as unknown, so v is don't-care semantically.
-    assert_eq!(v, BigUint::from(0x1Fu32));
+    // Value is normalized at X positions: v |= m → 0xFF
+    assert_eq!(v, BigUint::from(0xFFu32));
 }
 
 // ==========================================================================
@@ -3104,10 +3100,8 @@ fn test_four_state_sar_both_x() {
         BigUint::from(0xFFu32),
         "SAR with X in both data and shift amount → all-X"
     );
-    // Without normalization, v contains Cranelift's actual shift result: shift amount
-    // (v=3) is masked by width-1 (7), giving 3. So 0x80 (signed) >>> 3 = 0xF0.
-    // The mask marks all bits as unknown, so v is don't-care semantically.
-    assert_eq!(v, BigUint::from(0xF0u32));
+    // Value is normalized at X positions: v |= m → 0xFF
+    assert_eq!(v, BigUint::from(0xFFu32));
 }
 
 // ==========================================================================
@@ -3725,7 +3719,7 @@ fn test_z_mux_tristate_pattern() {
         BigUint::from(0xFFu32),
         "en=0: y should be all Z (mask=0xFF)"
     );
-    assert_eq!(v, BigUint::from(0x00u32), "en=0: Z encoding has v=0");
+    assert_eq!(v, BigUint::from(0xFFu32), "en=0: Z encoding normalized (v |= m)");
 }
 
 #[test]

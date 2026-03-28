@@ -580,15 +580,15 @@ fn check_ff_unary_4s(
 
 //                  op   in_ty       out_ty      a_v   a_m   b_v   b_m   e_v   e_m
 #[test_case("&",  "logic<8>", "logic<8>", 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00 ; "4s and 0 and X is 0")]
-#[test_case("&",  "logic<8>", "logic<8>", 0xFF, 0x00, 0x00, 0xFF, 0x00, 0xFF ; "4s and 1 and X is X")]
+#[test_case("&",  "logic<8>", "logic<8>", 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF ; "4s and 1 and X is X")]
 #[test_case("&",  "logic<8>", "logic<8>", 0xFF, 0x00, 0xA5, 0x00, 0xA5, 0x00 ; "4s and defined")]
 #[test_case("|",  "logic<8>", "logic<8>", 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00 ; "4s or 1 or X is 1")]
-#[test_case("|",  "logic<8>", "logic<8>", 0x00, 0x00, 0x00, 0xFF, 0x00, 0xFF ; "4s or 0 or X is X")]
+#[test_case("|",  "logic<8>", "logic<8>", 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF ; "4s or 0 or X is X")]
 #[test_case("|",  "logic<8>", "logic<8>", 0xA5, 0x00, 0x5A, 0x00, 0xFF, 0x00 ; "4s or defined")]
 // IEEE: XOR mask = l_m|r_m. Value at X positions is actual computation result.
-#[test_case("^",  "logic<8>", "logic<8>", 0x55, 0x00, 0xFF, 0xFF, 0xAA, 0xFF ; "4s xor with X")]
+#[test_case("^",  "logic<8>", "logic<8>", 0x55, 0x00, 0xFF, 0xFF, 0xFF, 0xFF ; "4s xor with X")]
 #[test_case("^",  "logic<8>", "logic<8>", 0x55, 0x00, 0xAA, 0x00, 0xFF, 0x00 ; "4s xor defined")]
-#[test_case("~^", "logic<8>", "logic<8>", 0xF0, 0x00, 0xFF, 0xFF, 0xF0, 0xFF ; "4s xnor with X")]
+#[test_case("~^", "logic<8>", "logic<8>", 0xF0, 0x00, 0xFF, 0xFF, 0x00, 0xFF ; "4s xnor with X")]
 #[test_case("~^", "logic<8>", "logic<8>", 0xF0, 0x00, 0xFF, 0x00, 0xF0, 0x00 ; "4s xnor defined")]
 fn comb_bitwise_4s(
     op: &str,
@@ -608,10 +608,10 @@ fn comb_bitwise_4s(
 // 4-state: Arithmetic — comb  (any X → all X, value is computation result)
 // ===================================================================
 
-#[test_case("+",  "logic<8>", "logic<8>", 10, 0x00, 1, 0x01, 11, 0xFF ; "4s add X input")]
+#[test_case("+",  "logic<8>", "logic<8>", 10, 0x00, 1, 0x01, 0xFF, 0xFF ; "4s add X input")]
 #[test_case("+",  "logic<8>", "logic<8>", 10, 0x00, 5, 0x00, 15, 0x00 ; "4s add defined")]
-#[test_case("-",  "logic<8>", "logic<8>", 10, 0x00, 1, 0x01,  9, 0xFF ; "4s sub X input")]
-#[test_case("*",  "logic<8>", "logic<8>",  7, 0x00, 1, 0x01,  7, 0xFF ; "4s mul X input")]
+#[test_case("-",  "logic<8>", "logic<8>", 10, 0x00, 1, 0x01, 0xFF, 0xFF ; "4s sub X input")]
+#[test_case("*",  "logic<8>", "logic<8>",  7, 0x00, 1, 0x01, 0xFF, 0xFF ; "4s mul X input")]
 fn comb_arith_4s(
     op: &str,
     in_ty: &str,
@@ -630,8 +630,8 @@ fn comb_arith_4s(
 // 4-state: Comparison — comb  (any X → result X)
 // ===================================================================
 
-#[test_case("==", "logic<8>", "logic", 42, 0x00, 0, 0x01, 0, 1 ; "4s eq X input")]
-#[test_case("<:", "logic<8>", "logic", 10, 0x00, 0, 0x01, 0, 1 ; "4s lt X input")]
+#[test_case("==", "logic<8>", "logic", 42, 0x00, 0, 0x01, 1, 1 ; "4s eq X input")]
+#[test_case("<:", "logic<8>", "logic", 10, 0x00, 0, 0x01, 1, 1 ; "4s lt X input")]
 #[test_case("==", "logic<8>", "logic", 42, 0x00, 42, 0x00, 1, 0 ; "4s eq defined")]
 fn comb_compare_4s(
     op: &str,
@@ -651,10 +651,9 @@ fn comb_compare_4s(
 // 4-state: Shift — comb  (X in amount → all X)
 // ===================================================================
 
-// IEEE 1800: X in shift amount → result is all-X; value is actual computation result
-// Cranelift masks shift amount by (width-1), so 0xFF & 7 = 7
-#[test_case("<<", "logic<8>", "logic<8>", 0x01, 0x00, 0xFF, 0xFF, 0x80, 0xFF ; "4s shl X amount")]
-#[test_case(">>", "logic<8>", "logic<8>", 0xFF, 0x00, 0xFF, 0xFF, 0x01, 0xFF ; "4s shr X amount")]
+// IEEE 1800: X in shift amount → result is all-X (v=1, m=1 per bit)
+#[test_case("<<", "logic<8>", "logic<8>", 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF ; "4s shl X amount")]
+#[test_case(">>", "logic<8>", "logic<8>", 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF ; "4s shr X amount")]
 fn comb_shift_4s(
     op: &str,
     in_ty: &str,
@@ -710,7 +709,7 @@ fn comb_reduction_4s(op: &str, in_ty: &str, out_ty: &str, a_v: u64, a_m: u64, e_
 #[test_case("&",  "logic<8>", "logic<8>", 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00 ; "4s ff and 0 X")]
 #[test_case("|",  "logic<8>", "logic<8>", 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00 ; "4s ff or 1 X")]
 #[test_case("+",  "logic<8>", "logic<8>",   10, 0x00,    5, 0x00,   15, 0x00 ; "4s ff add defined")]
-#[test_case("+",  "logic<8>", "logic<8>",   10, 0x00,    1, 0x01,   11, 0xFF ; "4s ff add X")]
+#[test_case("+",  "logic<8>", "logic<8>",   10, 0x00,    1, 0x01, 0xFF, 0xFF ; "4s ff add X")]
 fn ff_binary_4s(
     op: &str,
     in_ty: &str,
@@ -727,7 +726,7 @@ fn ff_binary_4s(
 
 // ~0xA5=0x5A, mask=0x0F → value preserved (no normalization) → 0x5A
 #[test_case("~",  "logic<8>", "logic<8>", 0xA5, 0x0F, 0x5A, 0x0F ; "4s ff bitnot partial X")]
-#[test_case("^",  "logic<8>", "logic",    0x03, 0x01, 0x00, 0x01 ; "4s ff red xor X")]
+#[test_case("^",  "logic<8>", "logic",    0x03, 0x01, 0x01, 0x01 ; "4s ff red xor X")]
 #[test_case("~^", "logic<8>", "logic",    0x03, 0x00, 0x01, 0x00 ; "4s ff red xnor defined")]
 #[test_case("~^", "logic<8>", "logic",    0x03, 0x01, 0x01, 0x01 ; "4s ff red xnor X")]
 fn ff_unary_4s(op: &str, in_ty: &str, out_ty: &str, a_v: u64, a_m: u64, e_v: u64, e_m: u64) {
@@ -926,8 +925,8 @@ fn concat_4s_partial_x() {
     let (v, m) = sim.get_four_state(sig_o);
     // mask: upper 8 = 0x00, lower 8 = 0xFF → 0x00FF
     assert_eq!(m, BigUint::from(0x00FFu64), "concat 4s: mask mismatch");
-    // Value at X positions preserved → upper 0xAB, lower 0xCD → 0xABCD
-    assert_eq!(v, BigUint::from(0xABCDu64), "concat 4s: value mismatch");
+    // Value at X positions normalized (v |= m) → upper 0xAB, lower 0xFF → 0xABFF
+    assert_eq!(v, BigUint::from(0xABFFu64), "concat 4s: value mismatch");
 }
 
 #[test]

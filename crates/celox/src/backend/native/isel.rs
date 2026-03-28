@@ -1615,6 +1615,12 @@ fn lower_instruction(
                 let r_m = ctx.get_mask(*rhs, block);
                 let res_m = lower_binary_mask(ctx, block, op, lhs_vreg, rhs_vreg, l_m, r_m, d_width);
                 ctx.set_mask(*dst, res_m);
+
+                // Normalize: X positions must have v=1 (X encoding = v:1, m:1)
+                let old_v = ctx.reg_map.get(*dst);
+                let normalized = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or { dst: normalized, lhs: old_v, rhs: res_m });
+                ctx.reg_map.set(*dst, normalized);
             }
         }
 
