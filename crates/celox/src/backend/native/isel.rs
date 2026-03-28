@@ -372,6 +372,38 @@ impl<'a> ISelContext<'a> {
         }
     }
 
+    /// Emit bitfield insert: dst = (base_word & ~(mask << shift)) | ((val & mask) << shift)
+    /// Decomposes into basic ALU ops (no pseudo-instruction).
+    fn emit_bfi(
+        &mut self,
+        block: &mut MBlock,
+        dst: VReg,
+        base_word: VReg,
+        val: VReg,
+        shift: u8,
+        mask: u64,
+    ) {
+        let clear_mask = !(mask << shift);
+        // cleared = base_word & clear_mask
+        let cleared = self.alloc_vreg(SpillDesc::transient());
+        self.emit_and_imm(block, cleared, base_word, clear_mask);
+        // masked_val = val & mask
+        let masked_val = self.alloc_vreg(SpillDesc::transient());
+        if mask != u64::MAX {
+            self.emit_and_imm(block, masked_val, val, mask);
+        } else {
+            block.push(MInst::Mov { dst: masked_val, src: val });
+        }
+        // shifted_val = masked_val << shift
+        if shift > 0 {
+            let shifted = self.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShlImm { dst: shifted, src: masked_val, imm: shift });
+            block.push(MInst::Or { dst, lhs: cleared, rhs: shifted });
+        } else {
+            block.push(MInst::Or { dst, lhs: cleared, rhs: masked_val });
+        }
+    }
+
     /// Number of 64-bit chunks needed for a given bit width.
     fn num_chunks(width_bits: usize) -> usize {
         (width_bits + 63) / 64
@@ -567,11 +599,7 @@ fn lower_instruction(
                                 offset: byte_off,
                                 size: op_size,
                             });
-                            block.push(MInst::AndImm {
-                                dst: vreg,
-                                src: raw,
-                                imm: mask_for_width(var_width),
-                            });
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(var_width));
                         } else {
                             block.push(MInst::Load {
                                 dst: vreg,
@@ -601,19 +629,11 @@ fn lower_instruction(
                                 imm: intra_byte as u8,
                             });
                             let mask = mask_for_width(*width_bits);
-                            block.push(MInst::AndImm {
-                                dst: vreg,
-                                src: shifted,
-                                imm: mask,
-                            });
+                            ctx.emit_and_imm(block, vreg, shifted, mask);
                         } else {
                             // Byte-aligned but non-native width: just mask
                             let mask = mask_for_width(*width_bits);
-                            block.push(MInst::AndImm {
-                                dst: vreg,
-                                src: tmp,
-                                imm: mask,
-                            });
+                            ctx.emit_and_imm(block, vreg, tmp, mask);
                         }
                     }
                 }
@@ -632,11 +652,7 @@ fn lower_instruction(
                         imm: 3,
                     });
                     let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::AndImm {
-                        dst: bit_shift,
-                        src: offset_vreg,
-                        imm: 7,
-                    });
+                    ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
 
                     // Load containing word at [sim + base_off + byte_off]
                     // Use a slightly larger load to account for bit_shift
@@ -661,11 +677,7 @@ fn lower_instruction(
                     // Mask to width
                     if *width_bits < 64 {
                         let mask = mask_for_width(*width_bits);
-                        block.push(MInst::AndImm {
-                            dst: vreg,
-                            src: shifted,
-                            imm: mask,
-                        });
+                        ctx.emit_and_imm(block, vreg, shifted, mask);
                     } else {
                         block.push(MInst::Mov {
                             dst: vreg,
@@ -796,16 +808,8 @@ fn lower_instruction(
                                         size: load_size,
                                     });
                                     let mask = mask_for_width(*chunk_width);
-                                    let val_copy = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::Mov { dst: val_copy, src: *chunk_vreg });
                                     let new = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::BitFieldInsert {
-                                        dst: new,
-                                        base_word: old,
-                                        val: val_copy,
-                                        shift: intra as u8,
-                                        mask,
-                                    });
+                                    ctx.emit_bfi(block, new, old, *chunk_vreg, intra as u8, mask);
                                     block.push(MInst::Store {
                                         base: BaseReg::SimState,
                                         offset: containing_off,
@@ -868,17 +872,8 @@ fn lower_instruction(
                             });
 
                             let mask = mask_for_width(*width_bits);
-                            // Copy val to fresh VReg so BFI emit can clobber it freely.
-                            let val_copy = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Mov { dst: val_copy, src: src_vreg });
                             let new_word = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::BitFieldInsert {
-                                dst: new_word,
-                                base_word: old_word,
-                                val: val_copy,
-                                shift: intra_byte as u8,
-                                mask,
-                            });
+                            ctx.emit_bfi(block, new_word, old_word, src_vreg, intra_byte as u8, mask);
 
                             block.push(MInst::Store {
                                 base: BaseReg::SimState,
@@ -902,11 +897,7 @@ fn lower_instruction(
                         imm: 3,
                     });
                     let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::AndImm {
-                        dst: bit_shift,
-                        src: offset_vreg,
-                        imm: 7,
-                    });
+                    ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
 
                     let rw_size = ISelContext::op_size_for_width(*width_bits + 7);
 
@@ -930,11 +921,7 @@ fn lower_instruction(
                     // masked_src = src & mask
                     let masked_src = ctx.alloc_vreg(SpillDesc::transient());
                     if mask_val != u64::MAX {
-                        block.push(MInst::AndImm {
-                            dst: masked_src,
-                            src: src_vreg,
-                            imm: mask_val,
-                        });
+                        ctx.emit_and_imm(block, masked_src, src_vreg, mask_val);
                     } else {
                         block.push(MInst::Mov {
                             dst: masked_src,
@@ -1041,16 +1028,8 @@ fn lower_instruction(
                                     offset: containing_off,
                                     size: load_size,
                                 });
-                                let val_copy = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Mov { dst: val_copy, src: mask_vreg });
                                 let new_word = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::BitFieldInsert {
-                                    dst: new_word,
-                                    base_word: old,
-                                    val: val_copy,
-                                    shift: intra_byte as u8,
-                                    mask: mask_for_width(*width_bits),
-                                });
+                                ctx.emit_bfi(block, new_word, old, mask_vreg, intra_byte as u8, mask_for_width(*width_bits));
                                 block.push(MInst::Store {
                                     base: BaseReg::SimState,
                                     offset: containing_off,
@@ -1426,11 +1405,7 @@ fn lower_instruction(
                     // Mask to destination width
                     if d_width < 64 {
                         let mask = mask_for_width(d_width);
-                        block.push(MInst::AndImm {
-                            dst: dst_vreg,
-                            src: shifted,
-                            imm: mask,
-                        });
+                        ctx.emit_and_imm(block, dst_vreg, shifted, mask);
                     } else {
                         block.push(MInst::Mov {
                             dst: dst_vreg,
@@ -1457,11 +1432,7 @@ fn lower_instruction(
                     }
                     if d_width < 64 {
                         let mask = mask_for_width(d_width);
-                        block.push(MInst::AndImm {
-                            dst: dst_vreg,
-                            src: shifted,
-                            imm: mask,
-                        });
+                        ctx.emit_and_imm(block, dst_vreg, shifted, mask);
                     } else {
                         block.push(MInst::Mov {
                             dst: dst_vreg,
@@ -1822,11 +1793,7 @@ fn lower_instruction(
                         }
                     }
                     // Extract bit 0
-                    block.push(MInst::AndImm {
-                        dst: dst_vreg,
-                        src: cur,
-                        imm: 1,
-                    });
+                    ctx.emit_and_imm(block, dst_vreg, cur, 1);
                 }
             }
 

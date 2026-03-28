@@ -274,16 +274,11 @@ pub fn emit(
     let callee_saved = used_callee_saved(assignment);
     let callee_push_size = (callee_saved.len() as u32) * 8;
 
-    // Reserve 8 bytes at the top of the frame as a scratch slot for
-    // emit_and_imm64 when the immediate exceeds i32/u32.
-    let scratch_frame_offset = spill_frame_size;
-    let needed_frame = spill_frame_size + 8;
-
     // Align frame
     let total_push = callee_push_size + 8;
     let frame_size = {
-        let misalign = (total_push + needed_frame) % 16;
-        if misalign == 0 { needed_frame } else { needed_frame + (16 - misalign) }
+        let misalign = (total_push + spill_frame_size) % 16;
+        if misalign == 0 { spill_frame_size } else { spill_frame_size + (16 - misalign) }
     };
 
     // ── Prologue ──
@@ -332,7 +327,7 @@ pub fn emit(
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Rem)?;
                 }
                 _ => {
-                    emit_inst(&mut asm, inst, assignment, &mut block_labels, scratch_frame_offset)?;
+                    emit_inst(&mut asm, inst, assignment, &mut block_labels)?;
                 }
             }
         }
@@ -363,7 +358,6 @@ fn emit_inst(
     inst: &MInst,
     assignment: &AssignmentMap,
     block_labels: &mut BTreeMap<BlockId, CodeLabel>,
-    scratch_frame_offset: u32,
 ) -> Result<(), IcedError> {
     match inst {
         MInst::Mov { dst, src } => {
@@ -535,7 +529,7 @@ fn emit_inst(
             if d != s {
                 asm.mov(d, s)?;
             }
-            emit_and_imm64(asm, d, *imm, scratch_frame_offset)?;
+            emit_and_imm64(asm, d, *imm)?;
         }
         MInst::OrImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
@@ -609,43 +603,6 @@ fn emit_inst(
                 asm.mov(d, s)?;
             }
             asm.neg(d)?;
-        }
-
-        MInst::BitFieldInsert { dst, base_word, val, shift, mask } => {
-            // dst = (base_word & ~(mask << shift)) | ((val & mask) << shift)
-            // ISel guarantees: val is a fresh copy, mask << shift fits u32.
-            let d = preg_to_reg64(resolve(assignment, *dst));
-            let bw = preg_to_reg64(resolve(assignment, *base_word));
-            let v = preg_to_reg64(resolve(assignment, *val));
-
-            if v != d {
-                // 1. dst = base_word
-                if d != bw { asm.mov(d, bw)?; }
-                // 2. Clear the field in dst
-                let clear_mask = !((*mask) << *shift);
-                emit_and_imm64(asm, d, clear_mask, scratch_frame_offset)?;
-                // 3. Prepare val (clobbers v)
-                if *mask != u64::MAX {
-                    asm.and(v, *mask as i32)?;
-                }
-                if *shift > 0 {
-                    asm.shl(v, *shift as u32)?;
-                }
-                asm.or(d, v)?;
-            } else {
-                // v == d: use XOR-based bitfield insert.
-                debug_assert!(bw != d, "BFI: val and base_word should not alias");
-                if *mask != u64::MAX {
-                    asm.and(d, *mask as i32)?;
-                }
-                if *shift > 0 {
-                    asm.shl(d, *shift as u32)?;
-                }
-                asm.xor(d, bw)?;
-                let field_mask = (*mask) << *shift;
-                emit_and_imm64(asm, d, field_mask, scratch_frame_offset)?;
-                asm.xor(d, bw)?;
-            }
         }
 
         MInst::Select { dst, cond, true_val, false_val } => {
@@ -868,7 +825,6 @@ fn emit_and_imm64(
     asm: &mut CodeAssembler,
     d: AsmRegister64,
     imm: u64,
-    scratch_frame_offset: u32,
 ) -> Result<(), IcedError> {
     if imm == u64::MAX {
         // AND with all-ones is a no-op
@@ -898,12 +854,10 @@ fn emit_and_imm64(
         };
         asm.and(d32, imm as i32)?;
     } else {
-        // 64-bit immediate: save scratch reg to frame slot, use it as tmp.
-        let scratch = if d != rax { rax } else { rdx };
-        asm.mov(qword_ptr(rsp + scratch_frame_offset as i32), scratch)?;
-        asm.mov(scratch, imm as i64)?;
-        asm.and(d, scratch)?;
-        asm.mov(scratch, qword_ptr(rsp + scratch_frame_offset as i32))?;
+        
+        panic!(
+            "AndImm {imm:#x} exceeds u32: ISel should emit LoadImm + And instead"
+        );
     }
     Ok(())
 }

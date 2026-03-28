@@ -380,7 +380,7 @@ bb0:
   0x00000003  push r13
   0x00000005  push r14
   0x00000007  push r15
-  0x00000009  sub rsp,58h
+  0x00000009  sub rsp,48h
   0x0000000d  mov r15,rdi
   0x00000010  mov eax,[r15]
   0x00000013  mov edx,[r15+38h]
@@ -599,7 +599,7 @@ bb0:
   0x0000030e  mov [r15+54h],eax
   0x00000312  xor eax,eax
   0x00000314  jmp short 0000000000000316h
-  0x00000316  add rsp,58h
+  0x00000316  add rsp,48h
   0x0000031a  pop r15
   0x0000031c  pop r14
   0x0000031e  pop r13

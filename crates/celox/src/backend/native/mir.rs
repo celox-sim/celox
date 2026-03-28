@@ -313,18 +313,6 @@ pub enum MInst {
     /// dst = -src (negate)
     Neg { dst: VReg, src: VReg },
 
-    // ── Bit-field insert (for unaligned stores) ────────────────
-    /// dst = (base_word & ~(mask << shift)) | ((val & mask) << shift)
-    ///
-    /// Used for RMW bit-field stores. Emitted as and+shl+or sequence.
-    BitFieldInsert {
-        dst: VReg,
-        base_word: VReg,
-        val: VReg,
-        shift: u8,
-        mask: u64,
-    },
-
     // ── Select (for div-by-zero guard, etc.) ───────────────────
     /// dst = cond ? true_val : false_val
     Select {
@@ -402,16 +390,6 @@ impl fmt::Display for MInst {
             } => write!(f, "{dst} = cmp.{kind:?} {lhs}, {rhs}"),
             MInst::BitNot { dst, src } => write!(f, "{dst} = not {src}"),
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
-            MInst::BitFieldInsert {
-                dst,
-                base_word,
-                val,
-                shift,
-                mask,
-            } => write!(
-                f,
-                "{dst} = bfi {base_word}, {val}, shift={shift}, mask={mask:#x}"
-            ),
             MInst::Select {
                 dst,
                 cond,
@@ -494,7 +472,6 @@ impl MInst {
             | MInst::URem { dst, .. }
             | MInst::BitNot { dst, .. }
             | MInst::Neg { dst, .. }
-            | MInst::BitFieldInsert { dst, .. }
             | MInst::Select { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
@@ -534,7 +511,6 @@ impl MInst {
             | MInst::ShlImm { src, .. }
             | MInst::SarImm { src, .. } => vec![*src],
             MInst::BitNot { src, .. } | MInst::Neg { src, .. } => vec![*src],
-            MInst::BitFieldInsert { base_word, val, .. } => vec![*base_word, *val],
             MInst::Select {
                 cond,
                 true_val,
@@ -586,10 +562,6 @@ impl MInst {
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. } => {
                 if *src == old { *src = new; }
-            }
-            MInst::BitFieldInsert { base_word, val, .. } => {
-                if *base_word == old { *base_word = new; }
-                if *val == old { *val = new; }
             }
             MInst::Select { cond, true_val, false_val, .. } => {
                 if *cond == old { *cond = new; }
