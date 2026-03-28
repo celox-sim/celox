@@ -59,9 +59,6 @@ impl ExecutionUnitPass for GvnPass {
             gvn_block(&mut block.instructions, &mut aliases, register_map, &[]);
         }
 
-        if std::env::var("CELOX_GVN_STATS").is_ok() && !aliases.is_empty() {
-            eprintln!("[gvn] eliminated {} redundant instructions", aliases.len());
-        }
         if aliases.is_empty() {
             return;
         }
