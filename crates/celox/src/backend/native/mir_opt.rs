@@ -43,10 +43,11 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
             let MInst::Xor { dst, lhs, rhs } = inst else { continue };
 
             // Try to collect the full XOR chain and extract bit positions
-            let mut bits: Vec<(VReg, u64)> = Vec::new(); // (source_reg, bit_position)
+            let mut bits: Vec<(VReg, u64)> = Vec::new();
             let mut source_reg: Option<VReg> = None;
 
-            if !collect_xor_chain_bits(*dst, *lhs, *rhs, &defs, &mut bits, &mut source_reg) {
+            let ok = collect_xor_chain_bits(*dst, *lhs, *rhs, &defs, &mut bits, &mut source_reg);
+            if !ok {
                 continue;
             }
 
