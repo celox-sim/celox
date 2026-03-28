@@ -651,14 +651,27 @@ fn lower_instruction(
                             let intra_byte = bit_off % 8;
                             let op_size = ISelContext::op_size_for_width(*width_bits);
                             let mvreg = ctx.alloc_vreg(SpillDesc::transient());
+                            let var_width = ctx.layout.widths.get(&addr.absolute_addr()).copied().unwrap_or(*width_bits);
 
                             if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
-                                block.push(MInst::Load {
-                                    dst: mvreg,
-                                    base: BaseReg::SimState,
-                                    offset: mask_off,
-                                    size: op_size,
-                                });
+                                // Mask to actual variable width if SIR optimizer widened the load
+                                if var_width < *width_bits && var_width < 64 {
+                                    let raw = ctx.alloc_vreg(SpillDesc::transient());
+                                    block.push(MInst::Load {
+                                        dst: raw,
+                                        base: BaseReg::SimState,
+                                        offset: mask_off,
+                                        size: op_size,
+                                    });
+                                    block.push(MInst::AndImm { dst: mvreg, src: raw, imm: mask_for_width(var_width) });
+                                } else {
+                                    block.push(MInst::Load {
+                                        dst: mvreg,
+                                        base: BaseReg::SimState,
+                                        offset: mask_off,
+                                        size: op_size,
+                                    });
+                                }
                             } else {
                                 let containing_off = ctx.mask_byte_offset(addr, 0) + (bit_off / 8) as i32;
                                 let load_size = ISelContext::op_size_for_width(*width_bits + intra_byte);
@@ -3266,8 +3279,16 @@ fn lower_unary_mask(
 ) -> VReg {
     match op {
         UnaryOp::Ident => {
-            // Mask passes through
-            src_m
+            // Mask passes through but must be zero-extended for widening.
+            // When src is narrower than dst, upper bits should be 0 (definite 0).
+            let effective_width = src_width.min(d_width);
+            if effective_width < 64 {
+                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::AndImm { dst: masked, src: src_m, imm: mask_for_width(effective_width) });
+                masked
+            } else {
+                src_m
+            }
         }
         UnaryOp::BitNot => {
             // ~X = X, mask passes through
