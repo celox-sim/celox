@@ -5,13 +5,13 @@
 //! which physical registers to assign. This eliminates the analysis
 //! divergence that required the k-1 hack.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::native::mir::*;
 
 use super::analysis::{self, AnalysisResult};
 use super::assignment::{
-    clobbers, is_reg_shift, use_constraints, AssignmentMap, PhysReg, RegConstraint,
+    clobbers, is_reg_shift, use_constraints, AssignmentMap, PhysReg, PhysRegSet, RegConstraint,
     ALLOCATABLE_REGS,
 };
 
@@ -25,15 +25,35 @@ use super::NUM_REGS;
 
 #[derive(Clone)]
 struct RegFile {
-    preg_to_vreg: BTreeMap<PhysReg, VReg>,
-    vreg_to_preg: BTreeMap<VReg, PhysReg>,
+    preg_to_vreg: [Option<VReg>; 13],
+    vreg_to_preg: HashMap<VReg, PhysReg>,
+}
+
+/// Map a PhysReg discriminant (which may have gaps, e.g. RSI=6) to a dense
+/// index in 0..13 for the preg_to_vreg array.
+const fn preg_dense_index(preg: PhysReg) -> usize {
+    match preg {
+        PhysReg::RAX => 0,
+        PhysReg::RCX => 1,
+        PhysReg::RDX => 2,
+        PhysReg::RBX => 3,
+        PhysReg::RSI => 4,
+        PhysReg::RDI => 5,
+        PhysReg::R8 => 6,
+        PhysReg::R9 => 7,
+        PhysReg::R10 => 8,
+        PhysReg::R11 => 9,
+        PhysReg::R12 => 10,
+        PhysReg::R13 => 11,
+        PhysReg::R14 => 12,
+    }
 }
 
 impl RegFile {
     fn new() -> Self {
         Self {
-            preg_to_vreg: BTreeMap::new(),
-            vreg_to_preg: BTreeMap::new(),
+            preg_to_vreg: [None; 13],
+            vreg_to_preg: HashMap::new(),
         }
     }
 
@@ -46,22 +66,23 @@ impl RegFile {
     }
 
     fn get_vreg(&self, preg: PhysReg) -> Option<VReg> {
-        self.preg_to_vreg.get(&preg).copied()
+        self.preg_to_vreg[preg_dense_index(preg)]
     }
 
     fn assign(&mut self, vreg: VReg, preg: PhysReg) {
+        let idx = preg_dense_index(preg);
         assert!(
-            !self.preg_to_vreg.contains_key(&preg),
+            self.preg_to_vreg[idx].is_none(),
             "PhysReg {preg} already occupied by {:?} when assigning {vreg}",
-            self.preg_to_vreg.get(&preg)
+            self.preg_to_vreg[idx]
         );
-        self.preg_to_vreg.insert(preg, vreg);
+        self.preg_to_vreg[idx] = Some(vreg);
         self.vreg_to_preg.insert(vreg, preg);
     }
 
     fn evict(&mut self, vreg: VReg) {
         if let Some(preg) = self.vreg_to_preg.remove(&vreg) {
-            self.preg_to_vreg.remove(&preg);
+            self.preg_to_vreg[preg_dense_index(preg)] = None;
         }
     }
 
@@ -69,11 +90,15 @@ impl RegFile {
         self.vreg_to_preg.contains_key(&vreg)
     }
 
-    fn find_free_excluding(&self, blocked: &BTreeSet<PhysReg>) -> Option<PhysReg> {
+    fn find_free_excluding(&self, blocked: &PhysRegSet) -> Option<PhysReg> {
         ALLOCATABLE_REGS
             .iter()
             .copied()
-            .find(|r| !self.preg_to_vreg.contains_key(r) && !blocked.contains(r))
+            .find(|r| self.preg_to_vreg[preg_dense_index(*r)].is_none() && !blocked.contains(r))
+    }
+
+    fn preg_occupied(&self, preg: PhysReg) -> bool {
+        self.preg_to_vreg[preg_dense_index(preg)].is_some()
     }
 
     fn vregs(&self) -> impl Iterator<Item = VReg> + '_ {
@@ -95,7 +120,7 @@ pub fn unified_alloc(
     let mut slots = SpillSlotAllocator::new();
 
     let mut regfile_exit: Vec<RegFile> = vec![RegFile::new(); num_blocks];
-    let mut s_exit: Vec<BTreeSet<VReg>> = vec![BTreeSet::new(); num_blocks];
+    let mut s_exit: Vec<HashSet<VReg>> = vec![HashSet::new(); num_blocks];
 
     for bi in 0..num_blocks {
         let (entry_rf, entry_s) = compute_entry_regfile(
@@ -132,24 +157,24 @@ fn compute_entry_regfile(
     block_idx: usize,
     k: usize,
     regfile_exit: &[RegFile],
-    _s_exit: &[BTreeSet<VReg>],
+    _s_exit: &[HashSet<VReg>],
     result: &AssignmentMap,
-) -> (RegFile, BTreeSet<VReg>) {
+) -> (RegFile, HashSet<VReg>) {
     let preds = &analysis.predecessors[block_idx];
     let mut rf = RegFile::new();
-    let s = BTreeSet::new();
+    let s = HashSet::new();
 
     if preds.is_empty() {
         return (rf, s);
     }
 
     // Collect VRegs in predecessor exits (forward edges only)
-    let mut all: Option<BTreeSet<VReg>> = None;
-    let mut some: BTreeSet<VReg> = BTreeSet::new();
+    let mut all: Option<HashSet<VReg>> = None;
+    let mut some: HashSet<VReg> = HashSet::new();
 
     for &pred_idx in preds {
         if pred_idx >= block_idx { continue; } // skip back edges (assumes layout ≈ RPO)
-        let pred_vregs: BTreeSet<VReg> = regfile_exit[pred_idx].vregs().collect();
+        let pred_vregs: HashSet<VReg> = regfile_exit[pred_idx].vregs().collect();
         some = some.union(&pred_vregs).copied().collect();
         all = Some(match all {
             None => pred_vregs,
@@ -162,10 +187,13 @@ fn compute_entry_regfile(
     // Start with intersection: VRegs in registers in ALL predecessors.
     // If the preferred PhysReg is already taken, skip — the VReg will be
     // reloaded on demand by process_block when actually used.
-    for vreg in &all {
+    // Sort for deterministic register assignment (HashSet iteration is unordered).
+    let mut all_sorted: Vec<VReg> = all.iter().copied().collect();
+    all_sorted.sort();
+    for vreg in &all_sorted {
         if rf.occupancy() >= k { break; }
         if let Some(preg) = result.get(*vreg) {
-            if !rf.preg_to_vreg.contains_key(&preg) {
+            if !rf.preg_occupied(preg) {
                 rf.assign(*vreg, preg);
             }
         }
@@ -179,14 +207,14 @@ fn compute_entry_regfile(
         let mut preferred: Option<PhysReg> = None;
         for (_pred_id, src_vreg) in &phi.sources {
             if let Some(preg) = result.get(*src_vreg) {
-                if !rf.preg_to_vreg.contains_key(&preg) {
+                if !rf.preg_occupied(preg) {
                     preferred = Some(preg);
                     break;
                 }
             }
         }
         let preg = preferred
-            .or_else(|| rf.find_free_excluding(&BTreeSet::new()))
+            .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
             .expect("no free register for phi dst");
         rf.assign(phi.dst, preg);
     }
@@ -197,18 +225,18 @@ fn compute_entry_regfile(
             .filter(|v| !rf.contains(*v))
             .collect();
         candidates.sort_by_key(|v| {
-            analysis.entry_distances[block_idx].get(v).copied().unwrap_or(u32::MAX)
+            (analysis.entry_distances[block_idx].get(v).copied().unwrap_or(u32::MAX), *v)
         });
         for vreg in candidates {
             if rf.occupancy() >= k { break; }
             if !analysis.entry_distances[block_idx].contains_key(&vreg) { continue; }
             if let Some(preg) = result.get(vreg) {
-                if !rf.preg_to_vreg.contains_key(&preg) {
+                if !rf.preg_occupied(preg) {
                     rf.assign(vreg, preg);
                     continue;
                 }
                 // PhysReg conflict — skip; process_block will reload on demand
-            } else if let Some(preg) = rf.find_free_excluding(&BTreeSet::new()) {
+            } else if let Some(preg) = rf.find_free_excluding(&PhysRegSet::new()) {
                 // No prior assignment — first time this VReg is assigned
                 rf.assign(vreg, preg);
             }
@@ -235,11 +263,12 @@ fn insert_coupling_code(
         if pred_idx >= block_idx { continue; }
 
         let pred_rf = &regfile_exit[pred_idx];
-        let phi_dsts: BTreeSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
+        let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
 
-        let need_reload: Vec<VReg> = entry_rf.vregs()
+        let mut need_reload: Vec<VReg> = entry_rf.vregs()
             .filter(|v| !pred_rf.contains(*v) && !phi_dsts.contains(v))
             .collect();
+        need_reload.sort();
 
         if !need_reload.is_empty() {
             let term_idx = func.blocks[pred_idx].insts.len().saturating_sub(1);
@@ -264,17 +293,17 @@ fn process_block(
     analysis: &AnalysisResult,
     block_idx: usize,
     mut rf: RegFile,
-    mut s: BTreeSet<VReg>,
+    mut s: HashSet<VReg>,
     k: usize,
     slots: &mut SpillSlotAllocator,
     result: &mut AssignmentMap,
-) -> (RegFile, BTreeSet<VReg>, Vec<MInst>) {
+) -> (RegFile, HashSet<VReg>, Vec<MInst>) {
     let block = &func.blocks[block_idx];
     let mut new_insts: Vec<MInst> = Vec::with_capacity(block.insts.len());
 
     // Pre-compute next-use table: for each VReg, sorted list of use positions.
     // This replaces O(n) forward scans in next_use_at with O(log n) binary search.
-    let mut use_positions: BTreeMap<VReg, Vec<usize>> = BTreeMap::new();
+    let mut use_positions: HashMap<VReg, Vec<usize>> = HashMap::new();
     for (i, inst) in block.insts.iter().enumerate() {
         for vreg in inst.uses() {
             use_positions.entry(vreg).or_default().push(i);
@@ -288,7 +317,7 @@ fn process_block(
     let clobber_points = super::assignment::block_clobber_points_for(block);
 
     // Pre-compute last-use positions for blocked set
-    let mut last_use_in_block: BTreeMap<VReg, usize> = BTreeMap::new();
+    let mut last_use_in_block: HashMap<VReg, usize> = HashMap::new();
     for (i, inst) in block.insts.iter().enumerate() {
         for vreg in inst.uses() {
             last_use_in_block.insert(vreg, i);
@@ -306,7 +335,7 @@ fn process_block(
         let constraints = use_constraints(inst);
 
         // Step A+B: Ensure all uses are in registers
-        let mut pinned: BTreeSet<VReg> = BTreeSet::new();
+        let mut pinned: HashSet<VReg> = HashSet::new();
 
         for (_ui, (&use_vreg, constraint)) in uses.iter().zip(constraints.iter()).enumerate() {
             if let RegConstraint::Fixed(required_preg) = constraint {
@@ -326,9 +355,9 @@ fn process_block(
                         if pinned.contains(&occupant) {
                             // Occupant is used by current instruction — keep it
                             // in a different register for this instruction only.
-                            let move_blocked: BTreeSet<PhysReg> = [*required_preg].into();
+                            let move_blocked = { let mut s = PhysRegSet::new(); s.insert(*required_preg); s };
                             if rf.occupancy() >= k {
-                                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &BTreeSet::new(), result);
+                                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
                             }
                             let new_preg = rf.find_free_excluding(&move_blocked)
                                 .expect("no free register for occupant move");
@@ -389,7 +418,7 @@ fn process_block(
 
                     // Evict if needed to make room
                     if rf.occupancy() >= k {
-                        evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &BTreeSet::new(), result);
+                        evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
                     }
 
                     // Find a free register (respecting shift blocked set)
@@ -397,7 +426,7 @@ fn process_block(
                         fresh, inst_idx, &last_use_in_block, &shift_points,
                     );
                     let preg = rf.find_free_excluding(&blocked)
-                        .or_else(|| rf.find_free_excluding(&BTreeSet::new()))
+                        .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
                         .expect("no free register for reload");
 
                     let mut reload = make_reload(use_vreg, func, slots);
@@ -419,7 +448,7 @@ fn process_block(
 
         // Step C: Evict to pressure ≤ k
         while rf.occupancy() > k {
-            evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &BTreeSet::new(), result);
+            evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
         }
 
         // Step D: Handle def
@@ -428,7 +457,7 @@ fn process_block(
 
             // Make room: need occupancy + 1 + clobber_extra ≤ k
             while rf.occupancy() + 1 + clobber_extra > k {
-                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx + 1, block.insts.len(), &use_positions, slots, &pinned, &BTreeSet::new(), result);
+                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx + 1, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
             }
 
             // Pick a PhysReg for the def
@@ -439,7 +468,7 @@ fn process_block(
             );
 
             let preg = rf.find_free_excluding(&blocked)
-                .or_else(|| rf.find_free_excluding(&BTreeSet::new()))
+                .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
                 .expect("no free register for def");
 
             rf.assign(def_vreg, preg);
@@ -469,7 +498,7 @@ fn process_block(
 fn emit_spill(
     new_insts: &mut Vec<MInst>,
     vreg: VReg,
-    s: &mut BTreeSet<VReg>,
+    s: &mut HashSet<VReg>,
     func: &MFunction,
     slots: &mut SpillSlotAllocator,
     _result: &mut AssignmentMap,
@@ -484,20 +513,21 @@ fn emit_spill(
 
 fn evict_farthest(
     rf: &mut RegFile,
-    s: &mut BTreeSet<VReg>,
+    s: &mut HashSet<VReg>,
     new_insts: &mut Vec<MInst>,
     func: &MFunction,
     analysis: &AnalysisResult,
     block_idx: usize,
     inst_idx: usize,
     block_len: usize,
-    use_positions: &BTreeMap<VReg, Vec<usize>>,
+    use_positions: &HashMap<VReg, Vec<usize>>,
     slots: &mut SpillSlotAllocator,
-    pinned: &BTreeSet<VReg>,
-    _blocked_pregs: &BTreeSet<PhysReg>,
+    pinned: &HashSet<VReg>,
+    _blocked_pregs: &PhysRegSet,
     result: &mut AssignmentMap,
 ) {
-    // Choose victim: farthest next-use, prefer rematerializable/cheap
+    // Choose victim: farthest next-use, prefer rematerializable/cheap.
+    // Secondary key: VReg id for deterministic tie-breaking (HashMap iteration is unordered).
     let victim = rf.vregs()
         .filter(|v| !pinned.contains(v))
         .max_by_key(|&v| {
@@ -510,7 +540,7 @@ fn evict_farthest(
                 _ => 0,
             };
             let effective_class = if s.contains(&v) { eviction_class.max(1) } else { eviction_class };
-            (effective_class, next_use)
+            (effective_class, next_use, v)
         })
         .expect("no eviction victim: all VRegs in RegFile are pinned (used by current instruction)");
 
@@ -520,7 +550,7 @@ fn evict_farthest(
 
 /// O(log n) next-use lookup using pre-computed use position lists.
 fn fast_next_use(
-    use_positions: &BTreeMap<VReg, Vec<usize>>,
+    use_positions: &HashMap<VReg, Vec<usize>>,
     analysis: &AnalysisResult,
     block_idx: usize,
     block_len: usize,
@@ -558,12 +588,12 @@ fn fast_next_use(
 fn compute_blocked_for_vreg(
     _vreg: VReg,
     _inst_idx: usize,
-    _last_use: &BTreeMap<VReg, usize>,
+    _last_use: &HashMap<VReg, usize>,
     _shift_points: &[usize],
-) -> BTreeSet<PhysReg> {
+) -> PhysRegSet {
     // For reloaded VRegs, we don't have last_use info yet.
     // Return empty — the caller falls back to find_free_excluding(&empty).
-    BTreeSet::new()
+    PhysRegSet::new()
 }
 
 fn compute_blocked_for_def(
@@ -571,8 +601,8 @@ fn compute_blocked_for_def(
     last_use_pos: usize,
     shift_points: &[usize],
     clobber_points: &[(usize, &'static [PhysReg])],
-) -> BTreeSet<PhysReg> {
-    let mut blocked = BTreeSet::new();
+) -> PhysRegSet {
+    let mut blocked = PhysRegSet::new();
     for &(pos, regs) in clobber_points {
         if pos > inst_idx && pos <= last_use_pos {
             for &r in regs { blocked.insert(r); }

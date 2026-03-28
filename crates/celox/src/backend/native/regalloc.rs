@@ -30,16 +30,16 @@ fn verify_assignment(
     analysis: &analysis::AnalysisResult,
     assignment: &assignment::AssignmentMap,
 ) {
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use super::mir::VReg;
     use assignment::PhysReg;
 
     for (bi, block) in func.blocks.iter().enumerate() {
         // Track live VRegs and their PhysRegs at each program point
-        let mut live: BTreeMap<VReg, PhysReg> = BTreeMap::new();
+        let mut live: HashMap<VReg, PhysReg> = HashMap::new();
 
         // Pre-compute use positions for O(log n) dead check
-        let mut use_positions: BTreeMap<VReg, Vec<usize>> = BTreeMap::new();
+        let mut use_positions: HashMap<VReg, Vec<usize>> = HashMap::new();
         for (i, inst) in block.insts.iter().enumerate() {
             for vreg in inst.uses() {
                 use_positions.entry(vreg).or_default().push(i);

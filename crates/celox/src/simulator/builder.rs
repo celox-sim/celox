@@ -654,7 +654,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                     mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}"));
                     mir_output.push_str("  Register assignment:\n");
-                    for (vreg, preg) in &ra.assignment.map {
+                    for (vreg, preg) in ra.assignment.sorted_entries() {
                         mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
                     }
                     if let Ok(result) = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {

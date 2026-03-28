@@ -3,7 +3,7 @@
 //! Defines `PhysReg`, `RegConstraint`, `AssignmentMap`, and helpers for
 //! querying instruction constraints and clobbers.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::backend::native::mir::*;
@@ -48,6 +48,28 @@ impl fmt::Display for PhysReg {
             PhysReg::R14 => "r14",
         };
         write!(f, "{name}")
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// PhysRegSet: u16 bitset for small PhysReg sets
+// ────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Default)]
+pub struct PhysRegSet(u16);
+
+impl PhysRegSet {
+    pub fn new() -> Self {
+        Self(0)
+    }
+    pub fn insert(&mut self, r: PhysReg) {
+        self.0 |= 1 << (r as u16);
+    }
+    pub fn contains(&self, r: &PhysReg) -> bool {
+        self.0 & (1 << (*r as u16)) != 0
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
     }
 }
 
@@ -117,7 +139,7 @@ pub fn block_clobber_points_for(block: &crate::backend::native::mir::MBlock) -> 
 
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
-    pub map: BTreeMap<VReg, PhysReg>,
+    pub map: HashMap<VReg, PhysReg>,
 }
 
 impl AssignmentMap {
@@ -127,5 +149,12 @@ impl AssignmentMap {
 
     pub fn set(&mut self, vreg: VReg, preg: PhysReg) {
         self.map.insert(vreg, preg);
+    }
+
+    /// Returns entries sorted by VReg for deterministic display.
+    pub fn sorted_entries(&self) -> Vec<(VReg, PhysReg)> {
+        let mut entries: Vec<(VReg, PhysReg)> = self.map.iter().map(|(&v, &p)| (v, p)).collect();
+        entries.sort_by_key(|(v, _)| *v);
+        entries
     }
 }

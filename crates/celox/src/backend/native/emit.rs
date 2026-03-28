@@ -4,12 +4,12 @@
 //! ABI: System V AMD64 — sim state base in RDI (moved to R15 in prologue).
 //! Function signature: `fn(unified_mem: *mut u8) -> i64`
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use iced_x86::code_asm::*;
 
 use crate::backend::native::mir::*;
-use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg};
+use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet};
 
 /// Reserved register for simulation state base pointer.
 const SIM_BASE: AsmRegister64 = r15;
@@ -132,8 +132,10 @@ const CALLEE_SAVED: &[PhysReg] = &[
 ];
 
 fn used_callee_saved(assignment: &AssignmentMap) -> Vec<PhysReg> {
-    let used: std::collections::BTreeSet<PhysReg> =
-        assignment.map.values().copied().collect();
+    let mut used = PhysRegSet::new();
+    for &preg in assignment.map.values() {
+        used.insert(preg);
+    }
     CALLEE_SAVED
         .iter()
         .copied()
@@ -265,7 +267,7 @@ pub fn emit(
     let mut asm = CodeAssembler::new(64)?;
 
     // Block labels
-    let mut block_labels: BTreeMap<BlockId, CodeLabel> = BTreeMap::new();
+    let mut block_labels: HashMap<BlockId, CodeLabel> = HashMap::new();
     for block in &func.blocks {
         block_labels.insert(block.id, asm.create_label());
     }
@@ -357,7 +359,7 @@ fn emit_inst(
     asm: &mut CodeAssembler,
     inst: &MInst,
     assignment: &AssignmentMap,
-    block_labels: &mut BTreeMap<BlockId, CodeLabel>,
+    block_labels: &mut HashMap<BlockId, CodeLabel>,
 ) -> Result<(), IcedError> {
     match inst {
         MInst::Mov { dst, src } => {

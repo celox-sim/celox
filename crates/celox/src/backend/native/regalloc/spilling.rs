@@ -10,7 +10,7 @@
 //!   are reloaded from their original location, not from the stack.
 //! - **Spill slot allocation**: each spilled value gets a unique stack slot.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 
 use crate::backend::native::mir::*;
 
@@ -23,7 +23,7 @@ use super::analysis::{self, AnalysisResult};
 /// Assigns unique stack frame offsets to spilled VRegs.
 pub(super) struct SpillSlotAllocator {
     /// VReg → stack offset (bytes from frame base)
-    pub(super) slots: BTreeMap<VReg, i32>,
+    pub(super) slots: HashMap<VReg, i32>,
     /// Next available offset
     pub(super) next_offset: i32,
 }
@@ -31,7 +31,7 @@ pub(super) struct SpillSlotAllocator {
 impl SpillSlotAllocator {
     pub(super) fn new() -> Self {
         Self {
-            slots: BTreeMap::new(),
+            slots: HashMap::new(),
             next_offset: 0,
         }
     }

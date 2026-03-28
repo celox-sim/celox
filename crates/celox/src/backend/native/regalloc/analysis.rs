@@ -4,7 +4,7 @@
 //! instead of computing live-in/live-out sets, we compute next-use distance
 //! maps. The join operation takes the minimum distance per variable.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 
 use crate::backend::native::mir::*;
 
@@ -16,13 +16,13 @@ const LOOP_EXIT_LENGTH: u32 = 100_000;
 pub struct AnalysisResult {
     /// For each block, the next-use distances at block entry.
     /// `entry_distances[block_idx][vreg] = distance`
-    pub entry_distances: Vec<BTreeMap<VReg, u32>>,
+    pub entry_distances: Vec<HashMap<VReg, u32>>,
     /// For each block, the next-use distances at block exit.
-    pub exit_distances: Vec<BTreeMap<VReg, u32>>,
+    pub exit_distances: Vec<HashMap<VReg, u32>>,
     /// Block layout order (index → BlockId).
     pub block_order: Vec<BlockId>,
     /// Reverse map: BlockId → index in block_order.
-    pub block_index: BTreeMap<BlockId, usize>,
+    pub block_index: HashMap<BlockId, usize>,
     /// Predecessor list for each block (by index).
     pub predecessors: Vec<Vec<usize>>,
     /// Successor list for each block (by index).
@@ -35,7 +35,7 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
 
     // Build block_order and block_index
     let block_order: Vec<BlockId> = func.blocks.iter().map(|b| b.id).collect();
-    let mut block_index = BTreeMap::new();
+    let mut block_index = HashMap::new();
     for (i, &bid) in block_order.iter().enumerate() {
         block_index.insert(bid, i);
     }
@@ -53,10 +53,10 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
     }
 
     // Initialize next-use distance maps
-    let mut entry_distances: Vec<BTreeMap<VReg, u32>> =
-        vec![BTreeMap::new(); num_blocks];
-    let mut exit_distances: Vec<BTreeMap<VReg, u32>> =
-        vec![BTreeMap::new(); num_blocks];
+    let mut entry_distances: Vec<HashMap<VReg, u32>> =
+        vec![HashMap::new(); num_blocks];
+    let mut exit_distances: Vec<HashMap<VReg, u32>> =
+        vec![HashMap::new(); num_blocks];
 
     // Iterative data-flow analysis (backward)
     // Compute next-use distances from block exits to entries.
@@ -85,7 +85,7 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
             let block_len = block.insts.len() as u32;
 
             // Compute exit distances by joining successor entry distances
-            let mut new_exit: BTreeMap<VReg, u32> = BTreeMap::new();
+            let mut new_exit: HashMap<VReg, u32> = HashMap::new();
             let my_block_id = block_order[bi];
             for &succ_idx in &successors[bi] {
                 // Edge length: 0 for normal edges, LOOP_EXIT_LENGTH for back edges
@@ -116,7 +116,7 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
 
             // Compute entry distances via transfer function
             // Walk instructions backwards to find first use of each vreg
-            let mut new_entry: BTreeMap<VReg, u32> = BTreeMap::new();
+            let mut new_entry: HashMap<VReg, u32> = HashMap::new();
 
             // Start with exit distances (for variables not used in this block)
             for (&vreg, &dist) in &new_exit {

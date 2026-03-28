@@ -239,7 +239,7 @@ impl JitBackend {
                     mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}"));
                     mir_output.push_str("  Register assignment:\n");
-                    for (vreg, preg) in &ra.assignment.map {
+                    for (vreg, preg) in ra.assignment.sorted_entries() {
                         mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
                     }
                     // Emit x86-64 and disassemble
@@ -267,7 +267,7 @@ impl JitBackend {
                         mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
                         mir_output.push_str(&format!("{mfunc}"));
                         mir_output.push_str("  Register assignment:\n");
-                        for (vreg, preg) in &ra.assignment.map {
+                        for (vreg, preg) in ra.assignment.sorted_entries() {
                             mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
                         }
                         mir_output.push('\n');
