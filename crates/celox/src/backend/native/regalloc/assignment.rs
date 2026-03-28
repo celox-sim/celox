@@ -125,6 +125,16 @@ pub fn is_reg_shift(inst: &MInst) -> bool {
     matches!(inst, MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. })
 }
 
+/// Compute clobber points for a block (for use by unified allocator).
+pub fn block_clobber_points_for(block: &crate::backend::native::mir::MBlock) -> Vec<(usize, &'static [PhysReg])> {
+    block.insts.iter().enumerate()
+        .filter_map(|(idx, inst)| {
+            let c = clobbers(inst);
+            if c.is_empty() { None } else { Some((idx, c)) }
+        })
+        .collect()
+}
+
 // ────────────────────────────────────────────────────────────────
 // Live-range splitting for Fixed constraints
 // ────────────────────────────────────────────────────────────────

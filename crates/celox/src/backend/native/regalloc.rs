@@ -6,6 +6,7 @@
 mod analysis;
 pub mod assignment;
 mod spilling;
+mod unified;
 
 use super::mir::MFunction;
 pub use assignment::AssignmentMap;
@@ -91,31 +92,17 @@ fn verify_assignment(
 /// Run the full register allocation pipeline on an MFunction.
 /// Returns the assignment map and required spill frame size.
 pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
-    // Pre-spilling live-range splits.
-    assignment::split_live_ranges_at_clobbers(func);
-    let _ = assignment::split_live_ranges_at_fixed_constraints(func);
-
-    // Spill → split → re-spill loop until convergence. Each pass:
-    // 1. Analyze liveness on the current instruction stream.
-    // 2. Spill to reduce pressure ≤ k (may insert spill/reload instructions).
-    // 3. Re-split Fixed constraints (spilling may have broken 1-inst lifetimes).
-    // Loop terminates when both spilling and splitting make no changes,
-    // meaning the assignment will see the same liveness as the final spilling.
-    // Convergence is guaranteed: each pass only adds instructions (monotonic),
-    // and pressure decreases monotonically. Typically 2-3 iterations.
-    let mut spill_frame_size = 0u32;
+    // Unified single-pass: simultaneous spilling + assignment.
+    // No separate analysis → spill → re-analyze → assign pipeline.
+    // No k-1 hack — uses k = NUM_REGS directly.
     let analysis = analysis::analyze(func);
-    let sr = spilling::spill(func, &analysis, NUM_REGS - 1);
-    spill_frame_size += sr.frame_size;
-
-    // Post-spilling: re-split Fixed constraints that spilling disrupted.
-    let _ = assignment::split_live_ranges_at_fixed_constraints(func);
-
-    let analysis = analysis::analyze(func);
-    let assignment = assignment::assign(func, &analysis);
+    let (assignment, spill_frame_size) = unified::unified_alloc(func, &analysis);
 
     #[cfg(debug_assertions)]
-    verify_assignment(func, &analysis, &assignment);
+    {
+        let analysis = analysis::analyze(func);
+        verify_assignment(func, &analysis, &assignment);
+    }
 
     RegallocResult {
         assignment,

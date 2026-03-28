@@ -21,15 +21,15 @@ use super::analysis::{self, AnalysisResult};
 // ────────────────────────────────────────────────────────────────
 
 /// Assigns unique stack frame offsets to spilled VRegs.
-struct SpillSlotAllocator {
+pub(super) struct SpillSlotAllocator {
     /// VReg → stack offset (bytes from frame base)
-    slots: BTreeMap<VReg, i32>,
+    pub(super) slots: BTreeMap<VReg, i32>,
     /// Next available offset
-    next_offset: i32,
+    pub(super) next_offset: i32,
 }
 
 impl SpillSlotAllocator {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             slots: BTreeMap::new(),
             next_offset: 0,
@@ -37,7 +37,7 @@ impl SpillSlotAllocator {
     }
 
     /// Get or allocate a spill slot for a VReg. Returns the byte offset.
-    fn slot_for(&mut self, vreg: VReg) -> i32 {
+    pub(super) fn slot_for(&mut self, vreg: VReg) -> i32 {
         *self.slots.entry(vreg).or_insert_with(|| {
             let off = self.next_offset;
             self.next_offset += 8; // all slots are 8 bytes (i64)
@@ -46,7 +46,7 @@ impl SpillSlotAllocator {
     }
 
     /// Total bytes of spill slots allocated.
-    fn total_size(&self) -> i32 {
+    pub(super) fn total_size(&self) -> i32 {
         self.next_offset
     }
 }
@@ -57,7 +57,7 @@ impl SpillSlotAllocator {
 
 /// Generate a spill instruction for `vreg` based on its SpillDesc.
 /// Returns None if no spill store is needed (remat, store-back-only).
-fn make_spill(
+pub(super) fn make_spill(
     vreg: VReg,
     func: &MFunction,
     slots: &mut SpillSlotAllocator,
@@ -97,7 +97,7 @@ fn make_spill(
 }
 
 /// Generate a reload instruction for `vreg` based on its SpillDesc.
-fn make_reload(
+pub(super) fn make_reload(
     vreg: VReg,
     func: &MFunction,
     slots: &mut SpillSlotAllocator,
