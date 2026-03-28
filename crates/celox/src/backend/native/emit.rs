@@ -360,7 +360,7 @@ pub fn emit(
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Rem)?;
                 }
                 _ => {
-                    emit_inst(&mut asm, inst, assignment, &mut block_labels)?;
+                    emit_inst(&mut asm, inst, assignment)?;
                 }
             }
         }
@@ -390,7 +390,6 @@ fn emit_inst(
     asm: &mut CodeAssembler,
     inst: &MInst,
     assignment: &AssignmentMap,
-    block_labels: &mut HashMap<BlockId, CodeLabel>,
 ) -> Result<(), IcedError> {
     match inst {
         MInst::Mov { dst, src } => {
