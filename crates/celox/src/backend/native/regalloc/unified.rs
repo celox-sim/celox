@@ -468,25 +468,23 @@ fn process_block(
                 &clobber_points,
             );
 
-            // Coalescing hint: if the instruction has a lhs operand that just
-            // died (last use at this instruction), reuse its PhysReg for dst.
-            let hint_preg = uses.first().and_then(|&lhs_vreg| {
-                let lhs_preg = rf.get_preg(lhs_vreg)?;
-                // Only coalesce if lhs dies here (won't conflict)
-                let next = fast_next_use(&use_positions, analysis, block_idx, block.insts.len(), inst_idx + 1, lhs_vreg);
-                if next == u32::MAX && !blocked.contains(&lhs_preg) {
-                    Some(lhs_preg)
+            // Coalescing hint: reuse a dying operand's PhysReg for dst.
+            // Prefer lhs (avoids mov in x86 2-operand form), then try rhs
+            // (emit_binop_rr swaps for commutative ops).
+            let hint_preg = uses.iter().find_map(|&use_vreg| {
+                let preg = rf.get_preg(use_vreg)?;
+                let next = fast_next_use(&use_positions, analysis, block_idx, block.insts.len(), inst_idx + 1, use_vreg);
+                if next == u32::MAX && !blocked.contains(&preg) {
+                    Some((use_vreg, preg))
                 } else {
                     None
                 }
             });
 
-            let preg = if let Some(hp) = hint_preg {
-                // Evict the dying lhs to free its PhysReg for the def
-                if let Some(lhs_vreg) = uses.first().copied() {
-                    if rf.get_preg(lhs_vreg) == Some(hp) {
-                        rf.evict(lhs_vreg);
-                    }
+            let preg = if let Some((hint_vreg, hp)) = hint_preg {
+                // Evict the dying operand to free its PhysReg for the def
+                if rf.get_preg(hint_vreg) == Some(hp) {
+                    rf.evict(hint_vreg);
                 }
                 hp
             } else {
