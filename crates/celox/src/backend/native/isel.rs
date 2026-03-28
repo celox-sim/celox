@@ -1250,6 +1250,12 @@ fn lower_instruction(
                     ctx.spill_descs[dst_vreg.0 as usize] = SpillDesc::remat(val);
                     block.push(MInst::LoadImm { dst: dst_vreg, value: val });
                     ctx.consts.insert(*dst, val);
+                    // 4-state: constants always have mask=0
+                    if ctx.four_state {
+                        let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm { dst: z, value: 0 });
+                        ctx.set_mask(*dst, z);
+                    }
                     return;
                 }
             }
