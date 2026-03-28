@@ -1345,40 +1345,88 @@ fn lower_instruction(
 
         SIRInstruction::Slice(dst, src, bit_offset, width) => {
             let dst_vreg = ctx.reg_map.get(*dst);
-            let src_vreg = ctx.reg_map.get(*src);
+            let src_width = ctx.sir_width(src);
 
-            if *width <= 64 {
-                if *bit_offset == 0 && *width == ctx.sir_width(src) {
-                    // Identity slice
-                    block.push(MInst::Mov {
-                        dst: dst_vreg,
-                        src: src_vreg,
-                    });
+            if *width <= 64 && src_width <= 64 {
+                let src_vreg = ctx.reg_map.get(*src);
+                if *bit_offset == 0 && *width == src_width {
+                    block.push(MInst::Mov { dst: dst_vreg, src: src_vreg });
                 } else if *bit_offset == 0 {
-                    // Just mask
                     let mask = mask_for_width(*width);
-                    block.push(MInst::AndImm {
-                        dst: dst_vreg,
-                        src: src_vreg,
-                        imm: mask,
-                    });
+                    block.push(MInst::AndImm { dst: dst_vreg, src: src_vreg, imm: mask });
                 } else {
-                    // Shift + mask
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::ShrImm {
-                        dst: shifted,
-                        src: src_vreg,
-                        imm: *bit_offset as u8,
-                    });
+                    block.push(MInst::ShrImm { dst: shifted, src: src_vreg, imm: *bit_offset as u8 });
                     let mask = mask_for_width(*width);
-                    block.push(MInst::AndImm {
-                        dst: dst_vreg,
-                        src: shifted,
-                        imm: mask,
-                    });
+                    block.push(MInst::AndImm { dst: dst_vreg, src: shifted, imm: mask });
+                }
+            } else if *width <= 64 {
+                // Narrow slice from wide source
+                let src_chunks = ctx.get_wide_chunks(src, block);
+                let chunk_idx = *bit_offset / 64;
+                let intra_bit = *bit_offset % 64;
+                let main = ctx.wide_chunk_or_zero(&src_chunks, chunk_idx, block);
+
+                if intra_bit == 0 {
+                    let mask = mask_for_width(*width);
+                    block.push(MInst::AndImm { dst: dst_vreg, src: main, imm: mask });
+                } else if intra_bit + *width <= 64 {
+                    // Fits in one chunk after shift
+                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShrImm { dst: shifted, src: main, imm: intra_bit as u8 });
+                    let mask = mask_for_width(*width);
+                    block.push(MInst::AndImm { dst: dst_vreg, src: shifted, imm: mask });
+                } else {
+                    // Crosses chunk boundary
+                    let lo = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShrImm { dst: lo, src: main, imm: intra_bit as u8 });
+                    let upper = ctx.wide_chunk_or_zero(&src_chunks, chunk_idx + 1, block);
+                    let hi = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShlImm { dst: hi, src: upper, imm: (64 - intra_bit) as u8 });
+                    let combined = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or { dst: combined, lhs: lo, rhs: hi });
+                    let mask = mask_for_width(*width);
+                    block.push(MInst::AndImm { dst: dst_vreg, src: combined, imm: mask });
                 }
             } else {
-                unimplemented!("wide slice not yet supported in native backend");
+                // Wide slice: extract bits from a wide source.
+                // Get source chunks, then extract the requested range.
+                let src_chunks = ctx.get_wide_chunks(src, block);
+                let dst_n_chunks = ISelContext::num_chunks(*width);
+                let chunk_start = *bit_offset / 64;
+                let intra_bit = *bit_offset % 64;
+
+                let mut dst_chunks = Vec::with_capacity(dst_n_chunks);
+                for i in 0..dst_n_chunks {
+                    let src_idx = chunk_start + i;
+                    let main = ctx.wide_chunk_or_zero(&src_chunks, src_idx, block);
+
+                    if intra_bit == 0 {
+                        dst_chunks.push((main, 64));
+                    } else {
+                        // Cross-chunk: combine bits from src[src_idx] and src[src_idx+1]
+                        let lo = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShrImm { dst: lo, src: main, imm: intra_bit as u8 });
+                        let upper = ctx.wide_chunk_or_zero(&src_chunks, src_idx + 1, block);
+                        let hi = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShlImm { dst: hi, src: upper, imm: (64 - intra_bit) as u8 });
+                        let combined = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or { dst: combined, lhs: lo, rhs: hi });
+                        dst_chunks.push((combined, 64));
+                    }
+                }
+
+                // Mask the top chunk to the exact width
+                let top_bits = *width % 64;
+                if top_bits != 0 && !dst_chunks.is_empty() {
+                    let last_idx = dst_chunks.len() - 1;
+                    let (last_vreg, _) = dst_chunks[last_idx];
+                    let masked = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::AndImm { dst: masked, src: last_vreg, imm: mask_for_width(top_bits) });
+                    dst_chunks[last_idx] = (masked, top_bits);
+                }
+
+                ctx.set_wide_chunks(*dst, dst_chunks);
             }
         }
     }
