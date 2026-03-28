@@ -1163,7 +1163,10 @@ fn lower_instruction(
 
         SIRInstruction::Unary(dst, op, src) => {
             let d_width = ctx.sir_width(dst);
-            if d_width > 64 {
+            let src_width = ctx.sir_width(src);
+            if d_width > 64 || src_width > 64
+                || ctx.wide_regs.contains_key(src)
+            {
                 lower_wide_unary(ctx, block, *dst, op, *src);
                 return;
             }
@@ -1396,7 +1399,10 @@ fn lower_wide_binary(
     rhs: RegisterId,
 ) {
     let d_width = ctx.sir_width(&dst);
-    let n_chunks = ISelContext::num_chunks(d_width);
+    let lhs_width = ctx.sir_width(&lhs);
+    // For comparisons and logic ops, the result may be narrow (1 bit)
+    // but we need to process all chunks of the wider operand.
+    let n_chunks = ISelContext::num_chunks(d_width.max(lhs_width));
 
     match op {
         // Chunk-wise operations: apply to each 64-bit chunk independently
@@ -2004,7 +2010,8 @@ fn lower_wide_unary(
     src: RegisterId,
 ) {
     let d_width = ctx.sir_width(&dst);
-    let n_chunks = ISelContext::num_chunks(d_width);
+    let src_width = ctx.sir_width(&src);
+    let n_chunks = ISelContext::num_chunks(d_width.max(src_width));
 
     match op {
         UnaryOp::BitNot => {
@@ -2177,9 +2184,19 @@ fn lower_wide_unary(
             ctx.set_wide_chunks(dst, dst_chunks);
         }
     }
+
+    // Sync narrow results to scalar reg_map
+    if d_width <= 64 {
+        if let Some(chunks) = ctx.wide_regs.get(&dst) {
+            let chunk0 = chunks[0].0;
+            let scalar = ctx.reg_map.get(dst);
+            if chunk0 != scalar {
+                block.push(MInst::Mov { dst: scalar, src: chunk0 });
+            }
+        }
+    }
 }
 
-/// Extract a ≤64-bit value from a wide (>64-bit) register by right-shifting.
 /// Extract a ≤64-bit value from a wide (>64-bit) register by right-shifting.
 fn lower_wide_extract(
     ctx: &mut ISelContext,
