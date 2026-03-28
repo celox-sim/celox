@@ -1348,22 +1348,88 @@ fn lower_instruction(
                 }
             } else {
                 // Wide concat (>64 bits): record chunk vregs for use by Store.
-                // args are [MSB, ..., LSB]. Store in LSB-first order.
-                // If an arg is itself wider than 64 bits, expand its chunks.
-                let mut chunks = Vec::new();
+                // args are [MSB, ..., LSB]. Collect bits in LSB-first order,
+                // then repack into uniform 64-bit chunks so Slice can use
+                // bit_offset / 64 for indexing.
+                let total_width = args.iter().map(|a| ctx.sir_width(a)).sum::<usize>();
+                let n_dst_chunks = ISelContext::num_chunks(total_width);
+
+                // Collect a flat bit stream: list of (vreg, width) in LSB-first order
+                let mut flat_bits: Vec<(VReg, usize)> = Vec::new();
                 for arg in args.iter().rev() {
                     let arg_width = ctx.sir_width(arg);
                     if arg_width > 64 {
                         let arg_chunks = ctx.get_wide_chunks(arg, block);
                         for ch in arg_chunks {
-                            chunks.push(ch);
+                            flat_bits.push(ch);
                         }
                     } else {
                         let arg_vreg = ctx.reg_map.get(*arg);
-                        chunks.push((arg_vreg, arg_width));
+                        flat_bits.push((arg_vreg, arg_width));
                     }
                 }
-                ctx.wide_regs.insert(*dst, chunks);
+
+                // Repack into 64-bit uniform chunks via shift+or
+                let mut dst_chunks: Vec<(VReg, usize)> = Vec::new();
+                let mut _bit_pos = 0usize; // current position in the flat stream
+                let mut flat_idx = 0usize;
+                let mut flat_consumed = 0usize; // bits consumed from flat_bits[flat_idx]
+
+                for chunk_i in 0..n_dst_chunks {
+                    let chunk_width = if chunk_i == n_dst_chunks - 1 {
+                        let rem = total_width % 64;
+                        if rem == 0 { 64 } else { rem }
+                    } else { 64 };
+
+                    let mut acc = ctx.alloc_vreg(SpillDesc::remat(0));
+                    block.push(MInst::LoadImm { dst: acc, value: 0 });
+                    let mut acc_pos = 0usize;
+
+                    while acc_pos < chunk_width && flat_idx < flat_bits.len() {
+                        let (fv, fw) = flat_bits[flat_idx];
+                        let remaining_in_flat = fw - flat_consumed;
+                        let need = chunk_width - acc_pos;
+                        let take = remaining_in_flat.min(need);
+
+                        // Extract `take` bits from fv starting at flat_consumed
+                        let mut piece = fv;
+                        if flat_consumed > 0 {
+                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::ShrImm { dst: shifted, src: piece, imm: flat_consumed as u8 });
+                            piece = shifted;
+                        }
+                        if take < 64 {
+                            let masked = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::AndImm { dst: masked, src: piece, imm: mask_for_width(take) });
+                            piece = masked;
+                        }
+
+                        // Place into acc at acc_pos
+                        if acc_pos > 0 {
+                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::ShlImm { dst: shifted, src: piece, imm: acc_pos as u8 });
+                            let merged = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Or { dst: merged, lhs: acc, rhs: shifted });
+                            acc = merged;
+                        } else {
+                            let merged = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Or { dst: merged, lhs: acc, rhs: piece });
+                            acc = merged;
+                        }
+
+                        acc_pos += take;
+                        flat_consumed += take;
+                        if flat_consumed >= fw {
+                            flat_idx += 1;
+                            flat_consumed = 0;
+                        }
+                    }
+
+                    dst_chunks.push((acc, chunk_width));
+                    _bit_pos += chunk_width;
+                }
+
+                ctx.wide_regs.insert(*dst, dst_chunks);
                 // No MIR instructions emitted; the value is consumed by Store.
             }
         }
