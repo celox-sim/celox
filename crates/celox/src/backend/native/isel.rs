@@ -1549,23 +1549,59 @@ fn lower_instruction(
                     });
                 }
                 BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
-                    // 2-state: wildcards are same as Eq/Ne
-                    let kind = if matches!(op, BinaryOp::EqWildcard) {
-                        CmpKind::Eq
+                    if ctx.four_state {
+                        // IEEE 1800 ==?/!=?: RHS X/Z bits are wildcards (don't care)
+                        let l_m = ctx.get_mask(*lhs, block);
+                        let r_m = ctx.get_mask(*rhs, block);
+
+                        // compare_mask = ~r_m (non-wildcard positions)
+                        let compare_mask = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::BitNot { dst: compare_mask, src: r_m });
+
+                        // Compare only at non-wildcard positions
+                        let l_eff = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::And { dst: l_eff, lhs: lhs_vreg, rhs: compare_mask });
+                        let r_eff = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::And { dst: r_eff, lhs: rhs_vreg, rhs: compare_mask });
+
+                        let kind = if matches!(op, BinaryOp::EqWildcard) { CmpKind::Eq } else { CmpKind::Ne };
+                        block.push(MInst::Cmp { dst: dst_vreg, lhs: l_eff, rhs: r_eff, kind });
+
+                        // Mask: check for LHS X at non-wildcard positions
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm { dst: zero, value: 0 });
+                        let x_at_compared = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::And { dst: x_at_compared, lhs: l_m, rhs: compare_mask });
+                        let has_x = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Cmp { dst: has_x, lhs: x_at_compared, rhs: zero, kind: CmpKind::Ne });
+
+                        // If definite mismatch at compared positions → mask=0
+                        let l_xor_r = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Xor { dst: l_xor_r, lhs: lhs_vreg, rhs: rhs_vreg });
+                        let l_definite = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::BitNot { dst: l_definite, src: l_m });
+                        let definite_compare = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::And { dst: definite_compare, lhs: compare_mask, rhs: l_definite });
+                        let mismatch = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::And { dst: mismatch, lhs: l_xor_r, rhs: definite_compare });
+                        let has_mismatch = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Cmp { dst: has_mismatch, lhs: mismatch, rhs: zero, kind: CmpKind::Ne });
+
+                        // mask = has_mismatch ? 0 : (has_x ? 1 : 0)
+                        let res_m = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Select { dst: res_m, cond: has_mismatch, true_val: zero, false_val: has_x });
+                        ctx.set_mask(*dst, res_m);
+                        // Skip the general 4-state mask computation below
                     } else {
-                        CmpKind::Ne
-                    };
-                    block.push(MInst::Cmp {
-                        dst: dst_vreg,
-                        lhs: lhs_vreg,
-                        rhs: rhs_vreg,
-                        kind,
-                    });
+                        // 2-state: wildcards are same as Eq/Ne
+                        let kind = if matches!(op, BinaryOp::EqWildcard) { CmpKind::Eq } else { CmpKind::Ne };
+                        block.push(MInst::Cmp { dst: dst_vreg, lhs: lhs_vreg, rhs: rhs_vreg, kind });
+                    }
                 }
             }
 
-            // 4-state: compute result mask
-            if ctx.four_state {
+            // 4-state: compute result mask (skip for wildcards which handle it inline)
+            if ctx.four_state && !matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
                 let l_m = ctx.get_mask(*lhs, block);
                 let r_m = ctx.get_mask(*rhs, block);
                 let res_m = lower_binary_mask(ctx, block, op, lhs_vreg, rhs_vreg, l_m, r_m, d_width);
