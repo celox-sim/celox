@@ -1349,11 +1349,19 @@ fn lower_instruction(
             } else {
                 // Wide concat (>64 bits): record chunk vregs for use by Store.
                 // args are [MSB, ..., LSB]. Store in LSB-first order.
+                // If an arg is itself wider than 64 bits, expand its chunks.
                 let mut chunks = Vec::new();
                 for arg in args.iter().rev() {
-                    let arg_vreg = ctx.reg_map.get(*arg);
                     let arg_width = ctx.sir_width(arg);
-                    chunks.push((arg_vreg, arg_width));
+                    if arg_width > 64 {
+                        let arg_chunks = ctx.get_wide_chunks(arg, block);
+                        for ch in arg_chunks {
+                            chunks.push(ch);
+                        }
+                    } else {
+                        let arg_vreg = ctx.reg_map.get(*arg);
+                        chunks.push((arg_vreg, arg_width));
+                    }
                 }
                 ctx.wide_regs.insert(*dst, chunks);
                 // No MIR instructions emitted; the value is consumed by Store.
