@@ -523,6 +523,9 @@ fn lower_instruction(
             block.push(MInst::LoadImm { dst: vreg, value: imm_val });
             // Track constant value for later folding
             ctx.consts.insert(*dst, imm_val);
+            // Known bits from the constant value
+            let imm_bits = if imm_val == 0 { 0 } else { 64 - imm_val.leading_zeros() as usize };
+            ctx.known_bits.insert(vreg, imm_bits.min(d_width));
 
             // For wide values, also store chunks in wide_regs
             if d_width > 64 {
@@ -1449,6 +1452,10 @@ fn lower_instruction(
                             src: lhs_vreg,
                             imm: shift_amt as u8,
                         });
+                        // Track known bits: shr reduces width
+                        let lhs_bits = ctx.known_bits.get(&lhs_vreg).copied().unwrap_or(64);
+                        let shifted_bits = lhs_bits.saturating_sub(shift_amt as usize);
+                        ctx.known_bits.insert(shifted, shifted_bits);
                     } else {
                         let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Mov { dst: rhs_copy, src: rhs_vreg });
