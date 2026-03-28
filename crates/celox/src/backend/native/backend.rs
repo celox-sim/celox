@@ -407,7 +407,13 @@ impl super::super::SimBackend for NativeBackend {
     fn get(&self, signal: SignalRef) -> BigUint {
         let bs = get_byte_size(signal.width);
         let bytes = self.mem_bytes();
-        BigUint::from_bytes_le(&bytes[signal.offset..signal.offset + bs])
+        let mut val = BigUint::from_bytes_le(&bytes[signal.offset..signal.offset + bs]);
+        // Mask to actual width to avoid upper-bit garbage
+        let extra_bits = bs * 8 - signal.width;
+        if extra_bits > 0 {
+            val &= (BigUint::from(1u32) << signal.width) - BigUint::from(1u32);
+        }
+        val
     }
 
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
