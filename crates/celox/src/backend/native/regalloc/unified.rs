@@ -460,16 +460,40 @@ fn process_block(
                 evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx + 1, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
             }
 
-            // Pick a PhysReg for the def
+            // Pick a PhysReg for the def.
+            // Prefer the lhs operand's register (avoids mov in x86 2-operand form).
             let last_use_pos = last_use_in_block.get(&def_vreg).copied().unwrap_or(inst_idx);
             let blocked = compute_blocked_for_def(
                 inst_idx, last_use_pos, &shift_points,
                 &clobber_points,
             );
 
-            let preg = rf.find_free_excluding(&blocked)
-                .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
-                .expect("no free register for def");
+            // Coalescing hint: if the instruction has a lhs operand that just
+            // died (last use at this instruction), reuse its PhysReg for dst.
+            let hint_preg = uses.first().and_then(|&lhs_vreg| {
+                let lhs_preg = rf.get_preg(lhs_vreg)?;
+                // Only coalesce if lhs dies here (won't conflict)
+                let next = fast_next_use(&use_positions, analysis, block_idx, block.insts.len(), inst_idx + 1, lhs_vreg);
+                if next == u32::MAX && !blocked.contains(&lhs_preg) {
+                    Some(lhs_preg)
+                } else {
+                    None
+                }
+            });
+
+            let preg = if let Some(hp) = hint_preg {
+                // Evict the dying lhs to free its PhysReg for the def
+                if let Some(lhs_vreg) = uses.first().copied() {
+                    if rf.get_preg(lhs_vreg) == Some(hp) {
+                        rf.evict(lhs_vreg);
+                    }
+                }
+                hp
+            } else {
+                rf.find_free_excluding(&blocked)
+                    .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
+                    .expect("no free register for def")
+            };
 
             rf.assign(def_vreg, preg);
             result.set(def_vreg, preg);
