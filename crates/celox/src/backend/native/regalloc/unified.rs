@@ -148,7 +148,7 @@ fn compute_entry_regfile(
     let mut some: BTreeSet<VReg> = BTreeSet::new();
 
     for &pred_idx in preds {
-        if pred_idx >= block_idx { continue; }
+        if pred_idx >= block_idx { continue; } // skip back edges (assumes layout ≈ RPO)
         let pred_vregs: BTreeSet<VReg> = regfile_exit[pred_idx].vregs().collect();
         some = some.union(&pred_vregs).copied().collect();
         all = Some(match all {
