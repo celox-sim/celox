@@ -486,6 +486,36 @@ fn lower_instruction(
                         // fallback paths that read the scalar VReg.
                         block.push(MInst::Mov { dst: vreg, src: chunks[0].0 });
                         ctx.wide_regs.insert(*dst, chunks);
+
+                        // 4-state: load wide mask chunks
+                        if ctx.is_4state_var(addr) {
+                            let mut mchunks = Vec::with_capacity(n_chunks);
+                            let mut m_remaining = *width_bits;
+                            let mut m_bit_pos = *bit_off;
+                            for _ in 0..n_chunks {
+                                let chunk_bits = m_remaining.min(64);
+                                let chunk_byte_off = ctx.mask_byte_offset(addr, m_bit_pos);
+                                let chunk_size = ISelContext::op_size_for_width(chunk_bits);
+                                let mv = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Load {
+                                    dst: mv,
+                                    base: BaseReg::SimState,
+                                    offset: chunk_byte_off,
+                                    size: chunk_size,
+                                });
+                                mchunks.push((mv, chunk_bits));
+                                m_bit_pos += chunk_bits;
+                                m_remaining -= chunk_bits;
+                            }
+                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Mov { dst: mvreg, src: mchunks[0].0 });
+                            ctx.set_mask(*dst, mvreg);
+                            ctx.wide_masks.insert(*dst, mchunks);
+                        } else if ctx.four_state {
+                            let mvreg = ctx.alloc_vreg(SpillDesc::remat(0));
+                            block.push(MInst::LoadImm { dst: mvreg, value: 0 });
+                            ctx.set_mask(*dst, mvreg);
+                        }
                         return;
                     }
 
@@ -618,35 +648,11 @@ fn lower_instruction(
                 }
             }
 
-            // 4-state: load mask from memory
+            // 4-state: load mask from memory (narrow path; wide handled above in early-return)
             if ctx.is_4state_var(addr) {
                 match offset {
                     SIROffset::Static(bit_off) => {
-                        if *width_bits > 64 {
-                            let n_chunks = ISelContext::num_chunks(*width_bits);
-                            let mut mchunks = Vec::with_capacity(n_chunks);
-                            let mut remaining = *width_bits;
-                            let mut bit_pos = *bit_off;
-                            for _ in 0..n_chunks {
-                                let chunk_bits = remaining.min(64);
-                                let chunk_byte_off = ctx.mask_byte_offset(addr, bit_pos);
-                                let chunk_size = ISelContext::op_size_for_width(chunk_bits);
-                                let mv = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: mv,
-                                    base: BaseReg::SimState,
-                                    offset: chunk_byte_off,
-                                    size: chunk_size,
-                                });
-                                mchunks.push((mv, chunk_bits));
-                                bit_pos += chunk_bits;
-                                remaining -= chunk_bits;
-                            }
-                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Mov { dst: mvreg, src: mchunks[0].0 });
-                            ctx.set_mask(*dst, mvreg);
-                            ctx.wide_masks.insert(*dst, mchunks);
-                        } else {
+                        if *width_bits <= 64 {
                             let mask_off = ctx.mask_byte_offset(addr, *bit_off);
                             let intra_byte = bit_off % 8;
                             let op_size = ISelContext::op_size_for_width(*width_bits);
