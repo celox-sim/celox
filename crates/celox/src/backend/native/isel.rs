@@ -1852,15 +1852,116 @@ fn lower_wide_binary(
             ctx.set_wide_chunks(dst, dst_chunks);
         }
 
-        // For remaining wide ops (Div, Rem, etc.),
-        // fall back to scalar (truncated to 64-bit). This is incorrect but
-        // prevents panics for unsupported operations.
-        _ => {
-            let lhs_vreg = ctx.reg_map.get(lhs);
-            let rhs_vreg = ctx.reg_map.get(rhs);
-            let dst_vreg = ctx.reg_map.get(dst);
-            block.push(MInst::Mov { dst: dst_vreg, src: lhs_vreg });
-            let _ = rhs_vreg;
+        // Wide division/remainder: bit-by-bit restoring division.
+        BinaryOp::Div | BinaryOp::Rem => {
+            let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
+            let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+            let total_bits = n_chunks * 64;
+
+            let mut q_chunks: Vec<VReg> = (0..n_chunks).map(|_| {
+                let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: z, value: 0 });
+                z
+            }).collect();
+            let mut rem_chunks: Vec<VReg> = (0..n_chunks).map(|_| {
+                let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: z, value: 0 });
+                z
+            }).collect();
+
+            for bit in (0..total_bits).rev() {
+                let chunk_idx = bit / 64;
+                let bit_idx = bit % 64;
+
+                // remainder <<= 1
+                for c in (0..n_chunks).rev() {
+                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShlImm { dst: shifted, src: rem_chunks[c], imm: 1 });
+                    if c > 0 {
+                        let carry_bit = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShrImm { dst: carry_bit, src: rem_chunks[c - 1], imm: 63 });
+                        let combined = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or { dst: combined, lhs: shifted, rhs: carry_bit });
+                        rem_chunks[c] = combined;
+                    } else {
+                        rem_chunks[c] = shifted;
+                    }
+                }
+
+                // remainder[0] |= (dividend[chunk_idx] >> bit_idx) & 1
+                let dividend_chunk = ctx.wide_chunk_or_zero(&lhs_chunks, chunk_idx, block);
+                let extracted = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::ShrImm { dst: extracted, src: dividend_chunk, imm: bit_idx as u8 });
+                let one_bit = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::AndImm { dst: one_bit, src: extracted, imm: 1 });
+                let new_rem0 = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or { dst: new_rem0, lhs: rem_chunks[0], rhs: one_bit });
+                rem_chunks[0] = new_rem0;
+
+                // if remainder >= divisor (chunk-wise unsigned comparison)
+                let init_ge = ctx.alloc_vreg(SpillDesc::remat(1));
+                block.push(MInst::LoadImm { dst: init_ge, value: 1 });
+                let mut ge = init_ge;
+                for c in 0..n_chunks {
+                    let rc = rem_chunks[c];
+                    let dc = ctx.wide_chunk_or_zero(&rhs_chunks, c, block);
+                    let eq = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: eq, lhs: rc, rhs: dc, kind: CmpKind::Eq });
+                    let gt = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp { dst: gt, lhs: rc, rhs: dc, kind: CmpKind::GeU });
+                    let next_ge = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Select { dst: next_ge, cond: eq, true_val: ge, false_val: gt });
+                    ge = next_ge;
+                }
+
+                // conditional: remainder -= divisor (wide sub with borrow)
+                let mut borrow: Option<VReg> = None;
+                for c in 0..n_chunks {
+                    let rc = rem_chunks[c];
+                    let dc = ctx.wide_chunk_or_zero(&rhs_chunks, c, block);
+
+                    let (diff, bout) = if let Some(bin) = borrow {
+                        let d1 = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Sub { dst: d1, lhs: rc, rhs: dc });
+                        let b1 = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Cmp { dst: b1, lhs: dc, rhs: rc, kind: CmpKind::GtU });
+                        let d2 = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Sub { dst: d2, lhs: d1, rhs: bin });
+                        let b2 = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Cmp { dst: b2, lhs: bin, rhs: d1, kind: CmpKind::GtU });
+                        let bout = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or { dst: bout, lhs: b1, rhs: b2 });
+                        (d2, bout)
+                    } else {
+                        let d = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Sub { dst: d, lhs: rc, rhs: dc });
+                        let bout = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Cmp { dst: bout, lhs: dc, rhs: rc, kind: CmpKind::GtU });
+                        (d, bout)
+                    };
+
+                    // select: if ge then subtracted else original
+                    let new_rc = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Select { dst: new_rc, cond: ge, true_val: diff, false_val: rc });
+                    rem_chunks[c] = new_rc;
+                    borrow = Some(bout);
+                }
+
+                // quotient[chunk_idx] |= ge ? (1 << bit_idx) : 0
+                let bit_mask = ctx.alloc_vreg(SpillDesc::remat(1u64 << bit_idx));
+                block.push(MInst::LoadImm { dst: bit_mask, value: 1u64 << bit_idx });
+                let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm { dst: zero, value: 0 });
+                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select { dst: masked, cond: ge, true_val: bit_mask, false_val: zero });
+                let new_q = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or { dst: new_q, lhs: q_chunks[chunk_idx], rhs: masked });
+                q_chunks[chunk_idx] = new_q;
+            }
+
+            let result_chunks = if matches!(op, BinaryOp::Div) { q_chunks } else { rem_chunks };
+            let dst_chunks: Vec<(VReg, usize)> = result_chunks.into_iter().map(|v| (v, 64)).collect();
+            ctx.set_wide_chunks(dst, dst_chunks);
         }
     }
 
