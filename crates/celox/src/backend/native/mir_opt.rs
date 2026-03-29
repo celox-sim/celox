@@ -9,22 +9,29 @@ use super::mir::*;
 
 /// Run all MIR optimization passes.
 pub fn optimize(func: &mut MFunction) {
-    // Run the core optimization pipeline twice to catch cascading opportunities.
-    // Pass 1 may expose new constant folding / mask elimination / CSE targets.
-    for _ in 0..2 {
-        constant_fold(func);
+    if func.vregs.count() > 40 {
+        // High-pressure: full pipeline
+        for _ in 0..2 {
+            constant_fold(func);
+            constant_dedup(func);
+            copy_propagate(func);
+            algebraic_simplify(func);
+            redundant_mask_eliminate(func);
+            global_gvn(func);
+            dead_code_eliminate(func);
+        }
+        lower_to_imm_forms(func);
+        sink_loads(func);
+        split_live_ranges(func);
+        compute_value_widths(func);
+        fold_xor_chain_to_pext(func);
+    } else {
+        // Low-pressure: original pipeline (no regression for counter)
         constant_dedup(func);
         copy_propagate(func);
-        algebraic_simplify(func);
-        redundant_mask_eliminate(func);
-        global_gvn(func);
+        fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
     }
-    lower_to_imm_forms(func);
-    sink_loads(func);
-    split_live_ranges(func);
-    compute_value_widths(func);
-    fold_xor_chain_to_pext(func);
 }
 
 // ────────────────────────────────────────────────────────────────

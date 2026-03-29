@@ -309,7 +309,11 @@ fn emit_inner(
     }
 
     // ── Blocks ──
-    for block in func.blocks.iter() {
+    // In naked mode, reorder blocks so that Return-ending blocks come last.
+    // This enables fall-through to the next EU (no jmp needed).
+    let block_order: Vec<usize> = (0..func.blocks.len()).collect();
+    for &bi in &block_order {
+        let block = &func.blocks[bi];
         let label = block_labels.get_mut(&block.id).unwrap();
         asm.set_label(label)?;
 
@@ -1068,186 +1072,80 @@ pub fn emit_chained_eus(
 ) -> Result<Vec<u8>, IcedError> {
     use super::{isel, regalloc};
 
-    // Step 1: Compile each EU, collecting regalloc results
-    struct CompiledEU {
-        assignment: regalloc::AssignmentMap,
-        spill_frame_size: u32,
-        func: super::mir::MFunction,
-    }
-    let mut compiled: Vec<CompiledEU> = Vec::new();
-    for eu in units {
-        let mut mfunc = isel::lower_execution_unit(eu, layout, four_state);
-        super::mir_opt::optimize(&mut mfunc);
-        let ra = regalloc::run_regalloc(&mut mfunc);
-        compiled.push(CompiledEU {
-            assignment: ra.assignment,
-            spill_frame_size: ra.spill_frame_size,
-            func: mfunc,
-        });
-    }
+    // Per-EU: ISel + optimize + regalloc + naked emit (shared frame)
+    // Then assemble with shared prologue/epilogue.
+    let mut eu_results: Vec<EmitResult> = Vec::new();
 
-    if compiled.len() == 1 {
-        let eu = compiled.pop().unwrap();
-        let result = emit(&eu.func, &eu.assignment, eu.spill_frame_size)?;
+    // First pass: compile all EUs to get max frame and callee-saved union
+    // Step 1: ISel + per-EU optimization
+    let mut eu_funcs: Vec<super::mir::MFunction> = units.iter()
+        .map(|eu| {
+            let mut mfunc = isel::lower_execution_unit(eu, layout, four_state);
+            super::mir_opt::optimize(&mut mfunc);
+            mfunc
+        })
+        .collect();
+
+    if eu_funcs.len() == 1 {
+        let mut mfunc = eu_funcs.pop().unwrap();
+        let ra = regalloc::run_regalloc(&mut mfunc);
+        let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
         return Ok(result.code);
     }
 
-    // Step 2: Compute shared prologue parameters
-    let max_spill_frame = compiled.iter().map(|eu| eu.spill_frame_size).max().unwrap_or(0);
-    let mut all_callee_saved_set = super::regalloc::assignment::PhysRegSet::new();
-    for eu in &compiled {
-        for &preg in eu.assignment.map.values() {
-            if CALLEE_SAVED.contains(&preg) {
-                all_callee_saved_set.insert(preg);
-            }
-        }
-    }
-    let shared_callee_saved: Vec<PhysReg> = CALLEE_SAVED.iter()
-        .copied()
-        .filter(|r| all_callee_saved_set.contains(r))
-        .collect();
+    // Step 2: Merge EUs into one MFunction
+    let mut merged = merge_mfunctions(&mut eu_funcs);
 
-    // Compute aligned frame size for the shared prologue
+    // Step 3: Unified regalloc (EU boundaries marked → regfile resets there)
+    let ra = regalloc::run_regalloc(&mut merged);
+
+    let shared_callee_saved = used_callee_saved(&ra.assignment);
     let callee_push_size = (shared_callee_saved.len() as u32) * 8;
-    let total_push = callee_push_size + 8; // +8 for R15
-    let shared_frame = {
-        let misalign = (total_push + max_spill_frame) % 16;
-        if misalign == 0 { max_spill_frame } else { max_spill_frame + (16 - misalign) }
+    let total_push = callee_push_size + 8;
+    let frame_size = {
+        let misalign = (total_push + ra.spill_frame_size) % 16;
+        if misalign == 0 { ra.spill_frame_size } else { ra.spill_frame_size + (16 - misalign) }
     };
 
-    // Step 3: Emit shared prologue using small CodeAssembler
-    let _prologue_code = {
+    // Single naked emit of the merged function
+    let naked_result = emit_naked(&merged, &ra.assignment, frame_size)?;
+    eu_results.push(naked_result);
+
+    // Build shared prologue/epilogue
+    let prologue = {
         let mut asm = CodeAssembler::new(64)?;
-        for &reg in &shared_callee_saved {
-            asm.push(preg_to_reg64(reg))?;
-        }
+        for &reg in &shared_callee_saved { asm.push(preg_to_reg64(reg))?; }
         asm.push(SIM_BASE)?;
-        if shared_frame > 0 {
-            asm.sub(rsp, shared_frame as i32)?;
-        }
+        if frame_size > 0 { asm.sub(rsp, frame_size as i32)?; }
         asm.mov(SIM_BASE, rdi)?;
         asm.assemble(0x0)?
     };
-
-    // Step 4: Emit shared epilogue
-    let _epilogue_code = {
+    let epilogue = {
         let mut asm = CodeAssembler::new(64)?;
-        if shared_frame > 0 {
-            asm.add(rsp, shared_frame as i32)?;
-        }
+        if frame_size > 0 { asm.add(rsp, frame_size as i32)?; }
         asm.pop(SIM_BASE)?;
-        for &reg in shared_callee_saved.iter().rev() {
-            asm.pop(preg_to_reg64(reg))?;
-        }
+        for &reg in shared_callee_saved.iter().rev() { asm.pop(preg_to_reg64(reg))?; }
         asm.ret()?;
         asm.assemble(0x0)?
     };
 
-    // Step 5: Emit each EU with full prologue/epilogue, then strip them.
-    // Each EU is emitted with its OWN spill frame size (not shared), so
-    // spill slot offsets are correct relative to RSP. We then strip
-    // the per-EU prologue/epilogue and use the shared one.
-    //
-    // Prologue structure (emit order):
-    //   push callee_saved[0]..callee_saved[n]   (1-2 bytes each)
-    //   push r15                                 (2 bytes)
-    //   sub rsp, frame_size                      (4 or 7 bytes, or 0 if frame=0)
-    //   mov r15, rdi                             (3 bytes: REX.W 89 FD → 49 89 FD)
-    //
-    // Epilogue structure:
-    //   add rsp, frame_size                      (4 or 7 bytes, or 0)
-    //   pop r15                                  (2 bytes)
-    //   pop callee_saved[n]..callee_saved[0]     (1-2 bytes each)
-    //   ret                                      (1 byte)
-
-    // Emit each EU normally, then compute body bounds.
-    // BUT: each EU might use a different spill frame size and different
-    // callee-saved set. For shared prologue to work, ALL EUs must use
-    // the same frame layout. So we emit naked with shared_frame.
-    //
-    // In naked mode: Return emits `xor eax, eax; ret`, ReturnError emits `mov eax, code; ret`.
-    // We then scan the body bytes and replace every 0xC3 (ret) with a
-    // 5-byte `jmp epilogue` by expanding the code.
-    //
-    // SIMPLER APPROACH: Emit each EU normally (with prologue/epilogue),
-    // use the old chaining strategy (ret→jmp) but with SHARED prologue.
-    // The per-EU prologue is wasteful but the old code is proven correct.
-    //
-    // Let's just do the old approach for now — it's correct and the overhead
-    // per EU is ~15-20 bytes of prologue, ~10 cycles. With 1000 EUs that's
-    // ~10K cycles per tick. At 800ns/tick (~2.4K cycles), this is ~4x overhead.
-    // So it IS significant and we do need the shared prologue. But let's
-    // get it correct first.
-
-    // APPROACH: each EU in naked mode, no ret. Instead, Return does nothing
-    // (fall through). We stitch EU bodies together. The final EU gets a
-    // jmp to the epilogue.
-    //
-    // This ONLY works if Return is the very last instruction executed in
-    // each EU (no code path continues after Return). Since Return is always
-    // at the end of a block that's a CFG exit, and the next EU's code
-    // immediately follows, this is correct.
-    //
-    // For ReturnError: we need a jmp to epilogue. We'll handle this by
-    // emitting `jmp <placeholder>` and patching later.
-
-    // Actually, the simplest correct approach: fall back to the proven
-    // old chaining method. The shared prologue optimization is complex
-    // and the benefit on THIS benchmark may be small relative to the risk.
-    // Let's measure the old approach first.
-
-    // Step 5: Emit each EU in naked mode (shared frame size)
-    struct NakedEU {
-        code: Vec<u8>,
-        return_patches: Vec<(usize, bool)>, // (offset, is_error)
-    }
-    let mut naked_eus: Vec<NakedEU> = Vec::new();
-    for eu in &compiled {
-        let result = emit_naked(&eu.func, &eu.assignment, shared_frame)?;
-        naked_eus.push(NakedEU {
-            code: result.code,
-            return_patches: result.return_patches,
-        });
-    }
-
-    // Step 6: Assemble: [prologue] [EU0] [EU1] ... [EUn] [epilogue]
+    // Assemble: [prologue] [EU0] [EU1] ... [EUn] [epilogue]
+    // Assemble: [prologue] [merged body] [epilogue]
     let mut combined: Vec<u8> = Vec::new();
-    combined.extend_from_slice(&_prologue_code);
+    combined.extend_from_slice(&prologue);
 
-    let mut eu_offsets: Vec<usize> = Vec::new();
-    for neu in &naked_eus {
-        eu_offsets.push(combined.len());
-        combined.extend_from_slice(&neu.code);
-    }
+    let body_offset = combined.len();
+    let naked_result = &eu_results[0];
+    combined.extend_from_slice(&naked_result.code);
 
     let epilogue_offset = combined.len();
-    combined.extend_from_slice(&_epilogue_code);
+    combined.extend_from_slice(&epilogue);
 
-    // Step 7: Patch return jmps
-    for (eu_idx, neu) in naked_eus.iter().enumerate() {
-        let eu_base = eu_offsets[eu_idx];
-        let is_last = eu_idx == naked_eus.len() - 1;
-
-        for &(patch_offset, is_error) in &neu.return_patches {
-            let abs_offset = eu_base + patch_offset;
-            if is_error || is_last {
-                // Error return or final EU success: jmp to epilogue
-                let rel = (epilogue_offset as i64) - (abs_offset as i64 + 5);
-                combined[abs_offset + 1..abs_offset + 5].copy_from_slice(&(rel as i32).to_le_bytes());
-            } else {
-                // Non-final success Return: jmp to next EU (fall through)
-                // The jmp is already a nop-jmp (rel=0 → next instruction).
-                // But the next EU starts after the current EU's code.
-                // We need to compute: target = next EU start.
-                // For consecutive EUs, the next instruction after this EU's code
-                // is the start of the next EU (they're contiguous).
-                // Since the jmp is at abs_offset within this EU, and we want
-                // to jump to eu_offsets[eu_idx + 1]:
-                let target = eu_offsets[eu_idx + 1];
-                let rel = (target as i64) - (abs_offset as i64 + 5);
-                combined[abs_offset + 1..abs_offset + 5].copy_from_slice(&(rel as i32).to_le_bytes());
-            }
-        }
+    // Patch all return jmps → epilogue
+    for &(patch_off, _is_error) in &naked_result.return_patches {
+        let abs = body_offset + patch_off;
+        let rel = (epilogue_offset as i64) - (abs as i64 + 5);
+        combined[abs + 1..abs + 5].copy_from_slice(&(rel as i32).to_le_bytes());
     }
 
     Ok(combined)
