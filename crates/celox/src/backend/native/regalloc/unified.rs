@@ -188,7 +188,12 @@ fn compute_entry_regfile(
     // If the preferred PhysReg is already taken, skip — the VReg will be
     // reloaded on demand by process_block when actually used.
     // Sort for deterministic register assignment (HashSet iteration is unordered).
-    let mut all_sorted: Vec<VReg> = all.iter().copied().collect();
+    // Only include VRegs that are actually live at this block's entry.
+    // This prevents stale VRegs from predecessor exits (e.g. after EU merge)
+    // from occupying registers unnecessarily.
+    let mut all_sorted: Vec<VReg> = all.iter().copied()
+        .filter(|v| analysis.entry_distances[block_idx].contains_key(v))
+        .collect();
     all_sorted.sort();
     for vreg in &all_sorted {
         if rf.occupancy() >= k { break; }
@@ -266,7 +271,8 @@ fn insert_coupling_code(
         let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
 
         let mut need_reload: Vec<VReg> = entry_rf.vregs()
-            .filter(|v| !pred_rf.contains(*v) && !phi_dsts.contains(v))
+            .filter(|v| !pred_rf.contains(*v) && !phi_dsts.contains(v)
+                && analysis.entry_distances[block_idx].contains_key(v))
             .collect();
         need_reload.sort();
 
@@ -469,8 +475,8 @@ fn process_block(
             );
 
             // Coalescing hint: reuse a dying operand's PhysReg for dst.
-            // Prefer lhs (avoids mov in x86 2-operand form), then try rhs
-            // (emit_binop_rr swaps for commutative ops).
+            // Try all operands; prefer lhs first (avoids mov in x86 2-operand form).
+            // Also try non-dying operands if they have a cheap remat path.
             let hint_preg = uses.iter().find_map(|&use_vreg| {
                 let preg = rf.get_preg(use_vreg)?;
                 let next = fast_next_use(&use_positions, analysis, block_idx, block.insts.len(), inst_idx + 1, use_vreg);
@@ -508,6 +514,8 @@ fn process_block(
         for v in dead {
             rf.evict(v);
         }
+
+        // (Live range splitting placeholder - currently no eager spill)
     }
 
     (rf, s, new_insts)
@@ -548,8 +556,6 @@ fn evict_farthest(
     _blocked_pregs: &PhysRegSet,
     result: &mut AssignmentMap,
 ) {
-    // Choose victim: farthest next-use, prefer rematerializable/cheap.
-    // Secondary key: VReg id for deterministic tie-breaking (HashMap iteration is unordered).
     let victim = rf.vregs()
         .filter(|v| !pinned.contains(v))
         .max_by_key(|&v| {
@@ -564,7 +570,7 @@ fn evict_farthest(
             let effective_class = if s.contains(&v) { eviction_class.max(1) } else { eviction_class };
             (effective_class, next_use, v)
         })
-        .expect("no eviction victim: all VRegs in RegFile are pinned (used by current instruction)");
+        .expect("no eviction victim: all VRegs in RegFile are pinned");
 
     emit_spill(new_insts, victim, s, func, slots, result);
     rf.evict(victim);

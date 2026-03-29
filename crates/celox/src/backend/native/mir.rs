@@ -330,6 +330,10 @@ pub enum MInst {
     ShlImm { dst: VReg, src: VReg, imm: u8 },
     /// dst = src >> imm (arithmetic)
     SarImm { dst: VReg, src: VReg, imm: u8 },
+    /// dst = src + imm
+    AddImm { dst: VReg, src: VReg, imm: i32 },
+    /// dst = src - imm
+    SubImm { dst: VReg, src: VReg, imm: i32 },
 
     // ── Comparison ─────────────────────────────────────────────
     /// dst = (lhs cmp rhs) ? 1 : 0
@@ -337,6 +341,13 @@ pub enum MInst {
         dst: VReg,
         lhs: VReg,
         rhs: VReg,
+        kind: CmpKind,
+    },
+    /// dst = (lhs cmp imm) ? 1 : 0
+    CmpImm {
+        dst: VReg,
+        lhs: VReg,
+        imm: i32,
         kind: CmpKind,
     },
 
@@ -430,9 +441,14 @@ impl fmt::Display for MInst {
             MInst::ShrImm { dst, src, imm } => write!(f, "{dst} = shr {src}, {imm}"),
             MInst::ShlImm { dst, src, imm } => write!(f, "{dst} = shl {src}, {imm}"),
             MInst::SarImm { dst, src, imm } => write!(f, "{dst} = sar {src}, {imm}"),
+            MInst::AddImm { dst, src, imm } => write!(f, "{dst} = add {src}, {imm}"),
+            MInst::SubImm { dst, src, imm } => write!(f, "{dst} = sub {src}, {imm}"),
             MInst::Cmp {
                 dst, lhs, rhs, kind,
             } => write!(f, "{dst} = cmp.{kind:?} {lhs}, {rhs}"),
+            MInst::CmpImm {
+                dst, lhs, imm, kind,
+            } => write!(f, "{dst} = cmp.{kind:?} {lhs}, {imm}"),
             MInst::BitNot { dst, src } => write!(f, "{dst} = not {src}"),
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
             MInst::Popcnt { dst, src } => write!(f, "{dst} = popcnt {src}"),
@@ -514,7 +530,10 @@ impl MInst {
             | MInst::ShrImm { dst, .. }
             | MInst::ShlImm { dst, .. }
             | MInst::SarImm { dst, .. }
+            | MInst::AddImm { dst, .. }
+            | MInst::SubImm { dst, .. }
             | MInst::Cmp { dst, .. }
+            | MInst::CmpImm { dst, .. }
             | MInst::UDiv { dst, .. }
             | MInst::URem { dst, .. }
             | MInst::BitNot { dst, .. }
@@ -560,9 +579,12 @@ impl MInst {
             | MInst::ShrImm { src, .. }
             | MInst::ShlImm { src, .. }
             | MInst::SarImm { src, .. }
+            | MInst::AddImm { src, .. }
+            | MInst::SubImm { src, .. }
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. } => Uses::one(*src),
+            MInst::CmpImm { lhs, .. } => Uses::one(*lhs),
             MInst::Select { cond, true_val, false_val, .. } => Uses::three(*cond, *true_val, *false_val),
             MInst::Branch { cond, .. } => Uses::one(*cond),
             MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => Uses::none(),
@@ -606,10 +628,15 @@ impl MInst {
             | MInst::ShrImm { src, .. }
             | MInst::ShlImm { src, .. }
             | MInst::SarImm { src, .. }
+            | MInst::AddImm { src, .. }
+            | MInst::SubImm { src, .. }
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. } => {
                 if *src == old { *src = new; }
+            }
+            MInst::CmpImm { lhs, .. } => {
+                if *lhs == old { *lhs = new; }
             }
             MInst::Pext { src, mask, .. } => {
                 if *src == old { *src = new; }
@@ -705,6 +732,12 @@ pub struct MFunction {
     pub spill_descs: Vec<SpillDesc>,
     /// VReg allocator (for the spilling phase to allocate reload regs).
     pub vregs: VRegAllocator,
+    /// Known value widths for each VReg (None = unknown/64-bit).
+    /// When Some(w) with w <= 32, the emit phase can use 32-bit registers.
+    pub value_widths: Vec<Option<u8>>,
+    /// Block indices that start a new EU (for merged functions).
+    /// GVN should not CSE Loads across these boundaries.
+    pub eu_boundaries: Vec<u32>,
 }
 
 impl MFunction {
@@ -713,7 +746,17 @@ impl MFunction {
             blocks: Vec::new(),
             spill_descs,
             vregs,
+            value_widths: Vec::new(),
+            eu_boundaries: Vec::new(),
         }
+    }
+
+    /// Returns true if VReg is known to fit in 32 bits (upper 32 guaranteed zero).
+    pub fn is_narrow32(&self, vreg: VReg) -> bool {
+        self.value_widths
+            .get(vreg.0 as usize)
+            .and_then(|w| *w)
+            .is_some_and(|w| w <= 32)
     }
 
     pub fn push_block(&mut self, block: MBlock) {

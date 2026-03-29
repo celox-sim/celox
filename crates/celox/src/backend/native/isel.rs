@@ -1590,36 +1590,41 @@ fn lower_instruction(
                 }
                 BinaryOp::Div | BinaryOp::Rem => {
                     // div/rem with zero guard: dst = rhs == 0 ? 0 : lhs op rhs
-                    // Regalloc handles RAX/RDX clobber via clobbers() in assignment.
-                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm { dst: zero, value: 0 });
-                    let one = ctx.alloc_vreg(SpillDesc::remat(1));
-                    block.push(MInst::LoadImm { dst: one, value: 1 });
-                    let is_zero = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Cmp {
-                        dst: is_zero,
-                        lhs: rhs_vreg,
-                        rhs: zero,
-                        kind: CmpKind::Eq,
-                    });
-                    let safe_rhs = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Select {
-                        dst: safe_rhs,
-                        cond: is_zero,
-                        true_val: one,
-                        false_val: rhs_vreg,
-                    });
+                    // Skip guard when rhs is a known non-zero constant.
+                    let effective_rhs = if ctx.consts.get(rhs).is_some_and(|&v| v != 0) {
+                        rhs_vreg
+                    } else {
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm { dst: zero, value: 0 });
+                        let one = ctx.alloc_vreg(SpillDesc::remat(1));
+                        block.push(MInst::LoadImm { dst: one, value: 1 });
+                        let is_zero = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Cmp {
+                            dst: is_zero,
+                            lhs: rhs_vreg,
+                            rhs: zero,
+                            kind: CmpKind::Eq,
+                        });
+                        let safe_rhs = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Select {
+                            dst: safe_rhs,
+                            cond: is_zero,
+                            true_val: one,
+                            false_val: rhs_vreg,
+                        });
+                        safe_rhs
+                    };
                     if matches!(op, BinaryOp::Div) {
                         block.push(MInst::UDiv {
                             dst: dst_vreg,
                             lhs: lhs_vreg,
-                            rhs: safe_rhs,
+                            rhs: effective_rhs,
                         });
                     } else {
                         block.push(MInst::URem {
                             dst: dst_vreg,
                             lhs: lhs_vreg,
-                            rhs: safe_rhs,
+                            rhs: effective_rhs,
                         });
                     }
                 }
