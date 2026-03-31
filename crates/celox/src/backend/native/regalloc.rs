@@ -25,6 +25,7 @@ pub struct RegallocResult {
 }
 
 /// Verify that no two simultaneously-live VRegs share a PhysReg.
+#[cfg(debug_assertions)]
 fn verify_assignment(
     func: &MFunction,
     analysis: &analysis::AnalysisResult,
