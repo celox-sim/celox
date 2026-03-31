@@ -21,6 +21,7 @@ pub fn optimize(func: &mut MFunction) {
             dead_code_eliminate(func);
         }
         lower_to_imm_forms(func);
+        dead_code_eliminate(func);
         sink_loads(func);
         split_live_ranges(func);
         fold_xor_chain_to_pext(func);
