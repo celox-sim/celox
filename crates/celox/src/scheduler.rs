@@ -1,5 +1,4 @@
 use crate::{
-    NativeBackend,
     backend::{EventHandle, SimBackend},
     ir::SignalRef,
 };
@@ -11,7 +10,7 @@ pub struct ClockDef {
 }
 
 #[derive(Debug, Clone)]
-pub struct SimEvent<B: SimBackend = NativeBackend> {
+pub struct SimEvent<B: SimBackend = crate::DefaultBackend> {
     pub time: u64,
     pub event_ref: B::Event,
     pub signal: SignalRef,
@@ -50,7 +49,7 @@ impl<B: SimBackend> Ord for SimEvent<B> {
     }
 }
 
-pub struct Scheduler<B: SimBackend = NativeBackend> {
+pub struct Scheduler<B: SimBackend = crate::DefaultBackend> {
     pub(crate) time: u64,
     pub(crate) clocks: Vec<Option<ClockDef>>,
     pub(crate) event_queue: BinaryHeap<SimEvent<B>>,

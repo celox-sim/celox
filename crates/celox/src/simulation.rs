@@ -12,7 +12,7 @@ use crate::{
 ///
 /// The default type parameter `B = NativeBackend` means that bare `Simulation`
 /// is equivalent to `Simulation<JitBackend>` for backward compatibility.
-pub struct Simulation<B: SimBackend = NativeBackend> {
+pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) scheduler: Scheduler<B>,
     pub(crate) last_clock_values: bit_set::BitSet,
@@ -22,7 +22,7 @@ pub struct Simulation<B: SimBackend = NativeBackend> {
     pub(crate) signal_to_id: crate::HashMap<SignalRef, usize>,
 }
 
-pub(crate) struct EventInfo<B: SimBackend = NativeBackend> {
+pub(crate) struct EventInfo<B: SimBackend = crate::DefaultBackend> {
     pub(crate) canonical_id: usize,
     pub(crate) is_cascaded: bool,
     pub(crate) eval_ff_event: Option<B::Event>,
