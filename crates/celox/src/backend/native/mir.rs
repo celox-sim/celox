@@ -735,9 +735,6 @@ pub struct MFunction {
     /// Known value widths for each VReg (None = unknown/64-bit).
     /// When Some(w) with w <= 32, the emit phase can use 32-bit registers.
     pub value_widths: Vec<Option<u8>>,
-    /// Block indices that start a new EU (for merged functions).
-    /// GVN should not CSE Loads across these boundaries.
-    pub eu_boundaries: Vec<u32>,
 }
 
 impl MFunction {
@@ -747,7 +744,6 @@ impl MFunction {
             spill_descs,
             vregs,
             value_widths: Vec::new(),
-            eu_boundaries: Vec::new(),
         }
     }
 

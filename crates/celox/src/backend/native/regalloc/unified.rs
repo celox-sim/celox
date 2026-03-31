@@ -164,8 +164,7 @@ fn compute_entry_regfile(
     let mut rf = RegFile::new();
     let s = HashSet::new();
 
-    // EU boundaries: start with empty regfile (no VRegs live across EU boundaries)
-    if preds.is_empty() || func.eu_boundaries.contains(&(block_idx as u32)) {
+    if preds.is_empty() {
         return (rf, s);
     }
 
@@ -265,8 +264,6 @@ fn insert_coupling_code(
     slots: &mut SpillSlotAllocator,
     result: &mut AssignmentMap,
 ) {
-    // No coupling code at EU boundaries (no live VRegs cross EU boundaries)
-    if func.eu_boundaries.contains(&(block_idx as u32)) { return; }
     for &pred_idx in &analysis.predecessors[block_idx] {
         if pred_idx >= block_idx { continue; }
 

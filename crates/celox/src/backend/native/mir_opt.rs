@@ -522,42 +522,14 @@ fn global_gvn(func: &mut MFunction) {
         func: &MFunction,
         value_table: &mut HashMap<GvnKey, VReg>,
         replacements: &mut Vec<(usize, usize, MInst)>,
-        eu_boundaries: &[u32],
     ) {
         let mut added_keys: Vec<GvnKey> = Vec::new();
         let block = &func.blocks[node];
 
-        // At EU boundaries, clear ALL entries to prevent cross-EU CSE.
-        // Cross-EU Load CSE creates extremely long live ranges that
-        // overwhelm the single-pass register allocator.
-        if eu_boundaries.contains(&(node as u32)) {
-            // Don't remove from value_table (parent scope owns them),
-            // but we won't match against them either — just clear and
-            // re-add within this scope. Actually, we need to prevent
-            // lookups too. Simplest: snapshot and clear, restore on exit.
-            let snapshot: Vec<(GvnKey, VReg)> = value_table.drain().collect();
-            // Process this block with empty table
-            process_gvn_block(node, block, value_table, &mut added_keys, replacements);
-            // Recurse
-            for &child in &dom_children[node] {
-                gvn_dfs(child, dom_children, func, value_table, replacements, eu_boundaries);
-            }
-            // Pop this block's entries
-            for key in added_keys {
-                value_table.remove(&key);
-            }
-            // Restore parent scope
-            for (k, v) in snapshot {
-                value_table.insert(k, v);
-            }
-            return;
-        }
-
         process_gvn_block(node, block, value_table, &mut added_keys, replacements);
 
-        // Recurse into dominated children
         for &child in &dom_children[node] {
-            gvn_dfs(child, dom_children, func, value_table, replacements, eu_boundaries);
+            gvn_dfs(child, dom_children, func, value_table, replacements);
         }
 
         // Pop this block's entries
@@ -603,7 +575,7 @@ fn global_gvn(func: &mut MFunction) {
         }
     }
 
-    gvn_dfs(0, &dom_children, func, &mut value_table, &mut replacements, &func.eu_boundaries);
+    gvn_dfs(0, &dom_children, func, &mut value_table, &mut replacements);
 
     // Apply replacements
     for (bi, inst_idx, new_inst) in replacements {
@@ -1068,24 +1040,11 @@ fn simplify_cfg(func: &mut MFunction) {
         }
     }
 
-    // Remove empty blocks that are now unreachable
-    // (Don't remove entry block or EU boundary blocks)
+    // Remove empty blocks that are now unreachable (keep entry block)
     let entry = func.blocks.first().map(|b| b.id);
-    // Collect EU boundary block IDs before mutating
-    let eu_boundary_block_ids: Vec<BlockId> = func.eu_boundaries.iter()
-        .filter_map(|&idx| func.blocks.get(idx as usize).map(|b| b.id))
-        .collect();
-    let eu_bid_set: std::collections::HashSet<BlockId> = eu_boundary_block_ids.iter().copied().collect();
     func.blocks.retain(|block| {
-        Some(block.id) == entry
-            || !resolved.contains_key(&block.id)
-            || eu_bid_set.contains(&block.id)
+        Some(block.id) == entry || !resolved.contains_key(&block.id)
     });
-    // Recompute eu_boundaries indices after block removal
-    func.eu_boundaries = eu_boundary_block_ids.iter()
-        .filter_map(|bid| func.blocks.iter().position(|b| b.id == *bid).map(|i| i as u32))
-        .collect();
-    func.eu_boundaries.sort();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1591,18 +1550,12 @@ fn collect_xor_chain_bits(
 /// Constant deduplication: merge LoadImm instructions with the same value
 /// into a single VReg. Reduces register pressure and instruction count.
 fn constant_dedup(func: &mut MFunction) {
-    let eu_boundary_set: std::collections::HashSet<u32> =
-        func.eu_boundaries.iter().copied().collect();
-
     let mut aliases: HashMap<VReg, VReg> = HashMap::new();
     // Map from constant value → canonical VReg
     let mut const_map: HashMap<u64, VReg> = HashMap::new();
 
-    for (bi, block) in func.blocks.iter().enumerate() {
-        // Reset const_map at EU boundaries to prevent cross-EU aliases
-        if eu_boundary_set.contains(&(bi as u32)) {
-            const_map.clear();
-        }
+    for block in &func.blocks {
+        const_map.clear(); // per-block to avoid cross-block live range extension
         for inst in &block.insts {
             if let MInst::LoadImm { dst, value } = inst {
                 if let Some(&canonical) = const_map.get(value) {

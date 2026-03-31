@@ -1170,7 +1170,7 @@ pub fn emit_chained_eus(
     }
 
     // SIR-level EU merge: combine all EUs into one SIR EU
-    let (mut merged_sir, sir_boundaries) = crate::ir::merge_sir_eus(units);
+    let (mut merged_sir, _sir_boundaries) = crate::ir::merge_sir_eus(units);
 
     // Re-run SIR optimization on merged EU (cross-EU optimization)
     crate::optimizer::coalescing::commit_ops::inline_commit_forwarding(&mut merged_sir);
@@ -1178,19 +1178,9 @@ pub fn emit_chained_eus(
     // Single ISel + optimization + regalloc on the merged EU
     let mut merged = isel::lower_execution_unit(&merged_sir, layout, four_state);
 
-    // Map SIR boundary BlockIds to MIR block indices
-    let mir_boundaries: Vec<u32> = sir_boundaries.iter()
-        .filter_map(|sir_bid| {
-            merged.blocks.iter().enumerate()
-                .find(|(_, b)| b.id.0 == sir_bid.0 as u32)
-                .map(|(idx, _)| idx as u32)
-        })
-        .collect();
-    merged.eu_boundaries = mir_boundaries;
-
     super::mir_opt::optimize(&mut merged);
 
-    // Step 3: Unified regalloc (eu_boundaries → regfile resets, no coupling code)
+    // Step 3: Unified regalloc
     let ra = regalloc::run_regalloc(&mut merged);
 
     // Step 4: Compute frame layout
@@ -1314,19 +1304,8 @@ fn merge_mfunctions(funcs: &mut [MFunction]) -> MFunction {
         }
     }
 
-    // Track EU boundary block indices (the first block of each EU after the first)
-    let mut eu_boundary_indices: Vec<u32> = Vec::new();
-    let mut block_count = 0u32;
-    for (eu_idx, func) in funcs.iter().enumerate() {
-        if eu_idx > 0 {
-            eu_boundary_indices.push(block_count);
-        }
-        block_count += func.blocks.len() as u32;
-    }
-
     let mut merged = MFunction::new(merged_vregs, merged_spill_descs);
     merged.blocks = merged_blocks;
-    merged.eu_boundaries = eu_boundary_indices;
     merged
 }
 
