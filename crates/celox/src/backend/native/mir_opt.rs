@@ -25,11 +25,15 @@ pub fn optimize(func: &mut MFunction) {
         split_live_ranges(func);
         fold_xor_chain_to_pext(func);
     } else {
-        // Low-pressure: original pipeline (no regression for counter)
+        // Low-pressure: lightweight but complete pipeline
+        constant_fold(func);
         constant_dedup(func);
         copy_propagate(func);
+        algebraic_simplify(func);
+        redundant_mask_eliminate(func);
         fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
+        lower_to_imm_forms(func);
     }
     if_convert(func);
     simplify_cfg(func);
