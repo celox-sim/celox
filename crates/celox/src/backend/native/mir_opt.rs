@@ -1342,10 +1342,9 @@ fn split_live_ranges(func: &mut MFunction) {
 
             // Determine re-materialization strategy
             let remat = match def_inst {
-                MInst::LoadImm { value, .. } => {
-                    // Already handled by sink_loads for LoadImm
-                    // Only split if sink_loads didn't handle it (gap check is different)
-                    Some(RematKind::Imm(*value))
+                MInst::LoadImm { .. } => {
+                    // Already handled by sink_loads — skip
+                    None
                 }
                 MInst::Load {
                     base: BaseReg::SimState,
@@ -1389,10 +1388,6 @@ fn split_live_ranges(func: &mut MFunction) {
         let new_vreg = func.vregs.alloc();
 
         let (reload_inst, spill_desc) = match split.kind {
-            RematKind::Imm(_) => {
-                // Skip: sink_loads already handles this
-                continue;
-            }
             RematKind::SimLoad(offset, size) => {
                 let inst = MInst::Load {
                     dst: new_vreg,
@@ -1440,7 +1435,6 @@ struct SplitAction {
 }
 
 enum RematKind {
-    Imm(u64),
     SimLoad(i32, OpSize),
     StackSpill,
 }

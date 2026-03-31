@@ -19,14 +19,8 @@ pub struct AnalysisResult {
     pub entry_distances: Vec<HashMap<VReg, u32>>,
     /// For each block, the next-use distances at block exit.
     pub exit_distances: Vec<HashMap<VReg, u32>>,
-    /// Block layout order (index → BlockId).
-    pub block_order: Vec<BlockId>,
-    /// Reverse map: BlockId → index in block_order.
-    pub block_index: HashMap<BlockId, usize>,
     /// Predecessor list for each block (by index).
     pub predecessors: Vec<Vec<usize>>,
-    /// Successor list for each block (by index).
-    pub successors: Vec<Vec<usize>>,
 }
 
 /// Compute liveness and next-use distances for the entire MFunction.
@@ -153,36 +147,6 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
     AnalysisResult {
         entry_distances,
         exit_distances,
-        block_order,
-        block_index,
         predecessors,
-        successors,
     }
-}
-
-/// Get the next-use distance of `vreg` at instruction `inst_idx` within `block_idx`.
-/// This walks forward from `inst_idx` to find the next use, then falls back
-/// to the block's exit distance.
-pub fn next_use_at(
-    func: &MFunction,
-    analysis: &AnalysisResult,
-    block_idx: usize,
-    inst_idx: usize,
-    vreg: VReg,
-) -> u32 {
-    let block = &func.blocks[block_idx];
-
-    // Search forward from inst_idx for the next use
-    for i in inst_idx..block.insts.len() {
-        if block.insts[i].uses().contains(&vreg) {
-            return (i - inst_idx) as u32;
-        }
-    }
-
-    // Not used in remaining block — use exit distance
-    let remaining = (block.insts.len() - inst_idx) as u32;
-    analysis.exit_distances[block_idx]
-        .get(&vreg)
-        .map(|d| remaining + d)
-        .unwrap_or(u32::MAX)
 }

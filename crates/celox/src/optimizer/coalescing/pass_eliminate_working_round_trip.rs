@@ -6,23 +6,6 @@
 
 use crate::ir::*;
 
-use super::pass_manager::ExecutionUnitPass;
-use crate::optimizer::PassOptions;
-
-#[allow(dead_code)]
-pub(super) struct EliminateWorkingRoundTripPass;
-
-impl ExecutionUnitPass for EliminateWorkingRoundTripPass {
-    fn name(&self) -> &'static str {
-        "eliminate_working_round_trip"
-    }
-
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        // Pre-merge: single EU, all WORKING variables are independent by construction
-        eliminate_working_round_trip(eu, &[]);
-    }
-}
-
 /// Eliminate the WORKING memory round-trip for independent variables.
 ///
 /// `eu_boundary_blocks`: block IDs that start a new original EU (after SIR merge).

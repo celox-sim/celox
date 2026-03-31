@@ -10,8 +10,6 @@ use crate::{
 use super::{JitEngine, MemoryLayout, get_byte_size};
 use thiserror::Error;
 pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
-#[allow(dead_code)]
-pub type BatchFunc = unsafe extern "C" fn(*mut u8, *const u8, *mut u8, i64) -> u64;
 
 /// Opaque handle to a compiled event (clock / async-reset) function.
 /// Holds the JIT-compiled function pointer directly — no indirection.
@@ -646,11 +644,6 @@ impl JitBackend {
         val
     }
 
-    /// Check if a signal has an entry in the Working region.
-    #[allow(dead_code)]
-    pub fn has_working_offset(&self, addr: &AbsoluteAddr) -> bool {
-        self.shared.layout.working_offsets.contains_key(addr)
-    }
 
     /// Set 4-state value for a variable using a pre-resolved [`SignalRef`].
     ///

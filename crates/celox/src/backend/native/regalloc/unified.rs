@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::native::mir::*;
 
-use super::analysis::{self, AnalysisResult};
+use super::analysis::AnalysisResult;
 use super::assignment::{
     ALLOCATABLE_REGS, AssignmentMap, PhysReg, PhysRegSet, RegConstraint, clobbers, is_reg_shift,
     use_constraints,

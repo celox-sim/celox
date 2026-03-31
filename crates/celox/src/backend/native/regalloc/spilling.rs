@@ -14,7 +14,6 @@ use std::collections::HashMap;
 
 use crate::backend::native::mir::*;
 
-use super::analysis::{self, AnalysisResult};
 
 // ────────────────────────────────────────────────────────────────
 // Spill slot allocator

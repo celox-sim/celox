@@ -13,7 +13,7 @@ use crate::{HashMap, SimulatorError, SimulatorOptions};
 
 use super::super::traits::SimulatorErrorCode;
 use super::super::{MemoryLayout, get_byte_size};
-use super::{emit, isel, jit_mem, regalloc};
+use super::{emit, jit_mem, regalloc};
 
 // ────────────────────────────────────────────────────────────────
 // Event handle
