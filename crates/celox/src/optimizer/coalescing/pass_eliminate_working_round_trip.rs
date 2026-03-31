@@ -79,7 +79,7 @@ pub(crate) fn eliminate_working_round_trip(
                     if src.region == STABLE_REGION && dst.region == WORKING_REGION {
                         // Seed: STABLE → WORKING
                         let has_dynamic = matches!(offset, SIROffset::Dynamic(_));
-                        let entry = vars.entry(abs.clone()).or_insert_with(|| VarInfo {
+                        let entry = vars.entry(abs).or_insert_with(|| VarInfo {
                             stable_addr: *src,
                             seed_locs: Vec::new(),
                             apply_locs: Vec::new(),
@@ -94,7 +94,7 @@ pub(crate) fn eliminate_working_round_trip(
                         // Apply: WORKING → STABLE
                         let abs_w = src.absolute_addr();
                         let has_dynamic = matches!(offset, SIROffset::Dynamic(_));
-                        let entry = vars.entry(abs_w.clone()).or_insert_with(|| VarInfo {
+                        let entry = vars.entry(abs_w).or_insert_with(|| VarInfo {
                             stable_addr: *dst,
                             seed_locs: Vec::new(),
                             apply_locs: Vec::new(),
@@ -110,14 +110,14 @@ pub(crate) fn eliminate_working_round_trip(
                 SIRInstruction::Load(_, addr, offset, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
                     if matches!(offset, SIROffset::Dynamic(_)) {
-                        vars.entry(abs.clone()).and_modify(|v| v.has_dynamic = true);
+                        vars.entry(abs).and_modify(|v| v.has_dynamic = true);
                     }
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
                 SIRInstruction::Store(addr, offset, _, _, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
                     if matches!(offset, SIROffset::Dynamic(_)) {
-                        vars.entry(abs.clone()).and_modify(|v| v.has_dynamic = true);
+                        vars.entry(abs).and_modify(|v| v.has_dynamic = true);
                     }
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
@@ -148,7 +148,7 @@ pub(crate) fn eliminate_working_round_trip(
             }
             true
         })
-        .map(|(abs, _)| abs.clone())
+        .map(|(abs, _)| *abs)
         .collect();
 
     if eligible.is_empty() {
@@ -158,7 +158,7 @@ pub(crate) fn eliminate_working_round_trip(
     // Build AbsoluteAddr → stable RegionedAbsoluteAddr mapping
     let stable_addrs: HashMap<AbsoluteAddr, RegionedAbsoluteAddr> = eligible
         .iter()
-        .filter_map(|abs| vars.get(abs).map(|info| (abs.clone(), info.stable_addr)))
+        .filter_map(|abs| vars.get(abs).map(|info| (*abs, info.stable_addr)))
         .collect();
 
     // Phase 3: Rewrite — redirect WORKING → STABLE, remove Commits

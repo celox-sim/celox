@@ -384,7 +384,6 @@ fn append_extra_source(sources: &mut Vec<(String, std::path::PathBuf)>, extra: &
 
 /// Configuration loaded from an optional `celox.toml` in the project root.
 #[derive(serde::Deserialize, Default)]
-#[allow(dead_code)]
 struct CeloxConfig {
     #[serde(default)]
     test: CeloxTestConfig,
@@ -401,7 +400,6 @@ struct CeloxTestConfig {
 }
 
 #[derive(serde::Deserialize, Default)]
-#[allow(dead_code)]
 struct CeloxSimulationConfig {
     /// Default maximum steps for `waitUntil` / `waitForCycles`.
     /// Overridden by the per-call `maxSteps` option.

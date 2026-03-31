@@ -46,8 +46,8 @@ impl ExecutionUnitPass for GvnPass {
                 if let (Some(si), Some(ti)) = (src_idx, tgt_idx) {
                     if ti <= si {
                         // All blocks in the range [ti, si] are in the loop
-                        for idx in ti..=si {
-                            loop_blocks.insert(block_ids[idx]);
+                        for &bid in &block_ids[ti..=si] {
+                            loop_blocks.insert(bid);
                         }
                     }
                 }

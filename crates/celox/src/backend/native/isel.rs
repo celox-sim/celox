@@ -114,7 +114,7 @@ pub fn lower_execution_unit(
         // Store instructions that write to the same addr as a Slice's src.
         for inst in &sir_block.instructions {
             if let SIRInstruction::Load(dst, addr, _, _) = inst {
-                ctx.reg_addrs.insert(*dst, addr.clone());
+                ctx.reg_addrs.insert(*dst, *addr);
             }
         }
 
@@ -499,7 +499,7 @@ impl<'a> ISelContext<'a> {
 
     /// Number of 64-bit chunks needed for a given bit width.
     fn num_chunks(width_bits: usize) -> usize {
-        (width_bits + 63) / 64
+        width_bits.div_ceil(64)
     }
 
     /// Get or create wide chunks for a SIR register.
@@ -621,7 +621,7 @@ fn lower_instruction(
         }
 
         SIRInstruction::Load(dst, addr, offset, width_bits) => {
-            ctx.reg_addrs.insert(*dst, addr.clone());
+            ctx.reg_addrs.insert(*dst, *addr);
             let vreg = ctx.reg_map.get(*dst);
 
             match offset {
@@ -637,7 +637,7 @@ fn lower_instruction(
                             let chunk_byte_off = ctx.byte_offset(addr, bit_pos);
                             let chunk_size = ISelContext::op_size_for_width(chunk_bits);
                             let chunk_vreg = ctx.alloc_vreg(SpillDesc::sim_state(
-                                addr.clone(),
+                                *addr,
                                 bit_pos,
                                 chunk_bits,
                                 false,
@@ -704,7 +704,7 @@ fn lower_instruction(
 
                     // Update spill desc
                     ctx.spill_descs[vreg.0 as usize] =
-                        SpillDesc::sim_state(addr.clone(), *bit_off, *width_bits, false);
+                        SpillDesc::sim_state(*addr, *bit_off, *width_bits, false);
 
                     if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
                         // Word-aligned, native size: single load.
@@ -997,7 +997,7 @@ fn lower_instruction(
                                     src: tmp,
                                     size: chunk_size,
                                 });
-                                let advance = (chunk_bits + 7) / 8;
+                                let advance = chunk_bits.div_ceil(8);
                                 off += advance as i32;
                                 remaining -= chunk_bits;
                             }
@@ -1444,7 +1444,7 @@ fn lower_instruction(
                                 src: tmp,
                                 size: chunk_size,
                             });
-                            let advance = (chunk_bits + 7) / 8;
+                            let advance = chunk_bits.div_ceil(8);
                             src_off += advance as i32;
                             dst_off += advance as i32;
                             remaining -= chunk_bits;
@@ -1467,7 +1467,7 @@ fn lower_instruction(
 
                     // For simplicity, copy the containing bytes chunk-by-chunk.
                     // The physical width covers width_bits + up to 7 bit shift.
-                    let phys_bytes = (*width_bits + 7) / 8;
+                    let phys_bytes = (*width_bits).div_ceil(8);
                     let mut copied = 0usize;
                     while copied < phys_bytes {
                         let remaining = phys_bytes - copied;
@@ -1541,7 +1541,7 @@ fn lower_instruction(
                                     src: tmp,
                                     size: cs,
                                 });
-                                let adv = (cb + 7) / 8;
+                                let adv = cb.div_ceil(8);
                                 s_off += adv as i32;
                                 d_off += adv as i32;
                                 remaining -= cb;
@@ -1558,7 +1558,7 @@ fn lower_instruction(
                             src: offset_vreg,
                             imm: 3,
                         });
-                        let phys_bytes = (*width_bits + 7) / 8;
+                        let phys_bytes = (*width_bits).div_ceil(8);
                         let mut copied = 0usize;
                         while copied < phys_bytes {
                             let remaining = phys_bytes - copied;
@@ -1660,8 +1660,8 @@ fn lower_instruction(
                 BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                     // 64-bit arithmetic may produce upper bits; mask to output width.
                     let raw = if d_width < 64 {
-                        let tmp = ctx.alloc_vreg(SpillDesc::transient());
-                        tmp
+                        
+                        ctx.alloc_vreg(SpillDesc::transient())
                     } else {
                         dst_vreg
                     };
@@ -3179,7 +3179,7 @@ fn lower_wide_binary(
                     dst: cmp,
                     lhs: l,
                     rhs: r,
-                    kind: kind,
+                    kind,
                 });
                 let next = ctx.alloc_vreg(SpillDesc::transient());
                 block.push(MInst::Select {
@@ -3518,8 +3518,7 @@ fn lower_wide_binary(
                     value: 1,
                 });
                 let mut ge = init_ge;
-                for c in 0..n_chunks {
-                    let rc = rem_chunks[c];
+                for (c, &rc) in rem_chunks.iter().enumerate() {
                     let dc = ctx.wide_chunk_or_zero(&rhs_chunks, c, block);
                     let eq = ctx.alloc_vreg(SpillDesc::transient());
                     block.push(MInst::Cmp {
@@ -3547,22 +3546,22 @@ fn lower_wide_binary(
 
                 // conditional: remainder -= divisor (wide sub with borrow)
                 let mut borrow: Option<VReg> = None;
-                for c in 0..n_chunks {
-                    let rc = rem_chunks[c];
+                for (c, rc) in rem_chunks.iter_mut().enumerate() {
+                    let old_rc = *rc;
                     let dc = ctx.wide_chunk_or_zero(&rhs_chunks, c, block);
 
                     let (diff, bout) = if let Some(bin) = borrow {
                         let d1 = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Sub {
                             dst: d1,
-                            lhs: rc,
+                            lhs: old_rc,
                             rhs: dc,
                         });
                         let b1 = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Cmp {
                             dst: b1,
                             lhs: dc,
-                            rhs: rc,
+                            rhs: old_rc,
                             kind: CmpKind::GtU,
                         });
                         let d2 = ctx.alloc_vreg(SpillDesc::transient());
@@ -3589,14 +3588,14 @@ fn lower_wide_binary(
                         let d = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Sub {
                             dst: d,
-                            lhs: rc,
+                            lhs: old_rc,
                             rhs: dc,
                         });
                         let bout = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Cmp {
                             dst: bout,
                             lhs: dc,
-                            rhs: rc,
+                            rhs: old_rc,
                             kind: CmpKind::GtU,
                         });
                         (d, bout)
@@ -3608,9 +3607,9 @@ fn lower_wide_binary(
                         dst: new_rc,
                         cond: ge,
                         true_val: diff,
-                        false_val: rc,
+                        false_val: old_rc,
                     });
-                    rem_chunks[c] = new_rc;
+                    *rc = new_rc;
                     borrow = Some(bout);
                 }
 
@@ -4035,8 +4034,7 @@ fn lower_wide_unary(
             // Then add 1 (wide add with constant 1)
             let mut dst_chunks = Vec::with_capacity(n_chunks);
             let mut carry: Option<VReg> = None;
-            for i in 0..n_chunks {
-                let l = inv_chunks[i].0;
+            for (i, &(l, _)) in inv_chunks.iter().enumerate() {
                 let r = if i == 0 {
                     let one = ctx.alloc_vreg(SpillDesc::remat(1));
                     block.push(MInst::LoadImm { dst: one, value: 1 });
@@ -4409,7 +4407,7 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
 ///   Simplified: any X bit where the other operand's corresponding bit is not
 ///   definite-0 propagates as X. If the other bit is definite-0, AND = 0 regardless.
 ///   Formula: res_m = (lm | rm) & ~(~lv & ~lm) & ~(~rv & ~rm)
-///     equivalently: res_m = (lm & rm) | (lm & rv) | (rm & lv)
+///   equivalently: res_m = (lm & rm) | (lm & rv) | (rm & lv)
 /// - OR:  dual of AND — dominant-1 cancels X
 ///   res_m = (lm & rm) | (lm & ~rv) | (rm & ~lv)
 /// - XOR: res_m = lm | rm
@@ -5293,19 +5291,18 @@ fn lower_wide_binary_mask(
                                 dst: all_ones,
                                 value: u64::MAX,
                             });
-                            for i in 0..dst_m_chunks.len() {
+                            for (i, chunk) in dst_m_chunks.iter_mut().enumerate() {
                                 let chunk_start = i * 64;
                                 if chunk_start >= effective_sign_pos {
                                     // Entire chunk is above sign — all X if sign is X
-                                    let old_m = dst_m_chunks[i].0;
                                     let new_m = ctx.alloc_vreg(SpillDesc::transient());
                                     block.push(MInst::Select {
                                         dst: new_m,
                                         cond: sign_is_x,
                                         true_val: all_ones,
-                                        false_val: old_m,
+                                        false_val: chunk.0,
                                     });
-                                    dst_m_chunks[i].0 = new_m;
+                                    chunk.0 = new_m;
                                 } else if chunk_start + 64 > effective_sign_pos {
                                     // Partial: bits above effective_sign_pos in this chunk
                                     let bit_in_chunk = effective_sign_pos - chunk_start;
@@ -5323,14 +5320,13 @@ fn lower_wide_binary_mask(
                                         true_val: upper_mask,
                                         false_val: z_cmp,
                                     });
-                                    let old_m = dst_m_chunks[i].0;
                                     let new_m = ctx.alloc_vreg(SpillDesc::transient());
                                     block.push(MInst::Or {
                                         dst: new_m,
-                                        lhs: old_m,
+                                        lhs: chunk.0,
                                         rhs: x_fill,
                                     });
-                                    dst_m_chunks[i].0 = new_m;
+                                    chunk.0 = new_m;
                                 }
                             }
                         }

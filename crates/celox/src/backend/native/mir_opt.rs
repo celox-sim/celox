@@ -503,9 +503,9 @@ fn global_gvn(func: &mut MFunction) {
 
     // Build dominator tree children
     let mut dom_children: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
-    for i in 1..num_blocks {
-        if let Some(parent) = idom[i] {
-            dom_children[parent].push(i);
+    for (i, dom) in idom.iter().enumerate().skip(1) {
+        if let Some(parent) = dom {
+            dom_children[*parent].push(i);
         }
     }
 

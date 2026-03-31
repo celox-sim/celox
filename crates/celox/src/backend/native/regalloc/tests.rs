@@ -137,7 +137,7 @@ fn test_high_pressure_spill() {
     // Use all 14 in a chain of adds
     let mut acc = VReg(0);
     for i in 1..14 {
-        let dst = VReg(14 + i as u32);
+        let dst = VReg(14 + i);
         insts.push(MInst::Add {
             dst,
             lhs: acc,

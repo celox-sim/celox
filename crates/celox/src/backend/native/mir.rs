@@ -116,6 +116,12 @@ pub struct VRegAllocator {
     next: u32,
 }
 
+impl Default for VRegAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VRegAllocator {
     pub fn new() -> Self {
         Self { next: 0 }
@@ -182,7 +188,7 @@ impl SpillDesc {
         width_bits: usize,
         store_back_only: bool,
     ) -> Self {
-        let reload_cost = if bit_offset % 64 == 0 && matches!(width_bits, 8 | 16 | 32 | 64) {
+        let reload_cost = if bit_offset.is_multiple_of(64) && matches!(width_bits, 8 | 16 | 32 | 64) {
             1 // word-aligned: single load
         } else {
             2 // needs shift/mask

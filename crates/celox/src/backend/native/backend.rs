@@ -250,7 +250,7 @@ impl NativeBackend {
     /// Each instance gets its own simulation state memory.
     pub fn from_shared(shared: Arc<SharedNativeCode>) -> Self {
         let mem_size_words =
-            (shared.layout.merged_total_size + shared.layout.triggered_bits_total_size + 7) / 8;
+            (shared.layout.merged_total_size + shared.layout.triggered_bits_total_size).div_ceil(8);
         let mut memory = vec![0u64; mem_size_words + 1]; // +1 for safety
 
         // Initialize 4-state regions to X (v=1, m=1)

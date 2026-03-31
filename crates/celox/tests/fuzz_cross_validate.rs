@@ -26,7 +26,7 @@ fn gen_random_comb_module(rng: &mut Rng, width: usize) -> (String, Vec<u64>) {
     let n_inputs = rng.range(2, 5) as usize;
     let n_temps = rng.range(1, 4) as usize;
 
-    let mut code = format!("module Top(\n");
+    let mut code = "module Top(\n".to_string();
     for i in 0..n_inputs {
         code += &format!("    i{i}: input logic<{width}>,\n");
     }
@@ -34,7 +34,7 @@ fn gen_random_comb_module(rng: &mut Rng, width: usize) -> (String, Vec<u64>) {
 
     // Generate random operations
     let ops = ["+", "-", "&", "|", "^"];
-    let mut last_var = format!("i0");
+    let mut last_var = "i0".to_string();
     for t in 0..n_temps {
         let op = ops[rng.range(0, ops.len() as u64) as usize];
         let rhs_idx = rng.range(0, n_inputs as u64) as usize;
@@ -65,13 +65,12 @@ fn run_fuzz_case(seed: u64, width: usize) {
 
     let sim_n_result = std::panic::catch_unwind(|| {
         let mut sim = Simulator::builder(&code, "Top").build().unwrap();
-        let n_inputs = inputs.len();
-        for i in 0..n_inputs {
+        for (i, &input) in inputs.iter().enumerate() {
             let sig = sim.signal(&format!("i{i}"));
             match width {
-                w if w <= 32 => sim.set(sig, inputs[i] as u32),
-                w if w <= 64 => sim.set(sig, inputs[i]),
-                _ => sim.set_wide(sig, BigUint::from(inputs[i])),
+                w if w <= 32 => sim.set(sig, input as u32),
+                w if w <= 64 => sim.set(sig, input),
+                _ => sim.set_wide(sig, BigUint::from(input)),
             }
         }
         let o = sim.signal("o");
@@ -80,13 +79,12 @@ fn run_fuzz_case(seed: u64, width: usize) {
 
     let sim_c_result = std::panic::catch_unwind(|| {
         let mut sim = Simulator::builder(&code, "Top").build_cranelift().unwrap();
-        let n_inputs = inputs.len();
-        for i in 0..n_inputs {
+        for (i, &input) in inputs.iter().enumerate() {
             let sig = sim.signal(&format!("i{i}"));
             match width {
-                w if w <= 32 => sim.set(sig, inputs[i] as u32),
-                w if w <= 64 => sim.set(sig, inputs[i]),
-                _ => sim.set_wide(sig, BigUint::from(inputs[i])),
+                w if w <= 32 => sim.set(sig, input as u32),
+                w if w <= 64 => sim.set(sig, input),
+                _ => sim.set_wide(sig, BigUint::from(input)),
             }
         }
         let o = sim.signal("o");

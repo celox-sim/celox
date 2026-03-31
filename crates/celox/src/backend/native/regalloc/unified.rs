@@ -387,7 +387,7 @@ fn process_block(
         // Step A+B: Ensure all uses are in registers
         let mut pinned: HashSet<VReg> = HashSet::new();
 
-        for (_ui, (&use_vreg, constraint)) in uses.iter().zip(constraints.iter()).enumerate() {
+        for (&use_vreg, constraint) in uses.iter().zip(constraints.iter()) {
             if let RegConstraint::Fixed(required_preg) = constraint {
                 // Fixed constraint: need use_vreg in required_preg
                 if rf.get_preg(use_vreg) == Some(*required_preg) {
