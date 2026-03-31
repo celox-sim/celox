@@ -1103,6 +1103,7 @@ pub fn emit_chained_eus(
         return Ok(result.code);
     }
 
+    // Debug: dump first EU's MIR
     // Step 2: Merge all EUs into one MFunction (Return → Jump to next EU)
     let mut merged = merge_mfunctions(&mut eu_funcs);
 

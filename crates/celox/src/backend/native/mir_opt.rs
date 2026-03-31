@@ -23,7 +23,6 @@ pub fn optimize(func: &mut MFunction) {
         lower_to_imm_forms(func);
         sink_loads(func);
         split_live_ranges(func);
-        compute_value_widths(func);
         fold_xor_chain_to_pext(func);
     } else {
         // Low-pressure: original pipeline (no regression for counter)
@@ -32,6 +31,8 @@ pub fn optimize(func: &mut MFunction) {
         fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
     }
+    simplify_cfg(func);
+    compute_value_widths(func);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -838,6 +839,79 @@ fn try_simplify_mul(dst: VReg, lhs: VReg, rhs: VReg, consts: &HashMap<VReg, u64>
         }
     }
     None
+}
+
+// ────────────────────────────────────────────────────────────────
+// CFG simplification
+// ────────────────────────────────────────────────────────────────
+
+/// Simplify the control flow graph:
+/// - Thread jumps through empty blocks (jmp-only blocks)
+/// - Fold branch targets through jump chains
+fn simplify_cfg(func: &mut MFunction) {
+    // Build jump-through map: if a block contains only `jmp target`,
+    // redirect all references to this block directly to `target`.
+    let mut redirect: HashMap<BlockId, BlockId> = HashMap::new();
+    for block in &func.blocks {
+        if block.phis.is_empty() && block.insts.len() == 1 {
+            if let MInst::Jump { target } = &block.insts[0] {
+                redirect.insert(block.id, *target);
+            }
+        }
+    }
+
+    if redirect.is_empty() { return; }
+
+    // Transitively resolve redirects
+    let mut resolved: HashMap<BlockId, BlockId> = HashMap::new();
+    for &src in redirect.keys() {
+        let mut target = src;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(&next) = redirect.get(&target) {
+            if !seen.insert(next) { break; } // cycle
+            target = next;
+        }
+        if target != src {
+            resolved.insert(src, target);
+        }
+    }
+
+    // Rewrite all jump/branch targets
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            match inst {
+                MInst::Jump { target } => {
+                    if let Some(&new_target) = resolved.get(target) {
+                        *target = new_target;
+                    }
+                }
+                MInst::Branch { true_bb, false_bb, .. } => {
+                    if let Some(&new_t) = resolved.get(true_bb) {
+                        *true_bb = new_t;
+                    }
+                    if let Some(&new_f) = resolved.get(false_bb) {
+                        *false_bb = new_f;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Rewrite phi sources
+        for phi in &mut block.phis {
+            for (pred_id, _) in &mut phi.sources {
+                if let Some(&new_pred) = resolved.get(pred_id) {
+                    *pred_id = new_pred;
+                }
+            }
+        }
+    }
+
+    // Remove empty blocks that are now unreachable
+    // (Don't remove entry block)
+    let entry = func.blocks.first().map(|b| b.id);
+    func.blocks.retain(|block| {
+        Some(block.id) == entry || !resolved.contains_key(&block.id)
+    });
 }
 
 // ────────────────────────────────────────────────────────────────
