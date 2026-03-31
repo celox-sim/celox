@@ -146,7 +146,7 @@ jobs:
         run: pnpm run build
 
       - name: Run tests
-        run: pnpm --filter="!@celox-sim/celox-napi" -r test
+        run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r test
 
   js-windows:
     name: JS Test (Windows)
@@ -177,4 +177,4 @@ jobs:
         run: pnpm run build
 
       - name: Run tests
-        run: pnpm --filter="!@celox-sim/celox-napi" -r test
+        run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r test

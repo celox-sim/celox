@@ -595,5 +595,4 @@ impl JitEngine {
 
         Ok(self.module.get_finalized_function(entry_func_id))
     }
-
 }

@@ -188,7 +188,8 @@ impl SpillDesc {
         width_bits: usize,
         store_back_only: bool,
     ) -> Self {
-        let reload_cost = if bit_offset.is_multiple_of(64) && matches!(width_bits, 8 | 16 | 32 | 64) {
+        let reload_cost = if bit_offset.is_multiple_of(64) && matches!(width_bits, 8 | 16 | 32 | 64)
+        {
             1 // word-aligned: single load
         } else {
             2 // needs shift/mask

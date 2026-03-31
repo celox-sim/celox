@@ -637,10 +637,7 @@ fn lower_instruction(
                             let chunk_byte_off = ctx.byte_offset(addr, bit_pos);
                             let chunk_size = ISelContext::op_size_for_width(chunk_bits);
                             let chunk_vreg = ctx.alloc_vreg(SpillDesc::sim_state(
-                                *addr,
-                                bit_pos,
-                                chunk_bits,
-                                false,
+                                *addr, bit_pos, chunk_bits, false,
                             ));
                             block.push(MInst::Load {
                                 dst: chunk_vreg,
@@ -1660,7 +1657,6 @@ fn lower_instruction(
                 BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                     // 64-bit arithmetic may produce upper bits; mask to output width.
                     let raw = if d_width < 64 {
-                        
                         ctx.alloc_vreg(SpillDesc::transient())
                     } else {
                         dst_vreg

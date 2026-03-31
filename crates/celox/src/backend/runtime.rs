@@ -644,7 +644,6 @@ impl JitBackend {
         val
     }
 
-
     /// Set 4-state value for a variable using a pre-resolved [`SignalRef`].
     ///
     /// Uses IEEE 1800 encoding:
