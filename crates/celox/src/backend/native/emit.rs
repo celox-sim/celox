@@ -1170,9 +1170,13 @@ pub fn emit_chained_eus(
     }
 
     // SIR-level EU merge: combine all EUs into one SIR EU
-    let (mut merged_sir, _sir_boundaries) = crate::ir::merge_sir_eus(units);
+    let (mut merged_sir, sir_boundaries) = crate::ir::merge_sir_eus(units);
 
     // Re-run SIR optimization on merged EU (cross-EU optimization)
+    let boundary_blocks = sir_boundaries;
+    crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+        &mut merged_sir, &boundary_blocks,
+    );
     crate::optimizer::coalescing::commit_ops::inline_commit_forwarding(&mut merged_sir);
 
     // Single ISel + optimization + regalloc on the merged EU

@@ -10,6 +10,7 @@ mod pass_coalesce_stores;
 mod pass_commit_sinking;
 pub(crate) mod pass_dead_store_elimination;
 mod pass_eliminate_dead_working_stores;
+pub(crate) mod pass_eliminate_working_round_trip;
 mod pass_hoist_common_branch_loads;
 mod pass_inline_commit_forwarding;
 mod pass_manager;
@@ -78,6 +79,9 @@ fn optimize_with_options(
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let phase_start = timing.then(crate::timing::now);
     let mut ff_passes = ExecutionUnitPassManager::new();
+    // Note: EliminateWorkingRoundTripPass runs post-merge in emit_chained_eus
+    // with boundary info for cross-EU independence check.
+    // Per-EU elimination is NOT safe without dependency analysis.
     if opt.store_load_forwarding {
         ff_passes.add_pass(StoreLoadForwardingPass);
     }
