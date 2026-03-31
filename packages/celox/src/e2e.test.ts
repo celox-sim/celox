@@ -561,8 +561,8 @@ module InitTest (
 		view.setUint8(sigA.offset, 0);
 		view.setUint8(sigA.offset + sigA.byteSize, 0);
 
-		// b = X (value=0, mask=1)
-		view.setUint8(sigB.offset, 0);
+		// b = X (value=1, mask=1) — X encoding: v=1, m=1
+		view.setUint8(sigB.offset, 1);
 		view.setUint8(sigB.offset + sigB.byteSize, 1);
 
 		raw.evalComb();
@@ -572,9 +572,9 @@ module InitTest (
 		expect(vAnd).toBe(0n);
 		expect(mAnd).toBe(0n);
 
-		// 0 | X = X (mask should be 1)
+		// 0 | X = X (value=1, mask=1 in X encoding)
 		const [vOr, mOr] = readFourState(buf, sigYOr);
-		expect(vOr).toBe(0n);
+		expect(vOr).toBe(1n);
 		expect(mOr).toBe(1n);
 	});
 
@@ -598,8 +598,8 @@ module InitTest (
 		view.setUint8(sigA.offset, 1);
 		view.setUint8(sigA.offset + sigA.byteSize, 0);
 
-		// b = X (value=0, mask=1)
-		view.setUint8(sigB.offset, 0);
+		// b = X (value=1, mask=1) — X encoding: v=1, m=1
+		view.setUint8(sigB.offset, 1);
 		view.setUint8(sigB.offset + sigB.byteSize, 1);
 
 		raw.evalComb();
