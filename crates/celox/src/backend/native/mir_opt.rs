@@ -1069,11 +1069,23 @@ fn simplify_cfg(func: &mut MFunction) {
     }
 
     // Remove empty blocks that are now unreachable
-    // (Don't remove entry block)
+    // (Don't remove entry block or EU boundary blocks)
     let entry = func.blocks.first().map(|b| b.id);
+    // Collect EU boundary block IDs before mutating
+    let eu_boundary_block_ids: Vec<BlockId> = func.eu_boundaries.iter()
+        .filter_map(|&idx| func.blocks.get(idx as usize).map(|b| b.id))
+        .collect();
+    let eu_bid_set: std::collections::HashSet<BlockId> = eu_boundary_block_ids.iter().copied().collect();
     func.blocks.retain(|block| {
-        Some(block.id) == entry || !resolved.contains_key(&block.id)
+        Some(block.id) == entry
+            || !resolved.contains_key(&block.id)
+            || eu_bid_set.contains(&block.id)
     });
+    // Recompute eu_boundaries indices after block removal
+    func.eu_boundaries = eu_boundary_block_ids.iter()
+        .filter_map(|bid| func.blocks.iter().position(|b| b.id == *bid).map(|i| i as u32))
+        .collect();
+    func.eu_boundaries.sort();
 }
 
 // ────────────────────────────────────────────────────────────────
