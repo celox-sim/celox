@@ -411,8 +411,12 @@ fn emit_inner(
                         };
                         let true_label = block_labels.get_mut(true_bb).unwrap();
                         emit_jcc(&mut asm, *true_label, kind)?;
-                        let false_label = block_labels.get_mut(false_bb).unwrap();
-                        asm.jmp(*false_label)?;
+                        if next_block_id == Some(*false_bb) {
+                            // Fall-through: jcc handles true path, false falls through
+                        } else {
+                            let false_label = block_labels.get_mut(false_bb).unwrap();
+                            asm.jmp(*false_label)?;
+                        }
                     } else {
                     let c = preg_to_reg64(resolve(assignment, *cond));
                     asm.test(c, c)?;
@@ -426,8 +430,10 @@ fn emit_inner(
                     if !true_has_phis && !false_has_phis {
                         let true_label = block_labels.get_mut(true_bb).unwrap();
                         asm.jne(*true_label)?;
-                        let false_label = block_labels.get_mut(false_bb).unwrap();
-                        asm.jmp(*false_label)?;
+                        if next_block_id != Some(*false_bb) {
+                            let false_label = block_labels.get_mut(false_bb).unwrap();
+                            asm.jmp(*false_label)?;
+                        }
                     } else {
                         let mut true_phi_label = asm.create_label();
                         asm.jne(true_phi_label)?;
