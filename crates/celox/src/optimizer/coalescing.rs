@@ -17,6 +17,7 @@ mod pass_manager;
 mod pass_optimize_blocks;
 mod pass_partial_forward;
 mod pass_reschedule;
+mod pass_split_coalesced_stores;
 mod pass_split_wide_commits;
 mod pass_concat_folding;
 mod pass_gvn;
@@ -37,6 +38,7 @@ use pass_manager::ExecutionUnitPassManager;
 use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_partial_forward::PartialForwardPass;
 use pass_reschedule::ReschedulePass;
+use pass_split_coalesced_stores::SplitCoalescedStoresPass;
 use pass_split_wide_commits::SplitWideCommitsPass;
 use pass_concat_folding::ConcatFoldingPass;
 use pass_gvn::GvnPass;
@@ -117,6 +119,11 @@ fn optimize_with_options(
     if opt.reschedule {
         ff_passes.add_pass(ReschedulePass);
     }
+    // Split wide Concat+Store back into individual stores after reschedule.
+    // Coalesce_stores combines for fewer memory ops, but for large arrays
+    // the Concat forces all values live simultaneously → spill hell.
+    // Splitting + hoisting stores next to their defs minimizes live ranges.
+    ff_passes.add_pass(SplitCoalescedStoresPass);
 
     let eu_count: usize = program.eval_apply_ffs.values().map(|v| v.len()).sum();
     for units in program.eval_apply_ffs.values_mut() {
