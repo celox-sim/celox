@@ -934,7 +934,7 @@ fn lower_instruction(
             }
         }
 
-        SIRInstruction::Store(addr, offset, width_bits, src_reg, _triggers) => {
+        SIRInstruction::Store(addr, offset, width_bits, src_reg, triggers) => {
             match offset {
                 SIROffset::Static(bit_off) => {
                     // Check for wide value from Concat
@@ -1321,6 +1321,82 @@ fn lower_instruction(
                     value: 0,
                 });
                 ctx.set_mask(*src_reg, zero);
+            }
+
+            // Trigger detection: compare old vs new value, set triggered_bits
+            if !triggers.is_empty() {
+                if let SIROffset::Static(bit_off) = offset {
+                    // Load new value (just stored)
+                    let byte_off = ctx.byte_offset(addr, *bit_off);
+                    let new_val = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Load {
+                        dst: new_val,
+                        base: BaseReg::SimState,
+                        offset: byte_off,
+                        size: ISelContext::op_size_for_width(*width_bits),
+                    });
+
+                    for trigger in triggers {
+                        let trigger_byte_idx = trigger.id / 8;
+                        let trigger_bit_idx = trigger.id % 8;
+                        let trigger_offset = ctx.layout.triggered_bits_offset + trigger_byte_idx;
+
+                        // Check new_val for trigger condition
+                        let triggered = ctx.alloc_vreg(SpillDesc::transient());
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm {
+                            dst: zero,
+                            value: 0,
+                        });
+
+                        // For posedge/async_high: triggered if new_val != 0
+                        // (old value comparison is handled by Simulation's step())
+                        block.push(MInst::Cmp {
+                            dst: triggered,
+                            lhs: new_val,
+                            rhs: zero,
+                            kind: CmpKind::Ne,
+                        });
+
+                        // Load current triggered byte, OR in the bit, store back
+                        let old_byte = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Load {
+                            dst: old_byte,
+                            base: BaseReg::SimState,
+                            offset: trigger_offset as i32,
+                            size: OpSize::S8,
+                        });
+
+                        let bit_mask = ctx.alloc_vreg(SpillDesc::remat(1u64 << trigger_bit_idx));
+                        block.push(MInst::LoadImm {
+                            dst: bit_mask,
+                            value: 1u64 << trigger_bit_idx,
+                        });
+
+                        // conditional: if triggered, OR in the bit
+                        let selected_mask = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Select {
+                            dst: selected_mask,
+                            cond: triggered,
+                            true_val: bit_mask,
+                            false_val: zero,
+                        });
+
+                        let new_byte = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or {
+                            dst: new_byte,
+                            lhs: old_byte,
+                            rhs: selected_mask,
+                        });
+
+                        block.push(MInst::Store {
+                            base: BaseReg::SimState,
+                            offset: trigger_offset as i32,
+                            src: new_byte,
+                            size: OpSize::S8,
+                        });
+                    }
+                }
             }
         }
 

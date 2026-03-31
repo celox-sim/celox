@@ -43,7 +43,7 @@ pub struct NamedSignal {
 /// A named event with its resolved ID and event reference.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
-pub struct NamedEvent<B: SimBackend = JitBackend> {
+pub struct NamedEvent<B: SimBackend = NativeBackend> {
     pub name: String,
     pub id: usize,
     pub event_ref: B::Event,

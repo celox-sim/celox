@@ -1,6 +1,6 @@
 use crate::{
-    RuntimeErrorCode, Simulator,
-    backend::{EventHandle, JitBackend, MemoryLayout, SimBackend},
+    NativeBackend, RuntimeErrorCode, Simulator,
+    backend::{EventHandle, MemoryLayout, SimBackend},
     ir::{DomainKind, SignalRef},
     scheduler::{Scheduler, SimEvent},
     simulator::{InstanceHierarchy, NamedEvent, NamedSignal},
@@ -10,9 +10,9 @@ use crate::{
 ///
 /// Manages simulation time, periodic clocks, and an event queue.
 ///
-/// The default type parameter `B = JitBackend` means that bare `Simulation`
+/// The default type parameter `B = NativeBackend` means that bare `Simulation`
 /// is equivalent to `Simulation<JitBackend>` for backward compatibility.
-pub struct Simulation<B: SimBackend = JitBackend> {
+pub struct Simulation<B: SimBackend = NativeBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) scheduler: Scheduler<B>,
     pub(crate) last_clock_values: bit_set::BitSet,
@@ -22,7 +22,7 @@ pub struct Simulation<B: SimBackend = JitBackend> {
     pub(crate) signal_to_id: crate::HashMap<SignalRef, usize>,
 }
 
-pub(crate) struct EventInfo<B: SimBackend = JitBackend> {
+pub(crate) struct EventInfo<B: SimBackend = NativeBackend> {
     pub(crate) canonical_id: usize,
     pub(crate) is_cascaded: bool,
     pub(crate) eval_ff_event: Option<B::Event>,
@@ -58,21 +58,21 @@ impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
     }
 }
 
-// ── JitBackend-specific constructors ────────────────────────────────
+// ── Backend-specific constructors ───────────────────────────────────
 
-impl Simulation<JitBackend> {
+impl Simulation<NativeBackend> {
     pub fn builder<'a>(
         code: &'a str,
         top: &'a str,
-    ) -> crate::SimulatorBuilder<'a, Simulation<JitBackend>> {
-        crate::SimulatorBuilder::<Simulation<JitBackend>>::new(code, top)
+    ) -> crate::SimulatorBuilder<'a, Simulation<NativeBackend>> {
+        crate::SimulatorBuilder::<Simulation<NativeBackend>>::new(code, top)
     }
 
     pub fn from_sources<'a>(
         sources: Vec<(&'a str, &'a std::path::Path)>,
         top: &'a str,
-    ) -> crate::SimulatorBuilder<'a, Simulation<JitBackend>> {
-        crate::SimulatorBuilder::<Simulation<JitBackend>>::from_sources(sources, top)
+    ) -> crate::SimulatorBuilder<'a, Simulation<NativeBackend>> {
+        crate::SimulatorBuilder::<Simulation<NativeBackend>>::from_sources(sources, top)
     }
 }
 

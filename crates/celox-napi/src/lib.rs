@@ -12,6 +12,7 @@ use veryl_parser::Parser;
 use veryl_path::PathSet;
 
 #[cfg(not(target_arch = "wasm32"))]
+use celox::SimBackend;
 use layout::{build_event_map, build_hierarchy_node, build_signal_layout};
 
 /// A segment of a hierarchical instance path.
@@ -535,7 +536,7 @@ fn apply_options<'a, T>(
 #[cfg(not(target_arch = "wasm32"))]
 /// Cached compilation result shared across simulator instances.
 struct CachedBuild {
-    shared_code: Arc<celox::SharedJitCode>,
+    shared_code: Arc<celox::SharedNativeCode>,
     layout_json: String,
     events_json: String,
     hierarchy_json: String,
@@ -665,7 +666,7 @@ fn build_cache_key(
 #[cfg(not(target_arch = "wasm32"))]
 #[napi]
 pub struct NativeSimulatorHandle {
-    backend: Option<celox::JitBackend>,
+    backend: Option<celox::NativeBackend>,
     vcd_writer: Option<celox::VcdWriter>,
     layout_json: String,
     events_json: String,
@@ -748,7 +749,7 @@ impl NativeSimulatorHandle {
 
     /// Create a handle from a cached build (shared compiled code + fresh memory).
     fn from_cached(cached: &CachedBuild, vcd_path: Option<&str>) -> Result<Self> {
-        let backend = celox::JitBackend::from_shared(Arc::clone(&cached.shared_code));
+        let backend = celox::NativeBackend::from_shared(Arc::clone(&cached.shared_code));
         let vcd_writer = if let Some(path) = vcd_path {
             Some(
                 celox::VcdWriter::new(path, &cached.vcd_descs)
@@ -1000,7 +1001,10 @@ impl NativeSimulationHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let mut builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
+        let mut builder = apply_options(
+            celox::Simulation::<celox::NativeBackend>::from_sources(source_refs, &top),
+            &opts,
+        );
         if let Some(path) = &opts.vcd {
             builder = builder.vcd(path);
         }
