@@ -71,7 +71,7 @@ fn resolve_forward_src_from_pred(
     None
 }
 
-pub(super) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+pub(crate) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     let block_ids: Vec<_> = eu.blocks.keys().copied().collect();
 
     for bid in block_ids {
@@ -312,7 +312,7 @@ pub(super) fn split_wide_commits(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     }
 }
 
-pub(super) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+pub(crate) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     let block_ids: Vec<_> = eu.blocks.keys().copied().collect();
 
     for merge_id in block_ids {

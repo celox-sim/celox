@@ -1170,7 +1170,10 @@ pub fn emit_chained_eus(
     }
 
     // SIR-level EU merge: combine all EUs into one SIR EU
-    let (merged_sir, sir_boundaries) = crate::ir::merge_sir_eus(units);
+    let (mut merged_sir, sir_boundaries) = crate::ir::merge_sir_eus(units);
+
+    // Re-run SIR optimization on merged EU (cross-EU optimization)
+    crate::optimizer::coalescing::commit_ops::inline_commit_forwarding(&mut merged_sir);
 
     // Single ISel + optimization + regalloc on the merged EU
     let mut merged = isel::lower_execution_unit(&merged_sir, layout, four_state);

@@ -2,7 +2,7 @@ use crate::ir::*;
 use crate::optimizer::{PassOptions, ProgramPass};
 
 mod block_opt;
-mod commit_ops;
+pub(crate) mod commit_ops;
 pub mod cost_model;
 mod dead_working_stores;
 mod pass_bit_extract_peephole;
