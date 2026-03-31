@@ -865,47 +865,14 @@ fn sink_loads(func: &mut MFunction) {
         // Process from the end to avoid invalidating indices.
         let mut sinks: Vec<(usize, usize)> = Vec::new(); // (from, to)
 
-        // Find positions of all Store/StoreIndexed instructions (memory barriers)
-        let store_positions: Vec<usize> = block.insts.iter().enumerate()
-            .filter_map(|(i, inst)| {
-                if matches!(inst, MInst::Store { .. } | MInst::StoreIndexed { .. }) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         for (i, inst) in block.insts.iter().enumerate() {
             // Only sink LoadImm (always safe — no memory dependency)
-            // Load from SimState is only safe if no Store intervenes
-            let (is_load_imm, is_sim_load) = match inst {
-                MInst::LoadImm { .. } => (true, false),
-                // SimState Load sinking disabled: it hurts I-cache locality
-                // in large combinational blocks where loads cluster at the top.
-                // MInst::Load { base: BaseReg::SimState, .. } => (false, true),
-                _ => continue,
-            };
-
-            let def = match inst.def() {
-                Some(d) => d,
-                None => continue,
-            };
+            if !matches!(inst, MInst::LoadImm { .. }) { continue; }
+            let Some(def) = inst.def() else { continue };
 
             if let Some(&use_pos) = first_use.get(&def) {
                 if use_pos > i + 4 {
-                    if is_load_imm {
-                        // LoadImm is always safe to sink
-                        sinks.push((i, use_pos));
-                    } else if is_sim_load {
-                        // SimState Load: only sink if no Store at all after
-                        // this load's position (conservative but safe)
-                        let has_store_after = store_positions.iter()
-                            .any(|&sp| sp > i);
-                        if !has_store_after {
-                            sinks.push((i, use_pos));
-                        }
-                    }
+                    sinks.push((i, use_pos));
                 }
             }
         }

@@ -1072,12 +1072,7 @@ pub fn emit_chained_eus(
 ) -> Result<Vec<u8>, IcedError> {
     use super::{isel, regalloc};
 
-    // Per-EU: ISel + optimize + regalloc + naked emit (shared frame)
-    // Then assemble with shared prologue/epilogue.
-    let mut eu_results: Vec<EmitResult> = Vec::new();
-
-    // First pass: compile all EUs to get max frame and callee-saved union
-    // Step 1: ISel + per-EU optimization
+    // Step 1: ISel + per-EU optimization (before merge to avoid cross-EU deps)
     let mut eu_funcs: Vec<super::mir::MFunction> = units.iter()
         .map(|eu| {
             let mut mfunc = isel::lower_execution_unit(eu, layout, four_state);
@@ -1093,28 +1088,28 @@ pub fn emit_chained_eus(
         return Ok(result.code);
     }
 
-    // Step 2: Merge EUs into one MFunction
+    // Step 2: Merge all EUs into one MFunction (Return → Jump to next EU)
     let mut merged = merge_mfunctions(&mut eu_funcs);
 
-    // Step 3: Unified regalloc (EU boundaries marked → regfile resets there)
+    // Step 3: Unified regalloc (eu_boundaries → regfile resets, no coupling code)
     let ra = regalloc::run_regalloc(&mut merged);
 
-    let shared_callee_saved = used_callee_saved(&ra.assignment);
-    let callee_push_size = (shared_callee_saved.len() as u32) * 8;
-    let total_push = callee_push_size + 8;
+    // Step 4: Compute frame layout
+    let callee_saved = used_callee_saved(&ra.assignment);
+    let callee_push_size = (callee_saved.len() as u32) * 8;
+    let total_push = callee_push_size + 8; // +8 for R15
     let frame_size = {
         let misalign = (total_push + ra.spill_frame_size) % 16;
         if misalign == 0 { ra.spill_frame_size } else { ra.spill_frame_size + (16 - misalign) }
     };
 
-    // Single naked emit of the merged function
-    let naked_result = emit_naked(&merged, &ra.assignment, frame_size)?;
-    eu_results.push(naked_result);
+    // Step 5: Emit merged body (naked — no prologue/epilogue)
+    let body = emit_naked(&merged, &ra.assignment, frame_size)?;
 
-    // Build shared prologue/epilogue
+    // Step 6: Build shared prologue + epilogue
     let prologue = {
         let mut asm = CodeAssembler::new(64)?;
-        for &reg in &shared_callee_saved { asm.push(preg_to_reg64(reg))?; }
+        for &reg in &callee_saved { asm.push(preg_to_reg64(reg))?; }
         asm.push(SIM_BASE)?;
         if frame_size > 0 { asm.sub(rsp, frame_size as i32)?; }
         asm.mov(SIM_BASE, rdi)?;
@@ -1124,25 +1119,20 @@ pub fn emit_chained_eus(
         let mut asm = CodeAssembler::new(64)?;
         if frame_size > 0 { asm.add(rsp, frame_size as i32)?; }
         asm.pop(SIM_BASE)?;
-        for &reg in shared_callee_saved.iter().rev() { asm.pop(preg_to_reg64(reg))?; }
+        for &reg in callee_saved.iter().rev() { asm.pop(preg_to_reg64(reg))?; }
         asm.ret()?;
         asm.assemble(0x0)?
     };
 
-    // Assemble: [prologue] [EU0] [EU1] ... [EUn] [epilogue]
-    // Assemble: [prologue] [merged body] [epilogue]
+    // Step 7: Assemble [prologue][body][epilogue] and patch return jmps
     let mut combined: Vec<u8> = Vec::new();
     combined.extend_from_slice(&prologue);
-
     let body_offset = combined.len();
-    let naked_result = &eu_results[0];
-    combined.extend_from_slice(&naked_result.code);
-
+    combined.extend_from_slice(&body.code);
     let epilogue_offset = combined.len();
     combined.extend_from_slice(&epilogue);
 
-    // Patch all return jmps → epilogue
-    for &(patch_off, _is_error) in &naked_result.return_patches {
+    for &(patch_off, _) in &body.return_patches {
         let abs = body_offset + patch_off;
         let rel = (epilogue_offset as i64) - (abs as i64 + 5);
         combined[abs + 1..abs + 5].copy_from_slice(&(rel as i32).to_le_bytes());
