@@ -34,6 +34,7 @@ pub fn optimize(func: &mut MFunction) {
         fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
         lower_to_imm_forms(func);
+        dead_code_eliminate(func); // clean up dead LoadImm from imm lowering
     }
     if_convert(func);
     simplify_cfg(func);
