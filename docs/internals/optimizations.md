@@ -1,6 +1,6 @@
 # Simulator Optimization Algorithms
 
-Celox applies optimizations across multiple layers from compile time to runtime to accelerate simulation. All SIRT optimization passes can be individually enabled/disabled via `OptimizeOptions`, and the Cranelift backend optimization level is configurable via `CraneliftOptLevel`.
+Celox applies optimizations across multiple layers from compile time to runtime to accelerate simulation. SIR optimization passes can be individually enabled/disabled via `OptimizeOptions`. The native x86-64 backend applies additional MIR-level optimizations automatically. The Cranelift backend optimization level is separately configurable via `CraneliftOptLevel`.
 
 ## 1. Logic Layer (SLT) Optimizations
 
@@ -33,7 +33,10 @@ Detects and removes writes to the Working region that are never referenced.
 ### 2.5 Instruction Scheduling
 Reorders instructions while preserving inter-instruction dependencies (RAW/WAR/WAW), taking into account processor execution ports and memory latency.
 
-### 2.6 Tail-Call Splitting
+### 2.6 Scheduler-level Store Coalescing
+During scheduling, consecutive DAG nodes targeting the same variable at the same topological layer are reordered to be adjacent. When contiguous bit ranges of the same variable are detected, they are merged into a single `Concat` + `Store` at the SIR level, reducing the number of memory writes. Controlled by the `coalesce_stores` option.
+
+### 2.7 Tail-Call Splitting
 Cranelift uses a 24-bit instruction index internally, limiting a single function to approximately 16M CLIF instructions. Large combinational designs (e.g., wide-bus arithmetic, many coalesced execution units) can exceed this limit.
 
 When the estimated CLIF instruction count for `eval_comb` exceeds the threshold (currently 8M, a 50% safety margin), the optimizer splits it into a chain of smaller functions connected by Cranelift's `return_call` (tail-call) instruction, which avoids stack growth.
@@ -48,7 +51,7 @@ This pass runs even when all SIRT passes are disabled (`OptimizeOptions::none()`
 
 ## Per-Pass Control
 
-Each SIRT optimization pass (sections 2.1–2.5) can be individually enabled or disabled via `OptimizeOptions`. The mapping from `OptimizeOptions` fields to passes:
+Each SIR optimization pass (sections 2.1–2.6) can be individually enabled or disabled via `OptimizeOptions`. The mapping from `OptimizeOptions` fields to passes:
 
 | `OptimizeOptions` field | Pass(es) |
 |---|---|
@@ -61,6 +64,39 @@ Each SIRT optimization pass (sections 2.1–2.5) can be individually enabled or 
 | `inline_commit_forwarding` | Inline Forwarding (2.3) |
 | `eliminate_dead_working_stores` | Dead Store Elimination (2.4) |
 | `reschedule` | Instruction Scheduling (2.5) |
+| `coalesce_stores` | Scheduler-level Store Coalescing (2.6) |
+
+## 3. Machine Layer (MIR) Optimizations — Native Backend
+
+These optimizations are applied in the native x86-64 backend between instruction selection (ISel) and register allocation. They operate on MIR, a word-level SSA IR with virtual registers.
+
+### Adaptive Pipeline
+
+The MIR optimizer adapts its aggressiveness based on register pressure:
+
+-   **High-pressure (VRegs > 40)**: Full pipeline with 2× iterative passes for maximum optimization.
+-   **Low-pressure (VRegs ≤ 40)**: Lightweight single-pass pipeline.
+
+### MIR Optimization Passes
+
+| Pass | Description |
+|---|---|
+| Constant folding | Evaluate operations with constant operands at compile time |
+| Constant deduplication | Merge duplicate `LoadImm` instructions |
+| Copy propagation | Replace uses of `Mov` destinations with their sources |
+| Algebraic simplification | Simplify patterns like `x & 0` → `0`, `x | 0` → `x`, `x ^ 0` → `x` |
+| Redundant mask elimination | Remove `AndImm` masks that are provably no-ops |
+| Global value numbering (GVN) | Deduplicate instructions with identical operands |
+| Dead code elimination (DCE) | Remove instructions whose results are unused |
+| Lower to immediate forms | Convert `op reg, LoadImm(c)` → `opImm reg, c` |
+| LoadImm sinking | Move constant loads closer to their uses to reduce register pressure |
+| Live range splitting | Split long-lived values to improve register allocation |
+| XOR chain to PEXT fusion | Fold XOR reduction chains into BMI2 `PEXT` instructions |
+| If-conversion | Convert diamond Branch patterns into `Select` (cmov) for small arms |
+| CFG simplification | Thread jumps through empty blocks, eliminate redundant branches |
+| Value width computation | Track actual bit widths for narrowing optimizations in the emitter |
+
+## 4. Cranelift Backend Options
 
 The Cranelift backend optimization level is separately configurable via `CraneliftOptLevel`:
 
@@ -87,12 +123,12 @@ Simulator::builder(code, "Top")
 
 This sets `opt_level = None`, `regalloc_algorithm = SinglePass`, disables alias analysis and the verifier.
 
-## 3. Execution Layer (Behavioral) Optimizations
+## 5. Execution Layer (Behavioral) Optimizations
 
 These are dynamic optimizations applied in the simulator's execution loop.
 
-### 3.1 Silent Edge Skipping
+### 5.1 Silent Edge Skipping
 When events such as clock signals occur but the signal value has not changed, or the trigger condition (rising/falling edge) is not met, evaluation of dependent flip-flops and re-evaluation of associated combinational logic are skipped.
 
-### 3.2 Multi-Phase Evaluation (Separation of Evaluation and Update)
+### 5.2 Multi-Phase Evaluation (Separation of Evaluation and Update)
 When multiple events are triggered simultaneously, all evaluations are performed based on the current values in the Stable region, followed by a bulk update. This guarantees consistent simulation results independent of the order in which events occur.

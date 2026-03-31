@@ -287,8 +287,24 @@ and `Slice` nodes are inserted as needed.
 1. **Build spatial index**: Map which bit range of each variable is driven by which `LogicPath`
 2. **Detect multiple drivers**: Report an error if multiple paths drive the same bit range
 3. **Build dependency graph**: Inspect whether each path's sources overlap with another path's targets, and add edges accordingly
-4. **Kahn's algorithm**: Execute topological sort. Report a `CombinationalLoop` error if a cycle is found
-5. **SIR generation**: Convert each `LogicPath`'s `expr(NodeId)` to SIR using `SLTToSIRLowerer` in sorted order
+4. **SCC extraction (Tarjan)**: Detect strongly connected components. SCCs with more than one node (or a self-loop) represent combinational cycles
+5. **Layer computation + DAG reordering**: Compute topological layers and reorder consecutive DAG SCCs by `(layer, target_id)` so that paths targeting the same variable at the same layer become adjacent, enabling store coalescing
+6. **SIR generation**: Process each SCC with one of two strategies:
+   - **Strategy A (Static Unrolling)**: For small DAG parts or loops with predictable convergence bounds (total ops ≤ 32). The SCC is unrolled a fixed number of times based on structural dependency depth.
+   - **Strategy B (Dynamic Convergence)**: For complex SCCs or user-annotated True Loops. Emits a runtime convergence loop with a dirty flag and safety limit. Each iteration checks whether values have changed; if all signals stabilize, the loop exits early. If the safety limit is exceeded, a `DetectedTrueLoop` runtime error is raised.
+
+### Store Coalescing in Scheduling
+
+When multiple DAG nodes at the same topological layer target consecutive bit ranges of the same variable, `flush_pending_coalesce` merges them into a single `Concat` + `Store`. Requirements: contiguous bit ranges, within the variable's declared width, and no self-references. This optimization is skipped in 4-state mode.
+
+### Cycle Handling
+
+Cycles in the dependency graph can be:
+- **Ignored loops**: Edges explicitly marked as non-problematic by the user (false loops)
+- **True loops**: Edges annotated with a user-specified safety limit for dynamic convergence
+- **Unauthorized cycles**: Reported as `CombinationalLoop` errors
+
+The FAS (Feedback Arc Set) sort algorithm (`greedy_fas_sort`) determines the optimal evaluation order within an SCC by maximizing forward edges and minimizing back-edges.
 
 ### Errors
 
