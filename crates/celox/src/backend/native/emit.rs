@@ -312,8 +312,18 @@ fn emit_inner(
     // In naked mode, reorder blocks so that Return-ending blocks come last.
     // This enables fall-through to the next EU (no jmp needed).
     let block_order: Vec<usize> = (0..func.blocks.len()).collect();
-    for &bi in &block_order {
+    let mut fell_through = false; // track if previous block fell through (needs label spacing)
+    for (order_idx, &bi) in block_order.iter().enumerate() {
         let block = &func.blocks[bi];
+        let next_block_id = block_order.get(order_idx + 1)
+            .map(|&next_bi| func.blocks[next_bi].id);
+
+        if fell_through {
+            // Previous block fell through — this label follows directly.
+            // No nop needed because the fall-through IS the label position.
+            fell_through = false;
+        }
+
         let label = block_labels.get_mut(&block.id).unwrap();
         asm.set_label(label)?;
 
@@ -349,8 +359,13 @@ fn emit_inner(
                 }
                 MInst::Jump { target } => {
                     emit_phi_moves_for_target(&mut asm, block.id, *target, func, assignment)?;
-                    let label = block_labels.get_mut(target).unwrap();
-                    asm.jmp(*label)?;
+                    if next_block_id == Some(*target) {
+                        // Fall-through (nop for label spacing if block is otherwise empty)
+                        asm.nop()?;
+                    } else {
+                        let label = block_labels.get_mut(target).unwrap();
+                        asm.jmp(*label)?;
+                    }
                 }
                 MInst::Branch { cond, true_bb, false_bb } => {
                     let c = preg_to_reg64(resolve(assignment, *cond));
