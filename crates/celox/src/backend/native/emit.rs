@@ -327,6 +327,26 @@ fn emit_inner(
         let label = block_labels.get_mut(&block.id).unwrap();
         asm.set_label(label)?;
 
+        // Pre-scan: detect Cmp+Branch fusion opportunity.
+        // If the instruction immediately before Branch is Cmp/CmpImm,
+        // and the cmp result is only used by the Branch, we can fuse
+        // into cmp + jcc (skipping setcc + movzx + test).
+        let fused_cmp: Option<VReg> = if block.insts.len() >= 2 {
+            if let Some(MInst::Branch { cond, true_bb, false_bb }) = block.terminator() {
+                let pre = &block.insts[block.insts.len() - 2];
+                let is_cmp = pre.def() == Some(*cond)
+                    && matches!(pre, MInst::Cmp { .. } | MInst::CmpImm { .. });
+                let no_phi_targets = !func.blocks.iter().any(|b| {
+                    (b.id == *true_bb || b.id == *false_bb) && !b.phis.is_empty()
+                });
+                if is_cmp && no_phi_targets {
+                    let used_elsewhere = block.insts[..block.insts.len() - 2]
+                        .iter().any(|i| i.uses().contains(cond));
+                    if !used_elsewhere { Some(*cond) } else { None }
+                } else { None }
+            } else { None }
+        } else { None };
+
         for inst in block.insts.iter() {
             match inst {
                 MInst::Return => {
@@ -368,6 +388,32 @@ fn emit_inner(
                     }
                 }
                 MInst::Branch { cond, true_bb, false_bb } => {
+                    if fused_cmp == Some(*cond) {
+                        // Fused Cmp+Branch: emit cmp + jcc directly
+                        let cmp_inst = &block.insts[block.insts.len() - 2];
+                        let kind = match cmp_inst {
+                            MInst::Cmp { lhs, rhs, kind, .. } => {
+                                let l = preg_to_reg64(resolve(assignment, *lhs));
+                                let r = preg_to_reg64(resolve(assignment, *rhs));
+                                asm.cmp(l, r)?;
+                                *kind
+                            }
+                            MInst::CmpImm { lhs, imm, kind, .. } => {
+                                let l = preg_to_reg64(resolve(assignment, *lhs));
+                                if *imm == 0 && matches!(kind, CmpKind::Eq | CmpKind::Ne) {
+                                    asm.test(l, l)?;
+                                } else {
+                                    asm.cmp(l, *imm)?;
+                                }
+                                *kind
+                            }
+                            _ => unreachable!(),
+                        };
+                        let true_label = block_labels.get_mut(true_bb).unwrap();
+                        emit_jcc(&mut asm, *true_label, kind)?;
+                        let false_label = block_labels.get_mut(false_bb).unwrap();
+                        asm.jmp(*false_label)?;
+                    } else {
                     let c = preg_to_reg64(resolve(assignment, *cond));
                     asm.test(c, c)?;
                     let true_has_phis = func.blocks.iter()
@@ -393,6 +439,7 @@ fn emit_inner(
                         let true_label = block_labels.get_mut(true_bb).unwrap();
                         asm.jmp(*true_label)?;
                     }
+                    } // end else (non-fused branch)
                 }
                 MInst::UDiv { dst, lhs, rhs } => {
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Div)?;
@@ -401,6 +448,12 @@ fn emit_inner(
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Rem)?;
                 }
                 _ => {
+                    // Skip Cmp/CmpImm if it's fused with the following Branch
+                    if let Some(fc) = fused_cmp {
+                        if inst.def() == Some(fc) {
+                            continue;
+                        }
+                    }
                     emit_inst(&mut asm, inst, assignment, func)?;
                 }
             }
@@ -792,6 +845,21 @@ fn emit_inst(
 }
 
 /// Emit setcc instruction for a comparison kind.
+fn emit_jcc(asm: &mut CodeAssembler, label: CodeLabel, kind: CmpKind) -> Result<(), IcedError> {
+    match kind {
+        CmpKind::Eq => asm.je(label),
+        CmpKind::Ne => asm.jne(label),
+        CmpKind::LtU => asm.jb(label),
+        CmpKind::LtS => asm.jl(label),
+        CmpKind::LeU => asm.jbe(label),
+        CmpKind::LeS => asm.jle(label),
+        CmpKind::GtU => asm.ja(label),
+        CmpKind::GtS => asm.jg(label),
+        CmpKind::GeU => asm.jae(label),
+        CmpKind::GeS => asm.jge(label),
+    }
+}
+
 fn emit_setcc(asm: &mut CodeAssembler, d8: AsmRegister8, kind: CmpKind) -> Result<(), IcedError> {
     match kind {
         CmpKind::Eq => asm.sete(d8),
