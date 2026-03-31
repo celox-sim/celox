@@ -645,18 +645,23 @@ fn lower_instruction(
                         // Word-aligned, native size: single load.
                         // If the load is wider than the variable (SIR optimizer widening),
                         // mask the result to the variable's actual width.
-                        // Store-side correctness: we guarantee that stored values
-                        // have upper bits cleared. So Loads don't need AND masks.
                         let var_width = ctx.layout.widths.get(&addr.absolute_addr()).copied().unwrap_or(*width_bits);
-                        block.push(MInst::Load {
-                            dst: vreg,
-                            base: BaseReg::SimState,
-                            offset: byte_off,
-                            size: op_size,
-                        });
-                        // Record the actual signal width for downstream optimization
-                        if var_width < *width_bits {
-                            ctx.known_bits.insert(vreg, var_width);
+                        if var_width < *width_bits && var_width < 64 {
+                            let raw = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Load {
+                                dst: raw,
+                                base: BaseReg::SimState,
+                                offset: byte_off,
+                                size: op_size,
+                            });
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(var_width));
+                        } else {
+                            block.push(MInst::Load {
+                                dst: vreg,
+                                base: BaseReg::SimState,
+                                offset: byte_off,
+                                size: op_size,
+                            });
                         }
                     } else {
                         // Unaligned or non-native width: load containing word + shift + mask
@@ -899,21 +904,11 @@ fn lower_instruction(
                         let intra_byte = bit_off % 8;
 
                         if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
-                            // Word-aligned, native size: store with width masking.
-                            // Ensure upper bits are clean so subsequent Loads don't
-                            // need AND masks (store-side correctness guarantee).
-                            let var_width = ctx.layout.widths.get(&addr.absolute_addr()).copied().unwrap_or(*width_bits);
-                            let effective_src = if var_width < *width_bits {
-                                let masked = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_and_imm(block, masked, src_vreg, mask_for_width(var_width));
-                                masked
-                            } else {
-                                src_vreg
-                            };
+                            // Word-aligned, native size: direct store
                             block.push(MInst::Store {
                                 base: BaseReg::SimState,
                                 offset: byte_off,
-                                src: effective_src,
+                                src: src_vreg,
                                 size: OpSize::from_bits(*width_bits).unwrap(),
                             });
                         } else {
