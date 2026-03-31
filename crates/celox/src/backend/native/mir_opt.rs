@@ -31,6 +31,7 @@ pub fn optimize(func: &mut MFunction) {
         fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
     }
+    if_convert(func);
     simplify_cfg(func);
     compute_value_widths(func);
 }
@@ -839,6 +840,162 @@ fn try_simplify_mul(dst: VReg, lhs: VReg, rhs: VReg, consts: &HashMap<VReg, u64>
         }
     }
     None
+}
+
+// ────────────────────────────────────────────────────────────────
+// If-conversion (branch → select)
+// ────────────────────────────────────────────────────────────────
+
+/// Convert simple diamond-shaped branches into Select (cmov) instructions.
+///
+/// Pattern:
+///   bb_head: ... branch cond, bb_true, bb_false
+///   bb_true: <1-2 instructions, no side effects except store> jump bb_merge
+///   bb_false: <1-2 instructions, no side effects except store> jump bb_merge
+///   bb_merge: ...
+///
+/// Converted to:
+///   bb_head: ... <true_insts> <false_insts> select cond, true_val, false_val; store; jump bb_merge
+fn if_convert(func: &mut MFunction) {
+    let block_map: HashMap<BlockId, usize> = func.blocks.iter()
+        .enumerate().map(|(i, b)| (b.id, i)).collect();
+
+    // Collect conversion candidates
+    struct Diamond {
+        head_idx: usize,
+        true_idx: usize,
+        false_idx: usize,
+        merge_id: BlockId,
+    }
+    let mut diamonds: Vec<Diamond> = Vec::new();
+
+    for (i, block) in func.blocks.iter().enumerate() {
+        let Some(MInst::Branch { cond: _, true_bb, false_bb }) = block.terminator() else { continue };
+        let Some(&ti) = block_map.get(true_bb) else { continue };
+        let Some(&fi) = block_map.get(false_bb) else { continue };
+
+        let true_block = &func.blocks[ti];
+        let false_block = &func.blocks[fi];
+
+        // Both arms must be small (≤ 3 instructions including terminator)
+        if true_block.insts.len() > 3 || false_block.insts.len() > 3 { continue; }
+        // No phi nodes in arms
+        if !true_block.phis.is_empty() || !false_block.phis.is_empty() { continue; }
+
+        // Both must end with Jump to the same merge block
+        let true_target = match true_block.terminator() {
+            Some(MInst::Jump { target }) => *target,
+            _ => continue,
+        };
+        let false_target = match false_block.terminator() {
+            Some(MInst::Jump { target }) => *target,
+            _ => continue,
+        };
+        if true_target != false_target { continue; }
+
+        // Arms must only contain stores and pure computations (no loads, no branches)
+        let arms_ok = |block: &MBlock| -> bool {
+            block.insts.iter().all(|inst| matches!(inst,
+                MInst::Store { .. } | MInst::StoreIndexed { .. }
+                | MInst::Load { .. } | MInst::LoadImm { .. } | MInst::Mov { .. }
+                | MInst::Add { .. } | MInst::Sub { .. } | MInst::Mul { .. }
+                | MInst::And { .. } | MInst::Or { .. } | MInst::Xor { .. }
+                | MInst::AndImm { .. } | MInst::OrImm { .. }
+                | MInst::ShrImm { .. } | MInst::ShlImm { .. }
+                | MInst::AddImm { .. } | MInst::SubImm { .. }
+                | MInst::Select { .. }
+                | MInst::Jump { .. }
+            ))
+        };
+        if !arms_ok(true_block) || !arms_ok(false_block) { continue; }
+
+        diamonds.push(Diamond {
+            head_idx: i,
+            true_idx: ti,
+            false_idx: fi,
+            merge_id: true_target,
+        });
+    }
+
+    // Apply conversions (in reverse order to preserve indices)
+    for diamond in diamonds.into_iter().rev() {
+        let cond = match func.blocks[diamond.head_idx].terminator() {
+            Some(MInst::Branch { cond, .. }) => *cond,
+            _ => continue,
+        };
+
+        // Collect non-terminator instructions from both arms
+        let true_insts: Vec<MInst> = func.blocks[diamond.true_idx].insts.iter()
+            .filter(|i| !i.is_terminator()).cloned().collect();
+        let false_insts: Vec<MInst> = func.blocks[diamond.false_idx].insts.iter()
+            .filter(|i| !i.is_terminator()).cloned().collect();
+
+        // Find matching stores: both arms store to the same address
+        // Replace with: compute both values, select, store once
+        let mut merged_insts: Vec<MInst> = Vec::new();
+        let mut handled_stores: Vec<(i32, OpSize)> = Vec::new();
+
+        // Check for paired stores (same base+offset in both arms)
+        for t_inst in &true_insts {
+            if let MInst::Store { base: t_base, offset: t_off, src: t_src, size: t_size } = t_inst {
+                for f_inst in &false_insts {
+                    if let MInst::Store { base: f_base, offset: f_off, src: f_src, size: f_size } = f_inst {
+                        if t_base == f_base && t_off == f_off && t_size == f_size {
+                            // Found matching store! Generate select + store
+                            // First, add any computation instructions from both arms
+                            // (LoadImm, Add, etc. that produce the store values)
+                            for ti2 in &true_insts {
+                                if !matches!(ti2, MInst::Store { .. }) {
+                                    merged_insts.push(ti2.clone());
+                                }
+                            }
+                            for fi2 in &false_insts {
+                                if !matches!(fi2, MInst::Store { .. }) {
+                                    merged_insts.push(fi2.clone());
+                                }
+                            }
+
+                            let sel_dst = func.vregs.alloc();
+                            while func.spill_descs.len() <= sel_dst.0 as usize {
+                                func.spill_descs.push(SpillDesc::transient());
+                            }
+                            merged_insts.push(MInst::Select {
+                                dst: sel_dst,
+                                cond,
+                                true_val: *t_src,
+                                false_val: *f_src,
+                            });
+                            merged_insts.push(MInst::Store {
+                                base: *t_base,
+                                offset: *t_off,
+                                src: sel_dst,
+                                size: *t_size,
+                            });
+                            handled_stores.push((*t_off, *t_size));
+                        }
+                    }
+                }
+            }
+        }
+
+        if handled_stores.is_empty() { continue; }
+
+        // Add remaining unhandled stores from both arms (shouldn't happen for simple cases)
+        // Remove the branch from head block, add merged instructions + jump to merge
+        let head = &mut func.blocks[diamond.head_idx];
+        // Remove terminator (Branch)
+        head.insts.pop();
+        // Add merged instructions
+        head.insts.extend(merged_insts);
+        // Jump to merge block
+        head.insts.push(MInst::Jump { target: diamond.merge_id });
+
+        // Mark true/false blocks as empty (will be cleaned up by simplify_cfg)
+        func.blocks[diamond.true_idx].insts.clear();
+        func.blocks[diamond.true_idx].insts.push(MInst::Jump { target: diamond.merge_id });
+        func.blocks[diamond.false_idx].insts.clear();
+        func.blocks[diamond.false_idx].insts.push(MInst::Jump { target: diamond.merge_id });
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
