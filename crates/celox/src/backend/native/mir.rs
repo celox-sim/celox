@@ -21,31 +21,73 @@ pub struct Uses {
 }
 
 impl Uses {
-    #[inline] pub fn none() -> Self { Self { buf: [VReg(0); 3], len: 0 } }
-    #[inline] pub fn one(a: VReg) -> Self { Self { buf: [a, VReg(0), VReg(0)], len: 1 } }
-    #[inline] pub fn two(a: VReg, b: VReg) -> Self { Self { buf: [a, b, VReg(0)], len: 2 } }
-    #[inline] pub fn three(a: VReg, b: VReg, c: VReg) -> Self { Self { buf: [a, b, c], len: 3 } }
-    #[inline] pub fn len(&self) -> usize { self.len as usize }
-    #[inline] pub fn is_empty(&self) -> bool { self.len == 0 }
-    #[inline] pub fn contains(&self, v: &VReg) -> bool { self.iter().any(|u| u == v) }
-    #[inline] pub fn iter(&self) -> impl Iterator<Item = &VReg> { self.buf[..self.len as usize].iter() }
+    #[inline]
+    pub fn none() -> Self {
+        Self {
+            buf: [VReg(0); 3],
+            len: 0,
+        }
+    }
+    #[inline]
+    pub fn one(a: VReg) -> Self {
+        Self {
+            buf: [a, VReg(0), VReg(0)],
+            len: 1,
+        }
+    }
+    #[inline]
+    pub fn two(a: VReg, b: VReg) -> Self {
+        Self {
+            buf: [a, b, VReg(0)],
+            len: 2,
+        }
+    }
+    #[inline]
+    pub fn three(a: VReg, b: VReg, c: VReg) -> Self {
+        Self {
+            buf: [a, b, c],
+            len: 3,
+        }
+    }
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    #[inline]
+    pub fn contains(&self, v: &VReg) -> bool {
+        self.iter().any(|u| u == v)
+    }
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &VReg> {
+        self.buf[..self.len as usize].iter()
+    }
 }
 
 impl std::ops::Deref for Uses {
     type Target = [VReg];
-    fn deref(&self) -> &[VReg] { &self.buf[..self.len as usize] }
+    fn deref(&self) -> &[VReg] {
+        &self.buf[..self.len as usize]
+    }
 }
 
 impl<'a> IntoIterator for &'a Uses {
     type Item = &'a VReg;
     type IntoIter = std::slice::Iter<'a, VReg>;
-    fn into_iter(self) -> Self::IntoIter { self.buf[..self.len as usize].iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.buf[..self.len as usize].iter()
+    }
 }
 
 impl IntoIterator for Uses {
     type Item = VReg;
     type IntoIter = std::iter::Take<std::array::IntoIter<VReg, 3>>;
-    fn into_iter(self) -> Self::IntoIter { self.buf.into_iter().take(self.len as usize) }
+    fn into_iter(self) -> Self::IntoIter {
+        self.buf.into_iter().take(self.len as usize)
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -444,10 +486,16 @@ impl fmt::Display for MInst {
             MInst::AddImm { dst, src, imm } => write!(f, "{dst} = add {src}, {imm}"),
             MInst::SubImm { dst, src, imm } => write!(f, "{dst} = sub {src}, {imm}"),
             MInst::Cmp {
-                dst, lhs, rhs, kind,
+                dst,
+                lhs,
+                rhs,
+                kind,
             } => write!(f, "{dst} = cmp.{kind:?} {lhs}, {rhs}"),
             MInst::CmpImm {
-                dst, lhs, imm, kind,
+                dst,
+                lhs,
+                imm,
+                kind,
             } => write!(f, "{dst} = cmp.{kind:?} {lhs}, {imm}"),
             MInst::BitNot { dst, src } => write!(f, "{dst} = not {src}"),
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
@@ -496,7 +544,11 @@ impl fmt::Display for MFunction {
         for block in &self.blocks {
             writeln!(f, "{}:", block.id)?;
             for phi in &block.phis {
-                let srcs: Vec<String> = phi.sources.iter().map(|(bid, v)| format!("{bid}: {v}")).collect();
+                let srcs: Vec<String> = phi
+                    .sources
+                    .iter()
+                    .map(|(bid, v)| format!("{bid}: {v}"))
+                    .collect();
                 writeln!(f, "  {} = phi({})", phi.dst, srcs.join(", "))?;
             }
             for inst in &block.insts {
@@ -585,7 +637,12 @@ impl MInst {
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. } => Uses::one(*src),
             MInst::CmpImm { lhs, .. } => Uses::one(*lhs),
-            MInst::Select { cond, true_val, false_val, .. } => Uses::three(*cond, *true_val, *false_val),
+            MInst::Select {
+                cond,
+                true_val,
+                false_val,
+                ..
+            } => Uses::three(*cond, *true_val, *false_val),
             MInst::Branch { cond, .. } => Uses::one(*cond),
             MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => Uses::none(),
         }
@@ -595,17 +652,27 @@ impl MInst {
     pub fn rewrite_use(&mut self, old: VReg, new: VReg) {
         match self {
             MInst::Mov { src, .. } => {
-                if *src == old { *src = new; }
+                if *src == old {
+                    *src = new;
+                }
             }
             MInst::Store { src, .. } => {
-                if *src == old { *src = new; }
+                if *src == old {
+                    *src = new;
+                }
             }
             MInst::LoadIndexed { index, .. } => {
-                if *index == old { *index = new; }
+                if *index == old {
+                    *index = new;
+                }
             }
             MInst::StoreIndexed { index, src, .. } => {
-                if *index == old { *index = new; }
-                if *src == old { *src = new; }
+                if *index == old {
+                    *index = new;
+                }
+                if *src == old {
+                    *src = new;
+                }
             }
             MInst::Add { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
@@ -620,8 +687,12 @@ impl MInst {
             | MInst::Cmp { lhs, rhs, .. }
             | MInst::UDiv { lhs, rhs, .. }
             | MInst::URem { lhs, rhs, .. } => {
-                if *lhs == old { *lhs = new; }
-                if *rhs == old { *rhs = new; }
+                if *lhs == old {
+                    *lhs = new;
+                }
+                if *rhs == old {
+                    *rhs = new;
+                }
             }
             MInst::AndImm { src, .. }
             | MInst::OrImm { src, .. }
@@ -633,22 +704,43 @@ impl MInst {
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. } => {
-                if *src == old { *src = new; }
+                if *src == old {
+                    *src = new;
+                }
             }
             MInst::CmpImm { lhs, .. } => {
-                if *lhs == old { *lhs = new; }
+                if *lhs == old {
+                    *lhs = new;
+                }
             }
             MInst::Pext { src, mask, .. } => {
-                if *src == old { *src = new; }
-                if *mask == old { *mask = new; }
+                if *src == old {
+                    *src = new;
+                }
+                if *mask == old {
+                    *mask = new;
+                }
             }
-            MInst::Select { cond, true_val, false_val, .. } => {
-                if *cond == old { *cond = new; }
-                if *true_val == old { *true_val = new; }
-                if *false_val == old { *false_val = new; }
+            MInst::Select {
+                cond,
+                true_val,
+                false_val,
+                ..
+            } => {
+                if *cond == old {
+                    *cond = new;
+                }
+                if *true_val == old {
+                    *true_val = new;
+                }
+                if *false_val == old {
+                    *false_val = new;
+                }
             }
             MInst::Branch { cond, .. } => {
-                if *cond == old { *cond = new; }
+                if *cond == old {
+                    *cond = new;
+                }
             }
             MInst::LoadImm { .. }
             | MInst::Load { .. }

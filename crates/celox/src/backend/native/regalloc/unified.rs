@@ -11,13 +11,13 @@ use crate::backend::native::mir::*;
 
 use super::analysis::{self, AnalysisResult};
 use super::assignment::{
-    clobbers, is_reg_shift, use_constraints, AssignmentMap, PhysReg, PhysRegSet, RegConstraint,
-    ALLOCATABLE_REGS,
+    ALLOCATABLE_REGS, AssignmentMap, PhysReg, PhysRegSet, RegConstraint, clobbers, is_reg_shift,
+    use_constraints,
 };
 
 // Re-use spill slot allocator and spill/reload generation from spilling.rs
-use super::spilling::{SpillSlotAllocator, make_spill, make_reload};
 use super::NUM_REGS;
+use super::spilling::{SpillSlotAllocator, make_reload, make_spill};
 
 // ────────────────────────────────────────────────────────────────
 // RegFile: bidirectional PhysReg ↔ VReg map
@@ -110,10 +110,7 @@ impl RegFile {
 // Unified allocator
 // ────────────────────────────────────────────────────────────────
 
-pub fn unified_alloc(
-    func: &mut MFunction,
-    analysis: &AnalysisResult,
-) -> (AssignmentMap, u32) {
+pub fn unified_alloc(func: &mut MFunction, analysis: &AnalysisResult) -> (AssignmentMap, u32) {
     let num_blocks = func.blocks.len();
     let k = NUM_REGS;
     let mut result = AssignmentMap::default();
@@ -123,12 +120,19 @@ pub fn unified_alloc(
     let mut s_exit: Vec<HashSet<VReg>> = vec![HashSet::new(); num_blocks];
 
     for bi in 0..num_blocks {
-        let (entry_rf, entry_s) = compute_entry_regfile(
-            func, analysis, bi, k, &regfile_exit, &s_exit, &result,
-        );
+        let (entry_rf, entry_s) =
+            compute_entry_regfile(func, analysis, bi, k, &regfile_exit, &s_exit, &result);
 
         // Insert coupling code
-        insert_coupling_code(func, analysis, bi, &entry_rf, &regfile_exit, &mut slots, &mut result);
+        insert_coupling_code(
+            func,
+            analysis,
+            bi,
+            &entry_rf,
+            &regfile_exit,
+            &mut slots,
+            &mut result,
+        );
 
         // Record entry assignments
         for (vreg, preg) in &entry_rf.vreg_to_preg {
@@ -136,7 +140,14 @@ pub fn unified_alloc(
         }
 
         let (exit_rf, exit_s, new_insts) = process_block(
-            func, analysis, bi, entry_rf, entry_s, k, &mut slots, &mut result,
+            func,
+            analysis,
+            bi,
+            entry_rf,
+            entry_s,
+            k,
+            &mut slots,
+            &mut result,
         );
 
         func.blocks[bi].insts = new_insts;
@@ -173,7 +184,9 @@ fn compute_entry_regfile(
     let mut some: HashSet<VReg> = HashSet::new();
 
     for &pred_idx in preds {
-        if pred_idx >= block_idx { continue; } // skip back edges (assumes layout ≈ RPO)
+        if pred_idx >= block_idx {
+            continue;
+        } // skip back edges (assumes layout ≈ RPO)
         let pred_vregs: HashSet<VReg> = regfile_exit[pred_idx].vregs().collect();
         some = some.union(&pred_vregs).copied().collect();
         all = Some(match all {
@@ -191,12 +204,16 @@ fn compute_entry_regfile(
     // Only include VRegs that are actually live at this block's entry.
     // This prevents stale VRegs from predecessor exits (e.g. after EU merge)
     // from occupying registers unnecessarily.
-    let mut all_sorted: Vec<VReg> = all.iter().copied()
+    let mut all_sorted: Vec<VReg> = all
+        .iter()
+        .copied()
         .filter(|v| analysis.entry_distances[block_idx].contains_key(v))
         .collect();
     all_sorted.sort();
     for vreg in &all_sorted {
-        if rf.occupancy() >= k { break; }
+        if rf.occupancy() >= k {
+            break;
+        }
         if let Some(preg) = result.get(*vreg) {
             if !rf.preg_occupied(preg) {
                 rf.assign(*vreg, preg);
@@ -206,8 +223,12 @@ fn compute_entry_regfile(
 
     // Add phi defs
     for phi in &func.blocks[block_idx].phis {
-        if rf.occupancy() >= k { break; }
-        if rf.contains(phi.dst) { continue; }
+        if rf.occupancy() >= k {
+            break;
+        }
+        if rf.contains(phi.dst) {
+            continue;
+        }
         // Try to coalesce with a phi source's register
         let mut preferred: Option<PhysReg> = None;
         for (_pred_id, src_vreg) in &phi.sources {
@@ -226,15 +247,27 @@ fn compute_entry_regfile(
 
     // Fill remaining slots from `some` set by next-use distance
     if rf.occupancy() < k {
-        let mut candidates: Vec<VReg> = some.difference(&all).copied()
+        let mut candidates: Vec<VReg> = some
+            .difference(&all)
+            .copied()
             .filter(|v| !rf.contains(*v))
             .collect();
         candidates.sort_by_key(|v| {
-            (analysis.entry_distances[block_idx].get(v).copied().unwrap_or(u32::MAX), *v)
+            (
+                analysis.entry_distances[block_idx]
+                    .get(v)
+                    .copied()
+                    .unwrap_or(u32::MAX),
+                *v,
+            )
         });
         for vreg in candidates {
-            if rf.occupancy() >= k { break; }
-            if !analysis.entry_distances[block_idx].contains_key(&vreg) { continue; }
+            if rf.occupancy() >= k {
+                break;
+            }
+            if !analysis.entry_distances[block_idx].contains_key(&vreg) {
+                continue;
+            }
             if let Some(preg) = result.get(vreg) {
                 if !rf.preg_occupied(preg) {
                     rf.assign(vreg, preg);
@@ -265,14 +298,20 @@ fn insert_coupling_code(
     result: &mut AssignmentMap,
 ) {
     for &pred_idx in &analysis.predecessors[block_idx] {
-        if pred_idx >= block_idx { continue; }
+        if pred_idx >= block_idx {
+            continue;
+        }
 
         let pred_rf = &regfile_exit[pred_idx];
         let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
 
-        let mut need_reload: Vec<VReg> = entry_rf.vregs()
-            .filter(|v| !pred_rf.contains(*v) && !phi_dsts.contains(v)
-                && analysis.entry_distances[block_idx].contains_key(v))
+        let mut need_reload: Vec<VReg> = entry_rf
+            .vregs()
+            .filter(|v| {
+                !pred_rf.contains(*v)
+                    && !phi_dsts.contains(v)
+                    && analysis.entry_distances[block_idx].contains_key(v)
+            })
             .collect();
         need_reload.sort();
 
@@ -317,7 +356,10 @@ fn process_block(
     }
 
     // Pre-compute shift and clobber points for blocked set
-    let shift_points: Vec<usize> = block.insts.iter().enumerate()
+    let shift_points: Vec<usize> = block
+        .insts
+        .iter()
+        .enumerate()
         .filter_map(|(idx, inst)| if is_reg_shift(inst) { Some(idx) } else { None })
         .collect();
     let clobber_points = super::assignment::block_clobber_points_for(block);
@@ -330,7 +372,9 @@ fn process_block(
         }
     }
     for &vreg in analysis.exit_distances[block_idx].keys() {
-        last_use_in_block.entry(vreg).and_modify(|v| *v = (*v).max(block.insts.len()))
+        last_use_in_block
+            .entry(vreg)
+            .and_modify(|v| *v = (*v).max(block.insts.len()))
             .or_insert(block.insts.len());
     }
 
@@ -361,17 +405,43 @@ fn process_block(
                         if pinned.contains(&occupant) {
                             // Occupant is used by current instruction — keep it
                             // in a different register for this instruction only.
-                            let move_blocked = { let mut s = PhysRegSet::new(); s.insert(*required_preg); s };
+                            let move_blocked = {
+                                let mut s = PhysRegSet::new();
+                                s.insert(*required_preg);
+                                s
+                            };
                             if rf.occupancy() >= k {
-                                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
+                                evict_farthest(
+                                    &mut rf,
+                                    &mut s,
+                                    &mut new_insts,
+                                    func,
+                                    analysis,
+                                    block_idx,
+                                    inst_idx,
+                                    block.insts.len(),
+                                    &use_positions,
+                                    slots,
+                                    &pinned,
+                                    &PhysRegSet::new(),
+                                    result,
+                                );
                             }
-                            let new_preg = rf.find_free_excluding(&move_blocked)
+                            let new_preg = rf
+                                .find_free_excluding(&move_blocked)
                                 .expect("no free register for occupant move");
                             let fresh_occ = func.vregs.alloc();
                             while func.spill_descs.len() <= fresh_occ.0 as usize {
-                                func.spill_descs.push(func.spill_desc(occupant).cloned().unwrap_or(SpillDesc::transient()));
+                                func.spill_descs.push(
+                                    func.spill_desc(occupant)
+                                        .cloned()
+                                        .unwrap_or(SpillDesc::transient()),
+                                );
                             }
-                            new_insts.push(MInst::Mov { dst: fresh_occ, src: occupant });
+                            new_insts.push(MInst::Mov {
+                                dst: fresh_occ,
+                                src: occupant,
+                            });
                             rf.evict(occupant);
                             rf.assign(fresh_occ, new_preg);
                             result.set(fresh_occ, new_preg);
@@ -389,7 +459,10 @@ fn process_block(
                         while func.spill_descs.len() <= fresh.0 as usize {
                             func.spill_descs.push(SpillDesc::transient());
                         }
-                        new_insts.push(MInst::Mov { dst: fresh, src: use_vreg });
+                        new_insts.push(MInst::Mov {
+                            dst: fresh,
+                            src: use_vreg,
+                        });
                         rf.assign(fresh, *required_preg);
                         result.set(fresh, *required_preg);
                         rewritten_inst.rewrite_use(use_vreg, fresh);
@@ -398,7 +471,11 @@ fn process_block(
                         // use_vreg is spilled, reload directly to required_preg
                         let fresh = func.vregs.alloc();
                         while func.spill_descs.len() <= fresh.0 as usize {
-                            func.spill_descs.push(func.spill_desc(use_vreg).cloned().unwrap_or(SpillDesc::transient()));
+                            func.spill_descs.push(
+                                func.spill_desc(use_vreg)
+                                    .cloned()
+                                    .unwrap_or(SpillDesc::transient()),
+                            );
                         }
                         let mut reload = make_reload(use_vreg, func, slots);
                         match &mut reload {
@@ -419,19 +496,41 @@ fn process_block(
                     // Need to reload
                     let fresh = func.vregs.alloc();
                     while func.spill_descs.len() <= fresh.0 as usize {
-                        func.spill_descs.push(func.spill_desc(use_vreg).cloned().unwrap_or(SpillDesc::transient()));
+                        func.spill_descs.push(
+                            func.spill_desc(use_vreg)
+                                .cloned()
+                                .unwrap_or(SpillDesc::transient()),
+                        );
                     }
 
                     // Evict if needed to make room
                     if rf.occupancy() >= k {
-                        evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
+                        evict_farthest(
+                            &mut rf,
+                            &mut s,
+                            &mut new_insts,
+                            func,
+                            analysis,
+                            block_idx,
+                            inst_idx,
+                            block.insts.len(),
+                            &use_positions,
+                            slots,
+                            &pinned,
+                            &PhysRegSet::new(),
+                            result,
+                        );
                     }
 
                     // Find a free register (respecting shift blocked set)
                     let blocked = compute_blocked_for_vreg(
-                        fresh, inst_idx, &last_use_in_block, &shift_points,
+                        fresh,
+                        inst_idx,
+                        &last_use_in_block,
+                        &shift_points,
                     );
-                    let preg = rf.find_free_excluding(&blocked)
+                    let preg = rf
+                        .find_free_excluding(&blocked)
                         .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
                         .expect("no free register for reload");
 
@@ -454,7 +553,21 @@ fn process_block(
 
         // Step C: Evict to pressure ≤ k
         while rf.occupancy() > k {
-            evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
+            evict_farthest(
+                &mut rf,
+                &mut s,
+                &mut new_insts,
+                func,
+                analysis,
+                block_idx,
+                inst_idx,
+                block.insts.len(),
+                &use_positions,
+                slots,
+                &pinned,
+                &PhysRegSet::new(),
+                result,
+            );
         }
 
         // Step D: Handle def
@@ -463,23 +576,45 @@ fn process_block(
 
             // Make room: need occupancy + 1 + clobber_extra ≤ k
             while rf.occupancy() + 1 + clobber_extra > k {
-                evict_farthest(&mut rf, &mut s, &mut new_insts, func, analysis, block_idx, inst_idx + 1, block.insts.len(), &use_positions, slots, &pinned, &PhysRegSet::new(), result);
+                evict_farthest(
+                    &mut rf,
+                    &mut s,
+                    &mut new_insts,
+                    func,
+                    analysis,
+                    block_idx,
+                    inst_idx + 1,
+                    block.insts.len(),
+                    &use_positions,
+                    slots,
+                    &pinned,
+                    &PhysRegSet::new(),
+                    result,
+                );
             }
 
             // Pick a PhysReg for the def.
             // Prefer the lhs operand's register (avoids mov in x86 2-operand form).
-            let last_use_pos = last_use_in_block.get(&def_vreg).copied().unwrap_or(inst_idx);
-            let blocked = compute_blocked_for_def(
-                inst_idx, last_use_pos, &shift_points,
-                &clobber_points,
-            );
+            let last_use_pos = last_use_in_block
+                .get(&def_vreg)
+                .copied()
+                .unwrap_or(inst_idx);
+            let blocked =
+                compute_blocked_for_def(inst_idx, last_use_pos, &shift_points, &clobber_points);
 
             // Coalescing hint: reuse a dying operand's PhysReg for dst.
             // Try all operands; prefer lhs first (avoids mov in x86 2-operand form).
             // Also try non-dying operands if they have a cheap remat path.
             let hint_preg = uses.iter().find_map(|&use_vreg| {
                 let preg = rf.get_preg(use_vreg)?;
-                let next = fast_next_use(&use_positions, analysis, block_idx, block.insts.len(), inst_idx + 1, use_vreg);
+                let next = fast_next_use(
+                    &use_positions,
+                    analysis,
+                    block_idx,
+                    block.insts.len(),
+                    inst_idx + 1,
+                    use_vreg,
+                );
                 if next == u32::MAX && !blocked.contains(&preg) {
                     Some((use_vreg, preg))
                 } else {
@@ -508,8 +643,18 @@ fn process_block(
 
         // Step E: Remove dead VRegs
         let block_len = block.insts.len();
-        let dead: Vec<VReg> = rf.vregs()
-            .filter(|&v| fast_next_use(&use_positions, analysis, block_idx, block_len, inst_idx + 1, v) == u32::MAX)
+        let dead: Vec<VReg> = rf
+            .vregs()
+            .filter(|&v| {
+                fast_next_use(
+                    &use_positions,
+                    analysis,
+                    block_idx,
+                    block_len,
+                    inst_idx + 1,
+                    v,
+                ) == u32::MAX
+            })
             .collect();
         for v in dead {
             rf.evict(v);
@@ -556,10 +701,12 @@ fn evict_farthest(
     _blocked_pregs: &PhysRegSet,
     result: &mut AssignmentMap,
 ) {
-    let victim = rf.vregs()
+    let victim = rf
+        .vregs()
         .filter(|v| !pinned.contains(v))
         .max_by_key(|&v| {
-            let next_use = fast_next_use(use_positions, analysis, block_idx, block_len, inst_idx, v);
+            let next_use =
+                fast_next_use(use_positions, analysis, block_idx, block_len, inst_idx, v);
             let desc = func.spill_desc(v);
             let eviction_class = match desc {
                 Some(d) if matches!(d.kind, SpillKind::Remat { .. }) => 3,
@@ -567,7 +714,11 @@ fn evict_farthest(
                 Some(d) if d.spill_cost == 0 => 1,
                 _ => 0,
             };
-            let effective_class = if s.contains(&v) { eviction_class.max(1) } else { eviction_class };
+            let effective_class = if s.contains(&v) {
+                eviction_class.max(1)
+            } else {
+                eviction_class
+            };
             (effective_class, next_use, v)
         })
         .expect("no eviction victim: all VRegs in RegFile are pinned");
@@ -633,7 +784,9 @@ fn compute_blocked_for_def(
     let mut blocked = PhysRegSet::new();
     for &(pos, regs) in clobber_points {
         if pos > inst_idx && pos <= last_use_pos {
-            for &r in regs { blocked.insert(r); }
+            for &r in regs {
+                blocked.insert(r);
+            }
         }
     }
     for &pos in shift_points {

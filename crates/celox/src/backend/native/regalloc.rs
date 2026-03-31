@@ -6,9 +6,9 @@
 mod analysis;
 pub mod assignment;
 mod spilling;
-mod unified;
 #[cfg(test)]
 mod tests;
+mod unified;
 
 use super::mir::MFunction;
 pub use assignment::AssignmentMap;
@@ -30,9 +30,9 @@ fn verify_assignment(
     analysis: &analysis::AnalysisResult,
     assignment: &assignment::AssignmentMap,
 ) {
-    use std::collections::HashMap;
     use super::mir::VReg;
     use assignment::PhysReg;
+    use std::collections::HashMap;
 
     for (bi, block) in func.blocks.iter().enumerate() {
         // Track live VRegs and their PhysRegs at each program point
@@ -77,18 +77,22 @@ fn verify_assignment(
             }
 
             // Remove dead VRegs (O(log n) per VReg via binary search)
-            let dead: Vec<VReg> = live.keys().copied().filter(|&v| {
-                let from = inst_idx + 1;
-                let has_future_use = if let Some(positions) = use_positions.get(&v) {
-                    match positions.binary_search(&from) {
-                        Ok(_) => true,
-                        Err(idx) => idx < positions.len(),
-                    }
-                } else {
-                    false
-                };
-                !has_future_use && !analysis.exit_distances[bi].contains_key(&v)
-            }).collect();
+            let dead: Vec<VReg> = live
+                .keys()
+                .copied()
+                .filter(|&v| {
+                    let from = inst_idx + 1;
+                    let has_future_use = if let Some(positions) = use_positions.get(&v) {
+                        match positions.binary_search(&from) {
+                            Ok(_) => true,
+                            Err(idx) => idx < positions.len(),
+                        }
+                    } else {
+                        false
+                    };
+                    !has_future_use && !analysis.exit_distances[bi].contains_key(&v)
+                })
+                .collect();
             for v in dead {
                 live.remove(&v);
             }
@@ -100,7 +104,8 @@ fn verify_assignment(
                     // have a global assignment but no longer occupies the
                     // register. If a new def claims the same PhysReg,
                     // evict the stale entry from live.
-                    let stale: Vec<VReg> = live.iter()
+                    let stale: Vec<VReg> = live
+                        .iter()
                         .filter(|(v, p)| **v != def && **p == preg)
                         .map(|(v, _)| *v)
                         .collect();

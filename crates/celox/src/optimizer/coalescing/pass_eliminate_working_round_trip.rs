@@ -36,8 +36,8 @@ pub(crate) fn eliminate_working_round_trip(
     // Phase 1: Scan — collect info about each WORKING variable
     struct VarInfo {
         stable_addr: RegionedAbsoluteAddr,
-        seed_locs: Vec<(BlockId, usize)>,    // Commit(STABLE→WORKING)
-        apply_locs: Vec<(BlockId, usize)>,   // Commit(WORKING→STABLE)
+        seed_locs: Vec<(BlockId, usize)>,  // Commit(STABLE→WORKING)
+        apply_locs: Vec<(BlockId, usize)>, // Commit(WORKING→STABLE)
         has_dynamic: bool,
     }
 
@@ -86,7 +86,9 @@ pub(crate) fn eliminate_working_round_trip(
                             has_dynamic: false,
                         });
                         entry.seed_locs.push((bid, ii));
-                        if has_dynamic { entry.has_dynamic = true; }
+                        if has_dynamic {
+                            entry.has_dynamic = true;
+                        }
                         var_eu_access.entry(abs).or_default().insert(eu_idx);
                     } else if src.region == WORKING_REGION && dst.region == STABLE_REGION {
                         // Apply: WORKING → STABLE
@@ -99,7 +101,9 @@ pub(crate) fn eliminate_working_round_trip(
                             has_dynamic: false,
                         });
                         entry.apply_locs.push((bid, ii));
-                        if has_dynamic { entry.has_dynamic = true; }
+                        if has_dynamic {
+                            entry.has_dynamic = true;
+                        }
                         var_eu_access.entry(abs_w).or_default().insert(eu_idx);
                     }
                 }
@@ -123,16 +127,23 @@ pub(crate) fn eliminate_working_round_trip(
     }
 
     // Phase 2: Determine eligible variables
-    let eligible: std::collections::HashSet<AbsoluteAddr> = vars.iter()
+    let eligible: std::collections::HashSet<AbsoluteAddr> = vars
+        .iter()
         .filter(|(abs, info)| {
             // Must have at least one seed and one apply
-            if info.seed_locs.is_empty() || info.apply_locs.is_empty() { return false; }
+            if info.seed_locs.is_empty() || info.apply_locs.is_empty() {
+                return false;
+            }
             // No dynamic offsets
-            if info.has_dynamic { return false; }
+            if info.has_dynamic {
+                return false;
+            }
             // Independence: only accessed by one original EU
             if !eu_boundary_blocks.is_empty() {
                 if let Some(eus) = var_eu_access.get(*abs) {
-                    if eus.len() > 1 { return false; }
+                    if eus.len() > 1 {
+                        return false;
+                    }
                 }
             }
             true
@@ -145,7 +156,8 @@ pub(crate) fn eliminate_working_round_trip(
     }
 
     // Build AbsoluteAddr → stable RegionedAbsoluteAddr mapping
-    let stable_addrs: HashMap<AbsoluteAddr, RegionedAbsoluteAddr> = eligible.iter()
+    let stable_addrs: HashMap<AbsoluteAddr, RegionedAbsoluteAddr> = eligible
+        .iter()
         .filter_map(|abs| vars.get(abs).map(|info| (abs.clone(), info.stable_addr)))
         .collect();
 
@@ -157,11 +169,15 @@ pub(crate) fn eliminate_working_round_trip(
                 SIRInstruction::Commit(src, dst, _, _, _) => {
                     if src.region == STABLE_REGION && dst.region == WORKING_REGION {
                         let abs = src.absolute_addr();
-                        if eligible.contains(&abs) { return false; } // remove seed
+                        if eligible.contains(&abs) {
+                            return false;
+                        } // remove seed
                     }
                     if src.region == WORKING_REGION && dst.region == STABLE_REGION {
                         let abs = src.absolute_addr();
-                        if eligible.contains(&abs) { return false; } // remove apply
+                        if eligible.contains(&abs) {
+                            return false;
+                        } // remove apply
                     }
                     true
                 }

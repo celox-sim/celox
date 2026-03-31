@@ -2,9 +2,9 @@
 //! placing each store immediately after its source value computation.
 //! This dramatically reduces register pressure for large arrays.
 
+use super::pass_manager::ExecutionUnitPass;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
-use super::pass_manager::ExecutionUnitPass;
 
 pub(super) struct SplitCoalescedStoresPass;
 
@@ -33,28 +33,40 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         for (si, inst) in block.instructions.iter().enumerate() {
             let (addr, offset, width, src_reg) = match inst {
                 SIRInstruction::Store(addr, SIROffset::Static(off), width, src, _)
-                    if *width > 64 => (*addr, *off, *width, *src),
+                    if *width > 64 =>
+                {
+                    (*addr, *off, *width, *src)
+                }
                 _ => continue,
             };
 
             // Find the Concat that defines src_reg
-            let concat = block.instructions[..si].iter()
-                .enumerate().rev()
-                .find_map(|(ci, cinst)| {
-                    if let SIRInstruction::Concat(dst, args) = cinst {
-                        if *dst == src_reg && args.len() >= 4 {
-                            return Some((ci, args.clone()));
+            let concat =
+                block.instructions[..si]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(ci, cinst)| {
+                        if let SIRInstruction::Concat(dst, args) = cinst {
+                            if *dst == src_reg && args.len() >= 4 {
+                                return Some((ci, args.clone()));
+                            }
                         }
-                    }
-                    None
-                });
+                        None
+                    });
 
-            let Some((concat_idx, args)) = concat else { continue };
+            let Some((concat_idx, args)) = concat else {
+                continue;
+            };
             let n_args = args.len();
             let elem_width = width / n_args;
-            if elem_width == 0 || elem_width * n_args != width { continue; }
+            if elem_width == 0 || elem_width * n_args != width {
+                continue;
+            }
             // Only split if significantly wide (saves enough register pressure)
-            if n_args < 4 { continue; }
+            if n_args < 4 {
+                continue;
+            }
 
             // Build 64-bit chunks: group consecutive Concat args into 64-bit stores.
             // Concat args: MSB-first → reverse for LSB-first offset order.
@@ -67,13 +79,24 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                 let chunk_elems: Vec<RegisterId> = args_lsb[chunk_start..chunk_end].to_vec();
                 let chunk_offset = offset + chunk_start * elem_width;
                 let chunk_width = (chunk_end - chunk_start) * elem_width;
-                chunks.push(ChunkInfo { offset: chunk_offset, width: chunk_width, elems: chunk_elems });
+                chunks.push(ChunkInfo {
+                    offset: chunk_offset,
+                    width: chunk_width,
+                    elems: chunk_elems,
+                });
             }
 
-            splits.push(SplitInfo { store_idx: si, concat_idx, addr, chunks });
+            splits.push(SplitInfo {
+                store_idx: si,
+                concat_idx,
+                addr,
+                chunks,
+            });
         }
 
-        if splits.is_empty() { continue; }
+        if splits.is_empty() {
+            continue;
+        }
 
         let block = eu.blocks.get_mut(&bid).unwrap();
 
@@ -93,34 +116,49 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                     let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
                     max_reg += 1;
                     let chunk_reg = RegisterId(max_reg);
-                    eu.register_map.insert(chunk_reg, RegisterType::Logic { width: chunk.width });
+                    eu.register_map
+                        .insert(chunk_reg, RegisterType::Logic { width: chunk.width });
 
                     // Find position: after the last element's definition
-                    let last_def_pos = chunk.elems.iter()
-                        .filter_map(|r| block.instructions.iter().position(|i| inst_def(i) == Some(*r)))
+                    let last_def_pos = chunk
+                        .elems
+                        .iter()
+                        .filter_map(|r| {
+                            block
+                                .instructions
+                                .iter()
+                                .position(|i| inst_def(i) == Some(*r))
+                        })
                         .max()
                         .unwrap_or(block.instructions.len().saturating_sub(1));
 
                     // Insert Concat for this chunk (MSB-first)
                     let concat_args: Vec<RegisterId> = chunk.elems.iter().rev().copied().collect();
-                    block.instructions.insert(last_def_pos + 1,
-                        SIRInstruction::Concat(chunk_reg, concat_args));
+                    block.instructions.insert(
+                        last_def_pos + 1,
+                        SIRInstruction::Concat(chunk_reg, concat_args),
+                    );
 
                     chunk_reg
                 };
 
                 // Find position for Store: after source definition
-                let src_pos = block.instructions.iter()
+                let src_pos = block
+                    .instructions
+                    .iter()
                     .position(|i| inst_def(i) == Some(store_src))
                     .unwrap_or(block.instructions.len().saturating_sub(1));
 
-                block.instructions.insert(src_pos + 1, SIRInstruction::Store(
-                    split.addr,
-                    SIROffset::Static(chunk.offset),
-                    chunk.width,
-                    store_src,
-                    vec![],
-                ));
+                block.instructions.insert(
+                    src_pos + 1,
+                    SIRInstruction::Store(
+                        split.addr,
+                        SIROffset::Static(chunk.offset),
+                        chunk.width,
+                        store_src,
+                        vec![],
+                    ),
+                );
             }
         }
     }

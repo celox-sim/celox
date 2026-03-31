@@ -2,6 +2,9 @@
 mod jit_engine;
 mod memory_layout;
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code, unused_imports)]
+pub(crate) mod native;
+#[cfg(not(target_arch = "wasm32"))]
 mod runtime;
 #[allow(dead_code)]
 pub mod traits;
@@ -13,9 +16,6 @@ pub mod wasm_codegen;
 pub mod wasm_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 mod wide_ops;
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code, unused_imports)]
-pub(crate) mod native;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use jit_engine::JitEngine;

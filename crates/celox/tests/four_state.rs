@@ -1198,7 +1198,11 @@ fn test_four_state_div_with_x() {
         BigUint::from(0xFFu32),
         "DIV with X dividend should yield all-X"
     );
-    assert_eq!(v, BigUint::from(0xFFu32), "Value normalized at X positions (v |= m)");
+    assert_eq!(
+        v,
+        BigUint::from(0xFFu32),
+        "Value normalized at X positions (v |= m)"
+    );
 }
 
 #[test]
@@ -1242,7 +1246,11 @@ fn test_four_state_mod_with_x() {
         BigUint::from(0xFFu32),
         "MOD with X divisor should yield all-X"
     );
-    assert_eq!(v, BigUint::from(0xFFu32), "Value normalized at X positions (v |= m)");
+    assert_eq!(
+        v,
+        BigUint::from(0xFFu32),
+        "Value normalized at X positions (v |= m)"
+    );
 }
 
 // ==========================================================================
@@ -2241,7 +2249,11 @@ fn test_four_state_mux_both_branches_x() {
         BigUint::from(0xFFu32),
         "sel=1 selecting X branch → all-X"
     );
-    assert_eq!(v, BigUint::from(0xFFu32), "Value normalized at X positions (v |= m)");
+    assert_eq!(
+        v,
+        BigUint::from(0xFFu32),
+        "Value normalized at X positions (v |= m)"
+    );
 
     // sel=0 (defined), still selects b which is X
     sim.modify(|io: &mut IOContext| {
@@ -3719,7 +3731,11 @@ fn test_z_mux_tristate_pattern() {
         BigUint::from(0xFFu32),
         "en=0: y should be all Z (mask=0xFF)"
     );
-    assert_eq!(v, BigUint::from(0xFFu32), "en=0: Z encoding normalized (v |= m)");
+    assert_eq!(
+        v,
+        BigUint::from(0xFFu32),
+        "en=0: Z encoding normalized (v |= m)"
+    );
 }
 
 #[test]

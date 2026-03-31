@@ -16,8 +16,10 @@ macro_rules! cross_validate {
             let sc = sim_c.signal(sig_name);
             let vn: BigUint = sim_n.get(sn);
             let vc: BigUint = sim_c.get(sc);
-            assert_eq!(vn, vc,
-                "Native vs Cranelift mismatch on '{sig_name}': native={vn:#x}, cranelift={vc:#x}");
+            assert_eq!(
+                vn, vc,
+                "Native vs Cranelift mismatch on '{sig_name}': native={vn:#x}, cranelift={vc:#x}"
+            );
         }
     }};
 }
@@ -32,7 +34,9 @@ fn xv_add_sub_mul() {
         assign o_sub = a - b;
         assign o_mul = a * b;
     }"#;
-    cross_validate!(code, "Top",
+    cross_validate!(
+        code,
+        "Top",
         |sim: &mut Simulator<_>| {
             sim.set(sim.signal("a"), 0xDEAD_BEEF_u64);
             sim.set(sim.signal("b"), 0xCAFE_BABE_u64);
@@ -54,7 +58,9 @@ fn xv_wide_add_128() {
     }"#;
     let a_val: BigUint = BigUint::from(1u64) << 64 | BigUint::from(0x1234_5678u64);
     let b_val: BigUint = BigUint::from(1u64);
-    cross_validate!(code, "Top",
+    cross_validate!(
+        code,
+        "Top",
         |sim: &mut Simulator<_>| {
             sim.set_wide(sim.signal("a"), a_val.clone());
             sim.set_wide(sim.signal("b"), b_val.clone());
@@ -72,7 +78,9 @@ fn xv_wide_add_carry() {
     let code = r#"module Top(a: input logic<128>, b: input logic<128>, o: output logic<128>) {
         assign o = a + b;
     }"#;
-    cross_validate!(code, "Top",
+    cross_validate!(
+        code,
+        "Top",
         |sim: &mut Simulator<_>| {
             sim.set_wide(sim.signal("a"), BigUint::from(u64::MAX));
             sim.set_wide(sim.signal("b"), BigUint::from(1u64));
@@ -90,7 +98,9 @@ fn xv_wide_sub_128() {
     let code = r#"module Top(a: input logic<128>, b: input logic<128>, o: output logic<128>) {
         assign o = a - b;
     }"#;
-    cross_validate!(code, "Top",
+    cross_validate!(
+        code,
+        "Top",
         |sim: &mut Simulator<_>| {
             sim.set_wide(sim.signal("a"), BigUint::from(1u64) << 64);
             sim.set_wide(sim.signal("b"), BigUint::from(1u64));
@@ -111,7 +121,9 @@ fn xv_wide_shl_256() {
         assign o = a << amt;
     }"#;
     for &amt in &[0u16, 1, 4, 63, 64, 65, 128, 200, 255] {
-        cross_validate!(code, "Top",
+        cross_validate!(
+            code,
+            "Top",
             |sim: &mut Simulator<_>| {
                 sim.set_wide(sim.signal("a"), BigUint::from(0xDEAD_BEEF_CAFE_BABEu64));
                 sim.set(sim.signal("amt"), amt);
@@ -132,7 +144,9 @@ fn xv_wide_shr_256() {
     }"#;
     let val: BigUint = BigUint::from(0xABCDu64) << 192 | BigUint::from(0x1234u64);
     for &amt in &[0u16, 1, 4, 64, 128, 192, 255] {
-        cross_validate!(code, "Top",
+        cross_validate!(
+            code,
+            "Top",
             |sim: &mut Simulator<_>| {
                 sim.set_wide(sim.signal("a"), val.clone());
                 sim.set(sim.signal("amt"), amt);
@@ -152,7 +166,9 @@ fn xv_wide_shl_512() {
         assign o = a << amt;
     }"#;
     for &amt in &[0u16, 1, 64, 65, 200, 511] {
-        cross_validate!(code, "Top",
+        cross_validate!(
+            code,
+            "Top",
             |sim: &mut Simulator<_>| {
                 sim.set_wide(sim.signal("a"), BigUint::from(0xDEADu64));
                 sim.set(sim.signal("amt"), amt);
@@ -172,7 +188,9 @@ fn xv_wide_shl_1024() {
         assign o = a << amt;
     }"#;
     for &amt in &[0u16, 1, 64, 500, 1023] {
-        cross_validate!(code, "Top",
+        cross_validate!(
+            code,
+            "Top",
             |sim: &mut Simulator<_>| {
                 sim.set_wide(sim.signal("a"), BigUint::from(0xDEADu64));
                 sim.set(sim.signal("amt"), amt);
@@ -194,7 +212,9 @@ fn xv_narrow_to_wide_shl() {
         assign o = (a as 512) << amt;
     }"#;
     for &amt in &[0u16, 1, 256, 300] {
-        cross_validate!(code, "Top",
+        cross_validate!(
+            code,
+            "Top",
             |sim: &mut Simulator<_>| {
                 sim.set_wide(sim.signal("a"), BigUint::from(0xDEAD_BEEF_CAFE_BABEu64));
                 sim.set(sim.signal("amt"), amt);
@@ -218,16 +238,29 @@ fn xv_wide_bitwise() {
         assign o_or  = a | b;
         assign o_xor = a ^ b;
     }"#;
-    cross_validate!(code, "Top",
+    cross_validate!(
+        code,
+        "Top",
         |sim: &mut Simulator<_>| {
-            sim.set_wide(sim.signal("a"), BigUint::from(0xFF00u64) | (BigUint::from(0xAAu64) << 128));
-            sim.set_wide(sim.signal("b"), BigUint::from(0x0FF0u64) | (BigUint::from(0x55u64) << 128));
+            sim.set_wide(
+                sim.signal("a"),
+                BigUint::from(0xFF00u64) | (BigUint::from(0xAAu64) << 128),
+            );
+            sim.set_wide(
+                sim.signal("b"),
+                BigUint::from(0x0FF0u64) | (BigUint::from(0x55u64) << 128),
+            );
         },
         |sim: &mut Simulator<_>| {
-            sim.set_wide(sim.signal("a"), BigUint::from(0xFF00u64) | (BigUint::from(0xAAu64) << 128));
-            sim.set_wide(sim.signal("b"), BigUint::from(0x0FF0u64) | (BigUint::from(0x55u64) << 128));
+            sim.set_wide(
+                sim.signal("a"),
+                BigUint::from(0xFF00u64) | (BigUint::from(0xAAu64) << 128),
+            );
+            sim.set_wide(
+                sim.signal("b"),
+                BigUint::from(0x0FF0u64) | (BigUint::from(0x55u64) << 128),
+            );
         },
         &["o_and", "o_or", "o_xor"]
     );
 }
-

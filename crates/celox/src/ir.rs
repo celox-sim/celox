@@ -567,7 +567,9 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
     }
 
     // Entry block IDs after renumbering
-    let entry_blocks: Vec<BlockId> = units.iter().enumerate()
+    let entry_blocks: Vec<BlockId> = units
+        .iter()
+        .enumerate()
         .map(|(i, eu)| BlockId(eu.entry_block_id.0 + block_offsets[i]))
         .collect();
 
@@ -575,7 +577,11 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
         let ro = reg_offsets[eu_idx];
         let bo = block_offsets[eu_idx];
         let is_last = eu_idx == units.len() - 1;
-        let next_entry = if !is_last { Some(entry_blocks[eu_idx + 1]) } else { None };
+        let next_entry = if !is_last {
+            Some(entry_blocks[eu_idx + 1])
+        } else {
+            None
+        };
 
         // Copy registers with offset
         for (&reg_id, reg_type) in &eu.register_map {
@@ -589,9 +595,11 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
             let b = |bid: BlockId| BlockId(bid.0 + bo);
 
             let new_params: Vec<RegisterId> = block.params.iter().map(|p| r(*p)).collect();
-            let new_insts: Vec<SIRInstruction<A>> = block.instructions.iter().map(|inst| {
-                renumber_sir_inst(inst, ro, bo)
-            }).collect();
+            let new_insts: Vec<SIRInstruction<A>> = block
+                .instructions
+                .iter()
+                .map(|inst| renumber_sir_inst(inst, ro, bo))
+                .collect();
 
             let new_terminator = match &block.terminator {
                 SIRTerminator::Return => {
@@ -606,33 +614,51 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
                     let new_args: Vec<RegisterId> = args.iter().map(|a| r(*a)).collect();
                     SIRTerminator::Jump(b(*target), new_args)
                 }
-                SIRTerminator::Branch { cond, true_block, false_block } => {
-                    SIRTerminator::Branch {
-                        cond: r(*cond),
-                        true_block: (b(true_block.0), true_block.1.iter().map(|a| r(*a)).collect()),
-                        false_block: (b(false_block.0), false_block.1.iter().map(|a| r(*a)).collect()),
-                    }
-                }
+                SIRTerminator::Branch {
+                    cond,
+                    true_block,
+                    false_block,
+                } => SIRTerminator::Branch {
+                    cond: r(*cond),
+                    true_block: (
+                        b(true_block.0),
+                        true_block.1.iter().map(|a| r(*a)).collect(),
+                    ),
+                    false_block: (
+                        b(false_block.0),
+                        false_block.1.iter().map(|a| r(*a)).collect(),
+                    ),
+                },
             };
 
-            merged_blocks.insert(new_block_id, BasicBlock {
-                id: new_block_id,
-                params: new_params,
-                instructions: new_insts,
-                terminator: new_terminator,
-            });
+            merged_blocks.insert(
+                new_block_id,
+                BasicBlock {
+                    id: new_block_id,
+                    params: new_params,
+                    instructions: new_insts,
+                    terminator: new_terminator,
+                },
+            );
         }
     }
 
     let eu_boundary_blocks: Vec<BlockId> = entry_blocks[1..].to_vec();
-    (ExecutionUnit {
-        entry_block_id: entry_blocks[0],
-        blocks: merged_blocks,
-        register_map: merged_regs,
-    }, eu_boundary_blocks)
+    (
+        ExecutionUnit {
+            entry_block_id: entry_blocks[0],
+            blocks: merged_blocks,
+            register_map: merged_regs,
+        },
+        eu_boundary_blocks,
+    )
 }
 
-fn renumber_sir_inst<A: Clone>(inst: &SIRInstruction<A>, ro: usize, _bo: usize) -> SIRInstruction<A> {
+fn renumber_sir_inst<A: Clone>(
+    inst: &SIRInstruction<A>,
+    ro: usize,
+    _bo: usize,
+) -> SIRInstruction<A> {
     let r = |reg: RegisterId| RegisterId(reg.0 + ro);
     let off = |o: &SIROffset| match o {
         SIROffset::Static(v) => SIROffset::Static(*v),
@@ -647,15 +673,17 @@ fn renumber_sir_inst<A: Clone>(inst: &SIRInstruction<A>, ro: usize, _bo: usize) 
         SIRInstruction::Store(addr, offset, width, src, triggers) => {
             SIRInstruction::Store(addr.clone(), off(offset), *width, r(*src), triggers.clone())
         }
-        SIRInstruction::Commit(src, dst, offset, width, triggers) => {
-            SIRInstruction::Commit(src.clone(), dst.clone(), off(offset), *width, triggers.clone())
-        }
+        SIRInstruction::Commit(src, dst, offset, width, triggers) => SIRInstruction::Commit(
+            src.clone(),
+            dst.clone(),
+            off(offset),
+            *width,
+            triggers.clone(),
+        ),
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
             SIRInstruction::Binary(r(*dst), r(*lhs), *op, r(*rhs))
         }
-        SIRInstruction::Unary(dst, op, src) => {
-            SIRInstruction::Unary(r(*dst), *op, r(*src))
-        }
+        SIRInstruction::Unary(dst, op, src) => SIRInstruction::Unary(r(*dst), *op, r(*src)),
         SIRInstruction::Concat(dst, args) => {
             SIRInstruction::Concat(r(*dst), args.iter().map(|a| r(*a)).collect())
         }

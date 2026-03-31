@@ -33,16 +33,26 @@ impl ExecutionUnitPass for ConcatFoldingPass {
             for inst in &block.instructions {
                 match inst {
                     SIRInstruction::Load(dst, addr, SIROffset::Static(off), width) => {
-                        load_defs.insert(*dst, BitSource { addr: *addr, bit_offset: *off, width: *width });
+                        load_defs.insert(
+                            *dst,
+                            BitSource {
+                                addr: *addr,
+                                bit_offset: *off,
+                                width: *width,
+                            },
+                        );
                     }
                     SIRInstruction::Slice(dst, src, off, width) => {
                         // If src was loaded from a known addr, compute the effective addr+offset
                         if let Some(src_info) = load_defs.get(src) {
-                            load_defs.insert(*dst, BitSource {
-                                addr: src_info.addr,
-                                bit_offset: src_info.bit_offset + *off,
-                                width: *width,
-                            });
+                            load_defs.insert(
+                                *dst,
+                                BitSource {
+                                    addr: src_info.addr,
+                                    bit_offset: src_info.bit_offset + *off,
+                                    width: *width,
+                                },
+                            );
                         }
                     }
                     _ => {}
@@ -52,11 +62,16 @@ impl ExecutionUnitPass for ConcatFoldingPass {
 
         // Process each block
         for block in eu.blocks.values_mut() {
-            let mut new_insts_to_insert: Vec<(usize, SIRInstruction<RegionedAbsoluteAddr>)> = Vec::new();
+            let mut new_insts_to_insert: Vec<(usize, SIRInstruction<RegionedAbsoluteAddr>)> =
+                Vec::new();
 
             for (inst_idx, inst) in block.instructions.iter_mut().enumerate() {
-                let SIRInstruction::Concat(_dst, args) = inst else { continue };
-                if args.len() < 3 { continue; }
+                let SIRInstruction::Concat(_dst, args) = inst else {
+                    continue;
+                };
+                if args.len() < 3 {
+                    continue;
+                }
 
                 // Walk LSB-first, find consecutive Load runs from same addr
                 let mut new_args: Vec<RegisterId> = Vec::new();
@@ -94,11 +109,22 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                             // Create a new wider Load
                             max_reg += 1;
                             let new_reg = RegisterId(max_reg);
-                            eu.register_map.insert(new_reg, RegisterType::Bit { width: run_width, signed: false });
+                            eu.register_map.insert(
+                                new_reg,
+                                RegisterType::Bit {
+                                    width: run_width,
+                                    signed: false,
+                                },
+                            );
 
                             new_insts_to_insert.push((
                                 inst_idx,
-                                SIRInstruction::Load(new_reg, run_addr, SIROffset::Static(run_start), run_width),
+                                SIRInstruction::Load(
+                                    new_reg,
+                                    run_addr,
+                                    SIROffset::Static(run_start),
+                                    run_width,
+                                ),
                             ));
                             new_args.push(new_reg);
                             any_merged = true;
@@ -123,13 +149,16 @@ impl ExecutionUnitPass for ConcatFoldingPass {
             }
         }
 
-        if !changed { return; }
+        if !changed {
+            return;
+        }
 
         let used = collect_all_used_registers(eu);
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {
                 if let Some(d) = def_reg(inst) {
-                    used.contains(&d) || matches!(inst, SIRInstruction::Store(..) | SIRInstruction::Commit(..))
+                    used.contains(&d)
+                        || matches!(inst, SIRInstruction::Store(..) | SIRInstruction::Commit(..))
                 } else {
                     true
                 }

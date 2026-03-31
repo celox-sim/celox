@@ -30,7 +30,11 @@ impl ExecutionUnitPass for GvnPass {
         for block in eu.blocks.values() {
             let targets: Vec<BlockId> = match &block.terminator {
                 SIRTerminator::Jump(t, _) => vec![*t],
-                SIRTerminator::Branch { true_block, false_block, .. } => {
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => {
                     vec![true_block.0, false_block.0]
                 }
                 _ => vec![],
@@ -108,7 +112,8 @@ impl ExecutionUnitPass for GvnPass {
             block.instructions.retain(|inst| {
                 if let Some(d) = def_reg(inst) {
                     // Keep if the register is used, or if the instruction has side effects
-                    used.contains(&d) || matches!(inst, SIRInstruction::Store(..) | SIRInstruction::Commit(..))
+                    used.contains(&d)
+                        || matches!(inst, SIRInstruction::Store(..) | SIRInstruction::Commit(..))
                 } else {
                     true // Keep side-effecting instructions (Store, Commit)
                 }
@@ -164,7 +169,11 @@ fn gvn_block(
             SIRInstruction::Binary(dst, lhs, op, rhs) => {
                 let l = resolve(*lhs, &canonical);
                 let r = resolve(*rhs, &canonical);
-                let (l, r) = if op.is_commutative() && l > r { (r, l) } else { (l, r) };
+                let (l, r) = if op.is_commutative() && l > r {
+                    (r, l)
+                } else {
+                    (l, r)
+                };
                 let w = register_map.get(dst).map(|t| t.width()).unwrap_or(0);
                 Some(ValueKey::Binary(*op, l, r, w))
             }
@@ -174,7 +183,8 @@ fn gvn_block(
                 Some(ValueKey::Unary(*op, s, w))
             }
             SIRInstruction::Concat(_, args) => {
-                let resolved: Vec<RegisterId> = args.iter().map(|a| resolve(*a, &canonical)).collect();
+                let resolved: Vec<RegisterId> =
+                    args.iter().map(|a| resolve(*a, &canonical)).collect();
                 Some(ValueKey::Concat(resolved))
             }
             SIRInstruction::Slice(_, src, off, width) => {
@@ -197,15 +207,19 @@ fn gvn_block(
         if let (Some(key), Some(dst)) = (key, def_reg(inst)) {
             // Check if any operand depends on a loop variable
             let uses_loop_var = match inst {
-                SIRInstruction::Binary(_, lhs, _, rhs) =>
+                SIRInstruction::Binary(_, lhs, _, rhs) => {
                     loop_dependent.contains(&resolve(*lhs, &canonical))
-                    || loop_dependent.contains(&resolve(*rhs, &canonical)),
-                SIRInstruction::Unary(_, _, src) =>
-                    loop_dependent.contains(&resolve(*src, &canonical)),
-                SIRInstruction::Concat(_, args) =>
-                    args.iter().any(|a| loop_dependent.contains(&resolve(*a, &canonical))),
-                SIRInstruction::Slice(_, src, _, _) =>
-                    loop_dependent.contains(&resolve(*src, &canonical)),
+                        || loop_dependent.contains(&resolve(*rhs, &canonical))
+                }
+                SIRInstruction::Unary(_, _, src) => {
+                    loop_dependent.contains(&resolve(*src, &canonical))
+                }
+                SIRInstruction::Concat(_, args) => args
+                    .iter()
+                    .any(|a| loop_dependent.contains(&resolve(*a, &canonical))),
+                SIRInstruction::Slice(_, src, _, _) => {
+                    loop_dependent.contains(&resolve(*src, &canonical))
+                }
                 _ => false,
             };
 
@@ -233,24 +247,36 @@ fn apply_aliases(
     match inst {
         SIRInstruction::Imm(_, _) => {}
         SIRInstruction::Binary(_, lhs, _, rhs) => {
-            if let Some(&a) = aliases.get(lhs) { *lhs = a; }
-            if let Some(&a) = aliases.get(rhs) { *rhs = a; }
+            if let Some(&a) = aliases.get(lhs) {
+                *lhs = a;
+            }
+            if let Some(&a) = aliases.get(rhs) {
+                *rhs = a;
+            }
         }
         SIRInstruction::Unary(_, _, src) => {
-            if let Some(&a) = aliases.get(src) { *src = a; }
+            if let Some(&a) = aliases.get(src) {
+                *src = a;
+            }
         }
         SIRInstruction::Load(_, _, _, _) => {}
         SIRInstruction::Store(_, _, _, src, _) => {
-            if let Some(&a) = aliases.get(src) { *src = a; }
+            if let Some(&a) = aliases.get(src) {
+                *src = a;
+            }
         }
         SIRInstruction::Commit(_, _, _, _, _) => {}
         SIRInstruction::Concat(_, args) => {
             for arg in args {
-                if let Some(&a) = aliases.get(arg) { *arg = a; }
+                if let Some(&a) = aliases.get(arg) {
+                    *arg = a;
+                }
             }
         }
         SIRInstruction::Slice(_, src, _, _) => {
-            if let Some(&a) = aliases.get(src) { *src = a; }
+            if let Some(&a) = aliases.get(src) {
+                *src = a;
+            }
         }
     }
 }

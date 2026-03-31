@@ -42,7 +42,10 @@ fn compile_and_run_inner(
     let emit_result = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
 
     if debug {
-        eprintln!("=== Disassembly ===\n{}", emit::disassemble(&emit_result.code, 0));
+        eprintln!(
+            "=== Disassembly ===\n{}",
+            emit::disassemble(&emit_result.code, 0)
+        );
     }
 
     let jit = jit_mem::JitCode::new(&emit_result.code).expect("mmap failed");
@@ -110,7 +113,7 @@ fn test_native_shared_expression() {
         write_u32_at(state, sir, layout, "a", 7);
         write_u32_at(state, sir, layout, "b", 3);
     });
-    assert_eq!(read_u32_at(&state, &sir, &layout, "x"), 0);  // (7+3) & 1 = 0
+    assert_eq!(read_u32_at(&state, &sir, &layout, "x"), 0); // (7+3) & 1 = 0
     assert_eq!(read_u32_at(&state, &sir, &layout, "y"), 10); // (7+3) | 2 = 10
 }
 
@@ -273,8 +276,12 @@ fn test_debug_let_bitslice_write() {
         eprintln!("=== EU {eu_idx} MIR ===\n{mfunc}");
         let ra = regalloc::run_regalloc(&mut mfunc);
         eprintln!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);
-        let emit_result = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
-        eprintln!("=== EU {eu_idx} Disassembly ===\n{}", emit::disassemble(&emit_result.code, 0));
+        let emit_result =
+            emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
+        eprintln!(
+            "=== EU {eu_idx} Disassembly ===\n{}",
+            emit::disassemble(&emit_result.code, 0)
+        );
     }
 
     // Also run and check the result
@@ -314,4 +321,3 @@ fn test_native_dynamic_index_pattern() {
     });
     assert_eq!(read_u32_at(&state, &sir, &layout, "z"), 0x04550201);
 }
-

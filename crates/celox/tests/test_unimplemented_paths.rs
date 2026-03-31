@@ -14,9 +14,7 @@ fn wide_dynamic_shift_works() {
             assign y = a >> idx;
         }
     "#;
-    let mut sim = SimulatorBuilder::new(code, "Top")
-        .build()
-        .unwrap();
+    let mut sim = SimulatorBuilder::new(code, "Top").build().unwrap();
     let id_a = sim.signal("a");
     let id_idx = sim.signal("idx");
     let id_y = sim.signal("y");

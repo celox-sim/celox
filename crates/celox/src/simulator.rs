@@ -4,8 +4,8 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{
     IOContext, RuntimeErrorCode,
-    backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     backend::native::{NativeBackend, SharedNativeCode},
+    backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     ir::{InstancePath, Program, SignalRef, VariableInfo},
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -513,10 +513,7 @@ impl Simulator<NativeBackend> {
     }
 
     /// Create a simulator from pre-compiled shared native code.
-    pub fn from_shared(
-        shared: Arc<SharedNativeCode>,
-        program: crate::ir::Program,
-    ) -> Self {
+    pub fn from_shared(shared: Arc<SharedNativeCode>, program: crate::ir::Program) -> Self {
         let backend = NativeBackend::from_shared(shared);
         Self::with_backend_and_program(backend, program, vec![])
     }

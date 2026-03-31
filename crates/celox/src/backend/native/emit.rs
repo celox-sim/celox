@@ -124,12 +124,7 @@ fn mem_operand_indexed(base: BaseReg, offset: i32, index: AsmRegister64) -> AsmM
 // Callee-saved register tracking
 // ────────────────────────────────────────────────────────────────
 
-const CALLEE_SAVED: &[PhysReg] = &[
-    PhysReg::RBX,
-    PhysReg::R12,
-    PhysReg::R13,
-    PhysReg::R14,
-];
+const CALLEE_SAVED: &[PhysReg] = &[PhysReg::RBX, PhysReg::R12, PhysReg::R13, PhysReg::R14];
 
 fn used_callee_saved(assignment: &AssignmentMap) -> Vec<PhysReg> {
     let mut used = PhysRegSet::new();
@@ -152,9 +147,6 @@ pub struct EmitResult {
     pub code: Vec<u8>,
     /// Stack frame size (bytes) for spill slots, excluding callee-saved pushes.
     pub frame_size: u32,
-    /// Offsets of `jmp rel32` placeholders that need patching (naked mode only).
-    /// Each entry: (offset_of_jmp_opcode, is_error_return).
-    pub return_patches: Vec<(usize, bool)>,
 }
 
 /// Disassemble the emitted code to a string (NASM syntax).
@@ -189,7 +181,9 @@ fn emit_phi_moves_for_target(
     assignment: &AssignmentMap,
 ) -> Result<(), IcedError> {
     let target_block = func.blocks.iter().find(|b| b.id == target_id);
-    let Some(target_block) = target_block else { return Ok(()) };
+    let Some(target_block) = target_block else {
+        return Ok(());
+    };
 
     // Collect parallel copies: (dst_preg, src_preg)
     let mut copies: Vec<(PhysReg, PhysReg)> = Vec::new();
@@ -205,7 +199,9 @@ fn emit_phi_moves_for_target(
         }
     }
 
-    if copies.is_empty() { return Ok(()); }
+    if copies.is_empty() {
+        return Ok(());
+    }
 
     // Sequentialize parallel copies, handling cycles with xchg.
     let mut done = vec![false; copies.len()];
@@ -213,11 +209,14 @@ fn emit_phi_moves_for_target(
     while progress {
         progress = false;
         for i in 0..copies.len() {
-            if done[i] { continue; }
+            if done[i] {
+                continue;
+            }
             let (dst, _src) = copies[i];
-            let dst_is_src = copies.iter().enumerate().any(|(j, (_, s))| {
-                j != i && !done[j] && *s == dst
-            });
+            let dst_is_src = copies
+                .iter()
+                .enumerate()
+                .any(|(j, (_, s))| j != i && !done[j] && *s == dst);
             if !dst_is_src {
                 let (d, s) = copies[i];
                 asm.mov(preg_to_reg64(d), preg_to_reg64(s))?;
@@ -229,12 +228,16 @@ fn emit_phi_moves_for_target(
 
     // Remaining undone copies form cycles; break with xchg
     for i in 0..copies.len() {
-        if done[i] { continue; }
+        if done[i] {
+            continue;
+        }
         let (d, s) = copies[i];
         asm.xchg(preg_to_reg64(d), preg_to_reg64(s))?;
         done[i] = true;
         for j in (i + 1)..copies.len() {
-            if done[j] { continue; }
+            if done[j] {
+                continue;
+            }
             if copies[j].1 == d {
                 copies[j].1 = s;
             } else if copies[j].1 == s {
@@ -255,30 +258,7 @@ pub fn emit(
     assignment: &AssignmentMap,
     spill_frame_size: u32,
 ) -> Result<EmitResult, IcedError> {
-    emit_inner(func, assignment, spill_frame_size, false)
-}
-
-/// Emit a function body without prologue/epilogue ("naked" mode).
-/// Return instructions emit `ret` (0xC3) directly.
-/// Used by shared-prologue EU chaining.
-pub fn emit_naked(
-    func: &MFunction,
-    assignment: &AssignmentMap,
-    spill_frame_size: u32,
-) -> Result<EmitResult, IcedError> {
-    emit_inner(func, assignment, spill_frame_size, true)
-}
-
-fn emit_inner(
-    func: &MFunction,
-    assignment: &AssignmentMap,
-    spill_frame_size: u32,
-    naked: bool,
-) -> Result<EmitResult, IcedError> {
     let mut asm = CodeAssembler::new(64)?;
-    let mut return_patches: Vec<(usize, bool)> = Vec::new();
-    // Labels used as jmp targets for naked return patching
-    let mut naked_return_labels: Vec<(CodeLabel, bool)> = Vec::new();
 
     // Block labels
     let mut block_labels: HashMap<BlockId, CodeLabel> = HashMap::new();
@@ -291,13 +271,17 @@ fn emit_inner(
     let total_push = callee_push_size + 8;
     let frame_size = {
         let misalign = (total_push + spill_frame_size) % 16;
-        if misalign == 0 { spill_frame_size } else { spill_frame_size + (16 - misalign) }
+        if misalign == 0 {
+            spill_frame_size
+        } else {
+            spill_frame_size + (16 - misalign)
+        }
     };
 
     let mut epilogue_label = asm.create_label();
 
-    if !naked {
-        // ── Prologue ──
+    // ── Prologue ──
+    {
         for &reg in &callee_saved {
             asm.push(preg_to_reg64(reg))?;
         }
@@ -309,13 +293,12 @@ fn emit_inner(
     }
 
     // ── Blocks ──
-    // In naked mode, reorder blocks so that Return-ending blocks come last.
-    // This enables fall-through to the next EU (no jmp needed).
     let block_order: Vec<usize> = (0..func.blocks.len()).collect();
     let mut fell_through = false; // track if previous block fell through (needs label spacing)
     for (order_idx, &bi) in block_order.iter().enumerate() {
         let block = &func.blocks[bi];
-        let next_block_id = block_order.get(order_idx + 1)
+        let next_block_id = block_order
+            .get(order_idx + 1)
             .map(|&next_bi| func.blocks[next_bi].id);
 
         if fell_through {
@@ -332,50 +315,43 @@ fn emit_inner(
         // and the cmp result is only used by the Branch, we can fuse
         // into cmp + jcc (skipping setcc + movzx + test).
         let fused_cmp: Option<VReg> = if block.insts.len() >= 2 {
-            if let Some(MInst::Branch { cond, true_bb, false_bb }) = block.terminator() {
+            if let Some(MInst::Branch {
+                cond,
+                true_bb,
+                false_bb,
+            }) = block.terminator()
+            {
                 let pre = &block.insts[block.insts.len() - 2];
                 let is_cmp = pre.def() == Some(*cond)
                     && matches!(pre, MInst::Cmp { .. } | MInst::CmpImm { .. });
-                let no_phi_targets = !func.blocks.iter().any(|b| {
-                    (b.id == *true_bb || b.id == *false_bb) && !b.phis.is_empty()
-                });
+                let no_phi_targets = !func
+                    .blocks
+                    .iter()
+                    .any(|b| (b.id == *true_bb || b.id == *false_bb) && !b.phis.is_empty());
                 if is_cmp && no_phi_targets {
                     let used_elsewhere = block.insts[..block.insts.len() - 2]
-                        .iter().any(|i| i.uses().contains(cond));
+                        .iter()
+                        .any(|i| i.uses().contains(cond));
                     if !used_elsewhere { Some(*cond) } else { None }
-                } else { None }
-            } else { None }
-        } else { None };
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         for inst in block.insts.iter() {
             match inst {
                 MInst::Return => {
                     asm.xor(eax, eax)?;
-                    if naked {
-                        // Naked: emit special byte sequence as placeholder.
-                        // INT3 (0xCC) × 5 — easy to find, never generated normally.
-                        asm.int3()?;
-                        asm.int3()?;
-                        asm.int3()?;
-                        asm.int3()?;
-                        asm.int3()?;
-                        naked_return_labels.push((CodeLabel::default(), false));
-                    } else {
-                        asm.jmp(epilogue_label)?;
-                    }
+                    asm.jmp(epilogue_label)?;
                 }
                 MInst::ReturnError { code } => {
                     asm.mov(eax, *code as u32)?;
-                    if naked {
-                        asm.int3()?;
-                        asm.int3()?;
-                        asm.int3()?;
-                        asm.int3()?;
-                        asm.int3()?;
-                        naked_return_labels.push((CodeLabel::default(), true));
-                    } else {
-                        asm.jmp(epilogue_label)?;
-                    }
+                    asm.jmp(epilogue_label)?;
                 }
                 MInst::Jump { target } => {
                     emit_phi_moves_for_target(&mut asm, block.id, *target, func, assignment)?;
@@ -387,7 +363,11 @@ fn emit_inner(
                         asm.jmp(*label)?;
                     }
                 }
-                MInst::Branch { cond, true_bb, false_bb } => {
+                MInst::Branch {
+                    cond,
+                    true_bb,
+                    false_bb,
+                } => {
                     if fused_cmp == Some(*cond) {
                         // Fused Cmp+Branch: emit cmp + jcc directly
                         let cmp_inst = &block.insts[block.insts.len() - 2];
@@ -418,33 +398,41 @@ fn emit_inner(
                             asm.jmp(*false_label)?;
                         }
                     } else {
-                    let c = preg_to_reg64(resolve(assignment, *cond));
-                    asm.test(c, c)?;
-                    let true_has_phis = func.blocks.iter()
-                        .find(|b| b.id == *true_bb)
-                        .is_some_and(|b| !b.phis.is_empty());
-                    let false_has_phis = func.blocks.iter()
-                        .find(|b| b.id == *false_bb)
-                        .is_some_and(|b| !b.phis.is_empty());
+                        let c = preg_to_reg64(resolve(assignment, *cond));
+                        asm.test(c, c)?;
+                        let true_has_phis = func
+                            .blocks
+                            .iter()
+                            .find(|b| b.id == *true_bb)
+                            .is_some_and(|b| !b.phis.is_empty());
+                        let false_has_phis = func
+                            .blocks
+                            .iter()
+                            .find(|b| b.id == *false_bb)
+                            .is_some_and(|b| !b.phis.is_empty());
 
-                    if !true_has_phis && !false_has_phis {
-                        let true_label = block_labels.get_mut(true_bb).unwrap();
-                        asm.jne(*true_label)?;
-                        if next_block_id != Some(*false_bb) {
+                        if !true_has_phis && !false_has_phis {
+                            let true_label = block_labels.get_mut(true_bb).unwrap();
+                            asm.jne(*true_label)?;
+                            if next_block_id != Some(*false_bb) {
+                                let false_label = block_labels.get_mut(false_bb).unwrap();
+                                asm.jmp(*false_label)?;
+                            }
+                        } else {
+                            let mut true_phi_label = asm.create_label();
+                            asm.jne(true_phi_label)?;
+                            emit_phi_moves_for_target(
+                                &mut asm, block.id, *false_bb, func, assignment,
+                            )?;
                             let false_label = block_labels.get_mut(false_bb).unwrap();
                             asm.jmp(*false_label)?;
+                            asm.set_label(&mut true_phi_label)?;
+                            emit_phi_moves_for_target(
+                                &mut asm, block.id, *true_bb, func, assignment,
+                            )?;
+                            let true_label = block_labels.get_mut(true_bb).unwrap();
+                            asm.jmp(*true_label)?;
                         }
-                    } else {
-                        let mut true_phi_label = asm.create_label();
-                        asm.jne(true_phi_label)?;
-                        emit_phi_moves_for_target(&mut asm, block.id, *false_bb, func, assignment)?;
-                        let false_label = block_labels.get_mut(false_bb).unwrap();
-                        asm.jmp(*false_label)?;
-                        asm.set_label(&mut true_phi_label)?;
-                        emit_phi_moves_for_target(&mut asm, block.id, *true_bb, func, assignment)?;
-                        let true_label = block_labels.get_mut(true_bb).unwrap();
-                        asm.jmp(*true_label)?;
-                    }
                     } // end else (non-fused branch)
                 }
                 MInst::UDiv { dst, lhs, rhs } => {
@@ -466,49 +454,19 @@ fn emit_inner(
         }
     }
 
-    if !naked {
-        // ── Epilogue ──
-        asm.set_label(&mut epilogue_label)?;
-        if frame_size > 0 {
-            asm.add(rsp, frame_size as i32)?;
-        }
-        asm.pop(SIM_BASE)?;
-        for &reg in callee_saved.iter().rev() {
-            asm.pop(preg_to_reg64(reg))?;
-        }
-        asm.ret()?;
+    // ── Epilogue ──
+    asm.set_label(&mut epilogue_label)?;
+    if frame_size > 0 {
+        asm.add(rsp, frame_size as i32)?;
     }
+    asm.pop(SIM_BASE)?;
+    for &reg in callee_saved.iter().rev() {
+        asm.pop(preg_to_reg64(reg))?;
+    }
+    asm.ret()?;
 
     let code = asm.assemble(0x0)?;
-
-    // In naked mode, find return placeholders (5 × INT3 = CC CC CC CC CC).
-    // Replace each with a jmp rel32 placeholder (E9 00 00 00 00) and record offset.
-    if naked {
-        let mut code = code;
-        let mut label_idx = 0;
-        let mut pos = 0;
-        while pos + 5 <= code.len() {
-            if code[pos..pos+5] == [0xCC, 0xCC, 0xCC, 0xCC, 0xCC] {
-                // Replace INT3×5 with jmp rel32 placeholder
-                code[pos] = 0xE9;
-                code[pos+1] = 0x00;
-                code[pos+2] = 0x00;
-                code[pos+3] = 0x00;
-                code[pos+4] = 0x00;
-                if label_idx < naked_return_labels.len() {
-                    let is_error = naked_return_labels[label_idx].1;
-                    return_patches.push((pos, is_error));
-                    label_idx += 1;
-                }
-                pos += 5;
-            } else {
-                pos += 1;
-            }
-        }
-        return Ok(EmitResult { code, frame_size, return_patches });
-    }
-
-    Ok(EmitResult { code, frame_size, return_patches })
+    Ok(EmitResult { code, frame_size })
 }
 
 fn emit_inst(
@@ -545,7 +503,12 @@ fn emit_inst(
             }
         }
 
-        MInst::Load { dst, base, offset, size } => {
+        MInst::Load {
+            dst,
+            base,
+            offset,
+            size,
+        } => {
             let d_preg = resolve(assignment, *dst);
             let mem = mem_operand(*base, *offset);
             match size {
@@ -568,7 +531,12 @@ fn emit_inst(
             }
         }
 
-        MInst::Store { base, offset, src, size } => {
+        MInst::Store {
+            base,
+            offset,
+            src,
+            size,
+        } => {
             let s_preg = resolve(assignment, *src);
             let mem = mem_operand(*base, *offset);
             match size {
@@ -587,7 +555,13 @@ fn emit_inst(
             }
         }
 
-        MInst::LoadIndexed { dst, base, offset, index, size } => {
+        MInst::LoadIndexed {
+            dst,
+            base,
+            offset,
+            index,
+            size,
+        } => {
             let d_preg = resolve(assignment, *dst);
             let idx = preg_to_reg64(resolve(assignment, *index));
             let mem = mem_operand_indexed(*base, *offset, idx);
@@ -607,7 +581,13 @@ fn emit_inst(
             }
         }
 
-        MInst::StoreIndexed { base, offset, index, src, size } => {
+        MInst::StoreIndexed {
+            base,
+            offset,
+            index,
+            src,
+            size,
+        } => {
             let s_preg = resolve(assignment, *src);
             let idx = preg_to_reg64(resolve(assignment, *index));
             let mem = mem_operand_indexed(*base, *offset, idx);
@@ -656,10 +636,14 @@ fn emit_inst(
                 asm.mul(rax)?;
             } else {
                 // Normal case: mov rax, lhs; mul rhs
-                if rax != l { asm.mov(rax, l)?; }
+                if rax != l {
+                    asm.mov(rax, l)?;
+                }
                 asm.mul(r)?;
             }
-            if d != rdx { asm.mov(d, rdx)?; }
+            if d != rdx {
+                asm.mov(d, rdx)?;
+            }
         }
         MInst::And { dst, lhs, rhs } => {
             let n32 = func.is_narrow32(*dst);
@@ -692,31 +676,41 @@ fn emit_inst(
             if func.is_narrow32(*dst) && *imm <= u32::MAX as u64 {
                 let d = preg_to_reg32(resolve(assignment, *dst));
                 let s = preg_to_reg32(resolve(assignment, *src));
-                if d != s { asm.mov(d, s)?; }
+                if d != s {
+                    asm.mov(d, s)?;
+                }
                 asm.and(d, *imm as i32)?;
             } else {
                 let d = preg_to_reg64(resolve(assignment, *dst));
                 let s = preg_to_reg64(resolve(assignment, *src));
-                if d != s { asm.mov(d, s)?; }
+                if d != s {
+                    asm.mov(d, s)?;
+                }
                 emit_and_imm64(asm, d, *imm)?;
             }
         }
         MInst::OrImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let s = preg_to_reg64(resolve(assignment, *src));
-            if d != s { asm.mov(d, s)?; }
+            if d != s {
+                asm.mov(d, s)?;
+            }
             emit_or_imm64(asm, d, *imm)?;
         }
         MInst::ShrImm { dst, src, imm } => {
             if func.is_narrow32(*src) {
                 let d = preg_to_reg32(resolve(assignment, *dst));
                 let s = preg_to_reg32(resolve(assignment, *src));
-                if d != s { asm.mov(d, s)?; }
+                if d != s {
+                    asm.mov(d, s)?;
+                }
                 asm.shr(d, *imm as u32)?;
             } else {
                 let d = preg_to_reg64(resolve(assignment, *dst));
                 let s = preg_to_reg64(resolve(assignment, *src));
-                if d != s { asm.mov(d, s)?; }
+                if d != s {
+                    asm.mov(d, s)?;
+                }
                 asm.shr(d, *imm as u32)?;
             }
         }
@@ -724,19 +718,25 @@ fn emit_inst(
             if func.is_narrow32(*dst) {
                 let d = preg_to_reg32(resolve(assignment, *dst));
                 let s = preg_to_reg32(resolve(assignment, *src));
-                if d != s { asm.mov(d, s)?; }
+                if d != s {
+                    asm.mov(d, s)?;
+                }
                 asm.shl(d, *imm as u32)?;
             } else {
                 let d = preg_to_reg64(resolve(assignment, *dst));
                 let s = preg_to_reg64(resolve(assignment, *src));
-                if d != s { asm.mov(d, s)?; }
+                if d != s {
+                    asm.mov(d, s)?;
+                }
                 asm.shl(d, *imm as u32)?;
             }
         }
         MInst::SarImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let s = preg_to_reg64(resolve(assignment, *src));
-            if d != s { asm.mov(d, s)?; }
+            if d != s {
+                asm.mov(d, s)?;
+            }
             asm.sar(d, *imm as u32)?;
         }
 
@@ -759,7 +759,12 @@ fn emit_inst(
             asm.sub(d, *imm)?;
         }
 
-        MInst::Cmp { dst, lhs, rhs, kind } => {
+        MInst::Cmp {
+            dst,
+            lhs,
+            rhs,
+            kind,
+        } => {
             let l = preg_to_reg64(resolve(assignment, *lhs));
             let r = preg_to_reg64(resolve(assignment, *rhs));
             asm.cmp(l, r)?;
@@ -768,7 +773,12 @@ fn emit_inst(
             emit_setcc(asm, d8, *kind)?;
             asm.movzx(d32, d8)?;
         }
-        MInst::CmpImm { dst, lhs, imm, kind } => {
+        MInst::CmpImm {
+            dst,
+            lhs,
+            imm,
+            kind,
+        } => {
             let l = preg_to_reg64(resolve(assignment, *lhs));
             if *imm == 0 && matches!(kind, CmpKind::Eq | CmpKind::Ne) {
                 // test reg, reg is shorter than cmp reg, 0
@@ -813,7 +823,12 @@ fn emit_inst(
             asm.pext(d, s, m)?;
         }
 
-        MInst::Select { dst, cond, true_val, false_val } => {
+        MInst::Select {
+            dst,
+            cond,
+            true_val,
+            false_val,
+        } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let c = preg_to_reg64(resolve(assignment, *cond));
             let tv = preg_to_reg64(resolve(assignment, *true_val));
@@ -982,7 +997,10 @@ enum BinOp {
 impl BinOp {
     /// Whether the operation is commutative (a op b == b op a).
     fn is_commutative(&self) -> bool {
-        matches!(self, BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or | BinOp::Xor)
+        matches!(
+            self,
+            BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or | BinOp::Xor
+        )
     }
 }
 
@@ -1023,7 +1041,9 @@ fn emit_binop_rr_64(
             return Ok(());
         }
     } else {
-        if d != l { asm.mov(d, l)?; }
+        if d != l {
+            asm.mov(d, l)?;
+        }
         (d, r)
     };
 
@@ -1064,7 +1084,9 @@ fn emit_binop_rr_32(
             return Ok(());
         }
     } else {
-        if d != l { asm.mov(d, l)?; }
+        if d != l {
+            asm.mov(d, l)?;
+        }
         (d, r)
     };
 
@@ -1082,11 +1104,7 @@ fn emit_binop_rr_32(
 
 /// Emit AND with a potentially 64-bit immediate.
 /// Uses the most efficient encoding available.
-fn emit_or_imm64(
-    asm: &mut CodeAssembler,
-    d: AsmRegister64,
-    imm: u64,
-) -> Result<(), IcedError> {
+fn emit_or_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result<(), IcedError> {
     if imm == 0 {
         return Ok(());
     }
@@ -1100,11 +1118,7 @@ fn emit_or_imm64(
     Ok(())
 }
 
-fn emit_and_imm64(
-    asm: &mut CodeAssembler,
-    d: AsmRegister64,
-    imm: u64,
-) -> Result<(), IcedError> {
+fn emit_and_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result<(), IcedError> {
     if imm == u64::MAX {
         // AND with all-ones is a no-op
         return Ok(());
@@ -1133,9 +1147,7 @@ fn emit_and_imm64(
         };
         asm.and(d32, imm as i32)?;
     } else {
-        panic!(
-            "AndImm {imm:#x} exceeds u32: ISel should emit LoadImm + And instead"
-        );
+        panic!("AndImm {imm:#x} exceeds u32: ISel should emit LoadImm + And instead");
     }
     Ok(())
 }
@@ -1161,231 +1173,23 @@ pub fn emit_chained_eus(
 ) -> Result<Vec<u8>, IcedError> {
     use super::{isel, regalloc};
 
-    if units.len() == 1 {
-        let mut mfunc = isel::lower_execution_unit(&units[0], layout, four_state);
-        super::mir_opt::optimize(&mut mfunc);
-        let ra = regalloc::run_regalloc(&mut mfunc);
-        let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
-        return Ok(result.code);
-    }
-
     // SIR-level EU merge: combine all EUs into one SIR EU
-    let (mut merged_sir, sir_boundaries) = crate::ir::merge_sir_eus(units);
-
-    // Re-run SIR optimization on merged EU (cross-EU optimization)
-    crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
-        &mut merged_sir, &sir_boundaries,
-    );
-    crate::optimizer::coalescing::commit_ops::inline_commit_forwarding(&mut merged_sir);
-
-    // Single ISel + optimization + regalloc on the merged EU
-    let mut merged = isel::lower_execution_unit(&merged_sir, layout, four_state);
-
-    super::mir_opt::optimize(&mut merged);
-
-    // Step 3: Unified regalloc
-    let ra = regalloc::run_regalloc(&mut merged);
-
-    // Step 4: Compute frame layout
-    let callee_saved = used_callee_saved(&ra.assignment);
-    let callee_push_size = (callee_saved.len() as u32) * 8;
-    let total_push = callee_push_size + 8; // +8 for R15
-    let frame_size = {
-        let misalign = (total_push + ra.spill_frame_size) % 16;
-        if misalign == 0 { ra.spill_frame_size } else { ra.spill_frame_size + (16 - misalign) }
+    let (sir_eu, _sir_boundaries) = if units.len() > 1 {
+        let (mut merged, boundaries) = crate::ir::merge_sir_eus(units);
+        // Cross-EU SIR optimization
+        crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+            &mut merged, &boundaries,
+        );
+        crate::optimizer::coalescing::commit_ops::inline_commit_forwarding(&mut merged);
+        (merged, boundaries)
+    } else {
+        (units[0].clone(), vec![])
     };
 
-    // Step 5: Emit merged body (naked — no prologue/epilogue)
-    let body = emit_naked(&merged, &ra.assignment, frame_size)?;
-
-    // Step 6: Build shared prologue + epilogue
-    let prologue = {
-        let mut asm = CodeAssembler::new(64)?;
-        for &reg in &callee_saved { asm.push(preg_to_reg64(reg))?; }
-        asm.push(SIM_BASE)?;
-        if frame_size > 0 { asm.sub(rsp, frame_size as i32)?; }
-        asm.mov(SIM_BASE, rdi)?;
-        asm.assemble(0x0)?
-    };
-    let epilogue = {
-        let mut asm = CodeAssembler::new(64)?;
-        if frame_size > 0 { asm.add(rsp, frame_size as i32)?; }
-        asm.pop(SIM_BASE)?;
-        for &reg in callee_saved.iter().rev() { asm.pop(preg_to_reg64(reg))?; }
-        asm.ret()?;
-        asm.assemble(0x0)?
-    };
-
-    // Step 7: Assemble [prologue][body][epilogue] and patch return jmps
-    let mut combined: Vec<u8> = Vec::new();
-    combined.extend_from_slice(&prologue);
-    let body_offset = combined.len();
-    combined.extend_from_slice(&body.code);
-    let epilogue_offset = combined.len();
-    combined.extend_from_slice(&epilogue);
-
-    for &(patch_off, _) in &body.return_patches {
-        let abs = body_offset + patch_off;
-        let rel = (epilogue_offset as i64) - (abs as i64 + 5);
-        combined[abs + 1..abs + 5].copy_from_slice(&(rel as i32).to_le_bytes());
-    }
-
-    Ok(combined)
-}
-
-/// Merge multiple MFunctions into a single MFunction.
-/// Each EU's Return is replaced with Jump to the next EU's entry block.
-/// VRegs and BlockIds are renumbered to avoid conflicts.
-fn merge_mfunctions(funcs: &mut [MFunction]) -> MFunction {
-    use super::mir::*;
-
-    let mut merged_vregs = VRegAllocator::new();
-    let mut merged_spill_descs: Vec<SpillDesc> = Vec::new();
-    let mut merged_blocks: Vec<MBlock> = Vec::new();
-
-    // Pre-compute offsets
-    let mut vreg_offsets: Vec<u32> = Vec::new();
-    let mut block_offsets: Vec<u32> = Vec::new();
-    let mut vreg_offset = 0u32;
-    let mut block_offset = 0u32;
-
-    for func in funcs.iter() {
-        vreg_offsets.push(vreg_offset);
-        block_offsets.push(block_offset);
-        vreg_offset += func.vregs.count();
-        // Use max block id + 1 (not blocks.len()) to avoid ID collisions
-        // when SIR BlockIds are non-contiguous.
-        let max_bid = func.blocks.iter().map(|b| b.id.0).max().unwrap_or(0);
-        block_offset += max_bid + 1;
-    }
-
-    // Allocate all VRegs in merged allocator
-    for _ in 0..vreg_offset {
-        merged_vregs.alloc();
-    }
-
-    // Entry block IDs for each EU (after renumbering)
-    let eu_entry_blocks: Vec<BlockId> = funcs.iter().enumerate()
-        .map(|(i, f)| {
-            let first_block_id = f.blocks.first().map(|b| b.id.0).unwrap_or(0);
-            BlockId(first_block_id + block_offsets[i])
-        })
-        .collect();
-
-    for (eu_idx, func) in funcs.iter().enumerate() {
-        let vo = vreg_offsets[eu_idx];
-        let bo = block_offsets[eu_idx];
-        let is_last = eu_idx == funcs.len() - 1;
-        let next_entry = if !is_last { Some(eu_entry_blocks[eu_idx + 1]) } else { None };
-
-        // Copy spill descs with VReg offset
-        for desc in &func.spill_descs {
-            merged_spill_descs.push(desc.clone());
-        }
-
-        // Process blocks
-        for block in &func.blocks {
-            let new_block_id = BlockId(block.id.0 + bo);
-            let mut new_block = MBlock::new(new_block_id);
-
-            // Renumber phis
-            for phi in &block.phis {
-                let new_dst = VReg(phi.dst.0 + vo);
-                let new_sources: Vec<(BlockId, VReg)> = phi.sources.iter()
-                    .map(|(bid, vreg)| (BlockId(bid.0 + bo), VReg(vreg.0 + vo)))
-                    .collect();
-                new_block.phis.push(PhiNode { dst: new_dst, sources: new_sources });
-            }
-
-            // Renumber instructions
-            for inst in &block.insts {
-                let new_inst = renumber_inst(inst, vo, bo, is_last, next_entry);
-                new_block.insts.push(new_inst);
-            }
-
-            merged_blocks.push(new_block);
-        }
-    }
-
-    let mut merged = MFunction::new(merged_vregs, merged_spill_descs);
-    merged.blocks = merged_blocks;
-    merged
-}
-
-/// Renumber VRegs and BlockIds in an instruction.
-/// For non-final EUs, Return becomes Jump to next EU entry.
-fn renumber_inst(
-    inst: &MInst,
-    vo: u32,    // VReg offset
-    bo: u32,    // BlockId offset
-    is_last: bool,
-    next_entry: Option<BlockId>,
-) -> MInst {
-    use super::mir::*;
-
-    // Helper closures
-    let v = |vreg: VReg| VReg(vreg.0 + vo);
-    let b = |bid: BlockId| BlockId(bid.0 + bo);
-
-    match inst {
-        // Control flow: renumber block targets, handle Return
-        MInst::Return => {
-            if is_last {
-                MInst::Return
-            } else {
-                MInst::Jump { target: next_entry.unwrap() }
-            }
-        }
-        MInst::ReturnError { code } => MInst::ReturnError { code: *code },
-        MInst::Jump { target } => MInst::Jump { target: b(*target) },
-        MInst::Branch { cond, true_bb, false_bb } => MInst::Branch {
-            cond: v(*cond), true_bb: b(*true_bb), false_bb: b(*false_bb),
-        },
-
-        // Data movement
-        MInst::Mov { dst, src } => MInst::Mov { dst: v(*dst), src: v(*src) },
-        MInst::LoadImm { dst, value } => MInst::LoadImm { dst: v(*dst), value: *value },
-        MInst::Load { dst, base, offset, size } => MInst::Load { dst: v(*dst), base: *base, offset: *offset, size: *size },
-        MInst::Store { base, offset, src, size } => MInst::Store { base: *base, offset: *offset, src: v(*src), size: *size },
-        MInst::LoadIndexed { dst, base, offset, index, size } => MInst::LoadIndexed { dst: v(*dst), base: *base, offset: *offset, index: v(*index), size: *size },
-        MInst::StoreIndexed { base, offset, index, src, size } => MInst::StoreIndexed { base: *base, offset: *offset, index: v(*index), src: v(*src), size: *size },
-
-        // ALU reg-reg
-        MInst::Add { dst, lhs, rhs } => MInst::Add { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::Sub { dst, lhs, rhs } => MInst::Sub { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::Mul { dst, lhs, rhs } => MInst::Mul { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::UMulHi { dst, lhs, rhs } => MInst::UMulHi { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::And { dst, lhs, rhs } => MInst::And { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::Or { dst, lhs, rhs } => MInst::Or { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::Xor { dst, lhs, rhs } => MInst::Xor { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::Shr { dst, lhs, rhs } => MInst::Shr { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::Shl { dst, lhs, rhs } => MInst::Shl { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::Sar { dst, lhs, rhs } => MInst::Sar { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::UDiv { dst, lhs, rhs } => MInst::UDiv { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-        MInst::URem { dst, lhs, rhs } => MInst::URem { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs) },
-
-        // ALU with immediate
-        MInst::AndImm { dst, src, imm } => MInst::AndImm { dst: v(*dst), src: v(*src), imm: *imm },
-        MInst::OrImm { dst, src, imm } => MInst::OrImm { dst: v(*dst), src: v(*src), imm: *imm },
-        MInst::ShrImm { dst, src, imm } => MInst::ShrImm { dst: v(*dst), src: v(*src), imm: *imm },
-        MInst::ShlImm { dst, src, imm } => MInst::ShlImm { dst: v(*dst), src: v(*src), imm: *imm },
-        MInst::SarImm { dst, src, imm } => MInst::SarImm { dst: v(*dst), src: v(*src), imm: *imm },
-        MInst::AddImm { dst, src, imm } => MInst::AddImm { dst: v(*dst), src: v(*src), imm: *imm },
-        MInst::SubImm { dst, src, imm } => MInst::SubImm { dst: v(*dst), src: v(*src), imm: *imm },
-
-        // Comparison
-        MInst::Cmp { dst, lhs, rhs, kind } => MInst::Cmp { dst: v(*dst), lhs: v(*lhs), rhs: v(*rhs), kind: *kind },
-        MInst::CmpImm { dst, lhs, imm, kind } => MInst::CmpImm { dst: v(*dst), lhs: v(*lhs), imm: *imm, kind: *kind },
-
-        // Unary
-        MInst::BitNot { dst, src } => MInst::BitNot { dst: v(*dst), src: v(*src) },
-        MInst::Neg { dst, src } => MInst::Neg { dst: v(*dst), src: v(*src) },
-        MInst::Popcnt { dst, src } => MInst::Popcnt { dst: v(*dst), src: v(*src) },
-        MInst::Pext { dst, src, mask } => MInst::Pext { dst: v(*dst), src: v(*src), mask: v(*mask) },
-
-        // Select
-        MInst::Select { dst, cond, true_val, false_val } => MInst::Select {
-            dst: v(*dst), cond: v(*cond), true_val: v(*true_val), false_val: v(*false_val),
-        },
-    }
+    // Single ISel + optimize + regalloc + emit
+    let mut mfunc = isel::lower_execution_unit(&sir_eu, layout, four_state);
+    super::mir_opt::optimize(&mut mfunc);
+    let ra = regalloc::run_regalloc(&mut mfunc);
+    let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
+    Ok(result.code)
 }

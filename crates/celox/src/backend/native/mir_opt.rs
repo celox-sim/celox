@@ -68,49 +68,85 @@ fn constant_fold(func: &mut MFunction) {
             for inst in &mut block.insts {
                 let folded = match inst {
                     // Binary reg-reg with both constant
-                    MInst::Add { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_add),
-                    MInst::Sub { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_sub),
-                    MInst::Mul { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_mul),
-                    MInst::And { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a & b),
-                    MInst::Or { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a | b),
-                    MInst::Xor { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a ^ b),
-                    MInst::Shr { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, |a, b| {
-                        if b >= 64 { 0 } else { a >> b }
-                    }),
-                    MInst::Shl { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, |a, b| {
-                        if b >= 64 { 0 } else { a << b }
-                    }),
+                    MInst::Add { dst, lhs, rhs } => {
+                        fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_add)
+                    }
+                    MInst::Sub { dst, lhs, rhs } => {
+                        fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_sub)
+                    }
+                    MInst::Mul { dst, lhs, rhs } => {
+                        fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_mul)
+                    }
+                    MInst::And { dst, lhs, rhs } => {
+                        fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a & b)
+                    }
+                    MInst::Or { dst, lhs, rhs } => {
+                        fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a | b)
+                    }
+                    MInst::Xor { dst, lhs, rhs } => {
+                        fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a ^ b)
+                    }
+                    MInst::Shr { dst, lhs, rhs } => {
+                        fold_bin(
+                            &consts,
+                            *dst,
+                            *lhs,
+                            *rhs,
+                            |a, b| {
+                                if b >= 64 { 0 } else { a >> b }
+                            },
+                        )
+                    }
+                    MInst::Shl { dst, lhs, rhs } => {
+                        fold_bin(
+                            &consts,
+                            *dst,
+                            *lhs,
+                            *rhs,
+                            |a, b| {
+                                if b >= 64 { 0 } else { a << b }
+                            },
+                        )
+                    }
                     MInst::Sar { dst, lhs, rhs } => fold_bin(&consts, *dst, *lhs, *rhs, |a, b| {
-                        if b >= 64 { ((a as i64) >> 63) as u64 } else { ((a as i64) >> b) as u64 }
+                        if b >= 64 {
+                            ((a as i64) >> 63) as u64
+                        } else {
+                            ((a as i64) >> b) as u64
+                        }
                     }),
                     // Binary imm with constant src
-                    MInst::AndImm { dst, src, imm } => {
-                        consts.get(src).map(|&v| (*dst, v & *imm))
-                    }
-                    MInst::OrImm { dst, src, imm } => {
-                        consts.get(src).map(|&v| (*dst, v | *imm))
-                    }
-                    MInst::ShrImm { dst, src, imm } => {
-                        consts.get(src).map(|&v| (*dst, if *imm >= 64 { 0 } else { v >> *imm }))
-                    }
-                    MInst::ShlImm { dst, src, imm } => {
-                        consts.get(src).map(|&v| (*dst, if *imm >= 64 { 0 } else { v << *imm }))
-                    }
-                    MInst::SarImm { dst, src, imm } => {
-                        consts.get(src).map(|&v| (*dst, if *imm >= 64 { ((v as i64) >> 63) as u64 } else { ((v as i64) >> *imm) as u64 }))
-                    }
+                    MInst::AndImm { dst, src, imm } => consts.get(src).map(|&v| (*dst, v & *imm)),
+                    MInst::OrImm { dst, src, imm } => consts.get(src).map(|&v| (*dst, v | *imm)),
+                    MInst::ShrImm { dst, src, imm } => consts
+                        .get(src)
+                        .map(|&v| (*dst, if *imm >= 64 { 0 } else { v >> *imm })),
+                    MInst::ShlImm { dst, src, imm } => consts
+                        .get(src)
+                        .map(|&v| (*dst, if *imm >= 64 { 0 } else { v << *imm })),
+                    MInst::SarImm { dst, src, imm } => consts.get(src).map(|&v| {
+                        (
+                            *dst,
+                            if *imm >= 64 {
+                                ((v as i64) >> 63) as u64
+                            } else {
+                                ((v as i64) >> *imm) as u64
+                            },
+                        )
+                    }),
                     // Unary with constant src
-                    MInst::BitNot { dst, src } => {
-                        consts.get(src).map(|&v| (*dst, !v))
-                    }
-                    MInst::Neg { dst, src } => {
-                        consts.get(src).map(|&v| (*dst, v.wrapping_neg()))
-                    }
+                    MInst::BitNot { dst, src } => consts.get(src).map(|&v| (*dst, !v)),
+                    MInst::Neg { dst, src } => consts.get(src).map(|&v| (*dst, v.wrapping_neg())),
                     MInst::Popcnt { dst, src } => {
                         consts.get(src).map(|&v| (*dst, v.count_ones() as u64))
                     }
                     // Comparison with both constant
-                    MInst::Cmp { dst, lhs, rhs, kind } => {
+                    MInst::Cmp {
+                        dst,
+                        lhs,
+                        rhs,
+                        kind,
+                    } => {
                         if let (Some(&l), Some(&r)) = (consts.get(lhs), consts.get(rhs)) {
                             let result = match kind {
                                 CmpKind::Eq => l == r,
@@ -210,9 +246,15 @@ fn redundant_mask_eliminate(func: &mut MFunction) {
                 // Check 2: AND chain folding — AndImm(AndImm(x, m1), m2) → AndImm(x, m1 & m2)
                 } else {
                     None
-                }.or_else(|| {
+                }
+                .or_else(|| {
                     // AND chain: if src was defined by AndImm(inner, m1), fold to AndImm(inner, m1 & imm)
-                    if let Some(MInst::AndImm { src: inner, imm: m1, .. }) = def_map.get(src) {
+                    if let Some(MInst::AndImm {
+                        src: inner,
+                        imm: m1,
+                        ..
+                    }) = def_map.get(src)
+                    {
                         let folded = *m1 & *imm;
                         Some(MaskElimAction::FoldAnd(*dst, *inner, folded))
                     } else {
@@ -232,8 +274,16 @@ fn redundant_mask_eliminate(func: &mut MFunction) {
                         }
                     }
                     MaskElimAction::FoldAnd(dst, inner, folded_mask) => {
-                        *inst = MInst::AndImm { dst, src: inner, imm: folded_mask };
-                        let w = if folded_mask == 0 { 0 } else { 64 - folded_mask.leading_zeros() as usize };
+                        *inst = MInst::AndImm {
+                            dst,
+                            src: inner,
+                            imm: folded_mask,
+                        };
+                        let w = if folded_mask == 0 {
+                            0
+                        } else {
+                            64 - folded_mask.leading_zeros() as usize
+                        };
                         known.insert(dst, w);
                     }
                 }
@@ -258,7 +308,11 @@ enum MaskElimAction {
 fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usize> {
     match inst {
         MInst::LoadImm { value, .. } => {
-            if *value == 0 { Some(0) } else { Some(64 - value.leading_zeros() as usize) }
+            if *value == 0 {
+                Some(0)
+            } else {
+                Some(64 - value.leading_zeros() as usize)
+            }
         }
         MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => {
             Some(size.bytes() as usize * 8)
@@ -267,29 +321,31 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
         MInst::Popcnt { .. } => Some(7), // max popcnt(u64) = 64, fits in 7 bits
         MInst::Mov { src, .. } => known.get(src).copied(),
         MInst::AndImm { src, imm, .. } => {
-            let imm_w = if *imm == 0 { 0 } else { 64 - imm.leading_zeros() as usize };
+            let imm_w = if *imm == 0 {
+                0
+            } else {
+                64 - imm.leading_zeros() as usize
+            };
             let src_w = known.get(src).copied().unwrap_or(64);
             Some(src_w.min(imm_w))
         }
         MInst::OrImm { src, imm, .. } => {
-            let imm_w = if *imm == 0 { 0 } else { 64 - imm.leading_zeros() as usize };
+            let imm_w = if *imm == 0 {
+                0
+            } else {
+                64 - imm.leading_zeros() as usize
+            };
             let src_w = known.get(src).copied().unwrap_or(64);
             Some(src_w.max(imm_w))
         }
-        MInst::ShrImm { src, imm, .. } => {
-            known.get(src).map(|&w| w.saturating_sub(*imm as usize))
-        }
-        MInst::ShlImm { src, imm, .. } => {
-            known.get(src).map(|&w| (w + *imm as usize).min(64))
-        }
-        MInst::And { lhs, rhs, .. } => {
-            match (known.get(lhs), known.get(rhs)) {
-                (Some(&l), Some(&r)) => Some(l.min(r)),
-                (Some(&l), None) => Some(l),
-                (None, Some(&r)) => Some(r),
-                _ => None,
-            }
-        }
+        MInst::ShrImm { src, imm, .. } => known.get(src).map(|&w| w.saturating_sub(*imm as usize)),
+        MInst::ShlImm { src, imm, .. } => known.get(src).map(|&w| (w + *imm as usize).min(64)),
+        MInst::And { lhs, rhs, .. } => match (known.get(lhs), known.get(rhs)) {
+            (Some(&l), Some(&r)) => Some(l.min(r)),
+            (Some(&l), None) => Some(l),
+            (None, Some(&r)) => Some(r),
+            _ => None,
+        },
         MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => {
             match (known.get(lhs), known.get(rhs)) {
                 (Some(&l), Some(&r)) => Some(l.max(r)),
@@ -302,18 +358,18 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
                 _ => None,
             }
         }
-        MInst::Mul { lhs, rhs, .. } => {
-            match (known.get(lhs), known.get(rhs)) {
-                (Some(&l), Some(&r)) => Some((l + r).min(64)),
-                _ => None,
-            }
-        }
-        MInst::Select { true_val, false_val, .. } => {
-            match (known.get(true_val), known.get(false_val)) {
-                (Some(&t), Some(&f)) => Some(t.max(f)),
-                _ => None,
-            }
-        }
+        MInst::Mul { lhs, rhs, .. } => match (known.get(lhs), known.get(rhs)) {
+            (Some(&l), Some(&r)) => Some((l + r).min(64)),
+            _ => None,
+        },
+        MInst::Select {
+            true_val,
+            false_val,
+            ..
+        } => match (known.get(true_val), known.get(false_val)) {
+            (Some(&t), Some(&f)) => Some(t.max(f)),
+            _ => None,
+        },
         MInst::Pext { .. } => Some(64), // conservative
         _ => None,
     }
@@ -338,7 +394,7 @@ enum GvnKey {
     CmpI(u8, VReg, i32, u8),
     AddI(VReg, i32),
     SubI(VReg, i32),
-    Load(u8, i32, u8),  // base(SimState=0,Stack=1), offset, size
+    Load(u8, i32, u8), // base(SimState=0,Stack=1), offset, size
 }
 
 const GVN_ADD: u8 = 1;
@@ -386,13 +442,18 @@ fn gvn_key(inst: &MInst) -> Option<GvnKey> {
         MInst::Popcnt { src, .. } => Some(GvnKey::Unary(GVN_POPCNT, *src)),
         MInst::Pext { src, mask, .. } => Some(GvnKey::BinRR(GVN_PEXT, *src, *mask)),
         MInst::Cmp { lhs, rhs, kind, .. } => Some(GvnKey::Cmp(GVN_CMP, *lhs, *rhs, *kind as u8)),
-        MInst::CmpImm { lhs, imm, kind, .. } => Some(GvnKey::CmpI(GVN_CMP, *lhs, *imm, *kind as u8)),
+        MInst::CmpImm { lhs, imm, kind, .. } => {
+            Some(GvnKey::CmpI(GVN_CMP, *lhs, *imm, *kind as u8))
+        }
         MInst::AddImm { src, imm, .. } => Some(GvnKey::AddI(*src, *imm)),
         MInst::SubImm { src, imm, .. } => Some(GvnKey::SubI(*src, *imm)),
         // Loads from SimState with fixed offset can be CSE'd (no aliasing stores between)
-        MInst::Load { base: BaseReg::SimState, offset, size, .. } => {
-            Some(GvnKey::Load(0, *offset, *size as u8))
-        }
+        MInst::Load {
+            base: BaseReg::SimState,
+            offset,
+            size,
+            ..
+        } => Some(GvnKey::Load(0, *offset, *size as u8)),
         _ => None,
     }
 }
@@ -413,10 +474,14 @@ fn is_memory_clobber(inst: &MInst) -> bool {
 /// Global GVN: dominator-tree-scoped value numbering.
 fn global_gvn(func: &mut MFunction) {
     let num_blocks = func.blocks.len();
-    if num_blocks == 0 { return; }
+    if num_blocks == 0 {
+        return;
+    }
 
     // Build block index map: BlockId → index
-    let block_id_to_idx: HashMap<BlockId, usize> = func.blocks.iter()
+    let block_id_to_idx: HashMap<BlockId, usize> = func
+        .blocks
+        .iter()
         .enumerate()
         .map(|(i, b)| (b.id, i))
         .collect();
@@ -553,18 +618,29 @@ fn global_gvn(func: &mut MFunction) {
                 // Only invalidate Load CSE entries that might alias with this Store.
                 // SimState loads/stores at different offsets don't alias.
                 let (store_base, store_off, store_size) = match inst {
-                    MInst::Store { base, offset, size, .. } => (Some(*base), *offset, size.bytes() as i32),
+                    MInst::Store {
+                        base, offset, size, ..
+                    } => (Some(*base), *offset, size.bytes() as i32),
                     MInst::StoreIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
                     _ => (None, 0, 0),
                 };
-                let load_keys: Vec<GvnKey> = value_table.keys()
+                let load_keys: Vec<GvnKey> = value_table
+                    .keys()
                     .filter(|k| {
                         if let GvnKey::Load(base, off, sz) = k {
                             // Keep if provably non-aliasing (same base, non-overlapping offset)
                             if let Some(sb) = store_base {
-                                let sb_val = match sb { BaseReg::SimState => 0u8, BaseReg::StackFrame => 1u8 };
+                                let sb_val = match sb {
+                                    BaseReg::SimState => 0u8,
+                                    BaseReg::StackFrame => 1u8,
+                                };
                                 if *base == sb_val {
-                                    let load_bytes = match *sz { 0 => 1, 1 => 2, 2 => 4, _ => 8 }; // OpSize enum → bytes
+                                    let load_bytes = match *sz {
+                                        0 => 1,
+                                        1 => 2,
+                                        2 => 4,
+                                        _ => 8,
+                                    }; // OpSize enum → bytes
                                     let load_end = *off + load_bytes;
                                     let store_end = store_off + store_size;
                                     // Non-overlapping ranges → no alias
@@ -698,9 +774,7 @@ fn algebraic_simplify(func: &mut MFunction) {
                 }
                 // Identity: mul x, 1 → x; annihilation: mul x, 0 → 0
                 // Strength reduction: mul x, 2^n → shl x, n
-                MInst::Mul { dst, lhs, rhs } => {
-                    try_simplify_mul(*dst, *lhs, *rhs, &consts)
-                }
+                MInst::Mul { dst, lhs, rhs } => try_simplify_mul(*dst, *lhs, *rhs, &consts),
                 // Identity: and x, -1 → x; annihilation: and x, 0 → 0
                 MInst::And { dst, lhs, rhs } => {
                     if consts.get(rhs) == Some(&u64::MAX) {
@@ -740,16 +814,18 @@ fn algebraic_simplify(func: &mut MFunction) {
                     }
                 }
                 // Identity: shr/shl/sar x, 0 → x
-                MInst::Shr { dst, lhs, rhs } | MInst::Shl { dst, lhs, rhs } | MInst::Sar { dst, lhs, rhs } => {
+                MInst::Shr { dst, lhs, rhs }
+                | MInst::Shl { dst, lhs, rhs }
+                | MInst::Sar { dst, lhs, rhs } => {
                     if consts.get(rhs) == Some(&0) {
                         Some(Simplification::Mov(*dst, *lhs))
                     } else {
                         None
                     }
                 }
-                MInst::ShrImm { dst, src, imm: 0 } | MInst::ShlImm { dst, src, imm: 0 } | MInst::SarImm { dst, src, imm: 0 } => {
-                    Some(Simplification::Mov(*dst, *src))
-                }
+                MInst::ShrImm { dst, src, imm: 0 }
+                | MInst::ShlImm { dst, src, imm: 0 }
+                | MInst::SarImm { dst, src, imm: 0 } => Some(Simplification::Mov(*dst, *src)),
                 // AND chain: and(x, m) with immediate where m is mask
                 MInst::AndImm { dst, src, imm } => {
                     if *imm == u64::MAX {
@@ -761,9 +837,7 @@ fn algebraic_simplify(func: &mut MFunction) {
                     }
                 }
                 // OrImm identity
-                MInst::OrImm { dst, src, imm: 0 } => {
-                    Some(Simplification::Mov(*dst, *src))
-                }
+                MInst::OrImm { dst, src, imm: 0 } => Some(Simplification::Mov(*dst, *src)),
                 // Double negate
                 MInst::BitNot { dst, src } => {
                     if let Some(&c) = consts.get(src) {
@@ -780,7 +854,12 @@ fn algebraic_simplify(func: &mut MFunction) {
                     }
                 }
                 // Select with constant condition
-                MInst::Select { dst, cond, true_val, false_val } => {
+                MInst::Select {
+                    dst,
+                    cond,
+                    true_val,
+                    false_val,
+                } => {
                     if let Some(&c) = consts.get(cond) {
                         if c != 0 {
                             Some(Simplification::Mov(*dst, *true_val))
@@ -826,7 +905,12 @@ enum Simplification {
     Shl(VReg, VReg, u8),
 }
 
-fn try_simplify_mul(dst: VReg, lhs: VReg, rhs: VReg, consts: &HashMap<VReg, u64>) -> Option<Simplification> {
+fn try_simplify_mul(
+    dst: VReg,
+    lhs: VReg,
+    rhs: VReg,
+    consts: &HashMap<VReg, u64>,
+) -> Option<Simplification> {
     // Check each operand for constant
     for &(val_vreg, const_vreg) in &[(lhs, rhs), (rhs, lhs)] {
         if let Some(&c) = consts.get(&const_vreg) {
@@ -861,8 +945,12 @@ fn try_simplify_mul(dst: VReg, lhs: VReg, rhs: VReg, consts: &HashMap<VReg, u64>
 /// Converted to:
 ///   bb_head: ... <true_insts> <false_insts> select cond, true_val, false_val; store; jump bb_merge
 fn if_convert(func: &mut MFunction) {
-    let block_map: HashMap<BlockId, usize> = func.blocks.iter()
-        .enumerate().map(|(i, b)| (b.id, i)).collect();
+    let block_map: HashMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
 
     // Collect conversion candidates
     struct Diamond {
@@ -874,17 +962,32 @@ fn if_convert(func: &mut MFunction) {
     let mut diamonds: Vec<Diamond> = Vec::new();
 
     for (i, block) in func.blocks.iter().enumerate() {
-        let Some(MInst::Branch { cond: _, true_bb, false_bb }) = block.terminator() else { continue };
-        let Some(&ti) = block_map.get(true_bb) else { continue };
-        let Some(&fi) = block_map.get(false_bb) else { continue };
+        let Some(MInst::Branch {
+            cond: _,
+            true_bb,
+            false_bb,
+        }) = block.terminator()
+        else {
+            continue;
+        };
+        let Some(&ti) = block_map.get(true_bb) else {
+            continue;
+        };
+        let Some(&fi) = block_map.get(false_bb) else {
+            continue;
+        };
 
         let true_block = &func.blocks[ti];
         let false_block = &func.blocks[fi];
 
         // Both arms must be small (≤ 3 instructions including terminator)
-        if true_block.insts.len() > 3 || false_block.insts.len() > 3 { continue; }
+        if true_block.insts.len() > 3 || false_block.insts.len() > 3 {
+            continue;
+        }
         // No phi nodes in arms
-        if !true_block.phis.is_empty() || !false_block.phis.is_empty() { continue; }
+        if !true_block.phis.is_empty() || !false_block.phis.is_empty() {
+            continue;
+        }
 
         // Both must end with Jump to the same merge block
         let true_target = match true_block.terminator() {
@@ -895,23 +998,40 @@ fn if_convert(func: &mut MFunction) {
             Some(MInst::Jump { target }) => *target,
             _ => continue,
         };
-        if true_target != false_target { continue; }
+        if true_target != false_target {
+            continue;
+        }
 
         // Arms must only contain stores and pure computations (no loads, no branches)
         let arms_ok = |block: &MBlock| -> bool {
-            block.insts.iter().all(|inst| matches!(inst,
-                MInst::Store { .. } | MInst::StoreIndexed { .. }
-                | MInst::Load { .. } | MInst::LoadImm { .. } | MInst::Mov { .. }
-                | MInst::Add { .. } | MInst::Sub { .. } | MInst::Mul { .. }
-                | MInst::And { .. } | MInst::Or { .. } | MInst::Xor { .. }
-                | MInst::AndImm { .. } | MInst::OrImm { .. }
-                | MInst::ShrImm { .. } | MInst::ShlImm { .. }
-                | MInst::AddImm { .. } | MInst::SubImm { .. }
-                | MInst::Select { .. }
-                | MInst::Jump { .. }
-            ))
+            block.insts.iter().all(|inst| {
+                matches!(
+                    inst,
+                    MInst::Store { .. }
+                        | MInst::StoreIndexed { .. }
+                        | MInst::Load { .. }
+                        | MInst::LoadImm { .. }
+                        | MInst::Mov { .. }
+                        | MInst::Add { .. }
+                        | MInst::Sub { .. }
+                        | MInst::Mul { .. }
+                        | MInst::And { .. }
+                        | MInst::Or { .. }
+                        | MInst::Xor { .. }
+                        | MInst::AndImm { .. }
+                        | MInst::OrImm { .. }
+                        | MInst::ShrImm { .. }
+                        | MInst::ShlImm { .. }
+                        | MInst::AddImm { .. }
+                        | MInst::SubImm { .. }
+                        | MInst::Select { .. }
+                        | MInst::Jump { .. }
+                )
+            })
         };
-        if !arms_ok(true_block) || !arms_ok(false_block) { continue; }
+        if !arms_ok(true_block) || !arms_ok(false_block) {
+            continue;
+        }
 
         diamonds.push(Diamond {
             head_idx: i,
@@ -929,10 +1049,18 @@ fn if_convert(func: &mut MFunction) {
         };
 
         // Collect non-terminator instructions from both arms
-        let true_insts: Vec<MInst> = func.blocks[diamond.true_idx].insts.iter()
-            .filter(|i| !i.is_terminator()).cloned().collect();
-        let false_insts: Vec<MInst> = func.blocks[diamond.false_idx].insts.iter()
-            .filter(|i| !i.is_terminator()).cloned().collect();
+        let true_insts: Vec<MInst> = func.blocks[diamond.true_idx]
+            .insts
+            .iter()
+            .filter(|i| !i.is_terminator())
+            .cloned()
+            .collect();
+        let false_insts: Vec<MInst> = func.blocks[diamond.false_idx]
+            .insts
+            .iter()
+            .filter(|i| !i.is_terminator())
+            .cloned()
+            .collect();
 
         // Find matching stores: both arms store to the same address
         // Replace with: compute both values, select, store once
@@ -941,9 +1069,21 @@ fn if_convert(func: &mut MFunction) {
 
         // Check for paired stores (same base+offset in both arms)
         for t_inst in &true_insts {
-            if let MInst::Store { base: t_base, offset: t_off, src: t_src, size: t_size } = t_inst {
+            if let MInst::Store {
+                base: t_base,
+                offset: t_off,
+                src: t_src,
+                size: t_size,
+            } = t_inst
+            {
                 for f_inst in &false_insts {
-                    if let MInst::Store { base: f_base, offset: f_off, src: f_src, size: f_size } = f_inst {
+                    if let MInst::Store {
+                        base: f_base,
+                        offset: f_off,
+                        src: f_src,
+                        size: f_size,
+                    } = f_inst
+                    {
                         if t_base == f_base && t_off == f_off && t_size == f_size {
                             // Found matching store! Generate select + store
                             // First, add any computation instructions from both arms
@@ -982,7 +1122,9 @@ fn if_convert(func: &mut MFunction) {
             }
         }
 
-        if handled_stores.is_empty() { continue; }
+        if handled_stores.is_empty() {
+            continue;
+        }
 
         // Add remaining unhandled stores from both arms (shouldn't happen for simple cases)
         // Remove the branch from head block, add merged instructions + jump to merge
@@ -992,13 +1134,19 @@ fn if_convert(func: &mut MFunction) {
         // Add merged instructions
         head.insts.extend(merged_insts);
         // Jump to merge block
-        head.insts.push(MInst::Jump { target: diamond.merge_id });
+        head.insts.push(MInst::Jump {
+            target: diamond.merge_id,
+        });
 
         // Mark true/false blocks as empty (will be cleaned up by simplify_cfg)
         func.blocks[diamond.true_idx].insts.clear();
-        func.blocks[diamond.true_idx].insts.push(MInst::Jump { target: diamond.merge_id });
+        func.blocks[diamond.true_idx].insts.push(MInst::Jump {
+            target: diamond.merge_id,
+        });
         func.blocks[diamond.false_idx].insts.clear();
-        func.blocks[diamond.false_idx].insts.push(MInst::Jump { target: diamond.merge_id });
+        func.blocks[diamond.false_idx].insts.push(MInst::Jump {
+            target: diamond.merge_id,
+        });
     }
 }
 
@@ -1021,7 +1169,9 @@ fn simplify_cfg(func: &mut MFunction) {
         }
     }
 
-    if redirect.is_empty() { return; }
+    if redirect.is_empty() {
+        return;
+    }
 
     // Transitively resolve redirects
     let mut resolved: HashMap<BlockId, BlockId> = HashMap::new();
@@ -1029,7 +1179,9 @@ fn simplify_cfg(func: &mut MFunction) {
         let mut target = src;
         let mut seen = std::collections::HashSet::new();
         while let Some(&next) = redirect.get(&target) {
-            if !seen.insert(next) { break; } // cycle
+            if !seen.insert(next) {
+                break;
+            } // cycle
             target = next;
         }
         if target != src {
@@ -1046,7 +1198,9 @@ fn simplify_cfg(func: &mut MFunction) {
                         *target = new_target;
                     }
                 }
-                MInst::Branch { true_bb, false_bb, .. } => {
+                MInst::Branch {
+                    true_bb, false_bb, ..
+                } => {
                     if let Some(&new_t) = resolved.get(true_bb) {
                         *true_bb = new_t;
                     }
@@ -1069,9 +1223,8 @@ fn simplify_cfg(func: &mut MFunction) {
 
     // Remove empty blocks that are now unreachable (keep entry block)
     let entry = func.blocks.first().map(|b| b.id);
-    func.blocks.retain(|block| {
-        Some(block.id) == entry || !resolved.contains_key(&block.id)
-    });
+    func.blocks
+        .retain(|block| Some(block.id) == entry || !resolved.contains_key(&block.id));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1101,7 +1254,9 @@ fn sink_loads(func: &mut MFunction) {
 
         for (i, inst) in block.insts.iter().enumerate() {
             // Only sink LoadImm (always safe — no memory dependency)
-            if !matches!(inst, MInst::LoadImm { .. }) { continue; }
+            if !matches!(inst, MInst::LoadImm { .. }) {
+                continue;
+            }
             let Some(def) = inst.def() else { continue };
 
             if let Some(&use_pos) = first_use.get(&def) {
@@ -1171,13 +1326,19 @@ fn split_live_ranges(func: &mut MFunction) {
 
         // Check each used VReg: if defined much earlier in the same block, split
         for (&vreg, &use_pos) in &first_use_in_block {
-            let Some(&(def_bi, def_ii, ref def_inst)) = def_info.get(&vreg) else { continue };
+            let Some(&(def_bi, def_ii, ref def_inst)) = def_info.get(&vreg) else {
+                continue;
+            };
 
             // Only handle same-block for now (cross-block is complex)
-            if def_bi != bi { continue; }
+            if def_bi != bi {
+                continue;
+            }
 
             let gap = use_pos.saturating_sub(def_ii);
-            if gap < SPLIT_THRESHOLD { continue; }
+            if gap < SPLIT_THRESHOLD {
+                continue;
+            }
 
             // Determine re-materialization strategy
             let remat = match def_inst {
@@ -1186,9 +1347,15 @@ fn split_live_ranges(func: &mut MFunction) {
                     // Only split if sink_loads didn't handle it (gap check is different)
                     Some(RematKind::Imm(*value))
                 }
-                MInst::Load { base: BaseReg::SimState, offset, size, .. } => {
+                MInst::Load {
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                    ..
+                } => {
                     // Check no Store between def and use (conservative)
-                    let has_store = block.insts[def_ii+1..use_pos].iter()
+                    let has_store = block.insts[def_ii + 1..use_pos]
+                        .iter()
                         .any(|i| matches!(i, MInst::Store { .. } | MInst::StoreIndexed { .. }));
                     if !has_store {
                         Some(RematKind::SimLoad(*offset, *size))
@@ -1203,7 +1370,12 @@ fn split_live_ranges(func: &mut MFunction) {
             };
 
             if let Some(kind) = remat {
-                splits.push(SplitAction { block_idx: bi, use_pos, vreg, kind });
+                splits.push(SplitAction {
+                    block_idx: bi,
+                    use_pos,
+                    vreg,
+                    kind,
+                });
             }
         }
     }
@@ -1293,29 +1465,51 @@ fn lower_to_imm_forms(func: &mut MFunction) {
     for block in &mut func.blocks {
         for inst in &mut block.insts {
             match inst {
-                MInst::Cmp { dst, lhs, rhs, kind } => {
+                MInst::Cmp {
+                    dst,
+                    lhs,
+                    rhs,
+                    kind,
+                } => {
                     if let Some(&val) = consts.get(rhs) {
                         if val as i64 >= i32::MIN as i64 && val as i64 <= i32::MAX as i64 {
-                            *inst = MInst::CmpImm { dst: *dst, lhs: *lhs, imm: val as i32, kind: *kind };
+                            *inst = MInst::CmpImm {
+                                dst: *dst,
+                                lhs: *lhs,
+                                imm: val as i32,
+                                kind: *kind,
+                            };
                         }
                     }
                 }
                 MInst::Add { dst, lhs, rhs } => {
                     if let Some(&val) = consts.get(rhs) {
                         if val as i64 >= i32::MIN as i64 && val as i64 <= i32::MAX as i64 {
-                            *inst = MInst::AddImm { dst: *dst, src: *lhs, imm: val as i32 };
+                            *inst = MInst::AddImm {
+                                dst: *dst,
+                                src: *lhs,
+                                imm: val as i32,
+                            };
                         }
                     } else if let Some(&val) = consts.get(lhs) {
                         // Add is commutative
                         if val as i64 >= i32::MIN as i64 && val as i64 <= i32::MAX as i64 {
-                            *inst = MInst::AddImm { dst: *dst, src: *rhs, imm: val as i32 };
+                            *inst = MInst::AddImm {
+                                dst: *dst,
+                                src: *rhs,
+                                imm: val as i32,
+                            };
                         }
                     }
                 }
                 MInst::Sub { dst, lhs, rhs } => {
                     if let Some(&val) = consts.get(rhs) {
                         if val as i64 >= i32::MIN as i64 && val as i64 <= i32::MAX as i64 {
-                            *inst = MInst::SubImm { dst: *dst, src: *lhs, imm: val as i32 };
+                            *inst = MInst::SubImm {
+                                dst: *dst,
+                                src: *lhs,
+                                imm: val as i32,
+                            };
                         }
                     }
                 }
@@ -1345,42 +1539,52 @@ fn compute_value_widths(func: &mut MFunction) {
         for inst in &block.insts {
             let w: Option<u8> = match inst {
                 MInst::LoadImm { value, .. } => {
-                    if *value == 0 { Some(0) } else { Some((64 - value.leading_zeros()) as u8) }
+                    if *value == 0 {
+                        Some(0)
+                    } else {
+                        Some((64 - value.leading_zeros()) as u8)
+                    }
                 }
                 MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => {
                     Some((size.bytes() * 8) as u8)
                 }
                 MInst::Cmp { .. } | MInst::CmpImm { .. } => Some(1),
                 MInst::Popcnt { .. } => Some(7),
-                MInst::Mov { src, .. } => {
-                    widths.get(src.0 as usize).copied().flatten()
-                }
+                MInst::Mov { src, .. } => widths.get(src.0 as usize).copied().flatten(),
                 MInst::AndImm { src, imm, .. } => {
-                    let imm_w = if *imm == 0 { 0 } else { (64 - imm.leading_zeros()) as u8 };
+                    let imm_w = if *imm == 0 {
+                        0
+                    } else {
+                        (64 - imm.leading_zeros()) as u8
+                    };
                     let src_w = widths.get(src.0 as usize).copied().flatten().unwrap_or(64);
                     Some(src_w.min(imm_w))
                 }
                 MInst::OrImm { src, imm, .. } => {
-                    let imm_w = if *imm == 0 { 0 } else { (64 - imm.leading_zeros()) as u8 };
+                    let imm_w = if *imm == 0 {
+                        0
+                    } else {
+                        (64 - imm.leading_zeros()) as u8
+                    };
                     let src_w = widths.get(src.0 as usize).copied().flatten().unwrap_or(64);
                     Some(src_w.max(imm_w))
                 }
-                MInst::ShrImm { src, imm, .. } => {
-                    widths.get(src.0 as usize).copied().flatten()
-                        .map(|w| w.saturating_sub(*imm))
-                }
-                MInst::ShlImm { src, imm, .. } => {
-                    widths.get(src.0 as usize).copied().flatten()
-                        .map(|w| (w as u16 + *imm as u16).min(64) as u8)
-                }
-                MInst::And { lhs, rhs, .. } => {
-                    match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
-                        (Some(l), Some(r)) => Some(l.min(r)),
-                        (Some(l), None) => Some(l),
-                        (None, Some(r)) => Some(r),
-                        _ => None,
-                    }
-                }
+                MInst::ShrImm { src, imm, .. } => widths
+                    .get(src.0 as usize)
+                    .copied()
+                    .flatten()
+                    .map(|w| w.saturating_sub(*imm)),
+                MInst::ShlImm { src, imm, .. } => widths
+                    .get(src.0 as usize)
+                    .copied()
+                    .flatten()
+                    .map(|w| (w as u16 + *imm as u16).min(64) as u8),
+                MInst::And { lhs, rhs, .. } => match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
+                    (Some(l), Some(r)) => Some(l.min(r)),
+                    (Some(l), None) => Some(l),
+                    (None, Some(r)) => Some(r),
+                    _ => None,
+                },
                 MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => {
                     match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
                         (Some(l), Some(r)) => Some(l.max(r)),
@@ -1393,22 +1597,23 @@ fn compute_value_widths(func: &mut MFunction) {
                         _ => None,
                     }
                 }
-                MInst::AddImm { src, .. } | MInst::SubImm { src, .. } => {
-                    widths.get(src.0 as usize).copied().flatten()
-                        .map(|w| (w + 1).min(64))
-                }
-                MInst::Mul { lhs, rhs, .. } => {
-                    match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
-                        (Some(l), Some(r)) => Some(((l as u16) + (r as u16)).min(64) as u8),
-                        _ => None,
-                    }
-                }
-                MInst::Select { true_val, false_val, .. } => {
-                    match (get_w(&widths, *true_val), get_w(&widths, *false_val)) {
-                        (Some(t), Some(f)) => Some(t.max(f)),
-                        _ => None,
-                    }
-                }
+                MInst::AddImm { src, .. } | MInst::SubImm { src, .. } => widths
+                    .get(src.0 as usize)
+                    .copied()
+                    .flatten()
+                    .map(|w| (w + 1).min(64)),
+                MInst::Mul { lhs, rhs, .. } => match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
+                    (Some(l), Some(r)) => Some(((l as u16) + (r as u16)).min(64) as u8),
+                    _ => None,
+                },
+                MInst::Select {
+                    true_val,
+                    false_val,
+                    ..
+                } => match (get_w(&widths, *true_val), get_w(&widths, *false_val)) {
+                    (Some(t), Some(f)) => Some(t.max(f)),
+                    _ => None,
+                },
                 _ => None,
             };
 
@@ -1456,7 +1661,9 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
 
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             // Look for: v = xor a, b  where result is 1-bit (used with and 1)
-            let MInst::Xor { dst, lhs, rhs } = inst else { continue };
+            let MInst::Xor { dst, lhs, rhs } = inst else {
+                continue;
+            };
 
             // Try to collect the full XOR chain and extract bit positions
             let mut bits: Vec<(VReg, u64)> = Vec::new();
@@ -1469,15 +1676,21 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
 
             // Need at least 3 bits to be worth the PEXT overhead
             let Some(src) = source_reg else { continue };
-            if bits.len() < 3 { continue; }
+            if bits.len() < 3 {
+                continue;
+            }
 
             // Build mask from bit positions
             let mut mask_val: u64 = 0;
             for &(_, pos) in &bits {
-                if pos >= 64 { continue; } // skip wide
+                if pos >= 64 {
+                    continue;
+                } // skip wide
                 mask_val |= 1u64 << pos;
             }
-            if mask_val == 0 { continue; }
+            if mask_val == 0 {
+                continue;
+            }
 
             // Generate: mask_vreg = imm mask_val
             //           pext_vreg = pext src, mask_vreg
@@ -1497,10 +1710,24 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
             }
 
             let new_insts = vec![
-                MInst::LoadImm { dst: mask_vreg, value: mask_val },
-                MInst::Pext { dst: pext_vreg, src, mask: mask_vreg },
-                MInst::Popcnt { dst: popcnt_vreg, src: pext_vreg },
-                MInst::AndImm { dst: *dst, src: popcnt_vreg, imm: 1 },
+                MInst::LoadImm {
+                    dst: mask_vreg,
+                    value: mask_val,
+                },
+                MInst::Pext {
+                    dst: pext_vreg,
+                    src,
+                    mask: mask_vreg,
+                },
+                MInst::Popcnt {
+                    dst: popcnt_vreg,
+                    src: pext_vreg,
+                },
+                MInst::AndImm {
+                    dst: *dst,
+                    src: popcnt_vreg,
+                    imm: 1,
+                },
             ];
             replacements.push((inst_idx, new_insts));
         }
@@ -1528,7 +1755,9 @@ fn collect_xor_chain_bits(
         if let Some(def_inst) = defs.get(&operand) {
             match def_inst {
                 // Pattern: v = xor a, b (recursive)
-                MInst::Xor { lhs: l2, rhs: r2, .. } => {
+                MInst::Xor {
+                    lhs: l2, rhs: r2, ..
+                } => {
                     if !collect_xor_chain_bits(operand, *l2, *r2, defs, bits, source_reg) {
                         return false;
                     }
@@ -1543,7 +1772,11 @@ fn collect_xor_chain_bits(
                     bits.push((*src, *imm as u64));
                 }
                 // Pattern: v = and src, 1 (masked bit — look through)
-                MInst::AndImm { src: and_src, imm: 1, .. } => {
+                MInst::AndImm {
+                    src: and_src,
+                    imm: 1,
+                    ..
+                } => {
                     if let Some(inner) = defs.get(and_src) {
                         match inner {
                             MInst::ShrImm { src, imm, .. } => {
@@ -1554,8 +1787,12 @@ fn collect_xor_chain_bits(
                                 }
                                 bits.push((*src, *imm as u64));
                             }
-                            MInst::Xor { lhs: l2, rhs: r2, .. } => {
-                                if !collect_xor_chain_bits(*and_src, *l2, *r2, defs, bits, source_reg) {
+                            MInst::Xor {
+                                lhs: l2, rhs: r2, ..
+                            } => {
+                                if !collect_xor_chain_bits(
+                                    *and_src, *l2, *r2, defs, bits, source_reg,
+                                ) {
                                     return false;
                                 }
                             }
@@ -1727,7 +1964,9 @@ fn dead_code_eliminate(func: &mut MFunction) {
             }
         }
 
-        if !removed { break; }
+        if !removed {
+            break;
+        }
     }
 }
 

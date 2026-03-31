@@ -97,11 +97,7 @@ pub(super) fn make_spill(
 }
 
 /// Generate a reload instruction for `vreg` based on its SpillDesc.
-pub(super) fn make_reload(
-    vreg: VReg,
-    func: &MFunction,
-    slots: &mut SpillSlotAllocator,
-) -> MInst {
+pub(super) fn make_reload(vreg: VReg, func: &MFunction, slots: &mut SpillSlotAllocator) -> MInst {
     let desc = func.spill_desc(vreg);
     match desc.map(|d| &d.kind) {
         Some(SpillKind::Remat { value }) => {

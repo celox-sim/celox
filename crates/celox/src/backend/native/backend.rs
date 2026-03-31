@@ -11,8 +11,8 @@ use num_bigint::BigUint;
 use crate::ir::{AbsoluteAddr, Program, SignalRef};
 use crate::{HashMap, SimulatorError, SimulatorOptions};
 
-use super::super::{MemoryLayout, get_byte_size};
 use super::super::traits::SimulatorErrorCode;
+use super::super::{MemoryLayout, get_byte_size};
 use super::{emit, isel, jit_mem, regalloc};
 
 // ────────────────────────────────────────────────────────────────
@@ -114,8 +114,7 @@ fn compile_units(
     // is patched to fall through to the next EU. One prologue/epilogue.
     let chained_code = emit::emit_chained_eus(units, layout, four_state)
         .map_err(|e| codegen_err(format!("emit error: {e}")))?;
-    jit_mem::JitCode::new(&chained_code)
-        .map_err(|e| codegen_err(format!("mmap error: {e}")))
+    jit_mem::JitCode::new(&chained_code).map_err(|e| codegen_err(format!("mmap error: {e}")))
 }
 
 fn compile_program(
@@ -142,11 +141,11 @@ fn compile_program(
         AbsoluteAddr,
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
     >,
-                                 all_codes: &mut Vec<jit_mem::JitCode>,
-                                 event_map_out: &mut HashMap<AbsoluteAddr, NativeEventRef>,
-                                 next_id: &mut usize,
-                                 id_to_addr: &mut Vec<AbsoluteAddr>,
-                                 id_to_event: &mut Vec<NativeEventRef>|
+                            all_codes: &mut Vec<jit_mem::JitCode>,
+                            event_map_out: &mut HashMap<AbsoluteAddr, NativeEventRef>,
+                            next_id: &mut usize,
+                            id_to_addr: &mut Vec<AbsoluteAddr>,
+                            id_to_event: &mut Vec<NativeEventRef>|
      -> Result<(), SimulatorError> {
         for (addr, units) in ff_map {
             let code = compile_units(units, &layout, options.four_state)?;
@@ -172,16 +171,28 @@ fn compile_program(
     };
 
     compile_ff_group(
-        &sir.eval_apply_ffs, &mut all_jit_codes, &mut event_map,
-        &mut next_id, &mut id_to_addr, &mut id_to_event,
+        &sir.eval_apply_ffs,
+        &mut all_jit_codes,
+        &mut event_map,
+        &mut next_id,
+        &mut id_to_addr,
+        &mut id_to_event,
     )?;
     compile_ff_group(
-        &sir.eval_only_ffs, &mut all_jit_codes, &mut eval_only_event_map,
-        &mut next_id, &mut id_to_addr, &mut id_to_event,
+        &sir.eval_only_ffs,
+        &mut all_jit_codes,
+        &mut eval_only_event_map,
+        &mut next_id,
+        &mut id_to_addr,
+        &mut id_to_event,
     )?;
     compile_ff_group(
-        &sir.apply_ffs, &mut all_jit_codes, &mut apply_event_map,
-        &mut next_id, &mut id_to_addr, &mut id_to_event,
+        &sir.apply_ffs,
+        &mut all_jit_codes,
+        &mut apply_event_map,
+        &mut next_id,
+        &mut id_to_addr,
+        &mut id_to_event,
     )?;
 
     // Pre-compute 4-state initialization regions
@@ -230,10 +241,7 @@ pub struct NativeBackend {
 }
 
 impl NativeBackend {
-    pub fn new(
-        sir: &Program,
-        options: &SimulatorOptions,
-    ) -> Result<Self, SimulatorError> {
+    pub fn new(sir: &Program, options: &SimulatorOptions) -> Result<Self, SimulatorError> {
         let shared = Arc::new(compile_program(sir, options)?);
         Ok(Self::from_shared(shared))
     }
@@ -255,7 +263,10 @@ impl NativeBackend {
             }
         }
 
-        Self { compiled: shared, memory }
+        Self {
+            compiled: shared,
+            memory,
+        }
     }
 
     /// Get the shared compiled code handle.
@@ -283,10 +294,7 @@ impl NativeBackend {
         unsafe { std::slice::from_raw_parts_mut(ptr, len) }
     }
 
-    fn call_func(
-        memory: &mut [u64],
-        func: NativeSimFunc,
-    ) -> Result<(), SimulatorErrorCode> {
+    fn call_func(memory: &mut [u64], func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         let ptr = memory.as_mut_ptr() as *mut u8;
         let ret = unsafe { func(ptr) };
         match ret {
@@ -304,10 +312,7 @@ impl super::super::SimBackend for NativeBackend {
         Self::call_func(&mut self.memory, self.compiled.comb_func)
     }
 
-    fn eval_apply_ff_and_comb(
-        &mut self,
-        event: NativeEventRef,
-    ) -> Result<(), SimulatorErrorCode> {
+    fn eval_apply_ff_and_comb(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
         Self::call_func(&mut self.memory, event.func)?;
         Self::call_func(&mut self.memory, self.compiled.comb_func)
     }
@@ -360,8 +365,9 @@ impl super::super::SimBackend for NativeBackend {
         let bs = get_byte_size(signal.width);
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
         let bytes = self.mem_bytes_mut();
-        let val_bytes =
-            unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, std::mem::size_of::<T>()) };
+        let val_bytes = unsafe {
+            std::slice::from_raw_parts(&val as *const T as *const u8, std::mem::size_of::<T>())
+        };
         let copy_len = val_bytes.len().min(bs);
         bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
         if clear_mask {

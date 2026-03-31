@@ -53,10 +53,8 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
     }
 
     // Initialize next-use distance maps
-    let mut entry_distances: Vec<HashMap<VReg, u32>> =
-        vec![HashMap::new(); num_blocks];
-    let mut exit_distances: Vec<HashMap<VReg, u32>> =
-        vec![HashMap::new(); num_blocks];
+    let mut entry_distances: Vec<HashMap<VReg, u32>> = vec![HashMap::new(); num_blocks];
+    let mut exit_distances: Vec<HashMap<VReg, u32>> = vec![HashMap::new(); num_blocks];
 
     // Iterative data-flow analysis (backward)
     // Compute next-use distances from block exits to entries.

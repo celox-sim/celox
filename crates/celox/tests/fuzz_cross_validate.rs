@@ -8,7 +8,9 @@ use celox::{BigUint, Simulator};
 struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Self { Self(seed) }
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
     fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
@@ -31,13 +33,14 @@ fn gen_random_comb_module(rng: &mut Rng, width: usize) -> (String, Vec<u64>) {
     code += &format!("    o: output logic<{width}>\n) {{\n");
 
     // Generate random operations
-    let ops = ["+" , "-", "&", "|", "^"];
+    let ops = ["+", "-", "&", "|", "^"];
     let mut last_var = format!("i0");
     for t in 0..n_temps {
         let op = ops[rng.range(0, ops.len() as u64) as usize];
         let rhs_idx = rng.range(0, n_inputs as u64) as usize;
         let rhs = format!("i{rhs_idx}");
-        code += &format!("    var t{t}: logic<{width}>;\n    assign t{t} = {last_var} {op} {rhs};\n");
+        code +=
+            &format!("    var t{t}: logic<{width}>;\n    assign t{t} = {last_var} {op} {rhs};\n");
         last_var = format!("t{t}");
     }
     code += &format!("    assign o = {last_var};\n}}\n");
@@ -45,7 +48,11 @@ fn gen_random_comb_module(rng: &mut Rng, width: usize) -> (String, Vec<u64>) {
     // Generate random input values
     let mut inputs = Vec::new();
     for _ in 0..n_inputs {
-        let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+        let mask = if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
         inputs.push(rng.next() & mask);
     }
 
@@ -88,15 +95,21 @@ fn run_fuzz_case(seed: u64, width: usize) {
 
     match (sim_n_result, sim_c_result) {
         (Ok(vn), Ok(vc)) => {
-            assert_eq!(vn, vc,
-                "Fuzz mismatch (seed={seed}, width={width}):\n  code: {code}\n  native={vn:#x}\n  cranelift={vc:#x}");
+            assert_eq!(
+                vn, vc,
+                "Fuzz mismatch (seed={seed}, width={width}):\n  code: {code}\n  native={vn:#x}\n  cranelift={vc:#x}"
+            );
         }
         (Err(_), Err(_)) => {} // Both fail: skip
         (Ok(vn), Err(e)) => {
-            panic!("Cranelift panicked but native succeeded (seed={seed}): native={vn:#x}, error={e:?}");
+            panic!(
+                "Cranelift panicked but native succeeded (seed={seed}): native={vn:#x}, error={e:?}"
+            );
         }
         (Err(e), Ok(vc)) => {
-            panic!("Native panicked but Cranelift succeeded (seed={seed}): cranelift={vc:#x}, error={e:?}");
+            panic!(
+                "Native panicked but Cranelift succeeded (seed={seed}): cranelift={vc:#x}, error={e:?}"
+            );
         }
     }
 }

@@ -560,9 +560,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
     /// Compiles the Veryl source and constructs the simulator.
     /// Uses the native x86-64 backend.
-    pub fn build(
-        self,
-    ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+    pub fn build(self) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
         self.build_native()
     }
 
@@ -647,7 +645,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
                 mir_output.push_str("=== MIR (eval_comb) ===\n");
                 for (idx, eu) in program.eval_comb.iter().enumerate() {
-                    let mut mfunc = isel::lower_execution_unit(eu, &layout, self.options.four_state);
+                    let mut mfunc =
+                        isel::lower_execution_unit(eu, &layout, self.options.four_state);
                     mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}\n"));
                     let ra = regalloc::run_regalloc(&mut mfunc);
@@ -666,9 +665,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 trace.mir = Some(mir_output);
             }
 
-            let backend = crate::backend::native::NativeBackend::new(
-                &program, &self.options,
-            )?;
+            let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
 
             let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
             sim.modify(|_| {}).map_err(SimulatorError::from)?;

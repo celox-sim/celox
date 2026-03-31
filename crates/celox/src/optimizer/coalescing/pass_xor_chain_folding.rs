@@ -38,13 +38,16 @@ impl ExecutionUnitPass for XorChainFoldingPass {
             }
         }
 
-        if !any_changed { return; }
+        if !any_changed {
+            return;
+        }
 
         let used = collect_all_used_registers(eu);
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {
                 if let Some(d) = def_reg(inst) {
-                    used.contains(&d) || matches!(inst, SIRInstruction::Store(..) | SIRInstruction::Commit(..))
+                    used.contains(&d)
+                        || matches!(inst, SIRInstruction::Store(..) | SIRInstruction::Commit(..))
                 } else {
                     true
                 }
@@ -72,7 +75,9 @@ fn fold_xor_chains(
 
     for (idx, inst) in instructions.iter().enumerate() {
         // Look for Binary XOR that's the root of a chain
-        let SIRInstruction::Binary(dst, lhs, BinaryOp::Xor, rhs) = inst else { continue };
+        let SIRInstruction::Binary(dst, lhs, BinaryOp::Xor, rhs) = inst else {
+            continue;
+        };
 
         // Collect all single-bit Slice positions from this XOR chain
         let mut bits: Vec<usize> = Vec::new();
@@ -86,7 +91,9 @@ fn fold_xor_chains(
                 let src_width = register_map.get(&src).map(|t| t.width()).unwrap_or(64);
                 let mut mask: u64 = 0;
                 for &pos in &bits {
-                    if pos < 64 { mask |= 1u64 << pos; }
+                    if pos < 64 {
+                        mask |= 1u64 << pos;
+                    }
                 }
                 if mask != 0 {
                     replacements.push((idx, *dst, src, mask, src_width));
@@ -108,11 +115,23 @@ fn fold_xor_chains(
         // Create fresh registers
         *next_reg += 1;
         let mask_reg = RegisterId(*next_reg);
-        register_map.insert(mask_reg, RegisterType::Bit { width: mask_width, signed: false });
+        register_map.insert(
+            mask_reg,
+            RegisterType::Bit {
+                width: mask_width,
+                signed: false,
+            },
+        );
 
         *next_reg += 1;
         let masked_reg = RegisterId(*next_reg);
-        register_map.insert(masked_reg, RegisterType::Bit { width: mask_width, signed: false });
+        register_map.insert(
+            masked_reg,
+            RegisterType::Bit {
+                width: mask_width,
+                signed: false,
+            },
+        );
 
         // Insert: mask = Imm(mask_value)
         let mask_value = SIRValue {
@@ -122,7 +141,10 @@ fn fold_xor_chains(
         instructions.insert(idx, SIRInstruction::Imm(mask_reg, mask_value));
 
         // Insert: masked = Binary(src, And, mask_reg)
-        instructions.insert(idx + 1, SIRInstruction::Binary(masked_reg, src, BinaryOp::And, mask_reg));
+        instructions.insert(
+            idx + 1,
+            SIRInstruction::Binary(masked_reg, src, BinaryOp::And, mask_reg),
+        );
 
         // Replace the original XOR with Unary::Xor of masked
         instructions[idx + 2] = SIRInstruction::Unary(dst, UnaryOp::Xor, masked_reg);
@@ -139,7 +161,9 @@ fn collect_xor_bits(
     bits: &mut Vec<usize>,
     source: &mut Option<RegisterId>,
 ) -> bool {
-    let Some(def) = defs.get(&reg) else { return false };
+    let Some(def) = defs.get(&reg) else {
+        return false;
+    };
 
     match def {
         SIRInstruction::Slice(_, src, offset, 1) => {
@@ -162,13 +186,10 @@ fn collect_xor_bits(
             false
         }
         SIRInstruction::Binary(_, lhs, BinaryOp::Xor, rhs) => {
-            collect_xor_bits(*lhs, defs, bits, source)
-                && collect_xor_bits(*rhs, defs, bits, source)
+            collect_xor_bits(*lhs, defs, bits, source) && collect_xor_bits(*rhs, defs, bits, source)
         }
         // Look through Unary::Ident (identity/cast)
-        SIRInstruction::Unary(_, UnaryOp::Ident, src) => {
-            collect_xor_bits(*src, defs, bits, source)
-        }
+        SIRInstruction::Unary(_, UnaryOp::Ident, src) => collect_xor_bits(*src, defs, bits, source),
         _ => false,
     }
 }

@@ -113,19 +113,29 @@ pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
 /// Returns physical registers clobbered by this instruction (besides dst).
 pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
     match inst {
-        MInst::UDiv { .. } | MInst::URem { .. } | MInst::UMulHi { .. } => &[PhysReg::RAX, PhysReg::RDX],
+        MInst::UDiv { .. } | MInst::URem { .. } | MInst::UMulHi { .. } => {
+            &[PhysReg::RAX, PhysReg::RDX]
+        }
         _ => &[],
     }
 }
 
 /// Returns true if the instruction is a register-register shift (needs RCX).
 pub fn is_reg_shift(inst: &MInst) -> bool {
-    matches!(inst, MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. })
+    matches!(
+        inst,
+        MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. }
+    )
 }
 
 /// Compute clobber points for a block (for use by unified allocator).
-pub fn block_clobber_points_for(block: &crate::backend::native::mir::MBlock) -> Vec<(usize, &'static [PhysReg])> {
-    block.insts.iter().enumerate()
+pub fn block_clobber_points_for(
+    block: &crate::backend::native::mir::MBlock,
+) -> Vec<(usize, &'static [PhysReg])> {
+    block
+        .insts
+        .iter()
+        .enumerate()
         .filter_map(|(idx, inst)| {
             let c = clobbers(inst);
             if c.is_empty() { None } else { Some((idx, c)) }
