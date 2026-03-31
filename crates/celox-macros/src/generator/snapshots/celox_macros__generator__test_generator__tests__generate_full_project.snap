@@ -6,7 +6,7 @@ pub struct Module04 {
     pub a: celox::SignalRef,
     pub rst: celox::SignalRef,
     pub c: celox::SignalRef,
-    pub clk: celox::EventRef,
+    pub clk: celox::NativeEventRef,
     pub b: celox::SignalRef,
 }
 impl Module04 {
@@ -213,7 +213,7 @@ pub struct SorterCell {
     pub rst: celox::SignalRef,
     pub o_reg: celox::SignalRef,
     pub o_val: celox::SignalRef,
-    pub clk: celox::EventRef,
+    pub clk: celox::NativeEventRef,
     pub en: celox::SignalRef,
 }
 impl SorterCell {
@@ -456,7 +456,7 @@ impl<'a, 'b> SorterCellIO<'a, 'b> {
     }
 }
 pub struct LinearSorter {
-    pub clk: celox::EventRef,
+    pub clk: celox::NativeEventRef,
     pub d_out: celox::SignalRef,
     pub rst: celox::SignalRef,
     pub d_in: celox::SignalRef,
@@ -678,7 +678,7 @@ impl<'a, 'b> LinearSorterIO<'a, 'b> {
     }
 }
 pub struct LinearSorterWrapper {
-    pub clk: celox::EventRef,
+    pub clk: celox::NativeEventRef,
     pub d_out: celox::SignalRef,
     pub rst: celox::SignalRef,
     pub d_in: celox::SignalRef,
@@ -908,8 +908,8 @@ pub struct async_fifo {
     pub is_rst: celox::SignalRef,
     pub id_pop: celox::SignalRef,
     pub os_full: celox::SignalRef,
-    pub is_clk: celox::EventRef,
-    pub id_clk: celox::EventRef,
+    pub is_clk: celox::NativeEventRef,
+    pub id_clk: celox::NativeEventRef,
     pub od_empty: celox::SignalRef,
     pub os_almost_full: celox::SignalRef,
     pub is_data: celox::SignalRef,
@@ -1326,11 +1326,11 @@ impl<'a, 'b> async_fifoIO<'a, 'b> {
 }
 pub struct async_fifo_reset_sync {
     pub id_rst: celox::SignalRef,
-    pub id_clk: celox::EventRef,
+    pub id_clk: celox::NativeEventRef,
     pub is_rst: celox::SignalRef,
     pub os_rst: celox::SignalRef,
     pub od_rst: celox::SignalRef,
-    pub is_clk: celox::EventRef,
+    pub is_clk: celox::NativeEventRef,
 }
 impl async_fifo_reset_sync {
     pub fn new(sim: &celox::Simulator) -> Self {
@@ -1547,10 +1547,10 @@ pub struct async_handshake {
     pub is_rst: celox::SignalRef,
     pub is_valid: celox::SignalRef,
     pub os_ready: celox::SignalRef,
-    pub id_clk: celox::EventRef,
+    pub id_clk: celox::NativeEventRef,
     pub od_valid: celox::SignalRef,
     pub id_rst: celox::SignalRef,
-    pub is_clk: celox::EventRef,
+    pub is_clk: celox::NativeEventRef,
     pub is_data: celox::SignalRef,
 }
 impl async_handshake {
@@ -2841,7 +2841,7 @@ impl<'a, 'b> linear_sec_encoderIO<'a, 'b> {
 }
 pub struct counter {
     pub o_wrap_around: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
     pub o_count_next: celox::SignalRef,
     pub i_set_value: celox::SignalRef,
     pub i_set: celox::SignalRef,
@@ -3749,7 +3749,7 @@ pub struct delay {
     pub o_d: celox::SignalRef,
     pub i_rst: celox::SignalRef,
     pub i_d: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
 }
 impl delay {
     pub fn new(sim: &celox::Simulator) -> Self {
@@ -3917,7 +3917,7 @@ pub struct edge_detector {
     pub o_edge: celox::SignalRef,
     pub i_rst: celox::SignalRef,
     pub i_clear: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
 }
 impl edge_detector {
     pub fn new(sim: &celox::Simulator) -> Self {
@@ -4208,7 +4208,7 @@ pub struct fifo {
     pub i_pop: celox::SignalRef,
     pub i_data: celox::SignalRef,
     pub o_full: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
     pub o_empty: celox::SignalRef,
     pub o_data: celox::SignalRef,
     pub i_rst: celox::SignalRef,
@@ -4677,7 +4677,7 @@ impl<'a, 'b> fifoIO<'a, 'b> {
 pub struct fifo_controller {
     pub i_clear: celox::SignalRef,
     pub o_write_to_ram: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
     pub o_full: celox::SignalRef,
     pub o_empty: celox::SignalRef,
     pub o_write_pointer: celox::SignalRef,
@@ -5365,7 +5365,7 @@ impl<'a, 'b> fifo_controllerIO<'a, 'b> {
 pub struct gray_counter {
     pub i_down: celox::SignalRef,
     pub i_set: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
     pub o_count_next: celox::SignalRef,
     pub o_count: celox::SignalRef,
     pub i_rst: celox::SignalRef,
@@ -6050,7 +6050,7 @@ pub struct lfsr_galois {
     pub i_en: celox::SignalRef,
     pub o_val: celox::SignalRef,
     pub i_setval: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
 }
 impl lfsr_galois {
     pub fn new(sim: &celox::Simulator) -> Self {
@@ -6255,7 +6255,7 @@ pub struct ram {
     pub o_qb: celox::SignalRef,
     pub i_da: celox::SignalRef,
     pub i_mea: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
     pub i_meb: celox::SignalRef,
     pub i_rst: celox::SignalRef,
     pub i_wea: celox::SignalRef,
@@ -6985,7 +6985,7 @@ pub struct slicer {
     pub i_ready: celox::SignalRef,
     pub o_valid: celox::SignalRef,
     pub i_valid: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
     pub o_data: celox::SignalRef,
     pub i_rst: celox::SignalRef,
     pub o_ready: celox::SignalRef,
@@ -7314,7 +7314,7 @@ pub struct slicer_unit_fb {
     pub i_data: celox::SignalRef,
     pub i_ready: celox::SignalRef,
     pub o_valid: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
     pub o_data: celox::SignalRef,
     pub i_rst: celox::SignalRef,
     pub o_ready: celox::SignalRef,
@@ -7649,7 +7649,7 @@ pub struct slicer_unit_hb {
     pub i_data: celox::SignalRef,
     pub i_ready: celox::SignalRef,
     pub o_valid: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
     pub o_data: celox::SignalRef,
     pub i_rst: celox::SignalRef,
     pub o_ready: celox::SignalRef,
@@ -7983,7 +7983,7 @@ pub struct synchronizer_basic {
     pub o_d: celox::SignalRef,
     pub i_rst: celox::SignalRef,
     pub i_d: celox::SignalRef,
-    pub i_clk: celox::EventRef,
+    pub i_clk: celox::NativeEventRef,
 }
 impl synchronizer_basic {
     pub fn new(sim: &celox::Simulator) -> Self {
