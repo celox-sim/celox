@@ -550,14 +550,40 @@ fn global_gvn(func: &mut MFunction) {
             let inst = &block.insts[inst_idx];
 
             if is_memory_clobber(inst) {
+                // Only invalidate Load CSE entries that might alias with this Store.
+                // SimState loads/stores at different offsets don't alias.
+                let (store_base, store_off, store_size) = match inst {
+                    MInst::Store { base, offset, size, .. } => (Some(*base), *offset, size.bytes() as i32),
+                    MInst::StoreIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
+                    _ => (None, 0, 0),
+                };
                 let load_keys: Vec<GvnKey> = value_table.keys()
-                    .filter(|k| matches!(k, GvnKey::Load(..)))
+                    .filter(|k| {
+                        if let GvnKey::Load(base, off, sz) = k {
+                            // Keep if provably non-aliasing (same base, non-overlapping offset)
+                            if let Some(sb) = store_base {
+                                let sb_val = match sb { BaseReg::SimState => 0u8, BaseReg::StackFrame => 1u8 };
+                                if *base == sb_val {
+                                    let load_bytes = match *sz { 0 => 1, 1 => 2, 2 => 4, _ => 8 }; // OpSize enum → bytes
+                                    let load_end = *off + load_bytes;
+                                    let store_end = store_off + store_size;
+                                    // Non-overlapping ranges → no alias
+                                    if load_end <= store_off || *off >= store_end {
+                                        return false; // keep this entry
+                                    }
+                                }
+                            }
+                            true // might alias → remove
+                        } else {
+                            false // not a Load key
+                        }
+                    })
                     .cloned()
                     .collect();
                 for k in &load_keys {
                     value_table.remove(k);
                 }
-                added_keys.retain(|k| !matches!(k, GvnKey::Load(..)));
+                added_keys.retain(|k| !load_keys.contains(k));
             }
 
             if let Some(key) = gvn_key(inst) {
