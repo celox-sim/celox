@@ -31,7 +31,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets
+        run: cargo clippy -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets --no-deps
 
       - uses: pnpm/action-setup@v4
 
