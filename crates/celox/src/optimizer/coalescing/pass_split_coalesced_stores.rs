@@ -99,6 +99,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         }
 
         let block = eu.blocks.get_mut(&bid).unwrap();
+        let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
 
         for split in splits.into_iter().rev() {
             // Remove Store and Concat
@@ -112,10 +113,8 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                     chunk.elems[0]
                 } else {
                     // Multi-element: need a Concat for this chunk
-                    // Allocate a new register
-                    let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
-                    max_reg += 1;
-                    let chunk_reg = RegisterId(max_reg);
+                    reg_counter += 1;
+                    let chunk_reg = RegisterId(reg_counter);
                     eu.register_map
                         .insert(chunk_reg, RegisterType::Logic { width: chunk.width });
 
