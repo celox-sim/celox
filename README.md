@@ -1,14 +1,24 @@
 # Celox
 
-JIT simulator for [Veryl HDL](https://veryl-lang.org/). Compiles Veryl designs with [Cranelift](https://cranelift.dev/) for high-speed RTL simulation.
+High-speed JIT simulator for [Veryl HDL](https://veryl-lang.org/). Compiles Veryl designs to native x86-64 machine code for near-hardware simulation performance.
+
+## Performance
+
+Celox's native backend generates optimized x86-64 code directly, outperforming both Cranelift JIT and Verilator on key benchmarks:
+
+| Benchmark | Celox (native) | Cranelift JIT | Verilator |
+|---|---|---|---|
+| counter_n1000 (sequential) | **245 ns/tick** | 395 ns/tick | 392 ns/tick |
+| linear_sec_p6 (combinational) | 134 ns/eval | 140 ns/eval | **14.8 ns/eval** |
 
 ## Features
 
-- **JIT Compilation** -- Multi-stage pipeline (Veryl &rarr; SLT &rarr; SIR &rarr; native code) for near-native execution speed
-- **Event-Driven Scheduling** -- Multi-clock domain support with proper timing interactions
-- **4-State Simulation** -- IEEE 1800-compliant X propagation
-- **TypeScript Testbenches** -- Type-safe signal access with modern developer tooling
-- **VCD Waveform Output** -- Generate VCD files for waveform inspection
+- **Native x86-64 Backend** — Custom compiler pipeline (SIR → MIR → regalloc → x86-64) with SIR-level EU merge, MIR optimization (constant folding, GVN, algebraic simplification, if-conversion, Cmp+Branch fusion), and 32-bit emit
+- **Cranelift JIT Fallback** — Automatically used on non-x86-64 platforms (ARM, RISC-V)
+- **Event-Driven Scheduling** — Multi-clock domain support with combinational clock cascade
+- **4-State Simulation** — IEEE 1800-compliant X/Z propagation
+- **TypeScript Testbenches** — Type-safe signal access with Vite integration
+- **VCD Waveform Output** — Generate VCD files for waveform inspection
 
 ## Quick Start
 
@@ -61,11 +71,26 @@ npm test
 
 See the [Getting Started](https://celox-sim.github.io/celox/guide/getting-started) guide for full setup instructions.
 
+## Architecture
+
+```
+Veryl → SLT → SIR → [SIRT optimizer] → native x86-64 (or Cranelift IR → JIT)
+```
+
+The native backend compiles SIR execution units into optimized machine code through:
+
+1. **SIR-level EU merge** — Combines multiple execution units into one function, enabling cross-EU commit forwarding and eliminating per-EU prologue overhead
+2. **SIRT passes** — Store-load forwarding, commit sinking, working memory elimination, coalesced store splitting
+3. **ISel** — SIR → MIR lowering with known-bits tracking, constant folding, Cmp+Branch fusion
+4. **MIR optimization** — Global value numbering (dominator-tree scoped), algebraic simplification, redundant mask elimination, if-conversion, CFG simplification
+5. **Register allocation** — Unified single-pass Braun & Hack MIN algorithm
+6. **x86-64 emit** — 32-bit register mode, branch fall-through optimization
+
 ## Workspace Structure
 
 | Crate / Package | Description |
 |---|---|
-| `crates/celox` | Core simulator (IR, JIT compilation, runtime) |
+| `crates/celox` | Core simulator (IR, native backend, JIT compilation, runtime) |
 | `crates/celox-macros` | Procedural macros |
 | `crates/celox-napi` | N-API bindings for Node.js |
 | `crates/celox-ts-gen` | TypeScript type generation library |
@@ -74,9 +99,9 @@ See the [Getting Started](https://celox-sim.github.io/celox/guide/getting-starte
 
 ## Documentation
 
-- [Guide](https://celox-sim.github.io/celox/guide/introduction) -- Introduction and tutorials
-- [API Reference](https://celox-sim.github.io/celox/api/) -- TypeScript API docs
-- [Internals](https://celox-sim.github.io/celox/internals/architecture) -- Architecture and design
+- [Guide](https://celox-sim.github.io/celox/guide/introduction) — Introduction and tutorials
+- [API Reference](https://celox-sim.github.io/celox/api/) — TypeScript API docs
+- [Internals](https://celox-sim.github.io/celox/internals/architecture) — Architecture and design
 
 ## License
 
