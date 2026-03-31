@@ -1,10 +1,13 @@
 //! Split wide Concat+Store back into individual element stores,
 //! placing each store immediately after its source value computation.
 //! This dramatically reduces register pressure for large arrays.
+//!
+//! Complexity: O(n) per block where n = number of instructions.
 
 use super::pass_manager::ExecutionUnitPass;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
+use std::collections::HashMap;
 
 pub(super) struct SplitCoalescedStoresPass;
 
@@ -20,6 +23,7 @@ impl ExecutionUnitPass for SplitCoalescedStoresPass {
 
 fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     let block_ids: Vec<BlockId> = eu.blocks.keys().copied().collect();
+    let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
 
     for bid in block_ids {
         let block = match eu.blocks.get(&bid) {
@@ -27,8 +31,22 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             None => continue,
         };
 
-        // Find wide Store backed by Concat that would benefit from splitting
-        let mut splits: Vec<SplitInfo> = Vec::new();
+        // Phase 1: Build def position map — O(n)
+        let mut def_pos: HashMap<RegisterId, usize> = HashMap::new();
+        for (i, inst) in block.instructions.iter().enumerate() {
+            if let Some(d) = inst_def(inst) {
+                def_pos.insert(d, i);
+            }
+        }
+
+        // Phase 2: Find wide Concat+Store pairs to split
+        struct SplitPlan {
+            store_idx: usize,
+            concat_idx: usize,
+            /// (insert_after_idx, instructions_to_insert)
+            insertions: Vec<(usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>)>,
+        }
+        let mut plans: Vec<SplitPlan> = Vec::new();
 
         for (si, inst) in block.instructions.iter().enumerate() {
             let (addr, offset, width, src_reg) = match inst {
@@ -40,7 +58,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                 _ => continue,
             };
 
-            // Find the Concat that defines src_reg
+            // Find Concat defining src_reg
             let concat =
                 block.instructions[..si]
                     .iter()
@@ -60,120 +78,101 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             };
             let n_args = args.len();
             let elem_width = width / n_args;
-            if elem_width == 0 || elem_width * n_args != width {
-                continue;
-            }
-            // Only split if significantly wide (saves enough register pressure)
-            if n_args < 4 {
+            if elem_width == 0 || elem_width * n_args != width || n_args < 4 {
                 continue;
             }
 
-            // Build 64-bit chunks: group consecutive Concat args into 64-bit stores.
-            // Concat args: MSB-first → reverse for LSB-first offset order.
+            // Build 64-bit chunks (Concat args are MSB-first, offsets are LSB-first)
             let args_lsb: Vec<RegisterId> = args.into_iter().rev().collect();
             let elems_per_chunk = (64 / elem_width).max(1);
-            let mut chunks: Vec<ChunkInfo> = Vec::new();
+            let mut insertions: Vec<(usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>)> =
+                Vec::new();
 
             for chunk_start in (0..n_args).step_by(elems_per_chunk) {
                 let chunk_end = (chunk_start + elems_per_chunk).min(n_args);
-                let chunk_elems: Vec<RegisterId> = args_lsb[chunk_start..chunk_end].to_vec();
+                let chunk_elems = &args_lsb[chunk_start..chunk_end];
                 let chunk_offset = offset + chunk_start * elem_width;
                 let chunk_width = (chunk_end - chunk_start) * elem_width;
-                chunks.push(ChunkInfo {
-                    offset: chunk_offset,
-                    width: chunk_width,
-                    elems: chunk_elems,
-                });
-            }
 
-            splits.push(SplitInfo {
-                store_idx: si,
-                concat_idx,
-                addr,
-                chunks,
-            });
-        }
+                let mut insts_to_insert: Vec<SIRInstruction<RegionedAbsoluteAddr>> = Vec::new();
 
-        if splits.is_empty() {
-            continue;
-        }
-
-        let block = eu.blocks.get_mut(&bid).unwrap();
-        let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
-
-        for split in splits.into_iter().rev() {
-            // Remove Store and Concat
-            block.instructions.remove(split.store_idx);
-            block.instructions.remove(split.concat_idx);
-
-            // Insert 64-bit stores, each right after its last element's definition
-            for chunk in split.chunks.into_iter().rev() {
-                let store_src = if chunk.elems.len() == 1 {
-                    // Single element: store directly
-                    chunk.elems[0]
+                let (store_src, insert_after) = if chunk_elems.len() == 1 {
+                    let pos = def_pos.get(&chunk_elems[0]).copied().unwrap_or(0);
+                    (chunk_elems[0], pos)
                 } else {
-                    // Multi-element: need a Concat for this chunk
                     reg_counter += 1;
                     let chunk_reg = RegisterId(reg_counter);
                     eu.register_map
-                        .insert(chunk_reg, RegisterType::Logic { width: chunk.width });
+                        .insert(chunk_reg, RegisterType::Logic { width: chunk_width });
 
-                    // Find position: after the last element's definition
-                    let last_def_pos = chunk
-                        .elems
+                    let last_pos = chunk_elems
                         .iter()
-                        .filter_map(|r| {
-                            block
-                                .instructions
-                                .iter()
-                                .position(|i| inst_def(i) == Some(*r))
-                        })
+                        .filter_map(|r| def_pos.get(r).copied())
                         .max()
-                        .unwrap_or(block.instructions.len().saturating_sub(1));
+                        .unwrap_or(0);
 
-                    // Insert Concat for this chunk (MSB-first)
-                    let concat_args: Vec<RegisterId> = chunk.elems.iter().rev().copied().collect();
-                    block.instructions.insert(
-                        last_def_pos + 1,
-                        SIRInstruction::Concat(chunk_reg, concat_args),
-                    );
+                    let concat_args: Vec<RegisterId> = chunk_elems.iter().rev().copied().collect();
+                    insts_to_insert.push(SIRInstruction::Concat(chunk_reg, concat_args));
 
-                    chunk_reg
+                    (chunk_reg, last_pos)
                 };
 
-                // Find position for Store: after source definition
-                let src_pos = block
-                    .instructions
-                    .iter()
-                    .position(|i| inst_def(i) == Some(store_src))
-                    .unwrap_or(block.instructions.len().saturating_sub(1));
+                insts_to_insert.push(SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(chunk_offset),
+                    chunk_width,
+                    store_src,
+                    vec![],
+                ));
 
-                block.instructions.insert(
-                    src_pos + 1,
-                    SIRInstruction::Store(
-                        split.addr,
-                        SIROffset::Static(chunk.offset),
-                        chunk.width,
-                        store_src,
-                        vec![],
-                    ),
-                );
+                insertions.push((insert_after, insts_to_insert));
+            }
+
+            plans.push(SplitPlan {
+                store_idx: si,
+                concat_idx,
+                insertions,
+            });
+        }
+
+        if plans.is_empty() {
+            continue;
+        }
+
+        // Phase 3: Rebuild instruction list in one pass — O(n)
+        let block = eu.blocks.get_mut(&bid).unwrap();
+
+        // Collect indices to skip (original Store + Concat)
+        let mut skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for plan in &plans {
+            skip.insert(plan.store_idx);
+            skip.insert(plan.concat_idx);
+        }
+
+        // Collect insertions by position: after index i, insert these instructions
+        let mut insert_map: HashMap<usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>> =
+            HashMap::new();
+        for plan in plans {
+            for (after_idx, insts) in plan.insertions {
+                insert_map.entry(after_idx).or_default().extend(insts);
             }
         }
+
+        // Single-pass rebuild
+        let mut new_insts: Vec<SIRInstruction<RegionedAbsoluteAddr>> =
+            Vec::with_capacity(block.instructions.len());
+
+        for (i, inst) in block.instructions.drain(..).enumerate() {
+            if !skip.contains(&i) {
+                new_insts.push(inst);
+            }
+            if let Some(extra) = insert_map.remove(&i) {
+                new_insts.extend(extra);
+            }
+        }
+
+        block.instructions = new_insts;
     }
-}
-
-struct SplitInfo {
-    store_idx: usize,
-    concat_idx: usize,
-    addr: RegionedAbsoluteAddr,
-    chunks: Vec<ChunkInfo>,
-}
-
-struct ChunkInfo {
-    offset: usize,
-    width: usize,
-    elems: Vec<RegisterId>,
 }
 
 fn inst_def(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {

@@ -101,8 +101,8 @@ fn sorter_tree_scaling_n16_n64() {
     let ratio = t64.as_secs_f64() / t16.as_secs_f64();
     eprintln!("N=16: {t16:?}, N=64: {t64:?}, ratio: {ratio:.2}x");
     assert!(
-        ratio < 8.0,
-        "N=64/N=16 ratio is {ratio:.2}x, expected < 8.0x"
+        ratio < 6.5,
+        "N=64/N=16 ratio is {ratio:.2}x, expected < 6.5x"
     );
 }
 
