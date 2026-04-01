@@ -2,8 +2,7 @@ use celox::Simulator;
 
 const SELECTOR_PKG_SRC: &str =
     include_str!("../../../deps/veryl/crates/std/veryl/src/selector/selector_pkg.veryl");
-const MUX_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/selector/mux.veryl");
+const MUX_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/selector/mux.veryl");
 const DEMUX_SRC: &str =
     include_str!("../../../deps/veryl/crates/std/veryl/src/selector/demux.veryl");
 

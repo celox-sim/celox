@@ -121,8 +121,16 @@ fn test_edge_detector_clear() {
     .unwrap();
     sim.eval_comb().unwrap();
 
-    assert_eq!(sim.get_as::<u8>(o_posedge), 0, "clear should suppress posedge");
-    assert_eq!(sim.get_as::<u8>(o_negedge), 0, "clear should suppress negedge");
+    assert_eq!(
+        sim.get_as::<u8>(o_posedge),
+        0,
+        "clear should suppress posedge"
+    );
+    assert_eq!(
+        sim.get_as::<u8>(o_negedge),
+        0,
+        "clear should suppress negedge"
+    );
 }
 
 /// Multi-bit edge detection (WIDTH=4) using o_edge output.

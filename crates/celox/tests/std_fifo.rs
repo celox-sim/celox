@@ -73,7 +73,11 @@ fn test_fifo_initial_empty() {
     let o_word_count = sim.signal("o_word_count");
 
     assert_eq!(sim.get_as::<u8>(o_empty), 1, "should be empty after reset");
-    assert_eq!(sim.get_as::<u8>(o_full), 0, "should not be full after reset");
+    assert_eq!(
+        sim.get_as::<u8>(o_full),
+        0,
+        "should not be full after reset"
+    );
     assert_eq!(sim.get_as::<u8>(o_word_count), 0, "word_count should be 0");
 }
 
@@ -101,7 +105,11 @@ fn test_fifo_push_pop_single() {
     sim.modify(|io| io.set(i_push, 0u8)).unwrap();
     sim.tick(clk).unwrap();
 
-    assert_eq!(sim.get_as::<u8>(o_empty), 0, "should not be empty after push");
+    assert_eq!(
+        sim.get_as::<u8>(o_empty),
+        0,
+        "should not be empty after push"
+    );
     assert_eq!(sim.get_as::<u8>(o_word_count), 1, "word_count should be 1");
 
     // DATA_FF_OUT=true: data should already be on output register

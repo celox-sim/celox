@@ -171,7 +171,11 @@ module Top (
     })
     .unwrap();
     sim.eval_comb().unwrap();
-    assert_eq!(sim.get_as::<u8>(o_qb), 0x22, "overwritten value should be 0x22");
+    assert_eq!(
+        sim.get_as::<u8>(o_qb),
+        0x22,
+        "overwritten value should be 0x22"
+    );
 }
 
 /// RAM with USE_RESET=true: clear via i_clr

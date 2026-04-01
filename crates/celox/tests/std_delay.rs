@@ -1,7 +1,6 @@
 use celox::Simulator;
 
-const DELAY_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/delay/delay.veryl");
+const DELAY_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/delay/delay.veryl");
 
 /// DELAY=0: passthrough (no delay)
 #[test]
@@ -131,13 +130,25 @@ module Top (
     // Tick 3: pipeline stage 2 (output) has 0xAA
     sim.modify(|io| io.set(i_d, 0xCCu8)).unwrap();
     sim.tick(clk).unwrap();
-    assert_eq!(sim.get_as::<u8>(o_d), 0xAA, "0xAA should appear after 3 ticks");
+    assert_eq!(
+        sim.get_as::<u8>(o_d),
+        0xAA,
+        "0xAA should appear after 3 ticks"
+    );
 
     // Tick 4: 0xBB arrives
     sim.tick(clk).unwrap();
-    assert_eq!(sim.get_as::<u8>(o_d), 0xBB, "0xBB should appear after 4 ticks");
+    assert_eq!(
+        sim.get_as::<u8>(o_d),
+        0xBB,
+        "0xBB should appear after 4 ticks"
+    );
 
     // Tick 5: 0xCC arrives
     sim.tick(clk).unwrap();
-    assert_eq!(sim.get_as::<u8>(o_d), 0xCC, "0xCC should appear after 5 ticks");
+    assert_eq!(
+        sim.get_as::<u8>(o_d),
+        0xCC,
+        "0xCC should appear after 5 ticks"
+    );
 }
