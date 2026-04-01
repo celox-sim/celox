@@ -1623,9 +1623,11 @@ fn compile_store(
     locals: &LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
-    // width=0: identity Store optimized away by alias; skip value store.
-    // Trigger detection for WASM is not yet implemented for width=0.
+    // width=0: identity Store optimized away by alias; emit triggers only.
     if op_width == 0 {
+        if emit_triggers && !triggers.is_empty() {
+            emit_trigger_detection(addr, triggers, layout, locals, instrs);
+        }
         return;
     }
     let s = &locals.reg_map[src];
