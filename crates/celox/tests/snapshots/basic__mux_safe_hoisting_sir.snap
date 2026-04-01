@@ -41,9 +41,9 @@ Execution Unit 0:
     Store(addr=m (region=0), offset=0, bits=32, src_reg = 8)
     r10 = SIRValue(0x1)
     r11 = r8 Add r10
-    r12 = SIRValue(0x2)
-    r13 = r11 Or r12
-    Store(addr=y (region=0), offset=0, bits=32, src_reg = 13)
-    r15 = r11 And r10
-    Store(addr=x (region=0), offset=0, bits=32, src_reg = 15)
+    r13 = r11 And r10
+    Store(addr=x (region=0), offset=0, bits=32, src_reg = 13)
+    r14 = SIRValue(0x2)
+    r15 = r11 Or r14
+    Store(addr=y (region=0), offset=0, bits=32, src_reg = 15)
     Return

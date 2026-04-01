@@ -19,6 +19,6 @@ Execution Unit 0:
     r0 = Load(addr=x (region=0), offset=0, bits=32)
     r1 = Load(addr=y (region=0), offset=0, bits=32)
     r2 = r0 Add r1
-    Store(addr=temp (region=0), offset=0, bits=32, src_reg = 2)
     Store(addr=z (region=0), offset=0, bits=32, src_reg = 2)
+    Store(addr=temp (region=0), offset=0, bits=32, src_reg = 2)
     Return

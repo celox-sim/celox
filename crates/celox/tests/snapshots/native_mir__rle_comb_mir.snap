@@ -9,8 +9,8 @@ bb0:
   v1 = load.i32 [sim + 8]
   v3 = add v0, v1
   v2 = and v3, 0xffffffff
-  store.i32 [sim + 12], v2
   store.i32 [sim + 4], v2
+  store.i32 [sim + 12], v2
   ret
 
 Execution Unit 0 (after regalloc):
@@ -19,8 +19,8 @@ bb0:
   v1 = load.i32 [sim + 8]
   v3 = add v0, v1
   v2 = and v3, 0xffffffff
-  store.i32 [sim + 12], v2
   store.i32 [sim + 4], v2
+  store.i32 [sim + 12], v2
   ret
   Register assignment:
     v0 -> rax
@@ -35,8 +35,8 @@ bb0:
   0x0000000c  mov edx,[r15+8]
   0x00000010  add rax,rdx
   0x00000013  and eax,0FFFFFFFFh
-  0x00000018  mov [r15+0Ch],eax
-  0x0000001c  mov [r15+4],eax
+  0x00000018  mov [r15+4],eax
+  0x0000001c  mov [r15+0Ch],eax
   0x00000020  xor eax,eax
   0x00000022  jmp short 0000000000000024h
   0x00000024  add rsp,8

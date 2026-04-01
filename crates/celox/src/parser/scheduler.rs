@@ -273,7 +273,7 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
 
 /// Flush pending DAG nodes, optionally coalescing contiguous stores to the
 /// same variable into a single `Concat` + `Store`.
-fn flush_pending_coalesce<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
+fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     pending: &mut Vec<usize>,
     input: &[LogicPath<Addr>],
     _atoms_map: &HashMap<Addr, Vec<(BitAccess, usize)>>,
@@ -385,6 +385,56 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
     pending.clear();
 }
 
+/// Reorders consecutive runs of DAG SCCs (single-node, no self-loop) so that
+/// paths targeting the same variable at the same topological layer are adjacent.
+/// This enables `flush_pending_coalesce` to merge them into wide Concat + Store.
+fn reorder_dag_runs<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    sccs: &[Vec<usize>],
+    adj: &[Vec<usize>],
+    layer: &[usize],
+    input: &[LogicPath<Addr>],
+) -> Vec<Vec<usize>> {
+    let is_dag_scc = |scc: &[usize]| scc.len() == 1 && !adj[scc[0]].contains(&scc[0]);
+
+    let mut result: Vec<Vec<usize>> = Vec::with_capacity(sccs.len());
+    let mut run_start: Option<usize> = None;
+
+    let flush_run = |result: &mut Vec<Vec<usize>>, sccs: &[Vec<usize>], start: usize, end: usize| {
+        if end - start <= 1 {
+            // Single SCC, no reordering needed
+            result.extend(sccs[start..end].iter().cloned());
+            return;
+        }
+        // Collect indices, stable sort by (layer, target_id)
+        let mut indices: Vec<usize> = (start..end).collect();
+        indices.sort_by(|&a, &b| {
+            let na = sccs[a][0];
+            let nb = sccs[b][0];
+            (layer[na], input[na].target.id).cmp(&(layer[nb], input[nb].target.id))
+        });
+        for i in indices {
+            result.push(sccs[i].clone());
+        }
+    };
+
+    for (i, scc) in sccs.iter().enumerate() {
+        if is_dag_scc(scc) {
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+        } else {
+            if let Some(start) = run_start.take() {
+                flush_run(&mut result, sccs, start, i);
+            }
+            result.push(scc.clone());
+        }
+    }
+    if let Some(start) = run_start {
+        flush_run(&mut result, sccs, start, sccs.len());
+    }
+    result
+}
+
 /// Schedules and transforms LogicPaths into Simulation Intermediate Representation (SIR).
 ///
 /// This process performs:
@@ -394,7 +444,7 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
 ///    - **Strategy A (Static Unrolling)**: For DAG parts or loops with small, predictable convergence bounds.
 ///    - **Strategy B (Dynamic Convergence)**: For complex SCCs or potential "True Loops", implementing
 ///      runtime oscillation detection and convergence-based repetition.
-pub fn sort<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
+pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     input: Vec<LogicPath<Addr>>,
     arena: &SLTNodeArena<Addr>,
     ignored_loops: &HashSet<(Addr, Addr)>,
@@ -449,6 +499,48 @@ pub fn sort<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
         }
     }
     ctx.sccs.reverse();
+
+    // ── Layer computation + DAG reordering ──
+    // Compute topological layers so that same-target paths at the same layer
+    // are adjacent, enabling flush_pending_coalesce to merge them.
+    let sccs = {
+        // Build reverse adjacency: rev_adj[u] = predecessors of u
+        let mut rev_adj = vec![Vec::new(); n];
+        for (v, neighbors) in adj.iter().enumerate() {
+            for &u in neighbors {
+                rev_adj[u].push(v);
+            }
+        }
+
+        // Compute layer[node] = 1 + max(layer[pred]) in topo order
+        let mut layer = vec![0usize; n];
+        for scc in &ctx.sccs {
+            let is_dag = scc.len() == 1 && !adj[scc[0]].contains(&scc[0]);
+            if is_dag {
+                let node = scc[0];
+                for &pred in &rev_adj[node] {
+                    layer[node] = layer[node].max(layer[pred] + 1);
+                }
+            } else {
+                let mut max_layer = 0usize;
+                for &node in scc {
+                    for &pred in &rev_adj[node] {
+                        if !scc.contains(&pred) {
+                            max_layer = max_layer.max(layer[pred] + 1);
+                        }
+                    }
+                }
+                for &node in scc {
+                    layer[node] = max_layer;
+                }
+            }
+        }
+
+        // Reorder consecutive DAG SCCs by (layer, target_id) so that
+        // same-target paths at the same layer become adjacent.
+        reorder_dag_runs(&ctx.sccs, &adj, &layer, &input)
+    };
+
     let mut builder = SIRBuilder::new();
     let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state);
 
@@ -498,7 +590,7 @@ pub fn sort<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
     let mut pending_target: Option<Addr> = None;
 
     // 4. Scheduling: Process each SCC by selecting either Static Unrolling (A) or Dynamic Convergence (B).
-    for scc in ctx.sccs {
+    for scc in sccs {
         let mut user_safety_limit = None;
         for &v_idx in &scc {
             for &u_idx in &adj[v_idx] {

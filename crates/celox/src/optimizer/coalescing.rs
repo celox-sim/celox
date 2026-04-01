@@ -23,6 +23,7 @@ mod pass_split_coalesced_stores;
 mod pass_split_wide_commits;
 mod pass_store_load_forwarding;
 pub(crate) mod pass_tail_call_split;
+mod pass_vectorize_concat;
 mod pass_xor_chain_folding;
 mod shared;
 
@@ -43,6 +44,7 @@ use pass_reschedule::ReschedulePass;
 use pass_split_coalesced_stores::SplitCoalescedStoresPass;
 use pass_split_wide_commits::SplitWideCommitsPass;
 use pass_store_load_forwarding::StoreLoadForwardingPass;
+use pass_vectorize_concat::VectorizeConcatPass;
 use pass_xor_chain_folding::XorChainFoldingPass;
 
 pub struct CoalescingPass;
@@ -237,6 +239,8 @@ fn optimize_with_options(
     if opt.coalesce_stores {
         comb_passes.add_pass(CoalesceStoresPass);
     }
+    comb_passes.add_pass(VectorizeConcatPass);
+    comb_passes.add_pass(GvnPass); // DCE for dead bit-extract chains after vectorization
 
     let eu_count = program.eval_comb.len();
     for (i, eu) in program.eval_comb.iter_mut().enumerate() {

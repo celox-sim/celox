@@ -23,10 +23,10 @@ Execution Unit 0:
     r0 = Load(addr=a (region=0), offset=0, bits=32)
     r1 = Load(addr=b (region=0), offset=0, bits=32)
     r2 = r0 Add r1
-    r3 = SIRValue(0x2)
-    r4 = r2 Or r3
-    Store(addr=y (region=0), offset=0, bits=32, src_reg = 4)
-    r5 = SIRValue(0x1)
-    r6 = r2 And r5
-    Store(addr=x (region=0), offset=0, bits=32, src_reg = 6)
+    r3 = SIRValue(0x1)
+    r4 = r2 And r3
+    Store(addr=x (region=0), offset=0, bits=32, src_reg = 4)
+    r5 = SIRValue(0x2)
+    r6 = r2 Or r5
+    Store(addr=y (region=0), offset=0, bits=32, src_reg = 6)
     Return

@@ -56,8 +56,7 @@ Execution Unit 0:
     r32 = Load(addr=i (region=0), offset=0, bits=64)
     r33 = SIRValue(0x1)
     r34 = r32 Shr r33
-    r35 = SIRValue(0x1)
-    r2 = r34 And r35
+    r2 = r34 And r33
     r3 = SIRValue(0x0)
     r4 = r3 Sub r0
     r5 = BitNot r4
@@ -65,8 +64,7 @@ Execution Unit 0:
     r7 = r5 And r2
     r8 = r6 Or r7
     Store(addr=v (region=0), offset=1, bits=1, src_reg = 8)
-    r36 = SIRValue(0x1)
-    r9 = r32 And r36
+    r9 = r32 And r33
     r14 = r4 And r9
     r15 = r5 And r8
     r16 = r14 Or r15
