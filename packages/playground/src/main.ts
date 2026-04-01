@@ -1,5 +1,12 @@
 import { chai, JestAsymmetricMatchers, JestChaiExpect } from "@vitest/expect";
 import * as monaco from "monaco-editor";
+import {
+	WaveformViewer,
+	generateVcdText,
+	type VcdSignalInfo,
+	type VcdSnapshot,
+	type VcdTrace,
+} from "./waveform-viewer.js";
 import celoxDutDts from "../../celox/dist/dut.d.ts?raw";
 import celoxIndexDts from "../../celox/dist/index.d.ts?raw";
 import celoxNapiBridgeDts from "../../celox/dist/napi-bridge.d.ts?raw";
@@ -178,6 +185,55 @@ describe("Counter (Simulation)", () => {
         sim.waitForCycles("clk", 5);
         expect(sim.dut.count).toBe(0n);
 
+        sim.dispose();
+    });
+});
+`,
+	},
+	counter_vcd: {
+		veryl: `module Counter (
+    clk: input clock,
+    rst: input reset,
+    en:  input logic,
+    count: output logic<8>,
+) {
+    var count_r: logic<8>;
+    always_ff (clk, rst) {
+        if_reset {
+            count_r = 0;
+        } else if en {
+            count_r = count_r + 1;
+        }
+    }
+    always_comb {
+        count = count_r;
+    }
+}`,
+		testbench: `import { describe, it, expect } from "vitest";
+import { Simulation } from "@celox-sim/celox";
+import { Counter } from "../src/Counter.veryl";
+
+describe("Counter (Waveform)", () => {
+    it("records waveform while counting", () => {
+        const sim = Simulation.create(Counter);
+        sim.addClock("clk", { period: 10 });
+
+        sim.dump(sim.time());
+        sim.reset("rst");
+        sim.dump(sim.time());
+
+        // Enable counting
+        sim.dut.en = 1n;
+        sim.dump(sim.time());
+
+        // Step through and dump at each event
+        for (let i = 0; i < 100; i++) {
+            const t = sim.step();
+            if (t === null) break;
+            sim.dump(t);
+        }
+
+        expect(sim.dut.count).toBeGreaterThan(0n);
         sim.dispose();
     });
 });
@@ -417,10 +473,22 @@ document.getElementById("app")!.innerHTML = `
   .panel-hdr { background: #16213e; padding: 3px 10px; font-size: 0.7rem; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
   #console { flex: 1; background: #0d1117; color: #c9d1d9; padding: 8px 10px; font-family: 'Fira Code', monospace; font-size: 0.8rem; line-height: 1.4; overflow-y: auto; white-space: pre-wrap; }
   .log-info { color: #58a6ff; } .log-error { color: #f85149; } .log-success { color: #3fb950; }
+  .right-tabs { display: flex; background: #16213e; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+  .right-tab { padding: 4px 14px; font-size: 0.7rem; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; cursor: pointer; user-select: none; border-right: 1px solid #0f3460; }
+  .right-tab:hover { color: #999; }
+  .right-tab.active { background: #0d1117; color: #c9d1d9; }
+  .right-content { display: none; flex: 1; overflow: hidden; }
+  .right-content.active { display: flex; flex-direction: column; }
+  #waveform-toolbar { display: flex; gap: 4px; padding: 3px 8px; background: #16213e; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+  #waveform-toolbar button { font-size: 0.7rem; padding: 2px 8px; background: #1a1a2e; color: #c9d1d9; border-color: #0f3460; font-weight: 400; }
+  #waveform-toolbar button:hover { background: #0f3460; }
+  #waveform-container { flex: 1; overflow: hidden; }
+  .wv-badge { display: none; font-size: 0.55rem; background: #3fb950; color: #0d1117; border-radius: 6px; padding: 0 4px; margin-left: 4px; font-weight: 700; }
+  .wv-badge.visible { display: inline; }
 </style>
 <header>
   <h1>Celox Playground</h1>
-  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option></select>
+  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option><option value="counter_vcd">Counter (Waveform)</option></select>
   <select id="run-target"></select>
   <input id="run-args" type="text" placeholder="vitest args (e.g. --grep &quot;add&quot;)" style="width: 180px; font-size: 0.8rem;" />
   <button id="run" disabled>Run</button>
@@ -432,8 +500,22 @@ document.getElementById("app")!.innerHTML = `
     <div class="editor-container" id="editor"></div>
   </div>
   <div class="panel">
-    <div class="panel-hdr">Console</div>
-    <div id="console"></div>
+    <div class="right-tabs">
+      <div class="right-tab active" data-tab="console">Console</div>
+      <div class="right-tab" data-tab="waveform">Waveform<span class="wv-badge" id="wv-badge"></span></div>
+    </div>
+    <div id="console-panel" class="right-content active">
+      <div id="console"></div>
+    </div>
+    <div id="waveform-panel" class="right-content">
+      <div id="waveform-toolbar">
+        <button id="wv-zoom-in">Zoom +</button>
+        <button id="wv-zoom-out">Zoom -</button>
+        <button id="wv-fit">Fit</button>
+        <button id="wv-download">Download VCD</button>
+      </div>
+      <div id="waveform-container"></div>
+    </div>
   </div>
 </div>`;
 
@@ -444,6 +526,9 @@ const examplesEl = document.getElementById("examples") as HTMLSelectElement;
 const runTargetEl = document.getElementById("run-target") as HTMLSelectElement;
 const runArgsEl = document.getElementById("run-args") as HTMLInputElement;
 const tabBarEl = document.getElementById("tab-bar")!;
+const consolePanelEl = document.getElementById("console-panel")!;
+const waveformPanelEl = document.getElementById("waveform-panel")!;
+const wvBadgeEl = document.getElementById("wv-badge")!;
 
 function appendConsole(msg: string, cls = "") {
 	const span = document.createElement("span");
@@ -455,6 +540,47 @@ function appendConsole(msg: string, cls = "") {
 function clearConsole() {
 	consoleEl.innerHTML = "";
 }
+
+// ── Right-panel tab switching ──────────────────────────────
+
+const rightTabs = document.querySelectorAll<HTMLElement>(".right-tab");
+function switchRightTab(tabName: string) {
+	for (const t of rightTabs) {
+		t.classList.toggle("active", t.dataset.tab === tabName);
+	}
+	consolePanelEl.classList.toggle("active", tabName === "console");
+	waveformPanelEl.classList.toggle("active", tabName === "waveform");
+	if (tabName === "waveform") waveformViewer.render();
+}
+for (const t of rightTabs) {
+	t.addEventListener("click", () => switchRightTab(t.dataset.tab!));
+}
+
+// ── Waveform viewer ────────────────────────────────────────
+
+const waveformViewer = new WaveformViewer(
+	document.getElementById("waveform-container")!,
+);
+let currentVcdTrace: VcdTrace | null = null;
+
+// VCD recording state — reset at the start of each run()
+let vcdSignals: VcdSignalInfo[] = [];
+let vcdSnapshots: VcdSnapshot[] = [];
+
+document.getElementById("wv-zoom-in")!.addEventListener("click", () => waveformViewer.zoomIn());
+document.getElementById("wv-zoom-out")!.addEventListener("click", () => waveformViewer.zoomOut());
+document.getElementById("wv-fit")!.addEventListener("click", () => waveformViewer.fit());
+document.getElementById("wv-download")!.addEventListener("click", () => {
+	if (!currentVcdTrace) return;
+	const text = generateVcdText(currentVcdTrace);
+	const blob = new Blob([text], { type: "text/plain" });
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement("a");
+	a.href = url;
+	a.download = "dump.vcd";
+	a.click();
+	URL.revokeObjectURL(url);
+});
 
 // ── Monaco editor (single instance, model switching) ────
 
@@ -1058,6 +1184,13 @@ async function run() {
 	runBtn.disabled = true;
 	statusEl.textContent = "Compiling…";
 
+	// Reset VCD recording state
+	vcdSignals = [];
+	vcdSnapshots = [];
+	currentVcdTrace = null;
+	wvBadgeEl.classList.remove("visible");
+	wvBadgeEl.textContent = "";
+
 	const targetPath = runTargetEl.value;
 	if (!targetPath) {
 		appendConsole("[error] No test file selected", "log-error");
@@ -1222,8 +1355,22 @@ async function run() {
 					}
 					return { __fourState: true, value, mask };
 				},
-				dump(_timestamp: number) {
-					throw new Error("VCD dump is not supported in the playground");
+				dump(timestamp: number) {
+					if (vcdSignals.length === 0) {
+						for (const [name, sig] of Object.entries(layout)) {
+							vcdSignals.push({ name, width: sig.width });
+						}
+					}
+					if (dirty) { evalComb(); }
+					const values: bigint[] = [];
+					for (const sig of Object.values(layout)) {
+						let v = 0n;
+						for (let i = sig.byte_size - 1; i >= 0; i--)
+							v = (v << 8n) | BigInt(view.getUint8(sig.offset + i));
+						if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
+						values.push(v);
+					}
+					vcdSnapshots.push({ timestamp, values });
 				},
 				dispose() {},
 			};
@@ -1577,8 +1724,25 @@ async function run() {
 					return { __fourState: true, value, mask };
 				},
 
-				dump(_timestamp: number) {
-					throw new Error("VCD dump is not supported in the playground");
+				dump(timestamp: number) {
+					if (vcdSignals.length === 0) {
+						for (const [name, sig] of Object.entries(layout)) {
+							vcdSignals.push({ name, width: sig.width });
+						}
+					}
+					if (simDirty) {
+						(combInst.exports.run as Function)();
+						simDirty = false;
+					}
+					const values: bigint[] = [];
+					for (const sig of Object.values(layout)) {
+						let v = 0n;
+						for (let i = sig.byte_size - 1; i >= 0; i--)
+							v = (v << 8n) | BigInt(view.getUint8(sig.offset + i));
+						if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
+						values.push(v);
+					}
+					vcdSnapshots.push({ timestamp, values });
 				},
 
 				dispose() {},
@@ -1741,6 +1905,19 @@ async function run() {
 		appendConsole(summary.join("\n"), failed > 0 ? "log-error" : "log-success");
 
 		statusEl.textContent = failed > 0 ? `${failed} failed` : "Done";
+
+		// If VCD data was recorded, show waveform
+		if (vcdSnapshots.length > 0) {
+			currentVcdTrace = { signals: vcdSignals, snapshots: vcdSnapshots };
+			waveformViewer.setTrace(currentVcdTrace);
+			wvBadgeEl.textContent = `${vcdSnapshots.length}`;
+			wvBadgeEl.classList.add("visible");
+			appendConsole(
+				`\n[vcd] ${vcdSnapshots.length} snapshots recorded — switch to Waveform tab`,
+				"log-info",
+			);
+			switchRightTab("waveform");
+		}
 	} catch (e: any) {
 		appendConsole(`[error] ${e.message}`, "log-error");
 		statusEl.textContent = "Error";
