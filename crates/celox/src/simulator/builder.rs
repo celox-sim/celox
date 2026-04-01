@@ -660,8 +660,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
                 mir_output.push_str("=== MIR (eval_comb) ===\n");
                 for (idx, eu) in program.eval_comb.iter().enumerate() {
-                    let mut mfunc =
-                        isel::lower_execution_unit(eu, layout, self.options.four_state);
+                    let mut mfunc = isel::lower_execution_unit(eu, layout, self.options.four_state);
                     mir_opt::optimize(&mut mfunc);
                     mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}\n"));
