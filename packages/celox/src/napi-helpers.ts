@@ -103,6 +103,7 @@ export interface NapiOptimizeOptions {
 	inlineCommitForwarding?: boolean;
 	eliminateDeadWorkingStores?: boolean;
 	reschedule?: boolean;
+	coalesceStores?: boolean;
 }
 
 export interface NapiOptions {
@@ -336,6 +337,8 @@ export function buildNapiOpts(
 		if (oo.eliminateDeadWorkingStores != null)
 			napiOo.eliminateDeadWorkingStores = oo.eliminateDeadWorkingStores;
 		if (oo.reschedule != null) napiOo.reschedule = oo.reschedule;
+		if (oo.coalesceStores != null)
+			napiOo.coalesceStores = oo.coalesceStores;
 		napiOpts.optimizeOptions = napiOo;
 		hasOpt = true;
 	}

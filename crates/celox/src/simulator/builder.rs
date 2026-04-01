@@ -375,6 +375,12 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Enable or disable scheduler-level store coalescing.
+    pub fn coalesce_stores(mut self, enable: bool) -> Self {
+        self.options.optimize_options.coalesce_stores = enable;
+        self
+    }
+
     /// Set the dead store elimination policy.
     pub fn dead_store_policy(mut self, policy: DeadStorePolicy) -> Self {
         self.options.dead_store_policy = policy;

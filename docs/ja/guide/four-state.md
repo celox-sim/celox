@@ -42,19 +42,20 @@ const sim = Simulation.create(MyModule, { fourState: true });
 4 値シミュレーションを使うには、ポートを `bit` ではなく `logic` で宣言してください。`bit` で宣言されたポートは X 値を暗黙的に落とします。
 :::
 
-## X 値の書き込み
+## X / Z 値の書き込み
 
-### 全ビットを X にする
+### 全ビットを X または Z にする
 
-`X` センチネルを使ってポートの全ビットを X に設定します：
+`X` センチネルで全ビットを不定に、`Z` センチネルで全ビットをハイインピーダンスに設定します：
 
 ```typescript
-import { Simulator, X } from "@celox-sim/celox";
+import { Simulator, X, Z } from "@celox-sim/celox";
 import { MyModule } from "../src/MyModule.veryl";
 
 const sim = Simulator.create(MyModule, { fourState: true });
 
-sim.dut.data_in = X;
+sim.dut.data_in = X;  // 全ビット不定
+sim.dut.tri_bus = Z;   // 全ビットハイインピーダンス
 sim.tick();
 ```
 
@@ -111,8 +112,8 @@ if (fs.mask !== 0n) {
 |----------|-----------|---------|
 | 0 | 0 | `0` |
 | 0 | 1 | `1` |
-| 1 | 0 | `X` |
-| 1 | 1 | 予約（正規化により除去される） |
+| 1 | 0 | `Z`（ハイインピーダンス） |
+| 1 | 1 | `X`（不定） |
 
 ::: tip
 低レベルアクセス（カスタムバッファ操作など）が必要な場合は、内部 API の `readFourState(buffer, layout)` 関数も利用できます。

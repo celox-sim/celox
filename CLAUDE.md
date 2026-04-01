@@ -73,6 +73,7 @@ Two levels of optimization control:
 | `inline_commit_forwarding` | Inlines values forwarded through commit operations |
 | `eliminate_dead_working_stores` | Removes working-memory stores that are never read |
 | `reschedule` | Reorders instructions for better Cranelift codegen |
+| `coalesce_stores` | Merges consecutive narrow stores into wider Concat+Store operations |
 
 All passes default to `true`. `.optimize(false)` sets all to `false` as a shorthand. See `docs/guide/optimization-tuning.md` for tuning guidance and benchmark data.
 

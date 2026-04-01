@@ -38,6 +38,7 @@ SIRT (Simulator IR Transform) passes optimize the intermediate representation be
 | `inlineCommitForwarding` | Writes directly to the destination region, removing the intermediate commit copy |
 | `eliminateDeadWorkingStores` | Removes stores to working memory that are never read |
 | `reschedule` | Reorders instructions to reduce register pressure |
+| `coalesceStores` | Merges consecutive narrow stores to the same variable into wider Concat+Store operations |
 
 ### Post-Merge Passes (Native Backend)
 

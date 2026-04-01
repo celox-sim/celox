@@ -11,7 +11,7 @@ This is an overview of the current implementation status and supported features 
 -   **Scheduler**: Event-driven time management (BinaryHeap-based) with deterministic ordering.
 -   **Multi-clock Synchronization**: Supports per-clock-domain evaluation and automatic detection of cross-domain chaining (cascade clocks). *[Evaluation order and consistency are subject to limitations](./cascade-limitations.md).*
 -   **Multi-phase Evaluation**: An evaluation strategy to guarantee consistency for simultaneously occurring events. Separate `eval_only` / `apply` execution units enable split-phase flip-flop processing.
--   **4-State Simulation**: X propagation via an IEEE 1800-compliant value/mask model. Normalization (`v &= ~m`) is applied across arithmetic, logic, shift, concatenation, Mux, and FF operations. See [four_state.md](./four-state.md) for details.
+-   **4-State Simulation**: X propagation via an IEEE 1800-compliant value/mask model. The distinction between Z (`v=0, m=1`) and X (`v=1, m=1`) is preserved throughout the pipeline — no normalization is applied. See [four_state.md](./four-state.md) for details.
 
 ## 2. Language Features
 

@@ -70,6 +70,7 @@ pub struct NapiOptimizeOptions {
     pub inline_commit_forwarding: Option<bool>,
     pub eliminate_dead_working_stores: Option<bool>,
     pub reschedule: Option<bool>,
+    pub coalesce_stores: Option<bool>,
 }
 
 /// Options for creating a simulator/simulation handle.
@@ -208,6 +209,9 @@ fn convert_optimize_options(napi: &NapiOptimizeOptions) -> celox::OptimizeOption
     }
     if let Some(v) = napi.reschedule {
         opts.reschedule = v;
+    }
+    if let Some(v) = napi.coalesce_stores {
+        opts.coalesce_stores = v;
     }
     opts
 }
@@ -616,6 +620,9 @@ fn encode_optimize_options(opts: &celox::OptimizeOptions) -> u16 {
     }
     if opts.reschedule {
         flags |= 1 << 8;
+    }
+    if opts.coalesce_stores {
+        flags |= 1 << 9;
     }
     flags
 }

@@ -74,7 +74,7 @@ impl Default for CraneliftOptions {
             opt_level: CraneliftOptLevel::default(),
             regalloc_algorithm: RegallocAlgorithm::default(),
             enable_alias_analysis: true,
-            enable_verifier: false,
+            enable_verifier: true,
         }
     }
 }

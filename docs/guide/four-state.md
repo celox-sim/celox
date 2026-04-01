@@ -42,19 +42,20 @@ When a 4-state value is assigned to a `bit`-type variable inside the design, the
 To use 4-state simulation, declare your ports as `logic` rather than `bit`. Ports declared as `bit` will silently drop X values.
 :::
 
-## Writing X Values
+## Writing X and Z Values
 
-### Assigning All-X
+### Assigning All-X or All-Z
 
-Use the `X` sentinel to set all bits of a port to X:
+Use the `X` sentinel to set all bits to unknown, or `Z` to set all bits to high-impedance:
 
 ```typescript
-import { Simulator, X } from "@celox-sim/celox";
+import { Simulator, X, Z } from "@celox-sim/celox";
 import { MyModule } from "../src/MyModule.veryl";
 
 const sim = Simulator.create(MyModule, { fourState: true });
 
-sim.dut.data_in = X;
+sim.dut.data_in = X; // all bits unknown
+sim.dut.tri_bus = Z;  // all bits high-impedance
 sim.tick();
 ```
 
@@ -111,8 +112,8 @@ The returned `FourStateValue` has the following semantics:
 |----------|-----------|---------|
 | 0 | 0 | `0` |
 | 0 | 1 | `1` |
-| 1 | 0 | `X` |
-| 1 | 1 | Reserved (eliminated by normalization) |
+| 1 | 0 | `Z` (high-impedance) |
+| 1 | 1 | `X` (unknown) |
 
 ::: tip
 For low-level access (e.g. custom buffer manipulation), the `readFourState(buffer, layout)` function is also available as an internal API.

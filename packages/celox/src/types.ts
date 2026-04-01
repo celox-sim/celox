@@ -153,6 +153,8 @@ export interface OptimizeOptions {
 	eliminateDeadWorkingStores?: boolean;
 	/** Reorders instructions for better Cranelift code generation. */
 	reschedule?: boolean;
+	/** Merges consecutive narrow stores into wider Concat+Store operations. */
+	coalesceStores?: boolean;
 }
 
 export interface SimulatorOptions {
