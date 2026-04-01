@@ -129,13 +129,11 @@ assign o = 16'h1 << (8'hff + 8'h1);
     );
 
     }
-}
-
-#[test]
-fn test_concatenation_constant_self_determination() {
 
     // Constant folding should also respect self-determination.
-    let code = r#"
+    fn test_concatenation_constant_self_determination(sim) {
+        @setup {
+            let code = r#"
         module Top (
             o: output logic<16>,
             o2: output logic<16>,
@@ -147,37 +145,33 @@ fn test_concatenation_constant_self_determination() {
             assign o3 = {8'hf0, 8'hff + 8'h1};
         }
     "#;
-    let mut sim = SimulatorBuilder::new(code, "Top")
-        .trace_analyzer_ir()
-        .trace_on_build()
-        .build_with_trace()
-        .unwrap();
-    let o = sim.signal("o");
-    let o2 = sim.signal("o2");
-    let o3 = sim.signal("o3");
-    assert_eq!(
-        sim.get(o),
-        0u16.into(),
-        "Concatenation should be self-determined"
-    );
-    assert_eq!(
-        sim.get(o2),
-        256u16.into(),
-        "Normal addition should not be self-determined"
-    );
-    assert_eq!(
-        sim.get(o3),
-        0xf000u16.into(),
-        "Concatenation should be self-determined"
-    );
+        }
+        @build SimulatorBuilder::new(code, "Top");
 
-}
-
-#[test]
-fn test_concatenation_constant_self_determination_runtime() {
+        let o = sim.signal("o");
+        let o2 = sim.signal("o2");
+        let o3 = sim.signal("o3");
+        assert_eq!(
+            sim.get(o),
+            0u16.into(),
+            "Concatenation should be self-determined"
+        );
+        assert_eq!(
+            sim.get(o2),
+            256u16.into(),
+            "Normal addition should not be self-determined"
+        );
+        assert_eq!(
+            sim.get(o3),
+            0xf000u16.into(),
+            "Concatenation should be self-determined"
+        );
+    }
 
     // Constant folding should also respect self-determination.
-    let code = r#"
+    fn test_concatenation_constant_self_determination_runtime(sim) {
+        @setup {
+            let code = r#"
         module Top (
             i: input logic<8>,
             o: output logic<16>
@@ -186,18 +180,16 @@ fn test_concatenation_constant_self_determination_runtime() {
             assign o = {8'hff + i};
         }
     "#;
-    let mut sim = SimulatorBuilder::new(code, "Top")
-        .trace_analyzer_ir()
-        .trace_on_build()
-        .build_with_trace()
-        .unwrap();
-    let i = sim.signal("i");
-    let o = sim.signal("o");
-    sim.modify(|io| io.set(i, 0x1u8)).unwrap();
-    assert_eq!(
-        sim.get(o),
-        0u16.into(),
-        "Constant concatenation failed to isolate addition width"
-    );
+        }
+        @build SimulatorBuilder::new(code, "Top");
 
+        let i = sim.signal("i");
+        let o = sim.signal("o");
+        sim.modify(|io| io.set(i, 0x1u8)).unwrap();
+        assert_eq!(
+            sim.get(o),
+            0u16.into(),
+            "Constant concatenation failed to isolate addition width"
+        );
+    }
 }

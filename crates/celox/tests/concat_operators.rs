@@ -1,4 +1,4 @@
-use celox::{Simulator, SimulatorBuilder};
+use celox::Simulator;
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -185,12 +185,10 @@ assign o = {{a, a} repeat 2};
     assert_eq!(sim.get(o), 0x5555u16.into());
 
     }
-}
 
-#[test]
-fn test_shift_in_concat() {
-
-    let code = r#"
+    fn test_shift_in_concat(sim) {
+        @setup {
+            let code = r#"
         module Top (
             a: input logic<8>,
             o: output logic<32>
@@ -198,20 +196,13 @@ fn test_shift_in_concat() {
             assign o = {a << 2, a >> 2, a <<< 2, a >>> 2};
         }
     "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_analyzer_ir()
-        .trace_sim_modules()
-        .trace_post_optimized_sir()
-        .build_with_trace();
-    let trace = result.trace;
-    println!("{}", trace.format_analyzer_ir().unwrap());
-    println!("{}", trace.format_slt().unwrap());
-    println!("{}", trace.format_post_optimized_sir().unwrap());
-    let mut sim = result.res.unwrap();
-    let a = sim.signal("a");
-    let o = sim.signal("o");
-    sim.modify(|io| io.set(a, 0x40u8)).unwrap();
-    let expected = 0x00100010u32;
-    assert_eq!(sim.get(o), expected.into());
+        }
+        @build Simulator::builder(code, "Top");
 
+        let a = sim.signal("a");
+        let o = sim.signal("o");
+        sim.modify(|io| io.set(a, 0x40u8)).unwrap();
+        let expected = 0x00100010u32;
+        assert_eq!(sim.get(o), expected.into());
+    }
 }

@@ -1,4 +1,4 @@
-use celox::{Simulator, SimulatorBuilder};
+use celox::Simulator;
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -189,12 +189,10 @@ o2 = 8'h00;
     assert_eq!(sim.get(o2), 0xAAu8.into());
 
     }
-}
 
-#[test]
-fn test_case_in_always_ff() {
-
-    let code = r#"
+    fn test_case_in_always_ff(sim) {
+        @setup {
+            let code = r#"
         module Top (
             clk: input clock,
             sel: input logic<2>,
@@ -211,37 +209,23 @@ fn test_case_in_always_ff() {
             assign o = r_val;
         }
     "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_analyzer_ir()
-        .trace_sim_modules()
-        .trace_post_optimized_sir()
-        .trace_post_optimized_clif()
-        .build_with_trace();
-    let trace = result.trace;
-    let sim = result.res;
-    println!("{}", trace.analyzer_ir.clone().unwrap());
+        }
+        @build Simulator::builder(code, "Top");
 
-    println!("{}", trace.format_slt().unwrap());
-    println!("{}", trace.format_post_optimized_sir().unwrap());
-    if let Some(clif) = &trace.post_optimized_clif {
-        println!("{}", clif);
+        let clk = sim.event("clk");
+        let sel = sim.signal("sel");
+        let o = sim.signal("o");
+
+        sim.modify(|io| io.set(sel, 0u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(o), 0x10u8.into());
+
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(o), 0x20u8.into());
+
+        sim.modify(|io| io.set(sel, 3u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(o), 0xFFu8.into());
     }
-
-    let mut sim = sim.unwrap();
-    let clk = sim.event("clk");
-    let sel = sim.signal("sel");
-    let o = sim.signal("o");
-
-    sim.modify(|io| io.set(sel, 0u8)).unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(o), 0x10u8.into());
-
-    sim.modify(|io| io.set(sel, 1u8)).unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(o), 0x20u8.into());
-
-    sim.modify(|io| io.set(sel, 3u8)).unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(o), 0xFFu8.into());
-
 }

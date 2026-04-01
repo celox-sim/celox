@@ -192,12 +192,10 @@ assign o3 = 128'shc000_0000_0000_0000_0000_0000_0000_0000 >>> 1;
     );
 
     }
-}
 
-#[test]
-fn test_shift_constant_folding_native() {
-
-    let code = r#"
+    fn test_shift_constant_folding_native(sim) {
+        @setup {
+            let code = r#"
         module Top (
             o: output signed logic<64>,
             o2: output signed logic<64>,
@@ -208,32 +206,30 @@ fn test_shift_constant_folding_native() {
             assign o3 = 64'shc000_0000_0000_0000 >>> 1;
         }
     "#;
-    let mut sim = SimulatorBuilder::new(code, "Top")
-        .trace_analyzer_ir()
-        .trace_on_build()
-        .build_with_trace()
-        .unwrap();
-    let o = sim.signal("o");
-    let o2 = sim.signal("o2");
-    let o3 = sim.signal("o3");
-    let expected = BigUint::from(0xe000_0000_0000_0000u64);
-    assert_eq!(
-        sim.get(o),
-        expected,
-        "Native arithmetic constant folding failed"
-    );
+        }
+        @build SimulatorBuilder::new(code, "Top");
 
-    let expected2 = BigUint::from(0x6000_0000_0000_0000u64);
-    assert_eq!(
-        sim.get(o2),
-        expected2,
-        "Native arithmetic constant folding failed"
-    );
-    let expected3 = BigUint::from(0xe000_0000_0000_0000u64);
-    assert_eq!(
-        sim.get(o3),
-        expected3,
-        "Native arithmetic constant folding failed"
-    );
+        let o = sim.signal("o");
+        let o2 = sim.signal("o2");
+        let o3 = sim.signal("o3");
+        let expected = BigUint::from(0xe000_0000_0000_0000u64);
+        assert_eq!(
+            sim.get(o),
+            expected,
+            "Native arithmetic constant folding failed"
+        );
 
+        let expected2 = BigUint::from(0x6000_0000_0000_0000u64);
+        assert_eq!(
+            sim.get(o2),
+            expected2,
+            "Native arithmetic constant folding failed"
+        );
+        let expected3 = BigUint::from(0xe000_0000_0000_0000u64);
+        assert_eq!(
+            sim.get(o3),
+            expected3,
+            "Native arithmetic constant folding failed"
+        );
+    }
 }

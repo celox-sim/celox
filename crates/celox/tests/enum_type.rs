@@ -1,4 +1,4 @@
-use celox::{Simulator, SimulatorBuilder};
+use celox::Simulator;
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -119,14 +119,12 @@ assign state_out = state;
     assert_eq!(sim.get(state_out), 0u8.into()); // Idle
 
     }
-}
 
-/// Enum-typed variables can be assigned from logic inputs
-/// and compared against enum members.
-#[test]
-fn test_enum_assign_and_compare() {
-
-    let code = r#"
+    // Enum-typed variables can be assigned from logic inputs
+    // and compared against enum members.
+    fn test_enum_assign_and_compare(sim) {
+        @setup {
+            let code = r#"
         module Top (
             i: input logic<2>,
             o_is_b: output logic
@@ -141,20 +139,16 @@ fn test_enum_assign_and_compare() {
             assign o_is_b = c == Color::Blue;
         }
     "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_sim_modules()
-        .build_with_trace();
-    let trace = result.trace;
-    println!("{}", trace.format_slt().unwrap());
+        }
+        @build Simulator::builder(code, "Top");
 
-    let mut sim = result.res.unwrap();
-    let i = sim.signal("i");
-    let o_is_b = sim.signal("o_is_b");
+        let i = sim.signal("i");
+        let o_is_b = sim.signal("o_is_b");
 
-    sim.modify(|io| io.set(i, 0u8)).unwrap();
-    assert_eq!(sim.get(o_is_b), 0u8.into());
+        sim.modify(|io| io.set(i, 0u8)).unwrap();
+        assert_eq!(sim.get(o_is_b), 0u8.into());
 
-    sim.modify(|io| io.set(i, 2u8)).unwrap();
-    assert_eq!(sim.get(o_is_b), 1u8.into());
-
+        sim.modify(|io| io.set(i, 2u8)).unwrap();
+        assert_eq!(sim.get(o_is_b), 1u8.into());
+    }
 }
