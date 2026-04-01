@@ -129,7 +129,8 @@ pub fn lower_execution_unit(
                 | SIRInstruction::Unary(d, _, _)
                 | SIRInstruction::Load(d, _, _, _)
                 | SIRInstruction::Concat(d, _)
-                | SIRInstruction::Slice(d, _, _, _) => Some(*d),
+                | SIRInstruction::Slice(d, _, _, _)
+                | SIRInstruction::Mux(d, _, _, _) => Some(*d),
                 SIRInstruction::Store(..) | SIRInstruction::Commit(..) => None,
             };
             if let Some(dr) = dst_reg {
@@ -553,6 +554,233 @@ fn lower_instruction(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
 ) {
     match inst {
+        SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+            // Expand Mux into Binary/Unary sequence and process through standard ISel.
+            // This ensures width masking, constant tracking, and 4-state mask handling
+            // are identical to the old branchless-select lowering.
+            //
+            // In 4-state mode, the Mux mask is computed separately: masks are selected
+            // (not computed via Binary mask rules), preserving Z through the select.
+            let d_width = ctx.sir_width(dst);
+            let cond_vreg = ctx.reg_map.get(*cond);
+
+            if d_width > 64 {
+                // Wide Mux: select per chunk
+                let n_chunks = ISelContext::num_chunks(d_width);
+                let tv_chunks = ctx.get_wide_chunks(then_val, block);
+                let ev_chunks = ctx.get_wide_chunks(else_val, block);
+
+                // Broadcast 1-bit cond to 64-bit: 0 - cond
+                let zero_v = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm {
+                    dst: zero_v,
+                    value: 0,
+                });
+                let cond_bc = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Sub {
+                    dst: cond_bc,
+                    lhs: zero_v,
+                    rhs: cond_vreg,
+                });
+                let not_cond_bc = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::BitNot {
+                    dst: not_cond_bc,
+                    src: cond_bc,
+                });
+
+                let mut res_chunks = Vec::with_capacity(n_chunks);
+                for i in 0..n_chunks {
+                    let tv = tv_chunks.get(i).map(|c| c.0).unwrap_or_else(|| {
+                        let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm { dst: z, value: 0 });
+                        z
+                    });
+                    let ev = ev_chunks.get(i).map(|c| c.0).unwrap_or_else(|| {
+                        let z = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm { dst: z, value: 0 });
+                        z
+                    });
+                    let masked_t = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::And {
+                        dst: masked_t,
+                        lhs: cond_bc,
+                        rhs: tv,
+                    });
+                    let masked_e = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::And {
+                        dst: masked_e,
+                        lhs: not_cond_bc,
+                        rhs: ev,
+                    });
+                    let res = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or {
+                        dst: res,
+                        lhs: masked_t,
+                        rhs: masked_e,
+                    });
+                    res_chunks.push((res, 64));
+                }
+                ctx.set_wide_chunks(*dst, res_chunks);
+
+                // 4-state: select masks the same way
+                if ctx.four_state {
+                    let tm_chunks = get_wide_mask_chunks(ctx, block, then_val, n_chunks);
+                    let em_chunks = get_wide_mask_chunks(ctx, block, else_val, n_chunks);
+
+                    // When cond has X/Z (mask != 0), result is all-X
+                    let cond_m = ctx.get_mask(*cond, block);
+                    // cond_uncertain = 0 - cond_mask (broadcast)
+                    let cond_unc = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Sub {
+                        dst: cond_unc,
+                        lhs: zero_v,
+                        rhs: cond_m,
+                    });
+
+                    let mut mask_chunks = Vec::with_capacity(n_chunks);
+                    for i in 0..n_chunks {
+                        let tm = *tm_chunks.get(i).unwrap_or(&zero_v);
+                        let em = *em_chunks.get(i).unwrap_or(&zero_v);
+                        // selected_mask = (cond_bc & then_mask) | (~cond_bc & else_mask)
+                        let mt = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::And {
+                            dst: mt,
+                            lhs: cond_bc,
+                            rhs: tm,
+                        });
+                        let me = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::And {
+                            dst: me,
+                            lhs: not_cond_bc,
+                            rhs: em,
+                        });
+                        let sel_m = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or {
+                            dst: sel_m,
+                            lhs: mt,
+                            rhs: me,
+                        });
+                        // final_mask = sel_m | cond_uncertain (if cond is X, all bits X)
+                        let fin_m = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or {
+                            dst: fin_m,
+                            lhs: sel_m,
+                            rhs: cond_unc,
+                        });
+                        mask_chunks.push((fin_m, 64));
+                    }
+                    ctx.wide_masks.insert(*dst, mask_chunks);
+                }
+            } else {
+                // Narrow Mux: branchless select
+                // Input may be wide (e.g., 4-bit Mux result used as 1-bit);
+                // use first chunk in that case.
+                let dst_vreg = ctx.reg_map.get(*dst);
+                let tv = if ctx.wide_regs.contains_key(then_val) {
+                    ctx.get_wide_chunks(then_val, block)[0].0
+                } else {
+                    ctx.reg_map.get(*then_val)
+                };
+                let ev = if ctx.wide_regs.contains_key(else_val) {
+                    ctx.get_wide_chunks(else_val, block)[0].0
+                } else {
+                    ctx.reg_map.get(*else_val)
+                };
+
+                // cond_broadcast = 0 - cond
+                let zero_v = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm {
+                    dst: zero_v,
+                    value: 0,
+                });
+                let cond_bc_raw = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Sub {
+                    dst: cond_bc_raw,
+                    lhs: zero_v,
+                    rhs: cond_vreg,
+                });
+                // Width-mask Sub and BitNot results (d_width < 64)
+                let cond_bc = if d_width < 64 {
+                    let masked = ctx.alloc_vreg(SpillDesc::transient());
+                    ctx.emit_and_imm(block, masked, cond_bc_raw, mask_for_width(d_width));
+                    masked
+                } else {
+                    cond_bc_raw
+                };
+                let not_cond_bc_raw = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::BitNot {
+                    dst: not_cond_bc_raw,
+                    src: cond_bc,
+                });
+                let not_cond_bc = if d_width < 64 {
+                    let masked = ctx.alloc_vreg(SpillDesc::transient());
+                    ctx.emit_and_imm(block, masked, not_cond_bc_raw, mask_for_width(d_width));
+                    masked
+                } else {
+                    not_cond_bc_raw
+                };
+
+                // result = (cond_bc & then) | (~cond_bc & else)
+                let masked_t = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::And {
+                    dst: masked_t,
+                    lhs: cond_bc,
+                    rhs: tv,
+                });
+                let masked_e = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::And {
+                    dst: masked_e,
+                    lhs: not_cond_bc,
+                    rhs: ev,
+                });
+                block.push(MInst::Or {
+                    dst: dst_vreg,
+                    lhs: masked_t,
+                    rhs: masked_e,
+                });
+
+                // 4-state: select masks separately, OR with cond uncertainty
+                if ctx.four_state {
+                    let tm = ctx.get_mask(*then_val, block);
+                    let em = ctx.get_mask(*else_val, block);
+                    let cond_m = ctx.get_mask(*cond, block);
+
+                    // selected_mask = (cond_bc & then_mask) | (~cond_bc & else_mask)
+                    let mt = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::And {
+                        dst: mt,
+                        lhs: cond_bc,
+                        rhs: tm,
+                    });
+                    let me = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::And {
+                        dst: me,
+                        lhs: not_cond_bc,
+                        rhs: em,
+                    });
+                    let sel_m = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or {
+                        dst: sel_m,
+                        lhs: mt,
+                        rhs: me,
+                    });
+                    // cond_uncertain = 0 - cond_mask
+                    let cond_unc = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Sub {
+                        dst: cond_unc,
+                        lhs: zero_v,
+                        rhs: cond_m,
+                    });
+                    let fin_m = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or {
+                        dst: fin_m,
+                        lhs: sel_m,
+                        rhs: cond_unc,
+                    });
+                    ctx.set_mask(*dst, fin_m);
+                }
+            }
+        }
         SIRInstruction::Imm(dst, val) => {
             let d_width = ctx.sir_width(dst);
             let digits = val.payload.to_u64_digits();
@@ -1684,6 +1912,7 @@ fn lower_instruction(
                 lower_wide_binary(ctx, block, *dst, *lhs, op, *rhs);
                 if ctx.four_state {
                     lower_wide_binary_mask(ctx, block, *dst, *lhs, op, *rhs, d_width);
+                    normalize_wide_value(ctx, block, *dst);
                 }
                 return;
             }
@@ -1693,6 +1922,7 @@ fn lower_instruction(
                 lower_wide_binary(ctx, block, *dst, *lhs, op, *rhs);
                 if ctx.four_state {
                     lower_wide_binary_mask(ctx, block, *dst, *lhs, op, *rhs, d_width);
+                    normalize_wide_value(ctx, block, *dst);
                 }
                 return;
             }
@@ -2247,6 +2477,7 @@ fn lower_instruction(
                 lower_wide_unary(ctx, block, *dst, op, *src);
                 if ctx.four_state {
                     lower_wide_unary_mask(ctx, block, *dst, op, *src, d_width, src_width);
+                    normalize_wide_value(ctx, block, *dst);
                 }
                 return;
             }
@@ -2348,6 +2579,16 @@ fn lower_instruction(
                 let s_m = ctx.get_mask(*src, block);
                 let res_m = lower_unary_mask(ctx, block, op, src_vreg, s_m, d_width, src_width);
                 ctx.set_mask(*dst, res_m);
+
+                // Normalize: operations produce X (v=1,m=1), never Z
+                let old_v = ctx.reg_map.get(*dst);
+                let normalized = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or {
+                    dst: normalized,
+                    lhs: old_v,
+                    rhs: res_m,
+                });
+                ctx.reg_map.set(*dst, normalized);
             }
         }
 
@@ -5089,6 +5330,34 @@ fn conservative_mask(
         false_val: zero,
     });
     res
+}
+
+/// Normalize wide 4-state value: operations produce X (v=1,m=1), never Z.
+/// For each chunk, computes `v_chunk |= m_chunk`.
+fn normalize_wide_value(ctx: &mut ISelContext, block: &mut MBlock, dst: RegisterId) {
+    let mask_chunks: Vec<VReg> = if let Some(mc) = ctx.wide_masks.get(&dst).cloned() {
+        mc.iter().map(|c| c.0).collect()
+    } else {
+        return;
+    };
+
+    if let Some(val_chunks) = ctx.wide_regs.get(&dst).cloned() {
+        let mut new_chunks = Vec::with_capacity(val_chunks.len());
+        for (i, &(vc, width)) in val_chunks.iter().enumerate() {
+            if let Some(&mc) = mask_chunks.get(i) {
+                let normed = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or {
+                    dst: normed,
+                    lhs: vc,
+                    rhs: mc,
+                });
+                new_chunks.push((normed, width));
+            } else {
+                new_chunks.push((vc, width));
+            }
+        }
+        ctx.wide_regs.insert(dst, new_chunks);
+    }
 }
 
 // ────────────────────────────────────────────────────────────────

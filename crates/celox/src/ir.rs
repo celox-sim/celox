@@ -760,6 +760,9 @@ fn renumber_sir_inst<A: Clone>(
         SIRInstruction::Slice(dst, src, offset, width) => {
             SIRInstruction::Slice(r(*dst), r(*src), *offset, *width)
         }
+        SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+            SIRInstruction::Mux(r(*dst), r(*cond), r(*then_val), r(*else_val))
+        }
     }
 }
 
@@ -1056,6 +1059,10 @@ pub enum SIRInstruction<Addr> {
     /// Extracts a bit range from a register: dst = src[offset +: width].
     /// Lowered to O(1) chunk-indexed loads in the CLIF backend.
     Slice(RegisterId, RegisterId, usize, usize), // dst, src, bit_offset, width
+    /// Mux: dst = if cond { then_val } else { else_val }.
+    /// In 4-state mode, preserves exact mask bits (including Z) of the selected branch.
+    /// When cond has X/Z bits, result is all-X.
+    Mux(RegisterId, RegisterId, RegisterId, RegisterId), // dst, cond, then_val, else_val
 }
 
 impl<A: Display> fmt::Display for SIRInstruction<A> {
@@ -1108,6 +1115,13 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     dst.0, src.0, offset, width
                 )
             }
+            SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+                write!(
+                    f,
+                    "r{} = Mux(cond=r{}, then=r{}, else=r{})",
+                    dst.0, cond.0, then_val.0, else_val.0
+                )
+            }
         }
     }
 }
@@ -1129,6 +1143,9 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Concat(dst, args) => SIRInstruction::Concat(dst, args),
             SIRInstruction::Slice(dst, src, offset, width) => {
                 SIRInstruction::Slice(dst, src, offset, width)
+            }
+            SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+                SIRInstruction::Mux(dst, cond, then_val, else_val)
             }
         }
     }
@@ -1153,6 +1170,9 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Concat(dst, args) => SIRInstruction::Concat(*dst, args.clone()),
             SIRInstruction::Slice(dst, src, offset, width) => {
                 SIRInstruction::Slice(*dst, *src, *offset, *width)
+            }
+            SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+                SIRInstruction::Mux(*dst, *cond, *then_val, *else_val)
             }
         }
     }

@@ -460,7 +460,8 @@ fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Unary(dst, _, _)
         | SIRInstruction::Load(dst, _, _, _)
         | SIRInstruction::Concat(dst, _)
-        | SIRInstruction::Slice(dst, _, _, _) => Some(*dst),
+        | SIRInstruction::Slice(dst, _, _, _)
+        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
         SIRInstruction::Store(..) | SIRInstruction::Commit(..) => None,
     }
 }
@@ -493,6 +494,11 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
         SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
         SIRInstruction::Slice(_, src, _, _) => {
             out.push(*src);
+        }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            out.push(*cond);
+            out.push(*then_val);
+            out.push(*else_val);
         }
     }
 }

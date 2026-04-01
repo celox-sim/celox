@@ -202,6 +202,17 @@ fn apply_aliases_to_inst(
                 }
             }
         }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            if let Some(&to) = aliases.get(cond) {
+                *cond = to;
+            }
+            if let Some(&to) = aliases.get(then_val) {
+                *then_val = to;
+            }
+            if let Some(&to) = aliases.get(else_val) {
+                *else_val = to;
+            }
+        }
         SIRInstruction::Slice(_, src, _, _) => {
             if let Some(&to) = aliases.get(src) {
                 *src = to;

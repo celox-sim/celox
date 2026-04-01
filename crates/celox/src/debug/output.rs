@@ -262,6 +262,12 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 dst.0, src.0, offset, width
             )
         }
+        SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+            format!(
+                "r{} = Mux(cond=r{}, then=r{}, else=r{})",
+                dst.0, cond.0, then_val.0, else_val.0
+            )
+        }
     }
 }
 

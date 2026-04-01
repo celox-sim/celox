@@ -555,10 +555,12 @@ impl SIRTranslator {
 
                 let final_res_v = cast_type(state.builder, res_v, dst_ty);
                 let final_res_m = cast_type(state.builder, res_m, dst_ty);
+                // Normalize: operations produce X (v=1,m=1), never Z (v=0,m=1)
+                let normalized_v = state.builder.ins().bor(final_res_v, final_res_m);
                 state.regs.insert(
                     *dst,
                     TransValue::FourState {
-                        values: vec![final_res_v],
+                        values: vec![normalized_v],
                         masks: vec![final_res_m],
                     },
                 );
@@ -750,10 +752,13 @@ impl SIRTranslator {
                                 .map(|_| state.builder.ins().iconst(types::I64, 0))
                                 .collect()
                         };
+                        // Normalize: operations produce X, never Z
+                        let normalized: Vec<_> = res_chunks.iter().zip(res_masks.iter())
+                            .map(|(&v, &m)| state.builder.ins().bor(v, m)).collect();
                         state.regs.insert(
                             *dst,
                             TransValue::FourState {
-                                values: res_chunks,
+                                values: normalized,
                                 masks: res_masks,
                             },
                         );
@@ -1061,10 +1066,13 @@ impl SIRTranslator {
                             state.builder.ins().band(res_masks[last_idx], width_mask);
                     }
 
+                    // Normalize: operations produce X, never Z
+                    let normalized: Vec<_> = res_chunks.iter().zip(res_masks.iter())
+                        .map(|(&v, &m)| state.builder.ins().bor(v, m)).collect();
                     state.regs.insert(
                         *dst,
                         TransValue::FourState {
-                            values: res_chunks,
+                            values: normalized,
                             masks: res_masks,
                         },
                     );
@@ -1207,10 +1215,12 @@ impl SIRTranslator {
                 } else {
                     res_m
                 };
+                // Normalize: operations produce X, never Z
+                let normalized_v = state.builder.ins().bor(final_res_v, final_res_m);
                 state.regs.insert(
                     *dst,
                     TransValue::FourState {
-                        values: vec![final_res_v],
+                        values: vec![normalized_v],
                         masks: vec![final_res_m],
                     },
                 );
@@ -1366,11 +1376,135 @@ impl SIRTranslator {
                     res_masks[last_idx] = state.builder.ins().band(res_masks[last_idx], width_mask);
                 }
 
+                // Normalize: operations produce X, never Z
+                let normalized: Vec<_> = res_chunks.iter().zip(res_masks.iter())
+                    .map(|(&v, &m)| state.builder.ins().bor(v, m)).collect();
+                state.regs.insert(
+                    *dst,
+                    TransValue::FourState {
+                        values: normalized,
+                        masks: res_masks,
+                    },
+                );
+            } else {
+                state.regs.insert(*dst, TransValue::TwoState(res_chunks));
+            }
+        }
+    }
+
+    /// Mux: dst = if cond { then_val } else { else_val }
+    /// In 4-state mode, selects both value and mask bits from the chosen branch.
+    /// If cond is X/Z, result is all-X.
+    pub(super) fn translate_mux_inst(
+        &self,
+        state: &mut TranslationState,
+        dst: &RegisterId,
+        cond: &RegisterId,
+        then_val: &RegisterId,
+        else_val: &RegisterId,
+    ) {
+        let d_width = state.register_map[dst].width();
+        let cond_raw = state.regs[cond].first_value(&mut state.builder);
+        // Extend cond to i64 before broadcast
+        let cond_v = cast_type(state.builder, cond_raw, types::I64);
+
+        // Broadcast 1-bit cond to i64: 0 - cond
+        let zero = state.builder.ins().iconst(types::I64, 0);
+        let cond_bc = state.builder.ins().isub(zero, cond_v);
+        let not_cond_bc = state.builder.ins().bnot(cond_bc);
+
+        if d_width <= 64 {
+            let ty = get_cl_type(d_width);
+            let tv_raw = state.regs[then_val].first_value(&mut state.builder);
+            let ev_raw = state.regs[else_val].first_value(&mut state.builder);
+            let tv = cast_type(state.builder, tv_raw, ty);
+            let ev = cast_type(state.builder, ev_raw, ty);
+            let cbc = cast_type(state.builder, cond_bc, ty);
+            let ncbc = cast_type(state.builder, not_cond_bc, ty);
+
+            let masked_t = state.builder.ins().band(cbc, tv);
+            let masked_e = state.builder.ins().band(ncbc, ev);
+            let result = state.builder.ins().bor(masked_t, masked_e);
+
+            if self.options.four_state {
+                let then_mc = state.regs[then_val]
+                    .load_mask_chunks(&mut state.builder)
+                    .unwrap_or_else(|| vec![state.builder.ins().iconst(ty, 0)]);
+                let else_mc = state.regs[else_val]
+                    .load_mask_chunks(&mut state.builder)
+                    .unwrap_or_else(|| vec![state.builder.ins().iconst(ty, 0)]);
+                let cond_mc = state.regs[cond]
+                    .load_mask_chunks(&mut state.builder)
+                    .unwrap_or_else(|| vec![state.builder.ins().iconst(ty, 0)]);
+
+                let tm = cast_type(state.builder, then_mc[0], ty);
+                let em = cast_type(state.builder, else_mc[0], ty);
+                let cm = cast_type(state.builder, cond_mc[0], ty);
+
+                // cond_uncertain = 0 - cond_mask (broadcast)
+                let z = state.builder.ins().iconst(ty, 0);
+                let cond_unc = state.builder.ins().isub(z, cm);
+                // selected_mask = (cbc & then_mask) | (~cbc & else_mask) | cond_uncertain
+                let mt = state.builder.ins().band(cbc, tm);
+                let me = state.builder.ins().band(ncbc, em);
+                let sel_m = state.builder.ins().bor(mt, me);
+                let fin_m = state.builder.ins().bor(sel_m, cond_unc);
+
+                state.regs.insert(
+                    *dst,
+                    TransValue::FourState {
+                        values: vec![result],
+                        masks: vec![fin_m],
+                    },
+                );
+            } else {
+                state.regs.insert(*dst, TransValue::TwoState(vec![result]));
+            }
+        } else {
+            // Wide Mux: per-chunk select
+            let n_chunks = (d_width + 63) / 64;
+            let tv_chunks = state.regs[then_val].load_value_chunks(&mut state.builder);
+            let ev_chunks = state.regs[else_val].load_value_chunks(&mut state.builder);
+
+            let mut res_chunks = Vec::with_capacity(n_chunks);
+            for i in 0..n_chunks {
+                let tv = *tv_chunks.get(i).unwrap_or(&zero);
+                let ev = *ev_chunks.get(i).unwrap_or(&zero);
+                let mt = state.builder.ins().band(cond_bc, tv);
+                let me = state.builder.ins().band(not_cond_bc, ev);
+                let r = state.builder.ins().bor(mt, me);
+                res_chunks.push(r);
+            }
+
+            if self.options.four_state {
+                let tm_chunks = state.regs[then_val]
+                    .load_mask_chunks(&mut state.builder)
+                    .unwrap_or_default();
+                let em_chunks = state.regs[else_val]
+                    .load_mask_chunks(&mut state.builder)
+                    .unwrap_or_default();
+                let cond_mc = state.regs[cond]
+                    .load_mask_chunks(&mut state.builder)
+                    .unwrap_or_default();
+                let cond_m_val = *cond_mc.first().unwrap_or(&zero);
+                let cond_unc = state.builder.ins().isub(zero, cond_m_val);
+
+                let mut mask_chunks = Vec::with_capacity(n_chunks);
+                for i in 0..n_chunks {
+                    let tm_i = *tm_chunks.get(i).unwrap_or(&zero);
+                    let em_i = *em_chunks.get(i).unwrap_or(&zero);
+                    let mt = state.builder.ins().band(cond_bc, tm_i);
+                    let me = state.builder.ins().band(not_cond_bc, em_i);
+                    let sel_m = state.builder.ins().bor(mt, me);
+                    let fin_m = state.builder.ins().bor(sel_m, cond_unc);
+                    mask_chunks.push(fin_m);
+                }
+
                 state.regs.insert(
                     *dst,
                     TransValue::FourState {
                         values: res_chunks,
-                        masks: res_masks,
+                        masks: mask_chunks,
                     },
                 );
             } else {

@@ -367,6 +367,9 @@ impl SIRTranslator {
             SIRInstruction::Slice(dst, src, bit_offset, width) => {
                 self.translate_slice_inst(state, dst, src, *bit_offset, *width);
             }
+            SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+                self.translate_mux_inst(state, dst, cond, then_val, else_val);
+            }
         }
     }
 

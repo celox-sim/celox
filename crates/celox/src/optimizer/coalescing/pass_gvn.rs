@@ -136,6 +136,8 @@ enum ValueKey {
     Concat(Vec<RegisterId>),
     /// Slice: (src_value_number, bit_offset, width)
     Slice(RegisterId, usize, usize),
+    /// Mux: (cond_value_number, then_value_number, else_value_number, result_width)
+    Mux(RegisterId, RegisterId, RegisterId, usize),
 }
 
 fn gvn_block(
@@ -151,6 +153,8 @@ fn gvn_block(
     // Registers that transitively depend on block params (loop variables).
     // Expressions depending on these must not be GVN'd.
     let mut loop_dependent: crate::HashSet<RegisterId> = block_params.iter().copied().collect();
+    // Track known constant values for Mux constant folding
+    let mut imm_constants: HashMap<RegisterId, u64> = HashMap::default();
 
     let resolve = |r: RegisterId, canonical: &HashMap<RegisterId, RegisterId>| -> RegisterId {
         canonical.get(&r).copied().unwrap_or(r)
@@ -158,7 +162,11 @@ fn gvn_block(
 
     for inst in instructions.iter() {
         let key = match inst {
-            SIRInstruction::Imm(_, val) => {
+            SIRInstruction::Imm(dst, val) => {
+                // Track constant for Mux folding
+                if let Some(v) = crate::optimizer::coalescing::shared::sir_value_to_u64(val) {
+                    imm_constants.insert(*dst, v);
+                }
                 // Include mask in key for 4-state correctness:
                 // Imm(0, mask=0) ≠ Imm(0, mask=0xFF)
                 let mut key_data = val.payload.to_u64_digits();
@@ -191,6 +199,20 @@ fn gvn_block(
                 let s = resolve(*src, &canonical);
                 Some(ValueKey::Slice(s, *off, *width))
             }
+            SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+                let c = resolve(*cond, &canonical);
+                let t = resolve(*then_val, &canonical);
+                let e = resolve(*else_val, &canonical);
+                // Constant fold: if cond is a known constant, alias to selected branch
+                if let Some(cond_val) = imm_constants.get(&c) {
+                    let selected = if *cond_val != 0 { t } else { e };
+                    aliases.insert(*dst, selected);
+                    canonical.insert(*dst, selected);
+                    continue;
+                }
+                let w = register_map.get(dst).map(|t| t.width()).unwrap_or(0);
+                Some(ValueKey::Mux(c, t, e, w))
+            }
             // Load: depends on memory state, cannot be value-numbered
             // (Store-Load forwarding handles Load redundancy separately)
             SIRInstruction::Load(..) => None,
@@ -219,6 +241,11 @@ fn gvn_block(
                     .any(|a| loop_dependent.contains(&resolve(*a, &canonical))),
                 SIRInstruction::Slice(_, src, _, _) => {
                     loop_dependent.contains(&resolve(*src, &canonical))
+                }
+                SIRInstruction::Mux(_, cond, then_val, else_val) => {
+                    loop_dependent.contains(&resolve(*cond, &canonical))
+                        || loop_dependent.contains(&resolve(*then_val, &canonical))
+                        || loop_dependent.contains(&resolve(*else_val, &canonical))
                 }
                 _ => false,
             };
@@ -276,6 +303,17 @@ fn apply_aliases(
         SIRInstruction::Slice(_, src, _, _) => {
             if let Some(&a) = aliases.get(src) {
                 *src = a;
+            }
+        }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            if let Some(&a) = aliases.get(cond) {
+                *cond = a;
+            }
+            if let Some(&a) = aliases.get(then_val) {
+                *then_val = a;
+            }
+            if let Some(&a) = aliases.get(else_val) {
+                *else_val = a;
             }
         }
     }

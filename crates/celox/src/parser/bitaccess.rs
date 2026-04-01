@@ -10,7 +10,12 @@ use veryl_parser::token_range::TokenRange;
 
 use crate::ir::BitAccess;
 
-/// Extract a compile-time constant value in Celox encoding (payload ^ mask_xz).
+/// Extract a compile-time constant value for Celox 4-state encoding.
+///
+/// Veryl encoding: X=(payload=0, mask=1), Z=(payload=1, mask=1)
+/// Celox encoding: X=(v=1, m=1), Z=(v=0, m=1)
+///
+/// Conversion: v = payload ^ mask_xz, m = mask_xz
 pub fn celox_value_from_comptime(comptime: &Comptime) -> Option<(BigUint, BigUint, usize, bool)> {
     let val = comptime.get_value().ok()?;
     let mask_xz = val.mask_xz().into_owned();

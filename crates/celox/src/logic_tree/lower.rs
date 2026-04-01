@@ -1,4 +1,4 @@
-use crate::ir::{BinaryOp, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRValue, UnaryOp};
+use crate::ir::{BinaryOp, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRValue};
 use crate::logic_tree::{NodeId, SLTNode, SLTNodeArena};
 use num_bigint::BigUint;
 use std::hash::Hash;
@@ -406,55 +406,10 @@ impl SLTToSIRLowerer {
         let else_width = self.get_width(else_expr, arena);
         let res_width = then_width.max(else_width);
 
-        // Broadcast 1-bit cond to res_width using 0 - cond at res_width:
-        //   0 - 1 = 0xFF...F (all ones), 0 - 0 = 0x00...0 (all zeros)
-        // We use Binary(Sub) instead of Unary(Minus) because Minus computes
-        // at the source register's width (1-bit), giving 0x01 not 0xFF...FF.
-        // When cond is X, Sub propagates X through the borrow chain → all-X mask.
-        let zero = builder.alloc_logic(res_width);
-        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
-        let cond_broadcast = builder.alloc_logic(res_width);
-        builder.emit(SIRInstruction::Binary(
-            cond_broadcast,
-            zero,
-            BinaryOp::Sub,
-            cond_reg,
-        ));
-
-        // ~cond_broadcast
-        let not_cond = builder.alloc_logic(res_width);
-        builder.emit(SIRInstruction::Unary(
-            not_cond,
-            UnaryOp::BitNot,
-            cond_broadcast,
-        ));
-
-        // masked_then = cond_broadcast & then_val
-        let masked_then = builder.alloc_logic(res_width);
-        builder.emit(SIRInstruction::Binary(
-            masked_then,
-            cond_broadcast,
-            BinaryOp::And,
-            then_val,
-        ));
-
-        // masked_else = ~cond_broadcast & else_val
-        let masked_else = builder.alloc_logic(res_width);
-        builder.emit(SIRInstruction::Binary(
-            masked_else,
-            not_cond,
-            BinaryOp::And,
-            else_val,
-        ));
-
-        // result = masked_then | masked_else
+        // Use Mux instruction: preserves Z in 4-state, branchless select in 2-state.
+        // Backends handle value and mask selection independently.
         let result = builder.alloc_logic(res_width);
-        builder.emit(SIRInstruction::Binary(
-            result,
-            masked_then,
-            BinaryOp::Or,
-            masked_else,
-        ));
+        builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
 
         result
     }

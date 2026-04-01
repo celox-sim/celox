@@ -21,7 +21,8 @@ pub(super) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Unary(dst, _, _)
         | SIRInstruction::Load(dst, _, _, _)
         | SIRInstruction::Concat(dst, _)
-        | SIRInstruction::Slice(dst, _, _, _) => Some(*dst),
+        | SIRInstruction::Slice(dst, _, _, _)
+        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
         SIRInstruction::Store(_, _, _, _, _) | SIRInstruction::Commit(_, _, _, _, _) => None,
     }
 }
@@ -105,6 +106,11 @@ fn collect_used_regs_into(
         }
         SIRInstruction::Slice(_, src, _, _) => {
             out.insert(*src);
+        }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            out.insert(*cond);
+            out.insert(*then_val);
+            out.insert(*else_val);
         }
     }
 }
@@ -386,6 +392,17 @@ pub(super) fn batch_replace_in_inst(
         SIRInstruction::Slice(_, src, _, _) => {
             if let Some(&to) = map.get(src) {
                 *src = to;
+            }
+        }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            if let Some(&to) = map.get(cond) {
+                *cond = to;
+            }
+            if let Some(&to) = map.get(then_val) {
+                *then_val = to;
+            }
+            if let Some(&to) = map.get(else_val) {
+                *else_val = to;
             }
         }
     }

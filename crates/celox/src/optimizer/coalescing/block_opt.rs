@@ -32,6 +32,11 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
         SIRInstruction::Slice(_, src, _, _) => {
             out.push(*src);
         }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            out.push(*cond);
+            out.push(*then_val);
+            out.push(*else_val);
+        }
     }
 }
 

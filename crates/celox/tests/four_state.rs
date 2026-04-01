@@ -222,7 +222,7 @@ fn test_read_a(sim) {
 }
 
 fn test_four_state_arithmetic_ops(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -547,9 +547,9 @@ fn test_four_state_mux_x_condition(sim) {
     let id_b = sim.signal("b");
     let id_y = sim.signal("y");
 
-    // sel = X, a = 0xAA, b = 0xBB → result should be X
+    // sel = X (v=1,m=1), a = 0xAA, b = 0xBB → cond uncertain → all-X
     sim.modify(|io| {
-        io.set_four_state(id_sel, BigUint::from(0u32), BigUint::from(1u32));
+        io.set_four_state(id_sel, BigUint::from(1u32), BigUint::from(1u32));
         io.set_four_state(id_a, BigUint::from(0xAAu32), BigUint::from(0u32));
         io.set_four_state(id_b, BigUint::from(0xBBu32), BigUint::from(0u32));
     })
@@ -558,8 +558,8 @@ fn test_four_state_mux_x_condition(sim) {
     let (_, m_y) = sim.get_four_state(id_y);
     assert_eq!(
         m_y,
-        BigUint::from(0xBBu32),
-        "Mux with X condition yields a conservative X-mask (0xBB in this case)"
+        BigUint::from(0xFFu32),
+        "Mux with X condition → all bits uncertain"
     );
 }
 
@@ -928,12 +928,9 @@ fn test_four_state_wide_shifts(sim) {
     .unwrap();
 
     let (v_shr, m_shr) = sim.get_four_state(id_y_shr);
-    // No normalization: value bits at X positions are preserved
-    // Upper word val=0xAA stays; lower word 0x55 remains
-    assert_eq!(
-        v_shr,
-        (BigUint::from(0xAAu64) << 64) | BigUint::from(0x55u64)
-    );
+    // Operations produce X (v=1,m=1): v |= m at uncertain positions
+    let raw_shr = (BigUint::from(0xAAu64) << 64) | BigUint::from(0x55u64);
+    assert_eq!(v_shr, raw_shr | &m_shr);
     assert_eq!(m_shr, mask_a);
 
     // Case 2: Shift by 64 (entire word boundary)
@@ -942,8 +939,8 @@ fn test_four_state_wide_shifts(sim) {
     })
     .unwrap();
     let (v_shr, m_shr) = sim.get_four_state(id_y_shr);
-    // Upper word (val=0xAA, mask=0xFF) shifted to lower; value preserved: 0xAA
-    assert_eq!(v_shr, BigUint::from(0xAAu64));
+    // Operations produce X: v |= m → 0xAA | 0xFF = 0xFF
+    assert_eq!(v_shr, BigUint::from(0xFFu64));
     assert_eq!(m_shr, BigUint::from(0xFFu64));
 
     // Case 3: Shift by amount with X -> Result should be all X
@@ -1095,9 +1092,9 @@ fn test_four_state_wide_concat_mixed(sim) {
 
     let (v_c, m_c) = sim.get_four_state(id_y_concat);
     let expected_m = BigUint::from(0xFFu64) << 64;
-    // No normalization: a's val=0xAA preserved; concatenated with b=0x55
+    // Operations produce X: v |= m at uncertain positions
     let expected_v = (BigUint::from(0xAAu64) << 64) | BigUint::from(0x55u64);
-    assert_eq!(v_c, expected_v);
+    assert_eq!(v_c, expected_v | &expected_m);
     assert_eq!(m_c, expected_m);
 }
 
@@ -1105,7 +1102,7 @@ fn test_four_state_wide_concat_mixed(sim) {
 // P0: MUL / DIV / MOD + X (conservative all-X)
 // ==========================================================================
 fn test_four_state_mul_with_x(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -1153,7 +1150,7 @@ fn test_four_state_mul_with_x(sim) {
 }
 
 fn test_four_state_div_with_x(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -1201,7 +1198,7 @@ fn test_four_state_div_with_x(sim) {
 }
 
 fn test_four_state_mod_with_x(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -1533,10 +1530,8 @@ fn test_four_state_65bit_boundary(sim) {
     );
     // Without normalization, v contains Cranelift's actual addition result on the
     // X-encoded value bits (v=1 for X). The mask marks all bits as unknown, so the
-    // value bits are don't-care from a simulation semantics perspective.
-    // Concrete: (0x1_0000_0000_0000_00FF + 0x1_0000_0000_0000_000F) truncated to
-    // 65 bits = 0x10E.
-    assert_eq!(v_add, BigUint::from(0x10Eu64));
+    // Operations produce X (v=1,m=1): v |= m for 65-bit all-X
+    assert_eq!(v_add, m_add.clone());
 }
 
 // ==========================================================================
@@ -1580,7 +1575,8 @@ fn test_four_state_negation_with_x(sim) {
         BigUint::from(0xFFu32),
         "Negation with X should yield all-X"
     );
-    assert_eq!(v, BigUint::from(0u32));
+    // Operations produce X (v=1,m=1), never Z
+    assert_eq!(v, BigUint::from(0xFFu32));
 }
 
 // ==========================================================================
@@ -1635,7 +1631,7 @@ fn test_four_state_logical_not_with_x(sim) {
 // P1: SAR + X shift amount
 // ==========================================================================
 fn test_four_state_sar_x_shift_amount(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -1683,7 +1679,7 @@ fn test_four_state_sar_x_shift_amount(sim) {
 // P1: 3+ element concatenation with X
 // ==========================================================================
 fn test_four_state_concat_three_elements(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -1870,7 +1866,7 @@ fn test_four_state_width_narrowing_with_x(sim) {
 // P2: Width widening (narrow → wide) with X
 // ==========================================================================
 fn test_four_state_width_widening_with_x(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -1986,7 +1982,7 @@ fn test_four_state_ff_conditional_with_x(sim) {
 // P2: Odd-width concatenation (3bit + 5bit) with X
 // ==========================================================================
 fn test_four_state_concat_odd_width(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -2137,10 +2133,8 @@ fn test_four_state_wide_negation_with_x(sim) {
     let all_x: BigUint = (BigUint::from(u64::MAX) << 64) | BigUint::from(u64::MAX);
     assert_eq!(m, all_x, "Wide negation with X should yield all-X");
     // Without normalization, v contains the actual negation of the raw value bits.
-    // a's value region is 5 (mask is separate), so -5 in 128-bit two's complement
-    // = 0xFFFF...FFFB. The mask marks all bits as unknown, so v is don't-care semantically.
-    let expected_neg = &all_x - BigUint::from(4u32); // (2^128 - 1) - 4 = 2^128 - 5
-    assert_eq!(v, expected_neg);
+    // Operations produce X (v=1,m=1): all-X means v = all ones
+    assert_eq!(v, all_x);
 }
 
 // ==========================================================================
@@ -2208,7 +2202,7 @@ fn test_four_state_wide_reduction_with_x(sim) {
 // Mux: both branches X
 // ==========================================================================
 fn test_four_state_mux_both_branches_x(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -2229,11 +2223,11 @@ fn test_four_state_mux_both_branches_x(sim) {
     let id_b = sim.signal("b");
     let id_y = sim.signal("y");
 
-    // sel=1 (defined), a=all-X, b=all-X → selects a, result all-X
+    // sel=1 (defined), a=all-X (v=1,m=1), b=all-X → selects a, result all-X
     sim.modify(|io| {
         io.set_four_state(id_sel, BigUint::from(1u32), BigUint::from(0u32));
-        io.set_four_state(id_a, BigUint::from(0u32), BigUint::from(0xFFu32));
-        io.set_four_state(id_b, BigUint::from(0u32), BigUint::from(0xFFu32));
+        io.set_four_state(id_a, BigUint::from(0xFFu32), BigUint::from(0xFFu32));
+        io.set_four_state(id_b, BigUint::from(0xFFu32), BigUint::from(0xFFu32));
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
@@ -2245,7 +2239,7 @@ fn test_four_state_mux_both_branches_x(sim) {
     assert_eq!(
         v,
         BigUint::from(0xFFu32),
-        "Value normalized at X positions (v |= m)"
+        "X encoding: v=1, m=1"
     );
 
     // sel=0 (defined), still selects b which is X
@@ -2341,7 +2335,7 @@ fn test_four_state_cascaded_mux_with_x(sim) {
 // Shift: both data and amount have X
 // ==========================================================================
 fn test_four_state_shift_both_x(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -2968,10 +2962,8 @@ fn test_four_state_wide_mul_with_x(sim) {
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
     assert_eq!(m, all_x_128, "Wide MUL with X should yield all-X mask");
-    // Without normalization, v contains the actual multiplication of raw value bits.
-    // a's value region is 3, b is 7, so 3 * 7 = 21 = 0x15.
-    // The mask marks all bits as unknown, so v is don't-care semantically.
-    assert_eq!(v, BigUint::from(21u32));
+    // Operations produce X (v=1,m=1): all-X means v = all ones
+    assert_eq!(v, all_x_128);
 }
 
 // ==========================================================================
@@ -3016,7 +3008,7 @@ fn test_four_state_wide_div_with_x(sim) {
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
     assert_eq!(m, all_x_128, "Wide DIV with X dividend should yield all-X");
-    assert_eq!(v, BigUint::from(0u32));
+    assert_eq!(v, all_x_128, "Operations produce X: v |= m");
 }
 
 // ==========================================================================
@@ -3061,17 +3053,15 @@ fn test_four_state_wide_mod_with_x(sim) {
     .unwrap();
     let (v, m) = sim.get_four_state(id_y);
     assert_eq!(m, all_x_128, "Wide MOD with X divisor should yield all-X");
-    // Without normalization, v contains the actual modulo of raw value bits.
-    // a's value is 17, b's value region is 1, so 17 % 1 = 0.
-    // The mask marks all bits as unknown, so v is don't-care semantically.
-    assert_eq!(v, BigUint::from(0u32));
+    // Operations produce X (v=1,m=1): all-X means v = all ones
+    assert_eq!(v, all_x_128);
 }
 
 // ==========================================================================
 // SAR with both data and shift amount having X
 // ==========================================================================
 fn test_four_state_sar_both_x(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (
@@ -3683,7 +3673,7 @@ fn test_z_literal_passthrough(sim) {
 }
 
 fn test_z_mux_tristate_pattern(sim) {
-    @ignore_on(cranelift, wasm);
+    @ignore_on(wasm);
     @setup {
     let code = r#"
         module Top (en: input logic, d: input logic<8>, y: output logic<8>) {
@@ -3719,10 +3709,11 @@ fn test_z_mux_tristate_pattern(sim) {
         BigUint::from(0xFFu32),
         "en=0: y should be all Z (mask=0xFF)"
     );
+    // Z = (v=0, m=1)
     assert_eq!(
         v,
-        BigUint::from(0xFFu32),
-        "en=0: Z encoding normalized (v |= m)"
+        BigUint::from(0u32),
+        "en=0: Z encoding (v=0, m=1)"
     );
 }
 

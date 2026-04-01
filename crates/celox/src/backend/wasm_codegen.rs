@@ -473,6 +473,9 @@ fn compile_instruction(
         SIRInstruction::Slice(_, _, _, _) => {
             todo!("Slice WASM lowering")
         }
+        SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+            compile_mux(dst, cond, then_val, else_val, unit, four_state, locals, instrs);
+        }
     }
 }
 
@@ -502,6 +505,67 @@ fn compile_imm(
             instrs.push(Instruction::I64Const(m as i64));
             instrs.push(Instruction::LocalSet(mask_idx + c as u32));
         }
+    }
+}
+
+fn compile_mux(
+    dst: &RegisterId,
+    cond: &RegisterId,
+    then_val: &RegisterId,
+    else_val: &RegisterId,
+    unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+    _four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let d_width = unit.register_map[dst].width();
+    let d_chunks = locals.reg_map[dst].num_chunks;
+    let cond_local = locals.reg_map[cond].value_idx;
+
+    // Allocate temps for cond_bc and not_cond_bc
+    let tmp_cbc = locals.alloc(1);
+    let tmp_ncbc = locals.alloc(1);
+
+    // cond_bc = 0 - cond (all ones if cond=1, all zeros if cond=0)
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::LocalGet(cond_local));
+    instrs.push(Instruction::I64Sub);
+    instrs.push(Instruction::LocalTee(tmp_cbc));
+
+    // not_cond_bc = ~cond_bc
+    instrs.push(Instruction::I64Const(-1));
+    instrs.push(Instruction::I64Xor);
+    instrs.push(Instruction::LocalSet(tmp_ncbc));
+
+    for i in 0..d_chunks {
+        let tv_local = locals.reg_map[then_val].value_idx + i as u32;
+        let ev_local = locals.reg_map[else_val].value_idx + i as u32;
+        let dst_local = locals.reg_map[dst].value_idx + i as u32;
+
+        // masked_then = cond_bc & then_val
+        instrs.push(Instruction::LocalGet(tmp_cbc));
+        instrs.push(Instruction::LocalGet(tv_local));
+        instrs.push(Instruction::I64And);
+
+        // masked_else = ~cond_bc & else_val
+        instrs.push(Instruction::LocalGet(tmp_ncbc));
+        instrs.push(Instruction::LocalGet(ev_local));
+        instrs.push(Instruction::I64And);
+
+        // result = masked_then | masked_else
+        instrs.push(Instruction::I64Or);
+
+        // Width mask for last chunk
+        if i == d_chunks - 1 {
+            let last_bits = d_width % 64;
+            if last_bits != 0 {
+                let mask = (1u64 << last_bits) - 1;
+                instrs.push(Instruction::I64Const(mask as i64));
+                instrs.push(Instruction::I64And);
+            }
+        }
+
+        instrs.push(Instruction::LocalSet(dst_local));
     }
 }
 

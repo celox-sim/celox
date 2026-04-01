@@ -110,6 +110,20 @@ pub fn estimate_clif_cost(
                 base * state_mul
             }
         }
+        SIRInstruction::Mux(dst, cond, then_val, else_val) => {
+            // Mux is a conditional select: roughly same cost as a Binary op.
+            let d_w = reg_width(register_map, dst);
+            let c_w = reg_width(register_map, cond);
+            let t_w = reg_width(register_map, then_val);
+            let e_w = reg_width(register_map, else_val);
+            let width = d_w.max(c_w).max(t_w).max(e_w);
+            if width <= 64 {
+                3 * state_mul
+            } else {
+                let nc = num_chunks(width);
+                nc * state_mul
+            }
+        }
         SIRInstruction::Unary(dst, op, src) => {
             // Unary also uses max(dst, src) as common width
             let d_w = reg_width(register_map, dst);
