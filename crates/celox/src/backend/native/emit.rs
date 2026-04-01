@@ -1188,6 +1188,9 @@ pub fn emit_chained_eus(
 
     // Single ISel + optimize + regalloc + emit
     let mut mfunc = isel::lower_execution_unit(&sir_eu, layout, four_state);
+    if cfg!(debug_assertions) {
+        mfunc.verify();
+    }
     super::mir_opt::optimize(&mut mfunc);
     let ra = regalloc::run_regalloc(&mut mfunc);
     let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;

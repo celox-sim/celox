@@ -562,7 +562,11 @@ fn lower_instruction(
             // In 4-state mode, the Mux mask is computed separately: masks are selected
             // (not computed via Binary mask rules), preserving Z through the select.
             let d_width = ctx.sir_width(dst);
-            let cond_vreg = ctx.reg_map.get(*cond);
+            let cond_vreg = if ctx.wide_regs.contains_key(cond) {
+                ctx.get_wide_chunks(cond, block)[0].0
+            } else {
+                ctx.reg_map.get(*cond)
+            };
 
             if d_width > 64 {
                 // Wide Mux: select per chunk

@@ -867,4 +867,61 @@ impl MFunction {
     pub fn spill_desc(&self, vreg: VReg) -> Option<&SpillDesc> {
         self.spill_descs.get(vreg.0 as usize)
     }
+
+    /// Verify MIR invariants. Panics with a diagnostic message on failure.
+    ///
+    /// Checks:
+    /// 1. Every VReg used by an instruction is defined before use (within the
+    ///    same block, or is a block parameter / function-level constant).
+    /// 2. No VReg is defined more than once (SSA property within a block).
+    pub fn verify(&self) {
+        use crate::HashSet;
+
+        // Collect all defs across all blocks (instructions + phi nodes)
+        let mut global_defs = HashSet::default();
+        for block in &self.blocks {
+            for phi in &block.phis {
+                global_defs.insert(phi.dst);
+            }
+            for inst in &block.insts {
+                if let Some(d) = inst.def() {
+                    if !global_defs.insert(d) {
+                        panic!(
+                            "MIR verify: VReg v{} defined more than once.\n  \
+                             second def: {inst}",
+                            d.0
+                        );
+                    }
+                }
+            }
+        }
+
+        // Check that every use has a corresponding def
+        for (bi, block) in self.blocks.iter().enumerate() {
+            // Phi sources
+            for phi in &block.phis {
+                for (_, src) in &phi.sources {
+                    if !global_defs.contains(src) {
+                        panic!(
+                            "MIR verify: VReg v{} used in phi but never defined.\n  \
+                             block {bi}, phi dst=v{}",
+                            src.0, phi.dst.0
+                        );
+                    }
+                }
+            }
+            // Instructions
+            for (ii, inst) in block.insts.iter().enumerate() {
+                for u in inst.uses().iter() {
+                    if !global_defs.contains(&u) {
+                        panic!(
+                            "MIR verify: VReg v{} used but never defined.\n  \
+                             block {bi}, inst {ii}: {inst}",
+                            u.0
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

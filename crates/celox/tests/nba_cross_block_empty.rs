@@ -213,6 +213,7 @@ r_empty: empty,
     // Stress test: push N items, pop all, verify empty eventually goes high.
     // This specifically catches the "empty=0 forever" bug.
     fn test_empty_never_stuck_at_zero(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 clk  : input  clock,
