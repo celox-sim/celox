@@ -151,7 +151,7 @@ fn compile_program(
                             id_to_event: &mut Vec<NativeEventRef>|
      -> Result<(), SimulatorError> {
         for (addr, units) in ff_map {
-            let code = compile_units(units, &layout, options.four_state)?;
+            let code = compile_units(units, layout, options.four_state)?;
             let func = code.fn_ptr;
             all_codes.push(code);
 

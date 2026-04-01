@@ -257,7 +257,7 @@ fn vectorize_concats(
         };
 
         let concat_width = args.len();
-        if concat_width > 64 || concat_width < 3 {
+        if !(3..=64).contains(&concat_width) {
             continue;
         }
 
@@ -281,11 +281,11 @@ fn vectorize_concats(
         for (i, &arg) in args.iter().enumerate() {
             let concat_position = concat_width - 1 - i; // LSB = 0
 
-            if is_zero(arg, &defs) {
+            if is_zero(arg, defs) {
                 continue;
             }
 
-            match resolve_bit_source(arg, &defs) {
+            match resolve_bit_source(arg, defs) {
                 Some(BitSource::Register {
                     source,
                     bit_position,
