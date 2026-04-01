@@ -157,6 +157,7 @@ pub fn compile_to_sir(
 use super::Simulator;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeBackend;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::backend::JitBackend;
 
 /// Controls which stores the dead store elimination pass preserves.

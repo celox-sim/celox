@@ -23,7 +23,10 @@ pub use runtime::SharedJitCode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{EventRef, JitBackend};
 pub use traits::SimulatorErrorCode;
+#[cfg(not(target_arch = "wasm32"))]
 pub use traits::{EventHandle, SimBackend};
+#[cfg(target_arch = "wasm32")]
+pub use traits::EventHandle;
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) use translator::SIRTranslator;
 #[cfg(not(target_arch = "wasm32"))]

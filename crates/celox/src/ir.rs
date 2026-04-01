@@ -585,6 +585,7 @@ impl SimModule {
 /// RegisterIds and BlockIds are renumbered to avoid conflicts.
 /// Returns (merged_eu, eu_entry_block_ids) where eu_entry_block_ids[i] is the
 /// BlockId of the i-th EU's entry block in the merged EU (for i > 0).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>, Vec<BlockId>) {
     if units.len() == 1 {
         return (units[0].clone(), vec![]);
@@ -696,6 +697,7 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
     )
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn renumber_sir_inst<A: Clone>(
     inst: &SIRInstruction<A>,
     ro: usize,

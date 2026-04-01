@@ -492,6 +492,7 @@ impl Simulator {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Simulator<JitBackend> {
     /// Returns the shared compiled JIT code, allowing it to be reused
     /// for creating additional simulator instances without recompilation.
@@ -505,6 +506,7 @@ impl Simulator<JitBackend> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Simulator<NativeBackend> {
     /// Returns the shared compiled native code, allowing it to be reused
     /// for creating additional simulator instances without recompilation.
