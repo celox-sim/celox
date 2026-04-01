@@ -520,10 +520,6 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     Self::scan_tb_methods(&s.true_side, clks, rsts);
                     Self::scan_tb_methods(&s.false_side, clks, rsts);
                 }
-                Statement::IfReset(s) => {
-                    Self::scan_tb_methods(&s.true_side, clks, rsts);
-                    Self::scan_tb_methods(&s.false_side, clks, rsts);
-                }
                 Statement::For(s) => Self::scan_tb_methods(&s.body, clks, rsts),
                 _ => {}
             }
