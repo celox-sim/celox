@@ -9,6 +9,7 @@ use crate::backend::traits::SimBackend;
 use crate::backend::get_byte_size;
 use crate::ir::{AbsoluteAddr, SignalRef};
 use crate::simulator::Simulator;
+use num_bigint::BigUint;
 use veryl_analyzer::ir::{
     Expression, Factor, ForRange, Op, Statement, SystemFunctionKind, TbMethod, TbMethodCall, VarId,
 };
@@ -65,120 +66,237 @@ pub struct CompiledExpr {
 }
 
 /// Bytecode instructions for the testbench expression evaluator.
+#[allow(dead_code)]
 enum TbOpcode {
     /// Push a constant u64.
     ConstU64(u64),
+    /// Push a wide constant (>64 bits).
+    ConstWide(BigUint),
     /// Read ≤8 bytes from memory at `offset`, zero-extend to u64.
     LoadU64 { offset: usize, byte_size: usize, mask: u64 },
-    /// Binary operation: pop two u64, push result.
+    /// Read >8 bytes from memory, push as BigUint.
+    LoadWide { offset: usize, byte_size: usize, width: usize },
+    /// Binary operation: pop two values, push result.
     BinOp(Op),
-    /// Unary operation: pop one u64, push result.
+    /// Unary operation: pop one value, push result.
     UnaryOp(Op),
-    /// Conditional: pop condition; if non-zero skip `skip_else` ops,
-    /// otherwise skip `skip_then` ops.  Used for ternary expressions.
+    /// Conditional: pop condition; if non-zero execute `then_len` ops,
+    /// otherwise skip them and execute `else_len` ops.
     Ternary { then_len: usize, else_len: usize },
+    /// Widen the top-of-stack from u64 to BigUint (for mixed-width ops).
+    Widen,
+}
+
+/// Stack value: either a native u64 or a heap-allocated BigUint.
+#[derive(Clone)]
+enum TbValue {
+    U64(u64),
+    Wide(BigUint),
+}
+
+impl TbValue {
+    #[inline]
+    fn to_u64(&self) -> u64 {
+        match self {
+            TbValue::U64(v) => *v,
+            TbValue::Wide(v) => {
+                let digits = v.to_u64_digits();
+                digits.first().copied().unwrap_or(0)
+            }
+        }
+    }
+
+    #[inline]
+    fn is_zero(&self) -> bool {
+        match self {
+            TbValue::U64(v) => *v == 0,
+            TbValue::Wide(v) => *v == BigUint::ZERO,
+        }
+    }
+
+    #[inline]
+    fn to_biguint(&self) -> BigUint {
+        match self {
+            TbValue::U64(v) => BigUint::from(*v),
+            TbValue::Wide(v) => v.clone(),
+        }
+    }
 }
 
 impl CompiledExpr {
     /// Evaluate against raw simulator memory, returning the result as u64.
-    ///
-    /// # Safety
-    /// `memory` must point to a valid simulator memory buffer that is at
-    /// least as large as the highest offset referenced by the bytecode.
+    /// For wide results, returns the low 64 bits.
     pub fn eval_u64(&self, memory: *const u8) -> u64 {
-        let mut stack = [0u64; 32];
-        let mut sp: usize = 0;
+        self.eval(memory).to_u64()
+    }
+
+    pub fn eval_bool(&self, memory: *const u8) -> bool {
+        !self.eval(memory).is_zero()
+    }
+
+    /// Core evaluation loop.  Uses `TbValue` to handle both u64 and wide
+    /// signals on a single stack.  The common case (all ≤64-bit operands)
+    /// stays in the `TbValue::U64` variant and never allocates.
+    fn eval(&self, memory: *const u8) -> TbValue {
+        let mut stack: Vec<TbValue> = Vec::with_capacity(16);
         let mut pc: usize = 0;
         let ops = &self.ops;
 
         while pc < ops.len() {
             match &ops[pc] {
                 TbOpcode::ConstU64(v) => {
-                    stack[sp] = *v;
-                    sp += 1;
-                    pc += 1;
+                    stack.push(TbValue::U64(*v));
+                }
+                TbOpcode::ConstWide(v) => {
+                    stack.push(TbValue::Wide(v.clone()));
                 }
                 TbOpcode::LoadU64 { offset, byte_size, mask } => {
                     // SAFETY: caller guarantees `memory` is valid simulator memory
                     let val = unsafe { read_le_u64(memory.add(*offset), *byte_size) } & mask;
-                    stack[sp] = val;
-                    sp += 1;
-                    pc += 1;
+                    stack.push(TbValue::U64(val));
+                }
+                TbOpcode::LoadWide { offset, byte_size, width } => {
+                    let val = unsafe { read_le_wide(memory.add(*offset), *byte_size, *width) };
+                    stack.push(TbValue::Wide(val));
                 }
                 TbOpcode::BinOp(op) => {
-                    sp -= 1;
-                    let r = stack[sp];
-                    sp -= 1;
-                    let l = stack[sp];
-                    stack[sp] = eval_binop_u64(l, *op, r);
-                    sp += 1;
-                    pc += 1;
+                    let r = stack.pop().unwrap_or(TbValue::U64(0));
+                    let l = stack.pop().unwrap_or(TbValue::U64(0));
+                    stack.push(eval_binop(l, *op, r));
                 }
                 TbOpcode::UnaryOp(op) => {
-                    stack[sp - 1] = eval_unop_u64(*op, stack[sp - 1]);
-                    pc += 1;
+                    if let Some(top) = stack.last_mut() {
+                        *top = eval_unop(*op, top);
+                    }
+                }
+                TbOpcode::Widen => {
+                    if let Some(TbValue::U64(v)) = stack.last() {
+                        let v = *v;
+                        *stack.last_mut().unwrap() = TbValue::Wide(BigUint::from(v));
+                    }
                 }
                 TbOpcode::Ternary { then_len, else_len } => {
-                    sp -= 1;
-                    let cond = stack[sp];
+                    let cond = stack.pop().unwrap_or(TbValue::U64(0));
                     pc += 1;
-                    if cond != 0 {
+                    if !cond.is_zero() {
+                        // evaluate then block, skip else
                         let then_end = pc + then_len;
                         while pc < then_end {
-                            self.step_one(ops, pc, &mut stack, &mut sp, memory);
-                            pc += 1;
+                            self.step(ops, &mut pc, &mut stack, memory);
                         }
                         pc += else_len;
+                        continue; // skip the pc += 1 at the end
                     } else {
                         pc += then_len;
                         let else_end = pc + else_len;
                         while pc < else_end {
-                            self.step_one(ops, pc, &mut stack, &mut sp, memory);
-                            pc += 1;
+                            self.step(ops, &mut pc, &mut stack, memory);
                         }
+                        continue;
                     }
                 }
             }
+            pc += 1;
         }
-        if sp > 0 { stack[sp - 1] } else { 0 }
+        stack.pop().unwrap_or(TbValue::U64(0))
     }
 
+    /// Execute a single opcode, advancing `pc`.
     #[inline]
-    fn step_one(&self, ops: &[TbOpcode], pc: usize, stack: &mut [u64; 32], sp: &mut usize, memory: *const u8) {
-        match &ops[pc] {
-            TbOpcode::ConstU64(v) => { stack[*sp] = *v; *sp += 1; }
+    fn step(&self, ops: &[TbOpcode], pc: &mut usize, stack: &mut Vec<TbValue>, memory: *const u8) {
+        if *pc >= ops.len() {
+            return;
+        }
+        match &ops[*pc] {
+            TbOpcode::ConstU64(v) => stack.push(TbValue::U64(*v)),
+            TbOpcode::ConstWide(v) => stack.push(TbValue::Wide(v.clone())),
             TbOpcode::LoadU64 { offset, byte_size, mask } => {
-                // SAFETY: caller guarantees `memory` is valid simulator memory
-                stack[*sp] = unsafe { read_le_u64(memory.add(*offset), *byte_size) } & mask;
-                *sp += 1;
+                let val = unsafe { read_le_u64(memory.add(*offset), *byte_size) } & mask;
+                stack.push(TbValue::U64(val));
+            }
+            TbOpcode::LoadWide { offset, byte_size, width } => {
+                let val = unsafe { read_le_wide(memory.add(*offset), *byte_size, *width) };
+                stack.push(TbValue::Wide(val));
             }
             TbOpcode::BinOp(op) => {
-                *sp -= 1; let r = stack[*sp];
-                *sp -= 1; stack[*sp] = eval_binop_u64(stack[*sp], *op, r);
-                *sp += 1;
+                let r = stack.pop().unwrap_or(TbValue::U64(0));
+                let l = stack.pop().unwrap_or(TbValue::U64(0));
+                stack.push(eval_binop(l, *op, r));
             }
-            TbOpcode::UnaryOp(op) => { stack[*sp - 1] = eval_unop_u64(*op, stack[*sp - 1]); }
-            _ => {}
+            TbOpcode::UnaryOp(op) => {
+                if let Some(top) = stack.last_mut() {
+                    *top = eval_unop(*op, top);
+                }
+            }
+            TbOpcode::Widen => {
+                if let Some(TbValue::U64(v)) = stack.last() {
+                    let v = *v;
+                    *stack.last_mut().unwrap() = TbValue::Wide(BigUint::from(v));
+                }
+            }
+            TbOpcode::Ternary { .. } => {} // handled by caller
         }
-    }
-
-    pub fn eval_bool(&self, memory: *const u8) -> bool {
-        self.eval_u64(memory) != 0
+        *pc += 1;
     }
 }
 
-/// Read up to 8 bytes from `ptr` as little-endian u64.
-#[inline(always)]
-/// Read up to 8 bytes from `ptr` as little-endian u64.
-///
 /// # Safety
 /// `ptr` must be valid for `byte_size` bytes of read access.
+#[inline(always)]
 unsafe fn read_le_u64(ptr: *const u8, byte_size: usize) -> u64 {
     let mut buf = [0u8; 8];
-    unsafe {
-        std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), byte_size.min(8));
-    }
+    unsafe { std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), byte_size.min(8)); }
     u64::from_le_bytes(buf)
+}
+
+/// # Safety
+/// `ptr` must be valid for `byte_size` bytes of read access.
+unsafe fn read_le_wide(ptr: *const u8, byte_size: usize, width: usize) -> BigUint {
+    let mut buf = vec![0u8; byte_size];
+    unsafe { std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), byte_size); }
+    let mut val = BigUint::from_bytes_le(&buf);
+    let extra_bits = byte_size * 8 - width;
+    if extra_bits > 0 {
+        val &= (BigUint::from(1u32) << width) - BigUint::from(1u32);
+    }
+    val
+}
+
+// ── Typed evaluation ───────────────────────────────────────────────────
+
+/// Binary operation on `TbValue`.  When both operands are `U64` the fast
+/// path runs entirely in registers; otherwise we promote to `BigUint`.
+#[inline]
+fn eval_binop(l: TbValue, op: Op, r: TbValue) -> TbValue {
+    match (&l, &r) {
+        (TbValue::U64(lv), TbValue::U64(rv)) => TbValue::U64(eval_binop_u64(*lv, op, *rv)),
+        _ => {
+            let lv = l.to_biguint();
+            let rv = r.to_biguint();
+            // Comparison / logic ops always return u64
+            match op {
+                Op::Eq | Op::Ne | Op::Less | Op::LessEq | Op::Greater | Op::GreaterEq
+                | Op::LogicAnd | Op::LogicOr => TbValue::U64(eval_binop_wide_cmp(&lv, op, &rv)),
+                _ => TbValue::Wide(eval_binop_wide(lv, op, rv)),
+            }
+        }
+    }
+}
+
+#[inline]
+fn eval_unop(op: Op, val: &TbValue) -> TbValue {
+    match val {
+        TbValue::U64(v) => TbValue::U64(eval_unop_u64(op, *v)),
+        TbValue::Wide(v) => match op {
+            Op::LogicNot => TbValue::U64((*v == BigUint::ZERO) as u64),
+            Op::BitNot => {
+                // For wide values, bitwise NOT without width info is ill-defined.
+                // Return logical NOT as a safe default.
+                TbValue::U64((*v == BigUint::ZERO) as u64)
+            }
+            _ => TbValue::Wide(v.clone()),
+        },
+    }
 }
 
 #[inline]
@@ -192,10 +310,10 @@ fn eval_binop_u64(l: u64, op: Op, r: u64) -> u64 {
         Op::BitAnd => l & r,
         Op::BitOr => l | r,
         Op::BitXor => l ^ r,
-        Op::LogicShiftL => l << (r & 63),
-        Op::LogicShiftR => l >> (r & 63),
-        Op::ArithShiftL => l << (r & 63),
-        Op::ArithShiftR => ((l as i64) >> (r & 63)) as u64,
+        Op::LogicShiftL => if r >= 64 { 0 } else { l << r },
+        Op::LogicShiftR => if r >= 64 { 0 } else { l >> r },
+        Op::ArithShiftL => if r >= 64 { 0 } else { l << r },
+        Op::ArithShiftR => if r >= 64 { ((l as i64) >> 63) as u64 } else { ((l as i64) >> r) as u64 },
         Op::Eq => (l == r) as u64,
         Op::Ne => (l != r) as u64,
         Op::Less => (l < r) as u64,
@@ -214,6 +332,42 @@ fn eval_unop_u64(op: Op, val: u64) -> u64 {
         Op::LogicNot => (val == 0) as u64,
         Op::BitNot => !val,
         _ => val,
+    }
+}
+
+fn eval_binop_wide(l: BigUint, op: Op, r: BigUint) -> BigUint {
+    match op {
+        Op::Add => l + r,
+        Op::Sub => if l >= r { l - r } else { BigUint::ZERO },
+        Op::Mul => l * r,
+        Op::Div => if r == BigUint::ZERO { BigUint::ZERO } else { l / r },
+        Op::Rem => if r == BigUint::ZERO { BigUint::ZERO } else { l % r },
+        Op::BitAnd => l & r,
+        Op::BitOr => l | r,
+        Op::BitXor => l ^ r,
+        Op::LogicShiftL => {
+            let s: u64 = (&r).try_into().unwrap_or(256);
+            l << s
+        }
+        Op::LogicShiftR => {
+            let s: u64 = (&r).try_into().unwrap_or(256);
+            l >> s
+        }
+        _ => BigUint::ZERO,
+    }
+}
+
+fn eval_binop_wide_cmp(l: &BigUint, op: Op, r: &BigUint) -> u64 {
+    match op {
+        Op::Eq => (l == r) as u64,
+        Op::Ne => (l != r) as u64,
+        Op::Less => (l < r) as u64,
+        Op::LessEq => (l <= r) as u64,
+        Op::Greater => (l > r) as u64,
+        Op::GreaterEq => (l >= r) as u64,
+        Op::LogicAnd => ((*l != BigUint::ZERO) && (*r != BigUint::ZERO)) as u64,
+        Op::LogicOr => ((*l != BigUint::ZERO) || (*r != BigUint::ZERO)) as u64,
+        _ => 0,
     }
 }
 
@@ -264,19 +418,36 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
             Factor::Variable(var_id, _, _, _) => {
                 if let Some(sig) = self.resolve_var(var_id) {
                     let byte_size = get_byte_size(sig.width);
-                    let mask = if sig.width >= 64 { u64::MAX } else { (1u64 << sig.width) - 1 };
-                    ops.push(TbOpcode::LoadU64 {
-                        offset: sig.offset,
-                        byte_size,
-                        mask,
-                    });
+                    if byte_size <= 8 {
+                        let mask = if sig.width >= 64 {
+                            u64::MAX
+                        } else {
+                            (1u64 << sig.width) - 1
+                        };
+                        ops.push(TbOpcode::LoadU64 {
+                            offset: sig.offset,
+                            byte_size,
+                            mask,
+                        });
+                    } else {
+                        ops.push(TbOpcode::LoadWide {
+                            offset: sig.offset,
+                            byte_size,
+                            width: sig.width,
+                        });
+                    }
                 } else {
                     ops.push(TbOpcode::ConstU64(0));
                 }
             }
             Factor::Value(comptime) => {
                 if let Ok(val) = comptime.get_value() {
-                    ops.push(TbOpcode::ConstU64(val.payload_u64()));
+                    let width = comptime.expr_context.width;
+                    if width <= 64 {
+                        ops.push(TbOpcode::ConstU64(val.payload_u64()));
+                    } else {
+                        ops.push(TbOpcode::ConstWide(val.payload().into_owned()));
+                    }
                 } else {
                     ops.push(TbOpcode::ConstU64(0));
                 }

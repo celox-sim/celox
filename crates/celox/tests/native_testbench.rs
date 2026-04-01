@@ -91,3 +91,49 @@ fn test_assert_failure() {
 
     assert!(matches!(result, TestResult::Fail(_)));
 }
+
+#[test]
+fn test_wide_signal() {
+    let code = r#"
+        module WideCounter (
+            clk: input  clock      ,
+            rst: input  reset      ,
+            cnt: output logic<128> ,
+        ) {
+            always_ff {
+                if_reset {
+                    cnt = 0;
+                } else {
+                    cnt += 1;
+                }
+            }
+        }
+
+        #[test(test_wide)]
+        module test_wide {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+
+            var cnt: logic<128>;
+
+            inst dut: WideCounter (
+                clk: clk,
+                rst: rst,
+                cnt: cnt,
+            );
+
+            initial {
+                rst.assert(clk);
+                clk.next  (5);
+                $assert   (cnt == 128'd5);
+                $finish   ();
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "test_wide")
+        .run_test()
+        .unwrap();
+
+    assert_eq!(result, TestResult::Pass);
+}
