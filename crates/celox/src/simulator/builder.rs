@@ -644,9 +644,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 );
             }
 
-            // Run MIR trace if requested (generates MIR output before/after regalloc)
+            // Run MIR trace if requested (generates MIR output before/after optimization + regalloc)
             if self.options.trace.mir {
-                use crate::backend::native::{emit, isel, regalloc};
+                use crate::backend::native::{emit, isel, mir_opt, regalloc};
                 let layout = crate::backend::MemoryLayout::build(&program, self.options.four_state);
                 let mut mir_output = String::new();
 
@@ -654,6 +654,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 for (idx, eu) in program.eval_comb.iter().enumerate() {
                     let mut mfunc =
                         isel::lower_execution_unit(eu, &layout, self.options.four_state);
+                    mir_opt::optimize(&mut mfunc);
                     mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}\n"));
                     let ra = regalloc::run_regalloc(&mut mfunc);

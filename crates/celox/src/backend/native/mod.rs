@@ -7,7 +7,7 @@ pub mod emit;
 pub mod isel;
 pub mod jit_mem;
 pub mod mir;
-mod mir_opt;
+pub(crate) mod mir_opt;
 pub mod regalloc;
 
 pub use backend::{NativeBackend, SharedNativeCode};
