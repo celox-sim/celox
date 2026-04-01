@@ -127,7 +127,10 @@ impl MemoryLayout {
                 .get(alias_addr)
                 .zip(widths.get(canonical_addr))
                 .is_some_and(|(&aw, &cw)| aw <= cw);
-            let not_in_ff = !ff_addrs.contains(alias_addr) && !ff_addrs.contains(canonical_addr);
+            // Only the alias (non-canonical) side must not be in FF.
+            // The canonical side can be in FF — aliasing only shares the STABLE
+            // region offset, and WORKING offsets are allocated independently.
+            let not_in_ff = !ff_addrs.contains(alias_addr);
             if fourstate_ok && alias_fits && not_in_ff {
                 if let Some(&canonical_offset) = offsets.get(canonical_addr) {
                     offsets.insert(*alias_addr, canonical_offset);
