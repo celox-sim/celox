@@ -59,14 +59,11 @@ impl ExecutionUnitPass for IdentityStoreBypassPass {
         let mut found_aliases: Vec<(RegionedAbsoluteAddr, RegionedAbsoluteAddr)> = Vec::new();
         for block in eu.blocks.values() {
             for inst in &block.instructions {
-                let SIRInstruction::Store(addr_b, SIROffset::Static(0), width, src_reg, triggers) =
+                let SIRInstruction::Store(addr_b, SIROffset::Static(0), width, src_reg, _triggers) =
                     inst
                 else {
                     continue;
                 };
-                if !triggers.is_empty() {
-                    continue;
-                }
                 // Must be the only Store to this address
                 if store_counts
                     .get(&addr_b.absolute_addr())
