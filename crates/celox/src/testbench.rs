@@ -466,6 +466,30 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 ops.extend(then_ops);
                 ops.extend(else_ops);
             }
+            Expression::Concatenation(parts, _) => {
+                // Build from MSB (first) to LSB (last):
+                //   acc = 0; for part: acc = (acc << width) | part
+                ops.push(TbOpcode::ConstU64(0));
+                for (val_expr, repeat_expr) in parts {
+                    let part_width = self.infer_expr_width(val_expr);
+                    let repeat = repeat_expr
+                        .as_ref()
+                        .and_then(|e| Self::try_const_usize(e))
+                        .unwrap_or(1);
+                    for _ in 0..repeat {
+                        if part_width > 0 {
+                            ops.push(TbOpcode::ConstU64(part_width as u64));
+                            ops.push(TbOpcode::BinOp(Op::LogicShiftL));
+                        }
+                        self.emit(val_expr, ops);
+                        if part_width > 0 && part_width < 64 {
+                            ops.push(TbOpcode::ConstU64((1u64 << part_width) - 1));
+                            ops.push(TbOpcode::BinOp(Op::BitAnd));
+                        }
+                        ops.push(TbOpcode::BinOp(Op::BitOr));
+                    }
+                }
+            }
             _ => ops.push(TbOpcode::ConstU64(0)),
         }
     }
@@ -731,6 +755,41 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     ///
     /// For static indices, adjusts the offset and narrows the width.
     /// Dynamic indices are not supported and fall back to the full variable.
+    /// Infer the bit width of an expression. Falls back to comptime if available,
+    /// otherwise resolves from VariableInfo for variables.
+    fn infer_expr_width(&self, expr: &Expression) -> usize {
+        let ctx_width = expr.comptime().expr_context.width;
+        if ctx_width > 0 {
+            return ctx_width;
+        }
+        // Try type-level width
+        if let Some(w) = expr.comptime().r#type.total_width() {
+            if w > 0 {
+                return w;
+            }
+        }
+        // For terms, look up variable info
+        if let Expression::Term(f) = expr {
+            match f.as_ref() {
+                Factor::Variable(var_id, _, _, _) => {
+                    let p = self.sim.program();
+                    if let Some(vars) = p.module_variables.get(&self.root_module_id) {
+                        if let Some(info) = vars.get(var_id) {
+                            return info.width;
+                        }
+                    }
+                }
+                Factor::Value(c) => {
+                    if let Ok(v) = c.get_value() {
+                        return v.width();
+                    }
+                }
+                _ => {}
+            }
+        }
+        0
+    }
+
     fn try_const_usize(expr: &Expression) -> Option<usize> {
         match expr {
             Expression::Term(f) => match f.as_ref() {

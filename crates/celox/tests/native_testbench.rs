@@ -533,6 +533,78 @@ fn test_bit_select() {
     );
 }
 
+// ── Concatenation ──────────────────────────────────────────────────────
+
+#[test]
+fn test_concatenation() {
+    let code = r#"
+        module ConcatDut (
+            clk: input  clock    ,
+            rst: input  reset    ,
+            hi:  output logic<8> ,
+            lo:  output logic<8> ,
+        ) {
+            always_ff {
+                if_reset { hi = 0; lo = 0; }
+                else     { hi = 8'hAB; lo = 8'hCD; }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var hi: logic<8>;
+            var lo: logic<8>;
+            inst dut: ConcatDut (clk, rst, hi, lo);
+            initial {
+                rst.assert(clk);
+                clk.next(1);
+                $assert({hi, lo} == 16'hABCD);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_repeat_concatenation() {
+    let code = r#"
+        module RepDut (
+            clk: input  clock    ,
+            rst: input  reset    ,
+            val: output logic<4> ,
+        ) {
+            always_ff {
+                if_reset { val = 0; }
+                else     { val = 4'b1010; }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var val: logic<4>;
+            inst dut: RepDut (clk, rst, val);
+            initial {
+                rst.assert(clk);
+                clk.next(1);
+                $assert({val repeat 2} == 8'b1010_1010);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Operators in assertions ────────────────────────────────────────────
 
 #[test]
