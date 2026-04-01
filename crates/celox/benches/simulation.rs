@@ -331,6 +331,15 @@ fn benchmark_linear_sec_dse(c: &mut Criterion) {
         })
     });
 
+    // Pure eval_comb with DSE (no I/O overhead)
+    sim.modify(|io| io.set(i_word, 42u64)).unwrap();
+    sim.eval_comb().unwrap();
+    c.bench_function("dse_isolation_eval_comb_linear_sec_p6", |b| {
+        b.iter(|| {
+            sim.eval_comb().unwrap();
+        })
+    });
+
     c.bench_function("dse_eval_linear_sec_p6_x1000000", |b| {
         let mut input: u64 = 0;
         b.iter(|| {
