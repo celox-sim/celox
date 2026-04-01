@@ -466,6 +466,8 @@ document.getElementById("app")!.innerHTML = `
   .tab:hover { background: #1a1a2e; color: #999; }
   .tab.active { background: #0d1117; color: #c9d1d9; }
   .tab .folder { color: #555; }
+  .tab .tab-close { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 3px; font-size: 0.65rem; color: #555; cursor: pointer; margin-left: 4px; line-height: 1; }
+  .tab .tab-close:hover { background: #e9456040; color: #f85149; }
   .tab-add { padding: 5px 10px; font-size: 0.85rem; color: #555; cursor: pointer; border-right: none; display: flex; align-items: center; user-select: none; flex-shrink: 0; }
   .tab-add:hover { color: #c9d1d9; background: #1a1a2e; }
   .tab-rename { background: #0d1117; color: #c9d1d9; border: 1px solid #e94560; outline: none; font-size: 0.75rem; font-family: system-ui, sans-serif; padding: 0 4px; width: 160px; }
@@ -661,6 +663,27 @@ function removeAllFiles() {
 	activeFilePath = null;
 }
 
+function removeFile(path: string) {
+	const file = files.get(path);
+	if (!file) return;
+	file.model.dispose();
+	files.delete(path);
+
+	// If the closed tab was active, switch to an adjacent one
+	if (activeFilePath === path) {
+		const remaining = [...files.keys()];
+		activeFilePath = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+		if (activeFilePath) {
+			const next = files.get(activeFilePath)!;
+			editor.setModel(next.model);
+			if (next.viewState) editor.restoreViewState(next.viewState);
+		} else {
+			editor.setModel(null);
+		}
+	}
+	renderTabs();
+}
+
 function activateFile(path: string) {
 	const file = files.get(path);
 	if (!file) return;
@@ -695,6 +718,17 @@ function renderTabs() {
 		} else {
 			tab.textContent = path;
 		}
+
+		// Close button
+		const closeBtn = document.createElement("span");
+		closeBtn.className = "tab-close";
+		closeBtn.textContent = "\u00d7";
+		closeBtn.title = "Close";
+		closeBtn.addEventListener("click", (e) => {
+			e.stopPropagation();
+			removeFile(path);
+		});
+		tab.appendChild(closeBtn);
 
 		tab.addEventListener("click", () => activateFile(path));
 		tab.addEventListener("dblclick", (e) => {
