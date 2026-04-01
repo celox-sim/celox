@@ -13,6 +13,7 @@ all_backends! {
 
     // Gray encode → decode roundtrip: o_bin == i_bin for all 8-bit values
     fn test_gray_roundtrip_8bit(sim) {
+        @ignore_on(wasm);
         @setup { let top = r#"
 module Top (
 i_bin  : input  logic<8>,

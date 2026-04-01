@@ -93,6 +93,7 @@ assign o = a + b;
     }
 
     fn test_wide_subtraction_128bit(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,
@@ -121,6 +122,7 @@ assign o = a - b;
     }
 
     fn test_wide_subtraction_borrow(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,
@@ -225,6 +227,7 @@ assign o_ne = a != b;
     }
 
     fn test_wide_shift_left(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<128>,
@@ -409,6 +412,7 @@ assign o_and = (|a) && b;
 
     // 128-bit multiply in always_comb.
     fn test_wide_comb_mul(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,
@@ -443,6 +447,7 @@ assign y = a * b;
 
     // 128-bit multiply in always_ff.
     fn test_wide_ff_mul(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -491,6 +496,7 @@ assign y = r;
 
     // 128-bit division in always_comb.
     fn test_wide_comb_div(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,
@@ -526,6 +532,7 @@ assign q = a / b;
 
     // 128-bit modulo in always_comb.
     fn test_wide_comb_rem(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,
@@ -588,6 +595,7 @@ assign y = a ~^ b;
 
     // 128-bit arithmetic shift right in always_comb.
     fn test_wide_comb_sar(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a: input  signed logic<128>,

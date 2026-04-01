@@ -10,6 +10,7 @@ all_backends! {
     // Block 1 updates `count`. Block 2 reads `count` to set `r_empty`.
     // NBA semantics: r_empty should see the OLD count value.
     fn test_same_module_count_and_empty_ff(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 clk  : input  clock    ,

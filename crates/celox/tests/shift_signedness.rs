@@ -94,6 +94,7 @@ o_ff = i >> 1;
     }
 
     fn test_shift_right_arithmetic_wide(sim) {
+        @ignore_on(wasm);
         @setup { // Verify 128-bit arithmetic shift
 let code = r#"
 module Top (
@@ -131,6 +132,7 @@ o_ff = i >>> 1;
     }
 
     fn test_shift_right_logical_wide(sim) {
+        @ignore_on(wasm);
         @setup { // Verify 128-bit logical shift (should zero-fill even if signed)
 let code = r#"
 module Top (

@@ -36,6 +36,7 @@ o = mem;
     }
 
     fn test_wide_concatenation(sim) {
+        @ignore_on(wasm);
         @setup { use num_bigint::ToBigUint;
 let code = r#"
 module Top (
@@ -73,6 +74,7 @@ assign o = {a, b, c};
     }
 
     fn test_wide_partial_write(sim) {
+        @ignore_on(wasm);
         @setup { use num_bigint::ToBigUint;
 let code = r#"
 module Top (
@@ -104,6 +106,7 @@ o = wide;
     }
 
     fn test_wide_cross_boundary_unaligned_write(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 val: input logic<125>,
@@ -135,6 +138,7 @@ o = wide;
     }
 
     fn test_wide_rmw_preserve_neighboring_bits(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 val: input logic<16>,

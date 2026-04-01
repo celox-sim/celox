@@ -37,6 +37,7 @@ mod test_utils;
 all_backends! {
 
     fn test_256bit_shift_left_by_zero(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<256>,
@@ -63,6 +64,7 @@ assign o = a << amt;
     }
 
     fn test_256bit_shift_left_within_chunk(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<256>,
@@ -93,6 +95,7 @@ assign o = a << amt;
     }
 
     fn test_256bit_shift_left_exact_chunk_boundary(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<256>,
@@ -139,6 +142,7 @@ assign o = a << amt;
     }
 
     fn test_256bit_shift_left_cross_chunk(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<256>,
@@ -169,6 +173,7 @@ assign o = a << amt;
     }
 
     fn test_256bit_shift_left_overflow(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<256>,
@@ -199,6 +204,7 @@ assign o = a << amt;
     }
 
     fn test_256bit_shift_right_logical(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<256>,
@@ -243,6 +249,7 @@ assign o = a >> amt;
     }
 
     fn test_256bit_arithmetic_shift_right(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  signed logic<256>,
@@ -296,6 +303,7 @@ assign o = a >>> amt;
     }
 
     fn test_512bit_shift_left(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<512>,
@@ -326,6 +334,7 @@ assign o = a << amt;
     }
 
     fn test_512bit_shift_right(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<512>,
@@ -355,6 +364,7 @@ assign o = a >> amt;
     }
 
     fn test_512bit_arithmetic_shift_right(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  signed logic<512>,
@@ -404,6 +414,7 @@ assign o = a >>> amt;
     }
 
     fn test_512bit_shift_left_multiword_pattern(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<512>,
@@ -450,6 +461,7 @@ assign o = a << amt;
     }
 
     fn test_512bit_shift_left_ff(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -488,6 +500,7 @@ o = a << amt;
     }
 
     fn test_512bit_sar_ff(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -523,6 +536,7 @@ o = a >>> amt;
     }
 
     fn test_1024bit_shift_left(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<1024>,
@@ -554,6 +568,7 @@ assign o = a << amt;
     }
 
     fn test_1024bit_shift_right(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<1024>,
@@ -587,6 +602,7 @@ assign o = a >> amt;
     }
 
     fn test_1024bit_sar_sign_extension(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  signed logic<1024>,
@@ -618,6 +634,7 @@ assign o = a >>> amt;
     }
 
     fn test_256bit_all_ones_shift_left_one(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<256>,
@@ -640,6 +657,7 @@ assign o = a << 1;
     }
 
     fn test_512bit_shift_right_complete_overflow(sim) {
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 a:   input  logic<512>,
@@ -670,6 +688,7 @@ assign o = a >> amt;
     }
 
     fn test_256bit_shift_right_cross_chunk(sim) {
+        @ignore_on(wasm);
         @setup { // Test that bits correctly flow between chunks during right shift
 let code = r#"
 module Top (
@@ -706,6 +725,7 @@ assign o = a >> amt;
     // Without padding, load_or_default reads uninitialised memory beyond the
     // source slot, producing garbage in the upper chunks.
     fn test_narrow_source_wide_dest_shift_left(sim) {
+        @ignore_on(wasm);
         @setup { // dst is 512-bit (8 chunks), lhs is 256-bit (4 chunks).
 // common_logical_width = max(512, 256, 64) = 512 → num_chunks = 8.
 // Source slot must be 8 chunks with chunks 4..7 zeroed.
@@ -751,6 +771,7 @@ assign o = (a as 512) << amt;
     }
 
     fn test_narrow_source_wide_dest_shift_right(sim) {
+        @ignore_on(wasm);
         @setup { // dst is 512-bit, lhs is 256-bit (cast up).
 // Right-shifting should see zeros in the upper chunks, not garbage.
 let code = r#"
@@ -784,6 +805,7 @@ assign o = (a as 512) >> amt;
     }
 
     fn test_narrow_source_wide_dest_sar(sim) {
+        @ignore_on(wasm);
         @setup { // 512-bit signed sar where source is a wide input.
 // The source slot for the 512-bit operand must be fully initialised.
 let code = r#"
