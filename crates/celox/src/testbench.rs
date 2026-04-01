@@ -657,20 +657,24 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         }
     }
 
-    /// Determine reset assert/deassert values from the variable's DomainKind.
+    /// Determine reset assert/deassert values from the variable's PortTypeKind.
+    /// PortTypeKind covers all four reset types (async/sync × high/low),
+    /// unlike DomainKind which maps sync resets to Other.
     fn resolve_reset_polarity(&self, inst: &StrId) -> (u8, u8) {
         let name = veryl_parser::resource_table::get_str_value(*inst).unwrap_or_default();
         let program = self.sim.program();
         if let Ok(addr) = program.get_addr(&[], &[&name]) {
             if let Some(info) = program.get_variable_info(&addr) {
-                return match info.kind {
-                    crate::ir::DomainKind::ResetAsyncHigh => (1, 0), // active-high
-                    crate::ir::DomainKind::ResetAsyncLow => (0, 1), // active-low
-                    _ => (0, 1), // default: active-low
+                return match info.type_kind {
+                    crate::ir::PortTypeKind::ResetAsyncHigh
+                    | crate::ir::PortTypeKind::ResetSyncHigh => (1, 0),
+                    crate::ir::PortTypeKind::ResetAsyncLow
+                    | crate::ir::PortTypeKind::ResetSyncLow => (0, 1),
+                    _ => (0, 1),
                 };
             }
         }
-        (0, 1) // default: active-low
+        (0, 1)
     }
 
     fn resolve_loop_var(&self, var_id: &VarId) -> Option<(SignalRef, usize)> {
