@@ -389,6 +389,10 @@ fn append_extra_source(sources: &mut Vec<(String, std::path::PathBuf)>, extra: &
 /// Configuration loaded from an optional `celox.toml` in the project root.
 #[derive(serde::Deserialize, Default)]
 struct CeloxConfig {
+    /// Glob patterns (relative to project root) for `.veryl` files to exclude
+    /// from compilation and type generation.
+    #[serde(default)]
+    exclude: Vec<String>,
     #[serde(default)]
     test: CeloxTestConfig,
     #[serde(default)]
@@ -421,6 +425,41 @@ fn load_celox_config(project_root: &std::path::Path) -> Result<CeloxConfig> {
         .map_err(|e| Error::from_reason(format!("Failed to read celox.toml: {e}")))?;
     toml::from_str(&content)
         .map_err(|e| Error::from_reason(format!("Failed to parse celox.toml: {e}")))
+}
+
+/// Build a `GlobSet` from the exclude patterns in the config.
+/// Returns `None` if there are no exclude patterns.
+fn build_exclude_set(config: &CeloxConfig) -> Result<Option<globset::GlobSet>> {
+    if config.exclude.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in &config.exclude {
+        let glob = globset::GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| Error::from_reason(format!("Invalid exclude pattern '{pattern}': {e}")))?;
+        builder.add(glob);
+    }
+    let set = builder
+        .build()
+        .map_err(|e| Error::from_reason(format!("Failed to build exclude set: {e}")))?;
+    Ok(Some(set))
+}
+
+/// Returns `true` if the path should be excluded based on the glob set.
+/// The path is matched relative to `project_root`.
+fn is_excluded(
+    path: &std::path::Path,
+    project_root: &std::path::Path,
+    exclude_set: &globset::GlobSet,
+) -> bool {
+    let relative = path
+        .strip_prefix(project_root)
+        .unwrap_or(path);
+    // Normalize to forward slashes for consistent matching
+    let rel_str = relative.to_string_lossy().replace('\\', "/");
+    exclude_set.is_match(&rel_str)
 }
 
 /// Collect all `.veryl` files from the extra test source directories declared in
@@ -487,6 +526,9 @@ fn load_project_sources(
     let project_root = toml_path.parent().unwrap_or(&toml_path);
     let celox_cfg = load_celox_config(project_root)?;
     collect_test_sources(&mut sources, project_root, &celox_cfg)?;
+    if let Some(exclude_set) = build_exclude_set(&celox_cfg)? {
+        sources.retain(|(_, path)| !is_excluded(path, project_root, &exclude_set));
+    }
     Ok((sources, metadata, celox_cfg))
 }
 
@@ -1738,6 +1780,10 @@ pub fn gen_ts(project_path: String) -> Result<String> {
                 map: src.with_extension("map"),
             });
         }
+    }
+
+    if let Some(exclude_set) = build_exclude_set(&celox_cfg)? {
+        paths.retain(|p| !is_excluded(&p.src, &project_root, &exclude_set));
     }
 
     if paths.is_empty() {

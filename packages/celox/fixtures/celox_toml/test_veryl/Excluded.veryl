@@ -1,0 +1,4 @@
+// This file is intentionally excluded via celox.toml `exclude`.
+// It contains invalid syntax that would cause a parse error if loaded.
+module Excluded (
+    INTENTIONAL_PARSE_ERROR

@@ -1,3 +1,5 @@
+exclude = ["test_veryl/Excluded.veryl"]
+
 [test]
 sources = ["test_veryl"]
 

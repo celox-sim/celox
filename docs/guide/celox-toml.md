@@ -25,12 +25,22 @@ my-project/
 ## Configuration Reference
 
 ```toml
+exclude = ["test_veryl/broken.veryl", "src/legacy/**"]
+
 [test]
 sources = ["test_veryl"]
 
 [simulation]
 max_steps = 100000
 ```
+
+### `exclude`
+
+| Key | Type | Description |
+|---|---|---|
+| `exclude` | `string[]` | Glob patterns (relative to project root) for `.veryl` files to exclude from compilation and type generation. Applies to both production sources and test sources. |
+
+Patterns use standard glob syntax (`*`, `**`, `?`, `[...]`). Path separators are always `/` regardless of platform.
 
 ### `[test]`
 
@@ -59,9 +69,11 @@ reset_type = "async_low"
 sources    = ["src"]
 ```
 
-**`celox.toml`** — additionally loads `test_veryl/` for simulation and sets a project-wide step budget:
+**`celox.toml`** — additionally loads `test_veryl/` for simulation, excludes WIP files, and sets a project-wide step budget:
 
 ```toml
+exclude = ["test_veryl/wip_*.veryl"]
+
 [test]
 sources = ["test_veryl"]
 
