@@ -11,10 +11,10 @@ pub(crate) mod portable;
 mod scheduler;
 pub(crate) mod serde_helpers;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod testbench;
-#[cfg(not(target_arch = "wasm32"))]
 mod simulation;
 mod simulator;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod testbench;
 pub(crate) mod timing;
 #[cfg(not(target_arch = "wasm32"))]
 mod vcd;

@@ -1623,6 +1623,11 @@ fn compile_store(
     locals: &LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    // width=0: identity Store optimized away by alias; skip value store.
+    // Trigger detection for WASM is not yet implemented for width=0.
+    if op_width == 0 {
+        return;
+    }
     let s = &locals.reg_map[src];
     let abs = addr.absolute_addr();
     let base_offset = compute_byte_offset(layout, &abs, addr.region);

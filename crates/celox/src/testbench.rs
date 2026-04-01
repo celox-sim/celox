@@ -5,8 +5,8 @@
 //! memory buffer.  Signals ≤64 bits use native `u64` arithmetic with zero
 //! heap allocation; wider signals fall back to `BigUint`.
 
-use crate::backend::traits::SimBackend;
 use crate::backend::get_byte_size;
+use crate::backend::traits::SimBackend;
 use crate::ir::{AbsoluteAddr, SignalRef};
 use crate::simulator::Simulator;
 use num_bigint::BigUint;
@@ -83,9 +83,17 @@ enum TbOpcode {
     /// Push a wide constant (>64 bits).
     ConstWide(BigUint),
     /// Read ≤8 bytes from memory at `offset`, zero-extend to u64.
-    LoadU64 { offset: usize, byte_size: usize, mask: u64 },
+    LoadU64 {
+        offset: usize,
+        byte_size: usize,
+        mask: u64,
+    },
     /// Read >8 bytes from memory, push as BigUint.
-    LoadWide { offset: usize, byte_size: usize, width: usize },
+    LoadWide {
+        offset: usize,
+        byte_size: usize,
+        width: usize,
+    },
     /// Binary operation: pop two values, push result.
     BinOp(Op),
     /// Unary operation: pop one value, push result.
@@ -109,10 +117,7 @@ enum TbOpcode {
         select_width: usize,
     },
     /// Pop value from stack and write to memory (for function arg binding).
-    StoreU64 {
-        offset: usize,
-        byte_size: usize,
-    },
+    StoreU64 { offset: usize, byte_size: usize },
 }
 
 /// Stack value: either a native u64 or a heap-allocated BigUint.
@@ -187,13 +192,7 @@ impl CompiledExpr {
     /// Execute the opcode at `pc` and advance `pc` past it.
     /// Handles all opcodes including `Ternary` (with recursive sub-block
     /// evaluation), so there is no separate `step()` function.
-    fn exec_at(
-        &self,
-        ops: &[TbOpcode],
-        pc: &mut usize,
-        stack: &mut Vec<TbValue>,
-        memory: *mut u8,
-    ) {
+    fn exec_at(&self, ops: &[TbOpcode], pc: &mut usize, stack: &mut Vec<TbValue>, memory: *mut u8) {
         match &ops[*pc] {
             TbOpcode::ConstU64(v) => {
                 stack.push(TbValue::U64(*v));
@@ -203,13 +202,21 @@ impl CompiledExpr {
                 stack.push(TbValue::Wide(v.clone()));
                 *pc += 1;
             }
-            TbOpcode::LoadU64 { offset, byte_size, mask } => {
+            TbOpcode::LoadU64 {
+                offset,
+                byte_size,
+                mask,
+            } => {
                 // SAFETY: caller guarantees `memory` is valid simulator memory
                 let val = unsafe { read_le_u64(memory.add(*offset), *byte_size) } & mask;
                 stack.push(TbValue::U64(val));
                 *pc += 1;
             }
-            TbOpcode::LoadWide { offset, byte_size, width } => {
+            TbOpcode::LoadWide {
+                offset,
+                byte_size,
+                width,
+            } => {
                 let val = unsafe { read_le_wide(memory.add(*offset), *byte_size, *width) };
                 stack.push(TbValue::Wide(val));
                 *pc += 1;
@@ -304,11 +311,7 @@ impl CompiledExpr {
                 let bytes = v.to_le_bytes();
                 let n = (*byte_size).min(8);
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        memory.add(*offset),
-                        n,
-                    );
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), memory.add(*offset), n);
                 }
                 *pc += 1;
             }
@@ -321,7 +324,9 @@ impl CompiledExpr {
 #[inline(always)]
 unsafe fn read_le_u64(ptr: *const u8, byte_size: usize) -> u64 {
     let mut buf = [0u8; 8];
-    unsafe { std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), byte_size.min(8)); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), byte_size.min(8));
+    }
     u64::from_le_bytes(buf)
 }
 
@@ -329,7 +334,9 @@ unsafe fn read_le_u64(ptr: *const u8, byte_size: usize) -> u64 {
 /// `ptr` must be valid for `byte_size` bytes of read access.
 unsafe fn read_le_wide(ptr: *const u8, byte_size: usize, width: usize) -> BigUint {
     let mut buf = vec![0u8; byte_size];
-    unsafe { std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), byte_size); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), byte_size);
+    }
     let mut val = BigUint::from_bytes_le(&buf);
     let extra_bits = byte_size * 8 - width;
     if extra_bits > 0 {
@@ -351,8 +358,14 @@ fn eval_binop(l: TbValue, op: Op, r: TbValue) -> TbValue {
             let rv = r.to_biguint();
             // Comparison / logic ops always return u64
             match op {
-                Op::Eq | Op::Ne | Op::Less | Op::LessEq | Op::Greater | Op::GreaterEq
-                | Op::LogicAnd | Op::LogicOr => TbValue::U64(eval_binop_wide_cmp(&lv, op, &rv)),
+                Op::Eq
+                | Op::Ne
+                | Op::Less
+                | Op::LessEq
+                | Op::Greater
+                | Op::GreaterEq
+                | Op::LogicAnd
+                | Op::LogicOr => TbValue::U64(eval_binop_wide_cmp(&lv, op, &rv)),
                 _ => TbValue::Wide(eval_binop_wide(lv, op, rv)),
             }
         }
@@ -381,15 +394,51 @@ fn eval_binop_u64(l: u64, op: Op, r: u64) -> u64 {
         Op::Add => l.wrapping_add(r),
         Op::Sub => l.wrapping_sub(r),
         Op::Mul => l.wrapping_mul(r),
-        Op::Div => if r == 0 { 0 } else { l / r },
-        Op::Rem => if r == 0 { 0 } else { l % r },
+        Op::Div => {
+            if r == 0 {
+                0
+            } else {
+                l / r
+            }
+        }
+        Op::Rem => {
+            if r == 0 {
+                0
+            } else {
+                l % r
+            }
+        }
         Op::BitAnd => l & r,
         Op::BitOr => l | r,
         Op::BitXor => l ^ r,
-        Op::LogicShiftL => if r >= 64 { 0 } else { l << r },
-        Op::LogicShiftR => if r >= 64 { 0 } else { l >> r },
-        Op::ArithShiftL => if r >= 64 { 0 } else { l << r },
-        Op::ArithShiftR => if r >= 64 { ((l as i64) >> 63) as u64 } else { ((l as i64) >> r) as u64 },
+        Op::LogicShiftL => {
+            if r >= 64 {
+                0
+            } else {
+                l << r
+            }
+        }
+        Op::LogicShiftR => {
+            if r >= 64 {
+                0
+            } else {
+                l >> r
+            }
+        }
+        Op::ArithShiftL => {
+            if r >= 64 {
+                0
+            } else {
+                l << r
+            }
+        }
+        Op::ArithShiftR => {
+            if r >= 64 {
+                ((l as i64) >> 63) as u64
+            } else {
+                ((l as i64) >> r) as u64
+            }
+        }
         Op::Eq => (l == r) as u64,
         Op::Ne => (l != r) as u64,
         Op::Less => (l < r) as u64,
@@ -414,10 +463,28 @@ fn eval_unop_u64(op: Op, val: u64) -> u64 {
 fn eval_binop_wide(l: BigUint, op: Op, r: BigUint) -> BigUint {
     match op {
         Op::Add => l + r,
-        Op::Sub => if l >= r { l - r } else { BigUint::ZERO },
+        Op::Sub => {
+            if l >= r {
+                l - r
+            } else {
+                BigUint::ZERO
+            }
+        }
         Op::Mul => l * r,
-        Op::Div => if r == BigUint::ZERO { BigUint::ZERO } else { l / r },
-        Op::Rem => if r == BigUint::ZERO { BigUint::ZERO } else { l % r },
+        Op::Div => {
+            if r == BigUint::ZERO {
+                BigUint::ZERO
+            } else {
+                l / r
+            }
+        }
+        Op::Rem => {
+            if r == BigUint::ZERO {
+                BigUint::ZERO
+            } else {
+                l % r
+            }
+        }
         Op::BitAnd => l & r,
         Op::BitOr => l | r,
         Op::BitXor => l ^ r,
@@ -546,11 +613,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
     /// Emit bytecode for a function call used as an expression value.
     /// Inline-expands: store args → emit body assigns → load return value.
-    fn emit_function_call(
-        &self,
-        fc: &veryl_analyzer::ir::FunctionCall,
-        ops: &mut Vec<TbOpcode>,
-    ) {
+    fn emit_function_call(&self, fc: &veryl_analyzer::ir::FunctionCall, ops: &mut Vec<TbOpcode>) {
         let p = self.sim.program();
         let func = match p.tb_functions.get(&fc.id) {
             Some(f) => f,
@@ -624,9 +687,16 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         ops: &mut Vec<TbOpcode>,
     ) {
         let p = self.sim.program();
-        let info = match p.module_variables.get(&self.root_module_id).and_then(|v| v.get(var_id)) {
+        let info = match p
+            .module_variables
+            .get(&self.root_module_id)
+            .and_then(|v| v.get(var_id))
+        {
             Some(i) => i,
-            None => { self.emit_load(sig.offset, sig.width, ops); return; }
+            None => {
+                self.emit_load(sig.offset, sig.width, ops);
+                return;
+            }
         };
 
         // No index or select → whole variable
@@ -653,7 +723,9 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         let mut dynamic_emitted = false;
 
         for (i, idx_expr) in index.0.iter().enumerate() {
-            if i >= info.array_dims.len() { break; }
+            if i >= info.array_dims.len() {
+                break;
+            }
             let stride = strides_bits[i];
 
             if let Some(idx_val) = Self::try_const_usize(idx_expr) {
@@ -715,8 +787,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
 
         // Static bit select
-        let (sel_lsb, sel_width, is_dynamic_select) =
-            self.resolve_select(select, ops);
+        let (sel_lsb, sel_width, is_dynamic_select) = self.resolve_select(select, ops);
 
         if is_dynamic_select {
             // Dynamic bit select: load full value, shift by dynamic amount, mask
@@ -984,7 +1055,10 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             root_instance_id,
             root_module_id,
         };
-        stmts.iter().filter_map(|s| self.convert_stmt(s, &ec)).collect()
+        stmts
+            .iter()
+            .filter_map(|s| self.convert_stmt(s, &ec))
+            .collect()
     }
 
     fn convert_stmt(
@@ -1061,9 +1135,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         expr: compiled,
                     })
             }
-            Statement::FunctionCall(fc) => {
-                self.convert_function_call(fc, ec)
-            }
+            Statement::FunctionCall(fc) => self.convert_function_call(fc, ec),
             _ => None,
         }
     }
@@ -1124,7 +1196,11 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         }
     }
 
-    fn convert_tb_method(&self, tb: &TbMethodCall, ec: &ExprCompiler<'_, B>) -> Option<TestbenchStatement<B>> {
+    fn convert_tb_method(
+        &self,
+        tb: &TbMethodCall,
+        ec: &ExprCompiler<'_, B>,
+    ) -> Option<TestbenchStatement<B>> {
         match &tb.method {
             TbMethod::ClockNext { count, .. } => {
                 let ev = self.event_map.get(&tb.inst).copied()?;
@@ -1148,7 +1224,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                 let clock_event = self.event_map.get(clock).copied()?;
                 let dur = duration
                     .as_ref()
-                    .and_then(|e| try_eval_const(e))
+                    .and_then(try_eval_const)
                     .unwrap_or(self.default_reset_duration);
                 // Determine reset polarity from the variable's DomainKind
                 let (assert_value, deassert_value) = self.resolve_reset_polarity(&tb.inst);

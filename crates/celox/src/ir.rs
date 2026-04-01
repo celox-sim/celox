@@ -152,11 +152,24 @@ impl Program {
             if !aliased.is_empty() {
                 for eu in &mut self.eval_comb {
                     for block in eu.blocks.values_mut() {
+                        for inst in &mut block.instructions {
+                            if let SIRInstruction::Store(addr, _, width, _, triggers) = inst {
+                                if aliased.contains(&addr.absolute_addr()) {
+                                    if triggers.is_empty() {
+                                        // Mark for removal
+                                        *width = 0;
+                                    } else {
+                                        // Self-copy: set width=0 so backend skips
+                                        // the Load+Store but still emits trigger code.
+                                        *width = 0;
+                                    }
+                                }
+                            }
+                        }
                         block.instructions.retain(|inst| {
                             !matches!(
                                 inst,
-                                SIRInstruction::Store(addr, _, _, _, triggers)
-                                    if triggers.is_empty() && aliased.contains(&addr.absolute_addr())
+                                SIRInstruction::Store(_, _, 0, _, triggers) if triggers.is_empty()
                             )
                         });
                     }

@@ -217,6 +217,49 @@ impl SIRTranslator {
         src_reg: &RegisterId,
         triggers: &[TriggerIdWithKind],
     ) {
+        // width=0: identity Store optimized away by alias; emit triggers only.
+        if *op_width == 0 {
+            if self.options.emit_triggers && !triggers.is_empty() {
+                // Read current value at the aliased address for edge detection
+                let abs = addr.absolute_addr();
+                let base_offset = self.layout.offsets[&abs];
+                let new_val = state.builder.ins().load(
+                    types::I8,
+                    MemFlags::trusted(),
+                    state.mem_ptr,
+                    base_offset as i32,
+                );
+                let old_val = state.trigger_old_values[&(abs, addr.region)];
+                // Compare and set trigger bits via the standard path
+                for trigger in triggers {
+                    let trigger_byte_idx = trigger.id / 8;
+                    let trigger_bit_idx = trigger.id % 8;
+                    let trigger_offset = self.layout.triggered_bits_offset + trigger_byte_idx;
+
+                    let changed = state.builder.ins().icmp(IntCC::NotEqual, new_val, old_val);
+                    let bit_mask = state
+                        .builder
+                        .ins()
+                        .iconst(types::I8, (1u64 << trigger_bit_idx) as i64);
+                    let zero = state.builder.ins().iconst(types::I8, 0);
+                    let selected = state.builder.ins().select(changed, bit_mask, zero);
+                    let old_trig = state.builder.ins().load(
+                        types::I8,
+                        MemFlags::trusted(),
+                        state.mem_ptr,
+                        trigger_offset as i32,
+                    );
+                    let new_trig = state.builder.ins().bor(old_trig, selected);
+                    state.builder.ins().store(
+                        MemFlags::trusted(),
+                        new_trig,
+                        state.mem_ptr,
+                        trigger_offset as i32,
+                    );
+                }
+            }
+            return;
+        }
         // Get physical register definition information
         let s_phys_width = state.register_map[src_reg].width();
 
