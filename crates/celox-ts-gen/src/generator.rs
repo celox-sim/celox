@@ -551,7 +551,9 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
     // Emit interface port groups as nested object types
     let child_indent = format!("{}  ", indent);
     for (parent_name, members) in groups {
-        out.push_str(&format!("{}{}: {{\n", indent, parent_name));
+        let all_output = members.iter().all(|m| m.is_output);
+        let readonly = if all_output { "readonly " } else { "" };
+        out.push_str(&format!("{}{}{}: {{\n", indent, readonly, parent_name));
         for member in members {
             let member_name = &member.name[member.name.find('.').unwrap() + 1..];
             let ts_type = ts_type_for_width(member.width);
@@ -1097,6 +1099,40 @@ module Top (
         assert!(
             top.dts_content.contains("at(i: number)"),
             "DTS must contain array accessor"
+        );
+    }
+
+    /// Interface port with producer modport (all members are output).
+    /// The parent `bus` entry in DTS must be `readonly`.
+    #[test]
+    fn test_interface_port_producer_readonly() {
+        let code = r#"
+interface Bus {
+    var data:  logic<8>;
+    var valid: logic;
+    modport producer {
+        data:  output,
+        valid: output,
+    }
+}
+
+module Top (
+    bus: modport Bus::producer,
+    inp: input logic<8>,
+) {
+    assign bus.data = inp;
+    assign bus.valid = 1;
+}
+"#;
+        let modules = generate_from_source(code);
+        let top = modules.iter().find(|m| m.module_name == "Top").unwrap();
+
+        assert_snapshot!("interface_port_producer_dts", top.dts_content);
+
+        // The parent `bus` entry must be readonly since all members are output
+        assert!(
+            top.dts_content.contains("readonly bus:"),
+            "DTS must have 'readonly bus' when all members are output"
         );
     }
 
