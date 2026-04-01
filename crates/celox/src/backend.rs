@@ -22,11 +22,11 @@ pub use memory_layout::{MemoryLayout, get_byte_size};
 pub use runtime::SharedJitCode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{EventRef, JitBackend};
+#[cfg(target_arch = "wasm32")]
+pub use traits::EventHandle;
 pub use traits::SimulatorErrorCode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use traits::{EventHandle, SimBackend};
-#[cfg(target_arch = "wasm32")]
-pub use traits::EventHandle;
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) use translator::SIRTranslator;
 #[cfg(not(target_arch = "wasm32"))]
