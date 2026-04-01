@@ -299,6 +299,52 @@ fn test_function_call() {
     );
 }
 
+/// Factor::FunctionCall — function return value used in an expression.
+#[test]
+fn test_function_return_value_in_assert() {
+    let code = r#"
+        module Dut (
+            clk: input  clock    ,
+            rst: input  reset    ,
+            val: output logic<8> ,
+        ) {
+            always_ff {
+                if_reset { val = 0; }
+                else     { val = 8'd42; }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var val: logic<8>;
+            inst dut: Dut (clk, rst, val);
+
+            function double(x: input logic<8>) -> logic<8> {
+                return x + x;
+            }
+
+            function add_offset(x: input logic<8>, offset: input logic<8>) -> logic<8> {
+                return x + offset;
+            }
+
+            initial {
+                rst.assert(clk);
+                clk.next(1);
+                $assert(val == 8'd42);
+                $assert(double(val) == 8'd84);
+                $assert(add_offset(val, 8'd8) == 8'd50);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Dual clock ─────────────────────────────────────────────────────────
 
 #[test]

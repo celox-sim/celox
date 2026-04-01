@@ -108,6 +108,11 @@ enum TbOpcode {
         base_byte_size: usize,
         select_width: usize,
     },
+    /// Pop value from stack and write to memory (for function arg binding).
+    StoreU64 {
+        offset: usize,
+        byte_size: usize,
+    },
 }
 
 /// Stack value: either a native u64 or a heap-allocated BigUint.
@@ -149,23 +154,23 @@ impl TbValue {
 impl CompiledExpr {
     /// Evaluate against raw simulator memory, returning the result as u64.
     /// For wide results, returns the low 64 bits.
-    pub fn eval_u64(&self, memory: *const u8) -> u64 {
+    pub fn eval_u64(&self, memory: *mut u8) -> u64 {
         self.eval(memory).to_u64()
     }
 
     /// Evaluate and return the full `TbValue` (preserves wide results).
-    fn eval_value(&self, memory: *const u8) -> TbValue {
+    fn eval_value(&self, memory: *mut u8) -> TbValue {
         self.eval(memory)
     }
 
-    pub fn eval_bool(&self, memory: *const u8) -> bool {
+    pub fn eval_bool(&self, memory: *mut u8) -> bool {
         !self.eval(memory).is_zero()
     }
 
     /// Core evaluation loop.  Uses `TbValue` to handle both u64 and wide
     /// signals on a single stack.  The common case (all ≤64-bit operands)
     /// stays in the `TbValue::U64` variant and never allocates.
-    fn eval(&self, memory: *const u8) -> TbValue {
+    fn eval(&self, memory: *mut u8) -> TbValue {
         let mut stack: Vec<TbValue> = Vec::with_capacity(16);
         let mut pc: usize = 0;
         let ops = &self.ops;
@@ -187,7 +192,7 @@ impl CompiledExpr {
         ops: &[TbOpcode],
         pc: &mut usize,
         stack: &mut Vec<TbValue>,
-        memory: *const u8,
+        memory: *mut u8,
     ) {
         match &ops[*pc] {
             TbOpcode::ConstU64(v) => {
@@ -288,6 +293,23 @@ impl CompiledExpr {
                 };
                 let val = (full_val >> shift) & mask;
                 stack.push(TbValue::U64(val));
+                *pc += 1;
+            }
+            TbOpcode::StoreU64 { offset, byte_size } => {
+                let val = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: StoreU64 underflow");
+                    TbValue::U64(0)
+                });
+                let v = val.to_u64();
+                let bytes = v.to_le_bytes();
+                let n = (*byte_size).min(8);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        memory.add(*offset),
+                        n,
+                    );
+                }
                 *pc += 1;
             }
         }
@@ -515,7 +537,79 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                     ops.push(TbOpcode::ConstU64(0));
                 }
             }
+            Factor::FunctionCall(fc) => {
+                self.emit_function_call(fc, ops);
+            }
             _ => ops.push(TbOpcode::ConstU64(0)),
+        }
+    }
+
+    /// Emit bytecode for a function call used as an expression value.
+    /// Inline-expands: store args → emit body assigns → load return value.
+    fn emit_function_call(
+        &self,
+        fc: &veryl_analyzer::ir::FunctionCall,
+        ops: &mut Vec<TbOpcode>,
+    ) {
+        let p = self.sim.program();
+        let func = match p.tb_functions.get(&fc.id) {
+            Some(f) => f,
+            None => {
+                ops.push(TbOpcode::ConstU64(0));
+                return;
+            }
+        };
+        let func_body = match if let Some(idx) = &fc.index {
+            func.get_function(idx)
+        } else {
+            func.get_function(&[])
+        } {
+            Some(fb) => fb,
+            None => {
+                ops.push(TbOpcode::ConstU64(0));
+                return;
+            }
+        };
+
+        // 1. Store input arguments into memory
+        for (arg_path, arg_expr) in &fc.inputs {
+            if let Some(&arg_var_id) = func_body.arg_map.get(arg_path) {
+                if let Some(sig) = self.resolve_var(&arg_var_id) {
+                    self.emit(arg_expr, ops);
+                    ops.push(TbOpcode::StoreU64 {
+                        offset: sig.offset,
+                        byte_size: get_byte_size(sig.width),
+                    });
+                }
+            }
+        }
+
+        // 2. Emit body statements as bytecode (only Assign is supported)
+        for stmt in &func_body.statements {
+            if let veryl_analyzer::ir::Statement::Assign(a) = stmt {
+                if let Some(first_dst) = a.dst.first() {
+                    if let Some(dst_sig) = self.resolve_var(&first_dst.id) {
+                        self.emit(&a.expr, ops);
+                        ops.push(TbOpcode::StoreU64 {
+                            offset: dst_sig.offset,
+                            byte_size: get_byte_size(dst_sig.width),
+                        });
+                    }
+                }
+            }
+            // Non-assign statements (if/for in function body) are skipped.
+            // This covers the common case of pure computation functions.
+        }
+
+        // 3. Load return value
+        if let Some(ret_var_id) = &func_body.ret {
+            if let Some(sig) = self.resolve_var(ret_var_id) {
+                self.emit_load(sig.offset, sig.width, ops);
+            } else {
+                ops.push(TbOpcode::ConstU64(0));
+            }
+        } else {
+            ops.push(TbOpcode::ConstU64(0));
         }
     }
 
@@ -1163,7 +1257,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
                     if let Err(e) = sim.eval_comb() {
                         return ExecResult::Fail(format!("eval_comb: {e}"));
                     }
-                    let (ptr, _) = sim.memory_as_ptr();
+                    let (ptr, _) = sim.memory_as_mut_ptr();
                     expr.eval_u64(ptr)
                 }
             };
@@ -1194,7 +1288,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_ptr();
+            let (ptr, _) = sim.memory_as_mut_ptr();
             if !expr.eval_bool(ptr) {
                 ExecResult::Fail(message.as_deref().unwrap_or("assertion failed").to_string())
             } else {
@@ -1209,7 +1303,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_ptr();
+            let (ptr, _) = sim.memory_as_mut_ptr();
             if expr.eval_bool(ptr) {
                 exec(sim, then_block)
             } else {
@@ -1255,7 +1349,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_ptr();
+            let (ptr, _) = sim.memory_as_mut_ptr();
             let val = expr.eval_value(ptr);
             match val {
                 TbValue::U64(v) => sim.set(*dst, v),
