@@ -13,6 +13,7 @@ use veryl_path::PathSet;
 
 #[cfg(not(target_arch = "wasm32"))]
 use celox::SimBackend;
+#[cfg(not(target_arch = "wasm32"))]
 use layout::{build_event_map, build_hierarchy_node, build_signal_layout};
 
 /// A segment of a hierarchical instance path.
@@ -1373,6 +1374,7 @@ impl NativeSimulatorHandle {
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
+        let layout = layout.clone();
 
         Ok(Self {
             program,
@@ -1438,6 +1440,7 @@ impl NativeSimulatorHandle {
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
+        let layout = layout.clone();
 
         Ok(Self {
             program,
