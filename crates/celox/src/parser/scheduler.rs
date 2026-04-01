@@ -399,23 +399,24 @@ fn reorder_dag_runs<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let mut result: Vec<Vec<usize>> = Vec::with_capacity(sccs.len());
     let mut run_start: Option<usize> = None;
 
-    let flush_run = |result: &mut Vec<Vec<usize>>, sccs: &[Vec<usize>], start: usize, end: usize| {
-        if end - start <= 1 {
-            // Single SCC, no reordering needed
-            result.extend(sccs[start..end].iter().cloned());
-            return;
-        }
-        // Collect indices, stable sort by (layer, target_id)
-        let mut indices: Vec<usize> = (start..end).collect();
-        indices.sort_by(|&a, &b| {
-            let na = sccs[a][0];
-            let nb = sccs[b][0];
-            (layer[na], input[na].target.id).cmp(&(layer[nb], input[nb].target.id))
-        });
-        for i in indices {
-            result.push(sccs[i].clone());
-        }
-    };
+    let flush_run =
+        |result: &mut Vec<Vec<usize>>, sccs: &[Vec<usize>], start: usize, end: usize| {
+            if end - start <= 1 {
+                // Single SCC, no reordering needed
+                result.extend(sccs[start..end].iter().cloned());
+                return;
+            }
+            // Collect indices, stable sort by (layer, target_id)
+            let mut indices: Vec<usize> = (start..end).collect();
+            indices.sort_by(|&a, &b| {
+                let na = sccs[a][0];
+                let nb = sccs[b][0];
+                (layer[na], input[na].target.id).cmp(&(layer[nb], input[nb].target.id))
+            });
+            for i in indices {
+                result.push(sccs[i].clone());
+            }
+        };
 
     for (i, scc) in sccs.iter().enumerate() {
         if is_dag_scc(scc) {

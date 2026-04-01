@@ -127,8 +127,7 @@ impl MemoryLayout {
                 .get(alias_addr)
                 .zip(widths.get(canonical_addr))
                 .is_some_and(|(&aw, &cw)| aw <= cw);
-            let not_in_ff =
-                !ff_addrs.contains(alias_addr) && !ff_addrs.contains(canonical_addr);
+            let not_in_ff = !ff_addrs.contains(alias_addr) && !ff_addrs.contains(canonical_addr);
             if fourstate_ok && alias_fits && not_in_ff {
                 if let Some(&canonical_offset) = offsets.get(canonical_addr) {
                     offsets.insert(*alias_addr, canonical_offset);

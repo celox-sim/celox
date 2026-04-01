@@ -9,9 +9,7 @@ const LINEAR_SEC_SRC: &str = concat!(
 );
 
 fn build_sim() -> Simulator<celox::NativeBackend> {
-    Simulator::builder(LINEAR_SEC_SRC, "Top")
-        .build()
-        .unwrap()
+    Simulator::builder(LINEAR_SEC_SRC, "Top").build().unwrap()
 }
 
 fn build_sim_dse() -> Simulator<celox::NativeBackend> {

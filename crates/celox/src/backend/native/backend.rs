@@ -121,7 +121,10 @@ fn compile_program(
     sir: &Program,
     options: &SimulatorOptions,
 ) -> Result<SharedNativeCode, SimulatorError> {
-    let layout = sir.layout.as_ref().expect("layout must be built before backend");
+    let layout = sir
+        .layout
+        .as_ref()
+        .expect("layout must be built before backend");
     let mut all_jit_codes: Vec<jit_mem::JitCode> = Vec::new();
 
     // Compile eval_comb

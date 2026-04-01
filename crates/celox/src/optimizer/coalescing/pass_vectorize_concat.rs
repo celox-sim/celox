@@ -262,11 +262,9 @@ fn vectorize_concats(
         }
 
         // Check each arg is 1-bit wide
-        let all_single_bit = args.iter().all(|arg| {
-            register_map
-                .get(arg)
-                .is_some_and(|rt| rt.width() == 1)
-        });
+        let all_single_bit = args
+            .iter()
+            .all(|arg| register_map.get(arg).is_some_and(|rt| rt.width() == 1));
         if !all_single_bit {
             continue;
         }
@@ -385,27 +383,32 @@ fn vectorize_concats(
         return false;
     }
 
-    let alloc_reg =
-        |next_reg: &mut usize,
-         register_map: &mut HashMap<RegisterId, RegisterType>,
-         width: usize| {
-            *next_reg += 1;
-            let reg = RegisterId(*next_reg);
-            register_map.insert(
-                reg,
-                RegisterType::Bit {
-                    width,
-                    signed: false,
-                },
-            );
-            reg
-        };
+    let alloc_reg = |next_reg: &mut usize,
+                     register_map: &mut HashMap<RegisterId, RegisterType>,
+                     width: usize| {
+        *next_reg += 1;
+        let reg = RegisterId(*next_reg);
+        register_map.insert(
+            reg,
+            RegisterType::Bit {
+                width,
+                signed: false,
+            },
+        );
+        reg
+    };
 
     // Apply in reverse to preserve indices
     for repl in replacements.into_iter().rev() {
         // Check if mask covers all bits → And can be omitted
         let is_full_mask = |mask: u64, width: usize| -> bool {
-            width <= 64 && mask == (if width == 64 { u64::MAX } else { (1u64 << width) - 1 })
+            width <= 64
+                && mask
+                    == (if width == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    })
         };
 
         match repl {
@@ -418,8 +421,7 @@ fn vectorize_concats(
             } => {
                 if is_full_mask(mask, width) {
                     // All bits extracted → just alias the source
-                    instructions[inst_idx] =
-                        SIRInstruction::Unary(dst, UnaryOp::Ident, source);
+                    instructions[inst_idx] = SIRInstruction::Unary(dst, UnaryOp::Ident, source);
                 } else {
                     let mask_reg = alloc_reg(next_reg, register_map, width);
                     let mask_value = SIRValue {
@@ -453,10 +455,7 @@ fn vectorize_concats(
                         inst_idx,
                         SIRInstruction::Load(load_reg, addr, SIROffset::Static(0), width),
                     );
-                    instructions.insert(
-                        inst_idx + 1,
-                        SIRInstruction::Imm(mask_reg, mask_value),
-                    );
+                    instructions.insert(inst_idx + 1, SIRInstruction::Imm(mask_reg, mask_value));
                     instructions[inst_idx + 2] =
                         SIRInstruction::Binary(dst, load_reg, BinaryOp::And, mask_reg);
                 }
@@ -499,17 +498,13 @@ fn vectorize_concats(
                         shifted_reg
                     };
 
-                    let masked = if group_mask == u64::MAX
-                        || (src_start == 0 && group_len >= width)
+                    let masked = if group_mask == u64::MAX || (src_start == 0 && group_len >= width)
                     {
                         extracted
                     } else {
                         let mask_reg = alloc_reg(next_reg, register_map, width);
                         let masked_reg = alloc_reg(next_reg, register_map, width);
-                        new_insts.push(SIRInstruction::Imm(
-                            mask_reg,
-                            SIRValue::new(group_mask),
-                        ));
+                        new_insts.push(SIRInstruction::Imm(mask_reg, SIRValue::new(group_mask)));
                         new_insts.push(SIRInstruction::Binary(
                             masked_reg,
                             extracted,
@@ -545,12 +540,7 @@ fn vectorize_concats(
                 let mut result = group_regs[0];
                 for &gr in &group_regs[1..] {
                     let or_reg = alloc_reg(next_reg, register_map, width);
-                    new_insts.push(SIRInstruction::Binary(
-                        or_reg,
-                        result,
-                        BinaryOp::Or,
-                        gr,
-                    ));
+                    new_insts.push(SIRInstruction::Binary(or_reg, result, BinaryOp::Or, gr));
                     result = or_reg;
                 }
 

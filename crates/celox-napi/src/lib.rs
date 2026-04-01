@@ -454,9 +454,7 @@ fn is_excluded(
     project_root: &std::path::Path,
     exclude_set: &globset::GlobSet,
 ) -> bool {
-    let relative = path
-        .strip_prefix(project_root)
-        .unwrap_or(path);
+    let relative = path.strip_prefix(project_root).unwrap_or(path);
     // Normalize to forward slashes for consistent matching
     let rel_str = relative.to_string_lossy().replace('\\', "/");
     exclude_set.is_match(&rel_str)

@@ -652,7 +652,10 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             // Run MIR trace if requested (generates MIR output before/after optimization + regalloc)
             if self.options.trace.mir {
                 use crate::backend::native::{emit, isel, mir_opt, regalloc};
-                let layout = program.layout.as_ref().expect("layout must be built before MIR trace");
+                let layout = program
+                    .layout
+                    .as_ref()
+                    .expect("layout must be built before MIR trace");
                 let mut mir_output = String::new();
 
                 mir_output.push_str("=== MIR (eval_comb) ===\n");
