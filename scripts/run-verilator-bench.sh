@@ -16,8 +16,8 @@ run_bench() {
     (
         cd "$work"
         verilator --cc -O3 --exe "$cpp" "$sv" --top-module "$top" \
-            -Wno-WIDTHTRUNC \
-            -CFLAGS "-O3" -LDFLAGS "-lbenchmark -lpthread"
+            -Wno-WIDTHTRUNC -Wno-fatal \
+            -CFLAGS "-O3" -LDFLAGS "-L/usr/local/lib -lbenchmark -lpthread"
         make -C obj_dir -f "V${top}.mk" -j"$(nproc)" OPT_FAST="-O3" >/dev/null 2>&1
     )
     local t1; t1=$(date +%s%N)
