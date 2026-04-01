@@ -9,11 +9,11 @@ Celox's native backend generates optimized x86-64 code directly, outperforming b
 | Benchmark | Celox (native) | Cranelift JIT | Verilator |
 |---|---|---|---|
 | counter_n1000 (sequential) | **245 ns/tick** | 395 ns/tick | 392 ns/tick |
-| linear_sec_p6 (combinational) | 134 ns/eval | 140 ns/eval | **14.8 ns/eval** |
+| linear_sec_p6 (combinational) | **9.8 ns/eval** | 140 ns/eval | 19 ns/eval |
 
 ## Features
 
-- **Native x86-64 Backend** — Custom compiler pipeline (SIR → MIR → regalloc → x86-64) with SIR-level EU merge, MIR optimization (constant folding, GVN, algebraic simplification, if-conversion, Cmp+Branch fusion), and 32-bit emit
+- **Native x86-64 Backend** — Custom compiler pipeline (SIR → MIR → regalloc → x86-64) with SIR-level optimization (store coalescing, vectorize-concat, identity alias bypass), MIR optimization (constant folding, GVN, PEXT fusion), and 32-bit narrow emit
 - **Cranelift JIT Fallback** — Automatically used on non-x86-64 platforms (ARM, RISC-V)
 - **Event-Driven Scheduling** — Multi-clock domain support with combinational clock cascade
 - **4-State Simulation** — IEEE 1800-compliant X/Z propagation
