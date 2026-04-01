@@ -930,12 +930,11 @@ fn concat_4s_partial_x() {
     let (v, m) = sim.get_four_state(sig_o);
     // mask: upper 8 = 0x00, lower 8 = 0xFF → 0x00FF
     assert_eq!(m, BigUint::from(0x00FFu64), "concat 4s: mask mismatch");
-    // Value at X positions normalized (v |= m) → upper 0xAB, lower 0xFF → 0xABFF
-    assert_eq!(v, BigUint::from(0xABFFu64), "concat 4s: value mismatch");
+    // Concat preserves input value at X positions
+    assert_eq!(v, BigUint::from(0xABCDu64), "concat 4s: value mismatch");
 }
 
 #[test]
-#[ignore = "4-state normalization changes concat value expectations"]
 fn wide_concat_4s_partial_x() {
     // {a, b} where a is 64-bit defined, b is 64-bit with all X
     // Total: 128 bits — exercises the wide concat path

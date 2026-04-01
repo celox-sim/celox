@@ -1092,9 +1092,9 @@ fn test_four_state_wide_concat_mixed(sim) {
 
     let (v_c, m_c) = sim.get_four_state(id_y_concat);
     let expected_m = BigUint::from(0xFFu64) << 64;
-    // Operations produce X: v |= m at uncertain positions
+    // Concat preserves input values at X positions
     let expected_v = (BigUint::from(0xAAu64) << 64) | BigUint::from(0x55u64);
-    assert_eq!(v_c, expected_v | &expected_m);
+    assert_eq!(v_c, expected_v);
     assert_eq!(m_c, expected_m);
 }
 
@@ -1709,12 +1709,13 @@ fn test_four_state_concat_three_elements(sim) {
     .unwrap();
 
     let (v, m) = sim.get_four_state(id_y);
-    // y = {a, b, c} = {XXXX, 0101, 0011} → mask = 0xF00, value normalized: 0xA53 | 0xF00 = 0xF53
+    // y = {a, b, c} = {XXXX, 0101, 0011} → mask = 0xF00
+    // Concat preserves input value bits at X positions (a was set with v=0xA)
     assert_eq!(m, BigUint::from(0xF00u32), "Only high nibble should be X");
     assert_eq!(
         v,
-        BigUint::from(0xF53u32),
-        "Defined parts: b=5, c=3; X positions normalized (v |= m)"
+        BigUint::from(0xA53u32),
+        "Defined parts: b=5, c=3; X positions preserve input value"
     );
 }
 
@@ -1898,8 +1899,8 @@ fn test_four_state_width_widening_with_x(sim) {
     );
     assert_eq!(
         v,
-        BigUint::from(0xAFu32),
-        "Value normalized at X positions: 0xA5 | 0x0F = 0xAF"
+        BigUint::from(0xA5u32),
+        "Widening preserves input value at X positions"
     );
 }
 
@@ -2017,8 +2018,8 @@ fn test_four_state_concat_odd_width(sim) {
     // Normalization: v |= m → 0xB3 | 0x40 = 0xF3
     assert_eq!(
         v,
-        BigUint::from(0xF3u32),
-        "Concat value normalized at X positions: 0xB3 | 0x40 = 0xF3"
+        BigUint::from(0xB3u32),
+        "Concat preserves input value at X positions"
     );
 }
 

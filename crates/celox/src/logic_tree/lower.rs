@@ -287,49 +287,17 @@ impl SLTToSIRLowerer {
             return reg;
         }
 
-        let mut total_width = 0;
-        let mut acc_reg = None;
-
-        // Concatenate parts by shifting them into their respective positions and merging with bitwise OR.
-        // Parts are processed from LSB to MSB (reverse order of Concat list).
-        for (part_node, part_width) in parts.iter().rev() {
-            let part_reg = self.lower(builder, *part_node, arena, cache);
-
-            if let Some(current_acc) = acc_reg {
-                let next_width = total_width + part_width;
-
-                // Left shift current part to appropriate position
-                let shift_amt = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Imm(
-                    shift_amt,
-                    SIRValue::new(total_width as u64),
-                ));
-
-                let shifted = builder.alloc_logic(next_width);
-                builder.emit(SIRInstruction::Binary(
-                    shifted,
-                    part_reg,
-                    BinaryOp::Shl,
-                    shift_amt,
-                ));
-
-                // OR with accumulator
-                let next_acc = builder.alloc_logic(next_width);
-                builder.emit(SIRInstruction::Binary(
-                    next_acc,
-                    current_acc,
-                    BinaryOp::Or,
-                    shifted,
-                ));
-
-                acc_reg = Some(next_acc);
-                total_width = next_width;
-            } else {
-                acc_reg = Some(part_reg);
-                total_width = *part_width;
-            }
-        }
-        acc_reg.expect("Empty Concat")
+        // Use SIR Concat instruction directly. This preserves Z bits in 4-state
+        // mode (unlike the Shl+Or pattern which converts Z to X through Binary Or
+        // normalization). Concat args are [MSB, ..., LSB] — same order as `parts`.
+        let total_width: usize = parts.iter().map(|(_, w)| w).sum();
+        let part_regs: Vec<RegisterId> = parts
+            .iter()
+            .map(|(node, _)| self.lower(builder, *node, arena, cache))
+            .collect();
+        let result = builder.alloc_logic(total_width);
+        builder.emit(SIRInstruction::Concat(result, part_regs));
+        result
     }
 
     /// Try to fold a Concat of all-constant parts into a single wide Imm.

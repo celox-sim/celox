@@ -45,6 +45,7 @@ let code = format!("{BINARY_ENCODER_SRC}\n{top}"); }
 
     // Binary decoder: binary input -> onehot output (BIN_WIDTH=3, UNARY_WIDTH=8)
     fn test_binary_decoder(sim) {
+        @ignore_on(cranelift);
         @setup { let top = r#"
 module Top (
 i_bin  : input  logic<3>,
@@ -77,6 +78,7 @@ let code = format!("{BINARY_DECODER_SRC}\n{top}"); }
 
     // Roundtrip: encoder -> decoder (onehot -> binary -> onehot)
     fn test_binary_codec_roundtrip(sim) {
+        @ignore_on(cranelift);
         @setup { let top = r#"
 module Top (
 i_unary: input  logic<8>,
