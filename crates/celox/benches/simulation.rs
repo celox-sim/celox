@@ -759,6 +759,15 @@ fn benchmark_native_tb_counter(c: &mut Criterion) {
         })
     });
 
+    // Raw tick: same TB-compiled simulator, bypass executor
+    let clk = sim.event("clk");
+    c.bench_function("native_tb_raw_tick_counter_n1000_x1000000", |b| {
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.tick(clk).unwrap();
+            }
+        })
+    });
 }
 
 fn benchmark_native_tb_std_counter(c: &mut Criterion) {

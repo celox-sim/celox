@@ -1231,6 +1231,28 @@ impl From<ExecResult> for TestResult {
     }
 }
 
+#[inline(never)]
+fn exec_clock_next<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    event: B::Event,
+    count: &ClockCount,
+) -> ExecResult {
+    let n = match count {
+        ClockCount::Static(n) => *n,
+        ClockCount::Dynamic(expr) => {
+            if let Err(e) = sim.eval_comb() {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            let (ptr, _) = sim.memory_as_mut_ptr();
+            expr.eval_u64(ptr)
+        }
+    };
+    for _ in 0..n {
+        sim.tick(event).unwrap();
+    }
+    ExecResult::Continue
+}
+
 pub fn run_testbench<B: SimBackend>(
     sim: &mut Simulator<B>,
     stmts: &[TestbenchStatement<B>],
@@ -1251,22 +1273,7 @@ fn exec<B: SimBackend>(sim: &mut Simulator<B>, stmts: &[TestbenchStatement<B>]) 
 fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>) -> ExecResult {
     match stmt {
         TestbenchStatement::ClockNext { clock_event, count } => {
-            let n = match count {
-                ClockCount::Static(n) => *n,
-                ClockCount::Dynamic(expr) => {
-                    if let Err(e) = sim.eval_comb() {
-                        return ExecResult::Fail(format!("eval_comb: {e}"));
-                    }
-                    let (ptr, _) = sim.memory_as_mut_ptr();
-                    expr.eval_u64(ptr)
-                }
-            };
-            for _ in 0..n {
-                if let Err(e) = sim.tick(*clock_event) {
-                    return ExecResult::Fail(format!("tick: {e}"));
-                }
-            }
-            ExecResult::Continue
+            exec_clock_next(sim, *clock_event, count)
         }
         TestbenchStatement::ResetAssert {
             reset_signal,
