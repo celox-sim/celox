@@ -163,4 +163,57 @@ fn main() {
     let sv = strip_sourcemap(&emit_sv(&gray_counter_code));
     std::fs::write(out_dir.join("GrayCounter.sv"), &sv).unwrap();
     println!("Wrote GrayCounter.sv ({} bytes)", sv.len());
+
+    // --- std::fifo (WIDTH=8, DEPTH=16) ---
+    let fifo_code = format!(
+        "{}\n{}\n{}\n{}",
+        read_veryl(&veryl_std, &["ram", "ram.veryl"]),
+        read_veryl(&veryl_std, &["fifo", "fifo_controller.veryl"]),
+        read_veryl(&veryl_std, &["fifo", "fifo.veryl"]),
+        include_str!("../../../benches/veryl/fifo_top.veryl"),
+    );
+    let sv = strip_sourcemap(&emit_sv(&fifo_code));
+    std::fs::write(out_dir.join("Fifo.sv"), &sv).unwrap();
+    println!("Wrote Fifo.sv ({} bytes)", sv.len());
+
+    // --- std::gray_encoder + gray_decoder (WIDTH=32) ---
+    let gray_codec_code = format!(
+        "{}\n{}\n{}",
+        read_veryl(&veryl_std, &["gray", "gray_encoder.veryl"]),
+        read_veryl(&veryl_std, &["gray", "gray_decoder.veryl"]),
+        include_str!("../../../benches/veryl/gray_codec_top.veryl"),
+    );
+    let sv = strip_sourcemap(&emit_sv(&gray_codec_code));
+    std::fs::write(out_dir.join("GrayCodec.sv"), &sv).unwrap();
+    println!("Wrote GrayCodec.sv ({} bytes)", sv.len());
+
+    // --- std::edge_detector (WIDTH=32) ---
+    let edge_detector_code = format!(
+        "{}\n{}",
+        read_veryl(&veryl_std, &["edge_detector", "edge_detector.veryl"]),
+        include_str!("../../../benches/veryl/edge_detector_top.veryl"),
+    );
+    let sv = strip_sourcemap(&emit_sv(&edge_detector_code));
+    std::fs::write(out_dir.join("EdgeDetector.sv"), &sv).unwrap();
+    println!("Wrote EdgeDetector.sv ({} bytes)", sv.len());
+
+    // --- std::onehot (W=64) ---
+    let onehot_code = format!(
+        "{}\n{}",
+        read_veryl(&veryl_std, &["countones", "onehot.veryl"]),
+        include_str!("../../../benches/veryl/onehot_top.veryl"),
+    );
+    let sv = strip_sourcemap(&emit_sv(&onehot_code));
+    std::fs::write(out_dir.join("Onehot.sv"), &sv).unwrap();
+    println!("Wrote Onehot.sv ({} bytes)", sv.len());
+
+    // --- std::lfsr_galois (SIZE=32) ---
+    let lfsr_code = format!(
+        "{}\n{}",
+        read_veryl(&veryl_std, &["lfsr", "lfsr_galois.veryl"]),
+        include_str!("../../../benches/veryl/lfsr_top.veryl"),
+    );
+    let sv = strip_sourcemap(&emit_sv(&lfsr_code));
+    std::fs::write(out_dir.join("Lfsr.sv"), &sv).unwrap();
+    println!("Wrote Lfsr.sv ({} bytes)", sv.len());
 }

@@ -65,44 +65,44 @@ Benchmarks for Veryl stdlib modules across all three runtimes.
 
 **std::fifo (WIDTH=8, DEPTH=16)** — Synchronous FIFO with controller and RAM. Sequential.
 
-| Benchmark | Rust |
-|---|---|
-| `simulation_build_fifo_w8_d16` | JIT compile |
-| `simulation_tick_fifo_w8_d16_x1` | Single tick (push/pop alternating) |
-| `testbench_tick_fifo_w8_d16_x1000000` | 1M tick + read |
+| Benchmark | Rust | Verilator |
+|---|---|---|
+| `simulation_build_fifo_w8_d16` | JIT compile | Verilate + C++ compile |
+| `simulation_tick_fifo_w8_d16_x1` | Single tick (push/pop alternating) | Single tick (push/pop alternating) |
+| `testbench_tick_fifo_w8_d16_x1000000` | 1M tick + read | 1M tick + read |
 
 **std::gray_encoder + gray_decoder (WIDTH=32)** — Gray encode/decode roundtrip. Combinational.
 
-| Benchmark | Rust |
-|---|---|
-| `simulation_build_gray_codec_w32` | JIT compile |
-| `simulation_eval_gray_codec_w32_x1` | Single eval |
-| `simulation_eval_gray_codec_w32_x1000000` | 1M evals |
+| Benchmark | Rust | Verilator |
+|---|---|---|
+| `simulation_build_gray_codec_w32` | JIT compile | Verilate + C++ compile |
+| `simulation_eval_gray_codec_w32_x1` | Single eval | Single eval |
+| `simulation_eval_gray_codec_w32_x1000000` | 1M evals | 1M evals |
 
 **std::edge_detector (WIDTH=32)** — Per-bit edge detection (posedge/negedge). Sequential.
 
-| Benchmark | Rust |
-|---|---|
-| `simulation_build_edge_detector_w32` | JIT compile |
-| `simulation_tick_edge_detector_w32_x1` | Single tick |
-| `testbench_tick_edge_detector_w32_x1000000` | 1M tick + read |
+| Benchmark | Rust | Verilator |
+|---|---|---|
+| `simulation_build_edge_detector_w32` | JIT compile | Verilate + C++ compile |
+| `simulation_tick_edge_detector_w32_x1` | Single tick | Single tick |
+| `testbench_tick_edge_detector_w32_x1000000` | 1M tick + read | 1M tick + read |
 
 **std::onehot (W=64)** — One-hot and zero detection. Combinational.
 
-| Benchmark | Rust |
-|---|---|
-| `simulation_build_onehot_w64` | JIT compile |
-| `simulation_eval_onehot_w64_x1` | Single eval |
-| `simulation_eval_onehot_w64_x1000000` | 1M evals |
+| Benchmark | Rust | Verilator |
+|---|---|---|
+| `simulation_build_onehot_w64` | JIT compile | Verilate + C++ compile |
+| `simulation_eval_onehot_w64_x1` | Single eval | Single eval |
+| `simulation_eval_onehot_w64_x1000000` | 1M evals | 1M evals |
 
 **std::lfsr_galois (SIZE=32)** — Galois-mode linear feedback shift register. Sequential.
 
-| Benchmark | Rust |
-|---|---|
-| `simulation_build_lfsr_w32` | JIT compile |
-| `simulation_tick_lfsr_w32_x1` | Single tick |
-| `simulation_tick_lfsr_w32_x1000000` | 1M ticks |
-| `testbench_tick_lfsr_w32_x1000000` | 1M tick + read |
+| Benchmark | Rust | Verilator |
+|---|---|---|
+| `simulation_build_lfsr_w32` | JIT compile | Verilate + C++ compile |
+| `simulation_tick_lfsr_w32_x1` | Single tick | Single tick |
+| `simulation_tick_lfsr_w32_x1000000` | 1M ticks | 1M ticks |
+| `testbench_tick_lfsr_w32_x1000000` | 1M tick + read | 1M tick + read |
 
 ### API & Overhead
 

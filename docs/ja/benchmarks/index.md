@@ -65,44 +65,44 @@ Veryl 標準ライブラリモジュールのベンチマーク。
 
 **std::fifo (WIDTH=8, DEPTH=16)** — 同期 FIFO（コントローラ + RAM）。順序回路。
 
-| ベンチマーク | Rust |
-|---|---|
-| `simulation_build_fifo_w8_d16` | JIT コンパイル |
-| `simulation_tick_fifo_w8_d16_x1` | 単一ティック（push/pop 交互） |
-| `testbench_tick_fifo_w8_d16_x1000000` | 100 万ティック + 読出 |
+| ベンチマーク | Rust | Verilator |
+|---|---|---|
+| `simulation_build_fifo_w8_d16` | JIT コンパイル | Verilate + C++ コンパイル |
+| `simulation_tick_fifo_w8_d16_x1` | 単一ティック（push/pop 交互） | 単一ティック（push/pop 交互） |
+| `testbench_tick_fifo_w8_d16_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 |
 
 **std::gray_encoder + gray_decoder (WIDTH=32)** — Gray エンコード/デコードラウンドトリップ。組合せ回路。
 
-| ベンチマーク | Rust |
-|---|---|
-| `simulation_build_gray_codec_w32` | JIT コンパイル |
-| `simulation_eval_gray_codec_w32_x1` | 単一評価 |
-| `simulation_eval_gray_codec_w32_x1000000` | 100 万評価 |
+| ベンチマーク | Rust | Verilator |
+|---|---|---|
+| `simulation_build_gray_codec_w32` | JIT コンパイル | Verilate + C++ コンパイル |
+| `simulation_eval_gray_codec_w32_x1` | 単一評価 | 単一評価 |
+| `simulation_eval_gray_codec_w32_x1000000` | 100 万評価 | 100 万評価 |
 
 **std::edge_detector (WIDTH=32)** — ビット単位エッジ検出（posedge/negedge）。順序回路。
 
-| ベンチマーク | Rust |
-|---|---|
-| `simulation_build_edge_detector_w32` | JIT コンパイル |
-| `simulation_tick_edge_detector_w32_x1` | 単一ティック |
-| `testbench_tick_edge_detector_w32_x1000000` | 100 万ティック + 読出 |
+| ベンチマーク | Rust | Verilator |
+|---|---|---|
+| `simulation_build_edge_detector_w32` | JIT コンパイル | Verilate + C++ コンパイル |
+| `simulation_tick_edge_detector_w32_x1` | 単一ティック | 単一ティック |
+| `testbench_tick_edge_detector_w32_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 |
 
 **std::onehot (W=64)** — ワンホット検出・ゼロ検出。組合せ回路。
 
-| ベンチマーク | Rust |
-|---|---|
-| `simulation_build_onehot_w64` | JIT コンパイル |
-| `simulation_eval_onehot_w64_x1` | 単一評価 |
-| `simulation_eval_onehot_w64_x1000000` | 100 万評価 |
+| ベンチマーク | Rust | Verilator |
+|---|---|---|
+| `simulation_build_onehot_w64` | JIT コンパイル | Verilate + C++ コンパイル |
+| `simulation_eval_onehot_w64_x1` | 単一評価 | 単一評価 |
+| `simulation_eval_onehot_w64_x1000000` | 100 万評価 | 100 万評価 |
 
 **std::lfsr_galois (SIZE=32)** — ガロアモード線形帰還シフトレジスタ。順序回路。
 
-| ベンチマーク | Rust |
-|---|---|
-| `simulation_build_lfsr_w32` | JIT コンパイル |
-| `simulation_tick_lfsr_w32_x1` | 単一ティック |
-| `simulation_tick_lfsr_w32_x1000000` | 100 万ティック |
-| `testbench_tick_lfsr_w32_x1000000` | 100 万ティック + 読出 |
+| ベンチマーク | Rust | Verilator |
+|---|---|---|
+| `simulation_build_lfsr_w32` | JIT コンパイル | Verilate + C++ コンパイル |
+| `simulation_tick_lfsr_w32_x1` | 単一ティック | 単一ティック |
+| `simulation_tick_lfsr_w32_x1000000` | 100 万ティック | 100 万ティック |
+| `testbench_tick_lfsr_w32_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 |
 
 ### API & オーバーヘッド
 

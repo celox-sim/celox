@@ -45,3 +45,18 @@ run_bench simulation_build_std_counter_w32  Top        StdCounter.sv bench_std_c
 
 # ── std::gray_counter benchmark (WIDTH=32) ──
 run_bench simulation_build_gray_counter_w32 Top        GrayCounter.sv bench_gray_counter.cpp
+
+# ── std::fifo benchmark (WIDTH=8, DEPTH=16) ──
+run_bench simulation_build_fifo_w8_d16      Top        Fifo.sv        bench_fifo.cpp
+
+# ── gray_codec benchmark (WIDTH=32) ──
+run_bench simulation_build_gray_codec_w32   Top        GrayCodec.sv   bench_gray_codec.cpp
+
+# ── edge_detector benchmark (WIDTH=32) ──
+run_bench simulation_build_edge_detector_w32 Top       EdgeDetector.sv bench_edge_detector.cpp
+
+# ── onehot benchmark (W=64) ──
+run_bench simulation_build_onehot_w64       Top        Onehot.sv      bench_onehot.cpp
+
+# ── lfsr_galois benchmark (SIZE=32) ──
+run_bench simulation_build_lfsr_w32         Top        Lfsr.sv        bench_lfsr.cpp
