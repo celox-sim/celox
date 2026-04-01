@@ -644,6 +644,7 @@ pub(crate) fn flatten(
             address_aliases: HashMap::default(),
             layout: None,
             initial_statements: None,
+            tb_functions: fxhash::FxHashMap::default(),
         };
         let mut target_arena = SLTNodeArena::new();
         ParserError::Scheduler(e.map_addr(&global_arena, &mut target_arena, &|addr| {
@@ -738,6 +739,10 @@ pub(crate) fn flatten(
         address_aliases: HashMap::default(),
         layout: None,
         initial_statements,
+        tb_functions: module_ir
+            .get(root_id)
+            .map(|m| m.functions.clone())
+            .unwrap_or_default(),
     };
 
     // --- Trigger Injection ---

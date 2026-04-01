@@ -117,6 +117,8 @@ pub struct Program {
     pub layout: Option<crate::backend::MemoryLayout>,
     /// Initial block statements from the top-level module (for native testbenches).
     pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
+    /// Functions defined in the top-level module (for testbench function calls).
+    pub tb_functions: fxhash::FxHashMap<veryl_analyzer::ir::VarId, veryl_analyzer::ir::Function>,
 }
 
 impl fmt::Debug for Program {

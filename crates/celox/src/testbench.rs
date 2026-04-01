@@ -23,10 +23,16 @@ pub enum TestResult {
     Fail(String),
 }
 
+/// Clock cycle count: either a compile-time constant or a runtime expression.
+pub enum ClockCount {
+    Static(u64),
+    Dynamic(CompiledExpr),
+}
+
 pub enum TestbenchStatement<B: SimBackend> {
     ClockNext {
         clock_event: B::Event,
-        count: u64,
+        count: ClockCount,
     },
     ResetAssert {
         reset_signal: SignalRef,
@@ -834,7 +840,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         ec: &ExprCompiler<'_, B>,
     ) -> Option<TestbenchStatement<B>> {
         match stmt {
-            Statement::TbMethodCall(tb) => self.convert_tb_method(tb),
+            Statement::TbMethodCall(tb) => self.convert_tb_method(tb, ec),
             Statement::SystemFunctionCall(sf) => match &sf.kind {
                 SystemFunctionKind::Assert(cond, msg) => Some(TestbenchStatement::Assert {
                     expr: ec.compile(&cond.0),
@@ -902,21 +908,86 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         expr: compiled,
                     })
             }
+            Statement::FunctionCall(fc) => {
+                self.convert_function_call(fc, ec)
+            }
             _ => None,
         }
     }
 
-    fn convert_tb_method(&self, tb: &TbMethodCall) -> Option<TestbenchStatement<B>> {
+    /// Inline-expand a function call by binding arguments and converting
+    /// the function body's statements.
+    fn convert_function_call(
+        &self,
+        fc: &veryl_analyzer::ir::FunctionCall,
+        ec: &ExprCompiler<'_, B>,
+    ) -> Option<TestbenchStatement<B>> {
+        let program = self.sim.program();
+        let func = program.tb_functions.get(&fc.id)?;
+        let func_body = if let Some(idx) = &fc.index {
+            func.get_function(idx)?
+        } else {
+            func.get_function(&[])?
+        };
+
+        // Build a list of statements: argument assignments + body
+        let mut stmts: Vec<TestbenchStatement<B>> = Vec::new();
+
+        // Bind input arguments
+        for (arg_path, arg_expr) in &fc.inputs {
+            if let Some(&arg_var_id) = func_body.arg_map.get(arg_path) {
+                let compiled = ec.compile(arg_expr);
+                if let Some(sig) = ec.resolve_var(&arg_var_id) {
+                    stmts.push(TestbenchStatement::Assign {
+                        dst: sig,
+                        expr: compiled,
+                    });
+                }
+            }
+        }
+
+        // Inline body statements
+        for stmt in &func_body.statements {
+            if let Some(ts) = self.convert_stmt(stmt, ec) {
+                stmts.push(ts);
+            }
+        }
+
+        if stmts.len() == 1 {
+            Some(stmts.into_iter().next().unwrap())
+        } else {
+            // Wrap multiple statements into an If(true) block as a sequence container
+            // (there's no "Block" variant in TestbenchStatement)
+            // Actually, we can return None and use a different approach:
+            // flatten into the parent's statement list.
+            // For now, wrap in an always-true If:
+            Some(TestbenchStatement::If {
+                expr: CompiledExpr {
+                    ops: vec![TbOpcode::ConstU64(1)],
+                },
+                then_block: stmts,
+                else_block: Vec::new(),
+            })
+        }
+    }
+
+    fn convert_tb_method(&self, tb: &TbMethodCall, ec: &ExprCompiler<'_, B>) -> Option<TestbenchStatement<B>> {
         match &tb.method {
             TbMethod::ClockNext { count, .. } => {
                 let ev = self.event_map.get(&tb.inst).copied()?;
-                let n = count
-                    .as_ref()
-                    .and_then(|e| try_eval_const(e))
-                    .unwrap_or(1);
+                let clock_count = match count {
+                    Some(expr) => {
+                        if let Some(n) = try_eval_const(expr) {
+                            ClockCount::Static(n)
+                        } else {
+                            ClockCount::Dynamic(ec.compile(expr))
+                        }
+                    }
+                    None => ClockCount::Static(1),
+                };
                 Some(TestbenchStatement::ClockNext {
                     clock_event: ev,
-                    count: n,
+                    count: clock_count,
                 })
             }
             TbMethod::ResetAssert { clock, duration } => {
@@ -1027,7 +1098,17 @@ fn exec<B: SimBackend>(sim: &mut Simulator<B>, stmts: &[TestbenchStatement<B>]) 
 fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>) -> ExecResult {
     match stmt {
         TestbenchStatement::ClockNext { clock_event, count } => {
-            for _ in 0..*count {
+            let n = match count {
+                ClockCount::Static(n) => *n,
+                ClockCount::Dynamic(expr) => {
+                    if let Err(e) = sim.eval_comb() {
+                        return ExecResult::Fail(format!("eval_comb: {e}"));
+                    }
+                    let (ptr, _) = sim.memory_as_ptr();
+                    expr.eval_u64(ptr)
+                }
+            };
+            for _ in 0..n {
                 if let Err(e) = sim.tick(*clock_event) {
                     return ExecResult::Fail(format!("tick: {e}"));
                 }

@@ -257,6 +257,48 @@ fn test_for_loop_rev() {
     );
 }
 
+// ── Function call in testbench ──────────────────────────────────────────
+
+#[test]
+fn test_function_call() {
+    let code = r#"
+        module Counter2 (
+            clk: input clock,
+            rst: input reset,
+            cnt: output logic<32>,
+        ) {
+            always_ff {
+                if_reset { cnt = 0; }
+                else { cnt += 1; }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter2 (clk, rst, cnt);
+
+            function step_n(n: input logic<32>) {
+                clk.next(n);
+            }
+
+            initial {
+                rst.assert(clk);
+                step_n(5);
+                step_n(5);
+                $assert(cnt == 32'd10);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Dual clock ─────────────────────────────────────────────────────────
 
 #[test]
