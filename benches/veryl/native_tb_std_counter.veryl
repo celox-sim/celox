@@ -1,0 +1,21 @@
+/// Native testbench for std::counter (WIDTH=32).
+/// Equivalent to the manual `testbench_tick_std_counter_w32_x1000000` benchmark.
+#[test(bench_std_counter)]
+module bench_std_counter {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen;
+    var o_count: logic<32>;
+
+    inst dut: Top (
+        clk,
+        rst,
+        i_up: 1'b1,
+        o_count,
+    );
+
+    initial {
+        rst.assert(clk);
+        clk.next(1000000);
+        $finish();
+    }
+}

@@ -1,10 +1,21 @@
-use celox::{DeadStorePolicy, Simulator};
+use celox::{DeadStorePolicy, Simulator, TestResult};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 // Wrapper modules are shared with celox-bench-sv (Verilator SV generation)
 // via benches/veryl/*.veryl to guarantee identical circuits.
 
 const CODE: &str = include_str!("../../../benches/veryl/top_n1000.veryl");
+
+// Native testbench sources (DUT + TB module in one string)
+const NATIVE_TB_COUNTER_N1000: &str = concat!(
+    include_str!("../../../benches/veryl/top_n1000.veryl"),
+    include_str!("../../../benches/veryl/native_tb_counter_n1000.veryl"),
+);
+const NATIVE_TB_STD_COUNTER: &str = concat!(
+    include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
+    include_str!("../../../benches/veryl/std_counter_top.veryl"),
+    include_str!("../../../benches/veryl/native_tb_std_counter.veryl"),
+);
 
 // P=6: K=63-bit codeword, N=57-bit data
 const LINEAR_SEC_SRC: &str = concat!(
@@ -710,6 +721,72 @@ fn benchmark_lfsr(c: &mut Criterion) {
     });
 }
 
+// ── Native testbench benchmarks ────────────────────────────────────────
+
+fn benchmark_native_tb_counter(c: &mut Criterion) {
+    // Build cost: compile + run_test (includes compilation)
+    c.bench_function("native_tb_build_counter_n1000", |b| {
+        b.iter(|| {
+            let _result = Simulator::builder(NATIVE_TB_COUNTER_N1000, "bench_counter_n1000")
+                .build()
+                .unwrap();
+        })
+    });
+
+    // Full run_test: compile + reset + 1M ticks + $finish
+    c.bench_function("native_tb_run_counter_n1000_x1000000", |b| {
+        b.iter(|| {
+            let result = Simulator::builder(NATIVE_TB_COUNTER_N1000, "bench_counter_n1000")
+                .run_test()
+                .unwrap();
+            assert_eq!(result, TestResult::Pass);
+        })
+    });
+
+    // Tick-only: pre-built simulator, measure just the testbench execution
+    let mut sim = Simulator::builder(NATIVE_TB_COUNTER_N1000, "bench_counter_n1000")
+        .build()
+        .unwrap();
+    let initial_stmts = sim.program().initial_statements.clone().unwrap();
+    let mut tb_builder = celox::testbench::TestbenchBuilder::new(&sim);
+    tb_builder.build_event_map(&initial_stmts);
+    let tb_stmts = tb_builder.convert(&initial_stmts);
+
+    c.bench_function("native_tb_exec_counter_n1000_x1000000", |b| {
+        b.iter(|| {
+            let result = celox::testbench::run_testbench(&mut sim, &tb_stmts);
+            assert_eq!(result, TestResult::Pass);
+        })
+    });
+
+}
+
+fn benchmark_native_tb_std_counter(c: &mut Criterion) {
+    c.bench_function("native_tb_run_std_counter_w32_x1000000", |b| {
+        b.iter(|| {
+            let result = Simulator::builder(NATIVE_TB_STD_COUNTER, "bench_std_counter")
+                .run_test()
+                .unwrap();
+            assert_eq!(result, TestResult::Pass);
+        })
+    });
+
+    let mut sim = Simulator::builder(NATIVE_TB_STD_COUNTER, "bench_std_counter")
+        .build()
+        .unwrap();
+    let initial_stmts = sim.program().initial_statements.clone().unwrap();
+    let mut tb_builder = celox::testbench::TestbenchBuilder::new(&sim);
+    tb_builder.build_event_map(&initial_stmts);
+    let tb_stmts = tb_builder.convert(&initial_stmts);
+
+    c.bench_function("native_tb_exec_std_counter_w32_x1000000", |b| {
+        b.iter(|| {
+            let result = celox::testbench::run_testbench(&mut sim, &tb_stmts);
+            assert_eq!(result, TestResult::Pass);
+        })
+    });
+}
+
 criterion_group!(
     benches,
     benchmark_counter,
@@ -725,5 +802,7 @@ criterion_group!(
     benchmark_edge_detector,
     benchmark_onehot,
     benchmark_lfsr,
+    benchmark_native_tb_counter,
+    benchmark_native_tb_std_counter,
 );
 criterion_main!(benches);

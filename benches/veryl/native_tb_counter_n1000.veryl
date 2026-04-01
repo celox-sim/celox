@@ -1,0 +1,22 @@
+/// Native testbench for Top (N=1000 counters).
+/// Equivalent to the manual `testbench_tick_top_n1000_x1000000` benchmark.
+#[test(bench_counter_n1000)]
+module bench_counter_n1000 {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen;
+    var cnt: logic<32>[1000];
+    var cnt0: logic<32>;
+
+    inst dut: Top (
+        clk,
+        rst,
+        cnt,
+        cnt0,
+    );
+
+    initial {
+        rst.assert(clk);
+        clk.next(1000000);
+        $finish();
+    }
+}
