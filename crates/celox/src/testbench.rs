@@ -64,12 +64,13 @@ pub enum TestbenchStatement<B: SimBackend> {
 // ── Bytecode VM ────────────────────────────────────────────────────────
 
 /// A compiled expression: flat bytecode evaluated on a stack VM.
+#[derive(Debug)]
 pub struct CompiledExpr {
     ops: Vec<TbOpcode>,
 }
 
 /// Bytecode instructions for the testbench expression evaluator.
-#[allow(dead_code)]
+#[derive(Debug)]
 enum TbOpcode {
     /// Push a constant u64.
     ConstU64(u64),
@@ -86,12 +87,10 @@ enum TbOpcode {
     /// Conditional: pop condition; if non-zero execute `then_len` ops,
     /// otherwise skip them and execute `else_len` ops.
     Ternary { then_len: usize, else_len: usize },
-    /// Widen the top-of-stack from u64 to BigUint (for mixed-width ops).
-    Widen,
 }
 
 /// Stack value: either a native u64 or a heap-allocated BigUint.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum TbValue {
     U64(u64),
     Wide(BigUint),
@@ -133,6 +132,11 @@ impl CompiledExpr {
         self.eval(memory).to_u64()
     }
 
+    /// Evaluate and return the full `TbValue` (preserves wide results).
+    fn eval_value(&self, memory: *const u8) -> TbValue {
+        self.eval(memory)
+    }
+
     pub fn eval_bool(&self, memory: *const u8) -> bool {
         !self.eval(memory).is_zero()
     }
@@ -146,100 +150,85 @@ impl CompiledExpr {
         let ops = &self.ops;
 
         while pc < ops.len() {
-            match &ops[pc] {
-                TbOpcode::ConstU64(v) => {
-                    stack.push(TbValue::U64(*v));
-                }
-                TbOpcode::ConstWide(v) => {
-                    stack.push(TbValue::Wide(v.clone()));
-                }
-                TbOpcode::LoadU64 { offset, byte_size, mask } => {
-                    // SAFETY: caller guarantees `memory` is valid simulator memory
-                    let val = unsafe { read_le_u64(memory.add(*offset), *byte_size) } & mask;
-                    stack.push(TbValue::U64(val));
-                }
-                TbOpcode::LoadWide { offset, byte_size, width } => {
-                    let val = unsafe { read_le_wide(memory.add(*offset), *byte_size, *width) };
-                    stack.push(TbValue::Wide(val));
-                }
-                TbOpcode::BinOp(op) => {
-                    let r = stack.pop().unwrap_or(TbValue::U64(0));
-                    let l = stack.pop().unwrap_or(TbValue::U64(0));
-                    stack.push(eval_binop(l, *op, r));
-                }
-                TbOpcode::UnaryOp(op) => {
-                    if let Some(top) = stack.last_mut() {
-                        *top = eval_unop(*op, top);
-                    }
-                }
-                TbOpcode::Widen => {
-                    if let Some(TbValue::U64(v)) = stack.last() {
-                        let v = *v;
-                        *stack.last_mut().unwrap() = TbValue::Wide(BigUint::from(v));
-                    }
-                }
-                TbOpcode::Ternary { then_len, else_len } => {
-                    let cond = stack.pop().unwrap_or(TbValue::U64(0));
-                    pc += 1;
-                    if !cond.is_zero() {
-                        // evaluate then block, skip else
-                        let then_end = pc + then_len;
-                        while pc < then_end {
-                            self.step(ops, &mut pc, &mut stack, memory);
-                        }
-                        pc += else_len;
-                        continue; // skip the pc += 1 at the end
-                    } else {
-                        pc += then_len;
-                        let else_end = pc + else_len;
-                        while pc < else_end {
-                            self.step(ops, &mut pc, &mut stack, memory);
-                        }
-                        continue;
-                    }
-                }
-            }
-            pc += 1;
+            self.exec_at(ops, &mut pc, &mut stack, memory);
         }
-        stack.pop().unwrap_or(TbValue::U64(0))
+        stack.pop().unwrap_or_else(|| {
+            debug_assert!(false, "testbench bytecode: stack empty after evaluation");
+            TbValue::U64(0)
+        })
     }
 
-    /// Execute a single opcode, advancing `pc`.
-    #[inline]
-    fn step(&self, ops: &[TbOpcode], pc: &mut usize, stack: &mut Vec<TbValue>, memory: *const u8) {
-        if *pc >= ops.len() {
-            return;
-        }
+    /// Execute the opcode at `pc` and advance `pc` past it.
+    /// Handles all opcodes including `Ternary` (with recursive sub-block
+    /// evaluation), so there is no separate `step()` function.
+    fn exec_at(
+        &self,
+        ops: &[TbOpcode],
+        pc: &mut usize,
+        stack: &mut Vec<TbValue>,
+        memory: *const u8,
+    ) {
         match &ops[*pc] {
-            TbOpcode::ConstU64(v) => stack.push(TbValue::U64(*v)),
-            TbOpcode::ConstWide(v) => stack.push(TbValue::Wide(v.clone())),
+            TbOpcode::ConstU64(v) => {
+                stack.push(TbValue::U64(*v));
+                *pc += 1;
+            }
+            TbOpcode::ConstWide(v) => {
+                stack.push(TbValue::Wide(v.clone()));
+                *pc += 1;
+            }
             TbOpcode::LoadU64 { offset, byte_size, mask } => {
+                // SAFETY: caller guarantees `memory` is valid simulator memory
                 let val = unsafe { read_le_u64(memory.add(*offset), *byte_size) } & mask;
                 stack.push(TbValue::U64(val));
+                *pc += 1;
             }
             TbOpcode::LoadWide { offset, byte_size, width } => {
                 let val = unsafe { read_le_wide(memory.add(*offset), *byte_size, *width) };
                 stack.push(TbValue::Wide(val));
+                *pc += 1;
             }
             TbOpcode::BinOp(op) => {
-                let r = stack.pop().unwrap_or(TbValue::U64(0));
-                let l = stack.pop().unwrap_or(TbValue::U64(0));
+                let r = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: BinOp rhs underflow");
+                    TbValue::U64(0)
+                });
+                let l = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: BinOp lhs underflow");
+                    TbValue::U64(0)
+                });
                 stack.push(eval_binop(l, *op, r));
+                *pc += 1;
             }
             TbOpcode::UnaryOp(op) => {
                 if let Some(top) = stack.last_mut() {
                     *top = eval_unop(*op, top);
+                } else {
+                    debug_assert!(false, "testbench bytecode: UnaryOp underflow");
+                }
+                *pc += 1;
+            }
+            TbOpcode::Ternary { then_len, else_len } => {
+                let cond = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: Ternary cond underflow");
+                    TbValue::U64(0)
+                });
+                *pc += 1; // skip past Ternary opcode
+                if !cond.is_zero() {
+                    let then_end = *pc + then_len;
+                    while *pc < then_end {
+                        self.exec_at(ops, pc, stack, memory);
+                    }
+                    *pc += else_len; // skip else block
+                } else {
+                    *pc += then_len; // skip then block
+                    let else_end = *pc + else_len;
+                    while *pc < else_end {
+                        self.exec_at(ops, pc, stack, memory);
+                    }
                 }
             }
-            TbOpcode::Widen => {
-                if let Some(TbValue::U64(v)) = stack.last() {
-                    let v = *v;
-                    *stack.last_mut().unwrap() = TbValue::Wide(BigUint::from(v));
-                }
-            }
-            TbOpcode::Ternary { .. } => {} // handled by caller
         }
-        *pc += 1;
     }
 }
 
@@ -804,7 +793,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
         } => {
             if *reverse {
                 let mut i = *end;
-                while i > *start {
+                while i.checked_sub(*step).is_some_and(|next| next >= *start) {
                     i -= step;
                     if let Some((sig, _)) = loop_var {
                         sim.set(*sig, i as u64);
@@ -834,8 +823,11 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let (ptr, _) = sim.memory_as_ptr();
-            let val = expr.eval_u64(ptr);
-            sim.set(*dst, val);
+            let val = expr.eval_value(ptr);
+            match val {
+                TbValue::U64(v) => sim.set(*dst, v),
+                TbValue::Wide(v) => sim.set_wide(*dst, v),
+            }
             ExecResult::Continue
         }
         TestbenchStatement::Finish => ExecResult::Finished,

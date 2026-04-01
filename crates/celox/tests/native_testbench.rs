@@ -138,8 +138,11 @@ fn test_wide_signal() {
     assert_eq!(result, TestResult::Pass);
 }
 
+/// Verify that `rst.assert()` correctly drives active-high polarity
+/// when the project reset type is configured as `AsyncHigh`.
+/// The DUT uses generic `reset` type, resolved by `.reset_type()`.
 #[test]
-fn test_reset_active_high() {
+fn test_reset_async_high_polarity() {
     let code = r#"
         module Counter (
             clk: input  clock    ,
@@ -155,8 +158,8 @@ fn test_reset_active_high() {
             }
         }
 
-        #[test(test_active_high)]
-        module test_active_high {
+        #[test(test_polarity)]
+        module test_polarity {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen;
 
@@ -177,7 +180,7 @@ fn test_reset_active_high() {
         }
     "#;
 
-    let result = Simulator::builder(code, "test_active_high")
+    let result = Simulator::builder(code, "test_polarity")
         .reset_type(ResetType::AsyncHigh)
         .run_test()
         .unwrap();
