@@ -1,127 +1,96 @@
 use celox::{ResetType, Simulator, TestResult};
 
-#[test]
-fn test_counter_native_tb() {
-    let code = r#"
-        module Counter (
-            clk: input  clock    ,
-            rst: input  reset    ,
-            cnt: output logic<32>,
-        ) {
-            always_ff {
-                if_reset {
-                    cnt = 0;
-                } else {
-                    cnt += 1;
-                }
+const COUNTER: &str = r#"
+    module Counter (
+        clk: input  clock    ,
+        rst: input  reset    ,
+        cnt: output logic<32>,
+    ) {
+        always_ff {
+            if_reset {
+                cnt = 0;
+            } else {
+                cnt += 1;
             }
         }
+    }
+"#;
 
-        #[test(test_counter)]
-        module test_counter {
+// ── Basic ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_counter_pass() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen;
-
             var cnt: logic<32>;
-
-            inst dut: Counter (
-                clk: clk,
-                rst: rst,
-                cnt: cnt,
-            );
-
-            initial {
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
                 rst.assert(clk);
                 clk.next  (10);
                 $assert   (cnt == 32'd10);
                 $finish   ();
-            }
-        }
-    "#;
-
-    let result = Simulator::builder(code, "test_counter")
-        .run_test()
-        .unwrap();
-
-    assert_eq!(result, TestResult::Pass);
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
 }
 
 #[test]
-fn test_assert_failure() {
-    let code = r#"
-        module Counter (
-            clk: input  clock    ,
-            rst: input  reset    ,
-            cnt: output logic<32>,
-        ) {
-            always_ff {
-                if_reset {
-                    cnt = 0;
-                } else {
-                    cnt += 1;
-                }
-            }
-        }
-
-        #[test(test_fail)]
-        module test_fail {
+fn test_counter_fail() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen;
-
             var cnt: logic<32>;
-
-            inst dut: Counter (
-                clk: clk,
-                rst: rst,
-                cnt: cnt,
-            );
-
-            initial {
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
                 rst.assert(clk);
                 clk.next  (5);
                 $assert   (cnt == 32'd99);
                 $finish   ();
-            }
-        }
-    "#;
-
-    let result = Simulator::builder(code, "test_fail")
-        .run_test()
-        .unwrap();
-
-    assert!(matches!(result, TestResult::Fail(_)));
+            }}
+        }}
+    "#
+    );
+    assert!(matches!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Fail(_),
+    ));
 }
 
+// ── Wide signal (>64 bit) ──────────────────────────────────────────────
+
 #[test]
-fn test_wide_signal() {
+fn test_wide_128bit() {
     let code = r#"
-        module WideCounter (
+        module W (
             clk: input  clock      ,
             rst: input  reset      ,
             cnt: output logic<128> ,
         ) {
             always_ff {
-                if_reset {
-                    cnt = 0;
-                } else {
-                    cnt += 1;
-                }
+                if_reset { cnt = 0; }
+                else     { cnt += 1; }
             }
         }
-
-        #[test(test_wide)]
-        module test_wide {
+        #[test(t)]
+        module t {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen;
-
             var cnt: logic<128>;
-
-            inst dut: WideCounter (
-                clk: clk,
-                rst: rst,
-                cnt: cnt,
-            );
-
+            inst dut: W (clk, rst, cnt);
             initial {
                 rst.assert(clk);
                 clk.next  (5);
@@ -130,60 +99,336 @@ fn test_wide_signal() {
             }
         }
     "#;
-
-    let result = Simulator::builder(code, "test_wide")
-        .run_test()
-        .unwrap();
-
-    assert_eq!(result, TestResult::Pass);
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
 }
 
-/// Verify that `rst.assert()` correctly drives active-high polarity
-/// when the project reset type is configured as `AsyncHigh`.
-/// The DUT uses generic `reset` type, resolved by `.reset_type()`.
-#[test]
-fn test_reset_async_high_polarity() {
-    let code = r#"
-        module Counter (
-            clk: input  clock    ,
-            rst: input  reset    ,
-            cnt: output logic<32>,
-        ) {
-            always_ff {
-                if_reset {
-                    cnt = 0;
-                } else {
-                    cnt += 1;
-                }
-            }
-        }
+// ── Reset polarity ─────────────────────────────────────────────────────
 
-        #[test(test_polarity)]
-        module test_polarity {
+/// DUT uses generic `reset` type; builder overrides to AsyncHigh.
+#[test]
+fn test_reset_async_high() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen;
-
             var cnt: logic<32>;
-
-            inst dut: Counter (
-                clk: clk,
-                rst: rst,
-                cnt: cnt,
-            );
-
-            initial {
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
                 rst.assert(clk);
                 clk.next  (7);
                 $assert   (cnt == 32'd7);
                 $finish   ();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t")
+            .reset_type(ResetType::AsyncHigh)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+// ── Reset duration ─────────────────────────────────────────────────────
+
+#[test]
+fn test_reset_explicit_duration() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk, 5);
+                clk.next  (10);
+                $assert   (cnt == 32'd10);
+                $finish   ();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+// ── For loop ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_for_loop_basic() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                $assert(cnt == 32'd10);
+                for _i: u32 in 0..5 {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd15);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_for_loop_step() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                $assert(cnt == 32'd10);
+                for _i: u32 in 0..10 step += 2 {{
+                    clk.next(2);
+                }}
+                $assert(cnt == 32'd20);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_for_loop_rev() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                $assert(cnt == 32'd10);
+                for _i: i32 in rev 0..5 {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd15);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+// ── Dual clock ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_dual_clock() {
+    let code = r#"
+        module DualClock (
+            clk_a: input  'a clock    ,
+            rst_a: input  'a reset    ,
+            clk_b: input  'b clock    ,
+            rst_b: input  'b reset    ,
+            cnt_a: output 'a logic<32>,
+            cnt_b: output 'b logic<32>,
+        ) {
+            always_ff (clk_a, rst_a) {
+                if_reset { cnt_a = 0; }
+                else     { cnt_a += 1; }
+            }
+            always_ff (clk_b, rst_b) {
+                if_reset { cnt_b = 0; }
+                else     { cnt_b += 1; }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk_a: $tb::clock_gen;
+            inst rst_a: $tb::reset_gen;
+            inst clk_b: $tb::clock_gen;
+            inst rst_b: $tb::reset_gen;
+
+            var cnt_a: logic<32>;
+            var cnt_b: logic<32>;
+
+            inst dut: DualClock (
+                clk_a, rst_a, clk_b, rst_b, cnt_a, cnt_b,
+            );
+
+            initial {
+                rst_a.assert(clk_a);
+                rst_b.assert(clk_b);
+                clk_a.next  (10);
+                $assert     (cnt_a == 32'd10);
+                $assert     (cnt_b == 32'd0);
+                clk_b.next  (5);
+                $assert     (cnt_a == 32'd10);
+                $assert     (cnt_b == 32'd5);
+                $finish     ();
             }
         }
     "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
 
-    let result = Simulator::builder(code, "test_polarity")
-        .reset_type(ResetType::AsyncHigh)
-        .run_test()
-        .unwrap();
+// ── Implicit $finish (no $finish → Pass) ───────────────────────────────
 
-    assert_eq!(result, TestResult::Pass);
+#[test]
+fn test_no_finish_is_pass() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(3);
+                $assert(cnt == 32'd3);
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+// ── Multiple assertions ────────────────────────────────────────────────
+
+#[test]
+fn test_multiple_assertions() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                $assert(cnt == 32'd0);
+                clk.next(1);
+                $assert(cnt == 32'd1);
+                clk.next(1);
+                $assert(cnt == 32'd2);
+                clk.next(8);
+                $assert(cnt == 32'd10);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+// ── Operators in assertions ────────────────────────────────────────────
+
+#[test]
+fn test_comparison_operators() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(5);
+                $assert(cnt == 32'd5);
+                $assert(cnt != 32'd0);
+                $assert(cnt >: 32'd4);
+                $assert(cnt >= 32'd5);
+                $assert(cnt <: 32'd6);
+                $assert(cnt <= 32'd5);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_arithmetic_in_assert() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                $assert(cnt + 32'd5 == 32'd15);
+                $assert(cnt - 32'd3 == 32'd7);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
 }
