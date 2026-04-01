@@ -340,6 +340,47 @@ fn test_no_finish_is_pass() {
     );
 }
 
+// ── Dynamic indexing ───────────────────────────────────────────────────
+
+#[test]
+fn test_dynamic_array_index_in_for() {
+    let code = r#"
+        module ArrayFill (
+            clk: input  clock         ,
+            rst: input  reset         ,
+            arr: output logic<8>   [4],
+        ) {
+            for i in 0..4: g {
+                always_ff {
+                    if_reset { arr[i] = 0; }
+                    else     { arr[i] = arr[i] + i as u8 + 8'd10; }
+                }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var arr: logic<8>[4];
+            inst dut: ArrayFill (clk, rst, arr);
+            initial {
+                rst.assert(clk);
+                clk.next(1);
+                // arr[0]=10, arr[1]=11, arr[2]=12, arr[3]=13
+                for i: u32 in 0..4 {
+                    $assert(arr[i] == i as u8 + 8'd10);
+                }
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Multiple assertions ────────────────────────────────────────────────
 
 #[test]

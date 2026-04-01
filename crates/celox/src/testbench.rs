@@ -87,6 +87,21 @@ enum TbOpcode {
     /// Conditional: pop condition; if non-zero execute `then_len` ops,
     /// otherwise skip them and execute `else_len` ops.
     Ternary { then_len: usize, else_len: usize },
+    /// Dynamic array element load: pop index (u64), compute
+    /// `base_offset + index * stride_bytes`, read `element_width` bits.
+    LoadIndexed {
+        base_offset: usize,
+        stride_bytes: usize,
+        element_byte_size: usize,
+        element_width: usize,
+    },
+    /// Dynamic bit select: pop bit-index (u64), read full value from
+    /// `base_offset`, then shift right by bit-index and mask to `select_width`.
+    LoadBitSelect {
+        base_offset: usize,
+        base_byte_size: usize,
+        select_width: usize,
+    },
 }
 
 /// Stack value: either a native u64 or a heap-allocated BigUint.
@@ -227,6 +242,47 @@ impl CompiledExpr {
                         self.exec_at(ops, pc, stack, memory);
                     }
                 }
+            }
+            TbOpcode::LoadIndexed {
+                base_offset,
+                stride_bytes,
+                element_byte_size,
+                element_width,
+            } => {
+                let idx = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: LoadIndexed underflow");
+                    TbValue::U64(0)
+                });
+                let i = idx.to_u64() as usize;
+                let offset = base_offset + i * stride_bytes;
+                let mask = if *element_width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << element_width) - 1
+                };
+                let val = unsafe { read_le_u64(memory.add(offset), *element_byte_size) } & mask;
+                stack.push(TbValue::U64(val));
+                *pc += 1;
+            }
+            TbOpcode::LoadBitSelect {
+                base_offset,
+                base_byte_size,
+                select_width,
+            } => {
+                let bit_idx = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: LoadBitSelect underflow");
+                    TbValue::U64(0)
+                });
+                let shift = bit_idx.to_u64() as usize;
+                let full_val = unsafe { read_le_u64(memory.add(*base_offset), *base_byte_size) };
+                let mask = if *select_width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << select_width) - 1
+                };
+                let val = (full_val >> shift) & mask;
+                stack.push(TbValue::U64(val));
+                *pc += 1;
             }
         }
     }
@@ -412,21 +468,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         match factor {
             Factor::Variable(var_id, index, select, _) => {
                 if let Some(sig) = self.resolve_var(var_id) {
-                    let (offset, width, shift) =
-                        self.apply_index_select(var_id, sig, index, select);
-                    if shift == 0 {
-                        self.emit_load(offset, width, ops);
-                    } else {
-                        // Sub-byte bit select: load wider, shift right, mask
-                        let load_width = width + shift;
-                        self.emit_load(offset, load_width, ops);
-                        ops.push(TbOpcode::ConstU64(shift as u64));
-                        ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-                        if width < 64 {
-                            ops.push(TbOpcode::ConstU64((1u64 << width) - 1));
-                            ops.push(TbOpcode::BinOp(Op::BitAnd));
-                        }
-                    }
+                    self.emit_var_access(var_id, sig, index, select, ops);
                 } else {
                     ops.push(TbOpcode::ConstU64(0));
                 }
@@ -444,6 +486,214 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 }
             }
             _ => ops.push(TbOpcode::ConstU64(0)),
+        }
+    }
+
+    /// Emit bytecode for a variable access, handling static and dynamic
+    /// array indices and bit selects.
+    fn emit_var_access(
+        &self,
+        var_id: &VarId,
+        sig: SignalRef,
+        index: &veryl_analyzer::ir::VarIndex,
+        select: &veryl_analyzer::ir::VarSelect,
+        ops: &mut Vec<TbOpcode>,
+    ) {
+        let p = self.sim.program();
+        let info = match p.module_variables.get(&self.root_module_id).and_then(|v| v.get(var_id)) {
+            Some(i) => i,
+            None => { self.emit_load(sig.offset, sig.width, ops); return; }
+        };
+
+        // No index or select → whole variable
+        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+            self.emit_load(sig.offset, sig.width, ops);
+            return;
+        }
+
+        let array_total: usize = info.array_dims.iter().product::<usize>().max(1);
+        let element_width = info.width / array_total;
+
+        // Compute array strides
+        let mut strides_bits = vec![element_width; info.array_dims.len()];
+        if !info.array_dims.is_empty() {
+            let mut stride = element_width;
+            for i in (0..info.array_dims.len()).rev() {
+                strides_bits[i] = stride;
+                stride *= info.array_dims[i];
+            }
+        }
+
+        // Process unpacked array indices
+        let mut static_bit_offset: usize = 0;
+        let mut dynamic_emitted = false;
+
+        for (i, idx_expr) in index.0.iter().enumerate() {
+            if i >= info.array_dims.len() { break; }
+            let stride = strides_bits[i];
+
+            if let Some(idx_val) = Self::try_const_usize(idx_expr) {
+                // Static index: accumulate into offset
+                static_bit_offset += idx_val * stride;
+            } else {
+                // Dynamic index: emit the index expression, then LoadIndexed
+                let base_byte_offset = sig.offset + static_bit_offset / 8;
+                let stride_bytes = get_byte_size(stride);
+                let elem_byte_size = get_byte_size(element_width);
+                self.emit(idx_expr, ops);
+                ops.push(TbOpcode::LoadIndexed {
+                    base_offset: base_byte_offset,
+                    stride_bytes,
+                    element_byte_size: elem_byte_size,
+                    element_width,
+                });
+                dynamic_emitted = true;
+                // After a dynamic index, remaining indices would need chaining.
+                // For now, only single dynamic index is supported.
+                break;
+            }
+        }
+
+        if dynamic_emitted {
+            // Apply bit select on top of dynamic result if present
+            if select.1.is_some() || !select.0.is_empty() {
+                self.emit_post_select(select, element_width, ops);
+            }
+            return;
+        }
+
+        // All indices were static — apply bit select
+        let accessed_width = if index.0.len() >= info.array_dims.len() {
+            element_width
+        } else if index.0.is_empty() {
+            info.width
+        } else {
+            strides_bits[index.0.len() - 1]
+        };
+
+        if select.0.is_empty() && select.1.is_none() {
+            // No bit select, just load the element
+            let byte_offset = sig.offset + static_bit_offset / 8;
+            let sub = static_bit_offset % 8;
+            if sub == 0 {
+                self.emit_load(byte_offset, accessed_width, ops);
+            } else {
+                let load_width = accessed_width + sub;
+                self.emit_load(byte_offset, load_width, ops);
+                ops.push(TbOpcode::ConstU64(sub as u64));
+                ops.push(TbOpcode::BinOp(Op::LogicShiftR));
+                if accessed_width < 64 {
+                    ops.push(TbOpcode::ConstU64((1u64 << accessed_width) - 1));
+                    ops.push(TbOpcode::BinOp(Op::BitAnd));
+                }
+            }
+            return;
+        }
+
+        // Static bit select
+        let (sel_lsb, sel_width, is_dynamic_select) =
+            self.resolve_select(select, ops);
+
+        if is_dynamic_select {
+            // Dynamic bit select: load full value, shift by dynamic amount, mask
+            let byte_offset = sig.offset + static_bit_offset / 8;
+            let total_byte_size = get_byte_size(accessed_width);
+            ops.push(TbOpcode::LoadBitSelect {
+                base_offset: byte_offset,
+                base_byte_size: total_byte_size,
+                select_width: sel_width,
+            });
+            return;
+        }
+
+        let bit_offset = static_bit_offset + sel_lsb;
+        let byte_offset = sig.offset + bit_offset / 8;
+        let sub = bit_offset % 8;
+        if sub == 0 {
+            self.emit_load(byte_offset, sel_width, ops);
+        } else {
+            let load_width = sel_width + sub;
+            self.emit_load(byte_offset, load_width, ops);
+            ops.push(TbOpcode::ConstU64(sub as u64));
+            ops.push(TbOpcode::BinOp(Op::LogicShiftR));
+            if sel_width < 64 {
+                ops.push(TbOpcode::ConstU64((1u64 << sel_width) - 1));
+                ops.push(TbOpcode::BinOp(Op::BitAnd));
+            }
+        }
+    }
+
+    /// Resolve a VarSelect to `(lsb, width, is_dynamic)`.
+    /// If any index is dynamic, emits the dynamic index expression to `ops`
+    /// and returns `is_dynamic = true`.
+    fn resolve_select(
+        &self,
+        select: &veryl_analyzer::ir::VarSelect,
+        ops: &mut Vec<TbOpcode>,
+    ) -> (usize, usize, bool) {
+        if let Some((op, range_expr)) = &select.1 {
+            let anchor_expr = select.0.last();
+            let anchor = anchor_expr.and_then(|e| Self::try_const_usize(e));
+            let range_val = Self::try_const_usize(range_expr);
+
+            if let (Some(a), Some(v)) = (anchor, range_val) {
+                let (lsb, msb) = match op {
+                    veryl_analyzer::ir::VarSelectOp::Colon => (v, a),
+                    veryl_analyzer::ir::VarSelectOp::PlusColon => (a, a + v - 1),
+                    veryl_analyzer::ir::VarSelectOp::MinusColon => (a.saturating_sub(v) + 1, a),
+                    veryl_analyzer::ir::VarSelectOp::Step => (a * v, (a + 1) * v - 1),
+                };
+                return (lsb, msb - lsb + 1, false);
+            }
+
+            // Dynamic select: emit the anchor expression
+            if let Some(anchor_expr) = anchor_expr {
+                self.emit(anchor_expr, ops);
+            } else {
+                ops.push(TbOpcode::ConstU64(0));
+            }
+            let width = range_val.unwrap_or(1);
+            return (0, width, true);
+        }
+
+        // Simple bit index (no range)
+        if let Some(first) = select.0.first() {
+            if let Some(idx) = Self::try_const_usize(first) {
+                return (idx, 1, false);
+            }
+            // Dynamic single bit select
+            self.emit(first, ops);
+            return (0, 1, true);
+        }
+
+        (0, 0, false)
+    }
+
+    /// Emit post-load bit select operations on a value already on the stack
+    /// (for dynamic array element access followed by bit select).
+    fn emit_post_select(
+        &self,
+        select: &veryl_analyzer::ir::VarSelect,
+        _base_width: usize,
+        ops: &mut Vec<TbOpcode>,
+    ) {
+        let (lsb, width, is_dynamic) = self.resolve_select(select, ops);
+        if is_dynamic {
+            // Stack: [value, bit_index]
+            ops.push(TbOpcode::BinOp(Op::LogicShiftR));
+            if width < 64 {
+                ops.push(TbOpcode::ConstU64((1u64 << width) - 1));
+                ops.push(TbOpcode::BinOp(Op::BitAnd));
+            }
+        } else if lsb > 0 || width > 0 {
+            if lsb > 0 {
+                ops.push(TbOpcode::ConstU64(lsb as u64));
+                ops.push(TbOpcode::BinOp(Op::LogicShiftR));
+            }
+            if width > 0 && width < 64 {
+                ops.push(TbOpcode::ConstU64((1u64 << width) - 1));
+                ops.push(TbOpcode::BinOp(Op::BitAnd));
+            }
         }
     }
 
@@ -475,104 +725,6 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     ///
     /// For static indices, adjusts the offset and narrows the width.
     /// Dynamic indices are not supported and fall back to the full variable.
-    /// Returns `(byte_offset, bit_width, sub_byte_shift)`.
-    /// `sub_byte_shift` is non-zero when the bit select is not byte-aligned.
-    fn apply_index_select(
-        &self,
-        var_id: &VarId,
-        sig: SignalRef,
-        index: &veryl_analyzer::ir::VarIndex,
-        select: &veryl_analyzer::ir::VarSelect,
-    ) -> (usize, usize, usize) {
-        let p = self.sim.program();
-        let vars = &p.module_variables[&self.root_module_id];
-        let info = match vars.get(var_id) {
-            Some(i) => i,
-            None => return (sig.offset, sig.width, 0),
-        };
-
-        // No index or select → whole variable
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
-            return (sig.offset, sig.width, 0);
-        }
-
-        // Compute element width (total_width / product(array_dims))
-        let array_total: usize = info.array_dims.iter().product::<usize>().max(1);
-        let element_width = info.width / array_total;
-
-        // Apply unpacked array indices
-        let mut bit_offset: usize = 0;
-        let mut remaining_width = info.width;
-
-        if !info.array_dims.is_empty() {
-            let mut strides = vec![element_width; info.array_dims.len()];
-            let mut stride = element_width;
-            for i in (0..info.array_dims.len()).rev() {
-                strides[i] = stride;
-                stride *= info.array_dims[i];
-            }
-
-            for (i, idx_expr) in index.0.iter().enumerate() {
-                if i >= info.array_dims.len() {
-                    break;
-                }
-                if let Some(idx_val) = Self::try_const_usize(idx_expr) {
-                    bit_offset += idx_val * strides[i];
-                    remaining_width = strides[i];
-                } else {
-                    // Dynamic index — can't resolve at compile time
-                    return (sig.offset, sig.width, 0);
-                }
-            }
-        }
-
-        // Apply packed bit select
-        let mut final_width = if index.0.len() >= info.array_dims.len() {
-            element_width
-        } else {
-            remaining_width
-        };
-
-        if !select.0.is_empty() || select.1.is_some() {
-            // Simple bit index: select.0 contains index expressions
-            // Range select: select.1 contains (op, width_expr)
-            let mut all_indices: Vec<&Expression> =
-                select.0.iter().collect();
-
-            if let Some((op, range_expr)) = &select.1 {
-                if let (Some(anchor), Some(val)) = (
-                    all_indices.last().and_then(|e| Self::try_const_usize(e)),
-                    Self::try_const_usize(range_expr),
-                ) {
-                    // Mirror eval_var_select logic (weight=1 for scalar bit select)
-                    let (lsb, msb) = match op {
-                        veryl_analyzer::ir::VarSelectOp::Colon => (val, anchor),
-                        veryl_analyzer::ir::VarSelectOp::PlusColon => (anchor, anchor + val - 1),
-                        veryl_analyzer::ir::VarSelectOp::MinusColon => (anchor.saturating_sub(val) + 1, anchor),
-                        veryl_analyzer::ir::VarSelectOp::Step => (anchor * val, (anchor + 1) * val - 1),
-                    };
-                    bit_offset += lsb;
-                    final_width = msb - lsb + 1;
-                    all_indices.pop();
-                }
-            }
-
-            // Remaining simple indices (bit indexing without range)
-            for idx_expr in &all_indices {
-                if let Some(idx_val) = Self::try_const_usize(idx_expr) {
-                    bit_offset += idx_val;
-                    final_width = 1;
-                } else {
-                    return (sig.offset, sig.width, 0);
-                }
-            }
-        }
-
-        let byte_offset = sig.offset + bit_offset / 8;
-        let sub_byte_shift = bit_offset % 8;
-        (byte_offset, final_width, sub_byte_shift)
-    }
-
     fn try_const_usize(expr: &Expression) -> Option<usize> {
         match expr {
             Expression::Term(f) => match f.as_ref() {
