@@ -84,6 +84,33 @@ export function generateVcdText(trace: VcdTrace): string {
 	return L.join("\n") + "\n";
 }
 
+// ── Radix formatting ───────────────────────────────────────
+
+export type Radix = "hex" | "dec" | "oct" | "bin";
+const RADIX_OPTIONS: { value: Radix; label: string }[] = [
+	{ value: "hex", label: "Hex" },
+	{ value: "dec", label: "Dec" },
+	{ value: "oct", label: "Oct" },
+	{ value: "bin", label: "Bin" },
+];
+
+function formatVal(val: bigint, width: number, radix: Radix): string {
+	switch (radix) {
+		case "hex":
+			return "0x" + val.toString(16).toUpperCase();
+		case "dec":
+			return val.toString(10);
+		case "oct":
+			return "0o" + val.toString(8);
+		case "bin":
+			return "0b" + val.toString(2).padStart(width, "0");
+	}
+}
+
+function defaultRadix(width: number): Radix {
+	return width <= 8 ? "dec" : "hex";
+}
+
 // ── Theme constants ────────────────────────────────────────
 
 const BG = "#0d1117";
@@ -116,6 +143,8 @@ export class WaveformViewer {
 	private cursorTime: number | null = null;
 	private container: HTMLElement;
 	private resizeObs: ResizeObserver;
+	private radixMap = new Map<string, Radix>(); // signal name → radix
+	private ctxMenu: HTMLElement | null = null;
 
 	constructor(container: HTMLElement) {
 		this.container = container;
@@ -128,6 +157,7 @@ export class WaveformViewer {
 			passive: false,
 		});
 		this.canvas.addEventListener("click", this.onClick.bind(this));
+		this.canvas.addEventListener("contextmenu", this.onContextMenu.bind(this));
 
 		this.resizeObs = new ResizeObserver(() => this.render());
 		this.resizeObs.observe(container);
@@ -310,10 +340,12 @@ export class WaveformViewer {
 			ctx.fillText(label, NAME_WIDTH - 10, labelY);
 
 			if (signals[i].width > 1) {
+				const radix = this.getRadix(signals[i].name, signals[i].width);
 				ctx.fillStyle = TEXT_DIM;
 				ctx.font = "9px system-ui, sans-serif";
+				ctx.textAlign = "right";
 				ctx.fillText(
-					`[${signals[i].width - 1}:0]`,
+					`[${signals[i].width - 1}:0] ${radix}`,
 					NAME_WIDTH - 10,
 					labelY + 11,
 				);
@@ -328,10 +360,10 @@ export class WaveformViewer {
 					const y = RULER_HEIGHT + i * ROW_HEIGHT - this.scrollY;
 					if (y + ROW_HEIGHT < RULER_HEIGHT || y > h) continue;
 					const val = snapshots[snapIdx].values[i];
+					const sig = signals[i];
+					const radix = this.getRadix(sig.name, sig.width);
 					const txt =
-						signals[i].width === 1
-							? `${val}`
-							: `0x${val.toString(16).toUpperCase()}`;
+						sig.width === 1 ? `${val}` : formatVal(val, sig.width, radix);
 					ctx.fillStyle = CURSOR_COLOR;
 					ctx.font = "9px monospace";
 					ctx.textAlign = "left";
@@ -516,17 +548,15 @@ export class WaveformViewer {
 				ctx.stroke();
 			}
 
-			// Hex value text
+			// Value text
 			const textW = cx2 - txStart - 4;
 			if (textW > 18) {
-				const hex =
-					sig.width <= 8
-						? val.toString(10)
-						: "0x" + val.toString(16).toUpperCase();
+				const radix = this.getRadix(sig.name, sig.width);
+				const valStr = formatVal(val, sig.width, radix);
 				ctx.fillStyle = TEXT_COLOR;
 				ctx.font = '10px "Fira Code", monospace';
 				ctx.textAlign = "center";
-				ctx.fillText(hex, (txStart + cx2) / 2, mid + 3, textW);
+				ctx.fillText(valStr, (txStart + cx2) / 2, mid + 3, textW);
 			}
 		}
 	}
@@ -590,6 +620,7 @@ export class WaveformViewer {
 	}
 
 	private onClick(e: MouseEvent): void {
+		this.dismissCtxMenu();
 		const rect = this.canvas.getBoundingClientRect();
 		const x = e.clientX - rect.left;
 		if (x > NAME_WIDTH) {
@@ -598,6 +629,82 @@ export class WaveformViewer {
 				Math.round((x - NAME_WIDTH + this.scrollX) / this.pxPerUnit),
 			);
 			this.render();
+		}
+	}
+
+	// ── Per-signal radix ─────────────────────────────
+
+	private getRadix(name: string, width: number): Radix {
+		return this.radixMap.get(name) ?? defaultRadix(width);
+	}
+
+	private signalAtY(clientY: number): number {
+		const rect = this.canvas.getBoundingClientRect();
+		const y = clientY - rect.top;
+		const idx = Math.floor((y - RULER_HEIGHT + this.scrollY) / ROW_HEIGHT);
+		if (!this.trace || idx < 0 || idx >= this.trace.signals.length) return -1;
+		return idx;
+	}
+
+	private onContextMenu(e: MouseEvent): void {
+		const rect = this.canvas.getBoundingClientRect();
+		const x = e.clientX - rect.left;
+		// Only show context menu in the signal name column
+		if (x > NAME_WIDTH) return;
+
+		const idx = this.signalAtY(e.clientY);
+		if (idx < 0 || !this.trace) return;
+		const sig = this.trace.signals[idx];
+		if (sig.width <= 1) return; // no radix choice for 1-bit
+
+		e.preventDefault();
+		this.dismissCtxMenu();
+
+		const menu = document.createElement("div");
+		menu.style.cssText = `
+			position: fixed; left: ${e.clientX}px; top: ${e.clientY}px;
+			background: #1c2333; border: 1px solid #0f3460; border-radius: 4px;
+			padding: 4px 0; z-index: 9999; font-size: 12px; font-family: system-ui, sans-serif;
+			box-shadow: 0 4px 12px rgba(0,0,0,0.5); min-width: 100px;
+		`;
+
+		const current = this.getRadix(sig.name, sig.width);
+		for (const opt of RADIX_OPTIONS) {
+			const item = document.createElement("div");
+			item.textContent = opt.label;
+			item.style.cssText = `
+				padding: 4px 16px; cursor: pointer; color: ${opt.value === current ? "#e94560" : "#c9d1d9"};
+				font-weight: ${opt.value === current ? "600" : "400"};
+			`;
+			item.addEventListener("mouseenter", () => {
+				item.style.background = "#0f3460";
+			});
+			item.addEventListener("mouseleave", () => {
+				item.style.background = "transparent";
+			});
+			item.addEventListener("click", () => {
+				this.radixMap.set(sig.name, opt.value);
+				this.dismissCtxMenu();
+				this.render();
+			});
+			menu.appendChild(item);
+		}
+
+		document.body.appendChild(menu);
+		this.ctxMenu = menu;
+
+		// Dismiss on next click anywhere
+		const dismiss = () => {
+			this.dismissCtxMenu();
+			document.removeEventListener("click", dismiss);
+		};
+		setTimeout(() => document.addEventListener("click", dismiss), 0);
+	}
+
+	private dismissCtxMenu(): void {
+		if (this.ctxMenu) {
+			this.ctxMenu.remove();
+			this.ctxMenu = null;
 		}
 	}
 }
