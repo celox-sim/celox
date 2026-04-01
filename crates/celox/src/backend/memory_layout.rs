@@ -117,14 +117,17 @@ impl MemoryLayout {
         // - Neither address is used in FF execution units (FF timing requires separate storage)
         let ff_addrs = collect_ff_addresses(program);
         for (alias_addr, canonical_addr) in &program.address_aliases {
-            let same_4state = is_4states.get(alias_addr) == is_4states.get(canonical_addr);
+            // Skip 4-state variables: aliasing only shares the value offset,
+            // but 4-state also needs mask offset sharing which is not implemented.
+            let both_2state = is_4states.get(alias_addr) == Some(&false)
+                && is_4states.get(canonical_addr) == Some(&false);
             let alias_fits = widths
                 .get(alias_addr)
                 .zip(widths.get(canonical_addr))
                 .is_some_and(|(&aw, &cw)| aw <= cw);
             let not_in_ff =
                 !ff_addrs.contains(alias_addr) && !ff_addrs.contains(canonical_addr);
-            if same_4state && alias_fits && not_in_ff {
+            if both_2state && alias_fits && not_in_ff {
                 if let Some(&canonical_offset) = offsets.get(canonical_addr) {
                     offsets.insert(*alias_addr, canonical_offset);
                 }
