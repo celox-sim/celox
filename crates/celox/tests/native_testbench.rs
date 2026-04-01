@@ -1,4 +1,4 @@
-use celox::{Simulator, TestResult};
+use celox::{ResetType, Simulator, TestResult};
 
 #[test]
 fn test_counter_native_tb() {
@@ -132,6 +132,53 @@ fn test_wide_signal() {
     "#;
 
     let result = Simulator::builder(code, "test_wide")
+        .run_test()
+        .unwrap();
+
+    assert_eq!(result, TestResult::Pass);
+}
+
+#[test]
+fn test_reset_active_high() {
+    let code = r#"
+        module Counter (
+            clk: input  clock    ,
+            rst: input  reset    ,
+            cnt: output logic<32>,
+        ) {
+            always_ff {
+                if_reset {
+                    cnt = 0;
+                } else {
+                    cnt += 1;
+                }
+            }
+        }
+
+        #[test(test_active_high)]
+        module test_active_high {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+
+            var cnt: logic<32>;
+
+            inst dut: Counter (
+                clk: clk,
+                rst: rst,
+                cnt: cnt,
+            );
+
+            initial {
+                rst.assert(clk);
+                clk.next  (7);
+                $assert   (cnt == 32'd7);
+                $finish   ();
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "test_active_high")
+        .reset_type(ResetType::AsyncHigh)
         .run_test()
         .unwrap();
 

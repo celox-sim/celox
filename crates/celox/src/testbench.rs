@@ -29,10 +29,13 @@ pub enum TestbenchStatement<B: SimBackend> {
         count: u64,
     },
     ResetAssert {
-        _reset_event: B::Event,
         reset_signal: SignalRef,
         clock_event: B::Event,
         duration: u64,
+        /// Value to drive when reset is asserted (0 for active-low, 1 for active-high).
+        assert_value: u8,
+        /// Value to drive when reset is deasserted.
+        deassert_value: u8,
     },
     Assert {
         expr: CompiledExpr,
@@ -635,21 +638,39 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                 })
             }
             TbMethod::ResetAssert { clock, duration } => {
-                let reset_event = self.event_map.get(&tb.inst).copied()?;
                 let reset_signal = self.signal_map.get(&tb.inst).copied()?;
                 let clock_event = self.event_map.get(clock).copied()?;
                 let dur = duration
                     .as_ref()
                     .and_then(|e| try_eval_const(e))
                     .unwrap_or(self.default_reset_duration);
+                // Determine reset polarity from the variable's DomainKind
+                let (assert_value, deassert_value) = self.resolve_reset_polarity(&tb.inst);
                 Some(TestbenchStatement::ResetAssert {
-                    _reset_event: reset_event,
                     reset_signal,
                     clock_event,
                     duration: dur,
+                    assert_value,
+                    deassert_value,
                 })
             }
         }
+    }
+
+    /// Determine reset assert/deassert values from the variable's DomainKind.
+    fn resolve_reset_polarity(&self, inst: &StrId) -> (u8, u8) {
+        let name = veryl_parser::resource_table::get_str_value(*inst).unwrap_or_default();
+        let program = self.sim.program();
+        if let Ok(addr) = program.get_addr(&[], &[&name]) {
+            if let Some(info) = program.get_variable_info(&addr) {
+                return match info.kind {
+                    crate::ir::DomainKind::ResetAsyncHigh => (1, 0), // active-high
+                    crate::ir::DomainKind::ResetAsyncLow => (0, 1), // active-low
+                    _ => (0, 1), // default: active-low
+                };
+            }
+        }
+        (0, 1) // default: active-low
     }
 
     fn resolve_loop_var(&self, var_id: &VarId) -> Option<(SignalRef, usize)> {
@@ -731,15 +752,16 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
             reset_signal,
             clock_event,
             duration,
-            ..
+            assert_value,
+            deassert_value,
         } => {
-            sim.set(*reset_signal, 0u8);
+            sim.set(*reset_signal, *assert_value);
             for _ in 0..*duration {
                 if let Err(e) = sim.tick(*clock_event) {
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
             }
-            sim.set(*reset_signal, 1u8);
+            sim.set(*reset_signal, *deassert_value);
             ExecResult::Continue
         }
         TestbenchStatement::Assert { expr, message } => {
