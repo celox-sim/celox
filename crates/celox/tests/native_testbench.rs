@@ -373,6 +373,83 @@ fn test_multiple_assertions() {
     );
 }
 
+// ── Array and bit select ───────────────────────────────────────────────
+
+#[test]
+fn test_unpacked_array_index() {
+    let code = r#"
+        module ArrayCounter (
+            clk: input  clock         ,
+            rst: input  reset         ,
+            cnt: output logic<8>   [4],
+        ) {
+            for i in 0..4: g {
+                always_ff {
+                    if_reset { cnt[i] = 0; }
+                    else     { cnt[i] = cnt[i] + i as u8 + 8'd1; }
+                }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<8>[4];
+            inst dut: ArrayCounter (clk, rst, cnt);
+            initial {
+                rst.assert(clk);
+                clk.next(1);
+                $assert(cnt[0] == 8'd1);
+                $assert(cnt[1] == 8'd2);
+                $assert(cnt[2] == 8'd3);
+                $assert(cnt[3] == 8'd4);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_bit_select() {
+    let code = r#"
+        module BitSel (
+            clk: input  clock    ,
+            rst: input  reset    ,
+            val: output logic<16>,
+        ) {
+            always_ff {
+                if_reset { val = 0; }
+                else     { val = 16'hABCD; }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var val: logic<16>;
+            inst dut: BitSel (clk, rst, val);
+            initial {
+                rst.assert(clk);
+                clk.next(1);
+                $assert(val == 16'hABCD);
+                $assert(val[7:0] == 8'hCD);
+                $assert(val[15:8] == 8'hAB);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Operators in assertions ────────────────────────────────────────────
 
 #[test]

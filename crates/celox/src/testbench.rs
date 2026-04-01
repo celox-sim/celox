@@ -367,6 +367,9 @@ fn eval_binop_wide_cmp(l: &BigUint, op: Op, r: &BigUint) -> u64 {
 
 struct ExprCompiler<'a, B: SimBackend> {
     sim: &'a Simulator<B>,
+    /// Root module instance ID, cached for repeated lookups.
+    root_instance_id: crate::ir::InstanceId,
+    root_module_id: crate::ir::ModuleId,
 }
 
 impl<'a, B: SimBackend> ExprCompiler<'a, B> {
@@ -407,26 +410,22 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
     fn emit_factor(&self, factor: &Factor, ops: &mut Vec<TbOpcode>) {
         match factor {
-            Factor::Variable(var_id, _, _, _) => {
+            Factor::Variable(var_id, index, select, _) => {
                 if let Some(sig) = self.resolve_var(var_id) {
-                    let byte_size = get_byte_size(sig.width);
-                    if byte_size <= 8 {
-                        let mask = if sig.width >= 64 {
-                            u64::MAX
-                        } else {
-                            (1u64 << sig.width) - 1
-                        };
-                        ops.push(TbOpcode::LoadU64 {
-                            offset: sig.offset,
-                            byte_size,
-                            mask,
-                        });
+                    let (offset, width, shift) =
+                        self.apply_index_select(var_id, sig, index, select);
+                    if shift == 0 {
+                        self.emit_load(offset, width, ops);
                     } else {
-                        ops.push(TbOpcode::LoadWide {
-                            offset: sig.offset,
-                            byte_size,
-                            width: sig.width,
-                        });
+                        // Sub-byte bit select: load wider, shift right, mask
+                        let load_width = width + shift;
+                        self.emit_load(offset, load_width, ops);
+                        ops.push(TbOpcode::ConstU64(shift as u64));
+                        ops.push(TbOpcode::BinOp(Op::LogicShiftR));
+                        if width < 64 {
+                            ops.push(TbOpcode::ConstU64((1u64 << width) - 1));
+                            ops.push(TbOpcode::BinOp(Op::BitAnd));
+                        }
                     }
                 } else {
                     ops.push(TbOpcode::ConstU64(0));
@@ -448,17 +447,153 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
     }
 
+    /// Emit a LoadU64 or LoadWide opcode for the given byte offset and bit width.
+    fn emit_load(&self, offset: usize, width: usize, ops: &mut Vec<TbOpcode>) {
+        let byte_size = get_byte_size(width);
+        if byte_size <= 8 {
+            let mask = if width >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
+            ops.push(TbOpcode::LoadU64 {
+                offset,
+                byte_size,
+                mask,
+            });
+        } else {
+            ops.push(TbOpcode::LoadWide {
+                offset,
+                byte_size,
+                width,
+            });
+        }
+    }
+
+    /// Resolve VarIndex (unpacked array) and VarSelect (bit select) to
+    /// a concrete (byte_offset, bit_width) pair.
+    ///
+    /// For static indices, adjusts the offset and narrows the width.
+    /// Dynamic indices are not supported and fall back to the full variable.
+    /// Returns `(byte_offset, bit_width, sub_byte_shift)`.
+    /// `sub_byte_shift` is non-zero when the bit select is not byte-aligned.
+    fn apply_index_select(
+        &self,
+        var_id: &VarId,
+        sig: SignalRef,
+        index: &veryl_analyzer::ir::VarIndex,
+        select: &veryl_analyzer::ir::VarSelect,
+    ) -> (usize, usize, usize) {
+        let p = self.sim.program();
+        let vars = &p.module_variables[&self.root_module_id];
+        let info = match vars.get(var_id) {
+            Some(i) => i,
+            None => return (sig.offset, sig.width, 0),
+        };
+
+        // No index or select → whole variable
+        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+            return (sig.offset, sig.width, 0);
+        }
+
+        // Compute element width (total_width / product(array_dims))
+        let array_total: usize = info.array_dims.iter().product::<usize>().max(1);
+        let element_width = info.width / array_total;
+
+        // Apply unpacked array indices
+        let mut bit_offset: usize = 0;
+        let mut remaining_width = info.width;
+
+        if !info.array_dims.is_empty() {
+            let mut strides = vec![element_width; info.array_dims.len()];
+            let mut stride = element_width;
+            for i in (0..info.array_dims.len()).rev() {
+                strides[i] = stride;
+                stride *= info.array_dims[i];
+            }
+
+            for (i, idx_expr) in index.0.iter().enumerate() {
+                if i >= info.array_dims.len() {
+                    break;
+                }
+                if let Some(idx_val) = Self::try_const_usize(idx_expr) {
+                    bit_offset += idx_val * strides[i];
+                    remaining_width = strides[i];
+                } else {
+                    // Dynamic index — can't resolve at compile time
+                    return (sig.offset, sig.width, 0);
+                }
+            }
+        }
+
+        // Apply packed bit select
+        let mut final_width = if index.0.len() >= info.array_dims.len() {
+            element_width
+        } else {
+            remaining_width
+        };
+
+        if !select.0.is_empty() || select.1.is_some() {
+            // Simple bit index: select.0 contains index expressions
+            // Range select: select.1 contains (op, width_expr)
+            let mut all_indices: Vec<&Expression> =
+                select.0.iter().collect();
+
+            if let Some((op, range_expr)) = &select.1 {
+                if let (Some(anchor), Some(val)) = (
+                    all_indices.last().and_then(|e| Self::try_const_usize(e)),
+                    Self::try_const_usize(range_expr),
+                ) {
+                    // Mirror eval_var_select logic (weight=1 for scalar bit select)
+                    let (lsb, msb) = match op {
+                        veryl_analyzer::ir::VarSelectOp::Colon => (val, anchor),
+                        veryl_analyzer::ir::VarSelectOp::PlusColon => (anchor, anchor + val - 1),
+                        veryl_analyzer::ir::VarSelectOp::MinusColon => (anchor.saturating_sub(val) + 1, anchor),
+                        veryl_analyzer::ir::VarSelectOp::Step => (anchor * val, (anchor + 1) * val - 1),
+                    };
+                    bit_offset += lsb;
+                    final_width = msb - lsb + 1;
+                    all_indices.pop();
+                }
+            }
+
+            // Remaining simple indices (bit indexing without range)
+            for idx_expr in &all_indices {
+                if let Some(idx_val) = Self::try_const_usize(idx_expr) {
+                    bit_offset += idx_val;
+                    final_width = 1;
+                } else {
+                    return (sig.offset, sig.width, 0);
+                }
+            }
+        }
+
+        let byte_offset = sig.offset + bit_offset / 8;
+        let sub_byte_shift = bit_offset % 8;
+        (byte_offset, final_width, sub_byte_shift)
+    }
+
+    fn try_const_usize(expr: &Expression) -> Option<usize> {
+        match expr {
+            Expression::Term(f) => match f.as_ref() {
+                Factor::Value(c) => c.get_value().ok().map(|v| v.payload_u64() as usize),
+                Factor::Variable(_, _, _, c) => {
+                    c.get_value().ok().map(|v| v.payload_u64() as usize)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn resolve_var(&self, var_id: &VarId) -> Option<SignalRef> {
         let p = self.sim.program();
-        let rid = p.instance_ids.get(&crate::ir::InstancePath(Vec::new()))?;
-        let mid = p.instance_module.get(rid)?;
-        let vars = p.module_variables.get(mid)?;
+        let vars = p.module_variables.get(&self.root_module_id)?;
         let _ = vars.get(var_id)?;
-        Some(
-            self.sim
-                .backend_ref()
-                .resolve_signal(&AbsoluteAddr { instance_id: *rid, var_id: *var_id }),
-        )
+        Some(self.sim.backend_ref().resolve_signal(&AbsoluteAddr {
+            instance_id: self.root_instance_id,
+            var_id: *var_id,
+        }))
     }
 }
 
@@ -527,7 +662,17 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
     }
 
     pub fn convert(&self, stmts: &[Statement]) -> Vec<TestbenchStatement<B>> {
-        let ec = ExprCompiler { sim: self.sim };
+        let p = self.sim.program();
+        let root_instance_id = *p
+            .instance_ids
+            .get(&crate::ir::InstancePath(Vec::new()))
+            .expect("root instance not found");
+        let root_module_id = p.instance_module[&root_instance_id];
+        let ec = ExprCompiler {
+            sim: self.sim,
+            root_instance_id,
+            root_module_id,
+        };
         stmts.iter().filter_map(|s| self.convert_stmt(s, &ec)).collect()
     }
 
