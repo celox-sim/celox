@@ -214,7 +214,7 @@ import { Simulation } from "@celox-sim/celox";
 import { Counter } from "../src/Counter.veryl";
 
 describe("Counter (Waveform)", () => {
-    it("records waveform while counting", () => {
+    it("counts up with enable", () => {
         const sim = Simulation.create(Counter);
         sim.addClock("clk", { period: 10 });
 
@@ -222,11 +222,9 @@ describe("Counter (Waveform)", () => {
         sim.reset("rst");
         sim.dump(sim.time());
 
-        // Enable counting
         sim.dut.en = 1n;
         sim.dump(sim.time());
 
-        // Step through and dump at each event
         for (let i = 0; i < 100; i++) {
             const t = sim.step();
             if (t === null) break;
@@ -234,6 +232,27 @@ describe("Counter (Waveform)", () => {
         }
 
         expect(sim.dut.count).toBeGreaterThan(0n);
+        sim.dispose();
+    });
+
+    it("stays zero with enable off", () => {
+        const sim = Simulation.create(Counter);
+        sim.addClock("clk", { period: 10 });
+
+        sim.dump(sim.time());
+        sim.reset("rst");
+        sim.dump(sim.time());
+
+        sim.dut.en = 0n;
+        sim.dump(sim.time());
+
+        for (let i = 0; i < 60; i++) {
+            const t = sim.step();
+            if (t === null) break;
+            sim.dump(t);
+        }
+
+        expect(sim.dut.count).toBe(0n);
         sim.dispose();
     });
 });
@@ -482,6 +501,7 @@ document.getElementById("app")!.innerHTML = `
   .right-content { display: none; flex: 1; overflow: hidden; }
   .right-content.active { display: flex; flex-direction: column; }
   #waveform-toolbar { display: flex; gap: 4px; padding: 3px 8px; background: #16213e; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+  #waveform-toolbar select { font-size: 0.7rem; padding: 2px 6px; max-width: 260px; }
   #waveform-toolbar button { font-size: 0.7rem; padding: 2px 8px; background: #1a1a2e; color: #c9d1d9; border-color: #0f3460; font-weight: 400; }
   #waveform-toolbar button:hover { background: #0f3460; }
   #waveform-container { flex: 1; overflow: hidden; }
@@ -511,6 +531,7 @@ document.getElementById("app")!.innerHTML = `
     </div>
     <div id="waveform-panel" class="right-content">
       <div id="waveform-toolbar">
+        <select id="wv-trace-select"></select>
         <button id="wv-zoom-in">Zoom +</button>
         <button id="wv-zoom-out">Zoom -</button>
         <button id="wv-fit">Fit</button>
@@ -563,15 +584,37 @@ for (const t of rightTabs) {
 const waveformViewer = new WaveformViewer(
 	document.getElementById("waveform-container")!,
 );
+const wvTraceSelectEl = document.getElementById("wv-trace-select") as HTMLSelectElement;
+
+// Per-test VCD traces collected during a run
+let vcdTraces: { label: string; trace: VcdTrace }[] = [];
 let currentVcdTrace: VcdTrace | null = null;
 
-// VCD recording state — reset at the start of each run()
+// VCD recording state — reset before each test
 let vcdSignals: VcdSignalInfo[] = [];
 let vcdSnapshots: VcdSnapshot[] = [];
+
+/** Flush accumulated snapshots into a named trace entry. */
+function flushVcdTrace(label: string) {
+	if (vcdSnapshots.length > 0) {
+		vcdTraces.push({ label, trace: { signals: [...vcdSignals], snapshots: vcdSnapshots } });
+		vcdSnapshots = [];
+	}
+	// Keep vcdSignals — signals are the same across tests for the same module
+}
+
+/** Show the trace at the given index in the selector. */
+function showVcdTrace(index: number) {
+	if (index < 0 || index >= vcdTraces.length) return;
+	currentVcdTrace = vcdTraces[index].trace;
+	waveformViewer.setTrace(currentVcdTrace);
+	wvTraceSelectEl.value = String(index);
+}
 
 document.getElementById("wv-zoom-in")!.addEventListener("click", () => waveformViewer.zoomIn());
 document.getElementById("wv-zoom-out")!.addEventListener("click", () => waveformViewer.zoomOut());
 document.getElementById("wv-fit")!.addEventListener("click", () => waveformViewer.fit());
+wvTraceSelectEl.addEventListener("change", () => showVcdTrace(Number(wvTraceSelectEl.value)));
 document.getElementById("wv-download")!.addEventListener("click", () => {
 	if (!currentVcdTrace) return;
 	const text = generateVcdText(currentVcdTrace);
@@ -579,7 +622,8 @@ document.getElementById("wv-download")!.addEventListener("click", () => {
 	const url = URL.createObjectURL(blob);
 	const a = document.createElement("a");
 	a.href = url;
-	a.download = "dump.vcd";
+	const label = wvTraceSelectEl.selectedOptions[0]?.textContent ?? "dump";
+	a.download = label.replace(/[^a-zA-Z0-9_-]/g, "_") + ".vcd";
 	a.click();
 	URL.revokeObjectURL(url);
 });
@@ -1221,7 +1265,9 @@ async function run() {
 	// Reset VCD recording state
 	vcdSignals = [];
 	vcdSnapshots = [];
+	vcdTraces = [];
 	currentVcdTrace = null;
+	wvTraceSelectEl.innerHTML = "";
 	wvBadgeEl.classList.remove("visible");
 	wvBadgeEl.textContent = "";
 
@@ -1911,6 +1957,8 @@ async function run() {
 				lastFile = t.file;
 			}
 			const label = [...t.suite, t.name].join(" > ");
+			// Reset per-test VCD accumulator
+			vcdSnapshots = [];
 			try {
 				await t.fn();
 				passed++;
@@ -1920,6 +1968,8 @@ async function run() {
 				appendConsole(`   FAIL  ${label}`, "log-error");
 				appendConsole(`         ${e.message}`, "log-error");
 			}
+			// Flush any VCD data recorded by this test
+			flushVcdTrace(label);
 		}
 
 		const t3 = performance.now();
@@ -1941,13 +1991,22 @@ async function run() {
 		statusEl.textContent = failed > 0 ? `${failed} failed` : "Done";
 
 		// If VCD data was recorded, show waveform
-		if (vcdSnapshots.length > 0) {
-			currentVcdTrace = { signals: vcdSignals, snapshots: vcdSnapshots };
-			waveformViewer.setTrace(currentVcdTrace);
-			wvBadgeEl.textContent = `${vcdSnapshots.length}`;
+		if (vcdTraces.length > 0) {
+			// Populate trace selector
+			wvTraceSelectEl.innerHTML = "";
+			for (let i = 0; i < vcdTraces.length; i++) {
+				const opt = document.createElement("option");
+				opt.value = String(i);
+				opt.textContent = vcdTraces[i].label;
+				wvTraceSelectEl.appendChild(opt);
+			}
+			showVcdTrace(0);
+
+			const totalSnaps = vcdTraces.reduce((s, t) => s + t.trace.snapshots.length, 0);
+			wvBadgeEl.textContent = `${vcdTraces.length}`;
 			wvBadgeEl.classList.add("visible");
 			appendConsole(
-				`\n[vcd] ${vcdSnapshots.length} snapshots recorded — switch to Waveform tab`,
+				`\n[vcd] ${vcdTraces.length} trace(s), ${totalSnaps} total snapshots`,
 				"log-info",
 			);
 			switchRightTab("waveform");
