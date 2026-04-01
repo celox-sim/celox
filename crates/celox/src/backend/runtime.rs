@@ -125,7 +125,7 @@ impl JitBackend {
         options: &SimulatorOptions,
         mut trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<SharedJitCode, crate::SimulatorError> {
-        let layout = MemoryLayout::build(sir, options.four_state);
+        let layout = sir.layout.as_ref().expect("layout must be built before backend").clone();
 
         // Auto-select SinglePass RA for large designs where Backtracking RA's
         // superlinear compile time would dominate. The threshold is half the

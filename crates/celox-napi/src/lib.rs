@@ -1365,9 +1365,10 @@ impl NativeSimulatorHandle {
         )
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        let layout = celox::MemoryLayout::build(&program, opts.four_state);
+        program.build_layout(opts.four_state);
+        let layout = program.layout.as_ref().unwrap();
 
-        let layout_json = Self::build_layout_json(&program, &layout);
+        let layout_json = Self::build_layout_json(&program, layout);
         let events_json = Self::build_events_json(&program);
         let hierarchy_json = "{}".to_string(); // Hierarchy not available on wasm32
         let warnings_json = format_warnings_json(&warnings);
@@ -1429,9 +1430,10 @@ impl NativeSimulatorHandle {
         )
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        let layout = celox::MemoryLayout::build(&program, opts.four_state);
+        program.build_layout(opts.four_state);
+        let layout = program.layout.as_ref().unwrap();
 
-        let layout_json = Self::build_layout_json(&program, &layout);
+        let layout_json = Self::build_layout_json(&program, layout);
         let events_json = Self::build_events_json(&program);
         let hierarchy_json = "{}".to_string();
         let warnings_json = format_warnings_json(&warnings);

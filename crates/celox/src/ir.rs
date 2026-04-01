@@ -113,8 +113,47 @@ pub struct Program {
     /// Memory layout aliases: non-canonical → canonical address.
     /// Variables with identity Store→Load roundtrips share physical memory.
     pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    /// Pre-computed memory layout. Built after optimization, before backend codegen.
+    pub layout: Option<crate::backend::MemoryLayout>,
 }
 impl Program {
+    /// Build and store the memory layout. Also removes identity Stores for
+    /// validated aliases and runs DCE to clean up dead instruction chains.
+    pub fn build_layout(&mut self, four_state: bool) {
+        let layout = crate::backend::MemoryLayout::build(self, four_state);
+
+        // Remove identity Stores for aliases validated by the layout
+        if !self.address_aliases.is_empty() {
+            let aliased: crate::HashSet<AbsoluteAddr> = self
+                .address_aliases
+                .iter()
+                .filter(|(alias_addr, canonical_addr)| {
+                    layout
+                        .offsets
+                        .get(alias_addr)
+                        .zip(layout.offsets.get(canonical_addr))
+                        .is_some_and(|(a, c)| a == c)
+                })
+                .map(|(addr, _)| *addr)
+                .collect();
+            if !aliased.is_empty() {
+                for eu in &mut self.eval_comb {
+                    for block in eu.blocks.values_mut() {
+                        block.instructions.retain(|inst| {
+                            !matches!(
+                                inst,
+                                SIRInstruction::Store(addr, _, _, _, triggers)
+                                    if triggers.is_empty() && aliased.contains(&addr.absolute_addr())
+                            )
+                        });
+                    }
+                }
+            }
+        }
+
+        self.layout = Some(layout);
+    }
+
     pub fn get_addr(
         &self,
         instance_path: &[(&str, usize)],

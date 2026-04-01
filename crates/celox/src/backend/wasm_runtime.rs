@@ -150,7 +150,7 @@ pub struct WasmBackend {
 impl WasmBackend {
     pub fn new(sir: &Program, options: &SimulatorOptions) -> Result<Self, crate::SimulatorError> {
         let engine = Engine::default();
-        let layout = MemoryLayout::build(sir, options.four_state);
+        let layout = sir.layout.as_ref().expect("layout must be built before backend").clone();
 
         // Compile eval_comb
         let comb_wasm = wasm_codegen::compile_units(

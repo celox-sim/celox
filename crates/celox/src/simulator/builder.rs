@@ -554,6 +554,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.options.optimize_options,
         )?;
 
+        // Build memory layout (consumes address_aliases for offset sharing)
+        program.build_layout(self.options.four_state);
+
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             run_dead_store_elimination(
                 &mut program,
@@ -636,6 +639,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         );
 
         let sim_res = program_res.and_then(|(mut program, warnings)| {
+            program.build_layout(self.options.four_state);
+
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 run_dead_store_elimination(
                     &mut program,
@@ -647,7 +652,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             // Run MIR trace if requested (generates MIR output before/after optimization + regalloc)
             if self.options.trace.mir {
                 use crate::backend::native::{emit, isel, mir_opt, regalloc};
-                let layout = crate::backend::MemoryLayout::build(&program, self.options.four_state);
+                let layout = program.layout.as_ref().expect("layout must be built before MIR trace");
                 let mut mir_output = String::new();
 
                 mir_output.push_str("=== MIR (eval_comb) ===\n");
@@ -744,6 +749,8 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             &self.param_overrides,
             &self.options.optimize_options,
         )?;
+        program.build_layout(self.options.four_state);
+
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             run_dead_store_elimination(
                 &mut program,

@@ -8,8 +8,6 @@ use std::sync::Arc;
 use bit_set::BitSet;
 use num_bigint::BigUint;
 
-use crate::ir::SIRInstruction;
-
 use crate::ir::{AbsoluteAddr, Program, SignalRef};
 use crate::{HashMap, SimulatorError, SimulatorOptions};
 
@@ -123,49 +121,11 @@ fn compile_program(
     sir: &Program,
     options: &SimulatorOptions,
 ) -> Result<SharedNativeCode, SimulatorError> {
-    let layout = MemoryLayout::build(sir, options.four_state);
+    let layout = sir.layout.as_ref().expect("layout must be built before backend");
     let mut all_jit_codes: Vec<jit_mem::JitCode> = Vec::new();
 
-    // Remove identity Stores for aliased addresses (alias validated by layout).
-    // The aliased variable shares physical memory with the canonical, so the
-    // identity Store is a no-op and can be safely removed along with its inputs.
-    let eval_comb = if sir.address_aliases.is_empty() {
-        std::borrow::Cow::Borrowed(&sir.eval_comb)
-    } else {
-        let aliased: crate::HashSet<AbsoluteAddr> = sir
-            .address_aliases
-            .iter()
-            .filter(|(addr, canonical)| {
-                // Only remove if layout actually applied the alias (same offset)
-                layout
-                    .offsets
-                    .get(addr)
-                    .zip(layout.offsets.get(canonical))
-                    .is_some_and(|(a, c)| a == c)
-            })
-            .map(|(addr, _)| *addr)
-            .collect();
-        if aliased.is_empty() {
-            std::borrow::Cow::Borrowed(&sir.eval_comb)
-        } else {
-            let mut eus = sir.eval_comb.clone();
-            for eu in &mut eus {
-                for block in eu.blocks.values_mut() {
-                    block.instructions.retain(|inst| {
-                        !matches!(
-                            inst,
-                            SIRInstruction::Store(addr, _, _, _, triggers)
-                                if triggers.is_empty() && aliased.contains(&addr.absolute_addr())
-                        )
-                    });
-                }
-            }
-            std::borrow::Cow::Owned(eus)
-        }
-    };
-
     // Compile eval_comb
-    let comb_jit = compile_units(&eval_comb, &layout, options.four_state)?;
+    let comb_jit = compile_units(&sir.eval_comb, layout, options.four_state)?;
     let comb_func = comb_jit.fn_ptr;
     all_jit_codes.push(comb_jit);
 
@@ -265,7 +225,7 @@ fn compile_program(
         apply_event_map,
         id_to_addr,
         id_to_event,
-        layout,
+        layout: layout.clone(),
         options: options.clone(),
         four_state_inits,
     })
