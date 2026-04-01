@@ -311,6 +311,12 @@ impl<'a> FfParser<'a> {
                     Some(&sc.comptime.token),
                 )),
                 Statement::FunctionCall(call) => parser.apply_function_call_to_state(call, state),
+                Statement::For(f) => Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "for loop in function body",
+                    format!("{stmt}"),
+                    Some(&f.token),
+                )),
                 Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                     Err(ParserError::unsupported(
                         LoweringPhase::FfLowering,
@@ -459,6 +465,12 @@ impl<'a> FfParser<'a> {
                     let next_defs = parser.apply_function_call_to_state(call, defs)?;
                     resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
                 }
+                Statement::For(f) => Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "for loop in function body",
+                    format!("{stmt}"),
+                    Some(&f.token),
+                )),
                 Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                     Err(ParserError::unsupported(
                         LoweringPhase::FfLowering,

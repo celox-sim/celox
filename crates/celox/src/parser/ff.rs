@@ -304,6 +304,14 @@ impl<'a> FfParser<'a> {
                     call, targets, domain, convert, sources, ir_builder,
                 )?;
             }
+            Statement::For(f) => {
+                return Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "for loop in always_ff body",
+                    format!("{stmt}"),
+                    Some(&f.token),
+                ));
+            }
             Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                 return Err(ParserError::unsupported(
                     LoweringPhase::FfLowering,

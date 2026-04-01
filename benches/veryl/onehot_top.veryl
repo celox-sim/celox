@@ -1,0 +1,11 @@
+module Top (
+    i_data  : input  logic<64>,
+    o_onehot: output logic,
+    o_zero  : output logic,
+) {
+    inst u: onehot #(W: 64) (
+        i_data,
+        o_onehot,
+        o_zero,
+    );
+}

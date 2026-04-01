@@ -1467,6 +1467,12 @@ fn extract_function_return_expr(
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
+            Statement::For(f) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "for loop in function body",
+                format!("{stmt}"),
+                Some(&f.token),
+            )),
             Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                 Err(ParserError::unsupported(
                     LoweringPhase::CombLowering,
