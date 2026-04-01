@@ -1,5 +1,10 @@
 use celox::SimulatorBuilder;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
 #[test]
 fn test_compilation_trace_sim_modules() {
     let code = r#"

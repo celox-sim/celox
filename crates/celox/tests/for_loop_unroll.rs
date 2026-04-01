@@ -1,13 +1,19 @@
 use celox::Simulator;
 
-/// A `for` loop with compile-time-constant bounds inside `always_ff` is
-/// unrolled by the Veryl analyzer before Celox processes the IR.
-/// These tests verify that the unrolled shift-register pattern produces
-/// correct non-blocking FF semantics.
+// A `for` loop with compile-time-constant bounds inside `always_ff` is
+// unrolled by the Veryl analyzer before Celox processes the IR.
+// These tests verify that the unrolled shift-register pattern produces
+// correct non-blocking FF semantics.
 
-#[test]
-fn test_for_loop_unroll_shift_register() {
-    let code = r#"
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
+all_backends! {
+
+fn test_for_loop_unroll_shift_register(sim) {
+    @setup { let code = r#"
         module Delay #(param DELAY: u32 = 3, param WIDTH: u32 = 8) (
             i_clk: input clock,
             i_rst: input reset,
@@ -27,9 +33,8 @@ fn test_for_loop_unroll_shift_register() {
                 }
             }
         }
-    "#;
-
-    let mut sim = Simulator::builder(code, "Delay").build().unwrap();
+    "#; }
+    @build Simulator::builder(code, "Delay");
     let clk = sim.event("i_clk");
     let i_rst = sim.signal("i_rst");
     let i_d = sim.signal("i_d");
@@ -52,11 +57,10 @@ fn test_for_loop_unroll_shift_register() {
     assert_eq!(sim.get(o_d), 0xAAu8.into());
 }
 
-/// The std::delay module pattern: `'{0}` reset combined with a `for` loop.
-#[test]
+// The std::delay module pattern: `'{0}` reset combined with a `for` loop.
 #[ignore = "blocked by upstream Veryl IR: UnsupportedByIr at conv/utils.rs:231"]
-fn test_for_loop_unroll_with_brace_zero_reset() {
-    let code = r#"
+fn test_for_loop_unroll_with_brace_zero_reset(sim) {
+    @setup { let code = r#"
         module Delay #(param DELAY: u32 = 3, param WIDTH: u32 = 8) (
             i_clk: input clock,
             i_rst: input reset,
@@ -76,6 +80,8 @@ fn test_for_loop_unroll_with_brace_zero_reset() {
                 }
             }
         }
-    "#;
-    Simulator::builder(code, "Delay").build().unwrap();
+    "#; }
+    @build Simulator::builder(code, "Delay");
+}
+
 }

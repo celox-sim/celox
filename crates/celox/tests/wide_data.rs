@@ -1,20 +1,25 @@
 use celox::{BigUint, Simulator};
 
-#[test]
-fn test_wide_int_memory_access() {
-    let code = r#"
-        module Top (
-            i: input logic<256>,
-            o: output logic<256>
-        ) {
-            var mem: logic<256>;
-            always_comb {
-                mem = i;
-                o = mem;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
+all_backends! {
+
+    fn test_wide_int_memory_access(sim) {
+        @setup { let code = r#"
+module Top (
+i: input logic<256>,
+o: output logic<256>
+) {
+var mem: logic<256>;
+always_comb {
+mem = i;
+o = mem;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let i = sim.signal("i");
     let o = sim.signal("o");
 
@@ -27,23 +32,22 @@ fn test_wide_int_memory_access() {
         input_val,
         "256-bit value should be preserved through memory"
     );
+
+    }
+
+    fn test_wide_concatenation(sim) {
+        @setup { use num_bigint::ToBigUint;
+let code = r#"
+module Top (
+a: input logic<64>,
+b: input logic<64>,
+c: input logic<64>,
+o: output logic<192>
+) {
+assign o = {a, b, c};
 }
-
-#[test]
-fn test_wide_concatenation() {
-    use num_bigint::ToBigUint;
-
-    let code = r#"
-        module Top (
-            a: input logic<64>,
-            b: input logic<64>,
-            c: input logic<64>,
-            o: output logic<192>
-        ) {
-            assign o = {a, b, c};
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let c = sim.signal("c");
@@ -65,26 +69,25 @@ fn test_wide_concatenation() {
         | val_c.to_biguint().unwrap();
 
     assert_eq!(sim.get(o), expected);
+
+    }
+
+    fn test_wide_partial_write(sim) {
+        @setup { use num_bigint::ToBigUint;
+let code = r#"
+module Top (
+val: input logic<64>,
+o: output logic<256>
+) {
+var wide: logic<256>;
+always_comb {
+wide = 0;
+wide[127:64] = val;
+o = wide;
 }
-
-#[test]
-fn test_wide_partial_write() {
-    use num_bigint::ToBigUint;
-
-    let code = r#"
-        module Top (
-            val: input logic<64>,
-            o: output logic<256>
-        ) {
-            var wide: logic<256>;
-            always_comb {
-                wide = 0;
-                wide[127:64] = val;
-                o = wide;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let val = sim.signal("val");
     let o = sim.signal("o");
 
@@ -97,24 +100,24 @@ fn test_wide_partial_write() {
         expected,
         "Partial write across 64-bit boundaries should work"
     );
-}
 
-#[test]
-fn test_wide_cross_boundary_unaligned_write() {
-    let code = r#"
-        module Top (
-            val: input logic<125>,
-            o: output logic<256>
-        ) {
-            var wide: logic<256>;
-            always_comb {
-                wide = 0;
-                wide[184:60] = val;
-                o = wide;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_wide_cross_boundary_unaligned_write(sim) {
+        @setup { let code = r#"
+module Top (
+val: input logic<125>,
+o: output logic<256>
+) {
+var wide: logic<256>;
+always_comb {
+wide = 0;
+wide[184:60] = val;
+o = wide;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let val = sim.signal("val");
     let o = sim.signal("o");
 
@@ -128,24 +131,24 @@ fn test_wide_cross_boundary_unaligned_write() {
         expected,
         "Unaligned write crossing 3 chunks failed"
     );
-}
 
-#[test]
-fn test_wide_rmw_preserve_neighboring_bits() {
-    let code = r#"
-        module Top (
-            val: input logic<16>,
-            o: output logic<128>
-        ) {
-            var wide: logic<128>;
-            always_comb {
-                wide = 128'hAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA;
-                wide[71:56] = val;
-                o = wide;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_wide_rmw_preserve_neighboring_bits(sim) {
+        @setup { let code = r#"
+module Top (
+val: input logic<16>,
+o: output logic<128>
+) {
+var wide: logic<128>;
+always_comb {
+wide = 128'hAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA;
+wide[71:56] = val;
+o = wide;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let val = sim.signal("val");
     let o = sim.signal("o");
 
@@ -162,4 +165,6 @@ fn test_wide_rmw_preserve_neighboring_bits() {
         expected,
         "Neighbors were corrupted during Read-Modify-Write"
     );
+
+    }
 }

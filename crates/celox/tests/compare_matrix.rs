@@ -1,5 +1,9 @@
 use celox::{BigUint, Simulator};
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 /// Helper: pack 32-bit values into a single BigUint for an array port.
 /// Element 0 occupies the least-significant bits.
 fn pack_u32(values: &[u32]) -> BigUint {
@@ -31,139 +35,6 @@ fn pack_bits(values: &[u32], width: usize) -> BigUint {
         result |= BigUint::from(v) << (i * width);
     }
     result
-}
-
-/// Tests that two different packages can instantiate the same generic module,
-/// each getting a unique ModuleId.
-#[test]
-fn test_generic_module_instantiation() {
-    let code = r#"
-proto package DataType {
-    type data;
-}
-
-module GenericPass::<E: DataType> (
-    i: input  E::data,
-    o: output E::data,
-) {
-    assign o = i;
-}
-
-package Byte for DataType {
-    type data = logic<8>;
-}
-
-package Word for DataType {
-    type data = logic<16>;
-}
-
-module BytePass (
-    i: input  logic<8>,
-    o: output logic<8>,
-) {
-    inst inner: GenericPass::<Byte> (i, o);
-}
-
-module WordPass (
-    i: input  logic<16>,
-    o: output logic<16>,
-) {
-    inst inner: GenericPass::<Word> (i, o);
-}
-
-module Top (
-    a: input  logic<8>,
-    b: output logic<8>,
-    c: input  logic<16>,
-    d: output logic<16>,
-) {
-    inst bp: BytePass (i: a, o: b);
-    inst wp: WordPass (i: c, o: d);
-}
-    "#;
-
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
-    let a = sim.signal("a");
-    let b = sim.signal("b");
-    let c = sim.signal("c");
-    let d = sim.signal("d");
-
-    sim.modify(|io| {
-        io.set(a, 0xABu8);
-        io.set(c, 0x1234u16);
-    })
-    .unwrap();
-    assert_eq!(sim.get(b), 0xABu8.into());
-    assert_eq!(sim.get(d), 0x1234u16.into());
-
-    sim.modify(|io| {
-        io.set(a, 0xFFu8);
-        io.set(c, 0xFFFFu16);
-    })
-    .unwrap();
-    assert_eq!(sim.get(b), 0xFFu8.into());
-    assert_eq!(sim.get(d), 0xFFFFu16.into());
-}
-
-/// Tests proto package function resolution (E::gt → IntElement::gt).
-#[test]
-fn test_proto_function_basic() {
-    let code = r#"
-proto package Element {
-    type data;
-    function gt(
-        a: input data,
-        b: input data,
-    ) -> logic;
-}
-
-package IntElement for Element {
-    type data = logic<8>;
-    function gt(
-        a: input data,
-        b: input data,
-    ) -> logic {
-        return a >: b;
-    }
-}
-
-module GenericCompare::<E: Element> (
-    a: input  E::data,
-    b: input  E::data,
-    r: output logic,
-) {
-    always_comb {
-        r = E::gt(a, b);
-    }
-}
-
-module Top (
-    a: input  logic<8>,
-    b: input  logic<8>,
-    r: output logic,
-) {
-    inst inner: GenericCompare::<IntElement> (a, b, r);
-}
-    "#;
-
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
-    let a = sim.signal("a");
-    let b = sim.signal("b");
-    let r = sim.signal("r");
-
-    sim.modify(|io| {
-        io.set(a, 10u8);
-        io.set(b, 5u8);
-    })
-    .unwrap();
-    assert_eq!(sim.get(r), 1u8.into()); // 10 > 5
-
-    sim.modify(|io| {
-        io.set(a, 3u8);
-        io.set(b, 7u8);
-    })
-    .unwrap();
-    assert_eq!(sim.get(r), 0u8.into()); // 3 > 7 is false
 }
 
 /// Shared Veryl source for the compare matrix sorter tests.
@@ -363,52 +234,172 @@ module CompareMatrixMergerInt32 #(
 }
 "#;
 
-/// Tests proto constant (E::max_value) resolution.
-#[test]
-fn test_proto_const_max_value() {
-    let code = format!(
-        "{COMPARE_MATRIX_CODE}\n{}",
-        r#"
-module TestConst::<E: Element> (
-    out: output E::data,
-) {
-    assign out = E::max_value;
-}
+all_backends! {
 
+    // Tests that two different packages can instantiate the same generic module,
+    // each getting a unique ModuleId.
+    fn test_generic_module_instantiation(sim) {
+        @setup { let code = r#"
+proto package DataType {
+type data;
+}
+module GenericPass::<E: DataType> (
+i: input  E::data,
+o: output E::data,
+) {
+assign o = i;
+}
+package Byte for DataType {
+type data = logic<8>;
+}
+package Word for DataType {
+type data = logic<16>;
+}
+module BytePass (
+i: input  logic<8>,
+o: output logic<8>,
+) {
+inst inner: GenericPass::<Byte> (i, o);
+}
+module WordPass (
+i: input  logic<16>,
+o: output logic<16>,
+) {
+inst inner: GenericPass::<Word> (i, o);
+}
 module Top (
-    out: output logic<32>,
+a: input  logic<8>,
+b: output logic<8>,
+c: input  logic<16>,
+d: output logic<16>,
 ) {
-    inst t: TestConst::<IntElement> (out);
+inst bp: BytePass (i: a, o: b);
+inst wp: WordPass (i: c, o: d);
 }
-    "#
-    );
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let c = sim.signal("c");
+    let d = sim.signal("d");
 
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+    sim.modify(|io| {
+        io.set(a, 0xABu8);
+        io.set(c, 0x1234u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(b), 0xABu8.into());
+    assert_eq!(sim.get(d), 0x1234u16.into());
+
+    sim.modify(|io| {
+        io.set(a, 0xFFu8);
+        io.set(c, 0xFFFFu16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(b), 0xFFu8.into());
+    assert_eq!(sim.get(d), 0xFFFFu16.into());
+
+    }
+
+    // Tests proto package function resolution (E::gt → IntElement::gt).
+    fn test_proto_function_basic(sim) {
+        @setup { let code = r#"
+proto package Element {
+type data;
+function gt(
+a: input data,
+b: input data,
+) -> logic;
+}
+package IntElement for Element {
+type data = logic<8>;
+function gt(
+a: input data,
+b: input data,
+) -> logic {
+return a >: b;
+}
+}
+module GenericCompare::<E: Element> (
+a: input  E::data,
+b: input  E::data,
+r: output logic,
+) {
+always_comb {
+r = E::gt(a, b);
+}
+}
+module Top (
+a: input  logic<8>,
+b: input  logic<8>,
+r: output logic,
+) {
+inst inner: GenericCompare::<IntElement> (a, b, r);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let r = sim.signal("r");
+
+    sim.modify(|io| {
+        io.set(a, 10u8);
+        io.set(b, 5u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(r), 1u8.into()); // 10 > 5
+
+    sim.modify(|io| {
+        io.set(a, 3u8);
+        io.set(b, 7u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(r), 0u8.into()); // 3 > 7 is false
+
+    }
+
+    // Tests proto constant (E::max_value) resolution.
+    fn test_proto_const_max_value(sim) {
+        @setup { let code = format!(
+"{COMPARE_MATRIX_CODE}\n{}",
+r#"
+module TestConst::<E: Element> (
+out: output E::data,
+) {
+assign out = E::max_value;
+}
+module Top (
+out: output logic<32>,
+) {
+inst t: TestConst::<IntElement> (out);
+}
+"#
+); }
+        @build Simulator::builder(&code, "Top");
     let out = sim.signal("out");
     assert_eq!(
         sim.get(out),
         BigUint::from(u32::MAX),
         "E::max_value should be ~0 = 0xFFFFFFFF"
     );
-}
 
-/// Tests the compare matrix scoring module (CompareMatrixStage1CM).
-/// Input 4 values, verify scores reflect sorted order.
-#[test]
-fn test_compare_matrix_stage1cm() {
-    let code = format!(
-        "{COMPARE_MATRIX_CODE}\n{}",
-        r#"
+    }
+
+    // Tests the compare matrix scoring module (CompareMatrixStage1CM).
+    // Input 4 values, verify scores reflect sorted order.
+    fn test_compare_matrix_stage1cm(sim) {
+        @setup { let code = format!(
+"{COMPARE_MATRIX_CODE}\n{}",
+r#"
 module Top (
-    in_data  : input  logic<32>        [4],
-    out_score: output logic<2>         [4],
+in_data  : input  logic<32>        [4],
+out_score: output logic<2>         [4],
 ) {
-    inst cm: CompareMatrixStage1CM::<IntElement> #(P: 4) (in_data, out_score);
+inst cm: CompareMatrixStage1CM::<IntElement> #(P: 4) (in_data, out_score);
 }
-    "#
-    );
-
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+"#
+); }
+        @build Simulator::builder(&code, "Top");
     let in_data = sim.signal("in_data");
     let out_score = sim.signal("out_score");
 
@@ -423,26 +414,25 @@ module Top (
     assert_eq!(extract_bits(&scores, 1, 2), 3); // 40 is largest  → score 3
     assert_eq!(extract_bits(&scores, 2, 2), 1); // 20 → score 1
     assert_eq!(extract_bits(&scores, 3, 2), 2); // 30 → score 2
-}
 
-/// Tests the compare matrix selector module (through wrapper, verifying parameter forwarding).
-#[test]
-#[ignore = "blocked by upstream Veryl IR bug"]
-fn test_compare_matrix_selector() {
-    let top = r#"
+    }
+
+    // Tests the compare matrix selector module (through wrapper, verifying parameter forwarding).
+    #[ignore = "blocked by upstream Veryl IR bug"]
+    fn test_compare_matrix_selector(sim) {
+        @setup { let top = r#"
 module Top #(
-    param P: u32 = 4,
+param P: u32 = 4,
 ) (
-    in_data  : input  logic<32>         [P],
-    in_scores: input  logic<$clog2(P)> [P],
-    out_data : output logic<32>        [P],
+in_data  : input  logic<32>         [P],
+in_scores: input  logic<$clog2(P)> [P],
+out_data : output logic<32>        [P],
 ) {
-    inst sel: CompareMatrixSelectorInt32 #(P: P) (in_data, in_scores, out_data);
+inst sel: CompareMatrixSelectorInt32 #(P: P) (in_data, in_scores, out_data);
 }
-    "#;
-    let code = format!("{COMPARE_MATRIX_CODE}\n{top}");
-
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+"#;
+let code = format!("{COMPARE_MATRIX_CODE}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let in_data = sim.signal("in_data");
     let in_scores = sim.signal("in_scores");
     let out_data = sim.signal("out_data");
@@ -460,26 +450,25 @@ module Top #(
     assert_eq!(extract_u32(&out, 1), 20); // score 1 → slot 1
     assert_eq!(extract_u32(&out, 2), 30); // score 2 → slot 2
     assert_eq!(extract_u32(&out, 3), 40); // score 3 → slot 3
-}
 
-/// Tests full sorting via CompareMatrixStage1 (scoring + selection through wrapper chain).
-/// Input unsorted values, output sorted ascending.
-#[test]
-#[ignore = "blocked by upstream Veryl IR bug"]
-fn test_compare_matrix_stage1_sort() {
-    let top = r#"
+    }
+
+    // Tests full sorting via CompareMatrixStage1 (scoring + selection through wrapper chain).
+    // Input unsorted values, output sorted ascending.
+    #[ignore = "blocked by upstream Veryl IR bug"]
+    fn test_compare_matrix_stage1_sort(sim) {
+        @setup { let top = r#"
 module Top #(
-    param P: u32 = 4,
+param P: u32 = 4,
 ) (
-    in_data : input  logic<32> [P],
-    out_data: output logic<32> [P],
+in_data : input  logic<32> [P],
+out_data: output logic<32> [P],
 ) {
-    inst sorter: CompareMatrixStage1Int32 #(P: P) (in_data, out_data);
+inst sorter: CompareMatrixStage1Int32 #(P: P) (in_data, out_data);
 }
-    "#;
-    let code = format!("{COMPARE_MATRIX_CODE}\n{top}");
-
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+"#;
+let code = format!("{COMPARE_MATRIX_CODE}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let in_data = sim.signal("in_data");
     let out_data = sim.signal("out_data");
 
@@ -494,28 +483,27 @@ module Top #(
     assert_eq!(extract_u32(&out, 1), 20);
     assert_eq!(extract_u32(&out, 2), 30);
     assert_eq!(extract_u32(&out, 3), 40);
-}
 
-/// Tests the compare matrix merger.
-/// Two sorted ascending arrays in, one merged sorted ascending array out.
-#[test]
-#[ignore = "blocked by upstream Veryl IR bug"]
-fn test_compare_matrix_merger() {
-    let top = r#"
+    }
+
+    // Tests the compare matrix merger.
+    // Two sorted ascending arrays in, one merged sorted ascending array out.
+    #[ignore = "blocked by upstream Veryl IR bug"]
+    fn test_compare_matrix_merger(sim) {
+        @setup { let top = r#"
 module Top #(
-    param A: u32 = 3,
-    param B: u32 = 2,
+param A: u32 = 3,
+param B: u32 = 2,
 ) (
-    in_a    : input  logic<32> [A],
-    in_b    : input  logic<32> [B],
-    out_data: output logic<32> [A + B],
+in_a    : input  logic<32> [A],
+in_b    : input  logic<32> [B],
+out_data: output logic<32> [A + B],
 ) {
-    inst merger: CompareMatrixMergerInt32 #(A: A, B: B) (in_a, in_b, out_data);
+inst merger: CompareMatrixMergerInt32 #(A: A, B: B) (in_a, in_b, out_data);
 }
-    "#;
-    let code = format!("{COMPARE_MATRIX_CODE}\n{top}");
-
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+"#;
+let code = format!("{COMPARE_MATRIX_CODE}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let in_a = sim.signal("in_a");
     let in_b = sim.signal("in_b");
     let out_data = sim.signal("out_data");
@@ -534,4 +522,6 @@ module Top #(
     assert_eq!(extract_u32(&out, 2), 30);
     assert_eq!(extract_u32(&out, 3), 40);
     assert_eq!(extract_u32(&out, 4), 50);
+
+    }
 }

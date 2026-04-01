@@ -1,3 +1,8 @@
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
 #[cfg(test)]
 mod tests {
     use celox::{IOContext, SimulatorBuilder};

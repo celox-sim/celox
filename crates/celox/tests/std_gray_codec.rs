@@ -1,31 +1,36 @@
 use celox::Simulator;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 const GRAY_ENCODER_SRC: &str =
     include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_encoder.veryl");
 const GRAY_DECODER_SRC: &str =
     include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_decoder.veryl");
 
-/// Gray encode → decode roundtrip: o_bin == i_bin for all 8-bit values
-#[test]
-fn test_gray_roundtrip_8bit() {
-    let top = r#"
+all_backends! {
+
+    // Gray encode → decode roundtrip: o_bin == i_bin for all 8-bit values
+    fn test_gray_roundtrip_8bit(sim) {
+        @setup { let top = r#"
 module Top (
-    i_bin  : input  logic<8>,
-    o_gray : output logic<8>,
-    o_bin  : output logic<8>,
+i_bin  : input  logic<8>,
+o_gray : output logic<8>,
+o_bin  : output logic<8>,
 ) {
-    inst u_enc: gray_encoder #(WIDTH: 8) (
-        i_bin,
-        o_gray,
-    );
-    inst u_dec: gray_decoder #(WIDTH: 8) (
-        i_gray: o_gray,
-        o_bin,
-    );
+inst u_enc: gray_encoder #(WIDTH: 8) (
+i_bin,
+o_gray,
+);
+inst u_dec: gray_decoder #(WIDTH: 8) (
+i_gray: o_gray,
+o_bin,
+);
 }
 "#;
-    let code = format!("{GRAY_ENCODER_SRC}\n{GRAY_DECODER_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{GRAY_ENCODER_SRC}\n{GRAY_DECODER_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let i_bin = sim.signal("i_bin");
     let o_gray = sim.signal("o_gray");
     let o_bin = sim.signal("o_bin");
@@ -41,24 +46,24 @@ module Top (
             "roundtrip failed: input={val}, gray={gray_out:#04x}, output={bin_out}"
         );
     }
-}
 
-/// Verify Gray code property: adjacent binary values differ by exactly 1 bit in Gray
-#[test]
-fn test_gray_single_bit_change() {
-    let top = r#"
+    }
+
+    // Verify Gray code property: adjacent binary values differ by exactly 1 bit in Gray
+    fn test_gray_single_bit_change(sim) {
+        @setup { let top = r#"
 module Top (
-    i_bin  : input  logic<8>,
-    o_gray : output logic<8>,
+i_bin  : input  logic<8>,
+o_gray : output logic<8>,
 ) {
-    inst u_enc: gray_encoder #(WIDTH: 8) (
-        i_bin,
-        o_gray,
-    );
+inst u_enc: gray_encoder #(WIDTH: 8) (
+i_bin,
+o_gray,
+);
 }
 "#;
-    let code = format!("{GRAY_ENCODER_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{GRAY_ENCODER_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let i_bin = sim.signal("i_bin");
     let o_gray = sim.signal("o_gray");
 
@@ -75,5 +80,7 @@ module Top (
             );
         }
         prev_gray = Some(gray);
+    }
+
     }
 }

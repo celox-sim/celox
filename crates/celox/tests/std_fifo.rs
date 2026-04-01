@@ -1,4 +1,9 @@
-use celox::Simulator;
+use celox::{SimBackend, Simulator};
+
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
 
 const RAM_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/ram/ram.veryl");
 const FIFO_CTRL_SRC: &str =
@@ -38,12 +43,7 @@ module Top (
 }
 "#;
 
-fn build_fifo_sim() -> Simulator {
-    let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}");
-    Simulator::builder(&code, "Top").build().unwrap()
-}
-
-fn reset(sim: &mut Simulator) {
+fn reset<B: SimBackend>(sim: &mut Simulator<B>) {
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_clear = sim.signal("i_clear");
@@ -62,10 +62,12 @@ fn reset(sim: &mut Simulator) {
     sim.tick(clk).unwrap();
 }
 
-/// After reset, FIFO should be empty
-#[test]
-fn test_fifo_initial_empty() {
-    let mut sim = build_fifo_sim();
+all_backends! {
+
+// After reset, FIFO should be empty
+fn test_fifo_initial_empty(sim) {
+    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
     let o_empty = sim.signal("o_empty");
@@ -81,10 +83,10 @@ fn test_fifo_initial_empty() {
     assert_eq!(sim.get_as::<u8>(o_word_count), 0, "word_count should be 0");
 }
 
-/// Push one item, verify not empty, pop it back
-#[test]
-fn test_fifo_push_pop_single() {
-    let mut sim = build_fifo_sim();
+// Push one item, verify not empty, pop it back
+fn test_fifo_push_pop_single(sim) {
+    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
     let clk = sim.event("clk");
@@ -125,10 +127,10 @@ fn test_fifo_push_pop_single() {
     assert_eq!(sim.get_as::<u8>(o_word_count), 0, "word_count should be 0");
 }
 
-/// Push until full (DEPTH=4), verify full flag
-#[test]
-fn test_fifo_full() {
-    let mut sim = build_fifo_sim();
+// Push until full (DEPTH=4), verify full flag
+fn test_fifo_full(sim) {
+    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
     let clk = sim.event("clk");
@@ -153,10 +155,10 @@ fn test_fifo_full() {
     assert_eq!(sim.get_as::<u8>(o_word_count), 4);
 }
 
-/// Push 4 items then pop all, verify FIFO ordering
-#[test]
-fn test_fifo_ordering() {
-    let mut sim = build_fifo_sim();
+// Push 4 items then pop all, verify FIFO ordering
+fn test_fifo_ordering(sim) {
+    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
     let clk = sim.event("clk");
@@ -191,10 +193,10 @@ fn test_fifo_ordering() {
     assert_eq!(sim.get_as::<u8>(o_data), 0x40, "fourth out should be 0x40");
 }
 
-/// Clear resets the FIFO to empty
-#[test]
-fn test_fifo_clear() {
-    let mut sim = build_fifo_sim();
+// Clear resets the FIFO to empty
+fn test_fifo_clear(sim) {
+    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
     let clk = sim.event("clk");
@@ -226,4 +228,6 @@ fn test_fifo_clear() {
 
     assert_eq!(sim.get_as::<u8>(o_empty), 1, "should be empty after clear");
     assert_eq!(sim.get_as::<u8>(o_word_count), 0);
+}
+
 }

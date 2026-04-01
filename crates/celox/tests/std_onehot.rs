@@ -1,26 +1,31 @@
 use celox::Simulator;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 const ONEHOT_SRC: &str =
     include_str!("../../../deps/veryl/crates/std/veryl/src/countones/onehot.veryl");
 
-/// Exhaustive 8-bit onehot detection
-#[test]
-fn test_onehot_8bit_exhaustive() {
-    let top = r#"
+all_backends! {
+
+    // Exhaustive 8-bit onehot detection
+    fn test_onehot_8bit_exhaustive(sim) {
+        @setup { let top = r#"
 module Top (
-    i_data  : input  logic<8>,
-    o_onehot: output logic,
-    o_zero  : output logic,
+i_data  : input  logic<8>,
+o_onehot: output logic,
+o_zero  : output logic,
 ) {
-    inst u: onehot #(W: 8) (
-        i_data,
-        o_onehot,
-        o_zero,
-    );
+inst u: onehot #(W: 8) (
+i_data,
+o_onehot,
+o_zero,
+);
 }
 "#;
-    let code = format!("{ONEHOT_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{ONEHOT_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let i_data = sim.signal("i_data");
     let o_onehot = sim.signal("o_onehot");
     let o_zero = sim.signal("o_zero");
@@ -43,5 +48,7 @@ module Top (
             is_zero, expected_zero,
             "zero({val:#010b}): expected={expected_zero}, got={is_zero}"
         );
+    }
+
     }
 }

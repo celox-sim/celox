@@ -1,22 +1,27 @@
 use celox::{Simulator, SimulatorBuilder};
 
-#[test]
-fn test_concatenation_self_determination() {
-    // IEEE 1800-2023 Clause 11.6.1: Both operands of a concatenation are self-determined.
-    // In Veryl, {exp} is a concatenation item.
-    let code = r#"
-        module Top (
-            a: input  logic<8>,
-            b: input  logic<8>,
-            o: output logic<16>
-        ) {
-            // Addition inside {} should be self-determined (8-bit).
-            // 8'hff + 8'h1 = 8'h00 (overflow truncated)
-            // {8'h00} is then zero-extended to 16-bit -> 16'h0000
-            assign o = {a + b};
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
+all_backends! {
+
+    fn test_concatenation_self_determination(sim) {
+        @setup { // IEEE 1800-2023 Clause 11.6.1: Both operands of a concatenation are self-determined.
+// In Veryl, {exp} is a concatenation item.
+let code = r#"
+module Top (
+a: input  logic<8>,
+b: input  logic<8>,
+o: output logic<16>
+) {
+// Addition inside {} should be self-determined (8-bit).
+// 8'hff + 8'h1 = 8'h00 (overflow truncated)
+// {8'h00} is then zero-extended to 16-bit -> 16'h0000
+assign o = {a + b};
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let o = sim.signal("o");
@@ -32,24 +37,24 @@ fn test_concatenation_self_determination() {
         0u16.into(),
         "Concatenation failed to isolate addition width (self-determination)"
     );
-}
 
-#[test]
-fn test_comparison_self_determination() {
-    // Comparison results are self-determined.
-    // logic<16> y = (a <: b) + c;
-    // (a <: b) should be 1-bit, regardless of 16-bit context.
-    let code = r#"
-        module Top (
-            a: input  logic<8>,
-            b: input  logic<8>,
-            c: input  logic<16>,
-            o: output logic<16>
-        ) {
-            assign o = (a <: b) + c;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_comparison_self_determination(sim) {
+        @setup { // Comparison results are self-determined.
+// logic<16> y = (a <: b) + c;
+// (a <: b) should be 1-bit, regardless of 16-bit context.
+let code = r#"
+module Top (
+a: input  logic<8>,
+b: input  logic<8>,
+c: input  logic<16>,
+o: output logic<16>
+) {
+assign o = (a <: b) + c;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let c = sim.signal("c");
@@ -64,25 +69,25 @@ fn test_comparison_self_determination() {
 
     // true(1) + 1 = 2
     assert_eq!(sim.get(o), 2u16.into());
-}
 
-#[test]
-fn test_shift_rhs_self_determination() {
-    // Shift amount (RHS) is self-determined.
-    let code = r#"
-        module Top (
-            a: input  logic<16>,
-            b: input  logic<8>,
-            c: input  logic<8>,
-            o: output logic<16>
-        ) {
-            // b + c should be evaluated at 8-bit.
-            // 8'hff + 8'h1 = 8'h00.
-            // 16'h1 << 0 = 16'h1.
-            assign o = a << (b + c);
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_rhs_self_determination(sim) {
+        @setup { // Shift amount (RHS) is self-determined.
+let code = r#"
+module Top (
+a: input  logic<16>,
+b: input  logic<8>,
+c: input  logic<8>,
+o: output logic<16>
+) {
+// b + c should be evaluated at 8-bit.
+// 8'hff + 8'h1 = 8'h00.
+// 16'h1 << 0 = 16'h1.
+assign o = a << (b + c);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let c = sim.signal("c");
@@ -100,10 +105,35 @@ fn test_shift_rhs_self_determination() {
         1u16.into(),
         "Shift RHS failed to isolate addition width (self-determination)"
     );
+
+    }
+
+    fn test_shift_rhs_constant_self_determination(sim) {
+        @setup { // Constant shift RHS should be self-determined.
+let code = r#"
+module Top (
+o: output logic<16>
+) {
+// 8'hff + 8'h1 = 8'h00.
+// 16'h1 << 0 = 16'h1.
+assign o = 16'h1 << (8'hff + 8'h1);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o = sim.signal("o");
+
+    assert_eq!(
+        sim.get(o),
+        1u16.into(),
+        "Constant shift RHS failed self-determination boundary"
+    );
+
+    }
 }
 
 #[test]
 fn test_concatenation_constant_self_determination() {
+
     // Constant folding should also respect self-determination.
     let code = r#"
         module Top (
@@ -140,9 +170,12 @@ fn test_concatenation_constant_self_determination() {
         0xf000u16.into(),
         "Concatenation should be self-determined"
     );
+
 }
+
 #[test]
 fn test_concatenation_constant_self_determination_runtime() {
+
     // Constant folding should also respect self-determination.
     let code = r#"
         module Top (
@@ -166,25 +199,5 @@ fn test_concatenation_constant_self_determination_runtime() {
         0u16.into(),
         "Constant concatenation failed to isolate addition width"
     );
-}
-#[test]
-fn test_shift_rhs_constant_self_determination() {
-    // Constant shift RHS should be self-determined.
-    let code = r#"
-        module Top (
-            o: output logic<16>
-        ) {
-            // 8'hff + 8'h1 = 8'h00.
-            // 16'h1 << 0 = 16'h1.
-            assign o = 16'h1 << (8'hff + 8'h1);
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
-    let o = sim.signal("o");
 
-    assert_eq!(
-        sim.get(o),
-        1u16.into(),
-        "Constant shift RHS failed self-determination boundary"
-    );
 }

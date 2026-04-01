@@ -1,12 +1,17 @@
-/// Regression tests for sorter tree compilation scaling.
-///
-/// The SorterTreeDistEntry design creates deeply nested mux trees from
-/// MinReductionTree's binary merger structure.  Before the select-based mux
-/// lowering fix, branch-based mux lowering created 3 blocks per mux,
-/// causing exponential block count growth (N=16 took 24 minutes).
-///
-/// These tests verify that compilation time scales roughly linearly with N.
+// Regression tests for sorter tree compilation scaling.
+//
+// The SorterTreeDistEntry design creates deeply nested mux trees from
+// MinReductionTree's binary merger structure.  Before the select-based mux
+// lowering fix, branch-based mux lowering created 3 blocks per mux,
+// causing exponential block count growth (N=16 took 24 minutes).
+//
+// These tests verify that compilation time scales roughly linearly with N.
 use celox::SimulatorBuilder;
+
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
 use std::time::Instant;
 
 fn load_sorter_sources() -> String {

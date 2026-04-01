@@ -1,5 +1,10 @@
 use celox::{Simulator, SimulatorBuilder};
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
 fn setup_and_trace_with_loops(
     code: &str,
     top: &str,
@@ -189,8 +194,10 @@ fn test_struct_member_dynamic_access_false_loop() {
     assert!(result.is_ok());
 }
 
-#[test]
-fn test_large_scc_dynamic_loop_convergence() {
+all_backends! {
+
+fn test_large_scc_dynamic_loop_convergence(sim) {
+    @setup {
     let chain_size = 20;
     let mut assignments = String::new();
 
@@ -217,15 +224,14 @@ fn test_large_scc_dynamic_loop_convergence() {
     "#,
         chain_size, chain_size, assignments
     );
+    }
 
     // Initialize simulator (SCC extraction and Strategy B application are performed internally)
-    let mut sim = SimulatorBuilder::new(&code, "LargeLoop")
+    @build SimulatorBuilder::new(&code, "LargeLoop")
         .false_loop(
             (vec![], vec!["v".to_owned()]),
             (vec![], vec!["v".to_owned()]),
-        )
-        .build()
-        .unwrap();
+        );
     let i_port = sim.signal("i");
     let o_port = sim.signal("o");
 
@@ -234,6 +240,7 @@ fn test_large_scc_dynamic_loop_convergence() {
     sim.modify(|io| io.set(i_port, 1u8)).unwrap();
 
     // Expected value: all 20 bits are 1 (0xF_FFFF)
+    let chain_size = 20;
     let expected_all_ones = (1u32 << chain_size) - 1;
     assert_eq!(sim.get(o_port), expected_all_ones.into());
 
@@ -241,6 +248,36 @@ fn test_large_scc_dynamic_loop_convergence() {
     // Verify that all bits converge to 0
     sim.modify(|io| io.set(i_port, 0u8)).unwrap();
     assert_eq!(sim.get(o_port), 0u32.into());
+}
+
+fn test_read_then_overwrite_convergence(sim) {
+    @setup { let code = r#"
+        module Top (
+            i: input logic,
+            o: output logic,
+        ) {
+            var a: logic<2>;
+            assign a[0] = a[1];
+            assign a[1] = i;
+            assign o = a[0];
+        }
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
+
+    let i_port = sim.signal("i");
+    let o_port = sim.signal("o");
+
+    sim.modify(|io| io.set(i_port, 1u8)).unwrap();
+
+    let result = sim.get(o_port);
+
+    assert_eq!(
+        result,
+        1u8.into(),
+        "The false loop failed to converge to the stable state (Fixed Point)"
+    );
+}
+
 }
 #[test]
 fn test_range_limited_dependency_success() {
@@ -303,38 +340,6 @@ fn test_cross_bit_dependency_false_loop() {
     // our scheduler correctly detects that there is no loop
     assert!(result.is_ok());
 }
-#[test]
-fn test_read_then_overwrite_convergence() {
-    let code = r#"
-        module Top (
-            i: input logic,
-            o: output logic,
-        ) {
-            var a: logic<2>;
-            assign a[0] = a[1];
-            assign a[1] = i;
-            assign o = a[0];
-        }
-    "#;
-
-    let mut sim = SimulatorBuilder::new(code, "Top")
-        .build()
-        .expect("Failed to build simulator with SCC unrolling");
-
-    let i_port = sim.signal("i");
-    let o_port = sim.signal("o");
-
-    sim.modify(|io| io.set(i_port, 1u8)).unwrap();
-
-    let result = sim.get(o_port);
-
-    assert_eq!(
-        result,
-        1u8.into(),
-        "The false loop failed to converge to the stable state (Fixed Point)"
-    );
-}
-
 #[test]
 fn test_hierarchical_conditional_false_loop() {
     let code = r#"

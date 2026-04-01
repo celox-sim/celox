@@ -1,42 +1,47 @@
 use celox::Simulator;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 const RAM_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/ram/ram.veryl");
 
-/// Dual-port RAM: write via port A, read via port B (BUFFER_OUT=false, combinational read)
-#[test]
-fn test_ram_write_read() {
-    let top = r#"
+all_backends! {
+
+    // Dual-port RAM: write via port A, read via port B (BUFFER_OUT=false, combinational read)
+    fn test_ram_write_read(sim) {
+        @setup { let top = r#"
 module Top (
-    clk  : input  clock,
-    rst  : input  reset,
-    i_wea : input  logic,
-    i_adra: input  logic<2>,
-    i_da  : input  logic<8>,
-    i_adrb: input  logic<2>,
-    o_qb  : output logic<8>,
+clk  : input  clock,
+rst  : input  reset,
+i_wea : input  logic,
+i_adra: input  logic<2>,
+i_da  : input  logic<8>,
+i_adrb: input  logic<2>,
+o_qb  : output logic<8>,
 ) {
-    inst u_ram: ram #(
-        WORD_SIZE    : 4,
-        ADDRESS_WIDTH: 2,
-        DATA_WIDTH   : 8,
-        BUFFER_OUT   : 0,
-        USE_RESET    : 0,
-    ) (
-        i_clk : clk,
-        i_rst : rst,
-        i_clr : 1'b0,
-        i_mea : 1'b1,
-        i_wea,
-        i_adra,
-        i_da,
-        i_meb : 1'b1,
-        i_adrb,
-        o_qb,
-    );
+inst u_ram: ram #(
+WORD_SIZE    : 4,
+ADDRESS_WIDTH: 2,
+DATA_WIDTH   : 8,
+BUFFER_OUT   : 0,
+USE_RESET    : 0,
+) (
+i_clk : clk,
+i_rst : rst,
+i_clr : 1'b0,
+i_mea : 1'b1,
+i_wea,
+i_adra,
+i_da,
+i_meb : 1'b1,
+i_adrb,
+o_qb,
+);
 }
 "#;
-    let code = format!("{RAM_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{RAM_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_wea = sim.signal("i_wea");
@@ -97,43 +102,43 @@ module Top (
     sim.modify(|io| io.set(i_adrb, 2u8)).unwrap();
     sim.eval_comb().unwrap();
     assert_eq!(sim.get_as::<u8>(o_qb), 0xCC, "addr 2 should be 0xCC");
-}
 
-/// Overwrite same address and verify latest value
-#[test]
-fn test_ram_overwrite() {
-    let top = r#"
+    }
+
+    // Overwrite same address and verify latest value
+    fn test_ram_overwrite(sim) {
+        @setup { let top = r#"
 module Top (
-    clk  : input  clock,
-    rst  : input  reset,
-    i_wea : input  logic,
-    i_adra: input  logic<2>,
-    i_da  : input  logic<8>,
-    i_adrb: input  logic<2>,
-    o_qb  : output logic<8>,
+clk  : input  clock,
+rst  : input  reset,
+i_wea : input  logic,
+i_adra: input  logic<2>,
+i_da  : input  logic<8>,
+i_adrb: input  logic<2>,
+o_qb  : output logic<8>,
 ) {
-    inst u_ram: ram #(
-        WORD_SIZE    : 4,
-        ADDRESS_WIDTH: 2,
-        DATA_WIDTH   : 8,
-        BUFFER_OUT   : 0,
-        USE_RESET    : 0,
-    ) (
-        i_clk : clk,
-        i_rst : rst,
-        i_clr : 1'b0,
-        i_mea : 1'b1,
-        i_wea,
-        i_adra,
-        i_da,
-        i_meb : 1'b1,
-        i_adrb,
-        o_qb,
-    );
+inst u_ram: ram #(
+WORD_SIZE    : 4,
+ADDRESS_WIDTH: 2,
+DATA_WIDTH   : 8,
+BUFFER_OUT   : 0,
+USE_RESET    : 0,
+) (
+i_clk : clk,
+i_rst : rst,
+i_clr : 1'b0,
+i_mea : 1'b1,
+i_wea,
+i_adra,
+i_da,
+i_meb : 1'b1,
+i_adrb,
+o_qb,
+);
 }
 "#;
-    let code = format!("{RAM_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{RAM_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_wea = sim.signal("i_wea");
@@ -176,44 +181,44 @@ module Top (
         0x22,
         "overwritten value should be 0x22"
     );
-}
 
-/// RAM with USE_RESET=true: clear via i_clr
-#[test]
-fn test_ram_reset_and_clear() {
-    let top = r#"
+    }
+
+    // RAM with USE_RESET=true: clear via i_clr
+    fn test_ram_reset_and_clear(sim) {
+        @setup { let top = r#"
 module Top (
-    clk   : input  clock,
-    rst   : input  reset,
-    i_wea : input  logic,
-    i_adra: input  logic<2>,
-    i_da  : input  logic<8>,
-    i_clr : input  logic,
-    i_adrb: input  logic<2>,
-    o_qb  : output logic<8>,
+clk   : input  clock,
+rst   : input  reset,
+i_wea : input  logic,
+i_adra: input  logic<2>,
+i_da  : input  logic<8>,
+i_clr : input  logic,
+i_adrb: input  logic<2>,
+o_qb  : output logic<8>,
 ) {
-    inst u_ram: ram #(
-        WORD_SIZE    : 4,
-        ADDRESS_WIDTH: 2,
-        DATA_WIDTH   : 8,
-        BUFFER_OUT   : 0,
-        USE_RESET    : 1,
-    ) (
-        i_clk : clk,
-        i_rst : rst,
-        i_clr,
-        i_mea : 1'b1,
-        i_wea,
-        i_adra,
-        i_da,
-        i_meb : 1'b1,
-        i_adrb,
-        o_qb,
-    );
+inst u_ram: ram #(
+WORD_SIZE    : 4,
+ADDRESS_WIDTH: 2,
+DATA_WIDTH   : 8,
+BUFFER_OUT   : 0,
+USE_RESET    : 1,
+) (
+i_clk : clk,
+i_rst : rst,
+i_clr,
+i_mea : 1'b1,
+i_wea,
+i_adra,
+i_da,
+i_meb : 1'b1,
+i_adrb,
+o_qb,
+);
 }
 "#;
-    let code = format!("{RAM_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{RAM_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_wea = sim.signal("i_wea");
@@ -262,4 +267,6 @@ module Top (
     sim.modify(|io| io.set(i_adrb, 0u8)).unwrap();
     sim.eval_comb().unwrap();
     assert_eq!(sim.get_as::<u8>(o_qb), 0, "addr 0 should be 0 after clear");
+
+    }
 }

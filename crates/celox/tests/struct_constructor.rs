@@ -1,25 +1,28 @@
 use celox::Simulator;
 
-#[test]
-fn test_struct_constructor_comb_assignment() {
-    let code = r#"
-        module Top (
-            a: input logic<4>,
-            b: input logic<4>,
-            o: output logic<8>
-        ) {
-            struct S {
-                x: logic<4>,
-                y: logic<4>,
-            }
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
 
-            always_comb {
-                o = S'{x: a, y: b};
-            }
-        }
-    "#;
+all_backends! {
 
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    fn test_struct_constructor_comb_assignment(sim) {
+        @setup { let code = r#"
+module Top (
+a: input logic<4>,
+b: input logic<4>,
+o: output logic<8>
+) {
+struct S {
+x: logic<4>,
+y: logic<4>,
+}
+always_comb {
+o = S'{x: a, y: b};
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let o = sim.signal("o");
@@ -31,33 +34,30 @@ fn test_struct_constructor_comb_assignment() {
     .unwrap();
 
     assert_eq!(sim.get(o), 0xA5u8.into());
+
+    }
+
+    fn test_struct_constructor_member_width_adjustment(sim) {
+        @setup { let code = r#"
+module Top (
+narrow: input logic<4>,
+wide  : input logic<8>,
+o_pad : output logic<8>,
+o_cut : output logic<4>
+) {
+struct Padded {
+x: logic<8>,
 }
-
-#[test]
-fn test_struct_constructor_member_width_adjustment() {
-    let code = r#"
-        module Top (
-            narrow: input logic<4>,
-            wide  : input logic<8>,
-            o_pad : output logic<8>,
-            o_cut : output logic<4>
-        ) {
-            struct Padded {
-                x: logic<8>,
-            }
-
-            struct Cut {
-                y: logic<4>,
-            }
-
-            always_comb {
-                o_pad = Padded'{x: narrow};
-                o_cut = Cut'{y: wide};
-            }
-        }
-    "#;
-
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+struct Cut {
+y: logic<4>,
+}
+always_comb {
+o_pad = Padded'{x: narrow};
+o_cut = Cut'{y: wide};
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let narrow = sim.signal("narrow");
     let wide = sim.signal("wide");
     let o_pad = sim.signal("o_pad");
@@ -73,4 +73,6 @@ fn test_struct_constructor_member_width_adjustment() {
     assert_eq!(sim.get(o_pad), 0x0Bu8.into());
     // wide(8bit) -> member logic<4> should keep lower 4 bits.
     assert_eq!(sim.get(o_cut), 0xBu8.into());
+
+    }
 }

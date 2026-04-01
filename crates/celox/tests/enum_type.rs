@@ -1,28 +1,33 @@
 use celox::{Simulator, SimulatorBuilder};
 
-#[test]
-fn test_enum_case_match() {
-    let code = r#"
-        module Top (
-            sel: input logic<2>,
-            o:   output logic<8>
-        ) {
-            enum State: logic<2> {
-                Idle = 2'd0,
-                Run  = 2'd1,
-                Done = 2'd2,
-            }
-            always_comb {
-                case sel {
-                    State::Idle: o = 8'h00;
-                    State::Run:  o = 8'hAA;
-                    State::Done: o = 8'hFF;
-                    default:     o = 8'h01;
-                }
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
+all_backends! {
+
+    fn test_enum_case_match(sim) {
+        @setup { let code = r#"
+module Top (
+sel: input logic<2>,
+o:   output logic<8>
+) {
+enum State: logic<2> {
+Idle = 2'd0,
+Run  = 2'd1,
+Done = 2'd2,
+}
+always_comb {
+case sel {
+State::Idle: o = 8'h00;
+State::Run:  o = 8'hAA;
+State::Done: o = 8'hFF;
+default:     o = 8'h01;
+}
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let sel = sim.signal("sel");
     let o = sim.signal("o");
 
@@ -37,49 +42,49 @@ fn test_enum_case_match() {
 
     sim.modify(|io| io.set(sel, 3u8)).unwrap();
     assert_eq!(sim.get(o), 0x01u8.into());
-}
 
-#[test]
-fn test_enum_ff_state_machine() {
-    let code = r#"
-        module Top (
-            clk:   input clock,
-            rst:   input reset,
-            start: input logic,
-            state_out: output logic<2>
-        ) {
-            enum State: logic<2> {
-                Idle = 2'd0,
-                Run  = 2'd1,
-                Done = 2'd2,
-            }
-            var state: State;
-            always_ff (clk, rst) {
-                if_reset {
-                    state = State::Idle;
-                } else {
-                    case state {
-                        State::Idle: {
-                            if start {
-                                state = State::Run;
-                            }
-                        }
-                        State::Run: {
-                            state = State::Done;
-                        }
-                        State::Done: {
-                            state = State::Idle;
-                        }
-                        default: {
-                            state = State::Idle;
-                        }
-                    }
-                }
-            }
-            assign state_out = state;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_enum_ff_state_machine(sim) {
+        @setup { let code = r#"
+module Top (
+clk:   input clock,
+rst:   input reset,
+start: input logic,
+state_out: output logic<2>
+) {
+enum State: logic<2> {
+Idle = 2'd0,
+Run  = 2'd1,
+Done = 2'd2,
+}
+var state: State;
+always_ff (clk, rst) {
+if_reset {
+state = State::Idle;
+} else {
+case state {
+State::Idle: {
+if start {
+state = State::Run;
+}
+}
+State::Run: {
+state = State::Done;
+}
+State::Done: {
+state = State::Idle;
+}
+default: {
+state = State::Idle;
+}
+}
+}
+}
+assign state_out = state;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let start = sim.signal("start");
@@ -112,12 +117,15 @@ fn test_enum_ff_state_machine() {
     // Done -> Idle
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(state_out), 0u8.into()); // Idle
+
+    }
 }
 
 /// Enum-typed variables can be assigned from logic inputs
 /// and compared against enum members.
 #[test]
 fn test_enum_assign_and_compare() {
+
     let code = r#"
         module Top (
             i: input logic<2>,
@@ -148,4 +156,5 @@ fn test_enum_assign_and_compare() {
 
     sim.modify(|io| io.set(i, 2u8)).unwrap();
     assert_eq!(sim.get(o_is_b), 1u8.into());
+
 }

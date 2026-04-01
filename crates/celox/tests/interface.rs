@@ -1,8 +1,13 @@
 use celox::Simulator;
 
-#[test]
-fn test_interface_connection() {
-    let code = r#"
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
+all_backends! {
+    fn test_interface_connection(sim) {
+        @setup {
+            let code = r#"
     interface Bus {
         var data: logic<8>;
         var valid: logic;
@@ -41,19 +46,17 @@ fn test_interface_connection() {
         );
     }
     "#;
+            let top = "Top";
+        }
+        @build Simulator::builder(code, top);
 
-    let top = "Top";
+        // Run simulation
 
-    // This is expected to panic or fail until interface support is implemented
-    // Note: Simulator::new parses the code internally.
-    let mut sim = Simulator::builder(code, top).build().unwrap();
+        // Verify output
+        let out_id = sim.signal("out");
+        let out_val = sim.get(out_id);
 
-    // Run simulation
-
-    // Verify output
-    let out_id = sim.signal("out");
-    let out_val = sim.get(out_id);
-
-    // 0xAA = 170
-    assert_eq!(out_val, 170u32.into());
+        // 0xAA = 170
+        assert_eq!(out_val, 170u32.into());
+    }
 }

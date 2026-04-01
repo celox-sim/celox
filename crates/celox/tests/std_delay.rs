@@ -1,27 +1,32 @@
 use celox::Simulator;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 const DELAY_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/delay/delay.veryl");
 
-/// DELAY=0: passthrough (no delay)
-#[test]
-fn test_delay_zero() {
-    let top = r#"
+all_backends! {
+
+    // DELAY=0: passthrough (no delay)
+    fn test_delay_zero(sim) {
+        @setup { let top = r#"
 module Top (
-    clk: input  clock,
-    rst: input  reset,
-    i_d: input  logic<8>,
-    o_d: output logic<8>,
+clk: input  clock,
+rst: input  reset,
+i_d: input  logic<8>,
+o_d: output logic<8>,
 ) {
-    inst u: delay #(DELAY: 0, WIDTH: 8) (
-        i_clk: clk,
-        i_rst: rst,
-        i_d,
-        o_d,
-    );
+inst u: delay #(DELAY: 0, WIDTH: 8) (
+i_clk: clk,
+i_rst: rst,
+i_d,
+o_d,
+);
 }
 "#;
-    let code = format!("{DELAY_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{DELAY_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let i_d = sim.signal("i_d");
     let o_d = sim.signal("o_d");
 
@@ -31,28 +36,28 @@ module Top (
 
     sim.modify(|io| io.set(i_d, 0xCDu8)).unwrap();
     assert_eq!(sim.get_as::<u8>(o_d), 0xCD);
-}
 
-/// DELAY=1: one cycle delay
-#[test]
-fn test_delay_one() {
-    let top = r#"
+    }
+
+    // DELAY=1: one cycle delay
+    fn test_delay_one(sim) {
+        @setup { let top = r#"
 module Top (
-    clk: input  clock,
-    rst: input  reset,
-    i_d: input  logic<8>,
-    o_d: output logic<8>,
+clk: input  clock,
+rst: input  reset,
+i_d: input  logic<8>,
+o_d: output logic<8>,
 ) {
-    inst u: delay #(DELAY: 1, WIDTH: 8) (
-        i_clk: clk,
-        i_rst: rst,
-        i_d,
-        o_d,
-    );
+inst u: delay #(DELAY: 1, WIDTH: 8) (
+i_clk: clk,
+i_rst: rst,
+i_d,
+o_d,
+);
 }
 "#;
-    let code = format!("{DELAY_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{DELAY_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_d = sim.signal("i_d");
@@ -79,28 +84,28 @@ module Top (
     // Before tick, output still 0xAA
     sim.tick(clk).unwrap();
     assert_eq!(sim.get_as::<u8>(o_d), 0xBB, "should appear after 1 tick");
-}
 
-/// DELAY=3: three cycle pipeline
-#[test]
-fn test_delay_three() {
-    let top = r#"
+    }
+
+    // DELAY=3: three cycle pipeline
+    fn test_delay_three(sim) {
+        @setup { let top = r#"
 module Top (
-    clk: input  clock,
-    rst: input  reset,
-    i_d: input  logic<8>,
-    o_d: output logic<8>,
+clk: input  clock,
+rst: input  reset,
+i_d: input  logic<8>,
+o_d: output logic<8>,
 ) {
-    inst u: delay #(DELAY: 3, WIDTH: 8) (
-        i_clk: clk,
-        i_rst: rst,
-        i_d,
-        o_d,
-    );
+inst u: delay #(DELAY: 3, WIDTH: 8) (
+i_clk: clk,
+i_rst: rst,
+i_d,
+o_d,
+);
 }
 "#;
-    let code = format!("{DELAY_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{DELAY_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_d = sim.signal("i_d");
@@ -151,4 +156,6 @@ module Top (
         0xCC,
         "0xCC should appear after 5 ticks"
     );
+
+    }
 }

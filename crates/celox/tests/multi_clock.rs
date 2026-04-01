@@ -1,42 +1,46 @@
 use celox::Simulator;
 
-/// Two independent clock domains: each FF only advances on its own clock.
-#[test]
-fn test_independent_clock_domains() {
-    let code = r#"
-        module Top (
-            clk_a: input  'a clock,
-            clk_b: input  'b clock,
-            rst:   input  'a reset,
-            da:    input  'a logic<8>,
-            db:    input  'b logic<8>,
-            qa:    output 'a logic<8>,
-            qb:    output 'b logic<8>
-        ) {
-            var ra: 'a logic<8>;
-            var rb: 'b logic<8>;
-            always_ff (clk_a, rst) {
-                if_reset {
-                    ra = 8'd0;
-                } else {
-                    ra = da;
-                }
-            }
-            unsafe (cdc) {
-                always_ff (clk_b, rst) {
-                    if_reset {
-                        rb = 8'd0;
-                    } else {
-                        rb = db;
-                    }
-                }
-            }
-            assign qa = ra;
-            assign qb = rb;
-        }
-    "#;
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
 
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+all_backends! {
+
+    // Two independent clock domains: each FF only advances on its own clock.
+    fn test_independent_clock_domains(sim) {
+        @setup { let code = r#"
+module Top (
+clk_a: input  'a clock,
+clk_b: input  'b clock,
+rst:   input  'a reset,
+da:    input  'a logic<8>,
+db:    input  'b logic<8>,
+qa:    output 'a logic<8>,
+qb:    output 'b logic<8>
+) {
+var ra: 'a logic<8>;
+var rb: 'b logic<8>;
+always_ff (clk_a, rst) {
+if_reset {
+ra = 8'd0;
+} else {
+ra = da;
+}
+}
+unsafe (cdc) {
+always_ff (clk_b, rst) {
+if_reset {
+rb = 8'd0;
+} else {
+rb = db;
+}
+}
+}
+assign qa = ra;
+assign qb = rb;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk_a = sim.event("clk_a");
     let clk_b = sim.event("clk_b");
     let rst = sim.signal("rst");
@@ -69,49 +73,45 @@ fn test_independent_clock_domains() {
     sim.tick(clk_b).unwrap();
     assert_eq!(sim.get(qa), 0xAAu8.into());
     assert_eq!(sim.get(qb), 0xBBu8.into());
+
+    }
+
+    // A counter in one clock domain feeding into another (CDC pattern).
+    // Tests that domains are truly independent.
+    fn test_clock_domain_crossing_pattern(sim) {
+        @setup { let code = r#"
+module Top (
+clk_fast: input  'a clock,
+clk_slow: input  'b clock,
+rst:      input  'a reset,
+count_out:  output 'a logic<4>,
+sample_out: output 'b logic<4>
+) {
+var counter: 'a logic<4>;
+var sample:  'b logic<4>;
+// Fast domain: counter increments
+always_ff (clk_fast, rst) {
+if_reset {
+counter = 4'd0;
+} else {
+counter = counter + 4'd1;
 }
-
-/// A counter in one clock domain feeding into another (CDC pattern).
-/// Tests that domains are truly independent.
-#[test]
-fn test_clock_domain_crossing_pattern() {
-    let code = r#"
-        module Top (
-            clk_fast: input  'a clock,
-            clk_slow: input  'b clock,
-            rst:      input  'a reset,
-            count_out:  output 'a logic<4>,
-            sample_out: output 'b logic<4>
-        ) {
-            var counter: 'a logic<4>;
-            var sample:  'b logic<4>;
-
-            // Fast domain: counter increments
-            always_ff (clk_fast, rst) {
-                if_reset {
-                    counter = 4'd0;
-                } else {
-                    counter = counter + 4'd1;
-                }
-            }
-
-            // Slow domain: samples the counter (CDC)
-            unsafe (cdc) {
-                always_ff (clk_slow, rst) {
-                    if_reset {
-                        sample = 4'd0;
-                    } else {
-                        sample = counter;
-                    }
-                }
-            }
-
-            assign count_out  = counter;
-            assign sample_out = sample;
-        }
-    "#;
-
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+}
+// Slow domain: samples the counter (CDC)
+unsafe (cdc) {
+always_ff (clk_slow, rst) {
+if_reset {
+sample = 4'd0;
+} else {
+sample = counter;
+}
+}
+}
+assign count_out  = counter;
+assign sample_out = sample;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk_fast = sim.event("clk_fast");
     let clk_slow = sim.event("clk_slow");
     let rst = sim.signal("rst");
@@ -146,44 +146,43 @@ fn test_clock_domain_crossing_pattern() {
     assert_eq!(sim.get(count_out), 5u8.into());
     // sample still holds 3
     assert_eq!(sim.get(sample_out), 3u8.into());
+
+    }
+
+    // FF with separate clocks and separate resets.
+    fn test_separate_resets_per_domain(sim) {
+        @setup { let code = r#"
+module Top (
+clk_a: input  'a clock,
+clk_b: input  'b clock,
+rst_a: input  'a reset,
+rst_b: input  'b reset,
+da:    input  'a logic<8>,
+db:    input  'b logic<8>,
+qa:    output 'a logic<8>,
+qb:    output 'b logic<8>
+) {
+var ra: 'a logic<8>;
+var rb: 'b logic<8>;
+always_ff (clk_a, rst_a) {
+if_reset {
+ra = 8'hAA;
+} else {
+ra = da;
 }
-
-/// FF with separate clocks and separate resets.
-#[test]
-fn test_separate_resets_per_domain() {
-    let code = r#"
-        module Top (
-            clk_a: input  'a clock,
-            clk_b: input  'b clock,
-            rst_a: input  'a reset,
-            rst_b: input  'b reset,
-            da:    input  'a logic<8>,
-            db:    input  'b logic<8>,
-            qa:    output 'a logic<8>,
-            qb:    output 'b logic<8>
-        ) {
-            var ra: 'a logic<8>;
-            var rb: 'b logic<8>;
-            always_ff (clk_a, rst_a) {
-                if_reset {
-                    ra = 8'hAA;
-                } else {
-                    ra = da;
-                }
-            }
-            always_ff (clk_b, rst_b) {
-                if_reset {
-                    rb = 8'hBB;
-                } else {
-                    rb = db;
-                }
-            }
-            assign qa = ra;
-            assign qb = rb;
-        }
-    "#;
-
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+}
+always_ff (clk_b, rst_b) {
+if_reset {
+rb = 8'hBB;
+} else {
+rb = db;
+}
+}
+assign qa = ra;
+assign qb = rb;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk_a = sim.event("clk_a");
     let clk_b = sim.event("clk_b");
     let rst_a = sim.signal("rst_a");
@@ -216,4 +215,6 @@ fn test_separate_resets_per_domain() {
     sim.tick(clk_b).unwrap();
     assert_eq!(sim.get(qa), 0x11u8.into()); // A captures data
     assert_eq!(sim.get(qb), 0xBBu8.into()); // B in reset
+
+    }
 }

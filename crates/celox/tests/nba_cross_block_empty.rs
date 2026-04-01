@@ -1,51 +1,52 @@
 use celox::Simulator;
 
-/// Test: Two always_ff blocks in the same module, same clock.
-/// Block 1 updates `count`. Block 2 reads `count` to set `r_empty`.
-/// NBA semantics: r_empty should see the OLD count value.
-#[test]
-fn test_same_module_count_and_empty_ff() {
-    let code = r#"
-        module Top (
-            clk  : input  clock    ,
-            rst  : input  reset    ,
-            push : input  logic    ,
-            pop  : input  logic    ,
-            empty: output logic    ,
-        ) {
-            var count: logic<8>;
-            var r_empty: logic;
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
 
-            always_ff (clk, rst) {
-                if_reset {
-                    count = 0;
-                } else if push && !pop {
-                    count = count + 1;
-                } else if pop && !push {
-                    if count != 0 {
-                        count = count - 1;
-                    }
-                }
-            }
+all_backends! {
 
-            // Separate always_ff block reads count — should read OLD count (NBA)
-            always_ff (clk, rst) {
-                if_reset {
-                    r_empty = 1;
-                } else {
-                    if count == 0 {
-                        r_empty = 1;
-                    } else {
-                        r_empty = 0;
-                    }
-                }
-            }
-
-            assign empty = r_empty;
-        }
-    "#;
-
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    // Test: Two always_ff blocks in the same module, same clock.
+    // Block 1 updates `count`. Block 2 reads `count` to set `r_empty`.
+    // NBA semantics: r_empty should see the OLD count value.
+    fn test_same_module_count_and_empty_ff(sim) {
+        @setup { let code = r#"
+module Top (
+clk  : input  clock    ,
+rst  : input  reset    ,
+push : input  logic    ,
+pop  : input  logic    ,
+empty: output logic    ,
+) {
+var count: logic<8>;
+var r_empty: logic;
+always_ff (clk, rst) {
+if_reset {
+count = 0;
+} else if push && !pop {
+count = count + 1;
+} else if pop && !push {
+if count != 0 {
+count = count - 1;
+}
+}
+}
+// Separate always_ff block reads count — should read OLD count (NBA)
+always_ff (clk, rst) {
+if_reset {
+r_empty = 1;
+} else {
+if count == 0 {
+r_empty = 1;
+} else {
+r_empty = 0;
+}
+}
+}
+assign empty = r_empty;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let push = sim.signal("push");
@@ -104,63 +105,59 @@ fn test_same_module_count_and_empty_ff() {
         1u32.into(),
         "After settling: r_empty sees count=0 → empty=1"
     );
+
+    }
+
+    // Test: count FF in parent module, r_empty FF in child module.
+    // The child reads count through a port. NBA: should see OLD count.
+    fn test_cross_module_count_and_empty_ff(sim) {
+        @setup { let code = r#"
+module EmptyDetector (
+clk       : input  clock,
+rst       : input  reset,
+count_in  : input  logic<8>,
+r_empty   : output logic,
+) {
+always_ff (clk, rst) {
+if_reset {
+r_empty = 1;
+} else {
+if count_in == 0 {
+r_empty = 1;
+} else {
+r_empty = 0;
 }
-
-/// Test: count FF in parent module, r_empty FF in child module.
-/// The child reads count through a port. NBA: should see OLD count.
-#[test]
-fn test_cross_module_count_and_empty_ff() {
-    let code = r#"
-        module EmptyDetector (
-            clk       : input  clock,
-            rst       : input  reset,
-            count_in  : input  logic<8>,
-            r_empty   : output logic,
-        ) {
-            always_ff (clk, rst) {
-                if_reset {
-                    r_empty = 1;
-                } else {
-                    if count_in == 0 {
-                        r_empty = 1;
-                    } else {
-                        r_empty = 0;
-                    }
-                }
-            }
-        }
-
-        module Top (
-            clk  : input  clock,
-            rst  : input  reset,
-            push : input  logic,
-            pop  : input  logic,
-            empty: output logic,
-        ) {
-            var count: logic<8>;
-
-            always_ff (clk, rst) {
-                if_reset {
-                    count = 0;
-                } else if push && !pop {
-                    count = count + 1;
-                } else if pop && !push {
-                    if count != 0 {
-                        count = count - 1;
-                    }
-                }
-            }
-
-            inst det: EmptyDetector (
-                clk,
-                rst,
-                count_in: count,
-                r_empty: empty,
-            );
-        }
-    "#;
-
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+}
+}
+}
+module Top (
+clk  : input  clock,
+rst  : input  reset,
+push : input  logic,
+pop  : input  logic,
+empty: output logic,
+) {
+var count: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+count = 0;
+} else if push && !pop {
+count = count + 1;
+} else if pop && !push {
+if count != 0 {
+count = count - 1;
+}
+}
+}
+inst det: EmptyDetector (
+clk,
+rst,
+count_in: count,
+r_empty: empty,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let push = sim.signal("push");
@@ -209,52 +206,48 @@ fn test_cross_module_count_and_empty_ff() {
     sim.modify(|io| io.set(pop, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(empty), 1u32.into(), "empty=1 after settling");
+
+    }
+
+    // Stress test: push N items, pop all, verify empty eventually goes high.
+    // This specifically catches the "empty=0 forever" bug.
+    fn test_empty_never_stuck_at_zero(sim) {
+        @setup { let code = r#"
+module Top (
+clk  : input  clock,
+rst  : input  reset,
+push : input  logic,
+pop  : input  logic,
+empty: output logic,
+) {
+var count: logic<8>;
+var r_empty: logic;
+always_ff (clk, rst) {
+if_reset {
+count = 0;
+} else if push && !pop {
+count = count + 1;
+} else if pop && !push {
+if count != 0 {
+count = count - 1;
 }
-
-/// Stress test: push N items, pop all, verify empty eventually goes high.
-/// This specifically catches the "empty=0 forever" bug.
-#[test]
-fn test_empty_never_stuck_at_zero() {
-    let code = r#"
-        module Top (
-            clk  : input  clock,
-            rst  : input  reset,
-            push : input  logic,
-            pop  : input  logic,
-            empty: output logic,
-        ) {
-            var count: logic<8>;
-            var r_empty: logic;
-
-            always_ff (clk, rst) {
-                if_reset {
-                    count = 0;
-                } else if push && !pop {
-                    count = count + 1;
-                } else if pop && !push {
-                    if count != 0 {
-                        count = count - 1;
-                    }
-                }
-            }
-
-            always_ff (clk, rst) {
-                if_reset {
-                    r_empty = 1;
-                } else {
-                    if count == 0 {
-                        r_empty = 1;
-                    } else {
-                        r_empty = 0;
-                    }
-                }
-            }
-
-            assign empty = r_empty;
-        }
-    "#;
-
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+}
+}
+always_ff (clk, rst) {
+if_reset {
+r_empty = 1;
+} else {
+if count == 0 {
+r_empty = 1;
+} else {
+r_empty = 0;
+}
+}
+}
+assign empty = r_empty;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let push = sim.signal("push");
@@ -310,4 +303,6 @@ fn test_empty_never_stuck_at_zero() {
         1u32.into(),
         "BUG: empty should be 1 after all items popped — stuck at 0 forever?"
     );
+
+    }
 }

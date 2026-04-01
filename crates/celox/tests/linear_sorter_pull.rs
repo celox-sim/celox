@@ -1,5 +1,9 @@
 use celox::Simulator;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 fn sorter_code() -> &'static str {
     r#"
 proto package SorterItemProto {
@@ -136,9 +140,10 @@ pub module Top #(
 "#
 }
 
-#[test]
-fn test_sorter_push_pop_empty() {
-    let mut sim = Simulator::builder(sorter_code(), "Top").build().unwrap();
+all_backends! {
+
+    fn test_sorter_push_pop_empty(sim) {
+        @build Simulator::builder(sorter_code(), "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let push = sim.signal("push");
@@ -216,13 +221,13 @@ fn test_sorter_push_pop_empty() {
         1u32.into(),
         "Should be empty after popping all elements"
     );
-}
 
-/// Focused test: push one element, then pop it.
-/// The empty flag should go 1 → 0 → 1 across the three phases.
-#[test]
-fn test_sorter_empty_flag_single_push_pop() {
-    let mut sim = Simulator::builder(sorter_code(), "Top").build().unwrap();
+    }
+
+    // Focused test: push one element, then pop it.
+    // The empty flag should go 1 → 0 → 1 across the three phases.
+    fn test_sorter_empty_flag_single_push_pop(sim) {
+        @build Simulator::builder(sorter_code(), "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let push = sim.signal("push");
@@ -277,12 +282,12 @@ fn test_sorter_empty_flag_single_push_pop() {
     sim.modify(|io| io.set(pop, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(empty), 1u32.into(), "still empty");
-}
 
-/// Test: push+pop simultaneously — count should not change.
-#[test]
-fn test_sorter_simultaneous_push_pop() {
-    let mut sim = Simulator::builder(sorter_code(), "Top").build().unwrap();
+    }
+
+    // Test: push+pop simultaneously — count should not change.
+    fn test_sorter_simultaneous_push_pop(sim) {
+        @build Simulator::builder(sorter_code(), "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let push = sim.signal("push");
@@ -344,4 +349,6 @@ fn test_sorter_simultaneous_push_pop() {
         150u32.into(),
         "min should be 150 after replacing 200 with 150"
     );
+
+    }
 }

@@ -1,5 +1,9 @@
 use celox::Simulator;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 const EDGE_DETECTOR_SRC: &str =
     include_str!("../../../deps/veryl/crates/std/veryl/src/edge_detector/edge_detector.veryl");
 
@@ -25,16 +29,17 @@ module Top (
 }
 "#;
 
-/// Edge detector: output is combinational (assign), internal `data` register
-/// updates on clock edge. So the output reflects the difference between
-/// current i_data and the registered (previous-cycle) value.
-///
-/// Flow: set i_data -> tick (FF captures i_data into `data`) -> change i_data
-///       -> eval_comb -> read outputs (edge between old data and new i_data)
-#[test]
-fn test_edge_detector_basic() {
-    let code = format!("{EDGE_DETECTOR_SRC}\n{TOP_W1}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+all_backends! {
+
+    // Edge detector: output is combinational (assign), internal `data` register
+    // updates on clock edge. So the output reflects the difference between
+    // current i_data and the registered (previous-cycle) value.
+    //
+    // Flow: set i_data -> tick (FF captures i_data into `data`) -> change i_data
+    //       -> eval_comb -> read outputs (edge between old data and new i_data)
+    fn test_edge_detector_basic(sim) {
+        @setup { let code = format!("{EDGE_DETECTOR_SRC}\n{TOP_W1}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_clear = sim.signal("i_clear");
@@ -83,18 +88,18 @@ fn test_edge_detector_basic() {
     assert_eq!(sim.get_as::<u8>(o_posedge), 0);
     assert_eq!(sim.get_as::<u8>(o_negedge), 1, "negedge: i_data=0, data=1");
     assert_eq!(sim.get_as::<u8>(o_edge), 1);
-}
 
-/// Clear suppresses posedge/negedge outputs.
-///
-/// Note: the stdlib edge_detector has operator precedence such that:
-///   o_edge    = i_data ^ (data & ~i_clear)   -- XOR, not fully masked by clear
-///   o_posedge = i_data & ~data & ~i_clear     -- AND, fully masked by clear
-///   o_negedge = ~i_data & data & ~i_clear     -- AND, fully masked by clear
-#[test]
-fn test_edge_detector_clear() {
-    let code = format!("{EDGE_DETECTOR_SRC}\n{TOP_W1}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+    }
+
+    // Clear suppresses posedge/negedge outputs.
+    //
+    // Note: the stdlib edge_detector has operator precedence such that:
+    //   o_edge    = i_data ^ (data & ~i_clear)   -- XOR, not fully masked by clear
+    //   o_posedge = i_data & ~data & ~i_clear     -- AND, fully masked by clear
+    //   o_negedge = ~i_data & data & ~i_clear     -- AND, fully masked by clear
+    fn test_edge_detector_clear(sim) {
+        @setup { let code = format!("{EDGE_DETECTOR_SRC}\n{TOP_W1}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_clear = sim.signal("i_clear");
@@ -131,37 +136,37 @@ fn test_edge_detector_clear() {
         0,
         "clear should suppress negedge"
     );
-}
 
-/// Multi-bit edge detection (WIDTH=4) using o_edge output.
-///
-/// Note: o_edge uses XOR and correctly reflects per-bit changes.
-/// o_posedge/o_negedge use AND with 1-bit ~i_clear which limits multi-bit
-/// behavior due to zero-extension. We test o_edge for multi-bit correctness.
-#[test]
-fn test_edge_detector_multibit() {
-    let top = r#"
+    }
+
+    // Multi-bit edge detection (WIDTH=4) using o_edge output.
+    //
+    // Note: o_edge uses XOR and correctly reflects per-bit changes.
+    // o_posedge/o_negedge use AND with 1-bit ~i_clear which limits multi-bit
+    // behavior due to zero-extension. We test o_edge for multi-bit correctness.
+    fn test_edge_detector_multibit(sim) {
+        @setup { let top = r#"
 module Top (
-    clk      : input  clock,
-    rst      : input  reset,
-    i_data   : input  logic<4>,
-    o_edge   : output logic<4>,
-    o_posedge: output logic<4>,
-    o_negedge: output logic<4>,
+clk      : input  clock,
+rst      : input  reset,
+i_data   : input  logic<4>,
+o_edge   : output logic<4>,
+o_posedge: output logic<4>,
+o_negedge: output logic<4>,
 ) {
-    inst u: edge_detector #(WIDTH: 4) (
-        i_clk  : clk,
-        i_rst  : rst,
-        i_clear: 1'b0,
-        i_data,
-        o_edge,
-        o_posedge,
-        o_negedge,
-    );
+inst u: edge_detector #(WIDTH: 4) (
+i_clk  : clk,
+i_rst  : rst,
+i_clear: 1'b0,
+i_data,
+o_edge,
+o_posedge,
+o_negedge,
+);
 }
 "#;
-    let code = format!("{EDGE_DETECTOR_SRC}\n{top}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+let code = format!("{EDGE_DETECTOR_SRC}\n{top}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_data = sim.signal("i_data");
@@ -213,4 +218,6 @@ module Top (
         0b1010,
         "steady state: upper bits reflect masking artifact"
     );
+
+    }
 }

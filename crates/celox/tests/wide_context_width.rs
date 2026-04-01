@@ -1,18 +1,23 @@
 use celox::{BigUint, Simulator};
 
-#[test]
-fn test_wide_context_addition_carry() {
-    // (64-bit + 64-bit) in 65-bit context should preserve carry
-    let code = r#"
-        module Top (
-            a: input  logic<64>,
-            b: input  logic<64>,
-            o: output logic<65>
-        ) {
-            assign o = a + b;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
+all_backends! {
+
+    fn test_wide_context_addition_carry(sim) {
+        @setup { // (64-bit + 64-bit) in 65-bit context should preserve carry
+let code = r#"
+module Top (
+a: input  logic<64>,
+b: input  logic<64>,
+o: output logic<65>
+) {
+assign o = a + b;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let o = sim.signal("o");
@@ -32,21 +37,21 @@ fn test_wide_context_addition_carry() {
         expected,
         "Carry bit should be preserved in 65-bit context"
     );
-}
 
-#[test]
-fn test_wide_context_subtraction_underflow() {
-    // (64-bit - 64-bit) in 65-bit context
-    let code = r#"
-        module Top (
-            a: input  logic<64>,
-            b: input  logic<64>,
-            o: output logic<65>
-        ) {
-            assign o = a - b;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_wide_context_subtraction_underflow(sim) {
+        @setup { // (64-bit - 64-bit) in 65-bit context
+let code = r#"
+module Top (
+a: input  logic<64>,
+b: input  logic<64>,
+o: output logic<65>
+) {
+assign o = a - b;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let o = sim.signal("o");
@@ -66,57 +71,21 @@ fn test_wide_context_subtraction_underflow() {
         expected,
         "Underflow in 65-bit context should result in 65-bit all-ones"
     );
+
+    }
+
+    fn test_wide_context_shift_left(sim) {
+        @setup { let code = r#"
+module Top (
+i: input  logic<64>,
+s: input  logic<8>,
+o: output logic<130>
+) {
+// i as 130 ensures the shift happens in 130-bit context
+assign o = (i as 130) << s;
 }
-
-#[test]
-fn test_wide_context_nested_propagation() {
-    // (120-bit + 120-bit) * 2'd2 in 122-bit context
-    let code = r#"
-        module Top (
-            a: input  logic<120>,
-            b: input  logic<120>,
-            o: output logic<122>
-        ) {
-            assign o = (a + b) * 2'd2;
-        }
-    "#;
-    let code_top = "Top";
-    let mut sim = celox::SimulatorBuilder::new(code, code_top)
-        .build()
-        .expect("Build should succeed");
-
-    let a = sim.signal("a");
-    let b = sim.signal("b");
-    let o = sim.signal("o");
-
-    // a = 2^119, b = 2^119
-    // a + b = 2^120
-    // (a + b) * 2 = 2^121
-    let val_a = BigUint::from(1u32) << 119;
-    let val_b = BigUint::from(1u32) << 119;
-    let expected = BigUint::from(1u32) << 121;
-
-    sim.modify(|io| {
-        io.set_wide(a, val_a);
-        io.set_wide(b, val_b);
-    })
-    .unwrap();
-    assert_eq!(sim.get(o), expected, "Nested 122-bit context width failed");
-}
-
-#[test]
-fn test_wide_context_shift_left() {
-    let code = r#"
-        module Top (
-            i: input  logic<64>,
-            s: input  logic<8>,
-            o: output logic<130>
-        ) {
-            // i as 130 ensures the shift happens in 130-bit context
-            assign o = (i as 130) << s;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "Top");
     let i = sim.signal("i");
     let s = sim.signal("s");
     let o = sim.signal("o");
@@ -131,20 +100,20 @@ fn test_wide_context_shift_left() {
     })
     .unwrap();
     assert_eq!(sim.get(o), expected, "Shift left with wide cast failed");
-}
 
-#[test]
-fn test_wide_context_constant_folding() {
-    let code = r#"
-        module Top (
-            o: output logic<65>
-        ) {
-            always_comb {
-                o = 64'hffff_ffff_ffff_ffff + 64'h1;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_wide_context_constant_folding(sim) {
+        @setup { let code = r#"
+module Top (
+o: output logic<65>
+) {
+always_comb {
+o = 64'hffff_ffff_ffff_ffff + 64'h1;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let o = sim.signal("o");
 
     let expected = BigUint::from(1u32) << 64;
@@ -153,27 +122,26 @@ fn test_wide_context_constant_folding() {
         expected,
         "Constant folding in 65-bit context failed"
     );
+
+    }
+
+    fn test_wide_runtime_shift_width_behavior(sim) {
+        @setup { let code = r#"
+module Top (
+i: input  logic<64>,
+s: input  logic<8>,
+o1: output logic<130>,
+o2: output logic<130>
+) {
+always_comb {
+// The shift result width is determined by lhs.
+o1 = i << s;
+// To keep bits, 'i' must be cast to the target width before shifting.
+o2 = (i as 130) << s;
 }
-
-#[test]
-fn test_wide_runtime_shift_width_behavior() {
-    let code = r#"
-        module Top (
-            i: input  logic<64>,
-            s: input  logic<8>,
-            o1: output logic<130>,
-            o2: output logic<130>
-        ) {
-            always_comb {
-                // The shift result width is determined by lhs.
-                o1 = i << s;
-
-                // To keep bits, 'i' must be cast to the target width before shifting.
-                o2 = (i as 130) << s;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+}
+"#; }
+        @build Simulator::builder(code, "Top");
 
     let i = sim.signal("i");
     let s = sim.signal("s");
@@ -214,20 +182,20 @@ fn test_wide_runtime_shift_width_behavior() {
 
     assert_eq!(sim.get(o1), expected_o1);
     assert_eq!(sim.get(o2), expected_o2);
-}
 
-#[test]
-fn test_wide_context_constant_folding_128bit() {
-    let code = r#"
-        module Top (
-            o: output logic<128>
-        ) {
-            always_comb {
-                o = 32'hffff_ffff + 1;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_wide_context_constant_folding_128bit(sim) {
+        @setup { let code = r#"
+module Top (
+o: output logic<128>
+) {
+always_comb {
+o = 32'hffff_ffff + 1;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let o = sim.signal("o");
 
     let expected = BigUint::from(1u32) << 32;
@@ -236,21 +204,21 @@ fn test_wide_context_constant_folding_128bit() {
         expected,
         "Constant folding in 128-bit context failed: 32'hffff_ffff + 1 should be 32'h1_0000_0000"
     );
-}
 
-#[test]
-fn test_wide_context_multiplication_boundary() {
-    // 64-bit * 64-bit in 128-bit context
-    let code = r#"
-        module Top (
-            a: input  logic<64>,
-            b: input  logic<64>,
-            o: output logic<128>
-        ) {
-            assign o = (a as 128) * (b as 128);
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_wide_context_multiplication_boundary(sim) {
+        @setup { // 64-bit * 64-bit in 128-bit context
+let code = r#"
+module Top (
+a: input  logic<64>,
+b: input  logic<64>,
+o: output logic<128>
+) {
+assign o = (a as 128) * (b as 128);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let o = sim.signal("o");
@@ -270,21 +238,21 @@ fn test_wide_context_multiplication_boundary() {
         expected,
         "64-bit * 64-bit multiplication should not truncate in 128-bit context"
     );
-}
 
-#[test]
-fn test_wide_context_addition_mixed_boundary() {
-    // 64-bit + 1-bit in 65-bit context
-    let code = r#"
-        module Top (
-            a: input  logic<64>,
-            b: input  logic<1>,
-            o: output logic<65>
-        ) {
-            assign o = a + b;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_wide_context_addition_mixed_boundary(sim) {
+        @setup { // 64-bit + 1-bit in 65-bit context
+let code = r#"
+module Top (
+a: input  logic<64>,
+b: input  logic<1>,
+o: output logic<65>
+) {
+assign o = a + b;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let o = sim.signal("o");
@@ -304,4 +272,44 @@ fn test_wide_context_addition_mixed_boundary() {
         expected,
         "Mixed 64-bit + 1-bit addition should not truncate in 65-bit context"
     );
+
+    }
+}
+
+#[test]
+fn test_wide_context_nested_propagation() {
+
+    // (120-bit + 120-bit) * 2'd2 in 122-bit context
+    let code = r#"
+        module Top (
+            a: input  logic<120>,
+            b: input  logic<120>,
+            o: output logic<122>
+        ) {
+            assign o = (a + b) * 2'd2;
+        }
+    "#;
+    let code_top = "Top";
+    let mut sim = celox::SimulatorBuilder::new(code, code_top)
+        .build()
+        .expect("Build should succeed");
+
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let o = sim.signal("o");
+
+    // a = 2^119, b = 2^119
+    // a + b = 2^120
+    // (a + b) * 2 = 2^121
+    let val_a = BigUint::from(1u32) << 119;
+    let val_b = BigUint::from(1u32) << 119;
+    let expected = BigUint::from(1u32) << 121;
+
+    sim.modify(|io| {
+        io.set_wide(a, val_a);
+        io.set_wide(b, val_b);
+    })
+    .unwrap();
+    assert_eq!(sim.get(o), expected, "Nested 122-bit context width failed");
+
 }

@@ -1,38 +1,40 @@
 use celox::Simulator;
 
-/// Test NBA semantics across separate always_ff blocks with the same clock.
-/// In RTL, two always_ff blocks on the same clock should both read OLD values
-/// (pre-edge) and write NEW values (post-edge), regardless of textual order.
-#[test]
-fn test_nba_separate_blocks_swap() {
-    let code = r#"
-        module Top (clk: input clock, rst: input reset, a: output logic<8>, b: output logic<8>) {
-            var r1: logic<8>;
-            var r2: logic<8>;
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
 
-            // Block 1: r1 <= r2 (reads OLD r2)
-            always_ff (clk, rst) {
-                if_reset {
-                    r1 = 8'hAA;
-                } else {
-                    r1 = r2;
-                }
-            }
+all_backends! {
 
-            // Block 2: r2 <= r1 (reads OLD r1)
-            always_ff (clk, rst) {
-                if_reset {
-                    r2 = 8'h55;
-                } else {
-                    r2 = r1;
-                }
-            }
-
-            assign a = r1;
-            assign b = r2;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    // Test NBA semantics across separate always_ff blocks with the same clock.
+    // In RTL, two always_ff blocks on the same clock should both read OLD values
+    // (pre-edge) and write NEW values (post-edge), regardless of textual order.
+    fn test_nba_separate_blocks_swap(sim) {
+        @setup { let code = r#"
+module Top (clk: input clock, rst: input reset, a: output logic<8>, b: output logic<8>) {
+var r1: logic<8>;
+var r2: logic<8>;
+// Block 1: r1 <= r2 (reads OLD r2)
+always_ff (clk, rst) {
+if_reset {
+r1 = 8'hAA;
+} else {
+r1 = r2;
+}
+}
+// Block 2: r2 <= r1 (reads OLD r1)
+always_ff (clk, rst) {
+if_reset {
+r2 = 8'h55;
+} else {
+r2 = r1;
+}
+}
+assign a = r1;
+assign b = r2;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let a = sim.signal("a");
@@ -70,23 +72,22 @@ fn test_nba_separate_blocks_swap() {
         0x55u32.into(),
         "r2 should be 0x55 after 2nd swap"
     );
+
+    }
+
+    // Test pipeline pattern across 3 separate always_ff blocks.
+    // d → stage1 → stage2 → stage3 should take 3 clock cycles.
+    fn test_nba_separate_blocks_pipeline(sim) {
+        @setup { let code = r#"
+module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+var stage1: logic<8>;
+var stage2: logic<8>;
+always_ff (clk) { stage1 = d; }
+always_ff (clk) { stage2 = stage1; }
+always_ff (clk) { q = stage2; }
 }
-
-/// Test pipeline pattern across 3 separate always_ff blocks.
-/// d → stage1 → stage2 → stage3 should take 3 clock cycles.
-#[test]
-fn test_nba_separate_blocks_pipeline() {
-    let code = r#"
-        module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
-            var stage1: logic<8>;
-            var stage2: logic<8>;
-
-            always_ff (clk) { stage1 = d; }
-            always_ff (clk) { stage2 = stage1; }
-            always_ff (clk) { q = stage2; }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let d = sim.signal("d");
     let q = sim.signal("q");
@@ -108,24 +109,23 @@ fn test_nba_separate_blocks_pipeline() {
         0x42u32.into(),
         "q should be 0x42 after 3rd tick"
     );
+
+    }
+
+    // Test that the order of always_ff blocks in source code does not matter.
+    // Reverse the pipeline order (q first, stage1 last) — same behavior expected.
+    fn test_nba_separate_blocks_pipeline_reversed(sim) {
+        @setup { let code = r#"
+module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+var stage1: logic<8>;
+var stage2: logic<8>;
+// Intentionally reversed order in source
+always_ff (clk) { q = stage2; }
+always_ff (clk) { stage2 = stage1; }
+always_ff (clk) { stage1 = d; }
 }
-
-/// Test that the order of always_ff blocks in source code does not matter.
-/// Reverse the pipeline order (q first, stage1 last) — same behavior expected.
-#[test]
-fn test_nba_separate_blocks_pipeline_reversed() {
-    let code = r#"
-        module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
-            var stage1: logic<8>;
-            var stage2: logic<8>;
-
-            // Intentionally reversed order in source
-            always_ff (clk) { q = stage2; }
-            always_ff (clk) { stage2 = stage1; }
-            always_ff (clk) { stage1 = d; }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let d = sim.signal("d");
     let q = sim.signal("q");
@@ -147,4 +147,6 @@ fn test_nba_separate_blocks_pipeline_reversed() {
         0x42u32.into(),
         "q should be 0x42 after 3rd tick"
     );
+
+    }
 }

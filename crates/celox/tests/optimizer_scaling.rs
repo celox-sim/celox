@@ -1,12 +1,17 @@
-/// Scaling regression tests for optimizer passes.
-///
-/// These tests build the same parametric design at two sizes and assert that
-/// the build-time ratio stays within a bound.  This catches super-polynomial
-/// scaling regressions regardless of absolute machine speed.
-///
-/// Run with timing details:
-///   CELOX_PASS_TIMING=1 cargo test -p celox --test optimizer_scaling -- --nocapture
+// Scaling regression tests for optimizer passes.
+//
+// These tests build the same parametric design at two sizes and assert that
+// the build-time ratio stays within a bound.  This catches super-polynomial
+// scaling regressions regardless of absolute machine speed.
+//
+// Run with timing details:
+//   CELOX_PASS_TIMING=1 cargo test -p celox --test optimizer_scaling -- --nocapture
 use celox::SimulatorBuilder;
+
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------

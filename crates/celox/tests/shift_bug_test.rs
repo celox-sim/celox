@@ -1,27 +1,45 @@
 use celox::{BigUint, Simulator};
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 // Test 1: shift inside if_reset else branch
-#[test]
-fn test_shift_in_if_reset() {
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            rst: input  reset_async_high,
-            a: input logic<8>,
-            o: output logic<8>
-        ) {
-            var r: logic<8>;
-            always_ff (clk, rst) {
-                if_reset {
-                    r = 0;
-                } else {
-                    r = a << 2;
-                }
-            }
-            assign o = r;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+
+// Test 2: shift inside for loop (non-self-referencing)
+
+// Test 3: if_reset + for + shift (non-self-referencing)
+
+// Test 4: right shift in if_reset
+
+// Test 5: dynamic shift amount in if_reset
+
+// Test 6: shift with for loop index (writing to different array elements)
+
+// Test 7: shift amount wider than value (for loop const is 32-bit)
+
+all_backends! {
+
+    fn test_shift_in_if_reset(sim) {
+        @setup { let code = r#"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+a: input logic<8>,
+o: output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 0;
+} else {
+r = a << 2;
+}
+}
+assign o = r;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let a = sim.signal("a");
@@ -41,25 +59,24 @@ fn test_shift_in_if_reset() {
         "shift in if_reset: got {:x}",
         sim.get(o)
     );
-}
 
-// Test 2: shift inside for loop (non-self-referencing)
-#[test]
-fn test_shift_in_for_loop() {
-    let code = r#"
-        module Top (
-            clk: input clock,
-            a: input logic<32>,
-            o: output logic<32>
-        ) {
-            always_ff (clk) {
-                for _i: u32 in 0..1 {
-                    o = a << 4;
-                }
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_in_for_loop(sim) {
+        @setup { let code = r#"
+module Top (
+clk: input clock,
+a: input logic<32>,
+o: output logic<32>
+) {
+always_ff (clk) {
+for _i: u32 in 0..1 {
+o = a << 4;
+}
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let a = sim.signal("a");
     let o = sim.signal("o");
@@ -71,32 +88,31 @@ fn test_shift_in_for_loop() {
         "shift in for: got {:x}",
         sim.get(o)
     );
-}
 
-// Test 3: if_reset + for + shift (non-self-referencing)
-#[test]
-fn test_shift_ifreset_for() {
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            rst: input  reset_async_high,
-            a: input logic<8>,
-            o: output logic<8>
-        ) {
-            var r: logic<8>;
-            always_ff (clk, rst) {
-                if_reset {
-                    r = 8'h00;
-                } else {
-                    for _i: u32 in 0..1 {
-                        r = a << 1;
-                    }
-                }
-            }
-            assign o = r;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_ifreset_for(sim) {
+        @setup { let code = r#"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+a: input logic<8>,
+o: output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 8'h00;
+} else {
+for _i: u32 in 0..1 {
+r = a << 1;
+}
+}
+}
+assign o = r;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let a = sim.signal("a");
@@ -116,35 +132,34 @@ fn test_shift_ifreset_for() {
         "if_reset+for+shift: got {:x}",
         sim.get(o)
     );
-}
 
-// Test 4: right shift in if_reset
-#[test]
-fn test_right_shift_in_if_reset() {
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            rst: input  reset_async_high,
-            a: input logic<16>,
-            o_shr: output logic<16>,
-            o_shl: output logic<16>
-        ) {
-            var r_shr: logic<16>;
-            var r_shl: logic<16>;
-            always_ff (clk, rst) {
-                if_reset {
-                    r_shr = 0;
-                    r_shl = 0;
-                } else {
-                    r_shr = a >> 4;
-                    r_shl = a << 4;
-                }
-            }
-            assign o_shr = r_shr;
-            assign o_shl = r_shl;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_right_shift_in_if_reset(sim) {
+        @setup { let code = r#"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+a: input logic<16>,
+o_shr: output logic<16>,
+o_shl: output logic<16>
+) {
+var r_shr: logic<16>;
+var r_shl: logic<16>;
+always_ff (clk, rst) {
+if_reset {
+r_shr = 0;
+r_shl = 0;
+} else {
+r_shr = a >> 4;
+r_shl = a << 4;
+}
+}
+assign o_shr = r_shr;
+assign o_shl = r_shl;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let a = sim.signal("a");
@@ -170,31 +185,30 @@ fn test_right_shift_in_if_reset() {
         "left shift in if_reset: got {:x}",
         sim.get(o_shl)
     );
-}
 
-// Test 5: dynamic shift amount in if_reset
-#[test]
-fn test_dynamic_shift_in_if_reset() {
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            rst: input  reset_async_high,
-            a: input logic<16>,
-            sh: input logic<4>,
-            o: output logic<16>
-        ) {
-            var r: logic<16>;
-            always_ff (clk, rst) {
-                if_reset {
-                    r = 0;
-                } else {
-                    r = a << sh;
-                }
-            }
-            assign o = r;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_dynamic_shift_in_if_reset(sim) {
+        @setup { let code = r#"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+a: input logic<16>,
+sh: input logic<4>,
+o: output logic<16>
+) {
+var r: logic<16>;
+always_ff (clk, rst) {
+if_reset {
+r = 0;
+} else {
+r = a << sh;
+}
+}
+assign o = r;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let a = sim.signal("a");
@@ -216,33 +230,32 @@ fn test_dynamic_shift_in_if_reset() {
         "dynamic shift in if_reset: got {:x}",
         sim.get(o)
     );
-}
 
-// Test 6: shift with for loop index (writing to different array elements)
-#[test]
-fn test_shift_to_array_by_loop_index() {
-    let code = r#"
-        module Top (
-            clk: input clock,
-            a: input logic<8>,
-            o0: output logic<8>,
-            o1: output logic<8>,
-            o2: output logic<8>,
-            o3: output logic<8>
-        ) {
-            var arr: logic<8> [4];
-            always_ff (clk) {
-                for i: u32 in 0..4 {
-                    arr[i] = a << i;
-                }
-            }
-            assign o0 = arr[0];
-            assign o1 = arr[1];
-            assign o2 = arr[2];
-            assign o3 = arr[3];
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_to_array_by_loop_index(sim) {
+        @setup { let code = r#"
+module Top (
+clk: input clock,
+a: input logic<8>,
+o0: output logic<8>,
+o1: output logic<8>,
+o2: output logic<8>,
+o3: output logic<8>
+) {
+var arr: logic<8> [4];
+always_ff (clk) {
+for i: u32 in 0..4 {
+arr[i] = a << i;
+}
+}
+assign o0 = arr[0];
+assign o1 = arr[1];
+assign o2 = arr[2];
+assign o3 = arr[3];
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let a = sim.signal("a");
     let o0 = sim.signal("o0");
@@ -255,27 +268,26 @@ fn test_shift_to_array_by_loop_index() {
     assert_eq!(sim.get(o1), BigUint::from(0x02u64), "arr[1] = a << 1");
     assert_eq!(sim.get(o2), BigUint::from(0x04u64), "arr[2] = a << 2");
     assert_eq!(sim.get(o3), BigUint::from(0x08u64), "arr[3] = a << 3");
-}
 
-// Test 7: shift amount wider than value (for loop const is 32-bit)
-#[test]
-fn test_shift_with_wide_const_amount() {
-    // For loop unrolling creates 32-bit const shift amounts.
-    // Ensure the shift result width is determined by the LHS, not widened by the RHS.
-    let code = r#"
-        module Top (
-            clk: input clock,
-            a: input logic<8>,
-            o: output logic<8>
-        ) {
-            always_ff (clk) {
-                for _i: u32 in 0..1 {
-                    o = a << 2;
-                }
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_with_wide_const_amount(sim) {
+        @setup { // For loop unrolling creates 32-bit const shift amounts.
+// Ensure the shift result width is determined by the LHS, not widened by the RHS.
+let code = r#"
+module Top (
+clk: input clock,
+a: input logic<8>,
+o: output logic<8>
+) {
+always_ff (clk) {
+for _i: u32 in 0..1 {
+o = a << 2;
+}
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let a = sim.signal("a");
     let o = sim.signal("o");
@@ -287,4 +299,6 @@ fn test_shift_with_wide_const_amount() {
         "8-bit shift with 32-bit const amount: got {:x}",
         sim.get(o)
     );
+
+    }
 }

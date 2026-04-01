@@ -1,8 +1,14 @@
 use celox::SimulatorBuilder;
 
-#[test]
-fn test_context_determined_width_subtraction() {
-    let code = r#"
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
+all_backends! {
+
+fn test_context_determined_width_subtraction(sim) {
+    @setup { let code = r#"
         module Top (
             o1: output logic<1>,
             o2: output logic<1>
@@ -12,25 +18,8 @@ fn test_context_determined_width_subtraction() {
                 o2 = (2'd0 - 2'd1) == 2'd3;
             }
         }
-    "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_flattened_comb_blocks()
-        .trace_analyzer_ir()
-        .build_with_trace();
-
-    let res = result.res;
-    let trace = result.trace;
-
-    let mut sim = res.expect("Build should succeed");
-    if let Some(air) = trace.analyzer_ir {
-        println!("AIR:\n{}", air);
-    }
-    if let Some((blocks, arena)) = trace.flattened_comb_blocks {
-        for path in blocks {
-            println!("Target: {}", path.target);
-            println!("SLT:\n{}", arena.display(path.expr));
-        }
-    }
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
 
     let o1 = sim.signal("o1");
     let o2 = sim.signal("o2");
@@ -47,9 +36,8 @@ fn test_context_determined_width_subtraction() {
     );
 }
 
-#[test]
-fn test_unsized_constant_width_subtraction() {
-    let code = r#"
+fn test_unsized_constant_width_subtraction(sim) {
+    @setup { let code = r#"
         module Top (
             o: output logic<1>
         ) {
@@ -57,22 +45,8 @@ fn test_unsized_constant_width_subtraction() {
                 o = 2'd0 - 2'd1 == 3;
             }
         }
-    "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_flattened_comb_blocks()
-        .build_with_trace();
-
-    let res = result.res;
-    let trace = result.trace;
-
-    let mut sim = res.expect("Build should succeed");
-
-    if let Some((blocks, arena)) = trace.flattened_comb_blocks {
-        for path in blocks {
-            println!("Target: {}", path.target);
-            println!("SLT:\n{}", arena.display(path.expr));
-        }
-    }
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
 
     let o = sim.signal("o");
 
@@ -82,9 +56,9 @@ fn test_unsized_constant_width_subtraction() {
         "2'd0 - 2'd1 == 3 should be false because unsized value is extended to 32 bits"
     );
 }
-#[test]
-fn test_runtime_variable_width3_subtraction() {
-    let code = r#"
+
+fn test_runtime_variable_width3_subtraction(sim) {
+    @setup { let code = r#"
         module Top (
             i: input logic<2>,
             o: output logic<3>,
@@ -95,25 +69,8 @@ fn test_runtime_variable_width3_subtraction() {
                 c = (i - 2'd1) == 3'd7;
             }
         }
-    "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_flattened_comb_blocks()
-        .trace_analyzer_ir()
-        .build_with_trace();
-
-    let res = result.res;
-    let trace = result.trace;
-
-    let mut sim = res.expect("Build should succeed");
-    if let Some(air) = trace.analyzer_ir {
-        println!("AIR:\n{}", air);
-    }
-    if let Some((blocks, arena)) = trace.flattened_comb_blocks {
-        for path in blocks {
-            println!("Target: {}", path.target);
-            println!("SLT:\n{}", arena.display(path.expr));
-        }
-    }
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
 
     let i = sim.signal("i");
     let o = sim.signal("o");
@@ -137,9 +94,9 @@ fn test_runtime_variable_width3_subtraction() {
     );
     assert_eq!(sim.get(c), 0u8.into(), "(1 - 1) == 3'd7 should be true");
 }
-#[test]
-fn test_runtime_variable_width2_subtraction() {
-    let code = r#"
+
+fn test_runtime_variable_width2_subtraction(sim) {
+    @setup { let code = r#"
         module Top (
             i: input logic<2>,
             o: output logic<2>
@@ -148,22 +105,8 @@ fn test_runtime_variable_width2_subtraction() {
                 o = i - 2'd1;
             }
         }
-    "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_flattened_comb_blocks()
-        .build_with_trace();
-
-    let res = result.res;
-    let trace = result.trace;
-
-    let mut sim = res.expect("Build should succeed");
-
-    if let Some((blocks, arena)) = trace.flattened_comb_blocks {
-        for path in blocks {
-            println!("Target: {}", path.target);
-            println!("SLT:\n{}", arena.display(path.expr));
-        }
-    }
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
 
     let i = sim.signal("i");
     let o = sim.signal("o");
@@ -185,9 +128,8 @@ fn test_runtime_variable_width2_subtraction() {
     );
 }
 
-#[test]
-fn test_comparison_different_widths() {
-    let code = r#"
+fn test_comparison_different_widths(sim) {
+    @setup { let code = r#"
         module Top (
             o: output logic<1>
         ) {
@@ -195,16 +137,14 @@ fn test_comparison_different_widths() {
                 o = 2'd3 == 3'd3;
             }
         }
-    "#;
-    let sim = SimulatorBuilder::new(code, "Top").build();
-    let mut sim = sim.expect("Build should succeed");
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
     let o = sim.signal("o");
     assert_eq!(sim.get(o), 1u8.into(), "2'd3 == 3'd3 should be true");
 }
 
-#[test]
-fn test_addition_different_widths() {
-    let code = r#"
+fn test_addition_different_widths(sim) {
+    @setup { let code = r#"
         module Top (
             o: output logic<4>
         ) {
@@ -212,16 +152,14 @@ fn test_addition_different_widths() {
                 o = 2'd2 + 3'd5;
             }
         }
-    "#;
-    let sim = SimulatorBuilder::new(code, "Top").build();
-    let mut sim = sim.expect("Build should succeed");
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
     let o = sim.signal("o");
     assert_eq!(sim.get(o), 7u8.into(), "2'd2 + 3'd5 should be 7");
 }
 
-#[test]
-fn test_ff_width_propagation() {
-    let code = r#"
+fn test_ff_width_propagation(sim) {
+    @setup { let code = r#"
         module Top (
             clk: input clock,
             rst: input reset,
@@ -236,9 +174,8 @@ fn test_ff_width_propagation() {
                 }
             }
         }
-    "#;
-    let sim = SimulatorBuilder::new(code, "Top").build();
-    let mut sim = sim.expect("Build should succeed");
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
     let i = sim.signal("i");
     let o = sim.signal("o");
     let rst = sim.signal("rst");
@@ -252,9 +189,8 @@ fn test_ff_width_propagation() {
     assert_eq!(sim.get(o), 4u8.into(), "i=2, o=2+2=4");
 }
 
-#[test]
-fn test_zero_extend() {
-    let code = r#"
+fn test_zero_extend(sim) {
+    @setup { let code = r#"
         module Top (
             o: output logic<4>
         ) {
@@ -262,16 +198,14 @@ fn test_zero_extend() {
                 o = 2'd1;
             }
         }
-    "#;
-    let sim = SimulatorBuilder::new(code, "Top").build();
-    let mut sim = sim.expect("Build should succeed");
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
     let o = sim.signal("o");
     assert_eq!(sim.get(o), 1u8.into(), "2'd1 zero-extended to 4 bits");
 }
 
-#[test]
-fn test_nested_width_propagation() {
-    let code = r#"
+fn test_nested_width_propagation(sim) {
+    @setup { let code = r#"
         module Top (
             o: output logic<5>
         ) {
@@ -279,15 +213,14 @@ fn test_nested_width_propagation() {
                 o = (2'd1 + 3'd2) * 2'd2;
             }
         }
-    "#;
-    let sim = SimulatorBuilder::new(code, "Top").build();
-    let mut sim = sim.expect("Build should succeed");
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
     let o = sim.signal("o");
     assert_eq!(sim.get(o), 6u8.into(), "(1+2)*2 = 6, width propagation");
 }
-#[test]
-fn test_runtime_shift_width_behavior() {
-    let code = r#"
+
+fn test_runtime_shift_width_behavior(sim) {
+    @setup { let code = r#"
         module Top (
             i: input  logic<4>,
             s: input  logic<2>,
@@ -298,16 +231,8 @@ fn test_runtime_shift_width_behavior() {
                 o1 = i << s;
             }
         }
-    "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_sim_modules()
-        .trace_post_optimized_sir()
-        .build_with_trace();
-    let res = result.res;
-    let trace = result.trace;
-    let mut sim = res.expect("Build should succeed");
-    println!("{}", trace.format_slt().unwrap());
-    println!("{}", trace.format_post_optimized_sir().unwrap());
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
 
     let i = sim.signal("i");
     let s = sim.signal("s");
@@ -334,9 +259,8 @@ fn test_runtime_shift_width_behavior() {
     assert_eq!(sim.get(o1), 32u8.into());
 }
 
-#[test]
-fn test_runtime_arithmetic_shift_behavior() {
-    let code = r#"
+fn test_runtime_arithmetic_shift_behavior(sim) {
+    @setup { let code = r#"
         module Top (
             i_u: input  logic<4>,
             i_s: input  signed logic<4>,
@@ -351,16 +275,8 @@ fn test_runtime_arithmetic_shift_behavior() {
                 o_a = i_s >>> s;
             }
         }
-    "#;
-    let result = SimulatorBuilder::new(code, "Top")
-        .trace_sim_modules()
-        .trace_post_optimized_sir()
-        .build_with_trace();
-    let res = result.res;
-    let trace = result.trace;
-    let mut sim = res.expect("Build should succeed");
-    println!("{}", trace.format_slt().unwrap());
-    println!("{}", trace.format_post_optimized_sir().unwrap());
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
 
     let i_u = sim.signal("i_u");
     let i_s = sim.signal("i_s");
@@ -380,4 +296,6 @@ fn test_runtime_arithmetic_shift_behavior() {
     assert_eq!(sim.get(o_l), 2u8.into());
     // Arithmetic: 4'sb1000 >>> 2 = 4'sb1110 (14 or -2)
     assert_eq!(sim.get(o_a), 14u8.into());
+}
+
 }

@@ -1,40 +1,41 @@
 use celox::Simulator;
 
-/// Issue #11: `pub module` wrapper causes "PKG doesn't have member lt"
-/// when proto package has no `lt` — the `<:` operator is a builtin comparison,
-/// not a proto package function call.
-///
-/// Uses a combinational circuit to test that `<:` on PKG::Item resolves
-/// correctly to the builtin less-than operator.
-#[test]
-fn test_proto_package_builtin_comparison() {
-    let code = r#"
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
+all_backends! {
+
+    // Issue #11: `pub module` wrapper causes "PKG doesn't have member lt"
+    // when proto package has no `lt` — the `<:` operator is a builtin comparison,
+    // not a proto package function call.
+    //
+    // Uses a combinational circuit to test that `<:` on PKG::Item resolves
+    // correctly to the builtin less-than operator.
+    fn test_proto_package_builtin_comparison(sim) {
+        @setup { let code = r#"
 proto package ItemProto {
-    type Item;
+type Item;
 }
-
 package ItemU16 for ItemProto {
-    type Item = logic<16>;
+type Item = logic<16>;
 }
-
 module Comparator::<PKG: ItemProto> (
-    a    : input  PKG::Item,
-    b    : input  PKG::Item,
-    a_lt : output logic    ,
+a    : input  PKG::Item,
+b    : input  PKG::Item,
+a_lt : output logic    ,
 ) {
-    assign a_lt = a <: b;
+assign a_lt = a <: b;
 }
-
 pub module ComparatorU16 (
-    a    : input  logic<16>,
-    b    : input  logic<16>,
-    a_lt : output logic    ,
+a    : input  logic<16>,
+b    : input  logic<16>,
+a_lt : output logic    ,
 ) {
-    inst c: Comparator::<ItemU16> (a, b, a_lt);
+inst c: Comparator::<ItemU16> (a, b, a_lt);
 }
-    "#;
-
-    let mut sim = Simulator::builder(code, "ComparatorU16").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "ComparatorU16");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let a_lt = sim.signal("a_lt");
@@ -62,49 +63,45 @@ pub module ComparatorU16 (
     })
     .unwrap();
     assert_eq!(sim.get(a_lt), 0u8.into());
-}
 
-/// Positive control: proto package with an explicit `lt` function works correctly.
-/// This confirms that proto package function dispatch is functional.
-#[test]
-fn test_proto_package_with_custom_function() {
-    let code = r#"
-proto package ItemProto {
-    type Item;
-    function lt(
-        a: input Item,
-        b: input Item,
-    ) -> logic;
-}
-
-package ItemU16 for ItemProto {
-    type Item = logic<16>;
-    function lt(
-        a: input Item,
-        b: input Item,
-    ) -> logic {
-        return a <: b;
     }
-}
 
+    // Positive control: proto package with an explicit `lt` function works correctly.
+    // This confirms that proto package function dispatch is functional.
+    fn test_proto_package_with_custom_function(sim) {
+        @setup { let code = r#"
+proto package ItemProto {
+type Item;
+function lt(
+a: input Item,
+b: input Item,
+) -> logic;
+}
+package ItemU16 for ItemProto {
+type Item = logic<16>;
+function lt(
+a: input Item,
+b: input Item,
+) -> logic {
+return a <: b;
+}
+}
 module Comparator::<PKG: ItemProto> (
-    a    : input  PKG::Item,
-    b    : input  PKG::Item,
-    a_lt : output logic    ,
+a    : input  PKG::Item,
+b    : input  PKG::Item,
+a_lt : output logic    ,
 ) {
-    assign a_lt = PKG::lt(a, b);
+assign a_lt = PKG::lt(a, b);
 }
-
 pub module ComparatorU16 (
-    a    : input  logic<16>,
-    b    : input  logic<16>,
-    a_lt : output logic    ,
+a    : input  logic<16>,
+b    : input  logic<16>,
+a_lt : output logic    ,
 ) {
-    inst c: Comparator::<ItemU16> (a, b, a_lt);
+inst c: Comparator::<ItemU16> (a, b, a_lt);
 }
-    "#;
-
-    let mut sim = Simulator::builder(code, "ComparatorU16").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "ComparatorU16");
     let a = sim.signal("a");
     let b = sim.signal("b");
     let a_lt = sim.signal("a_lt");
@@ -132,4 +129,6 @@ pub module ComparatorU16 (
     })
     .unwrap();
     assert_eq!(sim.get(a_lt), 0u8.into());
+
+    }
 }

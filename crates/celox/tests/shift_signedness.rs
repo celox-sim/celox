@@ -2,25 +2,30 @@ use celox::{BigUint, Simulator, SimulatorBuilder};
 use num_traits::Num;
 use std::str::FromStr;
 
-#[test]
-fn test_shift_right_arithmetic_native() {
-    // IEEE 1800-2023 Clause 11.4.10:
-    // "Arithmetic shift right (>>>) ... shall fill the vacated bits at the most significant end
-    // with the value of the sign bit if the expression being shifted is signed."
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            i:   input  i64,
-            o_comb: output i64,
-            o_ff:   output i64
-        ) {
-            assign o_comb = i >>> 1;
-            always_ff (clk) {
-                o_ff = i >>> 1;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
+all_backends! {
+
+    fn test_shift_right_arithmetic_native(sim) {
+        @setup { // IEEE 1800-2023 Clause 11.4.10:
+// "Arithmetic shift right (>>>) ... shall fill the vacated bits at the most significant end
+// with the value of the sign bit if the expression being shifted is signed."
+let code = r#"
+module Top (
+clk: input  clock,
+i:   input  i64,
+o_comb: output i64,
+o_ff:   output i64
+) {
+assign o_comb = i >>> 1;
+always_ff (clk) {
+o_ff = i >>> 1;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let i = sim.signal("i");
     let o_comb = sim.signal("o_comb");
@@ -43,26 +48,26 @@ fn test_shift_right_arithmetic_native() {
         BigUint::from(0xc000_0000_0000_0000u64),
         "FF arithmetic shift failed"
     );
-}
 
-#[test]
-fn test_shift_right_logical_signed_native() {
-    // IEEE 1800-2023 Clause 11.4.10:
-    // "The logical shift operators shall fill the vacated bits with zeros regardless of whether the expression is signed or unsigned."
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            i:   input  i64,
-            o_comb: output i64,
-            o_ff:   output i64
-        ) {
-            assign o_comb = i >> 1;
-            always_ff (clk) {
-                o_ff = i >> 1;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_right_logical_signed_native(sim) {
+        @setup { // IEEE 1800-2023 Clause 11.4.10:
+// "The logical shift operators shall fill the vacated bits with zeros regardless of whether the expression is signed or unsigned."
+let code = r#"
+module Top (
+clk: input  clock,
+i:   input  i64,
+o_comb: output i64,
+o_ff:   output i64
+) {
+assign o_comb = i >> 1;
+always_ff (clk) {
+o_ff = i >> 1;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let i = sim.signal("i");
     let o_comb = sim.signal("o_comb");
@@ -85,25 +90,25 @@ fn test_shift_right_logical_signed_native() {
         BigUint::from(0x4000_0000_0000_0000u64),
         "FF logical shift (signed) failed"
     );
-}
 
-#[test]
-fn test_shift_right_arithmetic_wide() {
-    // Verify 128-bit arithmetic shift
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            i:   input  signed logic<128>,
-            o_comb: output signed logic<128>,
-            o_ff:   output signed logic<128>
-        ) {
-            assign o_comb = i >>> 1;
-            always_ff (clk) {
-                o_ff = i >>> 1;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_right_arithmetic_wide(sim) {
+        @setup { // Verify 128-bit arithmetic shift
+let code = r#"
+module Top (
+clk: input  clock,
+i:   input  signed logic<128>,
+o_comb: output signed logic<128>,
+o_ff:   output signed logic<128>
+) {
+assign o_comb = i >>> 1;
+always_ff (clk) {
+o_ff = i >>> 1;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let i = sim.signal("i");
     let o_comb = sim.signal("o_comb");
@@ -122,20 +127,20 @@ fn test_shift_right_arithmetic_wide() {
     sim.tick(clk).unwrap();
     let result_ff = sim.get(o_ff);
     assert_eq!(result_ff, expected, "FF wide arithmetic shift failed");
-}
 
-#[test]
-fn test_shift_right_logical_wide() {
-    // Verify 128-bit logical shift (should zero-fill even if signed)
-    let code = r#"
-        module Top (
-            i:   input  signed logic<128>,
-            o:   output signed logic<128>
-        ) {
-            assign o = i >> 1;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_right_logical_wide(sim) {
+        @setup { // Verify 128-bit logical shift (should zero-fill even if signed)
+let code = r#"
+module Top (
+i:   input  signed logic<128>,
+o:   output signed logic<128>
+) {
+assign o = i >> 1;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let i = sim.signal("i");
     let o = sim.signal("o");
 
@@ -148,22 +153,22 @@ fn test_shift_right_logical_wide() {
 
     let result = sim.get(o);
     assert_eq!(result, expected, "Wide logical shift failed");
-}
 
-#[test]
-fn test_shift_constant_folding_wide() {
-    let code = r#"
-        module Top (
-            o: output signed logic<128>,
-            o2: output signed logic<128>,
-            o3: output logic<128>
-        ) {
-            assign o = 128'shc000_0000_0000_0000_0000_0000_0000_0000 >>> 1;
-            assign o2 = 128'hc000_0000_0000_0000_0000_0000_0000_0000 >>> 1;
-            assign o3 = 128'shc000_0000_0000_0000_0000_0000_0000_0000 >>> 1;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_shift_constant_folding_wide(sim) {
+        @setup { let code = r#"
+module Top (
+o: output signed logic<128>,
+o2: output signed logic<128>,
+o3: output logic<128>
+) {
+assign o = 128'shc000_0000_0000_0000_0000_0000_0000_0000 >>> 1;
+assign o2 = 128'hc000_0000_0000_0000_0000_0000_0000_0000 >>> 1;
+assign o3 = 128'shc000_0000_0000_0000_0000_0000_0000_0000 >>> 1;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let o = sim.signal("o");
     let o2 = sim.signal("o2");
     let o3 = sim.signal("o3");
@@ -185,10 +190,13 @@ fn test_shift_constant_folding_wide() {
         expected3,
         "Wide arithmetic constant folding failed"
     );
+
+    }
 }
 
 #[test]
 fn test_shift_constant_folding_native() {
+
     let code = r#"
         module Top (
             o: output signed logic<64>,
@@ -227,4 +235,5 @@ fn test_shift_constant_folding_native() {
         expected3,
         "Native arithmetic constant folding failed"
     );
+
 }

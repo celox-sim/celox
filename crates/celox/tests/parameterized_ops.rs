@@ -1,6 +1,11 @@
 use celox::{BigUint, IOContext, Simulator};
 use test_case::test_case;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
 // ---------------------------------------------------------------------------
 // Helper: combinational binary operator  (assign o = a {op} b)
 // ---------------------------------------------------------------------------

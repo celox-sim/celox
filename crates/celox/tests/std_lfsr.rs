@@ -1,6 +1,10 @@
 use celox::Simulator;
 use std::collections::HashSet;
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 const LFSR_SRC: &str =
     include_str!("../../../deps/veryl/crates/std/veryl/src/lfsr/lfsr_galois.veryl");
 
@@ -25,18 +29,19 @@ module Top (
 }
 "#;
 
-/// Basic LFSR: seed then shift, verify output changes
-///
-/// NOTE: Veryl analyzer has a bug where generate-if `TAPVEC[K]` bit-index
-/// conditions are always evaluated as true, so all bit positions get XOR taps
-/// instead of only the ones specified by the tap vector. This makes the LFSR
-/// cycle length incorrect (9 instead of 255 for SIZE=8). These tests verify
-/// the simulation mechanics (seed, shift, hold) but not LFSR correctness.
-#[test]
-#[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
-fn test_lfsr_basic_shift() {
-    let code = format!("{LFSR_SRC}\n{TOP}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+all_backends! {
+
+    // Basic LFSR: seed then shift, verify output changes
+    //
+    // NOTE: Veryl analyzer has a bug where generate-if `TAPVEC[K]` bit-index
+    // conditions are always evaluated as true, so all bit positions get XOR taps
+    // instead of only the ones specified by the tap vector. This makes the LFSR
+    // cycle length incorrect (9 instead of 255 for SIZE=8). These tests verify
+    // the simulation mechanics (seed, shift, hold) but not LFSR correctness.
+    #[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
+    fn test_lfsr_basic_shift(sim) {
+        @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_en = sim.signal("i_en");
@@ -82,14 +87,14 @@ fn test_lfsr_basic_shift() {
     // Values should not all be the same
     let unique: HashSet<u8> = values.iter().copied().collect();
     assert!(unique.len() > 1, "LFSR should produce varying outputs");
-}
 
-/// Cycle detection: LFSR should produce a deterministic repeating cycle
-#[test]
-#[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
-fn test_lfsr_deterministic_cycle() {
-    let code = format!("{LFSR_SRC}\n{TOP}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+    }
+
+    // Cycle detection: LFSR should produce a deterministic repeating cycle
+    #[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
+    fn test_lfsr_deterministic_cycle(sim) {
+        @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_en = sim.signal("i_en");
@@ -148,14 +153,14 @@ fn test_lfsr_deterministic_cycle() {
             "cycle should repeat at offset {i}"
         );
     }
-}
 
-/// LFSR disabled (i_en=0) should hold its value
-#[test]
-#[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
-fn test_lfsr_enable_hold() {
-    let code = format!("{LFSR_SRC}\n{TOP}");
-    let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+    }
+
+    // LFSR disabled (i_en=0) should hold its value
+    #[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
+    fn test_lfsr_enable_hold(sim) {
+        @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
+        @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_en = sim.signal("i_en");
@@ -198,5 +203,7 @@ fn test_lfsr_enable_hold() {
             val_before,
             "LFSR should hold when disabled"
         );
+    }
+
     }
 }

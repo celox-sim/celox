@@ -1,27 +1,52 @@
-//! Tests for memory-backed wide shift operations (>= 256-bit / 4 chunks).
-//!
-//! The translator uses a memory-backed path (stack slots with O(1) dynamic
-//! indexing) for shift/sar when the operand width is >= MEM_SHIFT_THRESHOLD
-//! (4 chunks = 256 bits). These tests ensure correctness of that path.
-
 use celox::{BigUint, Simulator};
+
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
+// Tests for memory-backed wide shift operations (>= 256-bit / 4 chunks).
+//
+// The translator uses a memory-backed path (stack slots with O(1) dynamic
+// indexing) for shift/sar when the operand width is >= MEM_SHIFT_THRESHOLD
+// (4 chunks = 256 bits). These tests ensure correctness of that path.
 
 // ============================================================
 // 256-bit shifts (exactly at threshold: 4 chunks)
 // ============================================================
 
-#[test]
-fn test_256bit_shift_left_by_zero() {
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<9>,
-            o:   output logic<256>
-        ) {
-            assign o = a << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+// ============================================================
+// 512-bit shifts (8 chunks, well above threshold)
+// ============================================================
+
+// ============================================================
+// 512-bit shifts in always_ff (through clock edge)
+// ============================================================
+
+// ============================================================
+// 1024-bit shifts (16 chunks)
+// ============================================================
+
+// ============================================================
+// Edge cases
+// ============================================================
+
+// ============================================================
+// Narrow source, wide destination (OOB regression)
+// ============================================================
+
+all_backends! {
+
+    fn test_256bit_shift_left_by_zero(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -34,20 +59,20 @@ fn test_256bit_shift_left_by_zero() {
     })
     .unwrap();
     assert_eq!(sim.get(o), val, "256-bit shl by 0 should be identity");
-}
 
-#[test]
-fn test_256bit_shift_left_within_chunk() {
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<9>,
-            o:   output logic<256>
-        ) {
-            assign o = a << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_256bit_shift_left_within_chunk(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -64,20 +89,20 @@ fn test_256bit_shift_left_within_chunk() {
         BigUint::from(0xFF0u64),
         "256-bit shl by 4 failed"
     );
-}
 
-#[test]
-fn test_256bit_shift_left_exact_chunk_boundary() {
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<9>,
-            o:   output logic<256>
-        ) {
-            assign o = a << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_256bit_shift_left_exact_chunk_boundary(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -110,20 +135,20 @@ fn test_256bit_shift_left_exact_chunk_boundary() {
         BigUint::from(1u64) << 192,
         "256-bit shl by 192 should move value to chunk 3"
     );
-}
 
-#[test]
-fn test_256bit_shift_left_cross_chunk() {
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<9>,
-            o:   output logic<256>
-        ) {
-            assign o = a << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_256bit_shift_left_cross_chunk(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -140,20 +165,20 @@ fn test_256bit_shift_left_cross_chunk() {
         BigUint::from(0xFFFF_FFFFu64) << 48,
         "256-bit shl by 48 should cross chunk boundary"
     );
-}
 
-#[test]
-fn test_256bit_shift_left_overflow() {
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<9>,
-            o:   output logic<256>
-        ) {
-            assign o = a << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_256bit_shift_left_overflow(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -170,20 +195,20 @@ fn test_256bit_shift_left_overflow() {
         BigUint::from(0u64),
         "256-bit shl by 256 should produce zero"
     );
-}
 
-#[test]
-fn test_256bit_shift_right_logical() {
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<9>,
-            o:   output logic<256>
-        ) {
-            assign o = a >> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_256bit_shift_right_logical(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a >> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -214,20 +239,20 @@ fn test_256bit_shift_right_logical() {
         expected_cross,
         "256-bit shr by 4 (cross-chunk) failed"
     );
-}
 
-#[test]
-fn test_256bit_arithmetic_shift_right() {
-    let code = r#"
-        module Top (
-            a:   input  signed logic<256>,
-            amt: input  logic<9>,
-            o:   output signed logic<256>
-        ) {
-            assign o = a >>> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_256bit_arithmetic_shift_right(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  signed logic<256>,
+amt: input  logic<9>,
+o:   output signed logic<256>
+) {
+assign o = a >>> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -267,24 +292,20 @@ fn test_256bit_arithmetic_shift_right() {
     })
     .unwrap();
     assert_eq!(sim.get(o), neg_one, "256-bit sar of -2 by 1 should be -1");
+
+    }
+
+    fn test_512bit_shift_left(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = a << amt;
 }
-
-// ============================================================
-// 512-bit shifts (8 chunks, well above threshold)
-// ============================================================
-
-#[test]
-fn test_512bit_shift_left() {
-    let code = r#"
-        module Top (
-            a:   input  logic<512>,
-            amt: input  logic<10>,
-            o:   output logic<512>
-        ) {
-            assign o = a << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -301,20 +322,20 @@ fn test_512bit_shift_left() {
         let expected = &one << shift as usize;
         assert_eq!(sim.get(o), expected, "512-bit shl of 1 by {shift} failed");
     }
-}
 
-#[test]
-fn test_512bit_shift_right() {
-    let code = r#"
-        module Top (
-            a:   input  logic<512>,
-            amt: input  logic<10>,
-            o:   output logic<512>
-        ) {
-            assign o = a >> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_512bit_shift_right(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = a >> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -330,20 +351,20 @@ fn test_512bit_shift_right() {
         let expected = &msb >> shift as usize;
         assert_eq!(sim.get(o), expected, "512-bit shr of MSB by {shift} failed");
     }
-}
 
-#[test]
-fn test_512bit_arithmetic_shift_right() {
-    let code = r#"
-        module Top (
-            a:   input  signed logic<512>,
-            amt: input  logic<10>,
-            o:   output signed logic<512>
-        ) {
-            assign o = a >>> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_512bit_arithmetic_shift_right(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  signed logic<512>,
+amt: input  logic<10>,
+o:   output signed logic<512>
+) {
+assign o = a >>> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -379,20 +400,20 @@ fn test_512bit_arithmetic_shift_right() {
         expected,
         "512-bit sar of MIN_VALUE by 1 should sign-extend"
     );
-}
 
-#[test]
-fn test_512bit_shift_left_multiword_pattern() {
-    let code = r#"
-        module Top (
-            a:   input  logic<512>,
-            amt: input  logic<10>,
-            o:   output logic<512>
-        ) {
-            assign o = a << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_512bit_shift_left_multiword_pattern(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = a << amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -425,27 +446,23 @@ fn test_512bit_shift_left_multiword_pattern() {
         expected,
         "512-bit shl of multi-word pattern by 65 failed"
     );
+
+    }
+
+    fn test_512bit_shift_left_ff(sim) {
+        @setup { let code = r#"
+module Top (
+clk: input  clock,
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+always_ff {
+o = a << amt;
 }
-
-// ============================================================
-// 512-bit shifts in always_ff (through clock edge)
-// ============================================================
-
-#[test]
-fn test_512bit_shift_left_ff() {
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            a:   input  logic<512>,
-            amt: input  logic<10>,
-            o:   output logic<512>
-        ) {
-            always_ff {
-                o = a << amt;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
@@ -467,23 +484,23 @@ fn test_512bit_shift_left_ff() {
         expected,
         "512-bit shl by 200 in always_ff failed"
     );
-}
 
-#[test]
-fn test_512bit_sar_ff() {
-    let code = r#"
-        module Top (
-            clk: input  clock,
-            a:   input  signed logic<512>,
-            amt: input  logic<10>,
-            o:   output signed logic<512>
-        ) {
-            always_ff {
-                o = a >>> amt;
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_512bit_sar_ff(sim) {
+        @setup { let code = r#"
+module Top (
+clk: input  clock,
+a:   input  signed logic<512>,
+amt: input  logic<10>,
+o:   output signed logic<512>
+) {
+always_ff {
+o = a >>> amt;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
@@ -502,24 +519,20 @@ fn test_512bit_sar_ff() {
         neg_one,
         "512-bit sar of -1 by 200 in always_ff should remain -1"
     );
+
+    }
+
+    fn test_1024bit_shift_left(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<1024>,
+amt: input  logic<11>,
+o:   output logic<1024>
+) {
+assign o = a << amt;
 }
-
-// ============================================================
-// 1024-bit shifts (16 chunks)
-// ============================================================
-
-#[test]
-fn test_1024bit_shift_left() {
-    let code = r#"
-        module Top (
-            a:   input  logic<1024>,
-            amt: input  logic<11>,
-            o:   output logic<1024>
-        ) {
-            assign o = a << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -537,20 +550,20 @@ fn test_1024bit_shift_left() {
         let expected = (&one << shift as usize) & &mask;
         assert_eq!(sim.get(o), expected, "1024-bit shl of 1 by {shift} failed");
     }
-}
 
-#[test]
-fn test_1024bit_shift_right() {
-    let code = r#"
-        module Top (
-            a:   input  logic<1024>,
-            amt: input  logic<11>,
-            o:   output logic<1024>
-        ) {
-            assign o = a >> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_1024bit_shift_right(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<1024>,
+amt: input  logic<11>,
+o:   output logic<1024>
+) {
+assign o = a >> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -570,20 +583,20 @@ fn test_1024bit_shift_right() {
             "1024-bit shr of MSB by {shift} failed"
         );
     }
-}
 
-#[test]
-fn test_1024bit_sar_sign_extension() {
-    let code = r#"
-        module Top (
-            a:   input  signed logic<1024>,
-            amt: input  logic<11>,
-            o:   output signed logic<1024>
-        ) {
-            assign o = a >>> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_1024bit_sar_sign_extension(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  signed logic<1024>,
+amt: input  logic<11>,
+o:   output signed logic<1024>
+) {
+assign o = a >>> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -601,23 +614,19 @@ fn test_1024bit_sar_sign_extension() {
         all_ones,
         "1024-bit sar of -1 by 512 should remain -1"
     );
+
+    }
+
+    fn test_256bit_all_ones_shift_left_one(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<256>,
+o:   output logic<256>
+) {
+assign o = a << 1;
 }
-
-// ============================================================
-// Edge cases
-// ============================================================
-
-#[test]
-fn test_256bit_all_ones_shift_left_one() {
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            o:   output logic<256>
-        ) {
-            assign o = a << 1;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let o = sim.signal("o");
 
@@ -627,20 +636,20 @@ fn test_256bit_all_ones_shift_left_one() {
     // (all_ones << 1) & mask = all_ones - 1 (MSB lost, LSB becomes 0)
     let expected = (&all_ones << 1usize) & &mask;
     assert_eq!(sim.get(o), expected, "256-bit shl of all-ones by 1 failed");
-}
 
-#[test]
-fn test_512bit_shift_right_complete_overflow() {
-    let code = r#"
-        module Top (
-            a:   input  logic<512>,
-            amt: input  logic<10>,
-            o:   output logic<512>
-        ) {
-            assign o = a >> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_512bit_shift_right_complete_overflow(sim) {
+        @setup { let code = r#"
+module Top (
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = a >> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -657,21 +666,21 @@ fn test_512bit_shift_right_complete_overflow() {
         BigUint::from(0u64),
         "512-bit shr by 512 should produce zero"
     );
-}
 
-#[test]
-fn test_256bit_shift_right_cross_chunk() {
-    // Test that bits correctly flow between chunks during right shift
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<9>,
-            o:   output logic<256>
-        ) {
-            assign o = a >> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_256bit_shift_right_cross_chunk(sim) {
+        @setup { // Test that bits correctly flow between chunks during right shift
+let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a >> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -689,31 +698,27 @@ fn test_256bit_shift_right_cross_chunk() {
         expected,
         "256-bit shr of cross-chunk value by 8 failed"
     );
+
+    }
+
+    // Regression test: when lhs is narrower than dst, the memory-backed source
+    // slot must be zero-padded to num_chunks (= common_logical_width / 64).
+    // Without padding, load_or_default reads uninitialised memory beyond the
+    // source slot, producing garbage in the upper chunks.
+    fn test_narrow_source_wide_dest_shift_left(sim) {
+        @setup { // dst is 512-bit (8 chunks), lhs is 256-bit (4 chunks).
+// common_logical_width = max(512, 256, 64) = 512 → num_chunks = 8.
+// Source slot must be 8 chunks with chunks 4..7 zeroed.
+let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = (a as 512) << amt;
 }
-
-// ============================================================
-// Narrow source, wide destination (OOB regression)
-// ============================================================
-
-/// Regression test: when lhs is narrower than dst, the memory-backed source
-/// slot must be zero-padded to num_chunks (= common_logical_width / 64).
-/// Without padding, load_or_default reads uninitialised memory beyond the
-/// source slot, producing garbage in the upper chunks.
-#[test]
-fn test_narrow_source_wide_dest_shift_left() {
-    // dst is 512-bit (8 chunks), lhs is 256-bit (4 chunks).
-    // common_logical_width = max(512, 256, 64) = 512 → num_chunks = 8.
-    // Source slot must be 8 chunks with chunks 4..7 zeroed.
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<10>,
-            o:   output logic<512>
-        ) {
-            assign o = (a as 512) << amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -742,22 +747,22 @@ fn test_narrow_source_wide_dest_shift_left() {
     sim.modify(|io| io.set(amt, 300u16)).unwrap();
     let expected = (&val << 300usize) & &mask_512;
     assert_eq!(sim.get(o), expected, "Narrow→wide shl by 300 failed");
-}
 
-#[test]
-fn test_narrow_source_wide_dest_shift_right() {
-    // dst is 512-bit, lhs is 256-bit (cast up).
-    // Right-shifting should see zeros in the upper chunks, not garbage.
-    let code = r#"
-        module Top (
-            a:   input  logic<256>,
-            amt: input  logic<10>,
-            o:   output logic<512>
-        ) {
-            assign o = (a as 512) >> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_narrow_source_wide_dest_shift_right(sim) {
+        @setup { // dst is 512-bit, lhs is 256-bit (cast up).
+// Right-shifting should see zeros in the upper chunks, not garbage.
+let code = r#"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = (a as 512) >> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -775,22 +780,22 @@ fn test_narrow_source_wide_dest_shift_right() {
         expected,
         "Narrow→wide shr by 1: upper bits should stay zero"
     );
-}
 
-#[test]
-fn test_narrow_source_wide_dest_sar() {
-    // 512-bit signed sar where source is a wide input.
-    // The source slot for the 512-bit operand must be fully initialised.
-    let code = r#"
-        module Top (
-            a:   input  signed logic<512>,
-            amt: input  logic<10>,
-            o:   output signed logic<512>
-        ) {
-            assign o = a >>> amt;
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    }
+
+    fn test_narrow_source_wide_dest_sar(sim) {
+        @setup { // 512-bit signed sar where source is a wide input.
+// The source slot for the 512-bit operand must be fully initialised.
+let code = r#"
+module Top (
+a:   input  signed logic<512>,
+amt: input  logic<10>,
+o:   output signed logic<512>
+) {
+assign o = a >>> amt;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let amt = sim.signal("amt");
     let o = sim.signal("o");
@@ -808,4 +813,6 @@ fn test_narrow_source_wide_dest_sar() {
         &val >> 4usize,
         "512-bit sar of small positive value should zero-fill"
     );
+
+    }
 }

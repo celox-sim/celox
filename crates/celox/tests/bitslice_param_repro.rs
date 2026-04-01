@@ -1,6 +1,11 @@
+use celox::{Simulator, SimulatorBuilder};
+
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+mod test_utils;
+
 /// Reproduction for parametric bit-slice bug:
 /// `w_buf[N_CH - 1:0]` with N_CH=4 resolves to [1:0] instead of [3:0].
-use celox::{Simulator, SimulatorBuilder};
 
 const AXI_LITE_REG_FILE: &str = include_str!("fixtures/bitslice/axi_lite_reg_file.veryl");
 
@@ -115,8 +120,73 @@ fn axl_read(sim: &mut Simulator, addr: u32) -> u32 {
     val as u32
 }
 
+all_backends! {
+
+    fn fill_one_literal_multi_branch(sim) {
+        @setup { // Verify '1 fill-literal: unwritten bits should be 1, not 0.
+let code = r#"
+module Top (
+sel: input logic<2>,
+a: input logic,
+b: input logic,
+data: input logic<4>,
+out: output logic<32>,
+) {
+always_comb {
+out = '1;
+if sel == 2'b00 {
+out[0] = a;
+out[1] = b;
+} else if sel == 2'b01 {
+out[0] = b;
+out[1] = a;
+} else if sel == 2'b10 {
+out[3:0] = data;
+}
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let data = sim.signal("data");
+    let out = sim.signal("out");
+
+    // sel=0: out[0]=a=0, out[1]=b=0, upper bits should be all-1
+    sim.modify(|io| {
+        io.set(sel, 0u8);
+        io.set(a, 0u8);
+        io.set(b, 0u8);
+        io.set(data, 0u8);
+    })
+    .unwrap();
+    let val: u64 = sim.get(out).try_into().unwrap();
+    eprintln!("  sel=00, a=0, b=0 → out=0x{:08x}", val);
+    assert_eq!(
+        val, 0xFFFF_FFFC,
+        "sel=00: upper bits should be 1, got 0x{:08x}",
+        val
+    );
+
+    // sel=2: out[3:0]=data=0b0101, upper bits should be all-1
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(a, 0u8);
+        io.set(b, 0u8);
+        io.set(data, 0b0101u8);
+    })
+    .unwrap();
+    let val: u64 = sim.get(out).try_into().unwrap();
+    eprintln!("  sel=10, data=0b0101 → out=0x{:08x}", val);
+    assert_eq!(val, 0xFFFF_FFF5, "sel=10: got 0x{:08x}", val);
+
+    }
+}
+
 #[test]
 fn axi_lite_reg_file_req_last_vec() {
+
     let mut sim = create_dut();
     let reg_req_last_vec = sim.signal("reg_req_last_vec");
 
@@ -147,10 +217,12 @@ fn axi_lite_reg_file_req_last_vec() {
             got & 0xf,
         );
     }
+
 }
 
 #[test]
 fn parametric_bitslice_multi_branch() {
+
     // Simplified version of AxiLiteRegFile's read path
     let code = r#"
         module Top #(
@@ -225,10 +297,12 @@ fn parametric_bitslice_multi_branch() {
             val & 0xf,
         );
     }
+
 }
 
 #[test]
 fn hardcoded_bitslice_multi_branch() {
+
     // Three branches: two write individual bits, third writes a range
     let code = r#"
         module Top (
@@ -286,71 +360,12 @@ fn hardcoded_bitslice_multi_branch() {
             val & 0xf,
         );
     }
-}
 
-#[test]
-fn fill_one_literal_multi_branch() {
-    // Verify '1 fill-literal: unwritten bits should be 1, not 0.
-    let code = r#"
-        module Top (
-            sel: input logic<2>,
-            a: input logic,
-            b: input logic,
-            data: input logic<4>,
-            out: output logic<32>,
-        ) {
-            always_comb {
-                out = '1;
-                if sel == 2'b00 {
-                    out[0] = a;
-                    out[1] = b;
-                } else if sel == 2'b01 {
-                    out[0] = b;
-                    out[1] = a;
-                } else if sel == 2'b10 {
-                    out[3:0] = data;
-                }
-            }
-        }
-    "#;
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
-    let sel = sim.signal("sel");
-    let a = sim.signal("a");
-    let b = sim.signal("b");
-    let data = sim.signal("data");
-    let out = sim.signal("out");
-
-    // sel=0: out[0]=a=0, out[1]=b=0, upper bits should be all-1
-    sim.modify(|io| {
-        io.set(sel, 0u8);
-        io.set(a, 0u8);
-        io.set(b, 0u8);
-        io.set(data, 0u8);
-    })
-    .unwrap();
-    let val: u64 = sim.get(out).try_into().unwrap();
-    eprintln!("  sel=00, a=0, b=0 → out=0x{:08x}", val);
-    assert_eq!(
-        val, 0xFFFF_FFFC,
-        "sel=00: upper bits should be 1, got 0x{:08x}",
-        val
-    );
-
-    // sel=2: out[3:0]=data=0b0101, upper bits should be all-1
-    sim.modify(|io| {
-        io.set(sel, 2u8);
-        io.set(a, 0u8);
-        io.set(b, 0u8);
-        io.set(data, 0b0101u8);
-    })
-    .unwrap();
-    let val: u64 = sim.get(out).try_into().unwrap();
-    eprintln!("  sel=10, data=0b0101 → out=0x{:08x}", val);
-    assert_eq!(val, 0xFFFF_FFF5, "sel=10: got 0x{:08x}", val);
 }
 
 #[test]
 fn hardcoded_bitslice_trace() {
+
     let code = r#"
         module Top (
             sel: input logic<2>,
@@ -380,4 +395,5 @@ fn hardcoded_bitslice_trace() {
         .build_with_trace();
     let output = trace.trace.format_program().unwrap();
     eprintln!("{}", output);
+
 }
