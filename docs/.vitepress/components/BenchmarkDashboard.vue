@@ -81,6 +81,11 @@ function stdlibSections(cards: ChartCard[]): TabSection[] {
     "Countones (W=64)": [],
     "std::counter (W=32)": [],
     "std::gray_counter (W=32)": [],
+    "std::fifo (W=8, D=16)": [],
+    "std::gray_codec (W=32)": [],
+    "std::edge_detector (W=32)": [],
+    "std::onehot (W=64)": [],
+    "std::lfsr_galois (S=32)": [],
   };
 
   for (const card of cards) {
@@ -90,8 +95,18 @@ function stdlibSections(cards: ChartCard[]): TabSection[] {
       groups["Countones (W=64)"].push(card);
     } else if (card.benchName.includes("gray_counter")) {
       groups["std::gray_counter (W=32)"].push(card);
+    } else if (card.benchName.includes("gray_codec")) {
+      groups["std::gray_codec (W=32)"].push(card);
     } else if (card.benchName.includes("std_counter")) {
       groups["std::counter (W=32)"].push(card);
+    } else if (card.benchName.includes("fifo")) {
+      groups["std::fifo (W=8, D=16)"].push(card);
+    } else if (card.benchName.includes("edge_detector")) {
+      groups["std::edge_detector (W=32)"].push(card);
+    } else if (card.benchName.includes("onehot")) {
+      groups["std::onehot (W=64)"].push(card);
+    } else if (card.benchName.includes("lfsr")) {
+      groups["std::lfsr_galois (S=32)"].push(card);
     }
   }
 
@@ -138,7 +153,7 @@ const tabs: TabDef[] = [
     key: "stdlib",
     label: "Std Library",
     match: (n) =>
-      /linear_sec|countones|std_counter|gray_counter/.test(n),
+      /linear_sec|countones|std_counter|gray_counter|gray_codec|fifo|edge_detector|onehot|lfsr/.test(n),
     sections: stdlibSections,
   },
   {
@@ -232,6 +247,11 @@ function formatChartTitle(benchName: string): string {
   s = s.replace(/^countones_w64_/, "");
   s = s.replace(/^std_counter_w32_/, "");
   s = s.replace(/^std_gray_counter_w32_/, "");
+  s = s.replace(/^fifo_w8_d16_/, "");
+  s = s.replace(/^gray_codec_w32_/, "");
+  s = s.replace(/^edge_detector_w32_/, "");
+  s = s.replace(/^onehot_w64_/, "");
+  s = s.replace(/^lfsr_w32_/, "");
   // Strip counter workload identifiers
   s = s.replace(/_top_n1000/, "");
   // Strip optimize prefix patterns
