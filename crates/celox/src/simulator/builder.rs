@@ -620,6 +620,23 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         Ok(sim)
     }
 
+    /// Compiles using the Wasmtime WASM backend.
+    pub fn build_wasm(
+        self,
+    ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
+        let (program, warnings, options, vcd_path) = self.into_sir()?;
+        let backend = crate::backend::wasm_runtime::WasmBackend::new(&program, &options)?;
+        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+        if let Some(path) = vcd_path {
+            let descs = sim.build_vcd_descs(options.four_state);
+            let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+            sim.vcd_writer = Some(vcd_writer);
+        }
+        sim.modify(|_| {}).map_err(SimulatorError::from)?;
+        Ok(sim)
+    }
+
     /// Compiles and runs a native testbench (`#[test]` module).
     pub fn run_test(self) -> Result<crate::testbench::TestResult, SimulatorError> {
         let mut sim = self.build_native()?;
@@ -632,6 +649,22 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         tb_builder.build_event_map(&initial_stmts);
         let tb_stmts = tb_builder.convert(&initial_stmts);
         Ok(crate::testbench::run_testbench(&mut sim, &tb_stmts))
+    }
+
+    /// Compiles and runs a native testbench, collecting all assertion results.
+    pub fn run_test_detailed(
+        self,
+    ) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
+        let mut sim = self.build_native()?;
+        let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
+            SimulatorError::new(SimulatorErrorKind::Codegen(
+                "no initial block found — this module is not a native testbench".into(),
+            ))
+        })?;
+        let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
+        tb_builder.build_event_map(&initial_stmts);
+        let tb_stmts = tb_builder.convert(&initial_stmts);
+        Ok(crate::testbench::run_testbench_detailed(&mut sim, &tb_stmts))
     }
 
     /// Compiles the Veryl source and constructs the core logic simulator,

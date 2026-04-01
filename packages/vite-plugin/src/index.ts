@@ -101,17 +101,38 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				? { deadStorePolicy: dsePolicy }
 				: undefined;
 
-			// Build ESM exports for each module in this file
-			const exports = moduleNames
-				.map((name) => {
-					const mod = data.modules.find((m) => m.moduleName === name);
-					if (!mod) return "";
-					return generateEsmExport(mod, data.projectPath, defaultOptions);
-				})
-				.filter((s) => s.length > 0)
-				.join("\n\n");
+			// Partition into regular and test modules
+			const regularModules: string[] = [];
+			const testModules: string[] = [];
+			for (const name of moduleNames) {
+				const mod = data.modules.find((m) => m.moduleName === name);
+				if (!mod) continue;
+				if (mod.isTest) {
+					testModules.push(name);
+				} else {
+					regularModules.push(name);
+				}
+			}
 
-			return exports;
+			const parts: string[] = [];
+
+			// Build ESM exports for regular (non-test) modules
+			for (const name of regularModules) {
+				const mod = data.modules.find((m) => m.moduleName === name);
+				if (!mod) continue;
+				const code = generateEsmExport(mod, data.projectPath, defaultOptions);
+				if (code.length > 0) parts.push(code);
+			}
+
+			// Generate vitest test code for test modules (only in test mode)
+			if (
+				testModules.length > 0 &&
+				(process.env.VITEST === "true" || process.env.NODE_ENV === "test")
+			) {
+				parts.push(generateTestCode(testModules, data.projectPath));
+			}
+
+			return parts.join("\n\n") || "export {};";
 		},
 
 		handleHotUpdate({ file }) {
@@ -195,4 +216,45 @@ function generateEsmExport(
   ports: ${portsJson},
   events: ${eventsJson},${defaultOptsLine}
 };`;
+}
+
+/**
+ * Generate vitest test code for native testbench modules.
+ *
+ * Each `#[test]` module becomes a single `test()` case that runs the
+ * testbench via NAPI and reports all assertion results.
+ */
+function generateTestCode(
+	testModuleNames: string[],
+	projectPath: string,
+): string {
+	const lines: string[] = [
+		`import { test, expect } from "vitest";`,
+		`import { loadNativeAddon } from "@celox-sim/celox";`,
+		``,
+		`const __addon = loadNativeAddon();`,
+		``,
+	];
+
+	for (const name of testModuleNames) {
+		lines.push(`test(${JSON.stringify(name)}, () => {`);
+		lines.push(
+			`  const __result = __addon.runTestFromProject(${JSON.stringify(projectPath)}, ${JSON.stringify(name)});`,
+		);
+		lines.push(`  for (const __a of __result.assertions) {`);
+		lines.push(`    if (!__a.passed) {`);
+		lines.push(
+			`      const __loc = __a.file ? \` (\${__a.file}:\${__a.line}:\${__a.column})\` : "";`,
+		);
+		lines.push(
+			`      expect.soft(__a.passed, (__a.message ?? "assertion failed") + __loc).toBe(true);`,
+		);
+		lines.push(`    }`);
+		lines.push(`  }`);
+		lines.push(`  expect(__result.passed).toBe(true);`);
+		lines.push(`});`);
+		lines.push(``);
+	}
+
+	return lines.join("\n");
 }

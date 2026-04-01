@@ -36,7 +36,9 @@ export function generateSidecars(
 
 		const modules = moduleNames
 			.map((name) => data.modules.find((m) => m.moduleName === name))
-			.filter((m) => m !== undefined);
+			.filter(
+				(m): m is NonNullable<typeof m> => m !== undefined && !m.isTest,
+			);
 
 		if (modules.length === 0) continue;
 

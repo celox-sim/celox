@@ -129,6 +129,19 @@ export interface NapiSourceFile {
 	path: string;
 }
 
+export interface NapiAssertionResult {
+	passed: boolean;
+	message?: string;
+	file?: string;
+	line?: number;
+	column?: number;
+}
+
+export interface NapiTestResult {
+	passed: boolean;
+	assertions: NapiAssertionResult[];
+}
+
 export interface RawNapiAddon {
 	NativeSimulatorHandle: {
 		new (
@@ -156,6 +169,16 @@ export interface RawNapiAddon {
 	};
 	genTs(projectPath: string): string;
 	clearJitCache(): void;
+	runTest(
+		sources: NapiSourceFile[],
+		top: string,
+		options?: NapiOptions,
+	): NapiTestResult;
+	runTestFromProject(
+		projectPath: string,
+		top: string,
+		options?: NapiOptions,
+	): NapiTestResult;
 }
 
 // ---------------------------------------------------------------------------

@@ -1741,6 +1741,115 @@ pub fn clear_jit_cache() {
 #[napi]
 pub fn clear_jit_cache() {}
 
+// ---------------------------------------------------------------------------
+//  Native testbench execution
+// ---------------------------------------------------------------------------
+
+/// Result of a single `$assert` evaluation in a native testbench.
+#[cfg(not(target_arch = "wasm32"))]
+#[napi(object)]
+pub struct NapiAssertionResult {
+    pub passed: bool,
+    pub message: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+/// Detailed result of running a native testbench.
+#[cfg(not(target_arch = "wasm32"))]
+#[napi(object)]
+pub struct NapiTestResult {
+    pub passed: bool,
+    pub assertions: Vec<NapiAssertionResult>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn convert_test_result(r: celox::TestResultDetailed) -> NapiTestResult {
+    NapiTestResult {
+        passed: r.passed,
+        assertions: r
+            .assertions
+            .into_iter()
+            .map(|a| {
+                let (file, line, column) = match a.location {
+                    Some(loc) => (Some(loc.file), Some(loc.line), Some(loc.column)),
+                    None => (None, None, None),
+                };
+                NapiAssertionResult {
+                    passed: a.passed,
+                    message: a.message,
+                    file,
+                    line,
+                    column,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Run a native testbench from Veryl source code.
+///
+/// Compiles the given sources and runs the `#[test]` module specified by `top`,
+/// collecting all assertion results.
+#[cfg(not(target_arch = "wasm32"))]
+#[napi]
+pub fn run_test(
+    sources: Vec<NapiSourceFile>,
+    top: String,
+    options: Option<NapiOptions>,
+) -> Result<NapiTestResult> {
+    let opts = parse_options(&options)?;
+    let mut src_pairs: Vec<(String, std::path::PathBuf)> = sources
+        .into_iter()
+        .map(|s| (s.content, std::path::PathBuf::from(s.path)))
+        .collect();
+    append_extra_source(&mut src_pairs, &opts.extra_source);
+
+    let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        .iter()
+        .map(|(s, p)| (s.as_str(), p.as_path()))
+        .collect();
+    let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
+    let result = builder
+        .run_test_detailed()
+        .map_err(|e| Error::from_reason(format!("{e}")))?;
+    Ok(convert_test_result(result))
+}
+
+/// Run a native testbench from a Veryl project directory.
+///
+/// Searches upward from `project_path` for `Veryl.toml`, gathers all
+/// `.veryl` source files, and runs the `#[test]` module specified by `top`.
+#[cfg(not(target_arch = "wasm32"))]
+#[napi]
+pub fn run_test_from_project(
+    project_path: String,
+    top: String,
+    options: Option<NapiOptions>,
+) -> Result<NapiTestResult> {
+    let opts = parse_options(&options)?;
+    let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+    append_extra_source(&mut sources, &opts.extra_source);
+
+    let source_refs: Vec<(&str, &std::path::Path)> = sources
+        .iter()
+        .map(|(s, p)| (s.as_str(), p.as_path()))
+        .collect();
+    let builder = apply_options(
+        celox::Simulator::from_sources(source_refs, &top).with_metadata(metadata),
+        &opts,
+    );
+    let result = builder
+        .run_test_detailed()
+        .map_err(|e| Error::from_reason(format!("{e}")))?;
+    Ok(convert_test_result(result))
+}
+
+// ---------------------------------------------------------------------------
+//  TypeScript type generation
+// ---------------------------------------------------------------------------
+
 /// Generate TypeScript type information as JSON for a Veryl project.
 ///
 /// Equivalent to running `celox-gen-ts --json` from the given project directory.
@@ -1889,6 +1998,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
                 ports: m.ports,
                 events: m.events,
                 instances: m.instances,
+                is_test: m.is_test,
             });
         }
     }
@@ -2034,6 +2144,7 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
                 ports: m.ports,
                 events: m.events,
                 instances: m.instances,
+                is_test: m.is_test,
             });
         }
     }

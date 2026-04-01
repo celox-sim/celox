@@ -13,6 +13,8 @@ export interface GenTsModule {
 	readonly mdContent: string;
 	readonly ports: Record<string, GenTsPortInfo>;
 	readonly events: readonly string[];
+	/** Whether this module is a native testbench (`#[test]` module). */
+	readonly isTest: boolean;
 }
 
 /** Port metadata from the generator. */

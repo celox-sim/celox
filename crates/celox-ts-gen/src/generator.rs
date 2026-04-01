@@ -14,6 +14,8 @@ pub struct GeneratedModule {
     pub ports: HashMap<String, JsonPortInfo>,
     pub events: Vec<String>,
     pub instances: Vec<JsonInstanceInfo>,
+    /// Whether this module is a native testbench (`#[test]` module with `initial` block).
+    pub is_test: bool,
 }
 
 /// JSON-serializable port information for `--json` output.
@@ -83,6 +85,8 @@ pub struct JsonModuleEntry {
     pub ports: HashMap<String, JsonPortInfo>,
     pub events: Vec<String>,
     pub instances: Vec<JsonInstanceInfo>,
+    /// Whether this module is a native testbench (`#[test]` module with `initial` block).
+    pub is_test: bool,
 }
 
 /// JSON-serializable instance information for `--json` output.
@@ -382,6 +386,12 @@ pub fn generate_all(ir: &Ir, source_files: &[&str]) -> Vec<GeneratedModule> {
             continue;
         }
 
+        // Detect native testbench modules (have `initial` blocks).
+        let is_test = module
+            .declarations
+            .iter()
+            .any(|d| matches!(d, Declaration::Initial(_)));
+
         let ports = extract_ports(module);
         let instances = extract_instances(module);
 
@@ -407,6 +417,7 @@ pub fn generate_all(ir: &Ir, source_files: &[&str]) -> Vec<GeneratedModule> {
             ports: json_ports,
             events,
             instances: json_instances,
+            is_test,
         });
     }
 

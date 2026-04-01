@@ -101,6 +101,8 @@ pub use simulator::render_diagnostic;
 pub use simulator::{InstanceHierarchy, NamedEvent, NamedSignal};
 #[cfg(not(target_arch = "wasm32"))]
 pub use testbench::TestResult;
+#[cfg(not(target_arch = "wasm32"))]
+pub use testbench::{AssertionResult, SourceLocation, TestResultDetailed};
 pub use veryl_metadata::{ClockType, ResetType};
 
 // Re-exports needed for wasm32 builds

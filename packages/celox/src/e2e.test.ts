@@ -16,6 +16,7 @@ import {
 	loadNativeAddon,
 	parseNapiLayout,
 	parseSignalPath,
+	type NapiTestResult,
 	type RawNapiAddon,
 	type RawNapiSimulatorHandle,
 } from "./napi-helpers.js";
@@ -2685,5 +2686,97 @@ describe("E2E: non-byte-aligned unpacked array port", () => {
 		}
 
 		sim.dispose();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Native testbench (run_test / run_test_detailed)
+// ---------------------------------------------------------------------------
+
+const TB_COUNTER_SOURCE = `
+module Counter_tb (
+    clk: input  clock    ,
+    rst: input  reset    ,
+    cnt: output logic<32>,
+) {
+    always_ff {
+        if_reset {
+            cnt = 0;
+        } else {
+            cnt += 1;
+        }
+    }
+}
+`;
+
+const TB_PASS_SOURCE = `
+${TB_COUNTER_SOURCE}
+#[test(t)]
+module CounterTbPass {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen;
+    var cnt: logic<32>;
+    inst dut: Counter_tb (clk, rst, cnt);
+    initial {
+        rst.assert(clk);
+        clk.next  (10);
+        $assert   (cnt == 32'd10);
+        $finish   ();
+    }
+}
+`;
+
+const TB_FAIL_SOURCE = `
+${TB_COUNTER_SOURCE}
+#[test(t)]
+module CounterTbFail {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen;
+    var cnt: logic<32>;
+    inst dut: Counter_tb (clk, rst, cnt);
+    initial {
+        rst.assert(clk);
+        clk.next  (5);
+        $assert   (cnt == 32'd99);
+        $assert   (cnt == 32'd5);
+        $finish   ();
+    }
+}
+`;
+
+describe("E2E: native testbench (runTest)", () => {
+	const addon = loadNativeAddon();
+
+	test("passing testbench returns passed=true with all assertions passed", () => {
+		const result: NapiTestResult = addon.runTest(
+			[{ content: TB_PASS_SOURCE, path: "test.veryl" }],
+			"CounterTbPass",
+		);
+		expect(result.passed).toBe(true);
+		expect(result.assertions.length).toBe(1);
+		expect(result.assertions[0]!.passed).toBe(true);
+	});
+
+	test("failing testbench returns passed=false and collects all assertions", () => {
+		const result: NapiTestResult = addon.runTest(
+			[{ content: TB_FAIL_SOURCE, path: "test.veryl" }],
+			"CounterTbFail",
+		);
+		expect(result.passed).toBe(false);
+		// Both assertions are collected (not stopped at first failure)
+		expect(result.assertions.length).toBe(2);
+		expect(result.assertions[0]!.passed).toBe(false);
+		expect(result.assertions[1]!.passed).toBe(true);
+	});
+
+	test("assertion results include source location", () => {
+		const result: NapiTestResult = addon.runTest(
+			[{ content: TB_PASS_SOURCE, path: "test.veryl" }],
+			"CounterTbPass",
+		);
+		const a = result.assertions[0]!;
+		expect(a.file).toBeDefined();
+		expect(a.line).toBeGreaterThan(0);
+		expect(a.column).toBeGreaterThan(0);
 	});
 });
