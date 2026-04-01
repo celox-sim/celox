@@ -566,7 +566,7 @@ export class WaveformViewer {
 	private tickInterval(): number {
 		const minPx = 60;
 		const raw = minPx / this.pxPerUnit;
-		const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+		const mag = 10 ** Math.floor(Math.log10(raw));
 		const norm = raw / mag;
 		const nice = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
 		return Math.max(1, nice * mag);
@@ -595,8 +595,7 @@ export class WaveformViewer {
 		if (e.ctrlKey || e.metaKey) {
 			const rect = this.canvas.getBoundingClientRect();
 			const mouseX = e.clientX - rect.left;
-			const tAtMouse =
-				(mouseX - NAME_WIDTH + this.scrollX) / this.pxPerUnit;
+			const tAtMouse = (mouseX - NAME_WIDTH + this.scrollX) / this.pxPerUnit;
 			const factor = e.deltaY > 0 ? 0.8 : 1.25;
 			this.pxPerUnit = Math.max(0.1, Math.min(100, this.pxPerUnit * factor));
 			this.scrollX = tAtMouse * this.pxPerUnit - (mouseX - NAME_WIDTH);
@@ -610,10 +609,7 @@ export class WaveformViewer {
 					this.trace.signals.length * ROW_HEIGHT -
 						(this.container.clientHeight - RULER_HEIGHT),
 				);
-				this.scrollY = Math.max(
-					0,
-					Math.min(maxY, this.scrollY + e.deltaY),
-				);
+				this.scrollY = Math.max(0, Math.min(maxY, this.scrollY + e.deltaY));
 			}
 		}
 		this.render();

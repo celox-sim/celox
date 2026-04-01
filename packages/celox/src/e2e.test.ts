@@ -1895,10 +1895,11 @@ describe("E2E: celox.toml test sources", () => {
 		// but celox.toml excludes it via `exclude = ["test_veryl/Excluded.veryl"]`.
 		// If exclude works, fromProject succeeds (the broken file is skipped).
 		// If exclude is broken, the parse error will cause an exception.
-		const sim = Simulator.fromProject<{ rst: bigint; d: bigint; readonly q: bigint }>(
-			CELOX_TOML_PROJECT,
-			"Reg",
-		);
+		const sim = Simulator.fromProject<{
+			rst: bigint;
+			d: bigint;
+			readonly q: bigint;
+		}>(CELOX_TOML_PROJECT, "Reg");
 		sim.dut.rst = 1n;
 		sim.dut.d = 42n;
 		sim.tick();

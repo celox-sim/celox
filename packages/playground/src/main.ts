@@ -1,12 +1,5 @@
 import { chai, JestAsymmetricMatchers, JestChaiExpect } from "@vitest/expect";
 import * as monaco from "monaco-editor";
-import {
-	WaveformViewer,
-	generateVcdText,
-	type VcdSignalInfo,
-	type VcdSnapshot,
-	type VcdTrace,
-} from "./waveform-viewer.js";
 import celoxDutDts from "../../celox/dist/dut.d.ts?raw";
 import celoxIndexDts from "../../celox/dist/index.d.ts?raw";
 import celoxNapiBridgeDts from "../../celox/dist/napi-bridge.d.ts?raw";
@@ -16,6 +9,13 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 // Import real .d.ts files from @celox-sim/celox for Monaco type injection
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
+import {
+	generateVcdText,
+	type VcdSignalInfo,
+	type VcdSnapshot,
+	type VcdTrace,
+	WaveformViewer,
+} from "./waveform-viewer.js";
 
 // ── Examples ────────────────────────────────────────────
 
@@ -584,7 +584,9 @@ for (const t of rightTabs) {
 const waveformViewer = new WaveformViewer(
 	document.getElementById("waveform-container")!,
 );
-const wvTraceSelectEl = document.getElementById("wv-trace-select") as HTMLSelectElement;
+const wvTraceSelectEl = document.getElementById(
+	"wv-trace-select",
+) as HTMLSelectElement;
 
 // Per-test VCD traces collected during a run
 let vcdTraces: { label: string; trace: VcdTrace }[] = [];
@@ -597,7 +599,10 @@ let vcdSnapshots: VcdSnapshot[] = [];
 /** Flush accumulated snapshots into a named trace entry. */
 function flushVcdTrace(label: string) {
 	if (vcdSnapshots.length > 0) {
-		vcdTraces.push({ label, trace: { signals: [...vcdSignals], snapshots: vcdSnapshots } });
+		vcdTraces.push({
+			label,
+			trace: { signals: [...vcdSignals], snapshots: vcdSnapshots },
+		});
 		vcdSnapshots = [];
 	}
 	// Keep vcdSignals — signals are the same across tests for the same module
@@ -611,10 +616,18 @@ function showVcdTrace(index: number) {
 	wvTraceSelectEl.value = String(index);
 }
 
-document.getElementById("wv-zoom-in")!.addEventListener("click", () => waveformViewer.zoomIn());
-document.getElementById("wv-zoom-out")!.addEventListener("click", () => waveformViewer.zoomOut());
-document.getElementById("wv-fit")!.addEventListener("click", () => waveformViewer.fit());
-wvTraceSelectEl.addEventListener("change", () => showVcdTrace(Number(wvTraceSelectEl.value)));
+document
+	.getElementById("wv-zoom-in")!
+	.addEventListener("click", () => waveformViewer.zoomIn());
+document
+	.getElementById("wv-zoom-out")!
+	.addEventListener("click", () => waveformViewer.zoomOut());
+document
+	.getElementById("wv-fit")!
+	.addEventListener("click", () => waveformViewer.fit());
+wvTraceSelectEl.addEventListener("change", () =>
+	showVcdTrace(Number(wvTraceSelectEl.value)),
+);
 document.getElementById("wv-download")!.addEventListener("click", () => {
 	if (!currentVcdTrace) return;
 	const text = generateVcdText(currentVcdTrace);
@@ -716,7 +729,8 @@ function removeFile(path: string) {
 	// If the closed tab was active, switch to an adjacent one
 	if (activeFilePath === path) {
 		const remaining = [...files.keys()];
-		activeFilePath = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+		activeFilePath =
+			remaining.length > 0 ? remaining[remaining.length - 1] : null;
 		if (activeFilePath) {
 			const next = files.get(activeFilePath)!;
 			editor.setModel(next.model);
@@ -1441,7 +1455,9 @@ async function run() {
 							vcdSignals.push({ name, width: sig.width });
 						}
 					}
-					if (dirty) { evalComb(); }
+					if (dirty) {
+						evalComb();
+					}
 					const values: bigint[] = [];
 					for (const sig of Object.values(layout)) {
 						let v = 0n;
@@ -2002,7 +2018,10 @@ async function run() {
 			}
 			showVcdTrace(0);
 
-			const totalSnaps = vcdTraces.reduce((s, t) => s + t.trace.snapshots.length, 0);
+			const totalSnaps = vcdTraces.reduce(
+				(s, t) => s + t.trace.snapshots.length,
+				0,
+			);
 			wvBadgeEl.textContent = `${vcdTraces.length}`;
 			wvBadgeEl.classList.add("visible");
 			appendConsole(
