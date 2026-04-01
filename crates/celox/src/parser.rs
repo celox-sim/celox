@@ -276,7 +276,7 @@ pub fn parse_ir<'a>(
                 return Err(ParserError::unsupported(
                     LoweringPhase::SimulatorParser,
                     "systemverilog component",
-                    format!("name: {:?}", sv.name),
+                    format!("name: \"{}\"", sv.name),
                     None,
                 ));
             }

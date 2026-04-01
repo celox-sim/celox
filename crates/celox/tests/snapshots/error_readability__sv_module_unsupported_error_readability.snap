@@ -4,4 +4,4 @@ expression: err
 ---
 unsupported_simulator_parser
 
-  × Unsupported in simulator parser: systemverilog module instantiation (name: StrId(287))
+  × Unsupported in simulator parser: systemverilog module instantiation (name: "delay")

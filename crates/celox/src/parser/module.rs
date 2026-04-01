@@ -83,7 +83,7 @@ impl<'a> ModuleParser<'a> {
             return Err(ParserError::unsupported(
                 LoweringPhase::SimulatorParser,
                 "systemverilog module instantiation",
-                format!("name: {:?}", system_verilog.name),
+                format!("name: \"{}\"", system_verilog.name),
                 None,
             ));
         }
