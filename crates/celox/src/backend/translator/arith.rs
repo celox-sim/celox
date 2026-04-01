@@ -1108,7 +1108,18 @@ impl SIRTranslator {
             let res_v = match op {
                 UnaryOp::Minus => state.builder.ins().ineg(r),
                 UnaryOp::Ident => r,
-                UnaryOp::BitNot => state.builder.ins().bnot(r),
+                UnaryOp::BitNot => {
+                    let notted = state.builder.ins().bnot(r);
+                    // Width-mask: bnot flips ALL bits in the physical type (e.g., i8 = 8 bits),
+                    // but only d_width bits are logically valid.
+                    let phys_bits = common_ty.bits() as usize;
+                    if d_width < phys_bits {
+                        let mask = ((1u64 << d_width) - 1) as i64;
+                        state.builder.ins().band_imm(notted, mask)
+                    } else {
+                        notted
+                    }
+                }
 
                 UnaryOp::LogicNot => {
                     let zero = state.builder.ins().iconst(common_ty, 0);
@@ -1405,8 +1416,9 @@ impl SIRTranslator {
     ) {
         let d_width = state.register_map[dst].width();
         let cond_raw = state.regs[cond].first_value(&mut state.builder);
-        // Extend cond to i64 before broadcast
-        let cond_v = cast_type(state.builder, cond_raw, types::I64);
+        // Mask cond to 1-bit (SLT may produce multi-bit cond via Concat)
+        let cond_i64 = cast_type(state.builder, cond_raw, types::I64);
+        let cond_v = state.builder.ins().band_imm(cond_i64, 1);
 
         // Broadcast 1-bit cond to i64: 0 - cond
         let zero = state.builder.ins().iconst(types::I64, 0);

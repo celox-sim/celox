@@ -562,11 +562,14 @@ fn lower_instruction(
             // In 4-state mode, the Mux mask is computed separately: masks are selected
             // (not computed via Binary mask rules), preserving Z through the select.
             let d_width = ctx.sir_width(dst);
-            let cond_vreg = if ctx.wide_regs.contains_key(cond) {
+            let cond_raw = if ctx.wide_regs.contains_key(cond) {
                 ctx.get_wide_chunks(cond, block)[0].0
             } else {
                 ctx.reg_map.get(*cond)
             };
+            // Mask cond to 1-bit (SLT may produce multi-bit cond via Concat)
+            let cond_vreg = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, cond_vreg, cond_raw, 1);
 
             if d_width > 64 {
                 // Wide Mux: select per chunk
