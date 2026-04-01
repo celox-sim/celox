@@ -110,6 +110,9 @@ pub struct Program {
     pub num_events: usize,
     /// Maps reset AbsoluteAddr → clock AbsoluteAddr (from FfDeclaration).
     pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    /// Memory layout aliases: non-canonical → canonical address.
+    /// Variables with identity Store→Load roundtrips share physical memory.
+    pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
 }
 impl Program {
     pub fn get_addr(

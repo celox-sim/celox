@@ -641,6 +641,7 @@ pub(crate) fn flatten(
             arena: SLTNodeArena::new(),
             num_events: 0,
             reset_clock_map: HashMap::default(),
+            address_aliases: HashMap::default(),
         };
         let mut target_arena = SLTNodeArena::new();
         ParserError::Scheduler(e.map_addr(&global_arena, &mut target_arena, &|addr| {
@@ -721,6 +722,7 @@ pub(crate) fn flatten(
         arena: global_arena,
         num_events,
         reset_clock_map,
+        address_aliases: HashMap::default(),
     };
 
     // --- Trigger Injection ---

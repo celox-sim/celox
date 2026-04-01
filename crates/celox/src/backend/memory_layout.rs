@@ -1,5 +1,5 @@
 use crate::HashMap;
-use crate::ir::{AbsoluteAddr, Program};
+use crate::ir::{AbsoluteAddr, Program, SIRInstruction};
 
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {
@@ -110,6 +110,27 @@ impl MemoryLayout {
         let scratch_base_offset = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
         let merged_total_size = (scratch_base_offset + scratch_bytes + 7) & !7;
 
+        // Apply address aliases: aliased variables share the canonical's offset.
+        // Only alias when:
+        // - Both variables have the same 4-state mode
+        // - Alias width fits within canonical width
+        // - Neither address is used in FF execution units (FF timing requires separate storage)
+        let ff_addrs = collect_ff_addresses(program);
+        for (alias_addr, canonical_addr) in &program.address_aliases {
+            let same_4state = is_4states.get(alias_addr) == is_4states.get(canonical_addr);
+            let alias_fits = widths
+                .get(alias_addr)
+                .zip(widths.get(canonical_addr))
+                .is_some_and(|(&aw, &cw)| aw <= cw);
+            let not_in_ff =
+                !ff_addrs.contains(alias_addr) && !ff_addrs.contains(canonical_addr);
+            if same_4state && alias_fits && not_in_ff {
+                if let Some(&canonical_offset) = offsets.get(canonical_addr) {
+                    offsets.insert(*alias_addr, canonical_offset);
+                }
+            }
+        }
+
         Self {
             offsets,
             widths,
@@ -124,6 +145,35 @@ impl MemoryLayout {
             scratch_size: scratch_bytes,
         }
     }
+}
+
+/// Collect all absolute addresses referenced in FF execution units.
+fn collect_ff_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
+    let mut addrs = crate::HashSet::default();
+    let ff_eus = program
+        .eval_apply_ffs
+        .values()
+        .flat_map(|v| v.iter())
+        .chain(program.eval_only_ffs.values().flat_map(|v| v.iter()))
+        .chain(program.apply_ffs.values().flat_map(|v| v.iter()));
+    for eu in ff_eus {
+        for block in eu.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    SIRInstruction::Load(_, addr, _, _)
+                    | SIRInstruction::Store(addr, _, _, _, _) => {
+                        addrs.insert(addr.absolute_addr());
+                    }
+                    SIRInstruction::Commit(src, dst, _, _, _) => {
+                        addrs.insert(src.absolute_addr());
+                        addrs.insert(dst.absolute_addr());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    addrs
 }
 
 pub fn get_byte_size(width: usize) -> usize {

@@ -23,6 +23,7 @@ mod pass_split_coalesced_stores;
 mod pass_split_wide_commits;
 mod pass_store_load_forwarding;
 pub(crate) mod pass_tail_call_split;
+mod pass_identity_store_bypass;
 mod pass_vectorize_concat;
 mod pass_xor_chain_folding;
 mod shared;
@@ -253,6 +254,18 @@ fn optimize_with_options(
     }
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
+    }
+
+    // Identity Store bypass: detect Store(B, identity_copy_from_A), remove it,
+    // and register B→A alias for memory layout sharing.
+    let identity_pass = pass_identity_store_bypass::IdentityStoreBypassPass::new();
+    for eu in &mut program.eval_comb {
+        pass_manager::ExecutionUnitPass::run(&identity_pass, eu, &options);
+    }
+    let identity_aliases = identity_pass.aliases.into_inner();
+    if !identity_aliases.is_empty() {
+        // Store alias candidates in program for memory layout validation
+        program.address_aliases.extend(identity_aliases);
     }
 
     // 5. Tail-call chain splitting for eval_comb.
