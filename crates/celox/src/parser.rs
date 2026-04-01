@@ -643,6 +643,7 @@ pub(crate) fn flatten(
             reset_clock_map: HashMap::default(),
             address_aliases: HashMap::default(),
             layout: None,
+            initial_statements: None,
         };
         let mut target_arena = SLTNodeArena::new();
         ParserError::Scheduler(e.map_addr(&global_arena, &mut target_arena, &|addr| {
@@ -704,6 +705,17 @@ pub(crate) fn flatten(
         (HashMap::default(), HashMap::default())
     };
 
+    // Extract initial block statements from root module (for native testbenches)
+    let initial_statements = module_ir.get(root_id).and_then(|root_module| {
+        let mut stmts = Vec::new();
+        for decl in &root_module.declarations {
+            if let Declaration::Initial(init_decl) = decl {
+                stmts.extend(init_decl.statements.iter().cloned());
+            }
+        }
+        if stmts.is_empty() { None } else { Some(stmts) }
+    });
+
     let num_events = topological_clocks.len();
     let (mod_vars, mod_path_idx) = module_variables(module_ir, config)?;
     let program = Program {
@@ -725,6 +737,7 @@ pub(crate) fn flatten(
         reset_clock_map,
         address_aliases: HashMap::default(),
         layout: None,
+        initial_statements,
     };
 
     // --- Trigger Injection ---

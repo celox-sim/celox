@@ -11,6 +11,8 @@ pub(crate) mod portable;
 mod scheduler;
 pub(crate) mod serde_helpers;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod testbench;
+#[cfg(not(target_arch = "wasm32"))]
 mod simulation;
 mod simulator;
 pub(crate) mod timing;
@@ -97,6 +99,8 @@ pub use simulator::SimulatorOptions;
 pub use simulator::render_diagnostic;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::{InstanceHierarchy, NamedEvent, NamedSignal};
+#[cfg(not(target_arch = "wasm32"))]
+pub use testbench::TestResult;
 pub use veryl_metadata::{ClockType, ResetType};
 
 // Re-exports needed for wasm32 builds

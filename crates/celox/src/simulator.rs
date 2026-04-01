@@ -94,6 +94,11 @@ impl<B: SimBackend> Simulator<B> {
         &self.program
     }
 
+    /// Returns a reference to the backend (for signal/event resolution).
+    pub fn backend_ref(&self) -> &B {
+        &self.backend
+    }
+
     /// Returns analyzer warnings emitted during compilation.
     pub fn warnings(&self) -> &[veryl_analyzer::AnalyzerError] {
         &self.warnings

@@ -87,7 +87,7 @@ pub enum EvalCombPlan {
     MemorySpilled(crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Program {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
@@ -115,7 +115,18 @@ pub struct Program {
     pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
     /// Pre-computed memory layout. Built after optimization, before backend codegen.
     pub layout: Option<crate::backend::MemoryLayout>,
+    /// Initial block statements from the top-level module (for native testbenches).
+    pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
 }
+
+impl fmt::Debug for Program {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Program")
+            .field("num_events", &self.num_events)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Program {
     /// Build and store the memory layout. Also removes identity Stores for
     /// validated aliases and runs DCE to clean up dead instruction chains.

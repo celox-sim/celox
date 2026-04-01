@@ -620,6 +620,20 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         Ok(sim)
     }
 
+    /// Compiles and runs a native testbench (`#[test]` module).
+    pub fn run_test(self) -> Result<crate::testbench::TestResult, SimulatorError> {
+        let mut sim = self.build_native()?;
+        let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
+            SimulatorError::new(SimulatorErrorKind::Codegen(
+                "no initial block found — this module is not a native testbench".into(),
+            ))
+        })?;
+        let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
+        tb_builder.build_event_map(&initial_stmts);
+        let tb_stmts = tb_builder.convert(&initial_stmts);
+        Ok(crate::testbench::run_testbench(&mut sim, &tb_stmts))
+    }
+
     /// Compiles the Veryl source and constructs the core logic simulator,
     /// while capturing compilation trace data as configured by TraceOptions.
     pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
