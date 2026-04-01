@@ -218,8 +218,8 @@ fn test_parametric_interface_array() {
         }
     }
 
-    module Top::<T: type = u8> (
-        bus: modport Bus::<T>::consumer [2],
+    module Top (
+        bus: modport Bus::<u8>::consumer [2],
         out: output u8,
     ) {
         assign out = bus.data[0] + bus.data[1];
