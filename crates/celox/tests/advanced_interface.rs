@@ -253,3 +253,123 @@ fn test_parametric_interface_array() {
     assert_eq!(bus_data.signal.width, 16, "bus.data total signal width");
     assert_eq!(bus_valid.signal.width, 2, "bus.valid total signal width");
 }
+
+/// Transitive generics: type parameter flows through interface → child module → top.
+///
+/// Tests that generic type parameters are correctly propagated across multiple
+/// levels of the module hierarchy (a pattern that has been buggy in the past).
+#[test]
+fn test_transitive_generics() {
+    let code = r#"
+    interface DataBus::<T: type> {
+        var data: T;
+        modport source {
+            data: output,
+        }
+        modport sink {
+            data: input,
+        }
+    }
+
+    // Inner module: receives generic interface, adds 1
+    module Adder::<T: type> (
+        inp: modport DataBus::<T>::sink,
+        out: modport DataBus::<T>::source,
+    ) {
+        assign out.data = inp.data + 1 as T;
+    }
+
+    // Top: instantiates Adder with concrete u16, chains two stages
+    module Top (
+        i_val:  input  logic<16>,
+        o_val:  output logic<16>,
+    ) {
+        inst a_bus: DataBus::<u16>;
+        inst b_bus: DataBus::<u16>;
+
+        always_comb {
+            a_bus.data = i_val;
+        }
+
+        inst u_add1: Adder::<u16> (
+            inp: a_bus,
+            out: b_bus,
+        );
+
+        assign o_val = b_bus.data;
+    }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let i_val = sim.signal("i_val");
+    let o_val = sim.signal("o_val");
+
+    // 0 + 1 = 1
+    sim.modify(|io| io.set(i_val, 0u16)).unwrap();
+    assert_eq!(sim.get_as::<u16>(o_val), 1);
+
+    // 100 + 1 = 101
+    sim.modify(|io| io.set(i_val, 100u16)).unwrap();
+    assert_eq!(sim.get_as::<u16>(o_val), 101);
+
+    // 0xFFFF + 1 = 0 (wrap)
+    sim.modify(|io| io.set(i_val, 0xFFFFu16)).unwrap();
+    assert_eq!(sim.get_as::<u16>(o_val), 0, "u16 should wrap around");
+}
+
+/// Two-level transitive generics: Top → Mid::<T> → Leaf::<T>, all with concrete type at Top.
+#[test]
+fn test_transitive_generics_two_level() {
+    let code = r#"
+    module Leaf::<T: type> (
+        i_a: input T,
+        i_b: input T,
+        o_sum: output T,
+    ) {
+        assign o_sum = i_a + i_b;
+    }
+
+    module Mid::<T: type> (
+        i_x: input T,
+        i_y: input T,
+        o_z: output T,
+    ) {
+        inst u_leaf: Leaf::<T> (
+            i_a: i_x,
+            i_b: i_y,
+            o_sum: o_z,
+        );
+    }
+
+    module Top (
+        i_a: input  logic<8>,
+        i_b: input  logic<8>,
+        o_c: output logic<8>,
+    ) {
+        inst u_mid: Mid::<u8> (
+            i_x: i_a,
+            i_y: i_b,
+            o_z: o_c,
+        );
+    }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let i_a = sim.signal("i_a");
+    let i_b = sim.signal("i_b");
+    let o_c = sim.signal("o_c");
+
+    sim.modify(|io| {
+        io.set(i_a, 10u8);
+        io.set(i_b, 20u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(o_c), 30);
+
+    sim.modify(|io| {
+        io.set(i_a, 200u8);
+        io.set(i_b, 100u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(o_c), 44, "u8 wrap: 200+100=300→44");
+}
