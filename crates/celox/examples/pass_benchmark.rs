@@ -180,7 +180,10 @@ fn main() {
         ("split_wide_commits", SirPass::SplitWideCommits),
         ("commit_sinking", SirPass::CommitSinking),
         ("inline_commit_forwarding", SirPass::InlineCommitForwarding),
-        ("eliminate_dead_working_stores", SirPass::EliminateDeadWorkingStores),
+        (
+            "eliminate_dead_working_stores",
+            SirPass::EliminateDeadWorkingStores,
+        ),
         ("reschedule", SirPass::Reschedule),
     ];
 
@@ -256,10 +259,35 @@ fn main() {
         ("−slf", vec![SirPass::StoreLoadForwarding]),
         ("−hcbl", vec![SirPass::HoistCommonBranchLoads]),
         ("−icf", vec![SirPass::InlineCommitForwarding]),
-        ("−slf −hcbl", vec![SirPass::StoreLoadForwarding, SirPass::HoistCommonBranchLoads]),
-        ("−slf −icf", vec![SirPass::StoreLoadForwarding, SirPass::InlineCommitForwarding]),
-        ("−hcbl −icf", vec![SirPass::HoistCommonBranchLoads, SirPass::InlineCommitForwarding]),
-        ("−slf −hcbl −icf", vec![SirPass::StoreLoadForwarding, SirPass::HoistCommonBranchLoads, SirPass::InlineCommitForwarding]),
+        (
+            "−slf −hcbl",
+            vec![
+                SirPass::StoreLoadForwarding,
+                SirPass::HoistCommonBranchLoads,
+            ],
+        ),
+        (
+            "−slf −icf",
+            vec![
+                SirPass::StoreLoadForwarding,
+                SirPass::InlineCommitForwarding,
+            ],
+        ),
+        (
+            "−hcbl −icf",
+            vec![
+                SirPass::HoistCommonBranchLoads,
+                SirPass::InlineCommitForwarding,
+            ],
+        ),
+        (
+            "−slf −hcbl −icf",
+            vec![
+                SirPass::StoreLoadForwarding,
+                SirPass::HoistCommonBranchLoads,
+                SirPass::InlineCommitForwarding,
+            ],
+        ),
     ];
 
     for (design_name, code, top, sim_label, sim_count, is_seq) in [
@@ -400,39 +428,40 @@ fn main() {
     // ================================================================
     println!("# Part 4: Proposed new defaults\n");
 
-    let disable_three = vec![SirPass::StoreLoadForwarding, SirPass::HoistCommonBranchLoads, SirPass::InlineCommitForwarding];
+    let disable_three = vec![
+        SirPass::StoreLoadForwarding,
+        SirPass::HoistCommonBranchLoads,
+        SirPass::InlineCommitForwarding,
+    ];
     let proposals: Vec<(&str, Box<dyn Fn(&mut Config)>)> = vec![
         ("current defaults (all on)", Box::new(|_: &mut Config| {})),
-        (
-            "−slf −hcbl −icf (SIRT only)",
-            {
-                let d = disable_three.clone();
-                Box::new(move |c: &mut Config| {
-                    for &p in &d { c.opt = c.opt.clone().disable(p); }
-                })
-            },
-        ),
-        (
-            "−slf −hcbl −icf + verifier=false",
-            {
-                let d = disable_three.clone();
-                Box::new(move |c: &mut Config| {
-                    for &p in &d { c.opt = c.opt.clone().disable(p); }
-                    c.cl.enable_verifier = false;
-                })
-            },
-        ),
-        (
-            "−slf −hcbl −icf + alias=false + verifier=false",
-            {
-                let d = disable_three.clone();
-                Box::new(move |c: &mut Config| {
-                    for &p in &d { c.opt = c.opt.clone().disable(p); }
-                    c.cl.enable_alias_analysis = false;
-                    c.cl.enable_verifier = false;
-                })
-            },
-        ),
+        ("−slf −hcbl −icf (SIRT only)", {
+            let d = disable_three.clone();
+            Box::new(move |c: &mut Config| {
+                for &p in &d {
+                    c.opt = c.opt.clone().disable(p);
+                }
+            })
+        }),
+        ("−slf −hcbl −icf + verifier=false", {
+            let d = disable_three.clone();
+            Box::new(move |c: &mut Config| {
+                for &p in &d {
+                    c.opt = c.opt.clone().disable(p);
+                }
+                c.cl.enable_verifier = false;
+            })
+        }),
+        ("−slf −hcbl −icf + alias=false + verifier=false", {
+            let d = disable_three.clone();
+            Box::new(move |c: &mut Config| {
+                for &p in &d {
+                    c.opt = c.opt.clone().disable(p);
+                }
+                c.cl.enable_alias_analysis = false;
+                c.cl.enable_verifier = false;
+            })
+        }),
     ];
 
     for (design_name, code, top, _sim_label, sim_count, is_seq) in [

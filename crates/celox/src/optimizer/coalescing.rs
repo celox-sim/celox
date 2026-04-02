@@ -323,8 +323,7 @@ fn optimize_with_options(
             }
         }
         let split_start = timing.then(crate::timing::now);
-        if let Some(chunks) =
-            pass_tail_call_split::split_if_needed(&program.eval_comb, four_state)
+        if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state)
         {
             if timing {
                 eprintln!(
@@ -346,8 +345,7 @@ fn optimize_with_options(
                 );
                 for (i, chunk) in plan.chunks.iter().enumerate() {
                     let blocks = chunk.eu.blocks.len();
-                    let insts: usize =
-                        chunk.eu.blocks.values().map(|b| b.instructions.len()).sum();
+                    let insts: usize = chunk.eu.blocks.values().map(|b| b.instructions.len()).sum();
                     eprintln!(
                         "[split]   chunk[{i}]: blocks={blocks} insts={insts} in_spills={} out_spills={} cross_edges={}",
                         chunk.incoming_spills.len(),
