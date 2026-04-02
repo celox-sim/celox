@@ -177,8 +177,6 @@ pub struct SimulatorOptions {
     pub four_state: bool,
     /// Per-pass SIRT optimizer flags.
     pub optimize_options: crate::optimizer::OptimizeOptions,
-    /// Cranelift backend optimization level.
-    pub cranelift_opt_level: crate::optimizer::CraneliftOptLevel,
     /// Fine-grained Cranelift backend options.
     pub cranelift_options: crate::optimizer::CraneliftOptions,
     pub trace: crate::debug::TraceOptions,
@@ -192,11 +190,12 @@ pub struct SimulatorOptions {
 #[cfg(not(target_arch = "wasm32"))]
 impl Default for SimulatorOptions {
     fn default() -> Self {
+        let opt = crate::optimizer::OptimizeOptions::default();
+        let cranelift = opt.opt_level().default_cranelift_options();
         Self {
             four_state: false,
-            optimize_options: crate::optimizer::OptimizeOptions::default(),
-            cranelift_opt_level: crate::optimizer::CraneliftOptLevel::default(),
-            cranelift_options: crate::optimizer::CraneliftOptions::default(),
+            optimize_options: opt,
+            cranelift_options: cranelift,
             trace: Default::default(),
             emit_triggers: false,
             dead_store_policy: DeadStorePolicy::Off,
@@ -282,7 +281,32 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Set the overall optimization level. Sets defaults for SIR passes,
+    /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
+    pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
+        self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
+        self.options.cranelift_options = level.default_cranelift_options();
+        self.options.dead_store_policy = match level {
+            crate::optimizer::OptLevel::O2 => DeadStorePolicy::PreserveTopPorts,
+            _ => DeadStorePolicy::Off,
+        };
+        self
+    }
+
+    /// Enable a specific SIR pass, overriding the OptLevel default.
+    pub fn enable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
+        self.options.optimize_options = self.options.optimize_options.enable(pass);
+        self
+    }
+
+    /// Disable a specific SIR pass, overriding the OptLevel default.
+    pub fn disable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
+        self.options.optimize_options = self.options.optimize_options.disable(pass);
+        self
+    }
+
     /// Enable or disable all SIRT optimization passes at once.
+    /// Shorthand: `true` → `OptLevel::O1`, `false` → `OptLevel::O0`.
     pub fn optimize(mut self, enable: bool) -> Self {
         self.options.optimize_options = if enable {
             crate::optimizer::OptimizeOptions::all()
@@ -292,23 +316,15 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
-    /// Set per-pass optimizer flags.
+    /// Set per-pass optimizer flags directly.
     pub fn optimize_options(mut self, options: crate::optimizer::OptimizeOptions) -> Self {
         self.options.optimize_options = options;
-        self
-    }
-
-    /// Set the Cranelift backend optimization level.
-    pub fn cranelift_opt_level(mut self, level: crate::optimizer::CraneliftOptLevel) -> Self {
-        self.options.cranelift_opt_level = level;
-        self.options.cranelift_options.opt_level = level;
         self
     }
 
     /// Set fine-grained Cranelift backend options.
     pub fn cranelift_options(mut self, options: crate::optimizer::CraneliftOptions) -> Self {
         self.options.cranelift_options = options;
-        self.options.cranelift_opt_level = options.opt_level;
         self
     }
 
@@ -327,66 +343,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Enable or disable the Cranelift IR verifier.
     pub fn enable_verifier(mut self, enable: bool) -> Self {
         self.options.cranelift_options.enable_verifier = enable;
-        self
-    }
-
-    /// Enable or disable the store-load forwarding pass.
-    pub fn store_load_forwarding(mut self, enable: bool) -> Self {
-        self.options.optimize_options.store_load_forwarding = enable;
-        self
-    }
-
-    /// Enable or disable the hoist-common-branch-loads pass.
-    pub fn hoist_common_branch_loads(mut self, enable: bool) -> Self {
-        self.options.optimize_options.hoist_common_branch_loads = enable;
-        self
-    }
-
-    /// Enable or disable the bit-extract peephole pass.
-    pub fn bit_extract_peephole(mut self, enable: bool) -> Self {
-        self.options.optimize_options.bit_extract_peephole = enable;
-        self
-    }
-
-    /// Enable or disable the block optimization pass.
-    pub fn optimize_blocks(mut self, enable: bool) -> Self {
-        self.options.optimize_options.optimize_blocks = enable;
-        self
-    }
-
-    /// Enable or disable the split-wide-commits pass.
-    pub fn split_wide_commits(mut self, enable: bool) -> Self {
-        self.options.optimize_options.split_wide_commits = enable;
-        self
-    }
-
-    /// Enable or disable the commit sinking pass.
-    pub fn commit_sinking(mut self, enable: bool) -> Self {
-        self.options.optimize_options.commit_sinking = enable;
-        self
-    }
-
-    /// Enable or disable the inline commit forwarding pass.
-    pub fn inline_commit_forwarding(mut self, enable: bool) -> Self {
-        self.options.optimize_options.inline_commit_forwarding = enable;
-        self
-    }
-
-    /// Enable or disable the dead working stores elimination pass.
-    pub fn eliminate_dead_working_stores(mut self, enable: bool) -> Self {
-        self.options.optimize_options.eliminate_dead_working_stores = enable;
-        self
-    }
-
-    /// Enable or disable the reschedule pass.
-    pub fn reschedule(mut self, enable: bool) -> Self {
-        self.options.optimize_options.reschedule = enable;
-        self
-    }
-
-    /// Enable or disable scheduler-level store coalescing.
-    pub fn coalesce_stores(mut self, enable: bool) -> Self {
-        self.options.optimize_options.coalesce_stores = enable;
         self
     }
 

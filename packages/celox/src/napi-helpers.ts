@@ -109,6 +109,8 @@ export interface NapiOptimizeOptions {
 export interface NapiOptions {
 	fourState?: boolean;
 	vcd?: string;
+	optLevel?: string;
+	passOverrides?: string[];
 	optimize?: boolean;
 	optimizeOptions?: NapiOptimizeOptions;
 	craneliftOptLevel?: string;
@@ -275,6 +277,18 @@ export function buildNapiOpts(
 	}
 	if (options.vcd) {
 		napiOpts.vcd = options.vcd;
+		hasOpt = true;
+	}
+	if (options.optLevel) {
+		napiOpts.optLevel = options.optLevel;
+		hasOpt = true;
+	}
+	if (options.passOverrides && options.passOverrides.length > 0) {
+		// Convert camelCase pass names to snake_case for NAPI
+		napiOpts.passOverrides = options.passOverrides.map((s) => {
+			// Pass through +/- prefix and sir: prefix as-is; the Rust side parses them.
+			return s;
+		});
 		hasOpt = true;
 	}
 	if (options.optimize != null) {

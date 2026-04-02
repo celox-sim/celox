@@ -1230,16 +1230,12 @@ pub fn parse(
         t.pre_optimized_sir = Some(program.clone());
     }
 
-    if optimize_options.any_enabled() {
-        timed_phase!(
-            "optimize",
-            crate::optimizer::optimize(&mut program, four_state, optimize_options)
-        );
-    } else {
-        // Even without optimization, run tail-call splitting to avoid
-        // exceeding Cranelift's 24-bit instruction index limit.
-        crate::optimizer::split_if_needed(&mut program, four_state);
-    }
+    // Always run the optimizer — even at O0, individual passes (e.g. TailCallSplit)
+    // may be enabled and need to execute.
+    timed_phase!(
+        "optimize",
+        crate::optimizer::optimize(&mut program, four_state, optimize_options)
+    );
 
     if let Some(t) = trace
         && trace_opts.post_optimized_sir

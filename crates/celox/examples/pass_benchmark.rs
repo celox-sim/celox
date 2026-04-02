@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use celox::{
     CraneliftOptLevel, CraneliftOptions, OptimizeOptions, RegallocAlgorithm, Simulator,
-    SimulatorBuilder,
+    SimulatorBuilder, SirPass,
 };
 
 const TOP_N1000: &str = include_str!("../../../benches/veryl/top_n1000.veryl");
@@ -62,7 +62,7 @@ impl Config {
         builder: SimulatorBuilder<'a, Simulator>,
     ) -> SimulatorBuilder<'a, Simulator> {
         builder
-            .optimize_options(self.opt)
+            .optimize_options(self.opt.clone())
             .cranelift_options(self.cl)
     }
 }
@@ -172,22 +172,16 @@ fn main() {
     // ================================================================
     println!("# Part 1: Individual SIRT pass disabling\n");
 
-    let individual_passes: Vec<(&str, fn(&mut OptimizeOptions))> = vec![
-        ("store_load_forwarding", |o| o.store_load_forwarding = false),
-        ("hoist_common_branch_loads", |o| {
-            o.hoist_common_branch_loads = false
-        }),
-        ("bit_extract_peephole", |o| o.bit_extract_peephole = false),
-        ("optimize_blocks", |o| o.optimize_blocks = false),
-        ("split_wide_commits", |o| o.split_wide_commits = false),
-        ("commit_sinking", |o| o.commit_sinking = false),
-        ("inline_commit_forwarding", |o| {
-            o.inline_commit_forwarding = false
-        }),
-        ("eliminate_dead_working_stores", |o| {
-            o.eliminate_dead_working_stores = false
-        }),
-        ("reschedule", |o| o.reschedule = false),
+    let individual_passes: Vec<(&str, SirPass)> = vec![
+        ("store_load_forwarding", SirPass::StoreLoadForwarding),
+        ("hoist_common_branch_loads", SirPass::HoistCommonBranchLoads),
+        ("bit_extract_peephole", SirPass::BitExtractPeephole),
+        ("optimize_blocks", SirPass::OptimizeBlocks),
+        ("split_wide_commits", SirPass::SplitWideCommits),
+        ("commit_sinking", SirPass::CommitSinking),
+        ("inline_commit_forwarding", SirPass::InlineCommitForwarding),
+        ("eliminate_dead_working_stores", SirPass::EliminateDeadWorkingStores),
+        ("reschedule", SirPass::Reschedule),
     ];
 
     for (design_name, code, top, sim_label, sim_count, is_seq) in [
@@ -238,9 +232,9 @@ fn main() {
         println!();
         print_header();
 
-        for (name, apply) in &individual_passes {
+        for (name, pass) in &individual_passes {
             let mut cfg = Config::new(name);
-            apply(&mut cfg.opt);
+            cfg.opt = cfg.opt.disable(*pass);
             let compile = bench_compile(code, top, &cfg);
             let sim = if is_seq {
                 bench_tick(code, top, &cfg, sim_count)
@@ -258,33 +252,14 @@ fn main() {
     println!("# Part 2: Candidate combinations (interaction effects)\n");
 
     // Candidates from Part 1: store_load_forwarding, hoist_common_branch_loads, inline_commit_forwarding
-    let combinations: Vec<(&str, fn(&mut OptimizeOptions))> = vec![
-        ("−slf", |o| {
-            o.store_load_forwarding = false;
-        }),
-        ("−hcbl", |o| {
-            o.hoist_common_branch_loads = false;
-        }),
-        ("−icf", |o| {
-            o.inline_commit_forwarding = false;
-        }),
-        ("−slf −hcbl", |o| {
-            o.store_load_forwarding = false;
-            o.hoist_common_branch_loads = false;
-        }),
-        ("−slf −icf", |o| {
-            o.store_load_forwarding = false;
-            o.inline_commit_forwarding = false;
-        }),
-        ("−hcbl −icf", |o| {
-            o.hoist_common_branch_loads = false;
-            o.inline_commit_forwarding = false;
-        }),
-        ("−slf −hcbl −icf", |o| {
-            o.store_load_forwarding = false;
-            o.hoist_common_branch_loads = false;
-            o.inline_commit_forwarding = false;
-        }),
+    let combinations: Vec<(&str, Vec<SirPass>)> = vec![
+        ("−slf", vec![SirPass::StoreLoadForwarding]),
+        ("−hcbl", vec![SirPass::HoistCommonBranchLoads]),
+        ("−icf", vec![SirPass::InlineCommitForwarding]),
+        ("−slf −hcbl", vec![SirPass::StoreLoadForwarding, SirPass::HoistCommonBranchLoads]),
+        ("−slf −icf", vec![SirPass::StoreLoadForwarding, SirPass::InlineCommitForwarding]),
+        ("−hcbl −icf", vec![SirPass::HoistCommonBranchLoads, SirPass::InlineCommitForwarding]),
+        ("−slf −hcbl −icf", vec![SirPass::StoreLoadForwarding, SirPass::HoistCommonBranchLoads, SirPass::InlineCommitForwarding]),
     ];
 
     for (design_name, code, top, sim_label, sim_count, is_seq) in [
@@ -324,9 +299,11 @@ fn main() {
         println!();
         print_header();
 
-        for (name, apply) in &combinations {
+        for (name, passes) in &combinations {
             let mut cfg = Config::new(name);
-            apply(&mut cfg.opt);
+            for pass in passes {
+                cfg.opt = cfg.opt.disable(*pass);
+            }
             let compile = bench_compile(code, top, &cfg);
             let sim = if is_seq {
                 bench_tick(code, top, &cfg, sim_count)
@@ -423,34 +400,38 @@ fn main() {
     // ================================================================
     println!("# Part 4: Proposed new defaults\n");
 
+    let disable_three = vec![SirPass::StoreLoadForwarding, SirPass::HoistCommonBranchLoads, SirPass::InlineCommitForwarding];
     let proposals: Vec<(&str, Box<dyn Fn(&mut Config)>)> = vec![
         ("current defaults (all on)", Box::new(|_: &mut Config| {})),
         (
             "−slf −hcbl −icf (SIRT only)",
-            Box::new(|c: &mut Config| {
-                c.opt.store_load_forwarding = false;
-                c.opt.hoist_common_branch_loads = false;
-                c.opt.inline_commit_forwarding = false;
-            }),
+            {
+                let d = disable_three.clone();
+                Box::new(move |c: &mut Config| {
+                    for &p in &d { c.opt = c.opt.clone().disable(p); }
+                })
+            },
         ),
         (
             "−slf −hcbl −icf + verifier=false",
-            Box::new(|c: &mut Config| {
-                c.opt.store_load_forwarding = false;
-                c.opt.hoist_common_branch_loads = false;
-                c.opt.inline_commit_forwarding = false;
-                c.cl.enable_verifier = false;
-            }),
+            {
+                let d = disable_three.clone();
+                Box::new(move |c: &mut Config| {
+                    for &p in &d { c.opt = c.opt.clone().disable(p); }
+                    c.cl.enable_verifier = false;
+                })
+            },
         ),
         (
             "−slf −hcbl −icf + alias=false + verifier=false",
-            Box::new(|c: &mut Config| {
-                c.opt.store_load_forwarding = false;
-                c.opt.hoist_common_branch_loads = false;
-                c.opt.inline_commit_forwarding = false;
-                c.cl.enable_alias_analysis = false;
-                c.cl.enable_verifier = false;
-            }),
+            {
+                let d = disable_three.clone();
+                Box::new(move |c: &mut Config| {
+                    for &p in &d { c.opt = c.opt.clone().disable(p); }
+                    c.cl.enable_alias_analysis = false;
+                    c.cl.enable_verifier = false;
+                })
+            },
         ),
     ];
 

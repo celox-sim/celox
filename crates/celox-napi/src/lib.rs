@@ -79,10 +79,16 @@ pub struct NapiOptimizeOptions {
 pub struct NapiOptions {
     pub four_state: Option<bool>,
     pub vcd: Option<String>,
+    /// Optimization level preset: "O0", "O1", or "O2".
+    /// Takes precedence over `optimize` and `optimize_options`.
+    pub opt_level: Option<String>,
+    /// Per-pass overrides applied on top of opt_level.
+    /// Each entry: "+sir:<pass_name>" to enable, "-sir:<pass_name>" to disable.
+    pub pass_overrides: Option<Vec<String>>,
     /// Shorthand to enable/disable all SIRT optimization passes.
-    /// `true` = all on, `false` = all off. Overridden by `optimize_options` if both set.
+    /// `true` = all on, `false` = all off. Overridden by `opt_level` or `optimize_options`.
     pub optimize: Option<bool>,
-    /// Per-pass optimizer flags.
+    /// Per-pass optimizer flags (legacy). Overridden by `opt_level`/`pass_overrides`.
     pub optimize_options: Option<NapiOptimizeOptions>,
     /// Cranelift backend optimization level: "none", "speed", or "speed_and_size".
     pub cranelift_opt_level: Option<String>,
@@ -131,7 +137,6 @@ struct ParsedOptionsCommon {
 #[cfg(not(target_arch = "wasm32"))]
 struct ParsedOptions {
     common: ParsedOptionsCommon,
-    cranelift_opt_level: celox::CraneliftOptLevel,
     cranelift_options: celox::CraneliftOptions,
     dead_store_policy: celox::DeadStorePolicy,
 }
@@ -181,40 +186,65 @@ fn parse_reset_type(s: &str) -> Result<celox::ResetType> {
     }
 }
 
-/// Convert NapiOptimizeOptions to celox::OptimizeOptions.
+/// Convert legacy NapiOptimizeOptions to celox::OptimizeOptions.
+/// Starts from O1 (all on) and disables any explicitly false fields.
 fn convert_optimize_options(napi: &NapiOptimizeOptions) -> celox::OptimizeOptions {
-    let mut opts = celox::OptimizeOptions::default();
-    if let Some(v) = napi.store_load_forwarding {
-        opts.store_load_forwarding = v;
-    }
-    if let Some(v) = napi.hoist_common_branch_loads {
-        opts.hoist_common_branch_loads = v;
-    }
-    if let Some(v) = napi.bit_extract_peephole {
-        opts.bit_extract_peephole = v;
-    }
-    if let Some(v) = napi.optimize_blocks {
-        opts.optimize_blocks = v;
-    }
-    if let Some(v) = napi.split_wide_commits {
-        opts.split_wide_commits = v;
-    }
-    if let Some(v) = napi.commit_sinking {
-        opts.commit_sinking = v;
-    }
-    if let Some(v) = napi.inline_commit_forwarding {
-        opts.inline_commit_forwarding = v;
-    }
-    if let Some(v) = napi.eliminate_dead_working_stores {
-        opts.eliminate_dead_working_stores = v;
-    }
-    if let Some(v) = napi.reschedule {
-        opts.reschedule = v;
-    }
-    if let Some(v) = napi.coalesce_stores {
-        opts.coalesce_stores = v;
+    let mut opts = celox::OptimizeOptions::all();
+    let fields: &[(Option<bool>, celox::SirPass)] = &[
+        (napi.store_load_forwarding, celox::SirPass::StoreLoadForwarding),
+        (napi.hoist_common_branch_loads, celox::SirPass::HoistCommonBranchLoads),
+        (napi.bit_extract_peephole, celox::SirPass::BitExtractPeephole),
+        (napi.optimize_blocks, celox::SirPass::OptimizeBlocks),
+        (napi.split_wide_commits, celox::SirPass::SplitWideCommits),
+        (napi.commit_sinking, celox::SirPass::CommitSinking),
+        (napi.inline_commit_forwarding, celox::SirPass::InlineCommitForwarding),
+        (napi.eliminate_dead_working_stores, celox::SirPass::EliminateDeadWorkingStores),
+        (napi.reschedule, celox::SirPass::Reschedule),
+        (napi.coalesce_stores, celox::SirPass::CoalesceStores),
+    ];
+    for &(val, pass) in fields {
+        if let Some(false) = val {
+            opts = opts.disable(pass);
+        }
     }
     opts
+}
+
+/// Parse pass override strings like "+sir:reschedule" or "-sir:coalesce_stores".
+fn apply_pass_overrides(
+    mut opts: celox::OptimizeOptions,
+    overrides: &[String],
+) -> Result<celox::OptimizeOptions> {
+    for s in overrides {
+        let (enable, rest) = if let Some(rest) = s.strip_prefix('+') {
+            (true, rest)
+        } else if let Some(rest) = s.strip_prefix('-') {
+            (false, rest)
+        } else {
+            return Err(Error::from_reason(format!(
+                "Invalid pass override '{}'. Must start with '+' or '-'.",
+                s
+            )));
+        };
+        let pass_name = rest.strip_prefix("sir:").unwrap_or(rest);
+        let pass = celox::SirPass::from_str(pass_name).ok_or_else(|| {
+            Error::from_reason(format!(
+                "Unknown SIR pass '{}'. Valid passes: {}",
+                pass_name,
+                celox::SirPass::ALL
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        opts = if enable {
+            opts.enable(pass)
+        } else {
+            opts.disable(pass)
+        };
+    }
+    Ok(opts)
 }
 
 /// Parse a Cranelift optimization level string.
@@ -300,9 +330,31 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
                         .collect()
                 })
                 .unwrap_or_default();
-            // Resolve optimize_options: per-pass flags take precedence over the shorthand bool.
-            let optimize_options = if let Some(ref oo) = o.optimize_options {
-                convert_optimize_options(oo)
+            // Resolve optimize_options with priority:
+            // 1. opt_level + pass_overrides (new API)
+            // 2. optimize_options (legacy per-pass bools)
+            // 3. optimize shorthand (legacy bool)
+            // 4. default (O1 = all on)
+            let optimize_options = if let Some(ref level_str) = o.opt_level {
+                let level = celox::OptLevel::from_str(level_str).ok_or_else(|| {
+                    Error::from_reason(format!(
+                        "Invalid opt_level '{}'. Expected 'O0', 'O1', or 'O2'.",
+                        level_str
+                    ))
+                })?;
+                let opts = celox::OptimizeOptions::new(level);
+                if let Some(ref overrides) = o.pass_overrides {
+                    apply_pass_overrides(opts, overrides)?
+                } else {
+                    opts
+                }
+            } else if let Some(ref oo) = o.optimize_options {
+                let opts = convert_optimize_options(oo);
+                if let Some(ref overrides) = o.pass_overrides {
+                    apply_pass_overrides(opts, overrides)?
+                } else {
+                    opts
+                }
             } else if let Some(false) = o.optimize {
                 celox::OptimizeOptions::none()
             } else {
@@ -366,14 +418,12 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
             };
             Ok(ParsedOptions {
                 common,
-                cranelift_opt_level,
                 cranelift_options,
                 dead_store_policy,
             })
         }
         None => Ok(ParsedOptions {
             common,
-            cranelift_opt_level: celox::CraneliftOptLevel::Speed,
             cranelift_options: celox::CraneliftOptions::default(),
             dead_store_policy: celox::DeadStorePolicy::Off,
         }),
@@ -389,6 +439,7 @@ fn append_extra_source(sources: &mut Vec<(String, std::path::PathBuf)>, extra: &
 
 /// Configuration loaded from an optional `celox.toml` in the project root.
 #[derive(serde::Deserialize, Default)]
+#[allow(dead_code)]
 struct CeloxConfig {
     /// Glob patterns (relative to project root) for `.veryl` files to exclude
     /// from compilation and type generation.
@@ -409,6 +460,7 @@ struct CeloxTestConfig {
 }
 
 #[derive(serde::Deserialize, Default)]
+#[allow(dead_code)]
 struct CeloxSimulationConfig {
     /// Default maximum steps for `waitUntil` / `waitForCycles`.
     /// Overridden by the per-call `maxSteps` option.
@@ -550,7 +602,7 @@ fn apply_options<'a, T>(
     opts: &ParsedOptions,
 ) -> celox::SimulatorBuilder<'a, T> {
     builder = builder.four_state(opts.four_state);
-    builder = builder.optimize_options(opts.optimize_options);
+    builder = builder.optimize_options(opts.optimize_options.clone());
     builder = builder.cranelift_options(opts.cranelift_options);
     // VCD is handled separately after build — not passed to SimulatorBuilder
     for (from, to) in &opts.false_loops {
@@ -602,8 +654,8 @@ struct CacheKey {
     sources: Vec<(String, String)>,
     top: String,
     four_state: bool,
-    /// Encoded OptimizeOptions: 9 bools packed into a u16 bitmask.
-    optimize_flags: u16,
+    /// Encoded OptimizeOptions: per-pass flags + OptLevel packed into a u32.
+    optimize_flags: u32,
     cranelift_opt_level: u8,
     regalloc_algorithm: u8,
     enable_alias_analysis: bool,
@@ -632,39 +684,16 @@ static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Pack OptimizeOptions bools into a bitmask for cache key hashing.
-fn encode_optimize_options(opts: &celox::OptimizeOptions) -> u16 {
-    let mut flags: u16 = 0;
-    if opts.store_load_forwarding {
-        flags |= 1 << 0;
+/// Pack OptimizeOptions into a u32 bitmask for cache key hashing.
+/// Lower 18 bits: per-pass enabled flags. Upper bits: OptLevel.
+fn encode_optimize_options(opts: &celox::OptimizeOptions) -> u32 {
+    let mut flags: u32 = 0;
+    for (i, &pass) in celox::SirPass::ALL.iter().enumerate() {
+        if opts.is_enabled(pass) {
+            flags |= 1 << i;
+        }
     }
-    if opts.hoist_common_branch_loads {
-        flags |= 1 << 1;
-    }
-    if opts.bit_extract_peephole {
-        flags |= 1 << 2;
-    }
-    if opts.optimize_blocks {
-        flags |= 1 << 3;
-    }
-    if opts.split_wide_commits {
-        flags |= 1 << 4;
-    }
-    if opts.commit_sinking {
-        flags |= 1 << 5;
-    }
-    if opts.inline_commit_forwarding {
-        flags |= 1 << 6;
-    }
-    if opts.eliminate_dead_working_stores {
-        flags |= 1 << 7;
-    }
-    if opts.reschedule {
-        flags |= 1 << 8;
-    }
-    if opts.coalesce_stores {
-        flags |= 1 << 9;
-    }
+    flags |= (opts.opt_level() as u32) << 24;
     flags
 }
 
@@ -691,7 +720,7 @@ fn build_cache_key(
         top: top.to_string(),
         four_state: opts.four_state,
         optimize_flags: encode_optimize_options(&opts.optimize_options),
-        cranelift_opt_level: opts.cranelift_opt_level as u8,
+        cranelift_opt_level: opts.cranelift_options.opt_level as u8,
         regalloc_algorithm: opts.cranelift_options.regalloc_algorithm as u8,
         enable_alias_analysis: opts.cranelift_options.enable_alias_analysis,
         enable_verifier: opts.cranelift_options.enable_verifier,
@@ -2210,7 +2239,6 @@ mod tests {
                 extra_source: None,
                 parameters: vec![],
             },
-            cranelift_opt_level: celox::CraneliftOptLevel::Speed,
             cranelift_options: celox::CraneliftOptions::default(),
             dead_store_policy: celox::DeadStorePolicy::Off,
         }
@@ -2295,8 +2323,8 @@ mod tests {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        o1.cranelift_opt_level = celox::CraneliftOptLevel::Speed;
-        o2.cranelift_opt_level = celox::CraneliftOptLevel::None;
+        o1.cranelift_options.opt_level = celox::CraneliftOptLevel::Speed;
+        o2.cranelift_options.opt_level = celox::CraneliftOptLevel::None;
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),

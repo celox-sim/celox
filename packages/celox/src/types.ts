@@ -163,11 +163,36 @@ export interface SimulatorOptions {
 	/** Path to write VCD waveform output. */
 	vcd?: string;
 	/**
+	 * Optimization level preset. Default: "O1".
+	 * - "O0": No SIR optimizations (except TailCallSplit). Fast compilation.
+	 * - "O1": All SIR optimizations enabled. Default.
+	 * - "O2": O1 + dead store elimination (PreserveTopPorts).
+	 */
+	optLevel?: "O0" | "O1" | "O2";
+	/**
+	 * Per-pass overrides applied on top of `optLevel`.
+	 * Each entry: "+sir:<pass_name>" to enable, "-sir:<pass_name>" to disable.
+	 *
+	 * Valid SIR passes: store_load_forwarding, hoist_common_branch_loads,
+	 * bit_extract_peephole, optimize_blocks, split_wide_commits, commit_sinking,
+	 * inline_commit_forwarding, eliminate_dead_working_stores, reschedule,
+	 * coalesce_stores, gvn, concat_folding, xor_chain_folding, vectorize_concat,
+	 * split_coalesced_stores, partial_forward, identity_store_bypass, tail_call_split
+	 *
+	 * @example ["-sir:reschedule", "+sir:gvn"]
+	 */
+	passOverrides?: string[];
+	/**
 	 * Shorthand to enable/disable all SIRT optimization passes.
-	 * `true` = all on, `false` = all off. Overridden by `optimizeOptions` if both set.
+	 * `true` = all on (O1), `false` = all off (O0).
+	 * Overridden by `optLevel` or `optimizeOptions` if set.
+	 * @deprecated Use `optLevel` instead.
 	 */
 	optimize?: boolean;
-	/** Per-pass SIRT optimizer flags. Takes precedence over `optimize`. */
+	/**
+	 * Per-pass SIRT optimizer flags. Takes precedence over `optimize`.
+	 * @deprecated Use `optLevel` + `passOverrides` instead.
+	 */
 	optimizeOptions?: OptimizeOptions;
 	/** Cranelift backend optimization level. Default: "speed". */
 	craneliftOptLevel?: "none" | "speed" | "speedAndSize";
@@ -199,7 +224,10 @@ export interface SimulatorOptions {
 	extraSource?: string;
 	/** Top-level module parameter overrides. */
 	parameters?: ParamOverride[];
-	/** Dead store elimination policy. Default: "off". */
+	/**
+	 * Dead store elimination policy. Default: "off".
+	 * When `optLevel` is "O2", defaults to "preserveTopPorts" unless explicitly set.
+	 */
 	deadStorePolicy?: "off" | "preserveTopPorts" | "preserveAllPorts";
 }
 

@@ -78,9 +78,11 @@ pub use num_bigint::BigUint;
 pub use optimizer::CraneliftOptLevel;
 #[cfg(not(target_arch = "wasm32"))]
 pub use optimizer::CraneliftOptions;
+pub use optimizer::OptLevel;
 pub use optimizer::OptimizeOptions;
 #[cfg(not(target_arch = "wasm32"))]
 pub use optimizer::RegallocAlgorithm;
+pub use optimizer::SirPass;
 pub use parser::LoweringPhase;
 pub use parser::ParserError;
 pub use parser::SchedulerError;

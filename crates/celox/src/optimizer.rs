@@ -92,79 +92,252 @@ impl CraneliftOptions {
     }
 }
 
-/// Per-pass enable/disable flags for fine-grained optimizer control.
+// ── OptLevel / SirPass / OptimizeOptions ────────────────────────────
+
+/// Optimization level presets, analogous to GCC's `-O` flags.
 ///
-/// All passes default to `true` (enabled). Set individual fields to `false`
-/// to skip specific optimization passes while keeping others active.
-#[derive(Debug, Clone, Copy)]
+/// Each level sets defaults for SIR passes, Cranelift backend options,
+/// and dead store elimination policy. Individual passes can be overridden
+/// via [`OptimizeOptions::enable`] / [`OptimizeOptions::disable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OptLevel {
+    /// No SIR optimizations except [`SirPass::TailCallSplit`].
+    /// Cranelift: `fast_compile()`. DSE: Off.
+    O0,
+    /// All SIR optimizations enabled.
+    /// Cranelift: Speed / Backtracking. DSE: Off.
+    #[default]
+    O1,
+    /// All SIR optimizations + DSE(`PreserveTopPorts`).
+    /// Cranelift: Speed / Backtracking.
+    O2,
+}
+
+impl OptLevel {
+    /// Returns whether a given SIR pass is enabled by default at this level.
+    pub fn default_enabled(self, pass: SirPass) -> bool {
+        match self {
+            OptLevel::O0 => matches!(pass, SirPass::TailCallSplit),
+            OptLevel::O1 | OptLevel::O2 => true,
+        }
+    }
+
+    /// Default Cranelift backend options for this level.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn default_cranelift_options(self) -> CraneliftOptions {
+        match self {
+            OptLevel::O0 => CraneliftOptions::fast_compile(),
+            OptLevel::O1 | OptLevel::O2 => CraneliftOptions::default(),
+        }
+    }
+
+    /// Parse from string (for NAPI/CLI).
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "O0" | "o0" => Some(Self::O0),
+            "O1" | "o1" => Some(Self::O1),
+            "O2" | "o2" => Some(Self::O2),
+            _ => None,
+        }
+    }
+
+    /// String representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OptLevel::O0 => "O0",
+            OptLevel::O1 => "O1",
+            OptLevel::O2 => "O2",
+        }
+    }
+}
+
+/// Individual SIR optimization passes that can be toggled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SirPass {
+    StoreLoadForwarding,
+    HoistCommonBranchLoads,
+    BitExtractPeephole,
+    OptimizeBlocks,
+    SplitWideCommits,
+    CommitSinking,
+    InlineCommitForwarding,
+    EliminateDeadWorkingStores,
+    Reschedule,
+    CoalesceStores,
+    Gvn,
+    ConcatFolding,
+    XorChainFolding,
+    VectorizeConcat,
+    SplitCoalescedStores,
+    PartialForward,
+    IdentityStoreBypass,
+    TailCallSplit,
+}
+
+impl SirPass {
+    /// All pass variants in definition order.
+    pub const ALL: &[SirPass] = &[
+        SirPass::StoreLoadForwarding,
+        SirPass::HoistCommonBranchLoads,
+        SirPass::BitExtractPeephole,
+        SirPass::OptimizeBlocks,
+        SirPass::SplitWideCommits,
+        SirPass::CommitSinking,
+        SirPass::InlineCommitForwarding,
+        SirPass::EliminateDeadWorkingStores,
+        SirPass::Reschedule,
+        SirPass::CoalesceStores,
+        SirPass::Gvn,
+        SirPass::ConcatFolding,
+        SirPass::XorChainFolding,
+        SirPass::VectorizeConcat,
+        SirPass::SplitCoalescedStores,
+        SirPass::PartialForward,
+        SirPass::IdentityStoreBypass,
+        SirPass::TailCallSplit,
+    ];
+
+    /// Snake_case string representation (for NAPI/TS serialization).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SirPass::StoreLoadForwarding => "store_load_forwarding",
+            SirPass::HoistCommonBranchLoads => "hoist_common_branch_loads",
+            SirPass::BitExtractPeephole => "bit_extract_peephole",
+            SirPass::OptimizeBlocks => "optimize_blocks",
+            SirPass::SplitWideCommits => "split_wide_commits",
+            SirPass::CommitSinking => "commit_sinking",
+            SirPass::InlineCommitForwarding => "inline_commit_forwarding",
+            SirPass::EliminateDeadWorkingStores => "eliminate_dead_working_stores",
+            SirPass::Reschedule => "reschedule",
+            SirPass::CoalesceStores => "coalesce_stores",
+            SirPass::Gvn => "gvn",
+            SirPass::ConcatFolding => "concat_folding",
+            SirPass::XorChainFolding => "xor_chain_folding",
+            SirPass::VectorizeConcat => "vectorize_concat",
+            SirPass::SplitCoalescedStores => "split_coalesced_stores",
+            SirPass::PartialForward => "partial_forward",
+            SirPass::IdentityStoreBypass => "identity_store_bypass",
+            SirPass::TailCallSplit => "tail_call_split",
+        }
+    }
+
+    /// Parse from snake_case string (for NAPI/CLI).
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "store_load_forwarding" => Some(SirPass::StoreLoadForwarding),
+            "hoist_common_branch_loads" => Some(SirPass::HoistCommonBranchLoads),
+            "bit_extract_peephole" => Some(SirPass::BitExtractPeephole),
+            "optimize_blocks" => Some(SirPass::OptimizeBlocks),
+            "split_wide_commits" => Some(SirPass::SplitWideCommits),
+            "commit_sinking" => Some(SirPass::CommitSinking),
+            "inline_commit_forwarding" => Some(SirPass::InlineCommitForwarding),
+            "eliminate_dead_working_stores" => Some(SirPass::EliminateDeadWorkingStores),
+            "reschedule" => Some(SirPass::Reschedule),
+            "coalesce_stores" => Some(SirPass::CoalesceStores),
+            "gvn" => Some(SirPass::Gvn),
+            "concat_folding" => Some(SirPass::ConcatFolding),
+            "xor_chain_folding" => Some(SirPass::XorChainFolding),
+            "vectorize_concat" => Some(SirPass::VectorizeConcat),
+            "split_coalesced_stores" => Some(SirPass::SplitCoalescedStores),
+            "partial_forward" => Some(SirPass::PartialForward),
+            "identity_store_bypass" => Some(SirPass::IdentityStoreBypass),
+            "tail_call_split" => Some(SirPass::TailCallSplit),
+            _ => None,
+        }
+    }
+}
+
+/// Controls which SIR optimization passes are enabled.
+///
+/// Built from an [`OptLevel`] preset, with optional per-pass overrides.
+///
+/// # Examples
+///
+/// ```
+/// use celox::{OptLevel, SirPass, OptimizeOptions};
+///
+/// // All passes enabled (default)
+/// let opts = OptimizeOptions::default();
+/// assert!(opts.is_enabled(SirPass::Gvn));
+///
+/// // O0 with one pass selectively enabled
+/// let opts = OptimizeOptions::new(OptLevel::O0)
+///     .enable(SirPass::Gvn);
+/// assert!(opts.is_enabled(SirPass::Gvn));
+/// assert!(!opts.is_enabled(SirPass::Reschedule));
+/// ```
+#[derive(Debug, Clone)]
 pub struct OptimizeOptions {
-    pub store_load_forwarding: bool,
-    pub hoist_common_branch_loads: bool,
-    pub bit_extract_peephole: bool,
-    pub optimize_blocks: bool,
-    pub split_wide_commits: bool,
-    pub commit_sinking: bool,
-    pub inline_commit_forwarding: bool,
-    pub eliminate_dead_working_stores: bool,
-    pub reschedule: bool,
-    pub coalesce_stores: bool,
+    opt_level: OptLevel,
+    enabled: crate::HashSet<SirPass>,
+    disabled: crate::HashSet<SirPass>,
 }
 
 impl Default for OptimizeOptions {
     fn default() -> Self {
-        Self {
-            store_load_forwarding: true,
-            hoist_common_branch_loads: true,
-            bit_extract_peephole: true,
-            optimize_blocks: true,
-            split_wide_commits: true,
-            commit_sinking: true,
-            inline_commit_forwarding: true,
-            eliminate_dead_working_stores: true,
-            reschedule: true,
-            coalesce_stores: true,
-        }
+        Self::new(OptLevel::default())
     }
 }
 
 impl OptimizeOptions {
-    /// All passes enabled.
-    pub fn all() -> Self {
-        Self::default()
-    }
-
-    /// All passes disabled.
-    pub fn none() -> Self {
+    /// Create options from an optimization level preset.
+    pub fn new(level: OptLevel) -> Self {
         Self {
-            store_load_forwarding: false,
-            hoist_common_branch_loads: false,
-            bit_extract_peephole: false,
-            optimize_blocks: false,
-            split_wide_commits: false,
-            commit_sinking: false,
-            inline_commit_forwarding: false,
-            eliminate_dead_working_stores: false,
-            reschedule: false,
-            coalesce_stores: false,
+            opt_level: level,
+            enabled: crate::HashSet::default(),
+            disabled: crate::HashSet::default(),
         }
     }
 
-    /// Returns true if any pass is enabled.
+    /// All passes enabled (equivalent to `OptLevel::O1`).
+    pub fn all() -> Self {
+        Self::new(OptLevel::O1)
+    }
+
+    /// All passes disabled except TailCallSplit (equivalent to `OptLevel::O0`).
+    pub fn none() -> Self {
+        Self::new(OptLevel::O0)
+    }
+
+    /// Enable a pass regardless of the OptLevel default.
+    pub fn enable(mut self, pass: SirPass) -> Self {
+        self.disabled.remove(&pass);
+        self.enabled.insert(pass);
+        self
+    }
+
+    /// Disable a pass regardless of the OptLevel default.
+    pub fn disable(mut self, pass: SirPass) -> Self {
+        self.enabled.remove(&pass);
+        self.disabled.insert(pass);
+        self
+    }
+
+    /// Query whether a specific pass is active.
+    pub fn is_enabled(&self, pass: SirPass) -> bool {
+        if self.enabled.contains(&pass) {
+            return true;
+        }
+        if self.disabled.contains(&pass) {
+            return false;
+        }
+        self.opt_level.default_enabled(pass)
+    }
+
+    /// Returns true if any pass other than TailCallSplit is enabled.
     pub fn any_enabled(&self) -> bool {
-        self.store_load_forwarding
-            || self.hoist_common_branch_loads
-            || self.bit_extract_peephole
-            || self.optimize_blocks
-            || self.split_wide_commits
-            || self.commit_sinking
-            || self.inline_commit_forwarding
-            || self.eliminate_dead_working_stores
-            || self.reschedule
-            || self.coalesce_stores
+        SirPass::ALL
+            .iter()
+            .any(|&p| p != SirPass::TailCallSplit && self.is_enabled(p))
+    }
+
+    /// The base optimization level.
+    pub fn opt_level(&self) -> OptLevel {
+        self.opt_level
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PassOptions {
     pub max_inflight_loads: usize,
     pub four_state: bool,
@@ -211,23 +384,6 @@ impl PassManager {
     }
 }
 
-/// Run only the tail-call splitting pass (no other optimizations).
-/// Used when `optimize=false` to still avoid exceeding Cranelift's instruction limit.
-pub fn split_if_needed(program: &mut Program, four_state: bool) {
-    use coalescing::pass_tail_call_split;
-
-    // split_with_threshold / split_multi_block_with_threshold do their own
-    // cost checks internally, so we delegate directly without a redundant
-    // estimate_units_cost call here.
-    if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state) {
-        program.eval_comb_plan = Some(crate::ir::EvalCombPlan::TailCallChunks(chunks));
-    } else if let Some(plan) =
-        pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state)
-    {
-        program.eval_comb_plan = Some(crate::ir::EvalCombPlan::MemorySpilled(plan));
-    }
-}
-
 pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &OptimizeOptions) {
     let mut manager = PassManager::new();
     manager.add_pass(coalescing::CoalescingPass);
@@ -235,7 +391,7 @@ pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &Opti
         program,
         &PassOptions {
             four_state,
-            optimize_options: *optimize_options,
+            optimize_options: optimize_options.clone(),
             ..PassOptions::default()
         },
     );
