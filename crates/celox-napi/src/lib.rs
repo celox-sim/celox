@@ -242,7 +242,7 @@ fn apply_pass_overrides(
             )));
         };
         let pass_name = rest.strip_prefix("sir:").unwrap_or(rest);
-        let pass = celox::SirPass::from_str(pass_name).ok_or_else(|| {
+        let pass = celox::SirPass::parse(pass_name).ok_or_else(|| {
             Error::from_reason(format!(
                 "Unknown SIR pass '{}'. Valid passes: {}",
                 pass_name,
@@ -351,7 +351,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
             // 3. optimize shorthand (legacy bool)
             // 4. default (O1 = all on)
             let optimize_options = if let Some(ref level_str) = o.opt_level {
-                let level = celox::OptLevel::from_str(level_str).ok_or_else(|| {
+                let level = celox::OptLevel::parse(level_str).ok_or_else(|| {
                     Error::from_reason(format!(
                         "Invalid opt_level '{}'. Expected 'O0', 'O1', or 'O2'.",
                         level_str

@@ -132,7 +132,7 @@ impl OptLevel {
     }
 
     /// Parse from string (for NAPI/CLI).
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "O0" | "o0" => Some(Self::O0),
             "O1" | "o1" => Some(Self::O1),
@@ -222,7 +222,7 @@ impl SirPass {
     }
 
     /// Parse from snake_case string (for NAPI/CLI).
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "store_load_forwarding" => Some(SirPass::StoreLoadForwarding),
             "hoist_common_branch_loads" => Some(SirPass::HoistCommonBranchLoads),
