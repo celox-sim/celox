@@ -156,8 +156,6 @@ pub fn compile_to_sir(
 #[cfg(not(target_arch = "wasm32"))]
 use super::Simulator;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::NativeBackend;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::backend::JitBackend;
 
 /// Controls which stores the dead store elimination pass preserves.
@@ -808,7 +806,10 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
                 self.options.dead_store_policy,
             );
         }
-        let backend = NativeBackend::new(&program, &self.options)?;
+        #[cfg(target_arch = "x86_64")]
+        let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
+        #[cfg(not(target_arch = "x86_64"))]
+        let backend = crate::backend::JitBackend::new(&program, &self.options, None)?;
 
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         if let Some(path) = self.vcd_path {

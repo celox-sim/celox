@@ -1,5 +1,5 @@
 use crate::{
-    NativeBackend, RuntimeErrorCode, Simulator,
+    RuntimeErrorCode, Simulator,
     backend::{EventHandle, MemoryLayout, SimBackend},
     ir::{DomainKind, SignalRef},
     scheduler::{Scheduler, SimEvent},
@@ -60,19 +60,16 @@ impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
 
 // ── Backend-specific constructors ───────────────────────────────────
 
-impl Simulation<NativeBackend> {
-    pub fn builder<'a>(
-        code: &'a str,
-        top: &'a str,
-    ) -> crate::SimulatorBuilder<'a, Simulation<NativeBackend>> {
-        crate::SimulatorBuilder::<Simulation<NativeBackend>>::new(code, top)
+impl Simulation {
+    pub fn builder<'a>(code: &'a str, top: &'a str) -> crate::SimulatorBuilder<'a, Simulation> {
+        crate::SimulatorBuilder::<Simulation>::new(code, top)
     }
 
     pub fn from_sources<'a>(
         sources: Vec<(&'a str, &'a std::path::Path)>,
         top: &'a str,
-    ) -> crate::SimulatorBuilder<'a, Simulation<NativeBackend>> {
-        crate::SimulatorBuilder::<Simulation<NativeBackend>>::from_sources(sources, top)
+    ) -> crate::SimulatorBuilder<'a, Simulation> {
+        crate::SimulatorBuilder::<Simulation>::from_sources(sources, top)
     }
 }
 
