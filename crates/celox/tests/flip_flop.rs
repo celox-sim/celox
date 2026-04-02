@@ -44,6 +44,7 @@ fn test_ff_nonblocking(sim) {
 }
 
 fn test_ff_if_reset_basic(sim) {
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, rst: input reset, d: input logic<8>, q: output logic<8>) {
             always_ff (clk, rst) {
@@ -77,6 +78,7 @@ fn test_ff_if_reset_basic(sim) {
 }
 
 fn test_async_reset(sim) {
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, rst: input reset_async_high, d: input logic<8>, q: output logic<8>) {
             always_ff (clk, rst) {
@@ -109,6 +111,7 @@ fn test_async_reset(sim) {
 }
 
 fn test_ff_swap_correctness(sim) {
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, rst: input reset, a: output logic<8>, b: output logic<8>) {
             var r1: logic<8>;
@@ -195,6 +198,7 @@ fn test_hierarchical_clocks(sim) {
 }
 
 fn test_multiple_async_resets(sim) {
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, rst1: input reset_async_high, rst2: input reset_async_high, d: input logic<8>, q: output logic<8>) {
             var r1: logic<8>;
@@ -235,6 +239,7 @@ fn test_multiple_async_resets(sim) {
 }
 
 fn test_ff_if_reset_multi_cycle(sim) {
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, rst: input reset, q: output logic<8>) {
             always_ff (clk, rst) {
@@ -332,6 +337,7 @@ fn test_ff_struct_constructor_expression(sim) {
 }
 
 fn test_ff_array_literal_default_expression(sim) {
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, in_data: input logic<8>, out_data: output logic<8>[4]) {
             var r: logic<8>[4];
@@ -578,6 +584,7 @@ fn test_ff_function_call_multistatement_body(sim) {
 }
 
 fn test_ff_function_call_indexed_argument_access(sim) {
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, in_a: input logic<8>[4], out_q: output logic<8>) {
             function f (x: input logic<8>[4]) -> logic<8> {

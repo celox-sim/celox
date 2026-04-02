@@ -92,6 +92,7 @@ assign b[7:3]    = a;
     }
 
     fn test_overlapping_override(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (x: input logic<8>, y: input logic<4>, o: output logic<8>) {
 var a: logic<8>;
@@ -149,6 +150,7 @@ o = tmp;
     }
 
     fn test_always_comb_blocking_assignment_chain(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (a: input logic<8>, o: output logic<8>) {
 var x: logic<8>;

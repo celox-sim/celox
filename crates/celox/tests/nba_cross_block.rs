@@ -10,6 +10,7 @@ all_backends! {
     // In RTL, two always_ff blocks on the same clock should both read OLD values
     // (pre-edge) and write NEW values (post-edge), regardless of textual order.
     fn test_nba_separate_blocks_swap(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (clk: input clock, rst: input reset, a: output logic<8>, b: output logic<8>) {
 var r1: logic<8>;

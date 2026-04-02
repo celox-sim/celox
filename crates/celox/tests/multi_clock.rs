@@ -8,6 +8,7 @@ all_backends! {
 
     // Two independent clock domains: each FF only advances on its own clock.
     fn test_independent_clock_domains(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk_a: input  'a clock,
@@ -79,6 +80,7 @@ assign qb = rb;
     // A counter in one clock domain feeding into another (CDC pattern).
     // Tests that domains are truly independent.
     fn test_clock_domain_crossing_pattern(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk_fast: input  'a clock,
@@ -151,6 +153,7 @@ assign sample_out = sample;
 
     // FF with separate clocks and separate resets.
     fn test_separate_resets_per_domain(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk_a: input  'a clock,

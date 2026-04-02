@@ -143,7 +143,7 @@ pub module Top #(
 all_backends! {
 
     fn test_sorter_push_pop_empty(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @build Simulator::builder(sorter_code(), "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -289,7 +289,7 @@ all_backends! {
 
     // Test: push+pop simultaneously — count should not change.
     fn test_sorter_simultaneous_push_pop(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @build Simulator::builder(sorter_code(), "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");

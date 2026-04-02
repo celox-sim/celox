@@ -43,6 +43,7 @@ criterion  = "0.5"
 proptest   = "1.10"
 test-case  = "3"
 tempfile.workspace = true
+veryl-simulator = { workspace = true }
 
 [[bench]]
 name = "simulation"

@@ -92,6 +92,7 @@ assign b = a;
 
     // Test rapid clock toggling: tick many times and verify counter state.
     fn test_rapid_tick_counter(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -157,6 +158,7 @@ assign sum = a + b + c;
     }
 
     fn test_overlapping_partial_write_keeps_untouched_bit_dependency(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 a: input logic,

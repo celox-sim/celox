@@ -199,6 +199,7 @@ inst dst_inst: Sink   (bus: wb, out: out);
 
     // Parametric interface array: verify array_dims are populated for parametric-type members.
     fn test_parametric_interface_array(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 interface Bus::<T: type> {
 var data:  T;

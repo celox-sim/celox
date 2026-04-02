@@ -9,6 +9,7 @@ all_backends! {
     // For-loop instances: verify named_hierarchy groups them correctly
     // and child_signal access works.
     fn test_for_loop_instance_hierarchy(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Sub (
 clk: input '_ clock,
@@ -163,7 +164,7 @@ inst u_sub: Sub ( i: 8'h0F, o: o );
     }
 
     fn test_hierarchical_concat_feedback_runtime(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module Child (
 a: input logic<2>,
@@ -201,7 +202,7 @@ assign out = v[0];
     }
 
     fn test_hierarchical_concat_feedback_runtime_multi_observe(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module Child (
 a: input logic<2>,
@@ -239,7 +240,7 @@ assign out1 = v[1];
     }
 
     fn test_hierarchical_concat_feedback_with_constant_middle_bit(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module Child (
 a: input logic<3>,
@@ -279,7 +280,7 @@ assign mid = v[1];
     }
 
     fn test_hierarchical_dynamic_index_feedback_runtime(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module ChildFb (
 a: input logic<3>,
@@ -353,7 +354,7 @@ assign out_dyn = d;
     }
 
     fn test_hierarchical_dual_dynamic_readers_feedback_runtime(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module ChildFb (
 a: input logic<3>,
@@ -449,7 +450,7 @@ assign out1 = d1;
     }
 
     fn test_hierarchical_overlapping_partial_write_dynamic_index_runtime(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module ChildFb (
 a: input logic<3>,
@@ -553,7 +554,7 @@ assign out_v1 = v[1];
     }
 
     fn test_hierarchical_concat_then_overlap_dynamic_index_runtime(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module ChildFb (
 a: input logic<3>,
@@ -635,6 +636,7 @@ assign out_v1 = v[1];
     }
 
     fn test_child_signal_access(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Sub (
 i_data: input  logic<8>,
@@ -666,6 +668,7 @@ o_data: top_out
     }
 
     fn test_named_hierarchy_structure(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Leaf (
 i: input  logic,
@@ -716,6 +719,7 @@ inst u_mid: Mid ( i: top_i, o: top_o );
     }
 
     fn test_named_hierarchy_multiple_instances(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Worker (
 clk: input clock,
@@ -753,6 +757,7 @@ inst u1: Worker ( clk: clk, i_val: in1, o_val: out1 );
     }
 
     fn test_instance_signals_child(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Sub (
 i_data: input  logic<8>,
@@ -782,6 +787,7 @@ o_data: top_out
     }
 
     fn test_instance_signals_deep_hierarchy(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Leaf (
 i: input  logic<8>,
@@ -822,6 +828,7 @@ inst u_mid: Mid ( i: top_i, o: top_o );
     }
 
     fn test_instance_signals_multiple_instances(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Worker (
 i_val: input  logic<8>,
@@ -872,6 +879,7 @@ inst u1: Worker ( i_val: in1, o_val: out1 );
     }
 
     fn test_instance_signals_nonexistent_path(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 i: input  logic,

@@ -159,6 +159,7 @@ fn test_addition_different_widths(sim) {
 }
 
 fn test_ff_width_propagation(sim) {
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,

@@ -350,7 +350,7 @@ assign o = r;
     }
 
     fn test_signed_comparison_after_as_cast(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module Top (a: input logic<8>, b: input logic<8>, y: output logic) {
 assign y = (a as i8) <: (b as i8);
@@ -588,6 +588,7 @@ assign y = a ~^ b;
 
     // XNOR in always_ff.
     fn test_ff_bitxnor(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -711,6 +712,7 @@ assign y = ~^a;
 
     // Reduction NAND in always_ff.
     fn test_ff_reduction_nand(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -795,6 +797,7 @@ o_comb = 32'hffff_ffff + 1;
 
     // Reduction NOR in always_ff.
     fn test_ff_reduction_nor(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -842,6 +845,7 @@ assign y = r;
     }
 
     fn test_mixed_signed_unsigned_comparison(sim) {
+        @ignore_on(veryl);
         @setup { // Mixed signed/unsigned should be treated as unsigned (Clause 11.8.1)
 let code = r#"
 module Top (

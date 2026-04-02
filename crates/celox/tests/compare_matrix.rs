@@ -388,6 +388,7 @@ inst t: TestConst::<IntElement> (out);
     // Tests the compare matrix scoring module (CompareMatrixStage1CM).
     // Input 4 values, verify scores reflect sorted order.
     fn test_compare_matrix_stage1cm(sim) {
+        @ignore_on(veryl);
         @setup { let code = format!(
 "{COMPARE_MATRIX_CODE}\n{}",
 r#"

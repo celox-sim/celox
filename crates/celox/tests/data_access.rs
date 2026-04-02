@@ -68,6 +68,7 @@ assign o = a[2];
     }
 
     fn test_multidimensional_access(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (i: input logic<8>, o: output logic<8>) {
 var a: logic<8> [4, 2];
@@ -92,6 +93,7 @@ assign o = a[1][0];
     }
 
     fn test_minus_colon_and_step_execution(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (a: input logic<8>, b: output logic<32>) {
 always_comb {
@@ -111,6 +113,7 @@ b[1 step 8] = a;
     }
 
     fn test_dynamic_slice_bullying(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (idx: input logic<2>, data: input logic<16>, o: output logic<4>) {
 var mem: logic<16>;
@@ -158,6 +161,7 @@ assign o = tmp;
     }
 
     fn test_genvar_const_in_generate(sim) {
+        @ignore_on(veryl);
         @setup { // Genvar used as a simple expression inside a generate block
 // should produce per-instance constant values.
 let code = r#"
@@ -188,6 +192,7 @@ assign o[j] = j as u8 + 10;
     }
 
     fn test_genvar_dynamic_index_issue21(sim) {
+        @ignore_on(veryl);
         @setup { // Issue #21: dynamic indexing of unpacked array using genvar-based
 // expression should produce different values per generate instance.
 // Each generate instance uses genvar `j` to compute a dynamic index
@@ -237,7 +242,7 @@ assign o[j] = local_data[idx];
     }
 
     fn test_dynamic_index_with_bitslice(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { // Regression: arr[dynamic_idx][hi:lo] produced wrong values because
 // the bit-select anchor was incorrectly added to the dynamic offset.
 let code = r#"
@@ -278,7 +283,7 @@ assign o_hi = regs[idx][63:32];
     }
 
     fn test_let_index_with_bitslice_write(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { // Regression: using a `let`-bound variable as an array index combined
 // with a bitslice write (e.g. data[idx][63:32]) produced wrong values
 // because eval_dynamic_assign treated the Colon MSB anchor as a

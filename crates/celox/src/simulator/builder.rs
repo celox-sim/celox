@@ -236,6 +236,16 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
 /// Configuration methods shared by all builder variants.
 #[cfg(not(target_arch = "wasm32"))]
 impl<'a, Target> SimulatorBuilder<'a, Target> {
+    /// Returns the source files passed to this builder.
+    pub fn sources(&self) -> &[(&'a str, &'a Path)] {
+        &self.sources
+    }
+
+    /// Returns the top module name.
+    pub fn top(&self) -> &'a str {
+        self.top
+    }
+
     /// Supply project metadata (clock/reset settings, etc.) instead of defaults.
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = Some(metadata);

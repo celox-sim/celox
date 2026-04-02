@@ -306,6 +306,7 @@ assign o = acc;
     // - `a && b` => BinaryOp::LogicAnd
     // - `a || b` => BinaryOp::LogicOr
     fn test_wide_comb_logic_and_or(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,
@@ -496,7 +497,7 @@ assign y = r;
 
     // 128-bit division in always_comb.
     fn test_wide_comb_div(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,
@@ -532,7 +533,7 @@ assign q = a / b;
 
     // 128-bit modulo in always_comb.
     fn test_wide_comb_rem(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,
@@ -595,7 +596,7 @@ assign y = a ~^ b;
 
     // 128-bit arithmetic shift right in always_comb.
     fn test_wide_comb_sar(sim) {
-        @ignore_on(wasm);
+        @ignore_on(wasm, veryl);
         @setup { let code = r#"
 module Top (
 a: input  signed logic<128>,
@@ -632,6 +633,7 @@ assign y = a >>> b;
 
     // 128-bit signed less-than.
     fn test_wide_comb_signed_lt(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 a: input  signed logic<128>,
@@ -674,6 +676,7 @@ assign y = a <: b;
 
     // 128-bit signed greater-than.
     fn test_wide_comb_signed_gt(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 a: input  signed logic<128>,
@@ -708,6 +711,7 @@ assign y = a >: b;
 
     // 128-bit reduction NAND.
     fn test_wide_comb_reduction_nand(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,

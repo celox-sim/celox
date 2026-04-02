@@ -145,6 +145,7 @@ all_backends! {
     // o_posedge/o_negedge use AND with 1-bit ~i_clear which limits multi-bit
     // behavior due to zero-extension. We test o_edge for multi-bit correctness.
     fn test_edge_detector_multibit(sim) {
+        @ignore_on(veryl);
         @setup { let top = r#"
 module Top (
 clk      : input  clock,

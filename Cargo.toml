@@ -26,7 +26,8 @@ veryl-analyzer = { path = "deps/veryl/crates/analyzer" }
 veryl-emitter  = { path = "deps/veryl/crates/emitter" }
 veryl-metadata = { path = "deps/veryl/crates/metadata" }
 veryl-parser   = { path = "deps/veryl/crates/parser", default-features = false }
-veryl-path     = { path = "deps/veryl/crates/path" }
+veryl-path      = { path = "deps/veryl/crates/path" }
+veryl-simulator = { path = "deps/veryl/crates/simulator" }
 
 # Shared dependencies (also needed by veryl submodule crates)
 anyhow          = "1.0"
@@ -58,6 +59,11 @@ toml            = "1.0.3"
 url             = { version = "2.5", features = ["serde"] }
 vcd             = "0.7.0"
 walkdir         = "2.5.0"
+
+# Dependencies needed by veryl-simulator (inherited via workspace)
+criterion       = { package = "codspeed-criterion-compat", version = "4.0" }
+fst-writer      = "0.3.1"
+pprof           = { version = "0.15.0", features = ["flamegraph"] }
 
 [workspace.lints.rust]
 warnings = "deny"
