@@ -3,42 +3,67 @@
 Celox provides two layers of optimization control: **SIRT passes** (Celox's own SIR-level optimizer) and **backend options**. On x86-64 the native backend is used by default; on other architectures Cranelift JIT is the fallback.
 
 ::: tip TL;DR
-The default settings (all enabled, native backend on x86-64) are the best general-purpose choice. Only tune if you have a specific compile-time or simulation-speed bottleneck, and always benchmark your actual design.
+The default settings (`O1`, native backend on x86-64) are the best general-purpose choice. Only tune if you have a specific compile-time or simulation-speed bottleneck, and always benchmark your actual design.
 :::
+
+## Optimization Levels
+
+Celox uses a GCC-style optimization model: **preset levels** set defaults, and **per-pass overrides** allow fine-grained control.
+
+| Level | SIR Passes | DSE | Cranelift |
+|---|---|---|---|
+| `O0` | TailCallSplit only | Off | `fast_compile()` |
+| `O1` (default) | All 18 passes | Off | Speed / Backtracking |
+| `O2` | All 18 passes | PreserveTopPorts | Speed / Backtracking |
 
 ## Quick Start
 
 ```ts
 import { Simulator } from '@celox-sim/celox';
 
-// Default: all optimizations enabled (best simulation speed)
+// Default (O1): all optimizations enabled
 const sim = await Simulator.create(module);
 
-// Disable all SIRT passes (backend still optimizes)
-const sim = await Simulator.create(module, { optimize: false });
+// O0: minimal optimization (fast compile, slower simulation)
+const sim = await Simulator.create(module, { optLevel: "O0" });
 
-// Fine-grained: disable specific passes
+// O2: all optimizations + dead store elimination
+const sim = await Simulator.create(module, { optLevel: "O2" });
+
+// O1 with specific passes disabled
 const sim = await Simulator.create(module, {
-    optimizeOptions: { reschedule: false, commitSinking: false },
+    optLevel: "O1",
+    passOverrides: ["-sir:reschedule", "-sir:commit_sinking"],
 });
+
+// Legacy (still supported):
+const sim = await Simulator.create(module, { optimize: false });
 ```
 
 ## SIRT Optimization Passes
 
-SIRT (Simulator IR Transform) passes optimize the intermediate representation before handing it to the backend for code generation.
+SIRT (Simulator IR Transform) passes optimize the intermediate representation before handing it to the backend for code generation. All 18 passes are individually controllable via `SirPass` (Rust) or `passOverrides` (TypeScript).
 
 | Pass | What it does |
 |---|---|
-| `storeLoadForwarding` | Reuses a stored value directly instead of reloading it from memory |
-| `hoistCommonBranchLoads` | When both branches of a conditional start with the same load, moves it before the branch |
-| `bitExtractPeephole` | Converts `(value >> shift) & mask` into a single ranged load |
-| `optimizeBlocks` | Dead block removal, block merging, load coalescing |
-| `splitWideCommits` | Splits wide commit operations into narrower ones |
-| `commitSinking` | Moves commit operations closer to where their values are used |
-| `inlineCommitForwarding` | Writes directly to the destination region, removing the intermediate commit copy |
-| `eliminateDeadWorkingStores` | Removes stores to working memory that are never read |
+| `store_load_forwarding` | Reuses a stored value directly instead of reloading it from memory |
+| `hoist_common_branch_loads` | When both branches of a conditional start with the same load, moves it before the branch |
+| `bit_extract_peephole` | Converts `(value >> shift) & mask` into a single ranged load |
+| `optimize_blocks` | Dead block removal, block merging, load coalescing |
+| `split_wide_commits` | Splits wide commit operations into narrower ones |
+| `commit_sinking` | Moves commit operations closer to where their values are used |
+| `inline_commit_forwarding` | Writes directly to the destination region, removing the intermediate commit copy |
+| `eliminate_dead_working_stores` | Removes stores to working memory that are never read |
 | `reschedule` | Reorders instructions to reduce register pressure |
-| `coalesceStores` | Merges consecutive narrow stores to the same variable into wider Concat+Store operations |
+| `coalesce_stores` | Merges consecutive narrow stores into wider Concat+Store operations |
+| `gvn` | Global value numbering / dead code elimination |
+| `concat_folding` | Folds redundant Concat operations |
+| `xor_chain_folding` | Folds XOR chains |
+| `vectorize_concat` | Vectorizes Concat patterns in combinational blocks |
+| `split_coalesced_stores` | Splits wide coalesced stores back after reschedule to reduce register pressure |
+| `partial_forward` | Partial store-load forwarding in combinational blocks |
+| `identity_store_bypass` | Detects identity copies and registers address aliases for layout sharing |
+| `tail_call_split` | Splits large functions into tail-call chains (enabled even at O0) |
 
 ### Post-Merge Passes (Native Backend)
 
@@ -79,7 +104,7 @@ hoistCommonBranchLoads┘
 `storeLoadForwarding` and `hoistCommonBranchLoads` simplify the IR so that `inlineCommitForwarding` can better match commit patterns. Disabling them individually may appear harmless, but **disabling them together** degrades the IR quality fed to the backend, causing compile time and simulation speed to suffer.
 
 ::: warning
-Do not disable `storeLoadForwarding`, `hoistCommonBranchLoads`, and `inlineCommitForwarding` as a group. In benchmarks, this combination increased combinational compile time by +69% and eval time by +17%.
+Do not disable `store_load_forwarding`, `hoist_common_branch_loads`, and `inline_commit_forwarding` as a group. In benchmarks, this combination increased combinational compile time by +69% and eval time by +17%.
 :::
 
 ## Backend Selection
@@ -104,36 +129,41 @@ These apply only when using the Cranelift backend (non-x86-64 platforms, or expl
 ### Rust API
 
 ```rust
-use celox::{Simulator, OptimizeOptions};
+use celox::{Simulator, OptLevel, SirPass, CraneliftOptions};
 
-// Default (native on x86-64):
+// Default (O1, native on x86-64):
 let sim = Simulator::builder(code, "Top").build()?;
+
+// O0 (fast compile):
+let sim = Simulator::builder(code, "Top")
+    .opt_level(OptLevel::O0)
+    .build()?;
+
+// O1 with specific pass disabled:
+let sim = Simulator::builder(code, "Top")
+    .opt_level(OptLevel::O1)
+    .disable_pass(SirPass::Reschedule)
+    .build()?;
 
 // Explicit Cranelift backend:
 let sim = Simulator::builder(code, "Top").build_cranelift()?;
-
-// Per-pass control:
-let sim = Simulator::builder(code, "Top")
-    .optimize_options(OptimizeOptions { reschedule: false, ..OptimizeOptions::all() })
-    .build()?;
-
-// Disable all SIRT passes:
-let sim = Simulator::builder(code, "Top")
-    .optimize(false)
-    .build()?;
 ```
 
 ### TypeScript API
 
 ```ts
-// Default: all optimizations, native backend on x86-64
+// Default: O1, native backend on x86-64
 const sim = await Simulator.create(module);
 
-// Fine-grained:
+// O2: all optimizations + DSE
+const sim = await Simulator.create(module, { optLevel: "O2" });
+
+// O1 with per-pass overrides:
 const sim = await Simulator.create(module, {
-    optimizeOptions: { reschedule: false, commitSinking: false },
+    optLevel: "O1",
+    passOverrides: ["-sir:reschedule", "-sir:commit_sinking"],
 });
 
-// Disable all SIRT passes:
-const sim = await Simulator.create(module, { optimize: false });
+// O0 (fast compile, slower simulation):
+const sim = await Simulator.create(module, { optLevel: "O0" });
 ```

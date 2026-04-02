@@ -12,7 +12,19 @@ Dead Store Elimination removes stores to signals that are never read, producing 
 
 ## Usage
 
-### With `fromSource` / `fromProject`
+### With `optLevel: "O2"`
+
+The simplest way to enable DSE is to use optimization level O2, which defaults to `preserveTopPorts`:
+
+```typescript
+const sim = Simulator.fromSource(SOURCE, "Top", {
+  optLevel: "O2",
+});
+```
+
+### With explicit `deadStorePolicy`
+
+You can also set the policy directly (overrides the `optLevel` default):
 
 ```typescript
 const sim = Simulator.fromSource(SOURCE, "Top", {
