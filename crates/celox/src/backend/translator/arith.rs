@@ -1424,7 +1424,7 @@ impl SIRTranslator {
         else_val: &RegisterId,
     ) {
         let d_width = state.register_map[dst].width();
-        let cond_raw = state.regs[cond].first_value(&mut state.builder);
+        let cond_raw = state.regs[cond].first_value(state.builder);
         // Mask cond to 1-bit (SLT may produce multi-bit cond via Concat)
         let cond_i64 = cast_type(state.builder, cond_raw, types::I64);
         let cond_v = state.builder.ins().band_imm(cond_i64, 1);
@@ -1436,8 +1436,8 @@ impl SIRTranslator {
 
         if d_width <= 64 {
             let ty = get_cl_type(d_width);
-            let tv_raw = state.regs[then_val].first_value(&mut state.builder);
-            let ev_raw = state.regs[else_val].first_value(&mut state.builder);
+            let tv_raw = state.regs[then_val].first_value(state.builder);
+            let ev_raw = state.regs[else_val].first_value(state.builder);
             let tv = cast_type(state.builder, tv_raw, ty);
             let ev = cast_type(state.builder, ev_raw, ty);
             let cbc = cast_type(state.builder, cond_bc, ty);
@@ -1449,13 +1449,13 @@ impl SIRTranslator {
 
             if self.options.four_state {
                 let then_mc = state.regs[then_val]
-                    .load_mask_chunks(&mut state.builder)
+                    .load_mask_chunks(state.builder)
                     .unwrap_or_else(|| vec![state.builder.ins().iconst(ty, 0)]);
                 let else_mc = state.regs[else_val]
-                    .load_mask_chunks(&mut state.builder)
+                    .load_mask_chunks(state.builder)
                     .unwrap_or_else(|| vec![state.builder.ins().iconst(ty, 0)]);
                 let cond_mc = state.regs[cond]
-                    .load_mask_chunks(&mut state.builder)
+                    .load_mask_chunks(state.builder)
                     .unwrap_or_else(|| vec![state.builder.ins().iconst(ty, 0)]);
 
                 let tm = cast_type(state.builder, then_mc[0], ty);
@@ -1483,9 +1483,9 @@ impl SIRTranslator {
             }
         } else {
             // Wide Mux: per-chunk select
-            let n_chunks = (d_width + 63) / 64;
-            let tv_chunks = state.regs[then_val].load_value_chunks(&mut state.builder);
-            let ev_chunks = state.regs[else_val].load_value_chunks(&mut state.builder);
+            let n_chunks = d_width.div_ceil(64);
+            let tv_chunks = state.regs[then_val].load_value_chunks(state.builder);
+            let ev_chunks = state.regs[else_val].load_value_chunks(state.builder);
 
             let mut res_chunks = Vec::with_capacity(n_chunks);
             for i in 0..n_chunks {
@@ -1499,13 +1499,13 @@ impl SIRTranslator {
 
             if self.options.four_state {
                 let tm_chunks = state.regs[then_val]
-                    .load_mask_chunks(&mut state.builder)
+                    .load_mask_chunks(state.builder)
                     .unwrap_or_default();
                 let em_chunks = state.regs[else_val]
-                    .load_mask_chunks(&mut state.builder)
+                    .load_mask_chunks(state.builder)
                     .unwrap_or_default();
                 let cond_mc = state.regs[cond]
-                    .load_mask_chunks(&mut state.builder)
+                    .load_mask_chunks(state.builder)
                     .unwrap_or_default();
                 let cond_m_val = *cond_mc.first().unwrap_or(&zero);
                 let cond_unc = state.builder.ins().isub(zero, cond_m_val);

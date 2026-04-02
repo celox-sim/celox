@@ -4,8 +4,8 @@ use celox::{Simulator, SimulatorBuilder};
 #[macro_use]
 mod test_utils;
 
-/// Reproduction for parametric bit-slice bug:
-/// `w_buf[N_CH - 1:0]` with N_CH=4 resolves to [1:0] instead of [3:0].
+// Reproduction for parametric bit-slice bug:
+// `w_buf[N_CH - 1:0]` with N_CH=4 resolves to [1:0] instead of [3:0].
 
 const AXI_LITE_REG_FILE: &str = include_str!("fixtures/bitslice/axi_lite_reg_file.veryl");
 

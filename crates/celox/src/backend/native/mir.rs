@@ -913,7 +913,7 @@ impl MFunction {
             // Instructions
             for (ii, inst) in block.insts.iter().enumerate() {
                 for u in inst.uses().iter() {
-                    if !global_defs.contains(&u) {
+                    if !global_defs.contains(u) {
                         panic!(
                             "MIR verify: VReg v{} used but never defined.\n  \
                              block {bi}, inst {ii}: {inst}",
