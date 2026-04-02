@@ -62,6 +62,15 @@ X (mask) propagation in each operation follows IEEE 1800 semantics.
 | `\|` (reduction OR) | If a known 1 exists, the result is a known 1; otherwise X |
 | `^` (reduction XOR) | If any bit is X, the result is X |
 
+## SIR-Level Z Preservation
+
+Two SIR instructions have dedicated 4-state handling to preserve Z (high-impedance) bits through the pipeline without converting them to X:
+
+-   **`Mux(dst, cond, then_val, else_val)`**: Selects the value/mask pair of the chosen branch. When `cond` has X/Z bits, the result is all-X. Unlike the previous AND/OR lowering pattern, this preserves exact Z bits of the selected branch.
+-   **`Concat(dst, [msb..lsb])`**: Pure data movement concatenation. Preserves the value/mask of each part without modification, keeping Z bits intact.
+
+These instructions replaced the earlier Shl+Or (for Concat) and Branch-based (for Mux) lowering patterns, which could convert Z to X through bitwise operations.
+
 ## Boundary with 2-State Variables
 
 When storing to a `bit`-type (2-state) variable, the mask is forcibly reset to 0 (post-store processing in `memory.rs`). This prevents unintended propagation of X through 2-state variables.

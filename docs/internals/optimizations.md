@@ -34,9 +34,30 @@ Detects and removes writes to the Working region that are never referenced.
 Reorders instructions while preserving inter-instruction dependencies (RAW/WAR/WAW), taking into account processor execution ports and memory latency.
 
 ### 2.6 Scheduler-level Store Coalescing
-During scheduling, consecutive DAG nodes targeting the same variable at the same topological layer are reordered to be adjacent. When contiguous bit ranges of the same variable are detected, they are merged into a single `Concat` + `Store` at the SIR level, reducing the number of memory writes. Controlled by the `coalesce_stores` option.
+During scheduling, consecutive DAG nodes targeting the same variable at the same topological layer are reordered to be adjacent. When contiguous bit ranges of the same variable are detected, they are merged into a single `Concat` + `Store` at the SIR level, reducing the number of memory writes. Controlled by `SirPass::CoalesceStores`.
 
-### 2.7 Tail-Call Splitting
+### 2.7 Global Value Numbering (GVN)
+Deduplicates SIR instructions with identical operands and eliminates dead code. Controlled by `SirPass::Gvn`.
+
+### 2.8 Concat Folding
+Folds redundant `Concat` operations — e.g., when a `Concat` reassembles slices of the same register in their original order, the Concat is eliminated. Controlled by `SirPass::ConcatFolding`.
+
+### 2.9 XOR Chain Folding
+Detects and folds XOR reduction chains into more efficient patterns. Controlled by `SirPass::XorChainFolding`.
+
+### 2.10 Vectorize Concat
+Vectorizes `Concat` patterns in combinational blocks — recognizes repeated similar operations across bit ranges and replaces them with wider operations. Controlled by `SirPass::VectorizeConcat`.
+
+### 2.11 Split Coalesced Stores
+Splits wide coalesced stores back into narrower ones after the reschedule pass, when the split form is more efficient for the backend. Controlled by `SirPass::SplitCoalescedStores`.
+
+### 2.12 Partial Forward
+Partial store-load forwarding in combinational blocks. When a store covers part of a subsequent load's range, forwards the known portion and narrows the load. Controlled by `SirPass::PartialForward`.
+
+### 2.13 Identity Store Bypass
+Detects identity copies (Store→Load roundtrips where the value is unchanged) and registers the source and destination as address aliases in `Program::address_aliases`. Aliased variables share physical memory, eliminating redundant copies. Controlled by `SirPass::IdentityStoreBypass`.
+
+### 2.14 Tail-Call Splitting
 Cranelift uses a 24-bit instruction index internally, limiting a single function to approximately 16M CLIF instructions. Large combinational designs (e.g., wide-bus arithmetic, many coalesced execution units) can exceed this limit.
 
 When the estimated CLIF instruction count for `eval_comb` exceeds the threshold (currently 8M, a 50% safety margin), the optimizer splits it into a chain of smaller functions connected by Cranelift's `return_call` (tail-call) instruction, which avoids stack growth.
@@ -51,20 +72,28 @@ This pass runs even when all SIRT passes are disabled (`OptimizeOptions::none()`
 
 ## Per-Pass Control
 
-Each SIR optimization pass (sections 2.1–2.6) can be individually enabled or disabled via `OptimizeOptions`. The mapping from `OptimizeOptions` fields to passes:
+Each SIR optimization pass can be individually enabled or disabled via the `SirPass` enum and `OptimizeOptions`. `OptLevel::O0` enables only `TailCallSplit`; `OptLevel::O1` (default) and `O2` enable all 18 passes.
 
-| `OptimizeOptions` field | Pass(es) |
+| `SirPass` variant | Pass(es) |
 |---|---|
-| `store_load_forwarding` | Load/Store Coalescing, Redundant Load Elimination (2.1, 2.2) |
-| `hoist_common_branch_loads` | Branch-shared load hoisting |
-| `bit_extract_peephole` | `(value >> shift) & mask` → direct ranged load |
-| `optimize_blocks` | Dead block removal, block merging |
-| `split_wide_commits` | Wide commit splitting |
-| `commit_sinking` | Commit Sinking (2.3) |
-| `inline_commit_forwarding` | Inline Forwarding (2.3) |
-| `eliminate_dead_working_stores` | Dead Store Elimination (2.4) |
-| `reschedule` | Instruction Scheduling (2.5) |
-| `coalesce_stores` | Scheduler-level Store Coalescing (2.6) |
+| `StoreLoadForwarding` | Load/Store Coalescing, Redundant Load Elimination (2.1, 2.2) |
+| `HoistCommonBranchLoads` | Branch-shared load hoisting |
+| `BitExtractPeephole` | `(value >> shift) & mask` → direct ranged load |
+| `OptimizeBlocks` | Dead block removal, block merging |
+| `SplitWideCommits` | Wide commit splitting |
+| `CommitSinking` | Commit Sinking (2.3) |
+| `InlineCommitForwarding` | Inline Forwarding (2.3) |
+| `EliminateDeadWorkingStores` | Dead Store Elimination (2.4) |
+| `Reschedule` | Instruction Scheduling (2.5) |
+| `CoalesceStores` | Scheduler-level Store Coalescing (2.6) |
+| `Gvn` | Global Value Numbering (2.7) |
+| `ConcatFolding` | Concat Folding (2.8) |
+| `XorChainFolding` | XOR Chain Folding (2.9) |
+| `VectorizeConcat` | Vectorize Concat (2.10) |
+| `SplitCoalescedStores` | Split Coalesced Stores (2.11) |
+| `PartialForward` | Partial Forward (2.12) |
+| `IdentityStoreBypass` | Identity Store Bypass (2.13) |
+| `TailCallSplit` | Tail-Call Splitting (2.14) — enabled even at O0 |
 
 ## 3. Machine Layer (MIR) Optimizations — Native Backend
 
@@ -74,8 +103,8 @@ These optimizations are applied in the native x86-64 backend between instruction
 
 The MIR optimizer adapts its aggressiveness based on register pressure:
 
--   **High-pressure (VRegs > 40)**: Full pipeline with 2× iterative passes for maximum optimization.
--   **Low-pressure (VRegs ≤ 40)**: Lightweight single-pass pipeline.
+-   **High-pressure (VRegs > 40)**: Full pipeline with 2× iterative core passes, followed by load sinking and live range splitting for maximum optimization.
+-   **Low-pressure (VRegs ≤ 40)**: Lightweight single-pass pipeline (skips load sinking and live range splitting).
 
 ### MIR Optimization Passes
 
@@ -84,17 +113,17 @@ The MIR optimizer adapts its aggressiveness based on register pressure:
 | Constant folding | Evaluate operations with constant operands at compile time |
 | Constant deduplication | Merge duplicate `LoadImm` instructions |
 | Copy propagation | Replace uses of `Mov` destinations with their sources |
-| Algebraic simplification | Simplify patterns like `x & 0` → `0`, `x | 0` → `x`, `x ^ 0` → `x` |
-| Redundant mask elimination | Remove `AndImm` masks that are provably no-ops |
-| Global value numbering (GVN) | Deduplicate instructions with identical operands |
+| Algebraic simplification | Simplify patterns like `x & 0` → `0`, `x \| 0` → `x`, `x ^ 0` → `x`, strength-reduce `Mul` to shifts |
+| Redundant mask elimination | Remove `AndImm` masks that are provably no-ops (uses known-width tracking) |
+| Global value numbering (GVN) | Deduplicate instructions with identical operands (dominator-aware) |
 | Dead code elimination (DCE) | Remove instructions whose results are unused |
 | Lower to immediate forms | Convert `op reg, LoadImm(c)` → `opImm reg, c` |
-| LoadImm sinking | Move constant loads closer to their uses to reduce register pressure |
-| Live range splitting | Split long-lived values to improve register allocation |
+| LoadImm sinking | Move constant loads closer to their uses to reduce register pressure (high-pressure only) |
+| Live range splitting | Split long-lived values to improve register allocation (high-pressure only) |
 | XOR chain to PEXT fusion | Fold XOR reduction chains into BMI2 `PEXT` instructions |
-| If-conversion | Convert diamond Branch patterns into `Select` (cmov) for small arms |
+| If-conversion | Convert diamond `Branch` patterns into `Select` (cmov) for small arms |
 | CFG simplification | Thread jumps through empty blocks, eliminate redundant branches |
-| Value width computation | Track actual bit widths for narrowing optimizations in the emitter |
+| Value width computation | Track actual bit widths for narrowing optimizations in the emitter (e.g., 32-bit registers) |
 
 ## 4. Cranelift Backend Options
 

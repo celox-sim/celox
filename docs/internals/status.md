@@ -7,11 +7,14 @@ This is an overview of the current implementation status and supported features 
 -   **Native x86-64 Backend (Default)**: Self-hosted compilation pipeline (SIR → ISel → MIR → mir_opt → regalloc → x86-64 emit). Default backend on x86-64 platforms.
 -   **Cranelift JIT Backend (Fallback)**: SIR-to-native-code translation via [Cranelift](https://cranelift.dev/). Available for non-x86-64 targets.
 -   **WASM Backend**: SIR-to-WASM compilation for browser-based simulation (Playground).
--   **Memory Model**: Single-buffer management with Stable, Working, Triggered-bits, and Scratch regions.
+-   **Memory Model**: Single-buffer management with Stable, Working, Triggered-bits, and Scratch regions. `MemoryLayout` is pre-computed in `Program` and shared by all backends. Address aliases from `IdentityStoreBypass` allow variables to share physical memory.
 -   **Scheduler**: Event-driven time management (BinaryHeap-based) with deterministic ordering.
 -   **Multi-clock Synchronization**: Supports per-clock-domain evaluation and automatic detection of cross-domain chaining (cascade clocks). *[Evaluation order and consistency are subject to limitations](./cascade-limitations.md).*
 -   **Multi-phase Evaluation**: An evaluation strategy to guarantee consistency for simultaneously occurring events. Separate `eval_only` / `apply` execution units enable split-phase flip-flop processing.
--   **4-State Simulation**: X propagation via an IEEE 1800-compliant value/mask model. The distinction between Z (`v=0, m=1`) and X (`v=1, m=1`) is preserved throughout the pipeline — no normalization is applied. See [four_state.md](./four-state.md) for details.
+-   **4-State Simulation**: X propagation via an IEEE 1800-compliant value/mask model. The distinction between Z (`v=0, m=1`) and X (`v=1, m=1`) is preserved throughout the pipeline — no normalization is applied. Dedicated SIR `Mux` and `Concat` instructions ensure Z bits are preserved through select and concatenation operations. See [four_state.md](./four-state.md) for details.
+-   **Testbench Bytecode VM**: A stack-based bytecode VM executes Veryl `initial` blocks and testbench functions. Supports narrow (≤64-bit) and wide signals via `TbValue`, dynamic array indices, bit selects, concatenation, and function calls.
+-   **Multi-Backend Testing**: The `all_backends!` macro generates test variants for all three backends (Native, Cranelift, WASM) from a single test body. Per-backend skip via `@ignore_on(wasm)` directive.
+-   **Veryl Simulator Cross-Validation**: `VerylSimAdapter` wraps the Veryl reference simulator to cross-validate Celox results, catching semantic bugs where all Celox backends agree but produce incorrect results.
 
 ## 2. Language Features
 

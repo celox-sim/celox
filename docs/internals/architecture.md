@@ -25,9 +25,10 @@ The transformation from Veryl source code to execution consists of the following
     -   **SIR Optimization**: Applies per-pass optimization (store-load forwarding, commit sinking, dead store elimination, instruction scheduling, etc.) controlled by `OptimizeOptions`.
 
 3.  **Backend (Code Generation)**:
-    -   **Memory Layout**: Determines memory offsets for all variables and places them on a single memory buffer with Stable, Working, and Triggered-bits regions.
+    -   **Memory Layout**: Determines memory offsets for all variables and places them on a single memory buffer with Stable, Working, Triggered-bits, and Scratch regions. Layout is pre-computed in `Program` after optimization, before backend codegen, so all backends share the same layout.
     -   **Code Generation**: Compiles SIR into executable machine code via one of the available backends.
     -   **Runtime**: Manages compiled function pointers as event handles and executes the simulation.
+    -   **Testbench VM** (optional): A stack-based bytecode VM that executes Veryl `initial` blocks and testbench functions. Opcodes include `ConstU64`, `ConstWide`, `LoadU64`, `LoadWide`, `BinOp`, `UnaryOp`, `Ternary`, `LoadIndexed`, `LoadBitSelect`, `StoreU64`, supporting both narrow (≤64-bit) and wide signals.
 
 ## Backends
 
@@ -67,9 +68,12 @@ A WebAssembly backend (`wasm_codegen`) generates WASM bytecode for browser-based
 All backends implement the `SimBackend` trait, which provides a unified interface for:
 
 -   Combinational evaluation (`eval_comb`)
--   Flip-flop evaluation with merged comb (`eval_apply_ff_and_comb`)
--   Split-phase FF evaluation (`eval_only_ff_at`, `apply_ff_at`)
--   Signal and event resolution
+-   Merged FF + comb evaluation (`eval_apply_ff_and_comb`) — single-call fast path when only one domain fires
+-   Single-phase FF evaluation (`eval_apply_ff_at`)
+-   Split-phase FF evaluation (`eval_only_ff_at`, `apply_ff_at`) — for cascade clock consistency
+-   Signal access (`resolve_signal`, `resolve_event`)
+-   Get/set operations (`get`, `set`, `set_wide`, `get_four_state`, `set_four_state`)
+-   Triggered-bits management (`clear_triggered_bits`, `mark_triggered_bit`, `get_triggered_bits`)
 
 ## Memory Model
 
@@ -80,6 +84,7 @@ The simulator employs a **multi-region model on a single memory buffer**.
 -   **Triggered-bits region**: One bit per event, used for cascade/gated clock trigger detection. After a `Store` instruction, the backend compares old and new values and sets the corresponding trigger bit if changed.
 -   **Scratch region**: Used by the tail-call splitting pass for inter-chunk register value spilling.
 -   **SignalRef**: A handle that caches offsets and metadata, enabling direct memory access without going through a `HashMap`.
+-   **Address Aliases**: The `IdentityStoreBypass` optimization detects variables that are identity copies (Store→Load roundtrips) and registers them as aliases in `Program::address_aliases`. Aliased variables share physical memory, eliminating redundant copies.
 
 For 4-state variables, each variable occupies `2 × ceil(width/8)` bytes (value + mask pair).
 
@@ -99,6 +104,7 @@ For 4-state variables, each variable occupies `2 × ceil(width/8)` bytes (value 
 
 ## Related Components
 
--   **`SimBackend`**: Trait abstracting over compilation backends. `NativeBackend` (x86-64) and `JitBackend` (Cranelift) implement this trait.
+-   **`SimBackend`**: Trait abstracting over compilation backends. `NativeBackend` (x86-64), `JitBackend` (Cranelift), and `WasmBackend` (wasmtime) implement this trait.
 -   **`Scheduler`**: Manages events using a `BinaryHeap` and dispatches them in chronological order with deterministic ordering (time → event ID → signal).
 -   **`VcdWriter`**: Records signal changes during simulation in VCD format.
+-   **`MemoryLayout`**: Pre-computed offset map shared by all backends. Contains stable/working region offsets, variable widths, 4-state flags, triggered-bits region, and scratch region for inter-chunk spilling.

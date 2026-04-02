@@ -31,7 +31,12 @@ pub struct Program {
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     pub eval_comb_plan: Option<EvalCombPlan>,
-    // ... other metadata (instance maps, clock domains, arena, etc.)
+    // ... instance maps, clock domains, arena, etc.
+    pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    pub layout: Option<MemoryLayout>,
+    pub initial_statements: Option<Vec<Statement>>,
+    pub tb_functions: FxHashMap<VarId, Function>,
 }
 ```
 
@@ -39,6 +44,11 @@ pub struct Program {
 -   **`eval_only_ffs`**: Phase that only computes the next state and writes it to the Working region.
 -   **`apply_ffs`**: Phase that commits values from the Working region to the Stable region.
 -   **`eval_comb_plan`**: Compilation plan for `eval_comb` when the estimated CLIF instruction count exceeds Cranelift's internal limit (~16M instructions). See [Tail-Call Splitting](./optimizations.md#27-tail-call-splitting) for details.
+-   **`reset_clock_map`**: Maps each reset `AbsoluteAddr` to its associated clock `AbsoluteAddr` (derived from `FfDeclaration`).
+-   **`address_aliases`**: Memory layout aliases mapping non-canonical → canonical addresses. Variables with identity `Store→Load` roundtrips share physical memory (populated by `IdentityStoreBypass`).
+-   **`layout`**: Pre-computed `MemoryLayout`. Built after optimization, before backend codegen. Centralizes offset calculation so all backends share the same layout.
+-   **`initial_statements`**: Initial block statements from the top-level module (for native testbenches).
+-   **`tb_functions`**: Functions defined in the top-level module (for testbench function calls via the bytecode VM).
 
 ### `EvalCombPlan`
 
@@ -80,8 +90,11 @@ pub struct ExecutionUnit<A> {
 -   `Unary(rd, op, rs)`: Unary operation (Not, Neg, etc.)
 
 ### Bit Manipulation
--   `Concat(rd, [msb..lsb])`: Register concatenation (first element is MSB)
+-   `Concat(rd, [msb..lsb])`: Register concatenation (first element is MSB). Pure data movement that preserves Z bits in 4-state mode.
 -   `Slice(rd, rs, offset, width)`: Bit range extraction (`rd = rs[offset +: width]`)
+
+### Select
+-   `Mux(rd, cond, then_val, else_val)`: Conditional select. In 4-state mode, preserves exact mask bits (including Z) of the selected branch. When `cond` has X/Z bits, the result is all-X.
 
 ## Control Flow
 
@@ -121,11 +134,20 @@ The register allocator uses `SpillDesc` to make cost-aware spill decisions:
 
 ```rust
 pub enum SpillKind {
-    /// Reload from simulation memory (zero spill cost — value already in memory)
-    SimState { addr, bit_offset, width_bits },
-    /// Spill to stack slot
+    /// Value lives in simulation state at a known location.
+    /// Reload = load from [sim_base + byte_offset] (+ optional shift/mask).
+    SimState { addr: RegionedAbsoluteAddr, bit_offset: usize, width_bits: usize },
+    /// Intermediate value with no home in simulation state. Spill to a stack slot.
     Stack,
-    /// Rematerialize from constant (zero spill cost)
+    /// Constant that can be cheaply rematerialized (mov imm).
     Remat { value: u64 },
+}
+
+pub struct SpillDesc {
+    pub kind: SpillKind,
+    /// Estimated cost (in x86-64 instructions) to reload this value.
+    pub reload_cost: u8,
+    /// Estimated cost to spill. 0 if the value is already in memory.
+    pub spill_cost: u8,
 }
 ```

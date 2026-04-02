@@ -33,12 +33,12 @@ pub enum SLTNode<A> {
     // Reference to an input variable
     Input {
         variable: A,                    // Variable address
-        index: Vec<NodeId>,             // Dynamic index expressions (multi-dimensional)
+        index: Vec<SLTIndex>,           // Dynamic index expressions (multi-dimensional)
         access: BitAccess,             // Bit range being referenced
     },
 
-    // Constant
-    Constant(BigUint, usize),           // (value, bit width)
+    // Constant (4-state aware)
+    Constant(BigUint, BigUint, usize, bool),  // (value, mask, bit width, is_4state)
 
     // Binary operation
     Binary(NodeId, BinaryOp, NodeId),
@@ -64,6 +64,15 @@ pub enum SLTNode<A> {
 }
 ```
 
+### `SLTIndex` -- Dynamic Index with Stride
+
+```rust
+pub struct SLTIndex {
+    pub node: NodeId,    // Expression computing the index value
+    pub stride: usize,   // Byte stride per index step (element size)
+}
+```
+
 ### Dynamic Indexing in `Input` Nodes
 
 A dynamic array access `arr[i][j]` is represented as follows:
@@ -71,7 +80,7 @@ A dynamic array access `arr[i][j]` is represented as follows:
 ```
 Input {
     variable: VarId of arr,
-    index: [NodeId(expression for i), NodeId(expression for j)],
+    index: [SLTIndex { node: expr_i, stride: elem_size }, SLTIndex { node: expr_j, stride: ... }],
     access: BitAccess { lsb: 0, msb: element_width - 1 },
 }
 ```
@@ -154,9 +163,11 @@ Each time an assignment statement is evaluated, the corresponding bit range of t
 
 ```rust
 pub struct RangeStore<T> {
-    pub ranges: BTreeMap<usize, (T, usize)>,  // key: lsb, value: (value, width)
+    pub ranges: BTreeMap<usize, (T, usize, usize)>,  // key: lsb, value: (value, width, origin_lsb)
 }
 ```
+
+The third element `origin_lsb` tracks the original bit position when this data was first placed, which is preserved even when the range is split.
 
 Key operations:
 
@@ -180,16 +191,16 @@ always_comb {
 ```
 
 ```
-Initial state:  RangeStore: { 0: (None, 8) }
+Initial state:  RangeStore: { 0: (None, 8, 0) }
 
 After y[3:0] = a:
   split_at(0), split_at(4)
   update([0,3], Some(Input(a)))
-  RangeStore: { 0: (Some(Input(a)), 4), 4: (None, 4) }
+  RangeStore: { 0: (Some(Input(a)), 4, 0), 4: (None, 4, 4) }
 
 After y[7:4] = b:
   update([4,7], Some(Input(b)))
-  RangeStore: { 0: (Some(Input(a)), 4), 4: (Some(Input(b)), 4) }
+  RangeStore: { 0: (Some(Input(a)), 4, 0), 4: (Some(Input(b)), 4, 4) }
 ```
 
 ### Statement Evaluation
