@@ -191,14 +191,29 @@ fn parse_reset_type(s: &str) -> Result<celox::ResetType> {
 fn convert_optimize_options(napi: &NapiOptimizeOptions) -> celox::OptimizeOptions {
     let mut opts = celox::OptimizeOptions::all();
     let fields: &[(Option<bool>, celox::SirPass)] = &[
-        (napi.store_load_forwarding, celox::SirPass::StoreLoadForwarding),
-        (napi.hoist_common_branch_loads, celox::SirPass::HoistCommonBranchLoads),
-        (napi.bit_extract_peephole, celox::SirPass::BitExtractPeephole),
+        (
+            napi.store_load_forwarding,
+            celox::SirPass::StoreLoadForwarding,
+        ),
+        (
+            napi.hoist_common_branch_loads,
+            celox::SirPass::HoistCommonBranchLoads,
+        ),
+        (
+            napi.bit_extract_peephole,
+            celox::SirPass::BitExtractPeephole,
+        ),
         (napi.optimize_blocks, celox::SirPass::OptimizeBlocks),
         (napi.split_wide_commits, celox::SirPass::SplitWideCommits),
         (napi.commit_sinking, celox::SirPass::CommitSinking),
-        (napi.inline_commit_forwarding, celox::SirPass::InlineCommitForwarding),
-        (napi.eliminate_dead_working_stores, celox::SirPass::EliminateDeadWorkingStores),
+        (
+            napi.inline_commit_forwarding,
+            celox::SirPass::InlineCommitForwarding,
+        ),
+        (
+            napi.eliminate_dead_working_stores,
+            celox::SirPass::EliminateDeadWorkingStores,
+        ),
         (napi.reschedule, celox::SirPass::Reschedule),
         (napi.coalesce_stores, celox::SirPass::CoalesceStores),
     ];
