@@ -891,7 +891,6 @@ o_signed_op = a >: (b as i8);
 
 #[test]
 fn test_nested_ternary_concat_hybrid() {
-
     let code = r#"
         module Top (sel: input logic, a: input logic<4>, b: input logic<4>, c: input logic<8>, o: output logic<8>) {
             always_comb {
@@ -904,5 +903,4 @@ fn test_nested_ternary_concat_hybrid() {
         result.is_ok(),
         "Should handle deeply nested expression structures"
     );
-
 }

@@ -249,7 +249,6 @@ assign out = x;
 /// Test that `try_new` returns Ok for valid designs.
 #[test]
 fn test_try_new_valid() {
-
     let code = r#"
         module Top (
             a: input  logic<8>,
@@ -260,13 +259,11 @@ fn test_try_new_valid() {
     "#;
     let result = Simulator::builder(code, "Top").build();
     assert!(result.is_ok());
-
 }
 
 /// Test that `try_new` returns Err for combinational loops.
 #[test]
 fn test_try_new_comb_loop() {
-
     let code = r#"
         module Top (
             a: input  logic,
@@ -286,5 +283,4 @@ fn test_try_new_comb_loop() {
         ),
         "Expected Analyzer or SIRParser error, got: {err:?}"
     );
-
 }

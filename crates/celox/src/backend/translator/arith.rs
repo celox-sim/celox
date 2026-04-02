@@ -753,8 +753,11 @@ impl SIRTranslator {
                                 .collect()
                         };
                         // Normalize: operations produce X, never Z
-                        let normalized: Vec<_> = res_chunks.iter().zip(res_masks.iter())
-                            .map(|(&v, &m)| state.builder.ins().bor(v, m)).collect();
+                        let normalized: Vec<_> = res_chunks
+                            .iter()
+                            .zip(res_masks.iter())
+                            .map(|(&v, &m)| state.builder.ins().bor(v, m))
+                            .collect();
                         state.regs.insert(
                             *dst,
                             TransValue::FourState {
@@ -1067,8 +1070,11 @@ impl SIRTranslator {
                     }
 
                     // Normalize: operations produce X, never Z
-                    let normalized: Vec<_> = res_chunks.iter().zip(res_masks.iter())
-                        .map(|(&v, &m)| state.builder.ins().bor(v, m)).collect();
+                    let normalized: Vec<_> = res_chunks
+                        .iter()
+                        .zip(res_masks.iter())
+                        .map(|(&v, &m)| state.builder.ins().bor(v, m))
+                        .collect();
                     state.regs.insert(
                         *dst,
                         TransValue::FourState {
@@ -1388,8 +1394,11 @@ impl SIRTranslator {
                 }
 
                 // Normalize: operations produce X, never Z
-                let normalized: Vec<_> = res_chunks.iter().zip(res_masks.iter())
-                    .map(|(&v, &m)| state.builder.ins().bor(v, m)).collect();
+                let normalized: Vec<_> = res_chunks
+                    .iter()
+                    .zip(res_masks.iter())
+                    .map(|(&v, &m)| state.builder.ins().bor(v, m))
+                    .collect();
                 state.regs.insert(
                     *dst,
                     TransValue::FourState {

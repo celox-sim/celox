@@ -463,7 +463,6 @@ out_b1 = out_b[1];
 
 #[test]
 fn test_stride_access() {
-
     // This test demonstrates a "false loop" where stride access is not correctly identified.
     // v[i*2] and v[i*2+1] should be disjoint, but because they share the same bounding box (0..31),
     // they are currently treated as overlapping, causing a combinational loop.
@@ -518,12 +517,10 @@ fn test_stride_access() {
     // Result: 0xAAAA_AAAA -> 0xAAAA_AAAE
     let result = sim.get(o_port);
     assert_eq!(result, 0xAAAA_AAAEu32.into());
-
 }
 
 #[test]
 fn test_dynamic_index_write_sir() {
-
     let code = r#"
     module Top (i: input logic<2>, val: input logic<8>, o: output logic<8>) {
         var a: logic<8> [4];
@@ -540,12 +537,10 @@ fn test_dynamic_index_write_sir() {
     let trace = setup_and_trace(code, "Top");
     let output = trace.format_program().unwrap();
     assert_snapshot!("dynamic_index_write_sir", output);
-
 }
 
 #[test]
 fn test_dynamic_offset_sir() {
-
     let code = r#"
     module Top (
         i: input logic<2>,
@@ -565,5 +560,4 @@ fn test_dynamic_offset_sir() {
     let trace = setup_and_trace(code, "Top");
     let output = trace.format_program().unwrap();
     assert_snapshot!("dynamic_offset_sir", output);
-
 }

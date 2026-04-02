@@ -652,9 +652,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     }
 
     /// Compiles and runs a native testbench, collecting all assertion results.
-    pub fn run_test_detailed(
-        self,
-    ) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
+    pub fn run_test_detailed(self) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
         let mut sim = self.build_native()?;
         let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
             SimulatorError::new(SimulatorErrorKind::Codegen(
@@ -664,7 +662,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
         tb_builder.build_event_map(&initial_stmts);
         let tb_stmts = tb_builder.convert(&initial_stmts);
-        Ok(crate::testbench::run_testbench_detailed(&mut sim, &tb_stmts))
+        Ok(crate::testbench::run_testbench_detailed(
+            &mut sim, &tb_stmts,
+        ))
     }
 
     /// Compiles the Veryl source and constructs the core logic simulator,

@@ -1311,9 +1311,14 @@ fn try_eval_const(expr: &Expression) -> Option<u64> {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-fn extract_source_location(token: &veryl_parser::token_range::TokenRange) -> Option<SourceLocation> {
+fn extract_source_location(
+    token: &veryl_parser::token_range::TokenRange,
+) -> Option<SourceLocation> {
     let t = &token.beg;
-    let file = t.source.get_path().and_then(resource_table::get_path_value)?;
+    let file = t
+        .source
+        .get_path()
+        .and_then(resource_table::get_path_value)?;
     Some(SourceLocation {
         file: file.to_string_lossy().into_owned(),
         line: t.line,

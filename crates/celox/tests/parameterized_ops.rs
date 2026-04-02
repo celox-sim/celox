@@ -446,7 +446,11 @@ fn check_comb_binary_4s(
 
     let (v, m) = sim.get_four_state(sig_o);
     assert_eq!(m, BigUint::from(exp_mask), "4s comb {op}: mask mismatch");
-    assert_eq!(v, BigUint::from(exp_val | exp_mask), "4s comb {op}: value mismatch (v|=m)");
+    assert_eq!(
+        v,
+        BigUint::from(exp_val | exp_mask),
+        "4s comb {op}: value mismatch (v|=m)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +496,11 @@ fn check_ff_binary_4s(
 
     let (v, m) = sim.get_four_state(sig_o);
     assert_eq!(m, BigUint::from(exp_mask), "4s ff {op}: mask mismatch");
-    assert_eq!(v, BigUint::from(exp_val | exp_mask), "4s ff {op}: value mismatch (v|=m)");
+    assert_eq!(
+        v,
+        BigUint::from(exp_val | exp_mask),
+        "4s ff {op}: value mismatch (v|=m)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -533,7 +541,11 @@ fn check_comb_unary_4s(
 
     let (v, m) = sim.get_four_state(sig_o);
     assert_eq!(m, BigUint::from(exp_mask), "4s comb {op}: mask mismatch");
-    assert_eq!(v, BigUint::from(exp_val | exp_mask), "4s comb {op}: value mismatch (v|=m)");
+    assert_eq!(
+        v,
+        BigUint::from(exp_val | exp_mask),
+        "4s comb {op}: value mismatch (v|=m)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +587,11 @@ fn check_ff_unary_4s(
 
     let (v, m) = sim.get_four_state(sig_o);
     assert_eq!(m, BigUint::from(exp_mask), "4s ff {op}: mask mismatch");
-    assert_eq!(v, BigUint::from(exp_val | exp_mask), "4s ff {op}: value mismatch (v|=m)");
+    assert_eq!(
+        v,
+        BigUint::from(exp_val | exp_mask),
+        "4s ff {op}: value mismatch (v|=m)"
+    );
 }
 
 // ===================================================================
@@ -777,7 +793,11 @@ fn check_wide_comb_binary_4s(
 
     let (v, m) = sim.get_four_state(sig_o);
     assert_eq!(&m, exp_mask, "wide 4s comb {op}: mask mismatch");
-    assert_eq!(v, exp_val | exp_mask, "wide 4s comb {op}: value mismatch (v|=m)");
+    assert_eq!(
+        v,
+        exp_val | exp_mask,
+        "wide 4s comb {op}: value mismatch (v|=m)"
+    );
 }
 
 /// Helper for wide 4-state comb unary.
@@ -811,7 +831,11 @@ fn check_wide_comb_unary_4s(
 
     let (v, m) = sim.get_four_state(sig_o);
     assert_eq!(&m, exp_mask, "wide 4s comb {op}: mask mismatch");
-    assert_eq!(v, exp_val | exp_mask, "wide 4s comb {op}: value mismatch (v|=m)");
+    assert_eq!(
+        v,
+        exp_val | exp_mask,
+        "wide 4s comb {op}: value mismatch (v|=m)"
+    );
 }
 
 // ===================================================================

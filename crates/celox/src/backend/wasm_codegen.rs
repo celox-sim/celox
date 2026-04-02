@@ -474,7 +474,9 @@ fn compile_instruction(
             todo!("Slice WASM lowering")
         }
         SIRInstruction::Mux(dst, cond, then_val, else_val) => {
-            compile_mux(dst, cond, then_val, else_val, unit, four_state, locals, instrs);
+            compile_mux(
+                dst, cond, then_val, else_val, unit, four_state, locals, instrs,
+            );
         }
     }
 }

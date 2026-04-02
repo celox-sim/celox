@@ -186,7 +186,6 @@ out[3:0] = data;
 
 #[test]
 fn axi_lite_reg_file_req_last_vec() {
-
     let mut sim = create_dut();
     let reg_req_last_vec = sim.signal("reg_req_last_vec");
 
@@ -217,12 +216,10 @@ fn axi_lite_reg_file_req_last_vec() {
             got & 0xf,
         );
     }
-
 }
 
 #[test]
 fn parametric_bitslice_multi_branch() {
-
     // Simplified version of AxiLiteRegFile's read path
     let code = r#"
         module Top #(
@@ -297,12 +294,10 @@ fn parametric_bitslice_multi_branch() {
             val & 0xf,
         );
     }
-
 }
 
 #[test]
 fn hardcoded_bitslice_multi_branch() {
-
     // Three branches: two write individual bits, third writes a range
     let code = r#"
         module Top (
@@ -360,12 +355,10 @@ fn hardcoded_bitslice_multi_branch() {
             val & 0xf,
         );
     }
-
 }
 
 #[test]
 fn hardcoded_bitslice_trace() {
-
     let code = r#"
         module Top (
             sel: input logic<2>,
@@ -395,5 +388,4 @@ fn hardcoded_bitslice_trace() {
         .build_with_trace();
     let output = trace.trace.format_program().unwrap();
     eprintln!("{}", output);
-
 }

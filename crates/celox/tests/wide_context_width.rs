@@ -284,7 +284,6 @@ assign o = a + b;
 
 #[test]
 fn test_wide_context_nested_propagation() {
-
     // (120-bit + 120-bit) * 2'd2 in 122-bit context
     let code = r#"
         module Top (
@@ -317,5 +316,4 @@ fn test_wide_context_nested_propagation() {
     })
     .unwrap();
     assert_eq!(sim.get(o), expected, "Nested 122-bit context width failed");
-
 }

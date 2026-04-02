@@ -99,7 +99,6 @@ assign o = {a repeat 4};
 
 #[test]
 fn test_rhs_concatenation_dependency() {
-
     let code = r#"
         module Top (a: input logic<8>, b: input logic<8>) {
             var tmp: logic<16>;
@@ -115,5 +114,4 @@ fn test_rhs_concatenation_dependency() {
         result.is_ok(),
         "RHS concatenation must register all parts as sources"
     );
-
 }

@@ -173,7 +173,6 @@ o = x;
 
 #[test]
 fn test_shared_expression_hoisting() {
-
     let code = r#"
     module Top (
         a: input logic<32>,
@@ -190,12 +189,10 @@ fn test_shared_expression_hoisting() {
     let trace = setup_and_trace(code, "Top");
     let output = trace.format_program().unwrap();
     assert_snapshot!("shared_expression_sir", output);
-
 }
 
 #[test]
 fn test_mux_safe_hoisting() {
-
     let code = r#"
     module Top (
         a: input logic<32>,
@@ -223,12 +220,10 @@ fn test_mux_safe_hoisting() {
     let trace = setup_and_trace(code, "Top");
     let output = trace.format_program().unwrap();
     assert_snapshot!("mux_safe_hoisting_sir", output);
-
 }
 
 #[test]
 fn test_hash_consing_deduplication() {
-
     let code = r#"
     module Top (
         a: input logic<32>,
@@ -243,12 +238,10 @@ fn test_hash_consing_deduplication() {
     let trace = setup_and_trace(code, "Top");
     let output = trace.format_program().unwrap();
     assert_snapshot!("hash_consing_sir", output);
-
 }
 
 #[test]
 fn test_rle_comb() {
-
     let trace = setup_and_trace(
         r#"
 module ModuleA (
@@ -268,12 +261,10 @@ module ModuleA (
     );
     let output = trace.format_program().unwrap();
     assert_snapshot!("rle_comb", output);
-
 }
 
 #[test]
 fn test_dse_preserve_top_ports() {
-
     // With PreserveTopPorts, top-level ports (top_in, top_out) survive DSE.
     let mut sim = Simulator::builder(DSE_HIERARCHY_SOURCE, "Top")
         .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
@@ -284,12 +275,10 @@ fn test_dse_preserve_top_ports() {
 
     sim.modify(|io| io.set(top_in, 0xABu8)).unwrap();
     assert_eq!(sim.get(top_out), 0xABu64.into());
-
 }
 
 #[test]
 fn test_dse_preserve_all_ports() {
-
     // With PreserveAllPorts, both top-level AND sub-instance ports survive DSE.
     let mut sim = Simulator::builder(DSE_HIERARCHY_SOURCE, "Top")
         .dead_store_policy(DeadStorePolicy::PreserveAllPorts)
@@ -305,5 +294,4 @@ fn test_dse_preserve_all_ports() {
     let sub_signals = sim.instance_signals(&[("u_sub", 0)]);
     let sub_o_data = sub_signals.iter().find(|s| s.name == "o_data").unwrap();
     assert_eq!(sim.get(sub_o_data.signal), 0x42u64.into());
-
 }
