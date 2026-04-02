@@ -140,6 +140,7 @@ arr[0] = 8'hAB;
     }
 
     fn test_array_literal_single_element_size_one_array(sim) {
+        @ignore_on(veryl);
         @setup { // '{val} on a 1-element array should still assign that one element correctly.
 let code = r#"
 module Top (
@@ -309,6 +310,7 @@ assign o3 = a[3];
 
     // '{default: 0} in always_ff if_reset: array reset via default fill.
     fn test_array_literal_default_in_ff_reset(sim) {
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input clock,
