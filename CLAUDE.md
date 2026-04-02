@@ -56,26 +56,42 @@ The analyzer enforces strict checks. When writing Veryl source in integration te
 
 ## Optimizer Options
 
-Two levels of optimization control:
+GCC-style optimization level presets with per-pass overrides.
 
-### SIRT Optimization Passes
+### OptLevel
 
-`OptimizeOptions` (`crates/celox/src/optimizer.rs`) provides per-pass toggles:
+`OptLevel` (`crates/celox/src/optimizer.rs`) sets defaults for SIR passes, Cranelift backend, and DSE:
+
+| Level | SIR Passes | DSE | Cranelift |
+|---|---|---|---|
+| `O0` | TailCallSplit only | Off | `fast_compile()` |
+| `O1` (default) | All 18 passes | Off | Speed / Backtracking |
+| `O2` | All 18 passes | PreserveTopPorts | Speed / Backtracking |
+
+### SirPass
+
+`SirPass` enum (`crates/celox/src/optimizer.rs`) — all 18 SIR optimization passes:
 
 | Pass | Description |
 |---|---|
-| `store_load_forwarding` | Propagates stored values to subsequent loads |
-| `hoist_common_branch_loads` | Hoists loads shared across all branches to the entry |
-| `bit_extract_peephole` | Converts `(value >> shift) & mask` → direct ranged loads |
-| `optimize_blocks` | General block-level optimizations (dead block removal, merging) |
-| `split_wide_commits` | Splits wide commit operations into narrower ones |
-| `commit_sinking` | Sinks commit operations closer to their use site |
-| `inline_commit_forwarding` | Inlines values forwarded through commit operations |
-| `eliminate_dead_working_stores` | Removes working-memory stores that are never read |
-| `reschedule` | Reorders instructions for better Cranelift codegen |
-| `coalesce_stores` | Merges consecutive narrow stores into wider Concat+Store operations |
-
-All passes default to `true`. `.optimize(false)` sets all to `false` as a shorthand. See `docs/guide/optimization-tuning.md` for tuning guidance and benchmark data.
+| `StoreLoadForwarding` | Propagates stored values to subsequent loads |
+| `HoistCommonBranchLoads` | Hoists loads shared across all branches to the entry |
+| `BitExtractPeephole` | Converts `(value >> shift) & mask` → direct ranged loads |
+| `OptimizeBlocks` | General block-level optimizations (dead block removal, merging) |
+| `SplitWideCommits` | Splits wide commit operations into narrower ones |
+| `CommitSinking` | Sinks commit operations closer to their use site |
+| `InlineCommitForwarding` | Inlines values forwarded through commit operations |
+| `EliminateDeadWorkingStores` | Removes working-memory stores that are never read |
+| `Reschedule` | Reorders instructions for better backend codegen |
+| `CoalesceStores` | Merges consecutive narrow stores into wider Concat+Store |
+| `Gvn` | Global value numbering / dead code elimination |
+| `ConcatFolding` | Folds redundant Concat operations |
+| `XorChainFolding` | Folds XOR chains |
+| `VectorizeConcat` | Vectorizes Concat patterns in combinational blocks |
+| `SplitCoalescedStores` | Splits wide coalesced stores back after reschedule |
+| `PartialForward` | Partial store-load forwarding in combinational blocks |
+| `IdentityStoreBypass` | Detects identity copies and registers address aliases |
+| `TailCallSplit` | Splits large functions into tail-call chains (enabled even at O0) |
 
 ### Cranelift Backend Optimization
 
@@ -93,22 +109,23 @@ All passes default to `true`. `.optimize(false)` sets all to `false` as a shorth
 ### Rust API
 
 ```rust
-use celox::{OptimizeOptions, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm};
+use celox::{OptLevel, SirPass, OptimizeOptions, CraneliftOptions, RegallocAlgorithm};
 
-// Per-pass control:
+// OptLevel preset:
 Simulator::builder(code, "Top")
-    .optimize_options(OptimizeOptions { reschedule: false, ..OptimizeOptions::all() })
+    .opt_level(OptLevel::O2)
     .build()
 
-// Individual toggles:
+// OptLevel + per-pass override:
 Simulator::builder(code, "Top")
-    .commit_sinking(false)
-    .reschedule(false)
+    .opt_level(OptLevel::O1)
+    .disable_pass(SirPass::Reschedule)
+    .enable_pass(SirPass::Gvn)
     .build()
 
-// Cranelift level:
+// Shorthand (true=O1, false=O0):
 Simulator::builder(code, "Top")
-    .cranelift_opt_level(CraneliftOptLevel::None)
+    .optimize(false)
     .build()
 
 // Fine-grained Cranelift options:
@@ -127,20 +144,22 @@ Simulator::builder(code, "Top")
 ### NAPI / TypeScript
 
 ```ts
+// New API: OptLevel + pass overrides
 const sim = await Simulator.create(module, {
-    optimizeOptions: { reschedule: false, commitSinking: false },
-    craneliftOptLevel: "none",
-    regallocAlgorithm: "singlePass",
-    enableAliasAnalysis: false,
-    enableVerifier: false,
+    optLevel: "O2",
+    passOverrides: ["-sir:reschedule", "+sir:gvn"],
 });
-// Shorthand: optimize: false disables all SIRT passes
+
+// Legacy (still supported, deprecated):
 const sim2 = await Simulator.create(module, { optimize: false });
+const sim3 = await Simulator.create(module, {
+    optimizeOptions: { reschedule: false },
+});
 ```
 
-- **NAPI**: `optimize_options: NapiOptimizeOptions`, `cranelift_opt_level: "none"|"speed"|"speed_and_size"`, `regalloc_algorithm: "backtracking"|"single_pass"`, `enable_alias_analysis: bool`, `enable_verifier: bool` (`crates/celox-napi/src/lib.rs`)
-- **TS**: `optimizeOptions: OptimizeOptions`, `craneliftOptLevel: "none"|"speed"|"speedAndSize"`, `regallocAlgorithm: "backtracking"|"singlePass"`, `enableAliasAnalysis: bool`, `enableVerifier: bool` (`packages/celox/src/types.ts`)
-- **`optimize: bool`**: TS/NAPI only — shorthand to set all SIRT passes on/off. `optimizeOptions` takes precedence.
+- **NAPI**: `opt_level: "O0"|"O1"|"O2"`, `pass_overrides: ["+sir:<pass>", "-sir:<pass>"]` (`crates/celox-napi/src/lib.rs`)
+- **TS**: `optLevel: "O0"|"O1"|"O2"`, `passOverrides: string[]` (`packages/celox/src/types.ts`)
+- **Legacy**: `optimize: bool`, `optimizeOptions: OptimizeOptions` — still accepted, overridden by new fields.
 
 ## Dead Store Elimination (DSE)
 
@@ -155,8 +174,14 @@ DSE removes stores that are never read, improving JIT performance. Controlled vi
 ### Rust API
 
 ```rust
+// Explicit DSE policy:
 Simulator::builder(code, "Top")
     .dead_store_policy(DeadStorePolicy::PreserveAllPorts)
+    .build()
+
+// Via OptLevel (O2 defaults to PreserveTopPorts):
+Simulator::builder(code, "Top")
+    .opt_level(OptLevel::O2)
     .build()
 ```
 
