@@ -643,10 +643,15 @@ fn apply_options<'a, T>(
 //  Process-global JIT cache (native only)
 // ---------------------------------------------------------------------------
 
+#[cfg(target_arch = "x86_64")]
+type SharedCode = celox::SharedNativeCode;
+#[cfg(all(not(target_arch = "wasm32"), not(target_arch = "x86_64")))]
+type SharedCode = celox::SharedJitCode;
+
 #[cfg(not(target_arch = "wasm32"))]
 /// Cached compilation result shared across simulator instances.
 struct CachedBuild {
-    shared_code: Arc<celox::SharedNativeCode>,
+    shared_code: Arc<SharedCode>,
     layout_json: String,
     events_json: String,
     hierarchy_json: String,
@@ -756,7 +761,7 @@ fn build_cache_key(
 #[cfg(not(target_arch = "wasm32"))]
 #[napi]
 pub struct NativeSimulatorHandle {
-    backend: Option<celox::NativeBackend>,
+    backend: Option<celox::DefaultBackend>,
     vcd_writer: Option<celox::VcdWriter>,
     layout_json: String,
     events_json: String,
@@ -839,7 +844,10 @@ impl NativeSimulatorHandle {
 
     /// Create a handle from a cached build (shared compiled code + fresh memory).
     fn from_cached(cached: &CachedBuild, vcd_path: Option<&str>) -> Result<Self> {
+        #[cfg(target_arch = "x86_64")]
         let backend = celox::NativeBackend::from_shared(Arc::clone(&cached.shared_code));
+        #[cfg(not(target_arch = "x86_64"))]
+        let backend = celox::JitBackend::from_shared(Arc::clone(&cached.shared_code));
         let vcd_writer = if let Some(path) = vcd_path {
             Some(
                 celox::VcdWriter::new(path, &cached.vcd_descs)
@@ -1091,10 +1099,7 @@ impl NativeSimulationHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let mut builder = apply_options(
-            celox::Simulation::<celox::NativeBackend>::from_sources(source_refs, &top),
-            &opts,
-        );
+        let mut builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
         if let Some(path) = &opts.vcd {
             builder = builder.vcd(path);
         }

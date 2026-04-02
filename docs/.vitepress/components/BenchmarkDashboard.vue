@@ -51,7 +51,7 @@ interface SeriesPoint {
 interface Series {
   key: string;
   benchName: string;
-  runtime: "rust" | "rust-dse" | "ts" | "verilator" | "unknown";
+  runtime: "rust" | "rust-dse" | "native-tb" | "ts" | "verilator" | "unknown";
   points: SeriesPoint[];
 }
 
@@ -185,6 +185,7 @@ function classifySeries(benchName: string): string {
 const RUNTIME_COLORS: Record<string, string> = {
   rust: "#3b82f6",
   "rust-dse": "#a855f7",
+  "native-tb": "#f43f5e",
   ts: "#22c55e",
   verilator: "#f97316",
   unknown: "#9ca3af",
@@ -193,6 +194,7 @@ const RUNTIME_COLORS: Record<string, string> = {
 const RUNTIME_LABELS: Record<string, string> = {
   rust: "Rust",
   "rust-dse": "Rust(DSE)",
+  "native-tb": "Native TB",
   ts: "TS",
   verilator: "Verilator",
   unknown: "Unknown",
@@ -211,8 +213,18 @@ function stripPrefix(name: string): string {
   return name.replace(/^(rust-dse|rust|ts|verilator)\//, "");
 }
 
-function runtime(name: string): "rust" | "rust-dse" | "ts" | "verilator" | "unknown" {
+/** Normalize native_tb benchmarks so they merge into the same chart cards as their equivalents */
+function normalizeNativeTb(benchName: string): string {
+  if (!benchName.startsWith("native_tb_")) return benchName;
+  return benchName
+    .replace(/^native_tb_build_/, "simulation_build_")
+    .replace(/^native_tb_raw_tick_/, "simulation_tick_")
+    .replace(/_counter_n(\d+)/, "_top_n$1");
+}
+
+function runtime(name: string): "rust" | "rust-dse" | "native-tb" | "ts" | "verilator" | "unknown" {
   if (name.startsWith("rust-dse/")) return "rust-dse";
+  if (name.startsWith("rust/") && stripPrefix(name).startsWith("native_tb_")) return "native-tb";
   if (name.startsWith("rust/")) return "rust";
   if (name.startsWith("ts/")) return "ts";
   if (name.startsWith("verilator/")) return "verilator";
@@ -258,6 +270,8 @@ function formatChartTitle(benchName: string): string {
   s = s.replace(/^optimize_/, "");
 
   // Replace operation names (longer prefixes first to avoid partial matches)
+  s = s.replace(/^native_tb_run/, "Native TB run");
+  s = s.replace(/^native_tb_exec/, "Native TB exec");
   s = s.replace(/^simulation_time_build/, "Time build");
   s = s.replace(/^simulation_time_tick/, "Time tick");
   s = s.replace(/^simulation_build/, "Build");
@@ -314,7 +328,7 @@ const allSeries = computed<Series[]>(() => {
     for (const [name, points] of map) {
       result.push({
         key: name,
-        benchName: stripPrefix(name),
+        benchName: normalizeNativeTb(stripPrefix(name)),
         runtime: runtime(name),
         points: points.sort((a, b) => a.date - b.date),
       });

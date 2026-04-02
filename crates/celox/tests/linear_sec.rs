@@ -8,11 +8,11 @@ const LINEAR_SEC_SRC: &str = concat!(
     include_str!("../../../benches/veryl/linear_sec_top.veryl"),
 );
 
-fn build_sim() -> Simulator<celox::NativeBackend> {
+fn build_sim() -> Simulator {
     Simulator::builder(LINEAR_SEC_SRC, "Top").build().unwrap()
 }
 
-fn build_sim_dse() -> Simulator<celox::NativeBackend> {
+fn build_sim_dse() -> Simulator {
     Simulator::builder(LINEAR_SEC_SRC, "Top")
         .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
         .build()

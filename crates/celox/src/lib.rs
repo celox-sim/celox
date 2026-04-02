@@ -58,18 +58,18 @@ pub use debug::{CompilationTrace, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{AbsoluteAddr, AddrLookupError, PortTypeKind, Program, SignalRef};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_arch = "x86_64")]
 pub mod native_backend {
     //! Re-exports for the native x86-64 backend (for testing/integration).
     pub use crate::backend::native::*;
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_arch = "x86_64")]
 pub use backend::native::backend::NativeEventRef;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_arch = "x86_64")]
 pub use backend::native::{NativeBackend, SharedNativeCode};
 
 /// Default simulation backend: NativeBackend on x86-64, JitBackend (Cranelift) elsewhere.
-#[cfg(all(not(target_arch = "wasm32"), target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub type DefaultBackend = NativeBackend;
 #[cfg(all(not(target_arch = "wasm32"), not(target_arch = "x86_64")))]
 pub type DefaultBackend = backend::JitBackend;

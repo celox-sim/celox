@@ -1,4 +1,5 @@
 //! Integration tests: execute native backend output and verify correctness.
+#![cfg(target_arch = "x86_64")]
 
 use celox::{MemoryLayout, Program, Simulator, SimulatorBuilder};
 

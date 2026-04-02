@@ -226,6 +226,7 @@ impl JitBackend {
                 full_native.push_str(&native_buf);
                 t.native = Some(full_native);
             }
+            #[cfg(target_arch = "x86_64")]
             if options.trace.mir {
                 use super::native::isel::lower_execution_unit;
                 use super::native::mir_opt;

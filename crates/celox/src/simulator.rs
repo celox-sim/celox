@@ -1,10 +1,11 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(target_arch = "x86_64")]
+use crate::backend::native::{NativeBackend, SharedNativeCode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{
     IOContext, RuntimeErrorCode,
-    backend::native::{NativeBackend, SharedNativeCode},
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     ir::{InstancePath, Program, SignalRef, VariableInfo},
 };
@@ -54,10 +55,10 @@ pub struct NamedEvent<B: SimBackend = crate::DefaultBackend> {
 /// Encapsulates the backend, the original SIR program,
 /// and an optional VCD writer. Provides low-level, event-driven control.
 ///
-/// The default type parameter `B = NativeBackend` means that bare `Simulator`
-/// uses the native x86-64 backend.
+/// The default type parameter `B = DefaultBackend` means that bare `Simulator`
+/// uses the native x86-64 backend on x86-64 and Cranelift elsewhere.
 #[cfg(not(target_arch = "wasm32"))]
-pub struct Simulator<B: SimBackend = crate::backend::native::NativeBackend> {
+pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(crate) backend: B,
     pub(crate) program: Program,
     pub(crate) vcd_writer: Option<crate::vcd::VcdWriter>,
@@ -511,7 +512,7 @@ impl Simulator<JitBackend> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_arch = "x86_64")]
 impl Simulator<NativeBackend> {
     /// Returns the shared compiled native code, allowing it to be reused
     /// for creating additional simulator instances without recompilation.

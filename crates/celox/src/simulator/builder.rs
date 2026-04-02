@@ -534,9 +534,16 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     }
 
     /// Compiles the Veryl source and constructs the simulator.
-    /// Uses the native x86-64 backend.
-    pub fn build(self) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-        self.build_native()
+    /// Uses the native x86-64 backend on x86-64, Cranelift elsewhere.
+    pub fn build(self) -> Result<Simulator<crate::DefaultBackend>, SimulatorError> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.build_native()
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            self.build_cranelift()
+        }
     }
 
     /// Compiles using the Cranelift JIT backend.
@@ -568,6 +575,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     }
 
     /// Compiles using the native x86-64 backend.
+    #[cfg(target_arch = "x86_64")]
     pub fn build_native(
         self,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
@@ -603,7 +611,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
     /// Compiles and runs a native testbench (`#[test]` module).
     pub fn run_test(self) -> Result<crate::testbench::TestResult, SimulatorError> {
-        let mut sim = self.build_native()?;
+        let mut sim = self.build()?;
         let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
             SimulatorError::new(SimulatorErrorKind::Codegen(
                 "no initial block found — this module is not a native testbench".into(),
@@ -617,7 +625,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
     /// Compiles and runs a native testbench, collecting all assertion results.
     pub fn run_test_detailed(self) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
-        let mut sim = self.build_native()?;
+        let mut sim = self.build()?;
         let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
             SimulatorError::new(SimulatorErrorKind::Codegen(
                 "no initial block found — this module is not a native testbench".into(),
@@ -662,6 +670,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             }
 
             // Run MIR trace if requested (generates MIR output before/after optimization + regalloc)
+            #[cfg(target_arch = "x86_64")]
             if self.options.trace.mir {
                 use crate::backend::native::{emit, isel, mir_opt, regalloc};
                 let layout = program
@@ -692,7 +701,10 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 trace.mir = Some(mir_output);
             }
 
+            #[cfg(target_arch = "x86_64")]
             let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
+            #[cfg(not(target_arch = "x86_64"))]
+            let backend = JitBackend::new(&program, &self.options, None)?;
 
             let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
             sim.modify(|_| {}).map_err(SimulatorError::from)?;

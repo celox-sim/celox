@@ -1,8 +1,8 @@
 use celox::PortTypeKind;
 #[cfg(not(target_arch = "wasm32"))]
-use celox::{InstanceHierarchy, NamedSignal, NativeBackend, get_byte_size};
+use celox::{DefaultBackend, InstanceHierarchy, NamedSignal, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
-type NamedEvent = celox::NamedEvent<NativeBackend>;
+type NamedEvent = celox::NamedEvent<DefaultBackend>;
 #[cfg(not(target_arch = "wasm32"))]
 use serde::Serialize;
 #[cfg(not(target_arch = "wasm32"))]
