@@ -14,9 +14,9 @@ import { readFourState } from "./dut.js";
 import {
 	createSimulatorBridge,
 	loadNativeAddon,
+	type NapiTestResult,
 	parseNapiLayout,
 	parseSignalPath,
-	type NapiTestResult,
 	type RawNapiAddon,
 	type RawNapiSimulatorHandle,
 } from "./napi-helpers.js";

@@ -81,7 +81,7 @@ export function generateVcdText(trace: VcdTrace): string {
 		}
 		prev = [...snap.values];
 	}
-	return L.join("\n") + "\n";
+	return `${L.join("\n")}\n`;
 }
 
 // ── Radix formatting ───────────────────────────────────────
@@ -97,13 +97,13 @@ const RADIX_OPTIONS: { value: Radix; label: string }[] = [
 function formatVal(val: bigint, width: number, radix: Radix): string {
 	switch (radix) {
 		case "hex":
-			return "0x" + val.toString(16).toUpperCase();
+			return `0x${val.toString(16).toUpperCase()}`;
 		case "dec":
 			return val.toString(10);
 		case "oct":
-			return "0o" + val.toString(8);
+			return `0o${val.toString(8)}`;
 		case "bin":
-			return "0b" + val.toString(2).padStart(width, "0");
+			return `0b${val.toString(2).padStart(width, "0")}`;
 	}
 }
 

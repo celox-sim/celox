@@ -636,7 +636,7 @@ document.getElementById("wv-download")!.addEventListener("click", () => {
 	const a = document.createElement("a");
 	a.href = url;
 	const label = wvTraceSelectEl.selectedOptions[0]?.textContent ?? "dump";
-	a.download = label.replace(/[^a-zA-Z0-9_-]/g, "_") + ".vcd";
+	a.download = `${label.replace(/[^a-zA-Z0-9_-]/g, "_")}.vcd`;
 	a.click();
 	URL.revokeObjectURL(url);
 });
