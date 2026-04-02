@@ -1340,7 +1340,7 @@ impl NativeSimulatorHandle {
             .collect();
 
         let trace_opts = celox::TraceOptions::default();
-        let (program, warnings) = celox::compile_to_sir(
+        let (mut program, warnings) = celox::compile_to_sir(
             &source_refs,
             &top,
             &opts
