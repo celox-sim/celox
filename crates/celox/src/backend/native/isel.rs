@@ -5363,6 +5363,11 @@ fn normalize_wide_value(ctx: &mut ISelContext, block: &mut MBlock, dst: Register
                 new_chunks.push((vc, width));
             }
         }
+        // Update reg_map scalar slot to point to normalized chunk 0,
+        // so narrow readers (e.g. Store) see the normalized value.
+        if let Some(&(normed_c0, _)) = new_chunks.first() {
+            ctx.reg_map.set(dst, normed_c0);
+        }
         ctx.wide_regs.insert(dst, new_chunks);
     }
 }
