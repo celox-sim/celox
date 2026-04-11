@@ -10,7 +10,7 @@ use crate::ir::*;
 ///
 /// `eu_boundary_blocks`: block IDs that start a new original EU (after SIR merge).
 /// Empty for pre-merge (single EU) — all variables are trivially independent.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(crate) fn eliminate_working_round_trip(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     eu_boundary_blocks: &[BlockId],

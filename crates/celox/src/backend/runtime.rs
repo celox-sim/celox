@@ -162,6 +162,7 @@ impl JitBackend {
             }
         }
 
+        #[cfg(target_arch = "x86_64")]
         let layout_for_mir = if options.trace.mir {
             Some(layout.clone())
         } else {
