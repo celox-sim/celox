@@ -11,7 +11,6 @@ all_backends! {
 // Wide dynamic shift (a >> idx with 128-bit a) is handled by the runtime
 // shift select chain, NOT by lower_wide_extract. Verify it works correctly.
 fn wide_dynamic_shift_works(sim) {
-    @ignore_on(wasm);
     @setup { let code = r#"
         module Top (
             a: input logic<128>,

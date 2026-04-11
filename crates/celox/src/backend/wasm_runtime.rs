@@ -135,9 +135,9 @@ pub struct WasmBackend {
     store: Store<()>,
     memory: Memory,
     comb_func: TypedFunc<(), i64>,
-    event_funcs: HashMap<AbsoluteAddr, TypedFunc<(), i64>>,
-    eval_only_funcs: HashMap<AbsoluteAddr, TypedFunc<(), i64>>,
-    apply_funcs: HashMap<AbsoluteAddr, TypedFunc<(), i64>>,
+    event_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
+    eval_only_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
+    apply_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
     event_map: HashMap<AbsoluteAddr, WasmEventRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, WasmEventRef>,
     apply_event_map: HashMap<AbsoluteAddr, WasmEventRef>,
@@ -189,10 +189,11 @@ impl WasmBackend {
                            id_to_addr: &mut Vec<AbsoluteAddr>|
          -> Result<(), crate::SimulatorError> {
             for (clock, units) in ff_map {
-                let id = *addr_to_id.entry(*clock).or_insert_with(|| {
+                let canonical = sir.clock_domains.get(clock).copied().unwrap_or(*clock);
+                let id = *addr_to_id.entry(canonical).or_insert_with(|| {
                     let id = *next_id;
                     *next_id += 1;
-                    id_to_addr.push(*clock);
+                    id_to_addr.push(canonical);
                     id
                 });
 
@@ -206,12 +207,12 @@ impl WasmBackend {
                     crate::SimulatorError::from(format!("WASM compilation failed (ff): {e:?}"))
                 })?;
                 let idx = modules.len();
-                modules.push((*clock, module));
+                modules.push((canonical, module));
                 emap.insert(
-                    *clock,
+                    canonical,
                     WasmEventRef {
                         instance_idx: idx,
-                        addr: *clock,
+                        addr: canonical,
                         id,
                     },
                 );
@@ -331,20 +332,21 @@ impl WasmBackend {
 
         let comb_func = instantiate_module(&engine, &mut store, &comb_module, &memory)?;
 
-        let mut event_funcs = HashMap::default();
+        let mut event_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>> = HashMap::default();
         for (addr, module) in &event_modules {
             let func = instantiate_module(&engine, &mut store, module, &memory)?;
-            event_funcs.insert(*addr, func);
+            event_funcs.entry(*addr).or_default().push(func);
         }
-        let mut eval_only_funcs = HashMap::default();
+        let mut eval_only_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>> =
+            HashMap::default();
         for (addr, module) in &eval_only_modules {
             let func = instantiate_module(&engine, &mut store, module, &memory)?;
-            eval_only_funcs.insert(*addr, func);
+            eval_only_funcs.entry(*addr).or_default().push(func);
         }
-        let mut apply_funcs = HashMap::default();
+        let mut apply_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>> = HashMap::default();
         for (addr, module) in &apply_modules {
             let func = instantiate_module(&engine, &mut store, module, &memory)?;
-            apply_funcs.insert(*addr, func);
+            apply_funcs.entry(*addr).or_default().push(func);
         }
 
         let id_to_event: Vec<WasmEventRef> =
@@ -382,27 +384,30 @@ impl WasmBackend {
     }
 
     pub fn eval_apply_ff_at(&mut self, event: &WasmEventRef) -> Result<(), SimulatorErrorCode> {
-        if let Some(func) = self.event_funcs.get(&event.addr).cloned() {
-            self.run_func(&func)
-        } else {
-            Ok(())
+        if let Some(funcs) = self.event_funcs.get(&event.addr).cloned() {
+            for func in funcs {
+                self.run_func(&func)?;
+            }
         }
+        Ok(())
     }
 
     pub fn eval_only_ff_at(&mut self, event: &WasmEventRef) -> Result<(), SimulatorErrorCode> {
-        if let Some(func) = self.eval_only_funcs.get(&event.addr).cloned() {
-            self.run_func(&func)
-        } else {
-            Ok(())
+        if let Some(funcs) = self.eval_only_funcs.get(&event.addr).cloned() {
+            for func in funcs {
+                self.run_func(&func)?;
+            }
         }
+        Ok(())
     }
 
     pub fn apply_ff_at(&mut self, event: &WasmEventRef) -> Result<(), SimulatorErrorCode> {
-        if let Some(func) = self.apply_funcs.get(&event.addr).cloned() {
-            self.run_func(&func)
-        } else {
-            Ok(())
+        if let Some(funcs) = self.apply_funcs.get(&event.addr).cloned() {
+            for func in funcs {
+                self.run_func(&func)?;
+            }
         }
+        Ok(())
     }
 
     pub fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {

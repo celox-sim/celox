@@ -10,7 +10,6 @@ all_backends! {
     // Block 1 updates `count`. Block 2 reads `count` to set `r_empty`.
     // NBA semantics: r_empty should see the OLD count value.
     fn test_same_module_count_and_empty_ff(sim) {
-        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 clk  : input  clock    ,
@@ -213,7 +212,6 @@ r_empty: empty,
     // Stress test: push N items, pop all, verify empty eventually goes high.
     // This specifically catches the "empty=0 forever" bug.
     fn test_empty_never_stuck_at_zero(sim) {
-        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
 clk  : input  clock,

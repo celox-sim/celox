@@ -470,8 +470,8 @@ fn compile_instruction(
         SIRInstruction::Concat(dst, args) => {
             compile_concat(dst, args, unit, four_state, locals, instrs);
         }
-        SIRInstruction::Slice(_, _, _, _) => {
-            todo!("Slice WASM lowering")
+        SIRInstruction::Slice(dst, src, bit_offset, width) => {
+            compile_slice(dst, src, *bit_offset, *width, four_state, locals, instrs);
         }
         SIRInstruction::Mux(dst, cond, then_val, else_val) => {
             compile_mux(
@@ -506,6 +506,80 @@ fn compile_imm(
             let m = mask_digits.get(c).copied().unwrap_or(0);
             instrs.push(Instruction::I64Const(m as i64));
             instrs.push(Instruction::LocalSet(mask_idx + c as u32));
+        }
+    }
+}
+
+fn emit_slice_chunks(
+    dst: &RegLocal,
+    src: &RegLocal,
+    bit_offset: usize,
+    width: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let num_dst_chunks = width.div_ceil(64);
+    let mut remaining = width;
+    let mut pos = bit_offset;
+
+    for out_idx in 0..dst.num_chunks {
+        if out_idx >= num_dst_chunks {
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(dst.value_idx + out_idx as u32));
+            continue;
+        }
+
+        let chunk_idx = pos / 64;
+        let chunk_off = pos % 64;
+        let chunk_width = remaining.min(64);
+        let bits_in_chunk = (64 - chunk_off).min(remaining);
+
+        emit_wide_get_chunk(instrs, src, chunk_idx);
+        if chunk_off > 0 {
+            instrs.push(Instruction::I64Const(chunk_off as i64));
+            instrs.push(Instruction::I64ShrU);
+        }
+
+        if bits_in_chunk < remaining {
+            emit_wide_get_chunk(instrs, src, chunk_idx + 1);
+            instrs.push(Instruction::I64Const(bits_in_chunk as i64));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+
+        emit_mask_to_width(instrs, chunk_width);
+        instrs.push(Instruction::LocalSet(dst.value_idx + out_idx as u32));
+
+        remaining -= chunk_width;
+        pos += chunk_width;
+    }
+}
+
+fn compile_slice(
+    dst: &RegisterId,
+    src: &RegisterId,
+    bit_offset: usize,
+    width: usize,
+    four_state: bool,
+    locals: &LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let d = &locals.reg_map[dst];
+    let s = &locals.reg_map[src];
+    emit_slice_chunks(d, s, bit_offset, width, instrs);
+
+    if four_state {
+        if let (Some(dst_mask), Some(src_mask)) = (d.mask_idx, s.mask_idx) {
+            let dst_mask_reg = RegLocal {
+                value_idx: dst_mask,
+                num_chunks: d.num_chunks,
+                mask_idx: None,
+            };
+            let src_mask_reg = RegLocal {
+                value_idx: src_mask,
+                num_chunks: s.num_chunks,
+                mask_idx: None,
+            };
+            emit_slice_chunks(&dst_mask_reg, &src_mask_reg, bit_offset, width, instrs);
         }
     }
 }
@@ -2415,36 +2489,54 @@ fn compile_commit(
 
             if bit_shift == 0 {
                 // Byte-aligned copy
-                let num_chunks = copy_bytes.div_ceil(8);
-                for c in 0..num_chunks {
-                    let src_off = src_base + byte_off + c * 8;
-                    let dst_off = dst_base + byte_off + c * 8;
-                    // Load from src
+                let mut copied = 0usize;
+                while copied < copy_bytes {
+                    let remaining = copy_bytes - copied;
+                    let src_off = src_base + byte_off + copied;
+                    let dst_off = dst_base + byte_off + copied;
                     instrs.push(Instruction::I32Const(dst_off as i32));
                     instrs.push(Instruction::I32Const(src_off as i32));
-                    instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }));
-                    instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }));
-                }
-
-                // 4-state mask commit
-                if four_state {
-                    let is_4state = layout.is_4states.get(&dst_abs).copied().unwrap_or(false);
-                    if is_4state {
-                        let src_var_byte_size = get_byte_size(layout.widths[&src_abs]);
-                        let dst_var_byte_size = get_byte_size(layout.widths[&dst_abs]);
-                        for c in 0..num_chunks {
-                            let src_mask_off = src_base + src_var_byte_size + byte_off + c * 8;
-                            let dst_mask_off = dst_base + dst_var_byte_size + byte_off + c * 8;
-                            instrs.push(Instruction::I32Const(dst_mask_off as i32));
-                            instrs.push(Instruction::I32Const(src_mask_off as i32));
+                    match remaining {
+                        1 => {
+                            instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
+                                offset: 0,
+                                align: 0,
+                                memory_index: 0,
+                            }));
+                            instrs.push(Instruction::I32Store8(wasm_encoder::MemArg {
+                                offset: 0,
+                                align: 0,
+                                memory_index: 0,
+                            }));
+                            copied += 1;
+                        }
+                        2 | 3 => {
+                            instrs.push(Instruction::I32Load16U(wasm_encoder::MemArg {
+                                offset: 0,
+                                align: 0,
+                                memory_index: 0,
+                            }));
+                            instrs.push(Instruction::I32Store16(wasm_encoder::MemArg {
+                                offset: 0,
+                                align: 0,
+                                memory_index: 0,
+                            }));
+                            copied += 2;
+                        }
+                        4..=7 => {
+                            instrs.push(Instruction::I32Load(wasm_encoder::MemArg {
+                                offset: 0,
+                                align: 0,
+                                memory_index: 0,
+                            }));
+                            instrs.push(Instruction::I32Store(wasm_encoder::MemArg {
+                                offset: 0,
+                                align: 0,
+                                memory_index: 0,
+                            }));
+                            copied += 4;
+                        }
+                        _ => {
                             instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
                                 offset: 0,
                                 align: 0,
@@ -2455,6 +2547,80 @@ fn compile_commit(
                                 align: 0,
                                 memory_index: 0,
                             }));
+                            copied += 8;
+                        }
+                    }
+                }
+
+                // 4-state mask commit
+                if four_state {
+                    let is_4state = layout.is_4states.get(&dst_abs).copied().unwrap_or(false);
+                    if is_4state {
+                        let src_var_byte_size = get_byte_size(layout.widths[&src_abs]);
+                        let dst_var_byte_size = get_byte_size(layout.widths[&dst_abs]);
+                        let mut copied = 0usize;
+                        while copied < copy_bytes {
+                            let remaining = copy_bytes - copied;
+                            let src_mask_off =
+                                src_base + src_var_byte_size + byte_off + copied;
+                            let dst_mask_off =
+                                dst_base + dst_var_byte_size + byte_off + copied;
+                            instrs.push(Instruction::I32Const(dst_mask_off as i32));
+                            instrs.push(Instruction::I32Const(src_mask_off as i32));
+                            match remaining {
+                                1 => {
+                                    instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
+                                        offset: 0,
+                                        align: 0,
+                                        memory_index: 0,
+                                    }));
+                                    instrs.push(Instruction::I32Store8(wasm_encoder::MemArg {
+                                        offset: 0,
+                                        align: 0,
+                                        memory_index: 0,
+                                    }));
+                                    copied += 1;
+                                }
+                                2 | 3 => {
+                                    instrs.push(Instruction::I32Load16U(wasm_encoder::MemArg {
+                                        offset: 0,
+                                        align: 0,
+                                        memory_index: 0,
+                                    }));
+                                    instrs.push(Instruction::I32Store16(wasm_encoder::MemArg {
+                                        offset: 0,
+                                        align: 0,
+                                        memory_index: 0,
+                                    }));
+                                    copied += 2;
+                                }
+                                4..=7 => {
+                                    instrs.push(Instruction::I32Load(wasm_encoder::MemArg {
+                                        offset: 0,
+                                        align: 0,
+                                        memory_index: 0,
+                                    }));
+                                    instrs.push(Instruction::I32Store(wasm_encoder::MemArg {
+                                        offset: 0,
+                                        align: 0,
+                                        memory_index: 0,
+                                    }));
+                                    copied += 4;
+                                }
+                                _ => {
+                                    instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+                                        offset: 0,
+                                        align: 0,
+                                        memory_index: 0,
+                                    }));
+                                    instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+                                        offset: 0,
+                                        align: 0,
+                                        memory_index: 0,
+                                    }));
+                                    copied += 8;
+                                }
+                            }
                         }
                     }
                 }
