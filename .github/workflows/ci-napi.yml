@@ -161,24 +161,15 @@ jobs:
           echo "Publishing version: $VERSION"
           npm version "$VERSION" --no-git-tag-version
 
+      - name: Exclude WASI from npm publish targets
+        working-directory: crates/celox-napi
+        run: |
+          node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.napi.targets = pkg.napi.targets.filter((target) => target !== 'wasm32-wasip1-threads'); fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: crates/celox-napi/artifacts
-
-      - name: Install Rust target for WASI
-        run: rustup target add wasm32-wasip1-threads
-
-      - name: Install WASI sysroot
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wasi-libc
-
-      - name: Build WASI package artifacts
-        working-directory: crates/celox-napi
-        env:
-          WASI_SYSROOT: /usr
-        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target wasm32-wasip1-threads --output-dir artifacts
 
       - name: Create npm dirs
         working-directory: crates/celox-napi
@@ -201,7 +192,7 @@ jobs:
 
       - name: Prepublish
         working-directory: crates/celox-napi
-        run: npx napi prepublish -t npm
+        run: npx napi prepublish -t npm --gh-release=false --skip-optional-publish
 
       - name: List packages
         working-directory: crates/celox-napi
