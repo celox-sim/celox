@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Celox
   text: JIT Simulator for Veryl HDL
-  tagline: Compile Veryl designs with Cranelift for high-speed simulation
+  tagline: Compile Veryl designs to native code for high-speed simulation
   actions:
     - theme: brand
       text: Get Started
@@ -14,8 +14,8 @@ hero:
       link: /guide/introduction
 
 features:
-  - title: JIT Compilation
-    details: Compiles simulation code to native machine code via Cranelift for maximum performance.
+  - title: Native Backend
+    details: Uses Celox's native x86-64 backend by default for the fastest simulations, with Cranelift as fallback on other targets.
   - title: Veryl HDL
     details: First-class support for the Veryl hardware description language.
   - title: TypeScript Testbenches

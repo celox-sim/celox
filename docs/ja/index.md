@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Celox
   text: Veryl HDL 向け JIT シミュレータ
-  tagline: Cranelift で Veryl 設計をコンパイルし、高速シミュレーションを実現
+  tagline: Veryl 設計をネイティブコードにコンパイルし、高速シミュレーションを実現
   actions:
     - theme: brand
       text: はじめる
@@ -14,8 +14,8 @@ hero:
       link: /ja/guide/introduction
 
 features:
-  - title: JIT コンパイル
-    details: Cranelift によるネイティブコードへのコンパイルで最高のパフォーマンスを実現。
+  - title: ネイティブバックエンド
+    details: x86-64 では Celox 独自のネイティブバックエンドを優先し、高速なシミュレーションを実現します。
   - title: Veryl HDL
     details: Veryl ハードウェア記述言語のファーストクラスサポート。
   - title: TypeScript テストベンチ

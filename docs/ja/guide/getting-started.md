@@ -26,10 +26,17 @@ Celox と Vitest をインストールします：
 npm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
 ```
 
+`.gitignore` に生成物ディレクトリも追加しておくと運用しやすくなります。
+
+```bash
+printf ".celox/\n" >> .gitignore
+```
+
 以下の手順を完了すると、プロジェクト構成は次のようになります：
 
 ```
 my-celox-project/
+├── .celox/               # 生成される型定義キャッシュ（git 管理しない）
 ├── Veryl.toml            # Veryl プロジェクト設定
 ├── vitest.config.ts      # Vitest + Celox プラグイン
 ├── tsconfig.json
@@ -114,17 +121,19 @@ import { Adder } from "../src/Adder.veryl";
 describe("Adder", () => {
   test("adds two numbers", () => {
     const sim = Simulator.create(Adder);
-
-    sim.dut.a = 100n;
-    sim.dut.b = 200n;
-    expect(sim.dut.sum).toBe(300n);
-
-    sim.dispose();
+    try {
+      sim.dut.a = 100n;
+      sim.dut.b = 200n;
+      sim.tick();
+      expect(sim.dut.sum).toBe(300n);
+    } finally {
+      sim.dispose();
+    }
   });
 });
 ```
 
-Vite プラグインが `.veryl` ファイルを自動的に解析して TypeScript の型定義を生成するため、`import { Adder } from "../src/Adder.veryl"` のインポートは完全に型付けされます。
+Vite プラグインが `.veryl` ファイルを自動的に解析して TypeScript の型定義を `.celox/` に生成するため、`import { Adder } from "../src/Adder.veryl"` のインポートは完全に型付けされます。ポート値は `bigint` で扱うのが基本です。
 
 ## テストを実行する
 
@@ -133,7 +142,8 @@ Vite プラグインが `.veryl` ファイルを自動的に解析して TypeScr
 ```json
 {
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:watch": "vitest"
   }
 }
 ```
@@ -147,4 +157,5 @@ npm test
 ## 次のステップ
 
 - [テストの書き方](./writing-tests.md) -- イベントベースとタイムベースのシミュレーションパターン。
+- [Vite プラグイン](./vite-plugin.md) -- `.veryl` import と型生成の仕組み。
 - [はじめに](./introduction.md) -- アーキテクチャの概要。

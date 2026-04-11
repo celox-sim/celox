@@ -22,22 +22,22 @@ Celox uses a GCC-style optimization model: **preset levels** set defaults, and *
 import { Simulator } from '@celox-sim/celox';
 
 // Default (O1): all optimizations enabled
-const sim = await Simulator.create(module);
+const sim = Simulator.create(module);
 
 // O0: minimal optimization (fast compile, slower simulation)
-const sim = await Simulator.create(module, { optLevel: "O0" });
+const fastCompile = Simulator.create(module, { optLevel: "O0" });
 
 // O2: all optimizations + dead store elimination
-const sim = await Simulator.create(module, { optLevel: "O2" });
+const simO2 = Simulator.create(module, { optLevel: "O2" });
 
 // O1 with specific passes disabled
-const sim = await Simulator.create(module, {
+const custom = Simulator.create(module, {
     optLevel: "O1",
     passOverrides: ["-sir:reschedule", "-sir:commit_sinking"],
 });
 
 // Legacy (still supported):
-const sim = await Simulator.create(module, { optimize: false });
+const legacy = Simulator.create(module, { optimize: false });
 ```
 
 ## SIRT Optimization Passes
@@ -153,17 +153,17 @@ let sim = Simulator::builder(code, "Top").build_cranelift()?;
 
 ```ts
 // Default: O1, native backend on x86-64
-const sim = await Simulator.create(module);
+const sim = Simulator.create(module);
 
 // O2: all optimizations + DSE
-const sim = await Simulator.create(module, { optLevel: "O2" });
+const simO2 = Simulator.create(module, { optLevel: "O2" });
 
 // O1 with per-pass overrides:
-const sim = await Simulator.create(module, {
+const custom = Simulator.create(module, {
     optLevel: "O1",
     passOverrides: ["-sir:reschedule", "-sir:commit_sinking"],
 });
 
 // O0 (fast compile, slower simulation):
-const sim = await Simulator.create(module, { optLevel: "O0" });
+const fastCompile = Simulator.create(module, { optLevel: "O0" });
 ```

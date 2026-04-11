@@ -158,6 +158,8 @@ Both `Simulator` and `Simulation` accept the following options:
 const sim = Simulator.fromSource(source, "Top", {
   fourState: true,      // Enable 4-state (X) simulation
   vcd: "./dump.vcd",    // Write VCD waveform output
+  optLevel: "O1",       // "O0" | "O1" | "O2"
+  passOverrides: ["-sir:reschedule"], // per-pass overrides on top of optLevel
   clockType: "posedge", // Clock polarity (default: "posedge")
   resetType: "async_low", // Reset type (default: "async_low")
   deadStorePolicy: "preserveAllPorts", // Dead store elimination policy
@@ -165,16 +167,9 @@ const sim = Simulator.fromSource(source, "Top", {
     { name: "WIDTH", value: 16 },
   ],
 
-  // Optimizer control (all passes enabled by default)
+  // Legacy API remains available for compatibility
+  optimize: true,
   optimizeOptions: {
-    storeLoadForwarding: true,
-    hoistCommonBranchLoads: true,
-    bitExtractPeephole: true,
-    optimizeBlocks: true,
-    splitWideCommits: true,
-    commitSinking: true,
-    inlineCommitForwarding: true,
-    eliminateDeadWorkingStores: true,
     reschedule: true,
   },
   craneliftOptLevel: "speed", // "none" | "speed" | "speedAndSize"
@@ -184,12 +179,19 @@ const sim = Simulator.fromSource(source, "Top", {
 });
 ```
 
-The `optimize` boolean shorthand is also supported: `optimize: false` disables all SIRT optimization passes at once. Per-pass `optimizeOptions` takes precedence when both are specified.
+The current recommended entry point is `optLevel` plus `passOverrides`.
 
-### Cranelift Compilation Speed
+- `optLevel: "O0"` prioritizes compile time over simulation speed.
+- `optLevel: "O1"` is the standard default.
+- `optLevel: "O2"` adds dead store elimination on top of `O1`.
 
-If Cranelift compilation is too slow, the most impactful settings are:
+`optimize` and `optimizeOptions` still exist for backward compatibility, but new code is clearer when it uses `optLevel` / `passOverrides`.
 
+### Compile-Time Tuning
+
+If compilation is too slow, start with these knobs:
+
+- **`optLevel: "O0"`** -- reduces Celox-side SIR optimization work.
 - **`regallocAlgorithm: "singlePass"`** -- Switches from the backtracking register allocator to a single-pass allocator. Much faster compilation but generates code with more register spills and moves (slower simulation).
 - **`craneliftOptLevel: "none"`** -- Disables the egraph optimization pass entirely.
 - **`enableVerifier: false`** -- Skips IR verification.

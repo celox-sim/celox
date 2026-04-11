@@ -158,6 +158,8 @@ sim.runUntil(10000, { maxSteps: 500 });
 const sim = Simulator.fromSource(source, "Top", {
   fourState: true,      // 4 値 (X) シミュレーションを有効化
   vcd: "./dump.vcd",    // VCD 波形出力を書き出す
+  optLevel: "O1",       // "O0" | "O1" | "O2"
+  passOverrides: ["-sir:reschedule"], // optLevel に対する個別上書き
   clockType: "posedge", // クロック極性 (デフォルト: "posedge")
   resetType: "async_low", // リセットタイプ (デフォルト: "async_low")
   deadStorePolicy: "preserveAllPorts", // デッドストア除去ポリシー
@@ -165,16 +167,9 @@ const sim = Simulator.fromSource(source, "Top", {
     { name: "WIDTH", value: 16 },
   ],
 
-  // オプティマイザ制御 (全パスデフォルト有効)
+  // 旧 API も互換目的で利用可能
+  optimize: true,
   optimizeOptions: {
-    storeLoadForwarding: true,
-    hoistCommonBranchLoads: true,
-    bitExtractPeephole: true,
-    optimizeBlocks: true,
-    splitWideCommits: true,
-    commitSinking: true,
-    inlineCommitForwarding: true,
-    eliminateDeadWorkingStores: true,
     reschedule: true,
   },
   craneliftOptLevel: "speed", // "none" | "speed" | "speedAndSize"
@@ -184,12 +179,19 @@ const sim = Simulator.fromSource(source, "Top", {
 });
 ```
 
-`optimize` ブールショートハンドも引き続きサポートされます。`optimize: false` で全 SIRT 最適化パスを一括無効化できます。両方指定した場合はパスごとの `optimizeOptions` が優先されます。
+現在の推奨は `optLevel` と `passOverrides` の組み合わせです。
 
-### Cranelift コンパイル速度
+- `optLevel: "O0"` -- SIR 最適化をほぼ無効化し、コンパイル時間を優先します。
+- `optLevel: "O1"` -- 標準設定です。
+- `optLevel: "O2"` -- `O1` に加えてデッドストア除去を有効にします。
 
-Cranelift のコンパイルが遅い場合、最も効果が大きい設定は：
+`optimize` と `optimizeOptions` も後方互換のため残っていますが、新しいコードでは `optLevel` / `passOverrides` を使う方が意図を共有しやすくなります。
 
+### コンパイル速度の調整
+
+コンパイル時間を優先する場合、まずは次の順で調整するのが現実的です：
+
+- **`optLevel: "O0"`** -- Celox 側の SIR 最適化を大きく減らします。
 - **`regallocAlgorithm: "singlePass"`** -- バックトラッキングレジスタアロケータからシングルパスアロケータに切り替え。コンパイルが大幅に速くなるが、レジスタスピルが増えるため実行は遅くなる。
 - **`craneliftOptLevel: "none"`** -- egraph 最適化パスを完全にスキップ。
 - **`enableVerifier: false`** -- IR 検証をスキップ。

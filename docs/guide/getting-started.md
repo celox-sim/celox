@@ -30,10 +30,17 @@ Install Celox and Vitest:
 npm add -D @celox-sim/celox @celox-sim/vite-plugin vitest
 ```
 
+It is also worth ignoring the generated sidecar directory up front:
+
+```bash
+printf ".celox/\n" >> .gitignore
+```
+
 After following the steps below, your project will look like this:
 
 ```
 my-celox-project/
+├── .celox/               # generated type sidecars (do not commit)
 ├── Veryl.toml            # Veryl project config
 ├── vitest.config.ts      # Vitest + Celox plugin
 ├── tsconfig.json
@@ -118,17 +125,19 @@ import { Adder } from "../src/Adder.veryl";
 describe("Adder", () => {
   test("adds two numbers", () => {
     const sim = Simulator.create(Adder);
-
-    sim.dut.a = 100n;
-    sim.dut.b = 200n;
-    expect(sim.dut.sum).toBe(300n);
-
-    sim.dispose();
+    try {
+      sim.dut.a = 100n;
+      sim.dut.b = 200n;
+      sim.tick();
+      expect(sim.dut.sum).toBe(300n);
+    } finally {
+      sim.dispose();
+    }
   });
 });
 ```
 
-The Vite plugin automatically analyzes your `.veryl` files and generates TypeScript type definitions, so imports like `import { Adder } from "../src/Adder.veryl"` are fully typed.
+The Vite plugin automatically analyzes your `.veryl` files and generates TypeScript sidecars in `.celox/`, so imports like `import { Adder } from "../src/Adder.veryl"` are fully typed. Signal values are generally handled as `bigint`.
 
 ## Run Tests
 
@@ -137,7 +146,8 @@ Add a test script to `package.json`:
 ```json
 {
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:watch": "vitest"
   }
 }
 ```
@@ -152,4 +162,5 @@ npm test
 
 - [Playground](https://celox-sim.github.io/celox/playground/) -- Try Celox in the browser.
 - [Writing Tests](./writing-tests.md) -- Event-based and time-based simulation patterns.
+- [Vite Plugin](./vite-plugin.md) -- How `.veryl` imports and type generation work.
 - [Introduction](./introduction.md) -- Architecture overview.
