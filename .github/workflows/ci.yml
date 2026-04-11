@@ -117,6 +117,44 @@ jobs:
             crates/celox-napi/index.js
             crates/celox-napi/index.d.ts
 
+  napi-linux-arm64:
+    name: NAPI Build (Linux ARM64 GNU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        working-directory: crates/celox-napi
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build NAPI (Linux ARM64 GNU)
+        working-directory: crates/celox-napi
+        run: npx napi build --platform --manifest-path ../../Cargo.toml -p celox-napi --target aarch64-unknown-linux-gnu --use-napi-cross
+
+      - name: Upload NAPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-linux-arm64-gnu
+          path: |
+            crates/celox-napi/celox.linux-arm64-gnu.node
+            crates/celox-napi/index.js
+            crates/celox-napi/index.d.ts
+
   js-ubuntu:
     name: JS Test (Ubuntu)
     needs: rust
