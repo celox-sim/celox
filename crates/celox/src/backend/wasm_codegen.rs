@@ -659,9 +659,11 @@ fn compile_binary(
     let l_num = locals.reg_map[lhs].num_chunks;
     let r_num = locals.reg_map[rhs].num_chunks;
     let d_width = unit.register_map[dst].width();
+    let l_width = unit.register_map[lhs].width();
+    let r_width = unit.register_map[rhs].width();
 
     if d_num == 1 && l_num == 1 && r_num == 1 {
-        compile_binary_narrow(dst, lhs, op, rhs, d_width, locals, instrs);
+        compile_binary_narrow(dst, lhs, op, rhs, d_width, l_width, r_width, locals, instrs);
     } else {
         compile_binary_wide(dst, lhs, op, rhs, d_width, unit, locals, instrs);
     }
@@ -673,6 +675,8 @@ fn compile_binary_narrow(
     op: &BinaryOp,
     rhs: &RegisterId,
     d_width: usize,
+    l_width: usize,
+    r_width: usize,
     locals: &LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -712,7 +716,6 @@ fn compile_binary_narrow(
             let len = instrs.len();
             instrs.truncate(len - 2);
             // Sign-extend lhs to 64-bit based on its logical width
-            let l_width = d_width; // lhs width matches dst width for shift
             emit_sign_extend(instrs, l.value_idx, l_width);
             instrs.push(Instruction::LocalGet(r.value_idx));
             instrs.push(Instruction::I64ShrS);
@@ -732,10 +735,8 @@ fn compile_binary_narrow(
         BinaryOp::LtS => {
             let len = instrs.len();
             instrs.truncate(len - 2);
-            let l_width = d_width.max(1); // Approximation: use dst width
-            let r_width = d_width.max(1);
-            emit_sign_extend(instrs, l.value_idx, l_width);
-            emit_sign_extend(instrs, r.value_idx, r_width);
+            emit_sign_extend(instrs, l.value_idx, l_width.max(1));
+            emit_sign_extend(instrs, r.value_idx, r_width.max(1));
             instrs.push(Instruction::I64LtS);
             instrs.push(Instruction::I64ExtendI32U);
         }
@@ -746,10 +747,8 @@ fn compile_binary_narrow(
         BinaryOp::LeS => {
             let len = instrs.len();
             instrs.truncate(len - 2);
-            let l_width = d_width.max(1);
-            let r_width = d_width.max(1);
-            emit_sign_extend(instrs, l.value_idx, l_width);
-            emit_sign_extend(instrs, r.value_idx, r_width);
+            emit_sign_extend(instrs, l.value_idx, l_width.max(1));
+            emit_sign_extend(instrs, r.value_idx, r_width.max(1));
             instrs.push(Instruction::I64LeS);
             instrs.push(Instruction::I64ExtendI32U);
         }
@@ -760,10 +759,8 @@ fn compile_binary_narrow(
         BinaryOp::GtS => {
             let len = instrs.len();
             instrs.truncate(len - 2);
-            let l_width = d_width.max(1);
-            let r_width = d_width.max(1);
-            emit_sign_extend(instrs, l.value_idx, l_width);
-            emit_sign_extend(instrs, r.value_idx, r_width);
+            emit_sign_extend(instrs, l.value_idx, l_width.max(1));
+            emit_sign_extend(instrs, r.value_idx, r_width.max(1));
             instrs.push(Instruction::I64GtS);
             instrs.push(Instruction::I64ExtendI32U);
         }
@@ -774,10 +771,8 @@ fn compile_binary_narrow(
         BinaryOp::GeS => {
             let len = instrs.len();
             instrs.truncate(len - 2);
-            let l_width = d_width.max(1);
-            let r_width = d_width.max(1);
-            emit_sign_extend(instrs, l.value_idx, l_width);
-            emit_sign_extend(instrs, r.value_idx, r_width);
+            emit_sign_extend(instrs, l.value_idx, l_width.max(1));
+            emit_sign_extend(instrs, r.value_idx, r_width.max(1));
             instrs.push(Instruction::I64GeS);
             instrs.push(Instruction::I64ExtendI32U);
         }
@@ -1859,6 +1854,7 @@ fn compile_load(
                             op_width,
                             instrs,
                         );
+                        normalize_loaded_four_state(d, &mask_local, op_width, instrs);
                     } else {
                         // Not a 4-state var: mask is 0
                         for c in 0..d.num_chunks {
@@ -1893,6 +1889,7 @@ fn compile_load(
                             op_width,
                             instrs,
                         );
+                        normalize_loaded_four_state(d, &mask_local, op_width, instrs);
                     } else {
                         for c in 0..d.num_chunks {
                             instrs.push(Instruction::I64Const(0));
@@ -1902,6 +1899,26 @@ fn compile_load(
                 }
             }
         }
+    }
+}
+
+fn normalize_loaded_four_state(
+    value_local: &RegLocal,
+    mask_local: &RegLocal,
+    op_width: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let top_bits = op_width % 64;
+    for c in 0..value_local.num_chunks {
+        instrs.push(Instruction::LocalGet(value_local.value_idx + c as u32));
+        instrs.push(Instruction::LocalGet(mask_local.value_idx + c as u32));
+        instrs.push(Instruction::I64Or);
+        if c + 1 == value_local.num_chunks && top_bits > 0 && top_bits < 64 {
+            let mask = (1u64 << top_bits) - 1;
+            instrs.push(Instruction::I64Const(mask as i64));
+            instrs.push(Instruction::I64And);
+        }
+        instrs.push(Instruction::LocalSet(value_local.value_idx + c as u32));
     }
 }
 
@@ -2145,8 +2162,15 @@ fn compile_store(
             }
         }
         SIROffset::Dynamic(reg) => {
-            let offset_reg = &locals.reg_map[reg];
-            compile_store_dynamic(&s, base_offset, offset_reg.value_idx, op_width, instrs);
+            let offset_reg_value_idx = locals.reg_map[reg].value_idx;
+            compile_store_dynamic(
+                &s,
+                base_offset,
+                offset_reg_value_idx,
+                op_width,
+                locals,
+                instrs,
+            );
 
             if four_state {
                 let is_4state = layout.is_4states.get(&abs).copied().unwrap_or(false);
@@ -2161,8 +2185,9 @@ fn compile_store(
                         compile_store_dynamic(
                             &mask_local,
                             mask_base,
-                            offset_reg.value_idx,
+                            offset_reg_value_idx,
                             op_width,
+                            locals,
                             instrs,
                         );
                     } else {
@@ -2191,7 +2216,9 @@ fn compile_store_at_offset(
     let store_bytes = get_byte_size(op_width);
     let num_chunks = num_i64_chunks(op_width);
 
-    if bit_shift == 0 {
+    if num_chunks == 1 && op_width <= 64 && (bit_shift != 0 || !op_width.is_multiple_of(8)) {
+        emit_partial_store_small(src, byte_offset, bit_shift, op_width, locals, instrs);
+    } else if bit_shift == 0 {
         // Byte-aligned store. Break remaining bytes into power-of-2
         // sized stores (8/4/2/1) so every byte of the value is written.
         for c in 0..num_chunks {
@@ -2237,34 +2264,42 @@ fn compile_store_at_offset(
                 }
             }
         }
-    } else if num_chunks == 1 {
-        // Bit-offset RMW store (single chunk). Only touch the bytes that
-        // actually overlap the updated bit range so adjacent signals do not
-        // get clobbered.
-        let affected_bytes = (bit_shift + op_width).div_ceil(8);
-        let tmp = locals.alloc(1);
-
-        emit_load_small_word(byte_offset, affected_bytes, instrs);
-        let clear_mask = !((((1u128 << op_width) - 1) << bit_shift) as u64);
-        instrs.push(Instruction::I64Const(mask_for_bytes(affected_bytes) as i64));
-        instrs.push(Instruction::I64And);
-        instrs.push(Instruction::I64Const(clear_mask as i64));
-        instrs.push(Instruction::I64And);
-        instrs.push(Instruction::LocalGet(src.value_idx));
-        if op_width < 64 {
-            let src_mask = (1u64 << op_width) - 1;
-            instrs.push(Instruction::I64Const(src_mask as i64));
-            instrs.push(Instruction::I64And);
-        }
-        instrs.push(Instruction::I64Const(bit_shift as i64));
-        instrs.push(Instruction::I64Shl);
-        instrs.push(Instruction::I64Or);
-        instrs.push(Instruction::LocalSet(tmp));
-        emit_store_small_word(byte_offset, affected_bytes, tmp, instrs);
     } else {
         // Multi-chunk bit-offset store: complex.
         // TODO: implement multi-chunk bit-offset RMW store
     }
+}
+
+fn emit_partial_store_small(
+    src: &RegLocal,
+    byte_offset: usize,
+    bit_shift: usize,
+    op_width: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let affected_bytes = (bit_shift + op_width).div_ceil(8);
+    let tmp = locals.alloc(1);
+
+    emit_load_small_word(byte_offset, affected_bytes, instrs);
+    let clear_mask = !((((1u128 << op_width) - 1) << bit_shift) as u64);
+    instrs.push(Instruction::I64Const(mask_for_bytes(affected_bytes) as i64));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::I64Const(clear_mask as i64));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::LocalGet(src.value_idx));
+    if op_width < 64 {
+        let src_mask = (1u64 << op_width) - 1;
+        instrs.push(Instruction::I64Const(src_mask as i64));
+        instrs.push(Instruction::I64And);
+    }
+    if bit_shift > 0 {
+        instrs.push(Instruction::I64Const(bit_shift as i64));
+        instrs.push(Instruction::I64Shl);
+    }
+    instrs.push(Instruction::I64Or);
+    instrs.push(Instruction::LocalSet(tmp));
+    emit_store_small_word(byte_offset, affected_bytes, tmp, instrs);
 }
 
 fn compile_store_zero(byte_offset: usize, op_width: usize, instrs: &mut Vec<Instruction<'static>>) {
@@ -2287,6 +2322,7 @@ fn compile_store_dynamic(
     base_offset: usize,
     dyn_bit_offset_local: u32,
     op_width: usize,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     // Dynamic store with sub-byte bit offset support (single chunk).
@@ -2304,79 +2340,50 @@ fn compile_store_dynamic(
     // the first chunk and carry between chunks.
     let num_chunks = num_i64_chunks(op_width);
 
-    if num_chunks == 1 && op_width <= 57 {
-        // Single chunk, fits within one 8-byte word even with 7-bit shift.
-        // RMW: load old, clear target bits, OR in shifted new value, store.
-
-        // addr = base_offset + (dyn_bits >> 3)
-        // Push addr (i32) for the store
-        instrs.push(Instruction::I64Const(base_offset as i64));
-        instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
-        instrs.push(Instruction::I64Const(3));
-        instrs.push(Instruction::I64ShrU);
-        instrs.push(Instruction::I64Add);
-        instrs.push(Instruction::I32WrapI64);
-        // Duplicate addr on stack for store: save addr to a pattern
-        // WASM doesn't have dup, so we recompute addr.
-
-        // Actually, let's compute addr once and use it:
-        // Stack: [addr_i32]
-        // We need: [addr_i32, new_value_i64] for i64.store
-        // Compute new_value:
-
-        // Load old 8 bytes at addr
-        instrs.push(Instruction::I64Const(base_offset as i64));
-        instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
-        instrs.push(Instruction::I64Const(3));
-        instrs.push(Instruction::I64ShrU);
-        instrs.push(Instruction::I64Add);
-        instrs.push(Instruction::I32WrapI64);
-        instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 0,
-            memory_index: 0,
-        }));
-
-        // Compute clear mask: ~(((1 << op_width) - 1) << bit_shift)
-        // = ~(mask << bit_shift)
-        // We need dynamic bit_shift, so compute at runtime:
-        // op_mask = (1 << op_width) - 1 (compile-time constant)
+    if num_chunks == 1 && op_width <= 64 {
+        let addr_local = locals.alloc(1);
+        let bit_shift_local = locals.alloc(1);
+        let tmp_local = locals.alloc(1);
+        let affected_bytes = (7 + op_width).div_ceil(8);
         let op_mask = if op_width >= 64 {
             u64::MAX
         } else {
             (1u64 << op_width) - 1
         };
-        // shifted_mask = op_mask << bit_shift
-        instrs.push(Instruction::I64Const(op_mask as i64));
+
+        instrs.push(Instruction::I64Const(base_offset as i64));
+        instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+        instrs.push(Instruction::I64Const(3));
+        instrs.push(Instruction::I64ShrU);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(addr_local));
+
         instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
         instrs.push(Instruction::I64Const(7));
         instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalSet(bit_shift_local));
+
+        emit_load_small_word_dynamic(addr_local, affected_bytes, instrs);
+        instrs.push(Instruction::I64Const(mask_for_bytes(affected_bytes) as i64));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Const(op_mask as i64));
+        instrs.push(Instruction::LocalGet(bit_shift_local));
         instrs.push(Instruction::I64Shl);
-        // clear_mask = ~shifted_mask
-        instrs.push(Instruction::I64Const(-1i64)); // 0xFFFF...
+        instrs.push(Instruction::I64Const(-1));
         instrs.push(Instruction::I64Xor);
-        // old_val & clear_mask
         instrs.push(Instruction::I64And);
 
-        // Shift src value: (src & op_mask) << bit_shift
         instrs.push(Instruction::LocalGet(src.value_idx));
         if op_width < 64 {
             instrs.push(Instruction::I64Const(op_mask as i64));
             instrs.push(Instruction::I64And);
         }
-        instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
-        instrs.push(Instruction::I64Const(7));
-        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalGet(bit_shift_local));
         instrs.push(Instruction::I64Shl);
-        // OR into cleared old value
         instrs.push(Instruction::I64Or);
+        instrs.push(Instruction::LocalSet(tmp_local));
 
-        // Store: stack is [addr_i32, new_value_i64]
-        instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
-            offset: 0,
-            align: 0,
-            memory_index: 0,
-        }));
+        emit_store_small_word_dynamic(addr_local, affected_bytes, tmp_local, instrs);
     } else {
         // Multi-chunk or wide single chunk: fall back to byte-aligned store.
         // This ignores sub-byte offset but handles the common case.
@@ -2398,6 +2405,193 @@ fn compile_store_dynamic(
                 align: 0,
                 memory_index: 0,
             }));
+        }
+    }
+}
+
+fn emit_dynamic_addr_with_offset(addr_local: u32, byte_offset: usize, instrs: &mut Vec<Instruction<'static>>) {
+    instrs.push(Instruction::LocalGet(addr_local));
+    instrs.push(Instruction::I32WrapI64);
+    if byte_offset > 0 {
+        instrs.push(Instruction::I32Const(byte_offset as i32));
+        instrs.push(Instruction::I32Add);
+    }
+}
+
+fn emit_load_small_word_dynamic(
+    addr_local: u32,
+    byte_len: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    emit_load_small_word_dynamic_at(addr_local, 0, byte_len, instrs);
+}
+
+fn emit_load_small_word_dynamic_at(
+    addr_local: u32,
+    start_off: usize,
+    byte_len: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    match byte_len {
+        0 => instrs.push(Instruction::I64Const(0)),
+        1 => {
+            emit_dynamic_addr_with_offset(addr_local, start_off, instrs);
+            instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+        }
+        2 => {
+            emit_dynamic_addr_with_offset(addr_local, start_off, instrs);
+            instrs.push(Instruction::I32Load16U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+        }
+        3 => {
+            emit_load_small_word_dynamic_at(addr_local, start_off, 2, instrs);
+            emit_load_small_word_dynamic_at(addr_local, start_off + 2, 1, instrs);
+            instrs.push(Instruction::I64Const(16));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        4 => {
+            emit_dynamic_addr_with_offset(addr_local, start_off, instrs);
+            instrs.push(Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+        }
+        5 => {
+            emit_load_small_word_dynamic_at(addr_local, start_off, 4, instrs);
+            emit_dynamic_addr_with_offset(addr_local, start_off + 4, instrs);
+            instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        6 => {
+            emit_load_small_word_dynamic_at(addr_local, start_off, 4, instrs);
+            emit_dynamic_addr_with_offset(addr_local, start_off + 4, instrs);
+            instrs.push(Instruction::I32Load16U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        7 => {
+            emit_load_small_word_dynamic_at(addr_local, start_off, 6, instrs);
+            emit_dynamic_addr_with_offset(addr_local, start_off + 6, instrs);
+            instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+            instrs.push(Instruction::I64Const(48));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        _ => {
+            emit_dynamic_addr_with_offset(addr_local, 0, instrs);
+            instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+        }
+    }
+}
+
+fn emit_store_small_word_dynamic(
+    addr_local: u32,
+    byte_len: usize,
+    value_local: u32,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    emit_store_small_word_dynamic_at(addr_local, 0, byte_len, value_local, instrs);
+}
+
+fn emit_store_small_word_dynamic_at(
+    addr_local: u32,
+    start_off: usize,
+    byte_len: usize,
+    value_local: u32,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let memarg = wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+    match byte_len {
+        0 => {}
+        1 => {
+            emit_dynamic_addr_with_offset(addr_local, start_off, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Store8(memarg));
+        }
+        2 => {
+            emit_dynamic_addr_with_offset(addr_local, start_off, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Store16(memarg));
+        }
+        3 => {
+            emit_store_small_word_dynamic_at(addr_local, start_off, 2, value_local, instrs);
+            emit_dynamic_addr_with_offset(addr_local, start_off + 2, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(16));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Store8(memarg));
+        }
+        4 => {
+            emit_dynamic_addr_with_offset(addr_local, start_off, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Store32(memarg));
+        }
+        5 => {
+            emit_store_small_word_dynamic_at(addr_local, start_off, 4, value_local, instrs);
+            emit_dynamic_addr_with_offset(addr_local, start_off + 4, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Store8(memarg));
+        }
+        6 => {
+            emit_store_small_word_dynamic_at(addr_local, start_off, 4, value_local, instrs);
+            emit_dynamic_addr_with_offset(addr_local, start_off + 4, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Store16(memarg));
+        }
+        7 => {
+            emit_store_small_word_dynamic_at(addr_local, start_off, 6, value_local, instrs);
+            emit_dynamic_addr_with_offset(addr_local, start_off + 6, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(48));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Store8(memarg));
+        }
+        _ => {
+            emit_dynamic_addr_with_offset(addr_local, start_off, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Store(memarg));
         }
     }
 }

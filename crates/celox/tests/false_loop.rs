@@ -197,7 +197,6 @@ fn test_struct_member_dynamic_access_false_loop() {
 all_backends! {
 
 fn test_large_scc_dynamic_loop_convergence(sim) {
-    @ignore_on(wasm);
     @setup {
     let chain_size = 20;
     let mut assignments = String::new();

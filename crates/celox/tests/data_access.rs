@@ -242,7 +242,7 @@ assign o[j] = local_data[idx];
     }
 
     fn test_dynamic_index_with_bitslice(sim) {
-        @ignore_on(wasm, veryl);
+        @ignore_on(veryl);
         @setup { // Regression: arr[dynamic_idx][hi:lo] produced wrong values because
 // the bit-select anchor was incorrectly added to the dynamic offset.
 let code = r#"
@@ -283,7 +283,7 @@ assign o_hi = regs[idx][63:32];
     }
 
     fn test_let_index_with_bitslice_write(sim) {
-        @ignore_on(wasm, veryl);
+        @ignore_on(veryl);
         @setup { // Regression: using a `let`-bound variable as an array index combined
 // with a bitslice write (e.g. data[idx][63:32]) produced wrong values
 // because eval_dynamic_assign treated the Colon MSB anchor as a

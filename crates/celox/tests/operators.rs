@@ -350,7 +350,7 @@ assign o = r;
     }
 
     fn test_signed_comparison_after_as_cast(sim) {
-        @ignore_on(wasm, veryl);
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (a: input logic<8>, b: input logic<8>, y: output logic) {
 assign y = (a as i8) <: (b as i8);
