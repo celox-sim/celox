@@ -192,7 +192,9 @@ jobs:
 
       - name: Prepublish
         working-directory: crates/celox-napi
-        run: npx napi prepublish -t npm --gh-release=false --skip-optional-publish
+        env:
+          GITHUB_REPOSITORY: ""
+        run: npx napi prepublish -t npm --skip-optional-publish
 
       - name: List packages
         working-directory: crates/celox-napi
