@@ -816,48 +816,28 @@ fn compile_binary_wide(
         // 3. Subtraction with borrow propagation
         BinaryOp::Sub => {
             let borrow = locals.alloc(1);
+            let d1 = locals.alloc(1);
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(borrow));
             for c in 0..d_chunks {
-                // d1 = l[c] - r[c]
                 emit_wide_get_chunk(instrs, &l, c);
                 emit_wide_get_chunk(instrs, &r, c);
                 instrs.push(Instruction::I64Sub);
-                instrs.push(Instruction::LocalTee(d.value_idx + c as u32));
-                // b1 = r[c] > l[c]
-                emit_wide_get_chunk(instrs, &r, c);
+                instrs.push(Instruction::LocalSet(d1));
+
                 emit_wide_get_chunk(instrs, &l, c);
-                instrs.push(Instruction::I64GtU);
+                emit_wide_get_chunk(instrs, &r, c);
+                instrs.push(Instruction::I64LtU);
                 instrs.push(Instruction::I64ExtendI32U);
-                if c > 0 {
-                    // d2 = d1 - borrow
-                    instrs.push(Instruction::LocalGet(d.value_idx + c as u32));
-                    instrs.push(Instruction::LocalGet(borrow));
-                    instrs.push(Instruction::I64Sub);
-                    instrs.push(Instruction::LocalTee(d.value_idx + c as u32));
-                    // b2 = d1 < borrow (d1 was d.value_idx before sub)
-                    // Actually: b2 = (borrow != 0) & (d1 == 0) ... simpler: b2 = d2 > d1
-                    // Use: if borrow was 1 and d1 was 0, d2 wraps.
-                    instrs.push(Instruction::LocalGet(borrow));
-                    instrs.push(Instruction::I64GtU); // d2 > borrow means no extra borrow... wrong
-                    // Simpler: b2 = (borrow != 0 && d1 was 0) → (borrow & (d1 == 0))
-                    // Let's just: total_borrow = b1 | b2 where b2 = (d2+borrow != d1) which is redundant.
-                    // Actually the cleanest: b2 = (d2 > d1_before_sub).
-                    // We don't have d1_before_sub. Use: b2 = (borrow != 0 && d1 == 0)
-                    // Drop the wrong instruction and redo:
-                    let len = instrs.len();
-                    instrs.truncate(len - 1); // remove wrong i64.gt_u
-                    // b2: if borrow was nonzero and d1 (before sub) was 0, there's extra borrow
-                    // d1 = d.value_idx + c BEFORE the sub. We don't have it anymore.
-                    // Simplest correct approach: save d1 to a temp.
-                    // Let me restructure.
-                    let len = instrs.len();
-                    // Undo everything from "d2 = d1 - borrow" onwards
-                    // This approach is getting messy. Let me use a cleaner implementation.
-                    instrs.truncate(len); // keep as is, just OR in b1
-                    instrs.push(Instruction::I64ExtendI32U);
-                    instrs.push(Instruction::I64Or);
-                }
+                instrs.push(Instruction::LocalGet(d1));
+                instrs.push(Instruction::LocalGet(borrow));
+                instrs.push(Instruction::I64Sub);
+                instrs.push(Instruction::LocalTee(d.value_idx + c as u32));
+                instrs.push(Instruction::LocalGet(d1));
+                instrs.push(Instruction::LocalGet(borrow));
+                instrs.push(Instruction::I64LtU);
+                instrs.push(Instruction::I64ExtendI32U);
+                instrs.push(Instruction::I64Or);
                 instrs.push(Instruction::LocalSet(borrow));
             }
         }
@@ -1102,8 +1082,71 @@ fn compile_binary_wide(
             }
         }
         // 9. Mul / Div / Rem — placeholder for now
-        BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-            // TODO: schoolbook mul, long division
+        BinaryOp::Mul => {
+            let carry = locals.alloc(1);
+            let tmp_lo = locals.alloc(1);
+            let tmp_rhs = locals.alloc(1);
+            let tmp_hi = locals.alloc(1);
+            let sum1 = locals.alloc(1);
+            let c1 = locals.alloc(1);
+            let c2 = locals.alloc(1);
+
+            for c in 0..d_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
+            }
+
+            for i in 0..d_chunks {
+                emit_wide_get_chunk(instrs, &l, i);
+                instrs.push(Instruction::LocalSet(tmp_lo));
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(carry));
+
+                for j in 0..d_chunks {
+                    let k = i + j;
+                    if k >= d_chunks {
+                        break;
+                    }
+
+                    emit_wide_get_chunk(instrs, &r, j);
+                    instrs.push(Instruction::LocalSet(tmp_rhs));
+                    instrs.push(Instruction::LocalGet(tmp_rhs));
+                    instrs.push(Instruction::LocalGet(tmp_lo));
+                    instrs.push(Instruction::I64Mul);
+                    instrs.push(Instruction::LocalSet(sum1));
+
+                    emit_u64_mul_hi(instrs, tmp_lo, tmp_rhs, tmp_hi, locals);
+
+                    instrs.push(Instruction::LocalGet(d.value_idx + k as u32));
+                    instrs.push(Instruction::LocalGet(sum1));
+                    instrs.push(Instruction::I64Add);
+                    instrs.push(Instruction::LocalSet(sum1));
+
+                    instrs.push(Instruction::LocalGet(sum1));
+                    instrs.push(Instruction::LocalGet(d.value_idx + k as u32));
+                    instrs.push(Instruction::I64LtU);
+                    instrs.push(Instruction::I64ExtendI32U);
+                    instrs.push(Instruction::LocalSet(c1));
+
+                    instrs.push(Instruction::LocalGet(sum1));
+                    instrs.push(Instruction::LocalGet(carry));
+                    instrs.push(Instruction::I64Add);
+                    instrs.push(Instruction::LocalTee(d.value_idx + k as u32));
+                    instrs.push(Instruction::LocalGet(sum1));
+                    instrs.push(Instruction::I64LtU);
+                    instrs.push(Instruction::I64ExtendI32U);
+                    instrs.push(Instruction::LocalSet(c2));
+
+                    instrs.push(Instruction::LocalGet(tmp_hi));
+                    instrs.push(Instruction::LocalGet(c1));
+                    instrs.push(Instruction::I64Add);
+                    instrs.push(Instruction::LocalGet(c2));
+                    instrs.push(Instruction::I64Add);
+                    instrs.push(Instruction::LocalSet(carry));
+                }
+            }
+        }
+        BinaryOp::Div | BinaryOp::Rem => {
             for c in 0..d_chunks {
                 instrs.push(Instruction::I64Const(0));
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
@@ -1123,6 +1166,94 @@ fn compile_binary_wide(
     }
 }
 
+fn emit_u64_mul_hi(
+    instrs: &mut Vec<Instruction<'static>>,
+    lhs_local: u32,
+    rhs_local: u32,
+    dst_local: u32,
+    locals: &mut LocalAllocator,
+) {
+    let mask = locals.alloc(1);
+    let a0 = locals.alloc(1);
+    let a1 = locals.alloc(1);
+    let b0 = locals.alloc(1);
+    let b1 = locals.alloc(1);
+    let lo_lo = locals.alloc(1);
+    let lo_hi = locals.alloc(1);
+    let hi_lo = locals.alloc(1);
+    let hi_hi = locals.alloc(1);
+    let cross = locals.alloc(1);
+
+    instrs.push(Instruction::I64Const(0xFFFF_FFFFu64 as i64));
+    instrs.push(Instruction::LocalSet(mask));
+
+    instrs.push(Instruction::LocalGet(lhs_local));
+    instrs.push(Instruction::LocalGet(mask));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::LocalSet(a0));
+    instrs.push(Instruction::LocalGet(lhs_local));
+    instrs.push(Instruction::I64Const(32));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::LocalSet(a1));
+
+    instrs.push(Instruction::LocalGet(rhs_local));
+    instrs.push(Instruction::LocalGet(mask));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::LocalSet(b0));
+    instrs.push(Instruction::LocalGet(rhs_local));
+    instrs.push(Instruction::I64Const(32));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::LocalSet(b1));
+
+    instrs.push(Instruction::LocalGet(a0));
+    instrs.push(Instruction::LocalGet(b0));
+    instrs.push(Instruction::I64Mul);
+    instrs.push(Instruction::LocalSet(lo_lo));
+
+    instrs.push(Instruction::LocalGet(a0));
+    instrs.push(Instruction::LocalGet(b1));
+    instrs.push(Instruction::I64Mul);
+    instrs.push(Instruction::LocalSet(lo_hi));
+
+    instrs.push(Instruction::LocalGet(a1));
+    instrs.push(Instruction::LocalGet(b0));
+    instrs.push(Instruction::I64Mul);
+    instrs.push(Instruction::LocalSet(hi_lo));
+
+    instrs.push(Instruction::LocalGet(a1));
+    instrs.push(Instruction::LocalGet(b1));
+    instrs.push(Instruction::I64Mul);
+    instrs.push(Instruction::LocalSet(hi_hi));
+
+    instrs.push(Instruction::LocalGet(lo_lo));
+    instrs.push(Instruction::I64Const(32));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::LocalGet(lo_hi));
+    instrs.push(Instruction::LocalGet(mask));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalGet(hi_lo));
+    instrs.push(Instruction::LocalGet(mask));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalSet(cross));
+
+    instrs.push(Instruction::LocalGet(hi_hi));
+    instrs.push(Instruction::LocalGet(lo_hi));
+    instrs.push(Instruction::I64Const(32));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalGet(hi_lo));
+    instrs.push(Instruction::I64Const(32));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalGet(cross));
+    instrs.push(Instruction::I64Const(32));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalSet(dst_local));
+}
+
 /// Wide shift left/right using word-offset + bit-shift decomposition.
 fn emit_wide_shift(
     op: &BinaryOp,
@@ -1139,6 +1270,7 @@ fn emit_wide_shift(
     let word_off = locals.alloc(1);
     let bit_off = locals.alloc(1);
     let inv_bit = locals.alloc(1);
+    let acc = locals.alloc(1);
 
     instrs.push(Instruction::LocalGet(r.value_idx));
     instrs.push(Instruction::I64Const(6));
@@ -1158,15 +1290,14 @@ fn emit_wide_shift(
     // For each result chunk, find the source chunks and combine.
     // Shr: d[i] = (l[i+word_off] >> bit_off) | (l[i+word_off+1] << inv_bit)
     // Shl: d[i] = (l[i-word_off] << bit_off) | (l[i-word_off-1] >> inv_bit)
-    // Use if-chain to select source chunks (O(n²) but simple).
+    // Use a local accumulator to keep the WASM stack shape trivial.
     for i in 0..d_chunks {
-        instrs.push(Instruction::I64Const(0)); // accumulator
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(acc));
         for j in 0..l.num_chunks {
-            // Check if j is the right source chunk
             let src_idx = j as i64;
             let target_idx = i as i64;
 
-            // Check: j == target + word_off (Shr) or j == target - word_off (Shl)
             instrs.push(Instruction::I64Const(target_idx));
             if matches!(op, BinaryOp::Shr) {
                 instrs.push(Instruction::LocalGet(word_off));
@@ -1178,8 +1309,7 @@ fn emit_wide_shift(
             instrs.push(Instruction::I64Const(src_idx));
             instrs.push(Instruction::I64Eq);
             instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
-            // This is the "current" chunk
-            instrs.push(Instruction::Drop); // drop old accumulator
+            instrs.push(Instruction::LocalGet(acc));
             instrs.push(Instruction::LocalGet(l.value_idx + j as u32));
             if matches!(op, BinaryOp::Shr) {
                 instrs.push(Instruction::LocalGet(bit_off));
@@ -1188,11 +1318,11 @@ fn emit_wide_shift(
                 instrs.push(Instruction::LocalGet(bit_off));
                 instrs.push(Instruction::I64Shl);
             }
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(acc));
             instrs.push(Instruction::End);
 
-            // Check for the "next" chunk (for cross-word bits)
             let next_src = if matches!(op, BinaryOp::Shr) {
-                // next: j == i + word_off + 1
                 i as i64 + 1
             } else {
                 i as i64 - 1
@@ -1208,11 +1338,11 @@ fn emit_wide_shift(
             instrs.push(Instruction::I64Const(src_idx));
             instrs.push(Instruction::I64Eq);
             instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
-            // bit_off != 0 check
             instrs.push(Instruction::LocalGet(bit_off));
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::I64Ne);
             instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            instrs.push(Instruction::LocalGet(acc));
             instrs.push(Instruction::LocalGet(l.value_idx + j as u32));
             if matches!(op, BinaryOp::Shr) {
                 instrs.push(Instruction::LocalGet(inv_bit));
@@ -1221,10 +1351,12 @@ fn emit_wide_shift(
                 instrs.push(Instruction::LocalGet(inv_bit));
                 instrs.push(Instruction::I64ShrU);
             }
-            instrs.push(Instruction::I64Or); // OR with accumulator
-            instrs.push(Instruction::End); // end if bit_off != 0
-            instrs.push(Instruction::End); // end if next chunk
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(acc));
+            instrs.push(Instruction::End);
+            instrs.push(Instruction::End);
         }
+        instrs.push(Instruction::LocalGet(acc));
         instrs.push(Instruction::LocalSet(d.value_idx + i as u32));
     }
 }
@@ -1707,8 +1839,17 @@ fn compile_store(
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             let store_offset = base_offset + byte_off;
+            let effective_width = if *bit_off == 0
+                && bit_shift == 0
+                && op_width < var_width
+                && s.num_chunks > num_i64_chunks(op_width)
+            {
+                var_width
+            } else {
+                op_width
+            };
 
-            compile_store_at_offset(s, store_offset, bit_shift, op_width, instrs);
+            compile_store_at_offset(s, store_offset, bit_shift, effective_width, instrs);
 
             // 4-state mask store
             if four_state {
@@ -1725,13 +1866,13 @@ fn compile_store(
                             &mask_local,
                             mask_store_offset,
                             bit_shift,
-                            op_width,
+                            effective_width,
                             instrs,
                         );
                     } else {
                         // Source is 2-state, clear mask
                         let mask_store_offset = base_offset + var_byte_size + byte_off;
-                        compile_store_zero(mask_store_offset, op_width, instrs);
+                        compile_store_zero(mask_store_offset, effective_width, instrs);
                     }
                 }
             }
@@ -1787,7 +1928,7 @@ fn compile_store_at_offset(
         // sized stores (8/4/2/1) so every byte of the value is written.
         for c in 0..num_chunks {
             let remaining_bytes = store_bytes - c * 8;
-            let src_local = src.value_idx + c as u32;
+            let src_local = (c < src.num_chunks).then_some(src.value_idx + c as u32);
             let mut written = 0usize;
             while written < remaining_bytes {
                 let left = remaining_bytes - written;
@@ -1799,12 +1940,19 @@ fn compile_store_at_offset(
                 };
                 instrs.push(Instruction::I32Const(chunk_off as i32));
                 if written == 0 {
-                    instrs.push(Instruction::LocalGet(src_local));
+                    if let Some(src_local) = src_local {
+                        instrs.push(Instruction::LocalGet(src_local));
+                    } else {
+                        instrs.push(Instruction::I64Const(0));
+                    }
                 } else {
-                    // Shift the source value right to get the next portion
-                    instrs.push(Instruction::LocalGet(src_local));
-                    instrs.push(Instruction::I64Const((written * 8) as i64));
-                    instrs.push(Instruction::I64ShrU);
+                    if let Some(src_local) = src_local {
+                        instrs.push(Instruction::LocalGet(src_local));
+                        instrs.push(Instruction::I64Const((written * 8) as i64));
+                        instrs.push(Instruction::I64ShrU);
+                    } else {
+                        instrs.push(Instruction::I64Const(0));
+                    }
                 }
                 if left >= 8 {
                     instrs.push(Instruction::I64Store(memarg));

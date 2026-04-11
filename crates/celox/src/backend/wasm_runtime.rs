@@ -164,7 +164,7 @@ impl WasmBackend {
             options.emit_triggers,
         );
         let comb_module = Module::new(&engine, &comb_wasm.bytes).map_err(|e| {
-            crate::SimulatorError::from(format!("WASM compilation failed (eval_comb): {e}"))
+            crate::SimulatorError::from(format!("WASM compilation failed (eval_comb): {e:?}"))
         })?;
 
         // Compile event functions
@@ -203,7 +203,7 @@ impl WasmBackend {
                     options.emit_triggers,
                 );
                 let module = Module::new(&engine, &wasm.bytes).map_err(|e| {
-                    crate::SimulatorError::from(format!("WASM compilation failed (ff): {e}"))
+                    crate::SimulatorError::from(format!("WASM compilation failed (ff): {e:?}"))
                 })?;
                 let idx = modules.len();
                 modules.push((*clock, module));
