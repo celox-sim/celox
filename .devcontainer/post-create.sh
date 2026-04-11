@@ -143,16 +143,23 @@ maybe_install_cargo_insta() {
 
 main() {
   local home_dir="${HOME:-/home/vscode}"
+  local pnpm_store_dir
 
   export PNPM_HOME="${PNPM_HOME:-${home_dir}/.local/share/pnpm}"
   export CODEX_HOME="${CODEX_HOME:-${home_dir}/.codex}"
   export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-${home_dir}/.claude}"
   export PATH="${PATH}:${PNPM_HOME}"
+  pnpm_store_dir="${PNPM_STORE_DIR:-${PNPM_HOME}/store}"
 
   ensure_root_owned_setup "${home_dir}/.local" "$PNPM_HOME" "$CODEX_HOME" "$CLAUDE_CONFIG_DIR"
+  ensure_dir "${pnpm_store_dir}"
+  ensure_dir "${PNPM_HOME}/global"
+  ensure_dir "${PNPM_HOME}/global/5"
+  ensure_dir "${PNPM_HOME}/.tools"
 
   if command -v pnpm >/dev/null 2>&1; then
     pnpm config set global-bin-dir "$PNPM_HOME" || warn "pnpm global-bin-dir setup failed"
+    pnpm config set store-dir "$pnpm_store_dir" || warn "pnpm store-dir setup failed"
   fi
 
   maybe_install_fuse_overlayfs
