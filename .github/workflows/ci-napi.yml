@@ -178,7 +178,7 @@ jobs:
         working-directory: crates/celox-napi
         env:
           WASI_SYSROOT: /usr
-        run: npx napi build --release --manifest-path ../../Cargo.toml -p celox-napi --target wasm32-wasip1-threads --output-dir artifacts
+        run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target wasm32-wasip1-threads --output-dir artifacts
 
       - name: Create npm dirs
         working-directory: crates/celox-napi
