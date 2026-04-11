@@ -564,8 +564,8 @@ fn compile_slice(
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     let d = &locals.reg_map[dst];
-    let s = &locals.reg_map[src];
-    emit_slice_chunks(d, s, bit_offset, width, instrs);
+    let s = locals.reg_map[src].clone();
+    emit_slice_chunks(d, &s, bit_offset, width, instrs);
 
     if four_state {
         if let (Some(dst_mask), Some(src_mask)) = (d.mask_idx, s.mask_idx) {
@@ -1654,14 +1654,14 @@ fn compile_unary(
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     let d = &locals.reg_map[dst];
-    let s = &locals.reg_map[src];
+    let s = locals.reg_map[src].clone();
     let d_width = unit.register_map[dst].width();
     let s_width = unit.register_map[src].width();
 
     match op {
         UnaryOp::Ident => {
             for c in 0..d.num_chunks {
-                emit_wide_get_chunk(instrs, s, c);
+                emit_wide_get_chunk(instrs, &s, c);
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
             }
         }
@@ -1683,7 +1683,7 @@ fn compile_unary(
         }
         UnaryOp::BitNot => {
             for c in 0..d.num_chunks {
-                emit_wide_get_chunk(instrs, s, c);
+                emit_wide_get_chunk(instrs, &s, c);
                 instrs.push(Instruction::I64Const(-1i64));
                 instrs.push(Instruction::I64Xor);
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
@@ -2084,7 +2084,7 @@ fn compile_store(
     layout: &MemoryLayout,
     four_state: bool,
     emit_triggers: bool,
-    locals: &LocalAllocator,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     // width=0: identity Store optimized away by alias; emit triggers only.
@@ -2094,7 +2094,7 @@ fn compile_store(
         }
         return;
     }
-    let s = &locals.reg_map[src];
+    let s = locals.reg_map[src].clone();
     let abs = addr.absolute_addr();
     let base_offset = compute_byte_offset(layout, &abs, addr.region);
     let var_width = layout.widths[&abs];
@@ -2115,7 +2115,7 @@ fn compile_store(
                 op_width
             };
 
-            compile_store_at_offset(s, store_offset, bit_shift, effective_width, instrs);
+            compile_store_at_offset(&s, store_offset, bit_shift, effective_width, locals, instrs);
 
             // 4-state mask store
             if four_state {
@@ -2133,6 +2133,7 @@ fn compile_store(
                             mask_store_offset,
                             bit_shift,
                             effective_width,
+                            locals,
                             instrs,
                         );
                     } else {
@@ -2145,7 +2146,7 @@ fn compile_store(
         }
         SIROffset::Dynamic(reg) => {
             let offset_reg = &locals.reg_map[reg];
-            compile_store_dynamic(s, base_offset, offset_reg.value_idx, op_width, instrs);
+            compile_store_dynamic(&s, base_offset, offset_reg.value_idx, op_width, instrs);
 
             if four_state {
                 let is_4state = layout.is_4states.get(&abs).copied().unwrap_or(false);
@@ -2184,6 +2185,7 @@ fn compile_store_at_offset(
     byte_offset: usize,
     bit_shift: usize,
     op_width: usize,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     let store_bytes = get_byte_size(op_width);
@@ -2236,77 +2238,18 @@ fn compile_store_at_offset(
             }
         }
     } else if num_chunks == 1 {
-        // Bit-offset RMW store (single chunk).
-        // 1. Load 8 bytes at byte_offset into a temp
-        // 2. Clear bits [bit_shift..bit_shift+op_width]
-        // 3. Shift src value left by bit_shift, OR into cleared value
-        // 4. Store 8 bytes back
-        //
-        // We use a careful stack ordering: compute the new value first,
-        // then store it.
+        // Bit-offset RMW store (single chunk). Only touch the bytes that
+        // actually overlap the updated bit range so adjacent signals do not
+        // get clobbered.
+        let affected_bytes = (bit_shift + op_width).div_ceil(8);
+        let tmp = locals.alloc(1);
 
-        // Compute: old_val & clear_mask | (src << bit_shift)
-        // Load old value
-        instrs.push(Instruction::I32Const(byte_offset as i32));
-        instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 0,
-            memory_index: 0,
-        }));
-        // Clear target bits
+        emit_load_small_word(byte_offset, affected_bytes, instrs);
         let clear_mask = !((((1u128 << op_width) - 1) << bit_shift) as u64);
+        instrs.push(Instruction::I64Const(mask_for_bytes(affected_bytes) as i64));
+        instrs.push(Instruction::I64And);
         instrs.push(Instruction::I64Const(clear_mask as i64));
         instrs.push(Instruction::I64And);
-        // Shift new value and OR in
-        instrs.push(Instruction::LocalGet(src.value_idx));
-        if op_width < 64 {
-            // Mask src to op_width to avoid polluting higher bits
-            let src_mask = (1u64 << op_width) - 1;
-            instrs.push(Instruction::I64Const(src_mask as i64));
-            instrs.push(Instruction::I64And);
-        }
-        instrs.push(Instruction::I64Const(bit_shift as i64));
-        instrs.push(Instruction::I64Shl);
-        instrs.push(Instruction::I64Or);
-
-        // Now store: need [addr, value] on stack.
-        // Stack currently has: [new_value]. We need to get addr below it.
-        // Use a temp local approach: save value, push addr, push value.
-        // Actually, since we're building instructions linearly, we can
-        // restructure to push addr first, then compute value.
-        // Let's redo: we'll use a temp local.
-
-        // Save computed value to src's local temporarily (it's safe since
-        // we won't read src again). Actually that's not safe if src is
-        // used elsewhere. Use a fresh approach: compute into the existing
-        // instruction stream and store via a two-step pattern.
-
-        // Stack: [new_value]
-        // We need: i32.const addr, new_value, i64.store
-        // But i32.const addr must come BEFORE new_value on the stack.
-        // Solution: save new_value to a scratch, push addr, reload scratch.
-        // We don't have a scratch local allocated. Instead, reconstruct:
-
-        // Let's just rewrite the whole thing with proper stack order.
-        let len = instrs.len();
-        // Remove everything we just pushed (count: load + const + and + get + [const+and] + const + shl + or)
-        let num_to_remove = len - (len - if op_width < 64 { 10 } else { 8 });
-        instrs.truncate(len - num_to_remove);
-
-        // Proper implementation: addr first, then value computation
-        instrs.push(Instruction::I32Const(byte_offset as i32)); // addr for store
-
-        // Load old value
-        instrs.push(Instruction::I32Const(byte_offset as i32));
-        instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 0,
-            memory_index: 0,
-        }));
-        // Clear target bits
-        instrs.push(Instruction::I64Const(clear_mask as i64));
-        instrs.push(Instruction::I64And);
-        // Shift new value and OR in
         instrs.push(Instruction::LocalGet(src.value_idx));
         if op_width < 64 {
             let src_mask = (1u64 << op_width) - 1;
@@ -2316,13 +2259,8 @@ fn compile_store_at_offset(
         instrs.push(Instruction::I64Const(bit_shift as i64));
         instrs.push(Instruction::I64Shl);
         instrs.push(Instruction::I64Or);
-
-        // Store: stack is [addr (i32), new_value (i64)]
-        instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
-            offset: 0,
-            align: 0,
-            memory_index: 0,
-        }));
+        instrs.push(Instruction::LocalSet(tmp));
+        emit_store_small_word(byte_offset, affected_bytes, tmp, instrs);
     } else {
         // Multi-chunk bit-offset store: complex.
         // TODO: implement multi-chunk bit-offset RMW store
@@ -2890,6 +2828,164 @@ fn compute_byte_offset(layout: &MemoryLayout, abs: &AbsoluteAddr, region: u32) -
         layout.offsets[abs]
     } else {
         layout.working_base_offset + layout.working_offsets[abs]
+    }
+}
+
+fn mask_for_bytes(bytes: usize) -> u64 {
+    match bytes {
+        0 => 0,
+        8.. => u64::MAX,
+        _ => (1u64 << (bytes * 8)) - 1,
+    }
+}
+
+fn emit_load_small_word(
+    byte_offset: usize,
+    byte_len: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    match byte_len {
+        0 => instrs.push(Instruction::I64Const(0)),
+        1 => {
+            instrs.push(Instruction::I32Const(byte_offset as i32));
+            instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+        }
+        2 => {
+            instrs.push(Instruction::I32Const(byte_offset as i32));
+            instrs.push(Instruction::I32Load16U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+        }
+        3 => {
+            emit_load_small_word(byte_offset, 2, instrs);
+            emit_load_small_word(byte_offset + 2, 1, instrs);
+            instrs.push(Instruction::I64Const(16));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        4 => {
+            instrs.push(Instruction::I32Const(byte_offset as i32));
+            instrs.push(Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            instrs.push(Instruction::I64ExtendI32U);
+        }
+        5 => {
+            emit_load_small_word(byte_offset, 4, instrs);
+            emit_load_small_word(byte_offset + 4, 1, instrs);
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        6 => {
+            emit_load_small_word(byte_offset, 4, instrs);
+            emit_load_small_word(byte_offset + 4, 2, instrs);
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        7 => {
+            emit_load_small_word(byte_offset, 4, instrs);
+            emit_load_small_word(byte_offset + 4, 2, instrs);
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+            emit_load_small_word(byte_offset + 6, 1, instrs);
+            instrs.push(Instruction::I64Const(48));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        _ => {
+            instrs.push(Instruction::I32Const(byte_offset as i32));
+            instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+        }
+    }
+}
+
+fn emit_store_small_word(
+    byte_offset: usize,
+    byte_len: usize,
+    value_local: u32,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let memarg = wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+    match byte_len {
+        0 => {}
+        1 => {
+            instrs.push(Instruction::I32Const(byte_offset as i32));
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Store8(memarg));
+        }
+        2 => {
+            instrs.push(Instruction::I32Const(byte_offset as i32));
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Store16(memarg));
+        }
+        3 => {
+            emit_store_small_word(byte_offset, 2, value_local, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(16));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::LocalSet(value_local));
+            emit_store_small_word(byte_offset + 2, 1, value_local, instrs);
+        }
+        4 => {
+            instrs.push(Instruction::I32Const(byte_offset as i32));
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Store32(memarg));
+        }
+        5 => {
+            emit_store_small_word(byte_offset, 4, value_local, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::LocalSet(value_local));
+            emit_store_small_word(byte_offset + 4, 1, value_local, instrs);
+        }
+        6 => {
+            emit_store_small_word(byte_offset, 4, value_local, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::LocalSet(value_local));
+            emit_store_small_word(byte_offset + 4, 2, value_local, instrs);
+        }
+        7 => {
+            emit_store_small_word(byte_offset, 4, value_local, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(32));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::LocalSet(value_local));
+            emit_store_small_word(byte_offset + 4, 2, value_local, instrs);
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Const(16));
+            instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::LocalSet(value_local));
+            emit_store_small_word(byte_offset + 6, 1, value_local, instrs);
+        }
+        _ => {
+            instrs.push(Instruction::I32Const(byte_offset as i32));
+            instrs.push(Instruction::LocalGet(value_local));
+            instrs.push(Instruction::I64Store(memarg));
+        }
     }
 }
 
