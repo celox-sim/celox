@@ -169,8 +169,15 @@ jobs:
       - name: Install Rust target for WASI
         run: rustup target add wasm32-wasip1-threads
 
+      - name: Install WASI sysroot
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wasi-libc
+
       - name: Build WASI package artifacts
         working-directory: crates/celox-napi
+        env:
+          WASI_SYSROOT: /usr
         run: npx napi build --release --manifest-path ../../Cargo.toml -p celox-napi --target wasm32-wasip1-threads --output-dir artifacts
 
       - name: Create npm dirs
