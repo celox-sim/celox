@@ -1,14 +1,19 @@
 {
     "name": "Celox",
-    "image": "mcr.microsoft.com/devcontainers/universal:2",
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "remoteUser": "vscode",
     "features": {
         "ghcr.io/devcontainers/features/rust:1": {},
         "ghcr.io/devcontainers/features/node:1": {},
         "ghcr.io/devcontainers-extra/features/pnpm:2": {}
     },
+    "mounts": [
+        "source=celox-codex-config,target=/home/vscode/.codex,type=volume"
+    ],
     "remoteEnv": {
-        "PNPM_HOME": "/home/codespace/.local/share/pnpm",
-        "PATH": "${containerEnv:PATH}:/home/codespace/.local/share/pnpm"
+        "CODEX_HOME": "/home/vscode/.codex",
+        "PNPM_HOME": "/home/vscode/.local/share/pnpm",
+        "PATH": "${containerEnv:PATH}:/home/vscode/.local/share/pnpm"
     },
-    "postCreateCommand": "sudo apt-get update -qq && sudo apt-get install -y -qq fuse-overlayfs && sudo mkdir -p /home/codespace/.local/share/pnpm && sudo chown -R $(whoami):$(whoami) /home/codespace/.local && pnpm config set global-bin-dir $PNPM_HOME && git submodule update --init --recursive && cargo install cargo-insta"
+    "postCreateCommand": "bash .devcontainer/post-create.sh"
 }

@@ -32,6 +32,7 @@ crates/celox-napi/wasi-worker-browser.mjs
 # Claude Code
 .claude/settings.local.json
 .claude/worktrees/
+.codex/
 
 # VitePress
 docs/.vitepress/dist
