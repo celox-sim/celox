@@ -166,6 +166,13 @@ jobs:
         with:
           path: crates/celox-napi/artifacts
 
+      - name: Install Rust target for WASI
+        run: rustup target add wasm32-wasip1-threads
+
+      - name: Build WASI package artifacts
+        working-directory: crates/celox-napi
+        run: npx napi build --release --manifest-path ../../Cargo.toml -p celox-napi --target wasm32-wasip1-threads --output-dir artifacts
+
       - name: Create npm dirs
         working-directory: crates/celox-napi
         run: npx napi create-npm-dirs
