@@ -236,7 +236,12 @@ impl SIRTranslator {
                     let trigger_bit_idx = trigger.id % 8;
                     let trigger_offset = self.layout.triggered_bits_offset + trigger_byte_idx;
 
-                    let changed = state.builder.ins().icmp(IntCC::NotEqual, new_val, old_val);
+                    let cmp_ty = state.builder.func.dfg.value_type(new_val);
+                    let old_val_cast = cast_type(state.builder, old_val, cmp_ty);
+                    let changed = state
+                        .builder
+                        .ins()
+                        .icmp(IntCC::NotEqual, new_val, old_val_cast);
                     let bit_mask = state
                         .builder
                         .ins()
