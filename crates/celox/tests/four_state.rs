@@ -267,7 +267,7 @@ fn test_four_state_arithmetic_ops(sim) {
 }
 
 fn test_four_state_unary_ops(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1440,7 +1440,7 @@ fn test_four_state_signed_comparison_with_x(sim) {
 // P0: Reduction XOR + X
 // ==========================================================================
 fn test_four_state_reduction_xor_with_x(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1589,7 +1589,7 @@ fn test_four_state_negation_with_x(sim) {
 // P1: Logical NOT (!) + X
 // ==========================================================================
 fn test_four_state_logical_not_with_x(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1874,7 +1874,7 @@ fn test_four_state_width_narrowing_with_x(sim) {
 // P2: Width widening (narrow → wide) with X
 // ==========================================================================
 fn test_four_state_width_widening_with_x(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2459,7 +2459,7 @@ fn test_four_state_case_x_in_selector(sim) {
 // Reduction OR/AND dominant-value semantics
 // ==========================================================================
 fn test_four_state_reduction_or_dominant_one(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2509,7 +2509,7 @@ fn test_four_state_reduction_or_dominant_one(sim) {
 }
 
 fn test_four_state_reduction_and_dominant_zero(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2640,7 +2640,7 @@ fn test_four_state_wide_reduction_and_dominant(sim) {
 // IEEE 1800 LogicAnd (&&) dominant-value: 0 && x = 0
 // ==========================================================================
 fn test_four_state_logic_and_dominant_zero(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2712,7 +2712,7 @@ fn test_four_state_logic_and_dominant_zero(sim) {
 // IEEE 1800 LogicOr (||) dominant-value: 1 || x = 1
 // ==========================================================================
 fn test_four_state_logic_or_dominant_one(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
