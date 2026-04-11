@@ -11,7 +11,7 @@ use veryl_metadata::Metadata;
 use veryl_parser::Parser;
 use veryl_path::PathSet;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_arch = "x86_64")]
 use celox::SimBackend;
 #[cfg(not(target_arch = "wasm32"))]
 use layout::{build_event_map, build_hierarchy_node, build_signal_layout};
