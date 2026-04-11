@@ -1424,14 +1424,16 @@ impl SIRTranslator {
         else_val: &RegisterId,
     ) {
         let d_width = state.register_map[dst].width();
+        let cond_width = state.register_map[cond].width();
+        let cond_ty = get_cl_type(cond_width);
         let cond_raw = state.regs[cond].first_value(state.builder);
-        // Mask cond to 1-bit (SLT may produce multi-bit cond via Concat)
-        let cond_i64 = cast_type(state.builder, cond_raw, types::I64);
-        let cond_v = state.builder.ins().band_imm(cond_i64, 1);
+        let cond_val = cast_type(state.builder, cond_raw, cond_ty);
+        let cond_zero = state.builder.ins().iconst(cond_ty, 0);
+        let cond_is_true = state.builder.ins().icmp(IntCC::NotEqual, cond_val, cond_zero);
 
-        // Broadcast 1-bit cond to i64: 0 - cond
         let zero = state.builder.ins().iconst(types::I64, 0);
-        let cond_bc = state.builder.ins().isub(zero, cond_v);
+        let all_ones = state.builder.ins().iconst(types::I64, -1);
+        let cond_bc = state.builder.ins().select(cond_is_true, all_ones, zero);
         let not_cond_bc = state.builder.ins().bnot(cond_bc);
 
         if d_width <= 64 {
@@ -1462,9 +1464,11 @@ impl SIRTranslator {
                 let em = cast_type(state.builder, else_mc[0], ty);
                 let cm = cast_type(state.builder, cond_mc[0], ty);
 
-                // cond_uncertain = 0 - cond_mask (broadcast)
+                // Any X/Z bit in the condition makes the whole mux result X.
                 let z = state.builder.ins().iconst(ty, 0);
-                let cond_unc = state.builder.ins().isub(z, cm);
+                let any_cond_x = state.builder.ins().icmp(IntCC::NotEqual, cm, z);
+                let all_ones = state.builder.ins().iconst(ty, -1);
+                let cond_unc = state.builder.ins().select(any_cond_x, all_ones, z);
                 // selected_mask = (cbc & then_mask) | (~cbc & else_mask) | cond_uncertain
                 let mt = state.builder.ins().band(cbc, tm);
                 let me = state.builder.ins().band(ncbc, em);
@@ -1508,7 +1512,8 @@ impl SIRTranslator {
                     .load_mask_chunks(state.builder)
                     .unwrap_or_default();
                 let cond_m_val = *cond_mc.first().unwrap_or(&zero);
-                let cond_unc = state.builder.ins().isub(zero, cond_m_val);
+                let cond_has_x = state.builder.ins().icmp(IntCC::NotEqual, cond_m_val, zero);
+                let cond_unc = state.builder.ins().select(cond_has_x, all_ones, zero);
 
                 let mut mask_chunks = Vec::with_capacity(n_chunks);
                 for i in 0..n_chunks {

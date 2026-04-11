@@ -156,6 +156,38 @@ module Top (
 }
 
 #[test]
+fn test_multi_bit_mux_condition_four_state_cranelift() {
+    let code = r#"
+module Top (
+    sel: input logic<2>,
+    d0: input logic<8>,
+    d1: input logic<8>,
+    y: output logic<8>,
+) {
+    assign y = if sel ? d1 : d0;
+}
+"#;
+
+    let mut sim = Simulator::builder(code, "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+
+    let sel = sim.signal("sel");
+    let d0 = sim.signal("d0");
+    let d1 = sim.signal("d1");
+    let y = sim.signal("y");
+
+    sim.set_four_state(sel, 0u8.into(), 0b11u8.into());
+    sim.set_four_state(d0, 0xAAu8.into(), 0u8.into());
+    sim.set_four_state(d1, 0x55u8.into(), 0u8.into());
+    sim.eval_comb().unwrap();
+
+    let (_value, mask) = sim.get_four_state(y);
+    assert_eq!(mask, 0xFFu8.into(), "X in multi-bit mux condition must produce all-X output");
+}
+
+#[test]
 fn test_clock_only_ff_conditional() {
     // Repro: clock-only always_ff with if (no reset)
     let code = r#"
