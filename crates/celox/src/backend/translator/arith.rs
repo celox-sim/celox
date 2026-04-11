@@ -1429,7 +1429,10 @@ impl SIRTranslator {
         let cond_raw = state.regs[cond].first_value(state.builder);
         let cond_val = cast_type(state.builder, cond_raw, cond_ty);
         let cond_zero = state.builder.ins().iconst(cond_ty, 0);
-        let cond_is_true = state.builder.ins().icmp(IntCC::NotEqual, cond_val, cond_zero);
+        let cond_is_true = state
+            .builder
+            .ins()
+            .icmp(IntCC::NotEqual, cond_val, cond_zero);
 
         let zero = state.builder.ins().iconst(types::I64, 0);
         let all_ones = state.builder.ins().iconst(types::I64, -1);

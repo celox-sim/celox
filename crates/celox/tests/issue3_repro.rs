@@ -184,7 +184,11 @@ module Top (
     sim.eval_comb().unwrap();
 
     let (_value, mask) = sim.get_four_state(y);
-    assert_eq!(mask, 0xFFu8.into(), "X in multi-bit mux condition must produce all-X output");
+    assert_eq!(
+        mask,
+        0xFFu8.into(),
+        "X in multi-bit mux condition must produce all-X output"
+    );
 }
 
 #[test]
