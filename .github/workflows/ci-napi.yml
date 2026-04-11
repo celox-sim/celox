@@ -129,7 +129,7 @@ jobs:
         run: pnpm install --no-frozen-lockfile
 
       - name: Build packages
-        run: pnpm --filter="!@celox-sim/celox-napi" -r build
+        run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r build
 
       - name: Run tests
         run: pnpm -r test
@@ -246,7 +246,7 @@ jobs:
           (cd packages/vite-plugin && npm version "$VERSION" --no-git-tag-version)
 
       - name: Build packages
-        run: pnpm --filter="!@celox-sim/celox-napi" -r build
+        run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r build
 
       - name: Publish @celox-sim/celox
         working-directory: packages/celox
