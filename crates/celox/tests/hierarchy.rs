@@ -9,7 +9,7 @@ all_backends! {
     // For-loop instances: verify named_hierarchy groups them correctly
     // and child_signal access works.
     fn test_for_loop_instance_hierarchy(sim) {
-        @ignore_on(veryl);
+        @omit_veryl;
         @setup { let code = r#"
 module Sub (
 clk: input '_ clock,
@@ -668,7 +668,7 @@ o_data: top_out
     }
 
     fn test_named_hierarchy_structure(sim) {
-        @ignore_on(veryl);
+        @omit_veryl;
         @setup { let code = r#"
 module Leaf (
 i: input  logic,
@@ -719,7 +719,7 @@ inst u_mid: Mid ( i: top_i, o: top_o );
     }
 
     fn test_named_hierarchy_multiple_instances(sim) {
-        @ignore_on(veryl);
+        @omit_veryl;
         @setup { let code = r#"
 module Worker (
 clk: input clock,
@@ -757,7 +757,7 @@ inst u1: Worker ( clk: clk, i_val: in1, o_val: out1 );
     }
 
     fn test_instance_signals_child(sim) {
-        @ignore_on(veryl);
+        @omit_veryl;
         @setup { let code = r#"
 module Sub (
 i_data: input  logic<8>,
@@ -787,7 +787,7 @@ o_data: top_out
     }
 
     fn test_instance_signals_deep_hierarchy(sim) {
-        @ignore_on(veryl);
+        @omit_veryl;
         @setup { let code = r#"
 module Leaf (
 i: input  logic<8>,
@@ -828,7 +828,7 @@ inst u_mid: Mid ( i: top_i, o: top_o );
     }
 
     fn test_instance_signals_multiple_instances(sim) {
-        @ignore_on(veryl);
+        @omit_veryl;
         @setup { let code = r#"
 module Worker (
 i_val: input  logic<8>,
@@ -879,7 +879,7 @@ inst u1: Worker ( i_val: in1, o_val: out1 );
     }
 
     fn test_instance_signals_nonexistent_path(sim) {
-        @ignore_on(veryl);
+        @omit_veryl;
         @setup { let code = r#"
 module Top (
 i: input  logic,

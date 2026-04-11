@@ -37,7 +37,7 @@ fn test_converging_true_loop_with_assign(sim) {
 // Non-converging true loop: oscillation detected at runtime.
 // Uses cross-bit assign to bypass the analyzer's UnassignVariable check.
 fn test_true_loop_oscillation_detected(sim) {
-    @ignore_on(veryl);
+    @omit_veryl;
     @setup {
     // v[0] = ~v[1] & a, v[1] = v[0]
     // When a=1: v[0]=~v[1], v[1]=v[0] → oscillates (0,0)→(1,0)→(1,1)→(0,1)→(0,0)→...

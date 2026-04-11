@@ -3,6 +3,7 @@
 //! `all_backends!` compiles for the Veryl reference backend.
 #![allow(dead_code)]
 
+use celox::{AddrLookupError, RuntimeErrorCode};
 use num_bigint::BigUint;
 use std::path::Path;
 use veryl_analyzer::ir as air;
@@ -105,7 +106,7 @@ impl VerylSimAdapter {
         VerylEventRef(idx)
     }
 
-    pub fn modify<F>(&mut self, f: F) -> Result<(), ()>
+    pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where
         F: FnOnce(&mut VerylIOContext<'_>),
     {
@@ -150,7 +151,7 @@ impl VerylSimAdapter {
         unimplemented!("four_state get not supported in veryl adapter");
     }
 
-    pub fn tick(&mut self, event: VerylEventRef) -> Result<(), ()> {
+    pub fn tick(&mut self, event: VerylEventRef) -> Result<(), RuntimeErrorCode> {
         self.sim.step(&self.events[event.0]);
         Ok(())
     }
@@ -179,16 +180,16 @@ impl VerylSimAdapter {
         self.signal(&joined)
     }
 
-    pub fn try_signal(&mut self, name: &str) -> Result<VerylSignalRef, String> {
+    pub fn try_signal(&mut self, name: &str) -> Result<VerylSignalRef, AddrLookupError> {
         Ok(self.signal(name))
     }
 
-    pub fn eval_comb(&mut self) -> Result<(), ()> {
+    pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
         self.sim.ensure_comb_updated();
         Ok(())
     }
 
-    pub fn try_event(&mut self, port: &str) -> Result<VerylEventRef, String> {
+    pub fn try_event(&mut self, port: &str) -> Result<VerylEventRef, AddrLookupError> {
         self.sim
             .get_clock(port)
             .map(|ev| {
@@ -196,8 +197,11 @@ impl VerylSimAdapter {
                 self.events.push(ev);
                 VerylEventRef(idx)
             })
-            .ok_or_else(|| format!("event '{port}' not found"))
+            .ok_or_else(|| AddrLookupError::VariableNotFound {
+                path: port.to_string(),
+            })
     }
+
 }
 
 // ---------------------------------------------------------------------------
