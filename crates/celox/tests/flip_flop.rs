@@ -361,7 +361,6 @@ fn test_ff_array_literal_default_expression(sim) {
     }
 }
 
-#[ignore = "blocked by upstream Veryl IR bug: nested '{default:} not recognized as full assignment"]
 fn test_ff_array_literal_nested_default_multidim_expression(sim) {
     @setup { let code = r#"
         module Top (

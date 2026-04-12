@@ -158,7 +158,6 @@ assign sum = a + b + c;
     }
 
     fn test_overlapping_partial_write_keeps_untouched_bit_dependency(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 a: input logic,

@@ -419,8 +419,8 @@ inst cm: CompareMatrixStage1CM::<IntElement> #(P: 4) (in_data, out_score);
     }
 
     // Tests the compare matrix selector module (through wrapper, verifying parameter forwarding).
-    #[ignore = "blocked by upstream Veryl IR bug"]
     fn test_compare_matrix_selector(sim) {
+        @ignore_on(veryl);
         @setup { let top = r#"
 module Top #(
 param P: u32 = 4,
@@ -456,8 +456,8 @@ let code = format!("{COMPARE_MATRIX_CODE}\n{top}"); }
 
     // Tests full sorting via CompareMatrixStage1 (scoring + selection through wrapper chain).
     // Input unsorted values, output sorted ascending.
-    #[ignore = "blocked by upstream Veryl IR bug"]
     fn test_compare_matrix_stage1_sort(sim) {
+        @ignore_on(veryl);
         @setup { let top = r#"
 module Top #(
 param P: u32 = 4,
@@ -489,8 +489,8 @@ let code = format!("{COMPARE_MATRIX_CODE}\n{top}"); }
 
     // Tests the compare matrix merger.
     // Two sorted ascending arrays in, one merged sorted ascending array out.
-    #[ignore = "blocked by upstream Veryl IR bug"]
     fn test_compare_matrix_merger(sim) {
+        @ignore_on(veryl);
         @setup { let top = r#"
 module Top #(
 param A: u32 = 3,

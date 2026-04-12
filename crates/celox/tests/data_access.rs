@@ -68,7 +68,6 @@ assign o = a[2];
     }
 
     fn test_multidimensional_access(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (i: input logic<8>, o: output logic<8>) {
 var a: logic<8> [4, 2];
@@ -93,7 +92,6 @@ assign o = a[1][0];
     }
 
     fn test_minus_colon_and_step_execution(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (a: input logic<8>, b: output logic<32>) {
 always_comb {

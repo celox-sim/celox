@@ -152,9 +152,6 @@ o = tmp;
     }
 
     fn test_always_comb_blocking_assignment_chain(sim) {
-        // Veryl direct simulator path currently yields 21 here,
-        // while the same code passes via native testbench and should produce 22.
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (a: input logic<8>, o: output logic<8>) {
 var x: logic<8>;

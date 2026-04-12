@@ -38,7 +38,6 @@ all_backends! {
     // instead of only the ones specified by the tap vector. This makes the LFSR
     // cycle length incorrect (9 instead of 255 for SIZE=8). These tests verify
     // the simulation mechanics (seed, shift, hold) but not LFSR correctness.
-    #[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
     fn test_lfsr_basic_shift(sim) {
         @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
         @build Simulator::builder(&code, "Top");
@@ -91,7 +90,6 @@ all_backends! {
     }
 
     // Cycle detection: LFSR should produce a deterministic repeating cycle
-    #[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
     fn test_lfsr_deterministic_cycle(sim) {
         @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
         @build Simulator::builder(&code, "Top");
@@ -157,7 +155,6 @@ all_backends! {
     }
 
     // LFSR disabled (i_en=0) should hold its value
-    #[ignore = "Veryl analyzer bug: generate-if TAPVEC[K] bit-index always evaluates true"]
     fn test_lfsr_enable_hold(sim) {
         @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
         @build Simulator::builder(&code, "Top");
