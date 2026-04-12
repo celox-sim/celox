@@ -484,7 +484,6 @@ fn compile_instruction(
 // ============================================================
 // Instruction compilers
 // ============================================================
-
 fn compile_imm(
     dst: &RegisterId,
     val: &SIRValue,
@@ -769,11 +768,34 @@ fn compile_binary_narrow(
         BinaryOp::Sub => instrs.push(Instruction::I64Sub),
         BinaryOp::Mul => instrs.push(Instruction::I64Mul),
         BinaryOp::Div => {
-            // Unsigned division (with zero-check: WASM traps on div by 0)
+            let tmp_l = locals.alloc(1);
+            let tmp_r = locals.alloc(1);
+            instrs.push(Instruction::LocalSet(tmp_r));
+            instrs.push(Instruction::LocalSet(tmp_l));
+            instrs.push(Instruction::LocalGet(tmp_r));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::Else);
+            instrs.push(Instruction::LocalGet(tmp_l));
+            instrs.push(Instruction::LocalGet(tmp_r));
             instrs.push(Instruction::I64DivU);
+            instrs.push(Instruction::End);
         }
         BinaryOp::Rem => {
+            let tmp_l = locals.alloc(1);
+            let tmp_r = locals.alloc(1);
+            instrs.push(Instruction::LocalSet(tmp_r));
+            instrs.push(Instruction::LocalSet(tmp_l));
+            instrs.push(Instruction::LocalGet(tmp_r));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::Else);
+            instrs.push(Instruction::LocalGet(tmp_l));
+            instrs.push(Instruction::LocalGet(tmp_r));
             instrs.push(Instruction::I64RemU);
+            instrs.push(Instruction::End);
         }
         BinaryOp::And => instrs.push(Instruction::I64And),
         BinaryOp::Or => instrs.push(Instruction::I64Or),
@@ -1075,12 +1097,12 @@ fn compile_binary_wide(
         }
         // 6. Unsigned comparisons (LtU, LeU, GtU, GeU)
         BinaryOp::LtU | BinaryOp::LeU | BinaryOp::GtU | BinaryOp::GeU => {
-            // Compare from MSB to LSB
-            // Start with "equal" and "less" flags
             let result = locals.alloc(1);
-            instrs.push(Instruction::I64Const(0)); // result
+            let decided = locals.alloc(1);
+            instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(result));
-            // Compare from top chunk down. First difference determines result.
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(decided));
             for c in (0..l.num_chunks.max(r.num_chunks)).rev() {
                 let lc = if c < l.num_chunks {
                     l.value_idx + c as u32
@@ -1104,22 +1126,18 @@ fn compile_binary_wide(
                 } else {
                     instrs.push(Instruction::I64Const(0));
                 }
-                // If chunks are not equal, determine result
-                // Stack: [l_chunk, r_chunk]
-                // We need to check if they differ, and if so, set the result based on the comparison.
-                // Use if/else:
-                // duplicate both for comparison
-                // This is complex with the stack machine. Use locals.
                 let tmp_l = locals.alloc(1);
                 let tmp_r = locals.alloc(1);
                 instrs.push(Instruction::LocalSet(tmp_r));
                 instrs.push(Instruction::LocalSet(tmp_l));
 
+                instrs.push(Instruction::LocalGet(decided));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
                 instrs.push(Instruction::LocalGet(tmp_l));
                 instrs.push(Instruction::LocalGet(tmp_r));
                 instrs.push(Instruction::I64Ne);
                 instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
-                // Chunks differ: set result based on comparison type
                 instrs.push(Instruction::LocalGet(tmp_l));
                 instrs.push(Instruction::LocalGet(tmp_r));
                 match op {
@@ -1129,34 +1147,18 @@ fn compile_binary_wide(
                 }
                 instrs.push(Instruction::I64ExtendI32U);
                 instrs.push(Instruction::LocalSet(result));
-                // We could break early but WASM doesn't have multi-level break from if.
-                // Just let it continue; subsequent equal chunks won't change the result
-                // because we check Ne first. Actually they WILL overwrite. We need to skip.
-                // Use a "decided" flag.
-                // For simplicity, we'll use a nested structure. But that's complex.
-                // Alternative: accumulate with priority. The last (highest) differing chunk wins.
-                // Since we iterate from MSB to LSB, each lower chunk should NOT overwrite
-                // a decision from a higher chunk. We need a "decided" flag.
+                instrs.push(Instruction::I64Const(1));
+                instrs.push(Instruction::LocalSet(decided));
+                instrs.push(Instruction::End);
                 instrs.push(Instruction::End);
             }
-            // For Le/Ge: if all equal, result should be 1 (equal satisfies <=, >=)
             if matches!(op, BinaryOp::LeU | BinaryOp::GeU) {
-                // Check if all chunks are equal
-                let all_eq = locals.alloc(1);
+                instrs.push(Instruction::LocalGet(decided));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
                 instrs.push(Instruction::I64Const(1));
-                for c in 0..l.num_chunks.max(r.num_chunks) {
-                    emit_wide_get_chunk(instrs, &l, c);
-                    emit_wide_get_chunk(instrs, &r, c);
-                    instrs.push(Instruction::I64Eq);
-                    instrs.push(Instruction::I64ExtendI32U);
-                    instrs.push(Instruction::I64And);
-                }
-                instrs.push(Instruction::LocalSet(all_eq));
-                // result = result | all_eq
-                instrs.push(Instruction::LocalGet(result));
-                instrs.push(Instruction::LocalGet(all_eq));
-                instrs.push(Instruction::I64Or);
                 instrs.push(Instruction::LocalSet(result));
+                instrs.push(Instruction::End);
             }
             instrs.push(Instruction::LocalGet(result));
             instrs.push(Instruction::LocalSet(d.value_idx));
@@ -1202,12 +1204,12 @@ fn compile_binary_wide(
             }
             instrs.push(Instruction::LocalSet(result));
             instrs.push(Instruction::Else);
-            // Signs same: use unsigned comparison
-            // (for negative numbers, unsigned comparison gives opposite, but since
-            // both are negative in two's complement, unsigned comparison is correct)
-            // Actually for same-sign, unsigned comparison works correctly.
+            // Signs same: compare from MSB to LSB and stop at the first differing chunk.
+            let decided = locals.alloc(1);
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(result));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(decided));
             for c in (0..l.num_chunks.max(r.num_chunks)).rev() {
                 let tmp_l = locals.alloc(1);
                 let tmp_r = locals.alloc(1);
@@ -1215,6 +1217,9 @@ fn compile_binary_wide(
                 instrs.push(Instruction::LocalSet(tmp_l));
                 emit_wide_get_chunk(instrs, &r, c);
                 instrs.push(Instruction::LocalSet(tmp_r));
+                instrs.push(Instruction::LocalGet(decided));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
                 instrs.push(Instruction::LocalGet(tmp_l));
                 instrs.push(Instruction::LocalGet(tmp_r));
                 instrs.push(Instruction::I64Ne);
@@ -1228,23 +1233,18 @@ fn compile_binary_wide(
                 }
                 instrs.push(Instruction::I64ExtendI32U);
                 instrs.push(Instruction::LocalSet(result));
+                instrs.push(Instruction::I64Const(1));
+                instrs.push(Instruction::LocalSet(decided));
+                instrs.push(Instruction::End);
                 instrs.push(Instruction::End);
             }
             if matches!(op, BinaryOp::LeS | BinaryOp::GeS) {
-                let all_eq = locals.alloc(1);
+                instrs.push(Instruction::LocalGet(decided));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
                 instrs.push(Instruction::I64Const(1));
-                for c in 0..l.num_chunks.max(r.num_chunks) {
-                    emit_wide_get_chunk(instrs, &l, c);
-                    emit_wide_get_chunk(instrs, &r, c);
-                    instrs.push(Instruction::I64Eq);
-                    instrs.push(Instruction::I64ExtendI32U);
-                    instrs.push(Instruction::I64And);
-                }
-                instrs.push(Instruction::LocalSet(all_eq));
-                instrs.push(Instruction::LocalGet(result));
-                instrs.push(Instruction::LocalGet(all_eq));
-                instrs.push(Instruction::I64Or);
                 instrs.push(Instruction::LocalSet(result));
+                instrs.push(Instruction::End);
             }
             instrs.push(Instruction::End); // end if (sign differ)
             instrs.push(Instruction::LocalGet(result));
@@ -3051,6 +3051,20 @@ fn compile_store(
                         // TODO: implement dynamic zero store
                     }
                 }
+            }
+        }
+    }
+
+    // 4-state type boundary enforcement:
+    // When storing to a 2-state variable, subsequent users of the same source
+    // register must observe the mask-cleared value. This mirrors the native
+    // backend and is required because combinational lowering can reuse the same
+    // source register across expressions that conceptually flow through a bit variable.
+    if four_state && !layout.is_4states.get(&abs).copied().unwrap_or(false) {
+        if let Some(mask_idx) = s.mask_idx {
+            for c in 0..s.num_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(mask_idx + c as u32));
             }
         }
     }
