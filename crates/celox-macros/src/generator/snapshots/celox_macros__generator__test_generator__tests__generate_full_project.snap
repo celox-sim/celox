@@ -1,5 +1,6 @@
 ---
 source: crates/celox-macros/src/generator/test_generator.rs
+assertion_line: 105
 expression: code
 ---
 pub struct Module04 {
@@ -6663,59 +6664,17 @@ impl<'a, 'b> ramIO<'a, 'b> {
     }
 }
 pub struct demux {
-    pub i_select: celox::SignalRef,
-    pub i_data: celox::SignalRef,
     pub o_data: celox::SignalRef,
+    pub i_data: celox::SignalRef,
+    pub i_select: celox::SignalRef,
 }
 impl demux {
     pub fn new(sim: &celox::Simulator) -> Self {
         Self {
-            i_select: sim.signal("i_select"),
-            i_data: sim.signal("i_data"),
             o_data: sim.signal("o_data"),
+            i_data: sim.signal("i_data"),
+            i_select: sim.signal("i_select"),
         }
-    }
-    pub fn set_i_select(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_select, val)).unwrap();
-    }
-    pub fn get_i_select(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_select);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_select"))
-    }
-    pub fn set_i_select_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_select, val, mask)).unwrap();
-    }
-    pub fn get_i_select_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_select)
-    }
-    pub fn set_i_data(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_data, val)).unwrap();
-    }
-    pub fn get_i_data(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_data);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_data"))
-    }
-    pub fn set_i_data_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_data, val, mask)).unwrap();
-    }
-    pub fn get_i_data_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_data)
     }
     pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.o_data, val)).unwrap();
@@ -6738,6 +6697,48 @@ impl demux {
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.o_data)
     }
+    pub fn set_i_data(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_data, val)).unwrap();
+    }
+    pub fn get_i_data(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_data);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_data"))
+    }
+    pub fn set_i_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.i_data, val, mask)).unwrap();
+    }
+    pub fn get_i_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.i_data)
+    }
+    pub fn set_i_select(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_select, val)).unwrap();
+    }
+    pub fn get_i_select(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_select);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_select"))
+    }
+    pub fn set_i_select_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.i_select, val, mask)).unwrap();
+    }
+    pub fn get_i_select_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.i_select)
+    }
     pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> demuxBound<'a> {
         demuxBound { sim, ids: self }
     }
@@ -6748,17 +6749,17 @@ pub struct demuxBound<'a> {
     ids: &'a demux,
 }
 impl<'a> demuxBound<'a> {
-    pub fn set_i_select(&mut self, val: u8) {
-        self.ids.set_i_select(self.sim, val);
+    pub fn set_o_data(&mut self, val: u8) {
+        self.ids.set_o_data(self.sim, val);
     }
-    pub fn get_i_select(&mut self) -> u8 {
-        self.ids.get_i_select(self.sim)
+    pub fn get_o_data(&mut self) -> u8 {
+        self.ids.get_o_data(self.sim)
     }
-    pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_i_select_4state(self.sim, val, mask);
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_o_data_4state(self.sim, val, mask);
     }
-    pub fn get_i_select_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_i_select_4state(self.sim)
+    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_o_data_4state(self.sim)
     }
     pub fn set_i_data(&mut self, val: u8) {
         self.ids.set_i_data(self.sim, val);
@@ -6772,17 +6773,17 @@ impl<'a> demuxBound<'a> {
     pub fn get_i_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_i_data_4state(self.sim)
     }
-    pub fn set_o_data(&mut self, val: u8) {
-        self.ids.set_o_data(self.sim, val);
+    pub fn set_i_select(&mut self, val: u8) {
+        self.ids.set_i_select(self.sim, val);
     }
-    pub fn get_o_data(&mut self) -> u8 {
-        self.ids.get_o_data(self.sim)
+    pub fn get_i_select(&mut self) -> u8 {
+        self.ids.get_i_select(self.sim)
     }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_o_data_4state(self.sim, val, mask);
+    pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_i_select_4state(self.sim, val, mask);
     }
-    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_o_data_4state(self.sim)
+    pub fn get_i_select_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_i_select_4state(self.sim)
     }
     pub fn tick(&mut self) {}
     pub fn modify<F>(&mut self, f: F)
@@ -6802,11 +6803,11 @@ pub struct demuxIO<'a, 'b> {
     ids: &'a demux,
 }
 impl<'a, 'b> demuxIO<'a, 'b> {
-    pub fn set_i_select(&mut self, val: u8) {
-        self.io.set(self.ids.i_select, val);
+    pub fn set_o_data(&mut self, val: u8) {
+        self.io.set(self.ids.o_data, val);
     }
-    pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.i_select, val, mask);
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.o_data, val, mask);
     }
     pub fn set_i_data(&mut self, val: u8) {
         self.io.set(self.ids.i_data, val);
@@ -6814,11 +6815,11 @@ impl<'a, 'b> demuxIO<'a, 'b> {
     pub fn set_i_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.i_data, val, mask);
     }
-    pub fn set_o_data(&mut self, val: u8) {
-        self.io.set(self.ids.o_data, val);
+    pub fn set_i_select(&mut self, val: u8) {
+        self.io.set(self.ids.i_select, val);
     }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.o_data, val, mask);
+    pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.i_select, val, mask);
     }
 }
 pub struct mux {
@@ -8153,3 +8154,114 @@ impl<'a, 'b> synchronizer_basicIO<'a, 'b> {
         self.io.set_four_state(self.ids.i_d, val, mask);
     }
 }
+pub struct test_extend {}
+impl test_extend {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_extendBound<'a> {
+        test_extendBound { sim, ids: self }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_extendBound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_extend,
+}
+impl<'a> test_extendBound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_extendIO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_extendIO { io, ids: self.ids };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_extendIO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_extend,
+}
+impl<'a, 'b> test_extendIO<'a, 'b> {}
+pub struct test_min_max {}
+impl test_min_max {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_min_maxBound<'a> {
+        test_min_maxBound {
+            sim,
+            ids: self,
+        }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_min_maxBound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_min_max,
+}
+impl<'a> test_min_maxBound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_min_maxIO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_min_maxIO {
+                    io,
+                    ids: self.ids,
+                };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_min_maxIO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_min_max,
+}
+impl<'a, 'b> test_min_maxIO<'a, 'b> {}
+pub struct test_truncate {}
+impl test_truncate {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_truncateBound<'a> {
+        test_truncateBound {
+            sim,
+            ids: self,
+        }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_truncateBound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_truncate,
+}
+impl<'a> test_truncateBound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_truncateIO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_truncateIO {
+                    io,
+                    ids: self.ids,
+                };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_truncateIO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_truncate,
+}
+impl<'a, 'b> test_truncateIO<'a, 'b> {}
