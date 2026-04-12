@@ -9,7 +9,7 @@ all_backends! {
 
 
 fn test_four_state_and_or(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2881,7 +2881,7 @@ fn test_four_state_eq_wildcard_value_at_wildcard_pos(sim) {
 }
 
 fn test_four_state_ne_wildcard_value_at_wildcard_pos(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3687,7 +3687,7 @@ fn test_z_literal_passthrough(sim) {
 }
 
 fn test_z_mux_tristate_pattern(sim) {
-    @ignore_on(wasm, veryl);
+    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (en: input logic, d: input logic<8>, y: output logic<8>) {

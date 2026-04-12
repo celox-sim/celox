@@ -687,7 +687,6 @@ fn compile_mux(
             instrs.push(Instruction::End);
         }
 
-        normalize_reg_with_mask(&dst_reg, d_width, instrs);
     }
 }
 
@@ -732,6 +731,34 @@ fn compile_binary_narrow(
     let d = locals.reg_map[dst].clone();
     let l = locals.reg_map[lhs].clone();
     let r = locals.reg_map[rhs].clone();
+
+    if four_state && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
+        let compare_mask = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(r.mask_idx.expect("four-state rhs mask")));
+        instrs.push(Instruction::I64Const(-1));
+        instrs.push(Instruction::I64Xor);
+        emit_mask_to_width(instrs, l_width.max(r_width));
+        instrs.push(Instruction::LocalSet(compare_mask));
+
+        instrs.push(Instruction::LocalGet(l.value_idx));
+        instrs.push(Instruction::LocalGet(compare_mask));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalGet(r.value_idx));
+        instrs.push(Instruction::LocalGet(compare_mask));
+        instrs.push(Instruction::I64And);
+        if matches!(op, BinaryOp::EqWildcard) {
+            instrs.push(Instruction::I64Eq);
+        } else {
+            instrs.push(Instruction::I64Ne);
+        }
+        instrs.push(Instruction::I64ExtendI32U);
+        emit_mask_to_width(instrs, d_width);
+        instrs.push(Instruction::LocalSet(d.value_idx));
+
+        compile_binary_mask_narrow(&d, &l, op, &r, d_width, locals, instrs);
+        normalize_reg_with_mask(&d, d_width, instrs);
+        return;
+    }
 
     // Load operands
     instrs.push(Instruction::LocalGet(l.value_idx));
@@ -886,6 +913,53 @@ fn compile_binary_wide(
     let l = locals.reg_map[lhs].clone();
     let r = locals.reg_map[rhs].clone();
     let d_chunks = d.num_chunks;
+
+    if four_state && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
+        let compare_mask = RegLocal {
+            value_idx: locals.alloc(d_chunks),
+            num_chunks: d_chunks,
+            mask_idx: None,
+        };
+        for c in 0..d_chunks {
+            if c < r.num_chunks {
+                instrs.push(Instruction::LocalGet(r.mask_idx.expect("four-state rhs mask") + c as u32));
+                instrs.push(Instruction::I64Const(-1));
+                instrs.push(Instruction::I64Xor);
+                emit_chunk_mask_to_width(instrs, c, d_chunks, d_width);
+                instrs.push(Instruction::LocalSet(compare_mask.value_idx + c as u32));
+            } else {
+                let chunk_mask = chunk_mask_for_width(c, d_chunks, d_width);
+                instrs.push(Instruction::I64Const(chunk_mask as i64));
+                instrs.push(Instruction::LocalSet(compare_mask.value_idx + c as u32));
+            }
+        }
+
+        instrs.push(Instruction::I64Const(1));
+        for c in 0..d_chunks {
+            emit_wide_get_chunk(instrs, &l, c);
+            emit_wide_get_chunk(instrs, &compare_mask, c);
+            instrs.push(Instruction::I64And);
+            emit_wide_get_chunk(instrs, &r, c);
+            emit_wide_get_chunk(instrs, &compare_mask, c);
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::I64Eq);
+            instrs.push(Instruction::I64ExtendI32U);
+            instrs.push(Instruction::I64And);
+        }
+        if matches!(op, BinaryOp::NeWildcard) {
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::I64Xor);
+        }
+        instrs.push(Instruction::LocalSet(d.value_idx));
+        for c in 1..d_chunks {
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
+        }
+
+        compile_binary_mask_wide(&d, &l, op, &r, d_width, locals, instrs);
+        normalize_reg_with_mask(&d, d_width, instrs);
+        return;
+    }
 
     match op {
         // 1. Chunk-wise bitwise ops
@@ -1574,6 +1648,50 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::End);
         }
+        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+            let compare_mask = locals.alloc(1);
+            let lhs_unknown = locals.alloc(1);
+            let mismatch = locals.alloc(1);
+
+            instrs.push(Instruction::LocalGet(rhs_mask));
+            instrs.push(Instruction::I64Const(-1));
+            instrs.push(Instruction::I64Xor);
+            emit_mask_to_width(instrs, d_width);
+            instrs.push(Instruction::LocalSet(compare_mask));
+
+            instrs.push(Instruction::LocalGet(lhs_mask));
+            instrs.push(Instruction::LocalGet(compare_mask));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::LocalSet(lhs_unknown));
+
+            instrs.push(Instruction::LocalGet(lhs.value_idx));
+            instrs.push(Instruction::LocalGet(rhs.value_idx));
+            instrs.push(Instruction::I64Xor);
+            instrs.push(Instruction::LocalGet(compare_mask));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::LocalGet(lhs_mask));
+            instrs.push(Instruction::I64Const(-1));
+            instrs.push(Instruction::I64Xor);
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::LocalSet(mismatch));
+
+            instrs.push(Instruction::LocalGet(mismatch));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            instrs.push(Instruction::LocalGet(lhs_unknown));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(dst_mask));
+            instrs.push(Instruction::Else);
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::LocalSet(dst_mask));
+            instrs.push(Instruction::End);
+            instrs.push(Instruction::Else);
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(dst_mask));
+            instrs.push(Instruction::End);
+        }
         _ => {
             let any_x = locals.alloc(1);
             instrs.push(Instruction::LocalGet(lhs_mask));
@@ -1843,6 +1961,65 @@ fn compile_binary_mask_wide(
                 instrs.push(Instruction::LocalSet(dst_mask.value_idx + c as u32));
             }
             instrs.push(Instruction::End);
+        }
+        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+            let any_unknown = locals.alloc(1);
+            let any_mismatch = locals.alloc(1);
+
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(any_unknown));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(any_mismatch));
+
+            for c in 0..dst.num_chunks.max(lhs.num_chunks).max(rhs.num_chunks) {
+                let compare_mask = locals.alloc(1);
+                emit_wide_get_chunk(instrs, &rhs_mask, c);
+                instrs.push(Instruction::I64Const(-1));
+                instrs.push(Instruction::I64Xor);
+                emit_chunk_mask_to_width(instrs, c, dst.num_chunks, d_width);
+                instrs.push(Instruction::LocalSet(compare_mask));
+
+                emit_wide_get_chunk(instrs, &lhs_mask, c);
+                instrs.push(Instruction::LocalGet(compare_mask));
+                instrs.push(Instruction::I64And);
+                instrs.push(Instruction::LocalGet(any_unknown));
+                instrs.push(Instruction::I64Or);
+                instrs.push(Instruction::LocalSet(any_unknown));
+
+                emit_wide_get_chunk(instrs, lhs, c);
+                emit_wide_get_chunk(instrs, rhs, c);
+                instrs.push(Instruction::I64Xor);
+                instrs.push(Instruction::LocalGet(compare_mask));
+                instrs.push(Instruction::I64And);
+                emit_wide_get_chunk(instrs, &lhs_mask, c);
+                instrs.push(Instruction::I64Const(-1));
+                instrs.push(Instruction::I64Xor);
+                instrs.push(Instruction::I64And);
+                instrs.push(Instruction::LocalGet(any_mismatch));
+                instrs.push(Instruction::I64Or);
+                instrs.push(Instruction::LocalSet(any_mismatch));
+            }
+
+            instrs.push(Instruction::LocalGet(any_mismatch));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            instrs.push(Instruction::LocalGet(any_unknown));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(dst_mask.value_idx));
+            instrs.push(Instruction::Else);
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::LocalSet(dst_mask.value_idx));
+            instrs.push(Instruction::End);
+            instrs.push(Instruction::Else);
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(dst_mask.value_idx));
+            instrs.push(Instruction::End);
+            for c in 1..dst.num_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(dst_mask.value_idx + c as u32));
+            }
         }
         _ => {
             let any_x = locals.alloc(1);
