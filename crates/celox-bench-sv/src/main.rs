@@ -38,7 +38,7 @@ fn emit_sv(code: &str) -> String {
         &PathBuf::from("bench.sv"),
         &PathBuf::from("bench.sv.map"),
     );
-    emitter.emit(&"prj", &parser.veryl);
+    emitter.emit("prj", &parser.veryl, code);
     emitter.as_str().to_string()
 }
 
