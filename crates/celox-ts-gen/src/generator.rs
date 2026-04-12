@@ -1079,7 +1079,7 @@ module Top (
     bus: modport Bus::consumer [2],
     out: output logic<8>,
 ) {
-    assign out = bus.data[0];
+    assign out = bus[0].data;
 }
 "#;
         let modules = generate_from_source(code);
