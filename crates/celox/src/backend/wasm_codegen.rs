@@ -685,7 +685,6 @@ fn compile_mux(
             instrs.push(Instruction::LocalSet(dst_mask + i as u32));
             instrs.push(Instruction::End);
         }
-
     }
 }
 
@@ -733,7 +732,9 @@ fn compile_binary_narrow(
 
     if four_state && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
         let compare_mask = locals.alloc(1);
-        instrs.push(Instruction::LocalGet(r.mask_idx.expect("four-state rhs mask")));
+        instrs.push(Instruction::LocalGet(
+            r.mask_idx.expect("four-state rhs mask"),
+        ));
         instrs.push(Instruction::I64Const(-1));
         instrs.push(Instruction::I64Xor);
         emit_mask_to_width(instrs, l_width.max(r_width));
@@ -774,7 +775,9 @@ fn compile_binary_narrow(
             instrs.push(Instruction::LocalSet(tmp_l));
             instrs.push(Instruction::LocalGet(tmp_r));
             instrs.push(Instruction::I64Eqz);
-            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                ValType::I64,
+            )));
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::Else);
             instrs.push(Instruction::LocalGet(tmp_l));
@@ -789,7 +792,9 @@ fn compile_binary_narrow(
             instrs.push(Instruction::LocalSet(tmp_l));
             instrs.push(Instruction::LocalGet(tmp_r));
             instrs.push(Instruction::I64Eqz);
-            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                ValType::I64,
+            )));
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::Else);
             instrs.push(Instruction::LocalGet(tmp_l));
@@ -944,7 +949,9 @@ fn compile_binary_wide(
         };
         for c in 0..d_chunks {
             if c < r.num_chunks {
-                instrs.push(Instruction::LocalGet(r.mask_idx.expect("four-state rhs mask") + c as u32));
+                instrs.push(Instruction::LocalGet(
+                    r.mask_idx.expect("four-state rhs mask") + c as u32,
+                ));
                 instrs.push(Instruction::I64Const(-1));
                 instrs.push(Instruction::I64Xor);
                 emit_chunk_mask_to_width(instrs, c, d_chunks, d_width);
@@ -1487,7 +1494,8 @@ fn compile_binary_mask_narrow(
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
-    let (Some(dst_mask), Some(lhs_mask), Some(rhs_mask)) = (dst.mask_idx, lhs.mask_idx, rhs.mask_idx)
+    let (Some(dst_mask), Some(lhs_mask), Some(rhs_mask)) =
+        (dst.mask_idx, lhs.mask_idx, rhs.mask_idx)
     else {
         return;
     };
@@ -1570,7 +1578,9 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::Else);
-            instrs.push(Instruction::I64Const(chunk_mask_for_width(0, 1, d_width) as i64));
+            instrs.push(Instruction::I64Const(
+                chunk_mask_for_width(0, 1, d_width) as i64
+            ));
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::End);
             instrs.push(Instruction::End);
@@ -1610,7 +1620,9 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::Else);
-            instrs.push(Instruction::I64Const(chunk_mask_for_width(0, 1, d_width) as i64));
+            instrs.push(Instruction::I64Const(
+                chunk_mask_for_width(0, 1, d_width) as i64
+            ));
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::End);
             instrs.push(Instruction::Else);
@@ -1644,7 +1656,9 @@ fn compile_binary_mask_narrow(
             emit_mask_to_width(instrs, d_width);
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::Else);
-            instrs.push(Instruction::I64Const(chunk_mask_for_width(0, 1, d_width) as i64));
+            instrs.push(Instruction::I64Const(
+                chunk_mask_for_width(0, 1, d_width) as i64
+            ));
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::End);
         }
@@ -1705,7 +1719,7 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::Else);
             instrs.push(Instruction::I64Const(
-                chunk_mask_for_width(0, 1, d_width) as i64,
+                chunk_mask_for_width(0, 1, d_width) as i64
             ));
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::End);
@@ -1842,7 +1856,9 @@ fn compile_binary_mask_wide(
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(dst_mask.value_idx));
             instrs.push(Instruction::Else);
-            instrs.push(Instruction::I64Const(chunk_mask_for_width(0, 1, d_width) as i64));
+            instrs.push(Instruction::I64Const(
+                chunk_mask_for_width(0, 1, d_width) as i64
+            ));
             instrs.push(Instruction::LocalSet(dst_mask.value_idx));
             instrs.push(Instruction::End);
             instrs.push(Instruction::End);
@@ -1903,7 +1919,9 @@ fn compile_binary_mask_wide(
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(dst_mask.value_idx));
             instrs.push(Instruction::Else);
-            instrs.push(Instruction::I64Const(chunk_mask_for_width(0, 1, d_width) as i64));
+            instrs.push(Instruction::I64Const(
+                chunk_mask_for_width(0, 1, d_width) as i64
+            ));
             instrs.push(Instruction::LocalSet(dst_mask.value_idx));
             instrs.push(Instruction::End);
             instrs.push(Instruction::Else);
@@ -1938,10 +1956,26 @@ fn compile_binary_mask_wide(
 
             match op {
                 BinaryOp::Shl | BinaryOp::Shr => {
-                    emit_wide_shift(op, &lhs_mask, rhs, &shifted_mask, dst.num_chunks, locals, instrs);
+                    emit_wide_shift(
+                        op,
+                        &lhs_mask,
+                        rhs,
+                        &shifted_mask,
+                        dst.num_chunks,
+                        locals,
+                        instrs,
+                    );
                 }
                 BinaryOp::Sar => {
-                    emit_wide_sar(&lhs_mask, rhs, &shifted_mask, dst.num_chunks, d_width, locals, instrs);
+                    emit_wide_sar(
+                        &lhs_mask,
+                        rhs,
+                        &shifted_mask,
+                        dst.num_chunks,
+                        d_width,
+                        locals,
+                        instrs,
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -2049,11 +2083,7 @@ fn compile_binary_mask_wide(
     }
 }
 
-fn normalize_reg_with_mask(
-    reg: &RegLocal,
-    width: usize,
-    instrs: &mut Vec<Instruction<'static>>,
-) {
+fn normalize_reg_with_mask(reg: &RegLocal, width: usize, instrs: &mut Vec<Instruction<'static>>) {
     let Some(mask_idx) = reg.mask_idx else {
         return;
     };
@@ -3279,7 +3309,11 @@ fn compile_store_dynamic(
     }
 }
 
-fn emit_dynamic_addr_with_offset(addr_local: u32, byte_offset: usize, instrs: &mut Vec<Instruction<'static>>) {
+fn emit_dynamic_addr_with_offset(
+    addr_local: u32,
+    byte_offset: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
     instrs.push(Instruction::LocalGet(addr_local));
     instrs.push(Instruction::I32WrapI64);
     if byte_offset > 0 {
@@ -3563,10 +3597,8 @@ fn compile_commit(
                         let mut copied = 0usize;
                         while copied < copy_bytes {
                             let remaining = copy_bytes - copied;
-                            let src_mask_off =
-                                src_base + src_var_byte_size + byte_off + copied;
-                            let dst_mask_off =
-                                dst_base + dst_var_byte_size + byte_off + copied;
+                            let src_mask_off = src_base + src_var_byte_size + byte_off + copied;
+                            let dst_mask_off = dst_base + dst_var_byte_size + byte_off + copied;
                             instrs.push(Instruction::I32Const(dst_mask_off as i32));
                             instrs.push(Instruction::I32Const(src_mask_off as i32));
                             match remaining {
@@ -4066,7 +4098,11 @@ fn chunk_mask_for_width(chunk: usize, num_chunks: usize, width: usize) -> u64 {
         u64::MAX
     } else {
         let top_bits = width % 64;
-        if top_bits == 0 { u64::MAX } else { (1u64 << top_bits) - 1 }
+        if top_bits == 0 {
+            u64::MAX
+        } else {
+            (1u64 << top_bits) - 1
+        }
     }
 }
 
