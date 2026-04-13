@@ -112,7 +112,7 @@ fn benchmark_counter(c: &mut Criterion) {
     c.bench_function("testbench_tick_top_n1000_x1", |b| {
         b.iter(|| {
             sim.tick(clk).unwrap();
-            std::hint::black_box(sim.get(cnt0));
+            std::hint::black_box(sim.get_as::<u32>(cnt0));
         })
     });
 
@@ -120,7 +120,7 @@ fn benchmark_counter(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..1000000 {
                 sim.tick(clk).unwrap();
-                std::hint::black_box(sim.get(cnt0));
+                std::hint::black_box(sim.get_as::<u32>(cnt0));
             }
         })
     });
@@ -141,8 +141,8 @@ fn benchmark_linear_sec(c: &mut Criterion) {
     c.bench_function("simulation_eval_linear_sec_p6_x1", |b| {
         let mut input: u64 = 0;
         b.iter(|| {
-            sim.modify(|io| io.set(i_word, input)).unwrap();
-            std::hint::black_box(sim.get(o_word));
+            sim.set(i_word, input);
+            std::hint::black_box(sim.get_as::<u64>(o_word));
             input = input.wrapping_add(1);
         })
     });
@@ -151,8 +151,8 @@ fn benchmark_linear_sec(c: &mut Criterion) {
         let mut input: u64 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_word, input)).unwrap();
-                std::hint::black_box(sim.get(o_word));
+                sim.set(i_word, input);
+                std::hint::black_box(sim.get_as::<u64>(o_word));
                 input = input.wrapping_add(1);
             }
         })
@@ -163,8 +163,8 @@ fn benchmark_linear_sec(c: &mut Criterion) {
         let mut input: u64 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_word, input)).unwrap();
-                std::hint::black_box(sim.get(o_corrected));
+                sim.set(i_word, input);
+                std::hint::black_box(sim.get_as::<u8>(o_corrected));
                 input = input.wrapping_add(1);
             }
         })
@@ -238,7 +238,7 @@ fn benchmark_linear_sec_isolation(c: &mut Criterion) {
     c.bench_function("isolation_set_eval_linear_sec_p6", |b| {
         let mut input: u64 = 0;
         b.iter(|| {
-            sim.modify(|io| io.set(i_word, input)).unwrap();
+            sim.set(i_word, input);
             sim.eval_comb().unwrap();
             input = input.wrapping_add(1);
         })
@@ -248,7 +248,7 @@ fn benchmark_linear_sec_isolation(c: &mut Criterion) {
         let mut input: u64 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_word, input)).unwrap();
+                sim.set(i_word, input);
                 sim.eval_comb().unwrap();
                 input = input.wrapping_add(1);
             }
@@ -259,7 +259,7 @@ fn benchmark_linear_sec_isolation(c: &mut Criterion) {
     c.bench_function("isolation_set_eval_get_as_linear_sec_p6", |b| {
         let mut input: u64 = 0;
         b.iter(|| {
-            sim.modify(|io| io.set(i_word, input)).unwrap();
+            sim.set(i_word, input);
             let out: u64 = sim.get_as(o_word);
             std::hint::black_box(out);
             input = input.wrapping_add(1);
@@ -270,7 +270,7 @@ fn benchmark_linear_sec_isolation(c: &mut Criterion) {
         let mut input: u64 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_word, input)).unwrap();
+                sim.set(i_word, input);
                 let out: u64 = sim.get_as(o_word);
                 std::hint::black_box(out);
                 input = input.wrapping_add(1);
@@ -293,8 +293,8 @@ fn benchmark_countones(c: &mut Criterion) {
     c.bench_function("simulation_eval_countones_w64_x1", |b| {
         let mut input: u64 = 0;
         b.iter(|| {
-            sim.modify(|io| io.set(i_data, input)).unwrap();
-            std::hint::black_box(sim.get(o_ones));
+            sim.set(i_data, input);
+            std::hint::black_box(sim.get_as::<u8>(o_ones));
             input = input.wrapping_add(1);
         })
     });
@@ -303,8 +303,8 @@ fn benchmark_countones(c: &mut Criterion) {
         let mut input: u64 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_data, input)).unwrap();
-                std::hint::black_box(sim.get(o_ones));
+                sim.set(i_data, input);
+                std::hint::black_box(sim.get_as::<u8>(o_ones));
                 input = input.wrapping_add(1);
             }
         })
@@ -331,8 +331,8 @@ fn benchmark_countones_dse(c: &mut Criterion) {
     c.bench_function("dse_eval_countones_w64_x1", |b| {
         let mut input: u64 = 0;
         b.iter(|| {
-            sim.modify(|io| io.set(i_data, input)).unwrap();
-            std::hint::black_box(sim.get(o_ones));
+            sim.set(i_data, input);
+            std::hint::black_box(sim.get_as::<u8>(o_ones));
             input = input.wrapping_add(1);
         })
     });
@@ -341,8 +341,8 @@ fn benchmark_countones_dse(c: &mut Criterion) {
         let mut input: u64 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_data, input)).unwrap();
-                std::hint::black_box(sim.get(o_ones));
+                sim.set(i_data, input);
+                std::hint::black_box(sim.get_as::<u8>(o_ones));
                 input = input.wrapping_add(1);
             }
         })
@@ -369,8 +369,8 @@ fn benchmark_linear_sec_dse(c: &mut Criterion) {
     c.bench_function("dse_eval_linear_sec_p6_x1", |b| {
         let mut input: u64 = 0;
         b.iter(|| {
-            sim.modify(|io| io.set(i_word, input)).unwrap();
-            std::hint::black_box(sim.get(o_word));
+            sim.set(i_word, input);
+            std::hint::black_box(sim.get_as::<u64>(o_word));
             input = input.wrapping_add(1);
         })
     });
@@ -388,8 +388,8 @@ fn benchmark_linear_sec_dse(c: &mut Criterion) {
         let mut input: u64 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_word, input)).unwrap();
-                std::hint::black_box(sim.get(o_word));
+                sim.set(i_word, input);
+                std::hint::black_box(sim.get_as::<u64>(o_word));
                 input = input.wrapping_add(1);
             }
         })
@@ -441,7 +441,7 @@ fn benchmark_std_counter(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..1_000_000 {
                 sim.tick(clk).unwrap();
-                std::hint::black_box(sim.get(o_count));
+                std::hint::black_box(sim.get_as::<u32>(o_count));
             }
         })
     });
@@ -492,7 +492,7 @@ fn benchmark_gray_counter(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..1_000_000 {
                 sim.tick(clk).unwrap();
-                std::hint::black_box(sim.get(o_count));
+                std::hint::black_box(sim.get_as::<u32>(o_count));
             }
         })
     });
@@ -549,7 +549,7 @@ fn benchmark_fifo(c: &mut Criterion) {
                 })
                 .unwrap();
                 sim.tick(clk).unwrap();
-                std::hint::black_box(sim.get(o_data));
+                std::hint::black_box(sim.get_as::<u8>(o_data));
                 push = !push;
             }
         })
@@ -570,8 +570,8 @@ fn benchmark_gray_codec(c: &mut Criterion) {
     c.bench_function("simulation_eval_gray_codec_w32_x1", |b| {
         let mut input: u32 = 0;
         b.iter(|| {
-            sim.modify(|io| io.set(i_bin, input)).unwrap();
-            std::hint::black_box(sim.get(o_bin));
+            sim.set(i_bin, input);
+            std::hint::black_box(sim.get_as::<u32>(o_bin));
             input = input.wrapping_add(1);
         })
     });
@@ -580,8 +580,8 @@ fn benchmark_gray_codec(c: &mut Criterion) {
         let mut input: u32 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_bin, input)).unwrap();
-                std::hint::black_box(sim.get(o_bin));
+                sim.set(i_bin, input);
+                std::hint::black_box(sim.get_as::<u32>(o_bin));
                 input = input.wrapping_add(1);
             }
         })
@@ -628,7 +628,7 @@ fn benchmark_edge_detector(c: &mut Criterion) {
             for _ in 0..1_000_000 {
                 sim.modify(|io| io.set(i_data, input)).unwrap();
                 sim.tick(clk).unwrap();
-                std::hint::black_box(sim.get(o_posedge));
+                std::hint::black_box(sim.get_as::<u32>(o_posedge));
                 input = input.wrapping_add(1);
             }
         })
@@ -649,8 +649,8 @@ fn benchmark_onehot(c: &mut Criterion) {
     c.bench_function("simulation_eval_onehot_w64_x1", |b| {
         let mut input: u64 = 0;
         b.iter(|| {
-            sim.modify(|io| io.set(i_data, input)).unwrap();
-            std::hint::black_box(sim.get(o_onehot));
+            sim.set(i_data, input);
+            std::hint::black_box(sim.get_as::<u8>(o_onehot));
             input = input.wrapping_add(1);
         })
     });
@@ -659,8 +659,8 @@ fn benchmark_onehot(c: &mut Criterion) {
         let mut input: u64 = 0;
         b.iter(|| {
             for _ in 0..1_000_000 {
-                sim.modify(|io| io.set(i_data, input)).unwrap();
-                std::hint::black_box(sim.get(o_onehot));
+                sim.set(i_data, input);
+                std::hint::black_box(sim.get_as::<u8>(o_onehot));
                 input = input.wrapping_add(1);
             }
         })
@@ -715,7 +715,7 @@ fn benchmark_lfsr(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..1_000_000 {
                 sim.tick(clk).unwrap();
-                std::hint::black_box(sim.get(o_val));
+                std::hint::black_box(sim.get_as::<u32>(o_val));
             }
         })
     });
