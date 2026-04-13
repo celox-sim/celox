@@ -463,6 +463,52 @@ export function parseNapiLayout(json: string): {
 }
 
 /**
+ * Recover 4-state flags for wasm32 layout JSON emitted by older addons.
+ *
+ * Older wasm artifacts reported `is_4state: false` for every signal even when
+ * the simulator was created with `fourState: true`. In that case, infer the
+ * flag from `typeKind` so JS-side DUT access continues to work.
+ */
+export function recoverWasmFourStateLayout(layout: {
+	signals: Record<
+		string,
+		SignalLayout & {
+			typeKind: string;
+			arrayDims?: number[];
+			associatedClock?: string;
+		}
+	>;
+	forDut: Record<string, SignalLayout>;
+}): {
+	signals: Record<
+		string,
+		SignalLayout & {
+			typeKind: string;
+			arrayDims?: number[];
+			associatedClock?: string;
+		}
+	>;
+	forDut: Record<string, SignalLayout>;
+} {
+	const signals = Object.fromEntries(
+		Object.entries(layout.signals).map(([name, sig]) => {
+			const inferred =
+				sig.is4state || (sig.typeKind !== "bit" && sig.typeKind !== "other");
+			return [name, { ...sig, is4state: inferred }];
+		}),
+	) as typeof layout.signals;
+
+	const forDut = Object.fromEntries(
+		Object.entries(layout.forDut).map(([name, sig]) => [
+			name,
+			{ ...sig, is4state: signals[name]?.is4state ?? sig.is4state },
+		]),
+	) as typeof layout.forDut;
+
+	return { signals, forDut };
+}
+
+/**
  * Build PortInfo records from the NAPI layout signals.
  * This auto-detects port metadata so users don't need to hand-write ModuleDefinition.
  *

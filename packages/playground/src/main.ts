@@ -258,6 +258,51 @@ describe("Counter (Waveform)", () => {
 });
 `,
 	},
+	four_state: {
+		veryl: `module FourStateDemo (
+    a: input logic<8>,
+    b: input logic<8>,
+    snapshot: output logic<8>,
+) {
+    assign snapshot = a;
+}`,
+		testbench: `import { describe, it, expect } from "vitest";
+import { FourState, Simulator, X } from "@celox-sim/celox";
+import { FourStateDemo } from "../src/FourStateDemo.veryl";
+
+describe("FourStateDemo", () => {
+    it("writes and reads all-X", () => {
+        const sim = Simulator.create(FourStateDemo, { fourState: true });
+
+        (sim.dut as any).a = X;
+
+        const a = sim.fourState("a");
+        expect(a.value).toBe(0xffn);
+        expect(a.mask).toBe(0xffn);
+
+        sim.dispose();
+    });
+
+    it("round-trips partial X and clears mask on defined write", () => {
+        const sim = Simulator.create(FourStateDemo, { fourState: true });
+
+        (sim.dut as any).b = FourState(0x05, 0xf0);
+
+        const partial = sim.fourState("b");
+        expect(partial.value).toBe(0x05n);
+        expect(partial.mask).toBe(0xf0n);
+
+        sim.dut.b = 0x33n;
+
+        const defined = sim.fourState("b");
+        expect(defined.value).toBe(0x33n);
+        expect(defined.mask).toBe(0n);
+
+        sim.dispose();
+    });
+});
+`,
+	},
 };
 
 // ── Language definitions ─────────────────────────────────
@@ -510,7 +555,7 @@ document.getElementById("app")!.innerHTML = `
 </style>
 <header>
   <h1>Celox Playground</h1>
-  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option><option value="counter_vcd">Counter (Waveform)</option></select>
+  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option><option value="counter_vcd">Counter (Waveform)</option><option value="four_state">4-State</option></select>
   <select id="run-target"></select>
   <input id="run-args" type="text" placeholder="vitest args (e.g. --grep &quot;add&quot;)" style="width: 180px; font-size: 0.8rem;" />
   <button id="run" disabled>Run</button>

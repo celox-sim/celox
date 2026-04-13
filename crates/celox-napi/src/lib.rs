@@ -1416,7 +1416,7 @@ impl NativeSimulatorHandle {
         program.build_layout(opts.four_state);
         let layout = program.layout.as_ref().unwrap();
 
-        let layout_json = Self::build_layout_json(&program, layout);
+        let layout_json = Self::build_layout_json(&program, layout, opts.four_state);
         let events_json = Self::build_events_json(&program);
         let hierarchy_json = "{}".to_string(); // Hierarchy not available on wasm32
         let warnings_json = format_warnings_json(&warnings);
@@ -1482,7 +1482,7 @@ impl NativeSimulatorHandle {
         program.build_layout(opts.four_state);
         let layout = program.layout.as_ref().unwrap();
 
-        let layout_json = Self::build_layout_json(&program, layout);
+        let layout_json = Self::build_layout_json(&program, layout, opts.four_state);
         let events_json = Self::build_events_json(&program);
         let hierarchy_json = "{}".to_string();
         let warnings_json = format_warnings_json(&warnings);
@@ -1587,7 +1587,11 @@ impl NativeSimulatorHandle {
 impl NativeSimulatorHandle {
     /// Build signal layout JSON from the Program and MemoryLayout.
     /// Mirrors the layout format from celox-wasm.
-    fn build_layout_json(program: &celox::Program, layout: &celox::MemoryLayout) -> String {
+    fn build_layout_json(
+        program: &celox::Program,
+        layout: &celox::MemoryLayout,
+        four_state: bool,
+    ) -> String {
         use std::collections::BTreeMap;
 
         let mut layout_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -1626,7 +1630,7 @@ impl NativeSimulatorHandle {
                             "offset": offset,
                             "width": width,
                             "byte_size": byte_size,
-                            "is_4state": false,
+                            "is_4state": four_state && info.is_4state,
                             "direction": layout::direction_str(info.var_kind),
                             "type_kind": layout::type_kind_str(info.type_kind),
                         }),

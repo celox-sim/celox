@@ -13,6 +13,7 @@ import {
 	loadNativeAddon,
 	parseHierarchyLayout,
 	parseNapiLayout,
+	recoverWasmFourStateLayout,
 	wrapDirectSimulatorHandle,
 } from "./napi-helpers.js";
 import type {
@@ -194,8 +195,12 @@ export class Simulator<P = Record<string, unknown>> {
 			top,
 			napiOpts,
 		);
+		const isWasm = isWasmHandle(raw);
 
-		const layout = parseNapiLayout(raw.layoutJson);
+		const layout =
+			isWasm && options?.fourState
+				? recoverWasmFourStateLayout(parseNapiLayout(raw.layoutJson))
+				: parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 		const hierarchy = filterHierarchyForDse(
@@ -214,7 +219,7 @@ export class Simulator<P = Record<string, unknown>> {
 		// Detect WASM-compiled addon and use the bridge
 		let buf: ArrayBuffer | SharedArrayBuffer;
 		let handle: NativeSimulatorHandle;
-		if (isWasmHandle(raw)) {
+		if (isWasm) {
 			const bridge = createWasmSimulatorBridge(raw);
 			buf = bridge.sharedMemory.buffer;
 			handle = bridge.handle;
@@ -269,8 +274,12 @@ export class Simulator<P = Record<string, unknown>> {
 			top,
 			napiOpts,
 		);
+		const isWasm = isWasmHandle(raw);
 
-		const layout = parseNapiLayout(raw.layoutJson);
+		const layout =
+			isWasm && options?.fourState
+				? recoverWasmFourStateLayout(parseNapiLayout(raw.layoutJson))
+				: parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 		const hierarchy = filterHierarchyForDse(
@@ -286,7 +295,7 @@ export class Simulator<P = Record<string, unknown>> {
 		// Detect WASM-compiled addon and use the bridge
 		let buf: ArrayBuffer | SharedArrayBuffer;
 		let handle: NativeSimulatorHandle;
-		if (isWasmHandle(raw)) {
+		if (isWasm) {
 			const bridge = createWasmSimulatorBridge(raw);
 			buf = bridge.sharedMemory.buffer;
 			handle = bridge.handle;
