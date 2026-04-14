@@ -44,6 +44,29 @@ BENCHMARK(BM_tick_x1)
     ->Name("simulation_tick_fifo_w8_d16_x1")
     ->Unit(benchmark::kNanosecond);
 
+// --- simulation_tick_fifo_w8_d16_x1000000 ---
+static void BM_tick_x1000000(benchmark::State &state) {
+    VTop top;
+    reset(&top);
+    for (auto _ : state) {
+        bool push = true;
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < 1000000; i++) {
+            top.i_push = push ? 1 : 0;
+            top.i_pop = push ? 0 : 1;
+            top.i_data = 0xAA;
+            tick(&top);
+            push = !push;
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+    }
+}
+BENCHMARK(BM_tick_x1000000)
+    ->Name("simulation_tick_fifo_w8_d16_x1000000")
+    ->UseManualTime()->Iterations(3)
+    ->Unit(benchmark::kNanosecond);
+
 // --- testbench_tick_fifo_w8_d16_x1000000 ---
 static void BM_testbench_tick_x1000000(benchmark::State &state) {
     VTop top;

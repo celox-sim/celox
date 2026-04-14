@@ -71,6 +71,7 @@ Veryl 標準ライブラリモジュールのベンチマーク。
 |---|---|---|
 | `simulation_build_fifo_w8_d16` | JIT コンパイル | Verilate + C++ コンパイル |
 | `simulation_tick_fifo_w8_d16_x1` | 単一ティック（push/pop 交互） | 単一ティック（push/pop 交互） |
+| `simulation_tick_fifo_w8_d16_x1000000` | 100 万ティック（pure runtime） | 100 万ティック（pure runtime） |
 | `testbench_tick_fifo_w8_d16_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 |
 
 **std::gray_encoder + gray_decoder (WIDTH=32)** — Gray エンコード/デコードラウンドトリップ。組合せ回路。

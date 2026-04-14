@@ -71,6 +71,7 @@ Benchmarks for Veryl stdlib modules across all three runtimes.
 |---|---|---|
 | `simulation_build_fifo_w8_d16` | JIT compile | Verilate + C++ compile |
 | `simulation_tick_fifo_w8_d16_x1` | Single tick (push/pop alternating) | Single tick (push/pop alternating) |
+| `simulation_tick_fifo_w8_d16_x1000000` | 1M ticks (pure runtime) | 1M ticks (pure runtime) |
 | `testbench_tick_fifo_w8_d16_x1000000` | 1M tick + read | 1M tick + read |
 
 **std::gray_encoder + gray_decoder (WIDTH=32)** — Gray encode/decode roundtrip. Combinational.

@@ -538,6 +538,22 @@ fn benchmark_fifo(c: &mut Criterion) {
         })
     });
 
+    c.bench_function("simulation_tick_fifo_w8_d16_x1000000", |b| {
+        let mut push = true;
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.modify(|io| {
+                    io.set(i_push, if push { 1u8 } else { 0u8 });
+                    io.set(i_pop, if push { 0u8 } else { 1u8 });
+                    io.set(i_data, 0xAAu8);
+                })
+                .unwrap();
+                sim.tick(clk).unwrap();
+                push = !push;
+            }
+        })
+    });
+
     c.bench_function("testbench_tick_fifo_w8_d16_x1000000", |b| {
         let mut push = true;
         b.iter(|| {
