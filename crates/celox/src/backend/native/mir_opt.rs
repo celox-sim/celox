@@ -2090,20 +2090,18 @@ fn find_covering_store(
 ) -> Option<(MemorySlot, VReg)> {
     let load_start = offset as i64;
     let load_end = load_start + i64::from(size.bytes());
-    available
-        .iter()
-        .find_map(|(slot, &src)| {
-            if slot.base != base {
-                return None;
-            }
-            let store_start = slot.offset as i64;
-            let store_end = store_start + i64::from(slot.size.bytes());
-            if store_start <= load_start && load_end <= store_end {
-                Some((*slot, src))
-            } else {
-                None
-            }
-        })
+    available.iter().find_map(|(slot, &src)| {
+        if slot.base != base {
+            return None;
+        }
+        let store_start = slot.offset as i64;
+        let store_end = store_start + i64::from(slot.size.bytes());
+        if store_start <= load_start && load_end <= store_end {
+            Some((*slot, src))
+        } else {
+            None
+        }
+    })
 }
 
 fn emit_partial_load_forward(
@@ -2547,30 +2545,39 @@ mod tests {
         optimize(&mut func);
 
         let insts = &func.blocks[0].insts;
-        assert!(insts.iter().any(|inst| matches!(
-            inst,
-            MInst::LoadImm {
-                dst: VReg(1),
-                value: 85,
-            }
-        )), "{insts:#?}");
-        assert!(insts.iter().any(|inst| matches!(
-            inst,
-            MInst::AddImm {
-                dst: VReg(2),
-                src: VReg(1),
-                imm: 1,
-            }
-        )), "{insts:#?}");
-        assert!(insts.iter().any(|inst| matches!(
-            inst,
-            MInst::Store {
-                base: BaseReg::SimState,
-                offset: 24,
-                src: VReg(2),
-                size: OpSize::S8,
-            }
-        )), "{insts:#?}");
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 85,
+                }
+            )),
+            "{insts:#?}"
+        );
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::AddImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 1,
+                }
+            )),
+            "{insts:#?}"
+        );
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(2),
+                    size: OpSize::S8,
+                }
+            )),
+            "{insts:#?}"
+        );
         assert!(!insts.iter().any(|inst| matches!(
             inst,
             MInst::Load {
@@ -2626,24 +2633,30 @@ mod tests {
         optimize(&mut func);
 
         let insts = &func.blocks[0].insts;
-        assert!(insts.iter().any(|inst| matches!(
-            inst,
-            MInst::Load {
-                dst: VReg(2),
-                base: BaseReg::SimState,
-                offset: 16,
-                size: OpSize::S16,
-            }
-        )), "{insts:#?}");
-        assert!(insts.iter().any(|inst| matches!(
-            inst,
-            MInst::Store {
-                base: BaseReg::SimState,
-                offset: 32,
-                src: VReg(2),
-                size: OpSize::S16,
-            }
-        )), "{insts:#?}");
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S16,
+                }
+            )),
+            "{insts:#?}"
+        );
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    src: VReg(2),
+                    size: OpSize::S16,
+                }
+            )),
+            "{insts:#?}"
+        );
     }
 
     #[test]
@@ -2725,22 +2738,28 @@ mod tests {
         optimize(&mut func);
 
         let insts = &func.blocks[0].insts;
-        assert!(!insts.iter().any(|inst| matches!(
-            inst,
-            MInst::Load {
-                dst: VReg(1),
-                base: BaseReg::SimState,
-                offset: 17,
-                size: OpSize::S8,
-            }
-        )), "{insts:#?}");
-        assert!(insts.iter().any(|inst| matches!(
-            inst,
-            MInst::ShrImm {
-                dst: _,
-                src: VReg(0),
-                imm: 8,
-            }
-        )), "{insts:#?}");
+        assert!(
+            !insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 17,
+                    size: OpSize::S8,
+                }
+            )),
+            "{insts:#?}"
+        );
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::ShrImm {
+                    dst: _,
+                    src: VReg(0),
+                    imm: 8,
+                }
+            )),
+            "{insts:#?}"
+        );
     }
 }
