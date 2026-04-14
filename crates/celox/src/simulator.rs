@@ -152,7 +152,9 @@ impl<B: SimBackend> Simulator<B> {
     /// Manually triggers a clock or event to process sequential logic.
     pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
         if self.dirty {
-            self.backend.eval_comb()?;
+            self.backend.eval_dirty_apply_ff_and_comb(event)?;
+            self.dirty = false;
+            return Ok(());
         }
         self.backend.eval_apply_ff_and_comb(event)?;
         self.dirty = false;
