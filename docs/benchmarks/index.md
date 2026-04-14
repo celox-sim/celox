@@ -6,7 +6,8 @@ Celox includes benchmark suites for the Rust core, the TypeScript runtime, and V
 
 <ClientOnly><BenchmarkDashboard /></ClientOnly>
 
-You can also view the raw data on the [external dashboard](https://celox-sim.github.io/celox/dev/bench/).
+This page shows only the primary graphs: one main sequential workload, one main testbench workload, and a small set of representative stdlib workloads. Where relevant, Celox-specific variants such as DSE remain visible as separate series on the same chart.
+For the full benchmark matrix and raw data, use the [external dashboard](https://celox-sim.github.io/celox/dev/bench/).
 
 ## What is Measured
 

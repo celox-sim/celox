@@ -75,17 +75,27 @@ interface TabDef {
   sections: (cards: ChartCard[]) => TabSection[];
 }
 
+const PRIMARY_COUNTER_BENCHES = new Set([
+  "simulation_build_top_n1000",
+  "simulation_tick_top_n1000_x1000000",
+  "testbench_tick_top_n1000_x1000000",
+]);
+
+const PRIMARY_STDLIB_BENCHES = new Set([
+  "simulation_eval_linear_sec_p6_x1000000",
+  "simulation_eval_countones_w64_x1000000",
+  "simulation_eval_onehot_w64_x1000000",
+  "simulation_tick_std_counter_w32_x1000000",
+  "simulation_tick_fifo_w8_d16_x1000000",
+]);
+
 function stdlibSections(cards: ChartCard[]): TabSection[] {
   const groups: Record<string, ChartCard[]> = {
     "Linear SEC (P=6)": [],
     "Countones (W=64)": [],
     "std::counter (W=32)": [],
-    "std::gray_counter (W=32)": [],
     "std::fifo (W=8, D=16)": [],
-    "std::gray_codec (W=32)": [],
-    "std::edge_detector (W=32)": [],
     "std::onehot (W=64)": [],
-    "std::lfsr_galois (S=32)": [],
   };
 
   for (const card of cards) {
@@ -93,42 +103,12 @@ function stdlibSections(cards: ChartCard[]): TabSection[] {
       groups["Linear SEC (P=6)"].push(card);
     } else if (card.benchName.includes("countones")) {
       groups["Countones (W=64)"].push(card);
-    } else if (card.benchName.includes("gray_counter")) {
-      groups["std::gray_counter (W=32)"].push(card);
-    } else if (card.benchName.includes("gray_codec")) {
-      groups["std::gray_codec (W=32)"].push(card);
     } else if (card.benchName.includes("std_counter")) {
       groups["std::counter (W=32)"].push(card);
     } else if (card.benchName.includes("fifo")) {
       groups["std::fifo (W=8, D=16)"].push(card);
-    } else if (card.benchName.includes("edge_detector")) {
-      groups["std::edge_detector (W=32)"].push(card);
     } else if (card.benchName.includes("onehot")) {
       groups["std::onehot (W=64)"].push(card);
-    } else if (card.benchName.includes("lfsr")) {
-      groups["std::lfsr_galois (S=32)"].push(card);
-    }
-  }
-
-  return Object.entries(groups)
-    .filter(([, c]) => c.length > 0)
-    .map(([label, c]) => ({ label, cards: c }));
-}
-
-function apiSections(cards: ChartCard[]): TabSection[] {
-  const groups: Record<string, ChartCard[]> = {
-    Overhead: [],
-    "Time-based Simulation": [],
-    "Testbench Helpers": [],
-  };
-
-  for (const card of cards) {
-    if (/^simulator_tick_|^simulation_step_/.test(card.benchName)) {
-      groups["Overhead"].push(card);
-    } else if (/^simulation_time_|^runUntil/.test(card.benchName)) {
-      groups["Time-based Simulation"].push(card);
-    } else {
-      groups["Testbench Helpers"].push(card);
     }
   }
 
@@ -141,7 +121,6 @@ function singleSection(cards: ChartCard[]): TabSection[] {
   return cards.length > 0 ? [{ label: "", cards }] : [];
 }
 
-// Priority order: API > Optimize > Stdlib > Counter
 const tabs: TabDef[] = [
   {
     key: "counter",
@@ -152,32 +131,16 @@ const tabs: TabDef[] = [
   {
     key: "stdlib",
     label: "Std Library",
-    match: (n) =>
-      /linear_sec|countones|std_counter|gray_counter|gray_codec|fifo|edge_detector|onehot|lfsr/.test(n),
+    match: (n) => /linear_sec|countones|std_counter|fifo|onehot/.test(n),
     sections: stdlibSections,
-  },
-  {
-    key: "api",
-    label: "API",
-    match: (n) =>
-      /^simulator_tick_|^simulation_step_|^simulation_time_|^waitForCycles|^manual_step|^runUntil/.test(n),
-    sections: apiSections,
-  },
-  {
-    key: "optimize",
-    label: "Optimize",
-    match: (n) => n.includes("optimize"),
-    sections: singleSection,
   },
 ];
 
-// Matching uses reverse priority: later tabs get first chance
 function classifySeries(benchName: string): string {
-  // Check in reverse priority order: API > Optimize > Stdlib > Counter
-  for (const tab of [tabs[2], tabs[3], tabs[1], tabs[0]]) {
+  for (const tab of [tabs[1], tabs[0]]) {
     if (tab.match(benchName)) return tab.key;
   }
-  return "counter"; // fallback
+  return "hidden";
 }
 
 // --- Color palette ---
@@ -192,10 +155,10 @@ const RUNTIME_COLORS: Record<string, string> = {
 };
 
 const RUNTIME_LABELS: Record<string, string> = {
-  rust: "Rust",
-  "rust-dse": "Rust(DSE)",
-  "native-tb": "Native TB",
-  ts: "TS",
+  rust: "Celox (rust)",
+  "rust-dse": "Celox (rust-dse)",
+  "native-tb": "Celox (native-tb)",
+  ts: "Celox (ts)",
   verilator: "Verilator",
   unknown: "Unknown",
 };
@@ -213,13 +176,25 @@ function stripPrefix(name: string): string {
   return name.replace(/^(rust-dse|rust|ts|verilator)\//, "");
 }
 
-/** Normalize native_tb benchmarks so they merge into the same chart cards as their equivalents */
-function normalizeNativeTb(benchName: string): string {
-  if (!benchName.startsWith("native_tb_")) return benchName;
-  return benchName
-    .replace(/^native_tb_build_/, "simulation_build_")
-    .replace(/^native_tb_raw_tick_/, "simulation_tick_")
-    .replace(/_counter_n(\d+)/, "_top_n$1");
+/** Normalize variant-specific benchmark names so they merge into the same chart cards */
+function normalizeBenchName(benchName: string): string {
+  if (benchName.startsWith("native_tb_")) {
+    return benchName
+      .replace(/^native_tb_build_/, "simulation_build_")
+      .replace(/^native_tb_raw_tick_/, "simulation_tick_")
+      .replace(/_counter_n(\d+)/, "_top_n$1");
+  }
+
+  if (benchName.startsWith("dse_")) {
+    return benchName
+      .replace(/^dse_build_/, "simulation_build_")
+      .replace(/^dse_eval_/, "simulation_eval_")
+      .replace(/^dse_tick_/, "simulation_tick_")
+      .replace(/^dse_testbench_eval_/, "testbench_eval_")
+      .replace(/^dse_testbench_tick_/, "testbench_tick_");
+  }
+
+  return benchName;
 }
 
 function runtime(name: string): "rust" | "rust-dse" | "native-tb" | "ts" | "verilator" | "unknown" {
@@ -328,7 +303,7 @@ const allSeries = computed<Series[]>(() => {
     for (const [name, points] of map) {
       result.push({
         key: name,
-        benchName: normalizeNativeTb(stripPrefix(name)),
+        benchName: normalizeBenchName(stripPrefix(name)),
         runtime: runtime(name),
         points: points.sort((a, b) => a.date - b.date),
       });
@@ -338,10 +313,14 @@ const allSeries = computed<Series[]>(() => {
   return result;
 });
 
+function isPrimaryBench(benchName: string): boolean {
+  return PRIMARY_COUNTER_BENCHES.has(benchName) || PRIMARY_STDLIB_BENCHES.has(benchName);
+}
+
 // --- Computed: tabs with chart cards ---
 
 const tabData = computed(() => {
-  const seriesList = allSeries.value;
+  const seriesList = allSeries.value.filter((s) => isPrimaryBench(s.benchName));
   if (seriesList.length === 0) return new Map<string, TabSection[]>();
 
   // Group all series by tab
@@ -352,6 +331,7 @@ const tabData = computed(() => {
 
   for (const s of seriesList) {
     const tabKey = classifySeries(s.benchName);
+    if (tabKey === "hidden") continue;
     tabSeries.get(tabKey)?.push(s);
   }
 
@@ -513,16 +493,23 @@ onMounted(async () => {
       </div>
 
       <!-- Tab content: sections with chart card grids -->
-      <div v-if="activeSections.length > 0" class="bench-sections">
+      <div
+        v-if="activeSections.length > 0"
+        :class="['bench-sections', { 'bench-sections-columns': activeTab === 'stdlib' }]"
+      >
         <div
           v-for="section in activeSections"
           :key="section.label"
-          class="bench-section"
+          :class="['bench-section', { 'bench-section-column': activeTab === 'stdlib' }]"
         >
           <h3 v-if="section.label" class="bench-section-title">
             {{ section.label }}
           </h3>
-          <div class="bench-grid">
+          <div
+            :class="[
+              activeTab === 'stdlib' ? 'bench-column-cards' : 'bench-grid',
+            ]"
+          >
             <div
               v-for="card in section.cards"
               :key="card.benchName"
@@ -600,6 +587,17 @@ onMounted(async () => {
   gap: 1.5rem;
 }
 
+.bench-sections-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.bench-section-column {
+  min-width: 0;
+}
+
 .bench-section-title {
   font-size: 0.95rem;
   font-weight: 600;
@@ -607,6 +605,12 @@ onMounted(async () => {
   margin: 0 0 0.75rem 0;
   padding-bottom: 0.35rem;
   border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.bench-column-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
 
 /* --- Card grid --- */

@@ -6,7 +6,8 @@ Celox には Rust コア、TypeScript ランタイム、および参照ベース
 
 <ClientOnly><BenchmarkDashboard /></ClientOnly>
 
-生データは[外部ダッシュボード](https://celox-sim.github.io/celox/dev/bench/)でも確認できます。
+このページでは主要なグラフだけを表示します。メインの順序回路ワークロード、主要なテストベンチ指標、代表的な stdlib ワークロードだけに絞っています。必要な場合は DSE のような Celox 側の系列だけ同じグラフ内に残します。
+完全なベンチマーク行列と生データは[外部ダッシュボード](https://celox-sim.github.io/celox/dev/bench/)を見てください。
 
 ## 測定対象
 
