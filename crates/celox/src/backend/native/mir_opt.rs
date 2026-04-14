@@ -16,6 +16,7 @@ pub fn optimize(func: &mut MFunction) {
             constant_dedup(func);
             copy_propagate(func);
             forward_local_store_loads(func);
+            eliminate_redundant_local_stores(func);
             algebraic_simplify(func);
             redundant_mask_eliminate(func);
             global_gvn(func);
@@ -33,6 +34,7 @@ pub fn optimize(func: &mut MFunction) {
         constant_dedup(func);
         copy_propagate(func);
         forward_local_store_loads(func);
+        eliminate_redundant_local_stores(func);
         algebraic_simplify(func);
         redundant_mask_eliminate(func);
         fold_add_chain_to_popcnt(func);
@@ -2056,6 +2058,58 @@ fn forward_local_store_loads(func: &mut MFunction) {
     }
 }
 
+fn eliminate_redundant_local_stores(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        let mut available: HashMap<MemorySlot, VReg> = HashMap::new();
+        let mut rewritten = Vec::with_capacity(block.insts.len());
+
+        for inst in block.insts.drain(..) {
+            match inst {
+                MInst::Store {
+                    base,
+                    offset,
+                    src,
+                    size,
+                } => {
+                    let key = MemorySlot { base, offset, size };
+                    let redundant = available.get(&key).copied() == Some(src);
+                    invalidate_overlapping_slots(&mut available, base, offset, size);
+                    available.insert(key, src);
+                    if !redundant {
+                        rewritten.push(MInst::Store {
+                            base,
+                            offset,
+                            src,
+                            size,
+                        });
+                    }
+                }
+                MInst::LoadIndexed { .. } | MInst::StoreIndexed { .. } => {
+                    available.clear();
+                    rewritten.push(inst);
+                }
+                MInst::Load {
+                    dst,
+                    base,
+                    offset,
+                    size,
+                } => {
+                    available.insert(MemorySlot { base, offset, size }, dst);
+                    rewritten.push(MInst::Load {
+                        dst,
+                        base,
+                        offset,
+                        size,
+                    });
+                }
+                other => rewritten.push(other),
+            }
+        }
+
+        block.insts = rewritten;
+    }
+}
+
 fn invalidate_overlapping_slots(
     available: &mut HashMap<MemorySlot, VReg>,
     base: BaseReg,
@@ -2491,5 +2545,50 @@ mod tests {
                 size: OpSize::S16,
             }
         )), "{insts:#?}");
+    }
+
+    #[test]
+    fn eliminates_redundant_same_slot_store() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            1,
+        );
+
+        optimize(&mut func);
+
+        let store_count = func.blocks[0]
+            .insts
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 16,
+                        src: VReg(0),
+                        size: OpSize::S8,
+                    }
+                )
+            })
+            .count();
+        assert_eq!(store_count, 1, "{:#?}", func.blocks[0].insts);
     }
 }

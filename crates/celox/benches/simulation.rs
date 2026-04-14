@@ -667,6 +667,44 @@ fn benchmark_onehot(c: &mut Criterion) {
     });
 }
 
+fn benchmark_onehot_dse(c: &mut Criterion) {
+    c.bench_function("dse_build_onehot_w64", |b| {
+        b.iter(|| {
+            let _sim = Simulator::builder(ONEHOT_SRC, "Top")
+                .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+                .build()
+                .unwrap();
+        })
+    });
+
+    let mut sim = Simulator::builder(ONEHOT_SRC, "Top")
+        .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+        .build()
+        .unwrap();
+    let i_data = sim.signal("i_data");
+    let o_onehot = sim.signal("o_onehot");
+
+    c.bench_function("dse_eval_onehot_w64_x1", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            sim.set(i_data, input);
+            std::hint::black_box(sim.get_as::<u8>(o_onehot));
+            input = input.wrapping_add(1);
+        })
+    });
+
+    c.bench_function("dse_eval_onehot_w64_x1000000", |b| {
+        let mut input: u64 = 0;
+        b.iter(|| {
+            for _ in 0..1_000_000 {
+                sim.set(i_data, input);
+                std::hint::black_box(sim.get_as::<u8>(o_onehot));
+                input = input.wrapping_add(1);
+            }
+        })
+    });
+}
+
 fn benchmark_lfsr(c: &mut Criterion) {
     c.bench_function("simulation_build_lfsr_w32", |b| {
         b.iter(|| {
@@ -806,6 +844,7 @@ criterion_group!(
     benchmark_gray_counter,
     benchmark_countones_dse,
     benchmark_linear_sec_dse,
+    benchmark_onehot_dse,
     benchmark_fifo,
     benchmark_gray_codec,
     benchmark_edge_detector,

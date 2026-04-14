@@ -54,9 +54,15 @@ impl ExecutionUnitPass for IdentityStoreBypassPass {
             }
         }
 
-        // Find identity Stores: Store(B, 0, W, reg) where reg = identity_copy(A)
-        // and B has exactly one Store
+        // Find aliasable Stores:
+        // 1. Identity Stores: Store(B, 0, W, reg) where reg = identity_copy(A)
+        // 2. Duplicate Stores: Store(A, 0, W, reg) and Store(B, 0, W, reg)
+        //    where both A and B are single-writer addresses. This captures
+        //    pure combinational instance glue that writes the same computed
+        //    value to both a child output and a parent-local wire.
         let mut found_aliases: Vec<(RegionedAbsoluteAddr, RegionedAbsoluteAddr)> = Vec::new();
+        let mut duplicate_store_canonicals: HashMap<(RegisterId, usize), RegionedAbsoluteAddr> =
+            HashMap::default();
         for block in eu.blocks.values() {
             for inst in &block.instructions {
                 let SIRInstruction::Store(addr_b, SIROffset::Static(0), width, src_reg, _triggers) =
@@ -76,7 +82,17 @@ impl ExecutionUnitPass for IdentityStoreBypassPass {
                 if let Some(addr_a) = trace_identity_source(*src_reg, *width, &defs) {
                     if addr_a.absolute_addr() != addr_b.absolute_addr() {
                         found_aliases.push((*addr_b, addr_a));
+                        continue;
                     }
+                }
+
+                let key = (*src_reg, *width);
+                if let Some(addr_a) = duplicate_store_canonicals.get(&key) {
+                    if addr_a.absolute_addr() != addr_b.absolute_addr() {
+                        found_aliases.push((*addr_b, *addr_a));
+                    }
+                } else {
+                    duplicate_store_canonicals.insert(key, *addr_b);
                 }
             }
         }
