@@ -75,6 +75,10 @@ interface TabDef {
   sections: (cards: ChartCard[]) => TabSection[];
 }
 
+const props = withDefaults(defineProps<{ mode?: "overview" | "diagnostic" }>(), {
+  mode: "overview",
+});
+
 const PRIMARY_COUNTER_BENCHES = new Set([
   "simulation_build_top_n1000",
   "simulation_tick_top_n1000_x1000000",
@@ -91,24 +95,24 @@ const PRIMARY_STDLIB_BENCHES = new Set([
 
 function stdlibSections(cards: ChartCard[]): TabSection[] {
   const groups: Record<string, ChartCard[]> = {
-    "Linear SEC (P=6)": [],
-    "Countones (W=64)": [],
-    "std::counter (W=32)": [],
-    "std::fifo (W=8, D=16)": [],
-    "std::onehot (W=64)": [],
+    "General Comb: countones": [],
+    "Comb + Liveness: onehot": [],
+    "Structured Datapath: linear_sec": [],
+    "Sequential Runtime: std::counter": [],
+    "Sequential Runtime: std::fifo": [],
   };
 
   for (const card of cards) {
     if (card.benchName.includes("linear_sec")) {
-      groups["Linear SEC (P=6)"].push(card);
+      groups["Structured Datapath: linear_sec"].push(card);
     } else if (card.benchName.includes("countones")) {
-      groups["Countones (W=64)"].push(card);
+      groups["General Comb: countones"].push(card);
     } else if (card.benchName.includes("std_counter")) {
-      groups["std::counter (W=32)"].push(card);
+      groups["Sequential Runtime: std::counter"].push(card);
     } else if (card.benchName.includes("fifo")) {
-      groups["std::fifo (W=8, D=16)"].push(card);
+      groups["Sequential Runtime: std::fifo"].push(card);
     } else if (card.benchName.includes("onehot")) {
-      groups["std::onehot (W=64)"].push(card);
+      groups["Comb + Liveness: onehot"].push(card);
     }
   }
 
@@ -121,7 +125,7 @@ function singleSection(cards: ChartCard[]): TabSection[] {
   return cards.length > 0 ? [{ label: "", cards }] : [];
 }
 
-const tabs: TabDef[] = [
+const overviewTabs: TabDef[] = [
   {
     key: "counter",
     label: "Counter",
@@ -136,8 +140,53 @@ const tabs: TabDef[] = [
   },
 ];
 
+function apiSections(cards: ChartCard[]): TabSection[] {
+  const groups: Record<string, ChartCard[]> = {
+    Overhead: [],
+    "Time-based Simulation": [],
+    "Testbench Helpers": [],
+  };
+
+  for (const card of cards) {
+    if (/^simulator_tick_|^simulation_step_/.test(card.benchName)) {
+      groups["Overhead"].push(card);
+    } else if (/^simulation_time_|^runUntil/.test(card.benchName)) {
+      groups["Time-based Simulation"].push(card);
+    } else {
+      groups["Testbench Helpers"].push(card);
+    }
+  }
+
+  return Object.entries(groups)
+    .filter(([, c]) => c.length > 0)
+    .map(([label, c]) => ({ label, cards: c }));
+}
+
+const diagnosticTabs: TabDef[] = [
+  ...overviewTabs,
+  {
+    key: "api",
+    label: "API",
+    match: (n) =>
+      /^simulator_tick_|^simulation_step_|^simulation_time_|^waitForCycles|^manual_step|^runUntil/.test(n),
+    sections: apiSections,
+  },
+  {
+    key: "optimize",
+    label: "Optimize",
+    match: (n) => n.includes("optimize"),
+    sections: singleSection,
+  },
+];
+
+const tabs = computed(() => (props.mode === "diagnostic" ? diagnosticTabs : overviewTabs));
+
 function classifySeries(benchName: string): string {
-  for (const tab of [tabs[1], tabs[0]]) {
+  const orderedTabs = tabs.value.length > 2
+    ? [tabs.value[2], tabs.value[3], tabs.value[1], tabs.value[0]]
+    : [tabs.value[1], tabs.value[0]];
+
+  for (const tab of orderedTabs) {
     if (tab.match(benchName)) return tab.key;
   }
   return "hidden";
@@ -320,12 +369,15 @@ function isPrimaryBench(benchName: string): boolean {
 // --- Computed: tabs with chart cards ---
 
 const tabData = computed(() => {
-  const seriesList = allSeries.value.filter((s) => isPrimaryBench(s.benchName));
+  const seriesList =
+    props.mode === "diagnostic"
+      ? allSeries.value
+      : allSeries.value.filter((s) => isPrimaryBench(s.benchName));
   if (seriesList.length === 0) return new Map<string, TabSection[]>();
 
   // Group all series by tab
   const tabSeries = new Map<string, Series[]>();
-  for (const tab of tabs) {
+  for (const tab of tabs.value) {
     tabSeries.set(tab.key, []);
   }
 
@@ -338,7 +390,7 @@ const tabData = computed(() => {
   // Within each tab, group series by benchName into chart cards
   const result = new Map<string, TabSection[]>();
 
-  for (const tab of tabs) {
+  for (const tab of tabs.value) {
     const tabSeriesList = tabSeries.get(tab.key) ?? [];
 
     // Group by benchName
@@ -365,7 +417,7 @@ const tabData = computed(() => {
 
 /** Which tabs actually have data */
 const availableTabs = computed(() =>
-  tabs.filter((t) => {
+  tabs.value.filter((t) => {
     const sections = tabData.value.get(t.key);
     return sections && sections.some((s) => s.cards.length > 0);
   }),

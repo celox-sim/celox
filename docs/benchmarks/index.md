@@ -6,8 +6,9 @@ Celox includes benchmark suites for the Rust core, the TypeScript runtime, and V
 
 <ClientOnly><BenchmarkDashboard /></ClientOnly>
 
-This page shows only the primary graphs: one main sequential workload, one main testbench workload, and a small set of representative stdlib workloads. Where relevant, Celox-specific variants such as DSE remain visible as separate series on the same chart.
+This page shows only the primary graphs: one main sequential workload, one main testbench workload, and a small set of representative stdlib workloads. The stdlib tab is organized by optimization character, not by catalog completeness: general combinational optimization, combinational workloads that are sensitive to liveness and DSE, larger structured datapaths, and sequential/runtime-dominated modules. Where relevant, Celox-specific variants such as DSE remain visible as separate series on the same chart.
 For the full benchmark matrix and raw data, use the [external dashboard](https://celox-sim.github.io/celox/dev/bench/).
+For more compiler-facing graphs, use the [diagnostic page](/benchmarks/diagnostic).
 
 ## What is Measured
 
