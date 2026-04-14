@@ -15,6 +15,7 @@ pub fn optimize(func: &mut MFunction) {
             constant_fold(func);
             constant_dedup(func);
             copy_propagate(func);
+            forward_local_store_loads(func);
             algebraic_simplify(func);
             redundant_mask_eliminate(func);
             global_gvn(func);
@@ -31,6 +32,7 @@ pub fn optimize(func: &mut MFunction) {
         constant_fold(func);
         constant_dedup(func);
         copy_propagate(func);
+        forward_local_store_loads(func);
         algebraic_simplify(func);
         redundant_mask_eliminate(func);
         fold_add_chain_to_popcnt(func);
@@ -2001,6 +2003,77 @@ fn constant_dedup(func: &mut MFunction) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MemorySlot {
+    base: BaseReg,
+    offset: i32,
+    size: OpSize,
+}
+
+fn forward_local_store_loads(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        let mut available: HashMap<MemorySlot, VReg> = HashMap::new();
+
+        for inst in &mut block.insts {
+            match inst {
+                MInst::Store {
+                    base,
+                    offset,
+                    src,
+                    size,
+                } => {
+                    invalidate_overlapping_slots(&mut available, *base, *offset, *size);
+                    available.insert(
+                        MemorySlot {
+                            base: *base,
+                            offset: *offset,
+                            size: *size,
+                        },
+                        *src,
+                    );
+                }
+                MInst::Load {
+                    dst,
+                    base,
+                    offset,
+                    size,
+                } => {
+                    let key = MemorySlot {
+                        base: *base,
+                        offset: *offset,
+                        size: *size,
+                    };
+                    if let Some(&src) = available.get(&key) {
+                        *inst = MInst::Mov { dst: *dst, src };
+                    }
+                }
+                MInst::LoadIndexed { .. } | MInst::StoreIndexed { .. } => {
+                    available.clear();
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn invalidate_overlapping_slots(
+    available: &mut HashMap<MemorySlot, VReg>,
+    base: BaseReg,
+    offset: i32,
+    size: OpSize,
+) {
+    let start = offset as i64;
+    let end = start + i64::from(size.bytes());
+    available.retain(|slot, _| {
+        if slot.base != base {
+            return true;
+        }
+        let slot_start = slot.offset as i64;
+        let slot_end = slot_start + i64::from(slot.size.bytes());
+        slot_end <= start || end <= slot_start
+    });
+}
+
 /// Copy propagation: for each `Mov { dst, src }`, replace all uses of dst
 /// with src throughout the function. Then remove the Mov.
 fn copy_propagate(func: &mut MFunction) {
@@ -2280,5 +2353,143 @@ mod tests {
                 src: _
             }
         )));
+    }
+
+    #[test]
+    fn forwards_exact_store_to_load_in_block() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 0x55,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S8,
+                },
+                MInst::AddImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(2),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        optimize(&mut func);
+
+        let insts = &func.blocks[0].insts;
+        assert!(insts.iter().any(|inst| matches!(
+            inst,
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 85,
+            }
+        )), "{insts:#?}");
+        assert!(insts.iter().any(|inst| matches!(
+            inst,
+            MInst::AddImm {
+                dst: VReg(2),
+                src: VReg(1),
+                imm: 1,
+            }
+        )), "{insts:#?}");
+        assert!(insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(2),
+                size: OpSize::S8,
+            }
+        )), "{insts:#?}");
+        assert!(!insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S8,
+            }
+        )));
+    }
+
+    #[test]
+    fn does_not_forward_across_overlapping_store() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 0x1122,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0x33,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S16,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 17,
+                    src: VReg(1),
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S16,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    src: VReg(2),
+                    size: OpSize::S16,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        optimize(&mut func);
+
+        let insts = &func.blocks[0].insts;
+        assert!(insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S16,
+            }
+        )), "{insts:#?}");
+        assert!(insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 32,
+                src: VReg(2),
+                size: OpSize::S16,
+            }
+        )), "{insts:#?}");
     }
 }
