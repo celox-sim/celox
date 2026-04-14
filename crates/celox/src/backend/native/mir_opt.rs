@@ -24,6 +24,7 @@ pub fn optimize(func: &mut MFunction) {
         dead_code_eliminate(func);
         sink_loads(func);
         split_live_ranges(func);
+        fold_add_chain_to_popcnt(func);
         fold_xor_chain_to_pext(func);
     } else {
         // Low-pressure: lightweight but complete pipeline
@@ -32,6 +33,7 @@ pub fn optimize(func: &mut MFunction) {
         copy_propagate(func);
         algebraic_simplify(func);
         redundant_mask_eliminate(func);
+        fold_add_chain_to_popcnt(func);
         fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
         lower_to_imm_forms(func);
@@ -1733,6 +1735,94 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
     }
 }
 
+/// Fold add trees of single-bit extractions from the same source into
+/// `and mask` + `popcnt`.
+///
+/// Pattern: `(src >> a) & 1 + (src >> b) & 1 + ...`
+/// Replacement:
+///   if mask == all_ones: `popcnt src`
+///   else: `masked = and src, mask; popcnt masked`
+fn fold_add_chain_to_popcnt(func: &mut MFunction) {
+    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let Some(d) = inst.def() {
+                defs.insert(d, inst.clone());
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
+
+        for (inst_idx, inst) in block.insts.iter().enumerate() {
+            let MInst::Add { dst, lhs, rhs } = inst else {
+                continue;
+            };
+
+            let mut bits: Vec<(VReg, u64)> = Vec::new();
+            let mut source_reg: Option<VReg> = None;
+
+            if !collect_add_chain_bits(*lhs, &defs, &mut bits, &mut source_reg)
+                || !collect_add_chain_bits(*rhs, &defs, &mut bits, &mut source_reg)
+            {
+                continue;
+            }
+
+            let Some(src) = source_reg else { continue };
+            if bits.len() < 3 {
+                continue;
+            }
+
+            let mut mask: u64 = 0;
+            for &(_, bit) in &bits {
+                if bit < 64 {
+                    if (mask >> bit) & 1 == 1 {
+                        mask = 0;
+                        break;
+                    }
+                    mask |= 1u64 << bit;
+                }
+            }
+            if mask == 0 {
+                continue;
+            }
+
+            let all_bits_mask = if bits.len() >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits.len()) - 1
+            };
+
+            let new_insts = if mask == u64::MAX || mask == all_bits_mask {
+                vec![MInst::Popcnt { dst: *dst, src }]
+            } else {
+                let masked_vreg = func.vregs.alloc();
+                while func.spill_descs.len() <= masked_vreg.0 as usize {
+                    func.spill_descs.push(SpillDesc::transient());
+                }
+                vec![
+                    MInst::AndImm {
+                        dst: masked_vreg,
+                        src,
+                        imm: mask,
+                    },
+                    MInst::Popcnt {
+                        dst: *dst,
+                        src: masked_vreg,
+                    },
+                ]
+            };
+
+            replacements.push((inst_idx, new_insts));
+        }
+
+        for (idx, new_insts) in replacements.into_iter().rev() {
+            block.insts.splice(idx..=idx, new_insts);
+        }
+    }
+}
+
 /// Recursively collect single-bit extractions from a XOR chain.
 /// Returns true if the entire chain consists of single-bit extractions
 /// from the same source register.
@@ -1803,6 +1893,57 @@ fn collect_xor_chain_bits(
         }
     }
     true
+}
+
+/// Recursively collect single-bit extractions from an add tree.
+/// Returns true if the tree contains only 0/1 bit extractions from one source.
+fn collect_add_chain_bits(
+    reg: VReg,
+    defs: &HashMap<VReg, MInst>,
+    bits: &mut Vec<(VReg, u64)>,
+    source_reg: &mut Option<VReg>,
+) -> bool {
+    let Some(def) = defs.get(&reg) else {
+        return false;
+    };
+
+    match def {
+        MInst::Add { lhs, rhs, .. } => {
+            collect_add_chain_bits(*lhs, defs, bits, source_reg)
+                && collect_add_chain_bits(*rhs, defs, bits, source_reg)
+        }
+        MInst::Mov { src, .. } => collect_add_chain_bits(*src, defs, bits, source_reg),
+        MInst::AddImm { src, imm, .. } if *imm == 0 => {
+            collect_add_chain_bits(*src, defs, bits, source_reg)
+        }
+        MInst::AndImm { src, imm, .. } if *imm == 1 => {
+            let Some(inner) = defs.get(src) else {
+                return false;
+            };
+            match inner {
+                MInst::ShrImm { src, imm, .. } => {
+                    match source_reg {
+                        Some(s) if *s != *src => return false,
+                        None => *source_reg = Some(*src),
+                        _ => {}
+                    }
+                    bits.push((*src, *imm as u64));
+                    true
+                }
+                MInst::Mov { src, .. } => {
+                    match source_reg {
+                        Some(s) if *s != *src => return false,
+                        None => *source_reg = Some(*src),
+                        _ => {}
+                    }
+                    bits.push((*src, 0));
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Constant deduplication: merge LoadImm instructions with the same value
@@ -1972,5 +2113,172 @@ fn rewrite_uses(inst: &mut MInst, aliases: &HashMap<VReg, VReg>) {
         if let Some(&target) = aliases.get(&u) {
             inst.rewrite_use(u, target);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_func(insts: Vec<MInst>, vreg_count: u32) -> MFunction {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..vreg_count {
+            vregs.alloc();
+        }
+        let spill_descs = (0..vreg_count).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = insts;
+        func.push_block(block);
+        func
+    }
+
+    #[test]
+    fn folds_add_tree_of_bit_extracts_to_popcnt() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::ShrImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0,
+                },
+                MInst::AndImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 1,
+                },
+                MInst::ShrImm {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 1,
+                },
+                MInst::AndImm {
+                    dst: VReg(4),
+                    src: VReg(3),
+                    imm: 1,
+                },
+                MInst::ShrImm {
+                    dst: VReg(5),
+                    src: VReg(0),
+                    imm: 2,
+                },
+                MInst::AndImm {
+                    dst: VReg(6),
+                    src: VReg(5),
+                    imm: 1,
+                },
+                MInst::Add {
+                    dst: VReg(7),
+                    lhs: VReg(2),
+                    rhs: VReg(4),
+                },
+                MInst::Add {
+                    dst: VReg(8),
+                    lhs: VReg(7),
+                    rhs: VReg(6),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(8),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            9,
+        );
+
+        optimize(&mut func);
+
+        let insts = &func.blocks[0].insts;
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Popcnt {
+                    dst: VReg(8),
+                    src: _
+                }
+            )),
+            "{insts:#?}"
+        );
+    }
+
+    #[test]
+    fn does_not_fold_add_tree_with_duplicate_bit() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::ShrImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0,
+                },
+                MInst::AndImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 1,
+                },
+                MInst::ShrImm {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 0,
+                },
+                MInst::AndImm {
+                    dst: VReg(4),
+                    src: VReg(3),
+                    imm: 1,
+                },
+                MInst::ShrImm {
+                    dst: VReg(5),
+                    src: VReg(0),
+                    imm: 2,
+                },
+                MInst::AndImm {
+                    dst: VReg(6),
+                    src: VReg(5),
+                    imm: 1,
+                },
+                MInst::Add {
+                    dst: VReg(7),
+                    lhs: VReg(2),
+                    rhs: VReg(4),
+                },
+                MInst::Add {
+                    dst: VReg(8),
+                    lhs: VReg(7),
+                    rhs: VReg(6),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(8),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            9,
+        );
+
+        optimize(&mut func);
+
+        let insts = &func.blocks[0].insts;
+        assert!(!insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Popcnt {
+                dst: VReg(8),
+                src: _
+            }
+        )));
     }
 }
