@@ -165,6 +165,9 @@ pub enum DeadStorePolicy {
     /// Keep all stores (no dead store elimination). Default for user-facing builds.
     #[default]
     Off,
+    /// Eliminate stores except those explicitly marked live via `live_signal()`
+    /// and those loaded by execution units.
+    PreserveListedSignals,
     /// Eliminate stores except those to top-module ports and those loaded by EUs.
     PreserveTopPorts,
     /// Eliminate stores except those to ports of *all* instances and those loaded by EUs.

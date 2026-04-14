@@ -671,14 +671,16 @@ fn benchmark_onehot_dse(c: &mut Criterion) {
     c.bench_function("dse_build_onehot_w64", |b| {
         b.iter(|| {
             let _sim = Simulator::builder(ONEHOT_SRC, "Top")
-                .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+                .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+                .live_signal(vec![], vec!["o_onehot".to_string()])
                 .build()
                 .unwrap();
         })
     });
 
     let mut sim = Simulator::builder(ONEHOT_SRC, "Top")
-        .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+        .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+        .live_signal(vec![], vec!["o_onehot".to_string()])
         .build()
         .unwrap();
     let i_data = sim.signal("i_data");
