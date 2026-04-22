@@ -1083,22 +1083,32 @@ fn eval_for_bound(
     }
 }
 
-fn collect_written_vars(statements: &[Statement], out: &mut HashSet<VarId>) {
+fn collect_written_accesses(
+    module: &Module,
+    statements: &[Statement],
+    out: &mut HashMap<VarId, Vec<BitAccess>>,
+) -> Result<(), ParserError> {
     for stmt in statements {
         match stmt {
             Statement::Assign(assign) => {
                 for dst in &assign.dst {
-                    out.insert(dst.id);
+                    let width = resolve_total_width(module, &module.variables[&dst.id])?;
+                    let access = if is_static_access(&dst.index, &dst.select) {
+                        eval_var_select(module, dst.id, &dst.index, &dst.select)?
+                    } else {
+                        BitAccess::new(0, width - 1)
+                    };
+                    out.entry(dst.id).or_default().push(access);
                 }
             }
             Statement::If(if_stmt) => {
-                collect_written_vars(&if_stmt.true_side, out);
-                collect_written_vars(&if_stmt.false_side, out);
+                collect_written_accesses(module, &if_stmt.true_side, out)?;
+                collect_written_accesses(module, &if_stmt.false_side, out)?;
             }
-            Statement::For(for_stmt) => collect_written_vars(&for_stmt.body, out),
+            Statement::For(for_stmt) => collect_written_accesses(module, &for_stmt.body, out)?,
             Statement::IfReset(if_reset) => {
-                collect_written_vars(&if_reset.true_side, out);
-                collect_written_vars(&if_reset.false_side, out);
+                collect_written_accesses(module, &if_reset.true_side, out)?;
+                collect_written_accesses(module, &if_reset.false_side, out)?;
             }
             Statement::SystemFunctionCall(_)
             | Statement::FunctionCall(_)
@@ -1108,6 +1118,7 @@ fn collect_written_vars(statements: &[Statement], out: &mut HashSet<VarId>) {
             | Statement::Null => {}
         }
     }
+    Ok(())
 }
 
 fn eval_for(
@@ -1127,11 +1138,35 @@ fn eval_for(
     };
 
     let mut symbolic_store = store.clone();
-    let mut written_vars = HashSet::default();
-    collect_written_vars(&for_stmt.body, &mut written_vars);
-    for id in written_vars {
+    let mut written_accesses = HashMap::default();
+    collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
+    for (id, accesses) in written_accesses {
         let width = resolve_total_width(module, &module.variables[&id])?;
-        symbolic_store.insert(id, RangeStore::new(None, width));
+        let mut loop_store = RangeStore::new(None, width);
+        let mut covered = vec![false; width];
+        for access in accesses {
+            for bit in access.lsb..=access.msb {
+                covered[bit] = true;
+            }
+        }
+        let original = store.get(&id).cloned().unwrap_or_else(|| RangeStore::new(None, width));
+        let mut bit = 0usize;
+        while bit < width {
+            if covered[bit] {
+                bit += 1;
+                continue;
+            }
+            let start = bit;
+            while bit < width && !covered[bit] {
+                bit += 1;
+            }
+            let end = bit - 1;
+            let access = BitAccess::new(start, end);
+            let parts = original.get_parts(access);
+            let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena);
+            loop_store.update(access, Some((expr, sources)));
+        }
+        symbolic_store.insert(id, loop_store);
     }
     symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
     let iter_store_before = symbolic_store.clone();
