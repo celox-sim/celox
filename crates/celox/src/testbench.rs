@@ -369,6 +369,16 @@ unsafe fn read_le_wide(ptr: *const u8, byte_size: usize, width: usize) -> BigUin
     val
 }
 
+fn sim_set_u64<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef, value: u64) {
+    match sig.width {
+        0..=8 => sim.set(sig, value as u8),
+        9..=16 => sim.set(sig, value as u16),
+        17..=32 => sim.set(sig, value as u32),
+        33..=64 => sim.set(sig, value),
+        _ => sim.set_wide(sig, BigUint::from(value)),
+    }
+}
+
 // ── Typed evaluation ───────────────────────────────────────────────────
 
 /// Binary operation on `TbValue`.  When both operands are `U64` the fast
@@ -1432,13 +1442,13 @@ fn exec_one_detailed<B: SimBackend>(
             assert_value,
             deassert_value,
         } => {
-            sim.set(*reset_signal, *assert_value);
+            sim_set_u64(sim, *reset_signal, (*assert_value).into());
             for _ in 0..*duration {
                 if let Err(e) = sim.tick(*clock_event) {
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
             }
-            sim.set(*reset_signal, *deassert_value);
+            sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
         }
         TestbenchStatement::Assert {
@@ -1486,7 +1496,7 @@ fn exec_one_detailed<B: SimBackend>(
                 while i.checked_sub(*step).is_some_and(|next| next >= *start) {
                     i -= step;
                     if let Some((sig, _)) = loop_var {
-                        sim.set(*sig, i as u64);
+                        sim_set_u64(sim, *sig, i as u64);
                     }
                     let r = exec_detailed(sim, body, ctx);
                     if matches!(r, ExecResult::Finished | ExecResult::Fail(_)) {
@@ -1497,7 +1507,7 @@ fn exec_one_detailed<B: SimBackend>(
                 let mut i = *start;
                 while i < *end {
                     if let Some((sig, _)) = loop_var {
-                        sim.set(*sig, i as u64);
+                        sim_set_u64(sim, *sig, i as u64);
                     }
                     let r = exec_detailed(sim, body, ctx);
                     if matches!(r, ExecResult::Finished | ExecResult::Fail(_)) {
@@ -1515,7 +1525,7 @@ fn exec_one_detailed<B: SimBackend>(
             let (ptr, _) = sim.memory_as_mut_ptr();
             let val = expr.eval_value(ptr);
             match val {
-                TbValue::U64(v) => sim.set(*dst, v),
+                TbValue::U64(v) => sim_set_u64(sim, *dst, v),
                 TbValue::Wide(v) => sim.set_wide(*dst, v),
             }
             ExecResult::Continue
@@ -1546,13 +1556,13 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
             assert_value,
             deassert_value,
         } => {
-            sim.set(*reset_signal, *assert_value);
+            sim_set_u64(sim, *reset_signal, (*assert_value).into());
             for _ in 0..*duration {
                 if let Err(e) = sim.tick(*clock_event) {
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
             }
-            sim.set(*reset_signal, *deassert_value);
+            sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
         }
         TestbenchStatement::Assert { expr, message, .. } => {
@@ -1594,7 +1604,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
                 while i.checked_sub(*step).is_some_and(|next| next >= *start) {
                     i -= step;
                     if let Some((sig, _)) = loop_var {
-                        sim.set(*sig, i as u64);
+                        sim_set_u64(sim, *sig, i as u64);
                     }
                     let r = exec(sim, body);
                     if r.should_stop() {
@@ -1605,7 +1615,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
                 let mut i = *start;
                 while i < *end {
                     if let Some((sig, _)) = loop_var {
-                        sim.set(*sig, i as u64);
+                        sim_set_u64(sim, *sig, i as u64);
                     }
                     let r = exec(sim, body);
                     if r.should_stop() {
@@ -1623,7 +1633,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
             let (ptr, _) = sim.memory_as_mut_ptr();
             let val = expr.eval_value(ptr);
             match val {
-                TbValue::U64(v) => sim.set(*dst, v),
+                TbValue::U64(v) => sim_set_u64(sim, *dst, v),
                 TbValue::Wide(v) => sim.set_wide(*dst, v),
             }
             ExecResult::Continue
