@@ -43,6 +43,62 @@ fn test_ff_nonblocking(sim) {
     assert_eq!(sim.get(q), 0x11111111u32.into());
 }
 
+fn test_ff_runtime_for_bounds(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<8>,
+            q_fwd: output logic<8>,
+            q_rev: output logic<8>,
+            q_inc: output logic<8>,
+            q_step: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_fwd = 8'hee;
+                for i: u32 in 0..count {
+                    q_fwd = i as 8;
+                }
+
+                q_rev = 8'hee;
+                for i: i32 in rev 0..count {
+                    q_rev = i as 8;
+                }
+
+                q_inc = 8'hee;
+                for i: u32 in 0..=count {
+                    q_inc = i as 8;
+                }
+
+                q_step = 8'hee;
+                for i: u32 in 1..(count + 4) step *= 2 {
+                    q_step = i as 8;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let count = sim.signal("count");
+    let q_fwd = sim.signal("q_fwd");
+    let q_rev = sim.signal("q_rev");
+    let q_inc = sim.signal("q_inc");
+    let q_step = sim.signal("q_step");
+
+    sim.modify(|io| io.set(count, 4u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_fwd), 3u32.into());
+    assert_eq!(sim.get(q_rev), 0u32.into());
+    assert_eq!(sim.get(q_inc), 4u32.into());
+    assert_eq!(sim.get(q_step), 4u32.into());
+
+    sim.modify(|io| io.set(count, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_fwd), 4u32.into());
+    assert_eq!(sim.get(q_rev), 0u32.into());
+    assert_eq!(sim.get(q_inc), 5u32.into());
+    assert_eq!(sim.get(q_step), 8u32.into());
+}
+
 fn test_ff_if_reset_basic(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

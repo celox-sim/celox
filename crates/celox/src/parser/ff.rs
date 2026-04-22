@@ -15,8 +15,8 @@ use bit_set::BitSet;
 use num_traits::ToPrimitive;
 
 use veryl_analyzer::ir::{
-    Expression, Factor, FfDeclaration, FfReset, IfResetStatement, IfStatement, Module, Op,
-    Statement, TypeKind, ValueVariant, VarId,
+    Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange, ForStatement,
+    IfResetStatement, IfStatement, Module, Op, Statement, TypeKind, ValueVariant, VarId,
 };
 
 mod expression;
@@ -38,6 +38,7 @@ pub struct FfParser<'a> {
     stack: VecDeque<RegisterId>,
     defined_ranges: HashMap<VarId, BitSet>,
     dynamic_defined_vars: HashSet<VarId>,
+    local_working_vars: HashSet<VarId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
     config: BuildConfig,
@@ -50,6 +51,7 @@ impl<'a> FfParser<'a> {
             stack: VecDeque::new(),
             defined_ranges: HashMap::default(),
             dynamic_defined_vars: HashSet::default(),
+            local_working_vars: HashSet::default(),
             reset: None,
             function_arg_stack: Vec::new(),
             config,
@@ -305,12 +307,7 @@ impl<'a> FfParser<'a> {
                 )?;
             }
             Statement::For(f) => {
-                return Err(ParserError::unsupported(
-                    LoweringPhase::FfLowering,
-                    "for loop in always_ff body",
-                    format!("{stmt}"),
-                    Some(&f.token),
-                ));
+                self.parse_for_statement(f, targets, domain, convert, sources, ir_builder)?;
             }
             Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                 return Err(ParserError::unsupported(
@@ -321,6 +318,231 @@ impl<'a> FfParser<'a> {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn parse_for_bound<A>(
+        &mut self,
+        bound: &ForBound,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<RegisterId, ParserError> {
+        match bound {
+            ForBound::Const(v) => {
+                let reg = ir_builder.alloc_bit(64, false);
+                ir_builder.emit(SIRInstruction::Imm(reg, crate::ir::SIRValue::new(*v as u64)));
+                Ok(reg)
+            }
+            ForBound::Expression(expr) => {
+                self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
+                Ok(self.stack.pop_back().unwrap())
+            }
+        }
+    }
+
+    fn parse_for_statement<A>(
+        &mut self,
+        stmt: &ForStatement,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let Some(loop_width) = stmt.var_type.total_width() else {
+            return Err(ParserError::unsupported(
+                LoweringPhase::FfLowering,
+                "for loop variable width",
+                format!("{:?}", stmt.var_name),
+                Some(&stmt.token),
+            ));
+        };
+
+        let (start_reg, end_reg, inclusive, step, reverse, stepped_op) = match &stmt.range {
+            ForRange::Forward {
+                start,
+                end,
+                inclusive,
+                step,
+            } => (
+                self.parse_for_bound(start, targets, domain, convert, sources, ir_builder)?,
+                self.parse_for_bound(end, targets, domain, convert, sources, ir_builder)?,
+                *inclusive,
+                *step,
+                false,
+                None,
+            ),
+            ForRange::Reverse {
+                start,
+                end,
+                inclusive,
+                step,
+            } => (
+                self.parse_for_bound(start, targets, domain, convert, sources, ir_builder)?,
+                self.parse_for_bound(end, targets, domain, convert, sources, ir_builder)?,
+                *inclusive,
+                *step,
+                true,
+                None,
+            ),
+            ForRange::Stepped {
+                start,
+                end,
+                inclusive,
+                step,
+                op,
+            } => (
+                self.parse_for_bound(start, targets, domain, convert, sources, ir_builder)?,
+                self.parse_for_bound(end, targets, domain, convert, sources, ir_builder)?,
+                *inclusive,
+                *step,
+                false,
+                Some(*op),
+            ),
+        };
+
+        let one_reg = ir_builder.alloc_bit(64, false);
+        ir_builder.emit(SIRInstruction::Imm(one_reg, crate::ir::SIRValue::new(1u64)));
+        let end_limit = if inclusive {
+            let reg = ir_builder.alloc_bit(64, false);
+            ir_builder.emit(SIRInstruction::Binary(reg, end_reg, crate::ir::BinaryOp::Add, one_reg));
+            reg
+        } else {
+            end_reg
+        };
+
+        let init_reg = if reverse { end_limit } else { start_reg };
+        ir_builder.emit(SIRInstruction::Store(
+            convert(stmt.var_id, domain.region()),
+            crate::ir::SIROffset::Static(0),
+            loop_width,
+            init_reg,
+            Vec::new(),
+        ));
+
+        let header_bb = ir_builder.new_block();
+        let body_bb = ir_builder.new_block();
+        let exit_bb = ir_builder.new_block();
+        ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![]));
+
+        let pre_loop_defined = self.defined_ranges.clone();
+        let pre_loop_dynamic = self.dynamic_defined_vars.clone();
+
+        ir_builder.switch_to_block(header_bb);
+        self.local_working_vars.insert(stmt.var_id);
+        self.op_load(
+            stmt.var_id,
+            &Default::default(),
+            &Default::default(),
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        let loop_reg = self.stack.pop_back().unwrap();
+        let cond_reg = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Binary(
+            cond_reg,
+            loop_reg,
+            if reverse {
+                crate::ir::BinaryOp::GtU
+            } else {
+                crate::ir::BinaryOp::LtU
+            },
+            if reverse { start_reg } else { end_limit },
+        ));
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: cond_reg,
+            true_block: (body_bb, vec![]),
+            false_block: (exit_bb, vec![]),
+        });
+
+        ir_builder.switch_to_block(body_bb);
+        if reverse {
+            let step_reg = ir_builder.alloc_bit(64, false);
+            ir_builder.emit(SIRInstruction::Imm(
+                step_reg,
+                crate::ir::SIRValue::new(step as u64),
+            ));
+            let next_reg = ir_builder.alloc_bit(64, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                next_reg,
+                loop_reg,
+                crate::ir::BinaryOp::Sub,
+                step_reg,
+            ));
+            ir_builder.emit(SIRInstruction::Store(
+                convert(stmt.var_id, domain.region()),
+                crate::ir::SIROffset::Static(0),
+                loop_width,
+                next_reg,
+                Vec::new(),
+            ));
+        }
+
+        let mut local_defined = self.defined_ranges.clone();
+        local_defined.insert(stmt.var_id, (0..loop_width).collect());
+        let prev_defined = std::mem::replace(&mut self.defined_ranges, local_defined);
+        let mut local_dynamic = self.dynamic_defined_vars.clone();
+        local_dynamic.insert(stmt.var_id);
+        let prev_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, local_dynamic);
+
+        for body_stmt in &stmt.body {
+            self.parse_statement(body_stmt, targets, domain, convert, sources, ir_builder)?;
+        }
+
+        self.defined_ranges = prev_defined;
+        self.dynamic_defined_vars = prev_dynamic;
+
+        if !reverse {
+            self.op_load(
+                stmt.var_id,
+                &Default::default(),
+                &Default::default(),
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+            let loop_reg = self.stack.pop_back().unwrap();
+            let step_reg = ir_builder.alloc_bit(64, false);
+            ir_builder.emit(SIRInstruction::Imm(
+                step_reg,
+                crate::ir::SIRValue::new(step as u64),
+            ));
+            let next_reg = ir_builder.alloc_bit(64, false);
+            let op = match stepped_op {
+                Some(Op::Mul) => crate::ir::BinaryOp::Mul,
+                Some(Op::LogicShiftL | Op::ArithShiftL) => crate::ir::BinaryOp::Shl,
+                Some(Op::Add) | None => crate::ir::BinaryOp::Add,
+                Some(other) => {
+                    self.local_working_vars.remove(&stmt.var_id);
+                    return Err(ParserError::unsupported(
+                        LoweringPhase::FfLowering,
+                        "for loop step operator in always_ff",
+                        format!("{other:?}"),
+                        Some(&stmt.token),
+                    ));
+                }
+            };
+            ir_builder.emit(SIRInstruction::Binary(next_reg, loop_reg, op, step_reg));
+            ir_builder.emit(SIRInstruction::Store(
+                convert(stmt.var_id, domain.region()),
+                crate::ir::SIROffset::Static(0),
+                loop_width,
+                next_reg,
+                Vec::new(),
+            ));
+        }
+
+        self.local_working_vars.remove(&stmt.var_id);
+        ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![]));
+        ir_builder.switch_to_block(exit_bb);
+        self.defined_ranges = pre_loop_defined;
+        self.dynamic_defined_vars = pre_loop_dynamic;
         Ok(())
     }
 
@@ -579,6 +801,7 @@ impl<'a> FfParser<'a> {
                 .chain(s.false_side.iter())
                 .flat_map(Self::collect_assigned_var_ids)
                 .collect(),
+            Statement::For(s) => s.body.iter().flat_map(Self::collect_assigned_var_ids).collect(),
             Statement::FunctionCall(call) => call
                 .outputs
                 .values()

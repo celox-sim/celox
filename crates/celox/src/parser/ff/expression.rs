@@ -233,9 +233,14 @@ impl<'a> FfParser<'a> {
         let offset =
             self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
 
+        let load_region = if self.local_working_vars.contains(&var_id) {
+            WORKING_REGION
+        } else {
+            STABLE_REGION
+        };
         ir_builder.emit(SIRInstruction::Load(
             dest_reg,
-            convert(var_id, STABLE_REGION),
+            convert(var_id, load_region),
             offset,
             width,
         ));
@@ -245,7 +250,8 @@ impl<'a> FfParser<'a> {
         // For source tracking, use the conservative range from eval_var_select
         // (covers all bits that might be read by a dynamic index).
         let access = eval_var_select(self.module, var_id, index, select)?;
-        let is_internal = self.is_range_fully_defined(var_id, access)
+        let is_internal = self.local_working_vars.contains(&var_id)
+            || self.is_range_fully_defined(var_id, access)
             || self.dynamic_defined_vars.contains(&var_id);
         if !is_internal {
             sources.push(VarAtomBase::new(
