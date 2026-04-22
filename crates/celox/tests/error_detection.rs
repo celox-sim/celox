@@ -287,6 +287,33 @@ fn test_runtime_for_loop_external_feedback_is_still_scheduler_loop() {
 }
 
 #[test]
+fn test_always_ff_runtime_for_non_progress_is_rejected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i: u32 in 1..count step *= 1 {
+                    q = i as 8;
+                }
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "Top").build();
+    assert!(result.is_err(), "non-progressing always_ff runtime for must be rejected");
+    let err = result.err().unwrap();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("non-progressing for loop in always_ff"),
+        "Expected always_ff non-progress rejection, got: {err:?}"
+    );
+}
+
+#[test]
 fn test_multiple_driver_error() {
     let code = r#"
         module Top (a: input logic, b: input logic, o: output logic) {

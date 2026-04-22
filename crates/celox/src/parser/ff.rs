@@ -404,6 +404,15 @@ impl<'a> FfParser<'a> {
             ),
         };
 
+        if Self::step_can_stall(reverse, stepped_op, step) {
+            return Err(ParserError::unsupported(
+                LoweringPhase::FfLowering,
+                "non-progressing for loop in always_ff",
+                format!("{:?}", stmt.var_name),
+                Some(&stmt.token),
+            ));
+        }
+
         let one_reg = ir_builder.alloc_bit(64, false);
         ir_builder.emit(SIRInstruction::Imm(one_reg, crate::ir::SIRValue::new(1u64)));
         let end_limit = if inclusive {
@@ -808,6 +817,18 @@ impl<'a> FfParser<'a> {
                 .flat_map(|dsts| dsts.iter().map(|d| d.id))
                 .collect(),
             _ => vec![],
+        }
+    }
+
+    fn step_can_stall(reverse: bool, stepped_op: Option<Op>, step: usize) -> bool {
+        if reverse {
+            return step == 0;
+        }
+        match stepped_op {
+            Some(Op::Mul) => step == 1,
+            Some(Op::LogicShiftL | Op::ArithShiftL) => step == 0,
+            Some(Op::Add) | None => step == 0,
+            Some(_) => false,
         }
     }
 }

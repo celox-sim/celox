@@ -631,9 +631,13 @@ impl SLTToSIRLowerer {
         } else {
             body_counter
         };
+        let loop_value_trunc = self.cast_reg_width(builder, loop_value, loop_width);
 
         let mut env_inputs = crate::HashMap::default();
-        env_inputs.insert(VarAtomBase::new(loop_var.clone(), 0, loop_width - 1), loop_value);
+        env_inputs.insert(
+            VarAtomBase::new(loop_var.clone(), 0, loop_width - 1),
+            loop_value_trunc,
+        );
         for (update, state_reg) in updates.iter().zip(body_states.iter().copied()) {
             env_inputs.insert(update.target.clone(), state_reg);
         }
@@ -667,12 +671,27 @@ impl SLTToSIRLowerer {
             builder.emit(SIRInstruction::Binary(reg, body_counter, op, step_reg));
             reg
         };
-        builder.seal_block(SIRTerminator::Jump(
-            header_block,
-            std::iter::once(next_counter)
-                .chain(next_states.iter().copied())
-                .collect(),
-        ));
+        if Self::step_can_stall(step_op, step) {
+            builder.seal_block(SIRTerminator::Jump(exit_block, next_states.clone()));
+        } else {
+            let progress = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(
+                progress,
+                next_counter,
+                BinaryOp::Ne,
+                body_counter,
+            ));
+            builder.seal_block(SIRTerminator::Branch {
+                cond: progress,
+                true_block: (
+                    header_block,
+                    std::iter::once(next_counter)
+                        .chain(next_states.iter().copied())
+                        .collect(),
+                ),
+                false_block: (exit_block, next_states.clone()),
+            });
+        }
 
         builder.switch_to_block(exit_block);
         let result_idx = updates
@@ -680,5 +699,13 @@ impl SLTToSIRLowerer {
             .position(|update| update.target == *result)
             .expect("ForFold result target must be present in updates");
         exit_states[result_idx]
+    }
+
+    fn step_can_stall(step_op: SLTStepOp, step: usize) -> bool {
+        match step_op {
+            SLTStepOp::Add => step == 0,
+            SLTStepOp::Mul => step == 1,
+            SLTStepOp::Shl => step == 0,
+        }
     }
 }
