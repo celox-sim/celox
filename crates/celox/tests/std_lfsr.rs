@@ -120,34 +120,47 @@ all_backends! {
     sim.tick(clk).unwrap();
     sim.modify(|io| io.set(i_set, 0u8)).unwrap();
 
-    // Collect first 300 values to find cycle
+    // Collect values until the first seeded state repeats.
     let mut values = Vec::new();
-    for _ in 0..300 {
+    let first = {
+        sim.tick(clk).unwrap();
+        sim.get_as::<u8>(o_val)
+    };
+    values.push(first);
+
+    let cycle_len = loop {
+        assert!(
+            values.len() < 512,
+            "LFSR should repeat within 512 ticks, observed {} values without a repeat",
+            values.len()
+        );
         sim.tick(clk).unwrap();
         let val = sim.get_as::<u8>(o_val);
+        if val == first {
+            break values.len();
+        }
         values.push(val);
-    }
+    };
 
     // LFSR should produce non-zero values
     for (i, &v) in values.iter().enumerate() {
         assert_ne!(v, 0, "LFSR output should never be 0 (tick {i})");
     }
 
-    // Find cycle length: detect when the first value repeats
-    let first = values[0];
-    let cycle_len = values[1..].iter().position(|&v| v == first).map(|p| p + 1);
-    assert!(
-        cycle_len.is_some(),
-        "LFSR should have a repeating cycle within 300 ticks"
-    );
-    let cycle_len = cycle_len.unwrap();
     assert!(cycle_len > 1, "cycle length should be > 1, got {cycle_len}");
 
-    // Verify the cycle actually repeats
-    for i in 0..cycle_len {
+    // Verify the cycle actually repeats for one more full period.
+    for (i, expected) in values
+        .iter()
+        .copied()
+        .skip(1)
+        .chain(std::iter::once(first))
+        .enumerate()
+    {
+        sim.tick(clk).unwrap();
         assert_eq!(
-            values[i],
-            values[i + cycle_len],
+            sim.get_as::<u8>(o_val),
+            expected,
             "cycle should repeat at offset {i}"
         );
     }
