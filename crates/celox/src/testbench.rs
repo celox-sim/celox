@@ -11,7 +11,8 @@ use crate::ir::{AbsoluteAddr, SignalRef};
 use crate::simulator::Simulator;
 use num_bigint::BigUint;
 use veryl_analyzer::ir::{
-    Expression, Factor, ForRange, Op, Statement, SystemFunctionKind, TbMethod, TbMethodCall, VarId,
+    Expression, Factor, ForBound, ForRange, Op, Statement, SystemFunctionKind, TbMethod,
+    TbMethodCall, VarId,
 };
 use veryl_parser::resource_table::{self, StrId};
 
@@ -1100,6 +1101,13 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         stmt: &Statement,
         ec: &ExprCompiler<'_, B>,
     ) -> Option<TestbenchStatement<B>> {
+        fn const_for_bound(bound: &ForBound) -> Option<usize> {
+            match bound {
+                ForBound::Const(x) => Some(*x),
+                ForBound::Expression(_) => None,
+            }
+        }
+
         match stmt {
             Statement::TbMethodCall(tb) => self.convert_tb_method(tb, ec),
             Statement::SystemFunctionCall(sf) => match &sf.kind {
@@ -1132,28 +1140,42 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     .collect();
                 let lv = self.resolve_loop_var(&s.var_id);
                 match &s.range {
-                    ForRange::Forward { start, end, step } => Some(TestbenchStatement::For {
+                    ForRange::Forward {
+                        start,
+                        end,
+                        inclusive,
+                        step,
+                    } => Some(TestbenchStatement::For {
                         loop_var: lv,
-                        start: *start,
-                        end: *end,
+                        start: const_for_bound(start)?,
+                        end: const_for_bound(end)? + usize::from(*inclusive),
                         step: *step,
                         reverse: false,
                         body,
                     }),
-                    ForRange::Reverse { start, end, step } => Some(TestbenchStatement::For {
+                    ForRange::Reverse {
+                        start,
+                        end,
+                        inclusive,
+                        step,
+                    } => Some(TestbenchStatement::For {
                         loop_var: lv,
-                        start: *start,
-                        end: *end,
+                        start: const_for_bound(start)?,
+                        end: const_for_bound(end)? + usize::from(*inclusive),
                         step: *step,
                         reverse: true,
                         body,
                     }),
                     ForRange::Stepped {
-                        start, end, step, ..
+                        start,
+                        end,
+                        inclusive,
+                        step,
+                        ..
                     } => Some(TestbenchStatement::For {
                         loop_var: lv,
-                        start: *start,
-                        end: *end,
+                        start: const_for_bound(start)?,
+                        end: const_for_bound(end)? + usize::from(*inclusive),
                         step: *step,
                         reverse: false,
                         body,

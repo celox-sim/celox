@@ -56,7 +56,7 @@ fn setup_to_flatting(
             .iter()
             .filter_map(|d| match d {
                 Declaration::Inst(inst) => {
-                    let child_name = match &inst.component {
+                    let child_name = match &*inst.component {
                         Component::Module(m) => m.name,
                         Component::SystemVerilog(sv) => sv.name,
                         Component::Interface(_) => unreachable!(),

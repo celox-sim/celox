@@ -267,7 +267,7 @@ fn extract_instances(module: &Module) -> Vec<InstanceInfo> {
         let Declaration::Inst(inst) = decl else {
             continue;
         };
-        let Component::Module(sub_module) = &inst.component else {
+        let Component::Module(sub_module) = &*inst.component else {
             continue;
         };
 

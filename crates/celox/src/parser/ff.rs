@@ -312,7 +312,7 @@ impl<'a> FfParser<'a> {
                     Some(&f.token),
                 ));
             }
-            Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                 return Err(ParserError::unsupported(
                     LoweringPhase::FfLowering,
                     "unsupported statement",

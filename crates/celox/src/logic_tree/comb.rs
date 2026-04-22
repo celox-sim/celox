@@ -1341,13 +1341,13 @@ fn extract_function_return_expr(
                     .iter()
                     .map(|item| match item {
                         ArrayLiteralItem::Value(x, rep) => ArrayLiteralItem::Value(
-                            substitute_expr_inner(x, defs, expanding),
+                            Box::new(substitute_expr_inner(x, defs, expanding)),
                             rep.as_ref()
-                                .map(|r| substitute_expr_inner(r, defs, expanding)),
+                                .map(|r| Box::new(substitute_expr_inner(r, defs, expanding))),
                         ),
-                        ArrayLiteralItem::Defaul(x) => {
-                            ArrayLiteralItem::Defaul(substitute_expr_inner(x, defs, expanding))
-                        }
+                        ArrayLiteralItem::Defaul(x) => ArrayLiteralItem::Defaul(Box::new(
+                            substitute_expr_inner(x, defs, expanding),
+                        )),
                     })
                     .collect(),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
@@ -1473,7 +1473,7 @@ fn extract_function_return_expr(
                 format!("{stmt}"),
                 Some(&f.token),
             )),
-            Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                 Err(ParserError::unsupported(
                     LoweringPhase::CombLowering,
                     "function body control flow",

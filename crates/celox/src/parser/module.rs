@@ -79,7 +79,7 @@ impl<'a> ModuleParser<'a> {
         decl: &InstDeclaration,
         module_id: ModuleId,
     ) -> Result<(), ParserError> {
-        if let Component::SystemVerilog(system_verilog) = &decl.component {
+        if let Component::SystemVerilog(system_verilog) = &*decl.component {
             return Err(ParserError::unsupported(
                 LoweringPhase::SimulatorParser,
                 "systemverilog module instantiation",
@@ -88,7 +88,7 @@ impl<'a> ModuleParser<'a> {
             ));
         }
 
-        let child_module = match &decl.component {
+        let child_module = match &*decl.component {
             Component::Module(m) => m,
             _ => unreachable!(),
         };
@@ -134,58 +134,41 @@ impl<'a> ModuleParser<'a> {
                 &|id| GlueAddr::Parent(*id),
             );
             let expr_width = get_width(expr_node, &self.arena);
-            // Iterate over target child ports (input.id)
-            let mut current_lsb = 0;
+            let child_port_id = input.id;
+            let ty = get_port_type(child_module, &child_port_id)?;
+            let width = ty.width();
+            let access = BitAccess::new(0, width - 1);
+            let sliced = if expr_width > 0 && access.msb == expr_width - 1 {
+                mapped_node
+            } else {
+                glue_arena.alloc(SLTNode::Slice {
+                    expr: mapped_node,
+                    access,
+                })
+            };
 
-            for child_port_id in &input.id {
-                let ty = get_port_type(child_module, child_port_id)?;
-                let width = ty.width();
-                let access = BitAccess::new(current_lsb, current_lsb + width - 1);
-                // Slice the expression
-                let sliced = if expr_width > 0 && access.lsb == 0 && access.msb == expr_width - 1 {
-                    mapped_node
-                } else {
-                    glue_arena.alloc(SLTNode::Slice {
-                        expr: mapped_node,
-                        access,
-                    })
-                };
+            let path = LogicPath {
+                target: VarAtomBase::new(GlueAddr::Child(child_port_id), 0, width - 1),
+                expr: sliced,
+                sources: collect_glue_sources(sliced, &glue_arena),
+            };
 
-                let path = LogicPath {
-                    target: VarAtomBase::new(GlueAddr::Child(*child_port_id), 0, width - 1),
-                    expr: sliced,
-                    sources: collect_glue_sources(sliced, &glue_arena),
-                };
-
-                let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
-                input_ports.push((parent_vars, path));
-                current_lsb += width;
-            }
+            let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
+            input_ports.push((parent_vars, path));
         }
 
         // 2. Outputs (Child -> Parent)
         let mut output_ports = Vec::new();
 
         for output in &decl.outputs {
-            // RHS: Concat of Child Ports.
-            let mut parts = Vec::new();
-            for child_port_id in &output.id {
-                let ty = get_port_type(child_module, child_port_id)?;
-                let width = ty.width();
-                let node = glue_arena.alloc(SLTNode::Input {
-                    variable: GlueAddr::Child(*child_port_id),
-                    index: vec![],
-                    access: BitAccess::new(0, width - 1),
-                });
-                parts.push((node, width));
-            }
-            // Reverse parts so LSB is at the end (for SLTNode::Concat)
-            parts.reverse();
-            let rhs_node = if parts.len() == 1 {
-                parts[0].0
-            } else {
-                glue_arena.alloc(SLTNode::Concat(parts))
-            };
+            let child_port_id = output.id;
+            let ty = get_port_type(child_module, &child_port_id)?;
+            let width = ty.width();
+            let rhs_node = glue_arena.alloc(SLTNode::Input {
+                variable: GlueAddr::Child(child_port_id),
+                index: vec![],
+                access: BitAccess::new(0, width - 1),
+            });
 
             // LHS: output.dst (AssignDestination).
             let mut current_offset = 0;
@@ -219,16 +202,11 @@ impl<'a> ModuleParser<'a> {
 
                 // Collect sources from rhs_node components manually
                 let mut sources = HashSet::default();
-                for child_port_id in &output.id {
-                    // Each child port is a source
-                    let ty = get_port_type(child_module, child_port_id)?;
-                    let width = ty.width();
-                    sources.insert(VarAtomBase::new(
-                        GlueAddr::Child(*child_port_id),
-                        0,
-                        width - 1,
-                    ));
-                }
+                sources.insert(VarAtomBase::new(
+                    GlueAddr::Child(child_port_id),
+                    0,
+                    width - 1,
+                ));
 
                 let path = LogicPath {
                     target: VarAtomBase::new(GlueAddr::Parent(dst.id), access.lsb, access.msb),

@@ -183,13 +183,14 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|item| match item {
                         ArrayLiteralItem::Value(x, rep) => ArrayLiteralItem::Value(
-                            Self::substitute_function_expr_inner(x, defs, expanding),
-                            rep.as_ref()
-                                .map(|r| Self::substitute_function_expr_inner(r, defs, expanding)),
+                            Box::new(Self::substitute_function_expr_inner(x, defs, expanding)),
+                            rep.as_ref().map(|r| {
+                                Box::new(Self::substitute_function_expr_inner(r, defs, expanding))
+                            }),
                         ),
-                        ArrayLiteralItem::Defaul(x) => ArrayLiteralItem::Defaul(
+                        ArrayLiteralItem::Defaul(x) => ArrayLiteralItem::Defaul(Box::new(
                             Self::substitute_function_expr_inner(x, defs, expanding),
-                        ),
+                        )),
                     })
                     .collect(),
                 Box::new(Comptime::create_unknown(TokenRange::default())),
@@ -317,7 +318,7 @@ impl<'a> FfParser<'a> {
                     format!("{stmt}"),
                     Some(&f.token),
                 )),
-                Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                     Err(ParserError::unsupported(
                         LoweringPhase::FfLowering,
                         "function body control flow",
@@ -471,7 +472,7 @@ impl<'a> FfParser<'a> {
                     format!("{stmt}"),
                     Some(&f.token),
                 )),
-                Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                     Err(ParserError::unsupported(
                         LoweringPhase::FfLowering,
                         "function body control flow",

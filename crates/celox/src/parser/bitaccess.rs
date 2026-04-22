@@ -130,7 +130,7 @@ fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserErro
     // For enum-typed variables, the width Shape is empty but the actual
     // bit width is encoded in the TypeKind. Use kind.width() as the
     // base scalar width when the explicit width shape is absent.
-    if var_type.width.is_empty() {
+    if var_type.width().is_empty() {
         if let Some(kind_width) = var_type.kind.width()
             && kind_width > 1
         {
@@ -140,7 +140,7 @@ fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserErro
         dims.extend(resolve_dims(
             module,
             variable,
-            var_type.width.as_slice(),
+            var_type.width().as_slice(),
             "width",
         )?);
     }

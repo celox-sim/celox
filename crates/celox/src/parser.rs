@@ -319,7 +319,7 @@ pub fn parse_ir<'a>(
         let mut inst_ids = Vec::new();
         for decl in &ir_module.declarations {
             if let Declaration::Inst(inst_decl) = decl {
-                match &inst_decl.component {
+                match &*inst_decl.component {
                     Component::SystemVerilog(_) => {
                         // SV modules: allocate a placeholder ModuleId.
                         // ModuleParser::parse_inst_declaration will return an error.
