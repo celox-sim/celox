@@ -215,16 +215,16 @@ fn build_event_comb_slices(
             let subset_for_chunks = subset.clone();
             let scheduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> =
                 scheduler::sort_with_options(
-                subset,
-                arena,
-                ignored_loops,
-                true_loops,
-                four_state,
-                var_widths,
-                scheduler::SchedulerOptions {
-                    preserve_dag_regions: true,
-                    preserve_register_chunks: false,
-                },
+                    subset,
+                    arena,
+                    ignored_loops,
+                    true_loops,
+                    four_state,
+                    var_widths,
+                    scheduler::SchedulerOptions {
+                        preserve_dag_regions: true,
+                        preserve_register_chunks: false,
+                    },
                 )?
                 .into_iter()
                 .map(|eu| crate::ir::ExecutionUnit {
@@ -310,12 +310,10 @@ fn build_event_comb_slices(
                                             .instructions
                                             .into_iter()
                                             .map(|inst| {
-                                                inst.into_map_addr(|addr| {
-                                                    RegionedAbsoluteAddr {
-                                                        region: STABLE_REGION,
-                                                        instance_id: addr.instance_id,
-                                                        var_id: addr.var_id,
-                                                    }
+                                                inst.into_map_addr(|addr| RegionedAbsoluteAddr {
+                                                    region: STABLE_REGION,
+                                                    instance_id: addr.instance_id,
+                                                    var_id: addr.var_id,
                                                 })
                                             })
                                             .collect(),
@@ -342,10 +340,7 @@ fn build_event_comb_slices(
                     outgoing
                 );
             }
-            pre_chunks.insert(
-                *event,
-                chunk_plan,
-            );
+            pre_chunks.insert(*event, chunk_plan);
             pre_slices.insert(*event, scheduled);
         }
 
@@ -357,16 +352,16 @@ fn build_event_comb_slices(
             let subset_for_chunks = subset.clone();
             let scheduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> =
                 scheduler::sort_with_options(
-                subset,
-                arena,
-                ignored_loops,
-                true_loops,
-                four_state,
-                var_widths,
-                scheduler::SchedulerOptions {
-                    preserve_dag_regions: true,
-                    preserve_register_chunks: false,
-                },
+                    subset,
+                    arena,
+                    ignored_loops,
+                    true_loops,
+                    four_state,
+                    var_widths,
+                    scheduler::SchedulerOptions {
+                        preserve_dag_regions: true,
+                        preserve_register_chunks: false,
+                    },
                 )?
                 .into_iter()
                 .map(|eu| crate::ir::ExecutionUnit {
@@ -452,12 +447,10 @@ fn build_event_comb_slices(
                                             .instructions
                                             .into_iter()
                                             .map(|inst| {
-                                                inst.into_map_addr(|addr| {
-                                                    RegionedAbsoluteAddr {
-                                                        region: STABLE_REGION,
-                                                        instance_id: addr.instance_id,
-                                                        var_id: addr.var_id,
-                                                    }
+                                                inst.into_map_addr(|addr| RegionedAbsoluteAddr {
+                                                    region: STABLE_REGION,
+                                                    instance_id: addr.instance_id,
+                                                    var_id: addr.var_id,
                                                 })
                                             })
                                             .collect(),
@@ -484,10 +477,7 @@ fn build_event_comb_slices(
                     outgoing
                 );
             }
-            post_chunks.insert(
-                *event,
-                chunk_plan,
-            );
+            post_chunks.insert(*event, chunk_plan);
             post_slices.insert(*event, scheduled);
         }
     }
@@ -1142,47 +1132,47 @@ pub(crate) fn flatten(
 
     let (event_pre_comb, event_post_comb, event_pre_comb_chunks, event_post_comb_chunks) =
         build_event_comb_slices(
-        &comb_blocks,
-        &eval_apply_ffs,
-        &global_arena,
-        &ignored_loops,
-        &true_loops,
-        four_state,
-        &var_widths,
-    )
-    .map_err(|e| {
-        let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
-        let program = Program {
-            eval_apply_ffs: HashMap::default(),
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
-            eval_comb: Vec::new(),
-            event_pre_comb: HashMap::default(),
-            event_post_comb: HashMap::default(),
-            event_pre_comb_chunks: HashMap::default(),
-            event_post_comb_chunks: HashMap::default(),
-            eval_comb_plan: None,
-            instance_ids: expanded.clone(),
-            instance_module: instance_modules.clone(),
-            module_variables: err_vars,
-            module_var_path_index: err_path_idx,
-            module_names: module_names.clone(),
-            clock_domains: HashMap::default(),
-            topological_clocks: Vec::new(),
-            cascaded_clocks: BTreeSet::new(),
-            arena: SLTNodeArena::new(),
-            num_events: 0,
-            reset_clock_map: HashMap::default(),
-            address_aliases: HashMap::default(),
-            layout: None,
-            initial_statements: None,
-            tb_functions: fxhash::FxHashMap::default(),
-        };
-        let mut target_arena = SLTNodeArena::new();
-        ParserError::Scheduler(e.map_addr(&global_arena, &mut target_arena, &|addr| {
-            program.get_path(addr)
-        }))
-    })?;
+            &comb_blocks,
+            &eval_apply_ffs,
+            &global_arena,
+            &ignored_loops,
+            &true_loops,
+            four_state,
+            &var_widths,
+        )
+        .map_err(|e| {
+            let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
+            let program = Program {
+                eval_apply_ffs: HashMap::default(),
+                eval_only_ffs: HashMap::default(),
+                apply_ffs: HashMap::default(),
+                eval_comb: Vec::new(),
+                event_pre_comb: HashMap::default(),
+                event_post_comb: HashMap::default(),
+                event_pre_comb_chunks: HashMap::default(),
+                event_post_comb_chunks: HashMap::default(),
+                eval_comb_plan: None,
+                instance_ids: expanded.clone(),
+                instance_module: instance_modules.clone(),
+                module_variables: err_vars,
+                module_var_path_index: err_path_idx,
+                module_names: module_names.clone(),
+                clock_domains: HashMap::default(),
+                topological_clocks: Vec::new(),
+                cascaded_clocks: BTreeSet::new(),
+                arena: SLTNodeArena::new(),
+                num_events: 0,
+                reset_clock_map: HashMap::default(),
+                address_aliases: HashMap::default(),
+                layout: None,
+                initial_statements: None,
+                tb_functions: fxhash::FxHashMap::default(),
+            };
+            let mut target_arena = SLTNodeArena::new();
+            ParserError::Scheduler(e.map_addr(&global_arena, &mut target_arena, &|addr| {
+                program.get_path(addr)
+            }))
+        })?;
 
     if let Some(t) = trace
         && trace_opts.scheduled_units
@@ -1220,12 +1210,12 @@ pub(crate) fn flatten(
         eval_apply_ffs,
         eval_only_ffs,
         apply_ffs,
-            eval_comb: schduled,
-            event_pre_comb,
-            event_post_comb,
+        eval_comb: schduled,
+        event_pre_comb,
+        event_post_comb,
         event_pre_comb_chunks,
         event_post_comb_chunks,
-            eval_comb_plan: None,
+        eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
         module_variables: mod_vars,

@@ -31,7 +31,10 @@ impl std::fmt::Debug for EventRef {
         f.debug_struct("EventRef")
             .field("func", &(self.func as usize))
             .field("merged_func", &self.merged_func.map(|f| f as usize))
-            .field("dirty_merged_func", &self.dirty_merged_func.map(|f| f as usize))
+            .field(
+                "dirty_merged_func",
+                &self.dirty_merged_func.map(|f| f as usize),
+            )
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()

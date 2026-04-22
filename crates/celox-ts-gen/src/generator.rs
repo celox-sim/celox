@@ -493,9 +493,9 @@ fn port_needs_four_state_type(port: &PortInfo) -> bool {
 
 fn module_needs_four_state_type(ports: &[PortInfo], instances: &[InstanceInfo]) -> bool {
     ports.iter().any(port_needs_four_state_type)
-        || instances.iter().any(|inst| {
-            module_needs_four_state_type(&inst.ports, &inst.children)
-        })
+        || instances
+            .iter()
+            .any(|inst| module_needs_four_state_type(&inst.ports, &inst.children))
 }
 
 fn type_info_str(info: TypeInfo) -> &'static str {
@@ -628,10 +628,7 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
                     ts_setter_type(member)
                 ));
             } else {
-                out.push_str(&format!(
-                    "{}{}: {};\n",
-                    child_indent, member_name, ts_type
-                ));
+                out.push_str(&format!("{}{}: {};\n", child_indent, member_name, ts_type));
             }
         }
         out.push_str(&format!("{}}};\n", indent));
@@ -1467,7 +1464,8 @@ module Top (
             "4-state input must keep bigint getter"
         );
         assert!(
-            top.dts_content.contains("set a(value: FourStateSignalValue);"),
+            top.dts_content
+                .contains("set a(value: FourStateSignalValue);"),
             "4-state input must accept FourStateSignalValue"
         );
         assert!(
