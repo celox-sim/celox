@@ -93,6 +93,12 @@ pub struct Program {
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub event_pre_comb: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    pub event_post_comb: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    pub event_pre_comb_chunks:
+        HashMap<AbsoluteAddr, Vec<crate::optimizer::coalescing::TailCallChunk>>,
+    pub event_post_comb_chunks:
+        HashMap<AbsoluteAddr, Vec<crate::optimizer::coalescing::TailCallChunk>>,
     /// Tail-call chain compilation plan, populated by the optimizer when the
     /// estimated CLIF instruction count exceeds Cranelift's limit.
     pub eval_comb_plan: Option<EvalCombPlan>,

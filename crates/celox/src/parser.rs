@@ -38,13 +38,462 @@ pub mod module;
 pub mod registry;
 mod scheduler;
 use crate::ir::{
-    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, ModuleId, Program,
-    RegionedAbsoluteAddr, STABLE_REGION, SimModule, VariableInfo,
+    AbsoluteAddr, BitAccess, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath,
+    ModuleId, Program, RegionedAbsoluteAddr, STABLE_REGION, SimModule, VarAtomBase, VariableInfo,
 };
 use crate::logic_tree::{LogicPath, SLTNodeArena};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
 use veryl_analyzer::ir::Declaration;
+
+fn collect_ff_read_write_sets(
+    units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+) -> (
+    HashSet<VarAtomBase<AbsoluteAddr>>,
+    HashSet<VarAtomBase<AbsoluteAddr>>,
+) {
+    let mut reads = HashSet::default();
+    let mut writes = HashSet::default();
+
+    for eu in units {
+        for bb in eu.blocks.values() {
+            for inst in &bb.instructions {
+                match inst {
+                    crate::ir::SIRInstruction::Load(_, addr, offset, width) => {
+                        let access = match offset {
+                            crate::ir::SIROffset::Static(lsb) => {
+                                BitAccess::new(*lsb, lsb + width - 1)
+                            }
+                            crate::ir::SIROffset::Dynamic(_) => BitAccess::new(0, usize::MAX / 2),
+                        };
+                        reads.insert(VarAtomBase {
+                            id: addr.absolute_addr(),
+                            access,
+                        });
+                    }
+                    crate::ir::SIRInstruction::Store(addr, offset, width, ..) => {
+                        let access = match offset {
+                            crate::ir::SIROffset::Static(lsb) => {
+                                BitAccess::new(*lsb, lsb + width - 1)
+                            }
+                            crate::ir::SIROffset::Dynamic(_) => BitAccess::new(0, usize::MAX / 2),
+                        };
+                        writes.insert(VarAtomBase {
+                            id: addr.absolute_addr(),
+                            access,
+                        });
+                    }
+                    crate::ir::SIRInstruction::Commit(_, dst, offset, width, ..) => {
+                        let access = match offset {
+                            crate::ir::SIROffset::Static(lsb) => {
+                                BitAccess::new(*lsb, lsb + width - 1)
+                            }
+                            crate::ir::SIROffset::Dynamic(_) => BitAccess::new(0, usize::MAX / 2),
+                        };
+                        writes.insert(VarAtomBase {
+                            id: dst.absolute_addr(),
+                            access,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    (reads, writes)
+}
+
+fn build_event_comb_slices(
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    eval_apply_ffs: &HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    ignored_loops: &HashSet<(AbsoluteAddr, AbsoluteAddr)>,
+    true_loops: &HashMap<(AbsoluteAddr, AbsoluteAddr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<AbsoluteAddr, usize>,
+) -> Result<
+    (
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::optimizer::coalescing::TailCallChunk>>,
+        HashMap<AbsoluteAddr, Vec<crate::optimizer::coalescing::TailCallChunk>>,
+    ),
+    SchedulerError<AbsoluteAddr>,
+> {
+    if comb_blocks.is_empty() {
+        return Ok((
+            HashMap::default(),
+            HashMap::default(),
+            HashMap::default(),
+            HashMap::default(),
+        ));
+    }
+
+    let mut writers_by_var: HashMap<AbsoluteAddr, Vec<(BitAccess, usize)>> = HashMap::default();
+    for (idx, path) in comb_blocks.iter().enumerate() {
+        writers_by_var
+            .entry(path.target.id)
+            .or_default()
+            .push((path.target.access, idx));
+    }
+
+    let mut succ = vec![Vec::new(); comb_blocks.len()];
+    let mut pred = vec![Vec::new(); comb_blocks.len()];
+    for (u, path) in comb_blocks.iter().enumerate() {
+        for source in &path.sources {
+            if let Some(candidates) = writers_by_var.get(&source.id) {
+                for &(target_access, v) in candidates {
+                    if source.access.overlaps(&target_access) {
+                        succ[v].push(u);
+                        pred[u].push(v);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut pre_slices = HashMap::default();
+    let mut post_slices = HashMap::default();
+    let mut pre_chunks = HashMap::default();
+    let mut post_chunks = HashMap::default();
+    let trace_event_materialization = std::env::var("CELOX_EVENT_MAT_TRACE").is_ok();
+    let trace_event_chunks = std::env::var("CELOX_EVENT_CHUNK_TRACE").is_ok();
+
+    for (event, ff_units) in eval_apply_ffs {
+        let (ff_reads, ff_writes) = collect_ff_read_write_sets(ff_units);
+
+        let mut pre_indices = BTreeSet::new();
+        let mut stack = Vec::new();
+        for read in ff_reads {
+            if let Some(indices) = writers_by_var.get(&read.id) {
+                for &(target_access, idx) in indices {
+                    if read.access.overlaps(&target_access) && pre_indices.insert(idx) {
+                        stack.push(idx);
+                    }
+                }
+            }
+        }
+        while let Some(idx) = stack.pop() {
+            for &p in &pred[idx] {
+                if pre_indices.insert(p) {
+                    stack.push(p);
+                }
+            }
+        }
+
+        let mut post_indices = BTreeSet::new();
+        let mut stack = Vec::new();
+        for write in ff_writes {
+            for (idx, path) in comb_blocks.iter().enumerate() {
+                if path
+                    .sources
+                    .iter()
+                    .any(|src| src.id == write.id && src.access.overlaps(&write.access))
+                    && post_indices.insert(idx)
+                {
+                    stack.push(idx);
+                }
+            }
+        }
+        while let Some(idx) = stack.pop() {
+            for &s in &succ[idx] {
+                if post_indices.insert(s) {
+                    stack.push(s);
+                }
+            }
+        }
+
+        let pre_len = pre_indices.len();
+        let post_len = post_indices.len();
+
+        if pre_len != 0 && pre_len < comb_blocks.len() {
+            let subset: Vec<_> = pre_indices
+                .into_iter()
+                .map(|idx| comb_blocks[idx].clone())
+                .collect();
+            let subset_for_chunks = subset.clone();
+            let scheduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> =
+                scheduler::sort_with_options(
+                subset,
+                arena,
+                ignored_loops,
+                true_loops,
+                four_state,
+                var_widths,
+                scheduler::SchedulerOptions {
+                    preserve_dag_regions: true,
+                    preserve_register_chunks: false,
+                },
+                )?
+                .into_iter()
+                .map(|eu| crate::ir::ExecutionUnit {
+                    entry_block_id: eu.entry_block_id,
+                    blocks: eu
+                        .blocks
+                        .into_iter()
+                        .map(|(id, bb)| {
+                            (
+                                id,
+                                crate::ir::BasicBlock {
+                                    id: bb.id,
+                                    params: bb.params,
+                                    instructions: bb
+                                        .instructions
+                                        .into_iter()
+                                        .map(|inst| {
+                                            inst.into_map_addr(|addr| RegionedAbsoluteAddr {
+                                                region: STABLE_REGION,
+                                                instance_id: addr.instance_id,
+                                                var_id: addr.var_id,
+                                            })
+                                        })
+                                        .collect(),
+                                    terminator: bb.terminator,
+                                },
+                            )
+                        })
+                        .collect(),
+                    register_map: eu.register_map,
+                })
+                .collect();
+            if trace_event_materialization {
+                let mut loads = 0usize;
+                let mut stores = 0usize;
+                let mut commits = 0usize;
+                for eu in &scheduled {
+                    for bb in eu.blocks.values() {
+                        for inst in &bb.instructions {
+                            match inst {
+                                crate::ir::SIRInstruction::Load(..) => loads += 1,
+                                crate::ir::SIRInstruction::Store(..) => stores += 1,
+                                crate::ir::SIRInstruction::Commit(..) => commits += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                eprintln!(
+                    "[event-mat] event={} kind=pre eus={} loads={} stores={} commits={}",
+                    event,
+                    scheduled.len(),
+                    loads,
+                    stores,
+                    commits
+                );
+            }
+            let chunk_plan: Vec<_> = scheduler::sort_tail_chunks(
+                subset_for_chunks,
+                arena,
+                ignored_loops,
+                true_loops,
+                four_state,
+                var_widths,
+            )?
+            .into_iter()
+            .map(|chunk| crate::optimizer::coalescing::TailCallChunk {
+                units: chunk
+                    .units
+                    .into_iter()
+                    .map(|eu| crate::ir::ExecutionUnit {
+                        entry_block_id: eu.entry_block_id,
+                        blocks: eu
+                            .blocks
+                            .into_iter()
+                            .map(|(id, bb)| {
+                                (
+                                    id,
+                                    crate::ir::BasicBlock {
+                                        id: bb.id,
+                                        params: bb.params,
+                                        instructions: bb
+                                            .instructions
+                                            .into_iter()
+                                            .map(|inst| {
+                                                inst.into_map_addr(|addr| {
+                                                    RegionedAbsoluteAddr {
+                                                        region: STABLE_REGION,
+                                                        instance_id: addr.instance_id,
+                                                        var_id: addr.var_id,
+                                                    }
+                                                })
+                                            })
+                                            .collect(),
+                                        terminator: bb.terminator,
+                                    },
+                                )
+                            })
+                            .collect(),
+                        register_map: eu.register_map,
+                    })
+                    .collect(),
+                incoming_live_regs: chunk.incoming_live_regs,
+                outgoing_live_regs: chunk.outgoing_live_regs,
+            })
+            .collect();
+            if trace_event_chunks {
+                let incoming: usize = chunk_plan.iter().map(|c| c.incoming_live_regs.len()).sum();
+                let outgoing: usize = chunk_plan.iter().map(|c| c.outgoing_live_regs.len()).sum();
+                eprintln!(
+                    "[event-chunk] event={} kind=pre chunks={} incoming_live={} outgoing_live={}",
+                    event,
+                    chunk_plan.len(),
+                    incoming,
+                    outgoing
+                );
+            }
+            pre_chunks.insert(
+                *event,
+                chunk_plan,
+            );
+            pre_slices.insert(*event, scheduled);
+        }
+
+        if post_len != 0 && post_len < comb_blocks.len() {
+            let subset: Vec<_> = post_indices
+                .into_iter()
+                .map(|idx| comb_blocks[idx].clone())
+                .collect();
+            let subset_for_chunks = subset.clone();
+            let scheduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> =
+                scheduler::sort_with_options(
+                subset,
+                arena,
+                ignored_loops,
+                true_loops,
+                four_state,
+                var_widths,
+                scheduler::SchedulerOptions {
+                    preserve_dag_regions: true,
+                    preserve_register_chunks: false,
+                },
+                )?
+                .into_iter()
+                .map(|eu| crate::ir::ExecutionUnit {
+                    entry_block_id: eu.entry_block_id,
+                    blocks: eu
+                        .blocks
+                        .into_iter()
+                        .map(|(id, bb)| {
+                            (
+                                id,
+                                crate::ir::BasicBlock {
+                                    id: bb.id,
+                                    params: bb.params,
+                                    instructions: bb
+                                        .instructions
+                                        .into_iter()
+                                        .map(|inst| {
+                                            inst.into_map_addr(|addr| RegionedAbsoluteAddr {
+                                                region: STABLE_REGION,
+                                                instance_id: addr.instance_id,
+                                                var_id: addr.var_id,
+                                            })
+                                        })
+                                        .collect(),
+                                    terminator: bb.terminator,
+                                },
+                            )
+                        })
+                        .collect(),
+                    register_map: eu.register_map,
+                })
+                .collect();
+            if trace_event_materialization {
+                let mut loads = 0usize;
+                let mut stores = 0usize;
+                let mut commits = 0usize;
+                for eu in &scheduled {
+                    for bb in eu.blocks.values() {
+                        for inst in &bb.instructions {
+                            match inst {
+                                crate::ir::SIRInstruction::Load(..) => loads += 1,
+                                crate::ir::SIRInstruction::Store(..) => stores += 1,
+                                crate::ir::SIRInstruction::Commit(..) => commits += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                eprintln!(
+                    "[event-mat] event={} kind=post eus={} loads={} stores={} commits={}",
+                    event,
+                    scheduled.len(),
+                    loads,
+                    stores,
+                    commits
+                );
+            }
+            let chunk_plan: Vec<_> = scheduler::sort_tail_chunks(
+                subset_for_chunks,
+                arena,
+                ignored_loops,
+                true_loops,
+                four_state,
+                var_widths,
+            )?
+            .into_iter()
+            .map(|chunk| crate::optimizer::coalescing::TailCallChunk {
+                units: chunk
+                    .units
+                    .into_iter()
+                    .map(|eu| crate::ir::ExecutionUnit {
+                        entry_block_id: eu.entry_block_id,
+                        blocks: eu
+                            .blocks
+                            .into_iter()
+                            .map(|(id, bb)| {
+                                (
+                                    id,
+                                    crate::ir::BasicBlock {
+                                        id: bb.id,
+                                        params: bb.params,
+                                        instructions: bb
+                                            .instructions
+                                            .into_iter()
+                                            .map(|inst| {
+                                                inst.into_map_addr(|addr| {
+                                                    RegionedAbsoluteAddr {
+                                                        region: STABLE_REGION,
+                                                        instance_id: addr.instance_id,
+                                                        var_id: addr.var_id,
+                                                    }
+                                                })
+                                            })
+                                            .collect(),
+                                        terminator: bb.terminator,
+                                    },
+                                )
+                            })
+                            .collect(),
+                        register_map: eu.register_map,
+                    })
+                    .collect(),
+                incoming_live_regs: chunk.incoming_live_regs,
+                outgoing_live_regs: chunk.outgoing_live_regs,
+            })
+            .collect();
+            if trace_event_chunks {
+                let incoming: usize = chunk_plan.iter().map(|c| c.incoming_live_regs.len()).sum();
+                let outgoing: usize = chunk_plan.iter().map(|c| c.outgoing_live_regs.len()).sum();
+                eprintln!(
+                    "[event-chunk] event={} kind=post chunks={} incoming_live={} outgoing_live={}",
+                    event,
+                    chunk_plan.len(),
+                    incoming,
+                    outgoing
+                );
+            }
+            post_chunks.insert(
+                *event,
+                chunk_plan,
+            );
+            post_slices.insert(*event, scheduled);
+        }
+    }
+
+    Ok((pre_slices, post_slices, pre_chunks, post_chunks))
+}
 
 /// Source location information for rich error diagnostics.
 #[derive(Debug)]
@@ -615,7 +1064,7 @@ pub(crate) fn flatten(
 
     let sched_start = flatten_timing.then(crate::timing::now);
     let schduled = scheduler::sort(
-        comb_blocks,
+        comb_blocks.clone(),
         &global_arena,
         &ignored_loops,
         &true_loops,
@@ -629,6 +1078,10 @@ pub(crate) fn flatten(
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             eval_comb: Vec::new(),
+            event_pre_comb: HashMap::default(),
+            event_post_comb: HashMap::default(),
+            event_pre_comb_chunks: HashMap::default(),
+            event_post_comb_chunks: HashMap::default(),
             eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
@@ -687,6 +1140,50 @@ pub(crate) fn flatten(
         })
         .collect();
 
+    let (event_pre_comb, event_post_comb, event_pre_comb_chunks, event_post_comb_chunks) =
+        build_event_comb_slices(
+        &comb_blocks,
+        &eval_apply_ffs,
+        &global_arena,
+        &ignored_loops,
+        &true_loops,
+        four_state,
+        &var_widths,
+    )
+    .map_err(|e| {
+        let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
+        let program = Program {
+            eval_apply_ffs: HashMap::default(),
+            eval_only_ffs: HashMap::default(),
+            apply_ffs: HashMap::default(),
+            eval_comb: Vec::new(),
+            event_pre_comb: HashMap::default(),
+            event_post_comb: HashMap::default(),
+            event_pre_comb_chunks: HashMap::default(),
+            event_post_comb_chunks: HashMap::default(),
+            eval_comb_plan: None,
+            instance_ids: expanded.clone(),
+            instance_module: instance_modules.clone(),
+            module_variables: err_vars,
+            module_var_path_index: err_path_idx,
+            module_names: module_names.clone(),
+            clock_domains: HashMap::default(),
+            topological_clocks: Vec::new(),
+            cascaded_clocks: BTreeSet::new(),
+            arena: SLTNodeArena::new(),
+            num_events: 0,
+            reset_clock_map: HashMap::default(),
+            address_aliases: HashMap::default(),
+            layout: None,
+            initial_statements: None,
+            tb_functions: fxhash::FxHashMap::default(),
+        };
+        let mut target_arena = SLTNodeArena::new();
+        ParserError::Scheduler(e.map_addr(&global_arena, &mut target_arena, &|addr| {
+            program.get_path(addr)
+        }))
+    })?;
+
     if let Some(t) = trace
         && trace_opts.scheduled_units
     {
@@ -723,8 +1220,12 @@ pub(crate) fn flatten(
         eval_apply_ffs,
         eval_only_ffs,
         apply_ffs,
-        eval_comb: schduled,
-        eval_comb_plan: None,
+            eval_comb: schduled,
+            event_pre_comb,
+            event_post_comb,
+        event_pre_comb_chunks,
+        event_post_comb_chunks,
+            eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
         module_variables: mod_vars,
@@ -863,6 +1364,56 @@ pub(crate) fn flatten(
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+    }
+    for units in program.event_pre_comb.values_mut() {
+        for eu in units {
+            for bb in eu.blocks.values_mut() {
+                for inst in &mut bb.instructions {
+                    match inst {
+                        crate::ir::SIRInstruction::Store(addr, .., triggers) => {
+                            let abs = addr.absolute_addr();
+                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            if let Some(ts) = trigger_map.get(&canonical) {
+                                *triggers = ts.clone();
+                            }
+                        }
+                        crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
+                            let abs = dst.absolute_addr();
+                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            if let Some(ts) = trigger_map.get(&canonical) {
+                                *triggers = ts.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    for units in program.event_post_comb.values_mut() {
+        for eu in units {
+            for bb in eu.blocks.values_mut() {
+                for inst in &mut bb.instructions {
+                    match inst {
+                        crate::ir::SIRInstruction::Store(addr, .., triggers) => {
+                            let abs = addr.absolute_addr();
+                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            if let Some(ts) = trigger_map.get(&canonical) {
+                                *triggers = ts.clone();
+                            }
+                        }
+                        crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
+                            let abs = dst.absolute_addr();
+                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            if let Some(ts) = trigger_map.get(&canonical) {
+                                *triggers = ts.clone();
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }

@@ -212,15 +212,27 @@ fn compile_program(
         }
 
         let mut merged_units: Vec<_> = units.clone();
-        merged_units.extend(sir.eval_comb.iter().cloned());
+        if let Some(post_units) = sir.event_post_comb.get(clock) {
+            merged_units.extend(post_units.iter().cloned());
+        } else {
+            merged_units.extend(sir.eval_comb.iter().cloned());
+        }
         let merged_code = compile_units(&merged_units, layout, options.four_state)?;
         let merged_func = merged_code.fn_ptr;
         all_jit_codes.push(merged_code);
         eval_apply_and_comb_map.insert(*clock, merged_func);
 
-        let mut dirty_merged_units = sir.eval_comb.clone();
+        let mut dirty_merged_units = sir
+            .event_pre_comb
+            .get(clock)
+            .cloned()
+            .unwrap_or_else(|| sir.eval_comb.clone());
         dirty_merged_units.extend(units.clone());
-        dirty_merged_units.extend(sir.eval_comb.iter().cloned());
+        if let Some(post_units) = sir.event_post_comb.get(clock) {
+            dirty_merged_units.extend(post_units.iter().cloned());
+        } else {
+            dirty_merged_units.extend(sir.eval_comb.iter().cloned());
+        }
         let dirty_merged_code = compile_units(&dirty_merged_units, layout, options.four_state)?;
         let dirty_merged_func = dirty_merged_code.fn_ptr;
         all_jit_codes.push(dirty_merged_code);
@@ -409,16 +421,32 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
-        let bs = get_byte_size(signal.width);
+        let allocated_size = get_byte_size(signal.width);
+        let provided_size = std::mem::size_of::<T>();
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
-        let bytes = self.mem_bytes_mut();
-        let val_bytes = unsafe {
-            std::slice::from_raw_parts(&val as *const T as *const u8, std::mem::size_of::<T>())
-        };
-        let copy_len = val_bytes.len().min(bs);
-        bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
-        if clear_mask {
-            bytes[signal.offset + bs..signal.offset + bs + bs].fill(0);
+
+        assert!(provided_size <= allocated_size);
+
+        unsafe {
+            let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
+            if !clear_mask && allocated_size == 1 {
+                let raw = *(&val as *const T as *const u8);
+                let byte = if signal.width < 8 {
+                    raw & ((1u8 << signal.width) - 1)
+                } else {
+                    raw
+                };
+                *base_ptr = byte;
+                return;
+            }
+
+            std::ptr::write_bytes(base_ptr, 0, allocated_size);
+            std::ptr::write_unaligned(base_ptr as *mut T, val);
+
+            if clear_mask {
+                let mask_ptr = base_ptr.add(allocated_size);
+                std::ptr::write_bytes(mask_ptr, 0, allocated_size);
+            }
         }
     }
 

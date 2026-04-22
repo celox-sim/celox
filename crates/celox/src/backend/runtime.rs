@@ -416,21 +416,77 @@ impl JitBackend {
                 if units.is_empty() {
                     continue;
                 }
-                let mut merged_units: Vec<_> = units.clone();
-                merged_units.extend(sir.eval_comb.iter().cloned());
-
-                let ptr = engine
-                    .compile_units(&merged_units, None, None, None)
-                    .map_err(SimulatorError::from)?;
+                let ptr = if let Some(post_chunks) = sir.event_post_comb_chunks.get(clock) {
+                    let mut merged_chunks = vec![crate::optimizer::coalescing::TailCallChunk {
+                        units: units.clone(),
+                        incoming_live_regs: Vec::new(),
+                        outgoing_live_regs: Vec::new(),
+                    }];
+                    merged_chunks.extend(post_chunks.iter().cloned());
+                    engine
+                        .compile_chunks(&merged_chunks, None, None, None)
+                        .map_err(SimulatorError::from)?
+                } else {
+                    let mut merged_units: Vec<_> = units.clone();
+                    if let Some(post_units) = sir.event_post_comb.get(clock) {
+                        merged_units.extend(post_units.iter().cloned());
+                    } else {
+                        merged_units.extend(sir.eval_comb.iter().cloned());
+                    }
+                    engine
+                        .compile_units(&merged_units, None, None, None)
+                        .map_err(SimulatorError::from)?
+                };
                 let func: SimFunc = unsafe { std::mem::transmute(ptr) };
                 eval_apply_and_comb_map.insert(*clock, func);
 
-                let mut dirty_merged_units: Vec<_> = sir.eval_comb.clone();
-                dirty_merged_units.extend(units.clone());
-                dirty_merged_units.extend(sir.eval_comb.iter().cloned());
-                let dirty_ptr = engine
-                    .compile_units(&dirty_merged_units, None, None, None)
-                    .map_err(SimulatorError::from)?;
+                let dirty_ptr = if sir.event_pre_comb_chunks.contains_key(clock)
+                    || sir.event_post_comb_chunks.contains_key(clock)
+                {
+                    let mut merged_chunks = sir
+                        .event_pre_comb_chunks
+                        .get(clock)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            vec![crate::optimizer::coalescing::TailCallChunk {
+                                units: sir.eval_comb.clone(),
+                                incoming_live_regs: Vec::new(),
+                                outgoing_live_regs: Vec::new(),
+                            }]
+                        });
+                    merged_chunks.push(crate::optimizer::coalescing::TailCallChunk {
+                        units: units.clone(),
+                        incoming_live_regs: Vec::new(),
+                        outgoing_live_regs: Vec::new(),
+                    });
+                    if let Some(post_chunks) = sir.event_post_comb_chunks.get(clock) {
+                        merged_chunks.extend(post_chunks.iter().cloned());
+                    } else {
+                        merged_chunks.push(crate::optimizer::coalescing::TailCallChunk {
+                            units: sir.eval_comb.clone(),
+                            incoming_live_regs: Vec::new(),
+                            outgoing_live_regs: Vec::new(),
+                        });
+                    }
+                    engine
+                        .compile_chunks(&merged_chunks, None, None, None)
+                        .map_err(SimulatorError::from)?
+                } else {
+                    let mut dirty_merged_units: Vec<_> = sir
+                        .event_pre_comb
+                        .get(clock)
+                        .cloned()
+                        .unwrap_or_else(|| sir.eval_comb.clone());
+                    dirty_merged_units.extend(units.clone());
+                    if let Some(post_units) = sir.event_post_comb.get(clock) {
+                        dirty_merged_units.extend(post_units.iter().cloned());
+                    } else {
+                        dirty_merged_units.extend(sir.eval_comb.iter().cloned());
+                    }
+                    engine
+                        .compile_units(&dirty_merged_units, None, None, None)
+                        .map_err(SimulatorError::from)?
+                };
                 let dirty_func: SimFunc = unsafe { std::mem::transmute(dirty_ptr) };
                 dirty_eval_apply_and_comb_map.insert(*clock, dirty_func);
             }
@@ -577,16 +633,28 @@ impl JitBackend {
     pub fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
+        let clear_mask = self.shared.options.four_state && signal.is_4state;
 
         assert!(provided_size <= allocated_size);
 
         unsafe {
             let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
+            if !clear_mask && allocated_size == 1 {
+                let raw = *(&value as *const T as *const u8);
+                let byte = if signal.width < 8 {
+                    raw & ((1u8 << signal.width) - 1)
+                } else {
+                    raw
+                };
+                *base_ptr = byte;
+                return;
+            }
+
             std::ptr::write_bytes(base_ptr, 0, allocated_size);
             let ptr = base_ptr as *mut T;
             std::ptr::write_unaligned(ptr, value);
 
-            if self.shared.options.four_state && signal.is_4state {
+            if clear_mask {
                 let mask_ptr = base_ptr.add(allocated_size);
                 std::ptr::write_bytes(mask_ptr, 0, allocated_size);
             }

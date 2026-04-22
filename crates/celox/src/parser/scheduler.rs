@@ -10,6 +10,7 @@ use crate::ir::SIRValue;
 use crate::ir::{BitAccess, BlockId, ExecutionUnit};
 use crate::logic_tree::NodeId;
 use crate::logic_tree::{LogicPath, SLTNodeArena};
+use crate::optimizer::coalescing::TailCallChunk;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -243,6 +244,12 @@ pub enum SchedulerError<A: Display + Debug + Eq + Hash + Clone> {
     MultipleDriver { blocks: Vec<LogicPath<A>> },
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SchedulerOptions {
+    pub preserve_dag_regions: bool,
+    pub preserve_register_chunks: bool,
+}
+
 impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
     pub fn map_addr<B: Display + Debug + Eq + Hash + Clone, F>(
         self,
@@ -453,6 +460,27 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     four_state: bool,
     var_widths: &HashMap<Addr, usize>,
 ) -> Result<Vec<ExecutionUnit<Addr>>, SchedulerError<Addr>> {
+    sort_with_options(
+        input,
+        arena,
+        ignored_loops,
+        true_loops,
+        four_state,
+        var_widths,
+        SchedulerOptions::default(),
+    )
+}
+
+pub fn sort_with_options<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    input: Vec<LogicPath<Addr>>,
+    arena: &SLTNodeArena<Addr>,
+    ignored_loops: &HashSet<(Addr, Addr)>,
+    true_loops: &HashMap<(Addr, Addr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+    options: SchedulerOptions,
+) -> Result<Vec<ExecutionUnit<Addr>>, SchedulerError<Addr>> {
+    let trace_scheduler = std::env::var("CELOX_SCHED_TRACE").is_ok();
     // 1. Build Atom Map & Multiple Driver Check
     let mut atoms_map: HashMap<Addr, Vec<(BitAccess, usize)>> = HashMap::default();
     for (i, path) in input.iter().enumerate() {
@@ -541,6 +569,23 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         // same-target paths at the same layer become adjacent.
         reorder_dag_runs(&ctx.sccs, &adj, &layer, &input)
     };
+
+    if trace_scheduler {
+        let dag_count = sccs
+            .iter()
+            .filter(|scc| scc.len() == 1 && !adj[scc[0]].contains(&scc[0]))
+            .count();
+        let loop_count = sccs.len().saturating_sub(dag_count);
+        let largest_scc = sccs.iter().map(|scc| scc.len()).max().unwrap_or(0);
+        eprintln!(
+            "[sched] paths={} sccs={} dag_sccs={} loop_sccs={} largest_scc={}",
+            input.len(),
+            sccs.len(),
+            dag_count,
+            loop_count,
+            largest_scc
+        );
+    }
 
     let mut builder = SIRBuilder::new();
     let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state);
@@ -812,10 +857,17 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     var_widths,
                 );
                 pending_target = None;
-                if let Some(eu) = builder.flush_eu() {
+                let flushed = if options.preserve_register_chunks {
+                    builder.flush_chunk_preserve_regs()
+                } else {
+                    builder.flush_eu()
+                };
+                if let Some(eu) = flushed {
                     result_eus.push(eu);
-                    // Clear the lowering cache — register IDs are EU-scoped
-                    lower_cache.clear();
+                    // Register IDs are EU-scoped only for normal EU flushes.
+                    if !options.preserve_register_chunks {
+                        lower_cache.clear();
+                    }
                 }
             }
 
@@ -840,6 +892,19 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     four_state,
                     var_widths,
                 );
+                if options.preserve_dag_regions {
+                    let flushed = if options.preserve_register_chunks {
+                        builder.flush_chunk_preserve_regs()
+                    } else {
+                        builder.flush_eu()
+                    };
+                    if let Some(eu) = flushed {
+                        result_eus.push(eu);
+                        if !options.preserve_register_chunks {
+                            lower_cache.clear();
+                        }
+                    }
+                }
                 pending_target = Some(this_target);
                 pending_indices.push(idx);
             }
@@ -860,13 +925,240 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         four_state,
         var_widths,
     );
-
-    builder.seal_block(SIRTerminator::Return);
-    let (blocks, reg_map, _) = builder.drain();
-    result_eus.push(ExecutionUnit {
-        entry_block_id: BlockId(0),
-        blocks,
-        register_map: reg_map,
-    });
+    let flushed = if options.preserve_register_chunks {
+        builder.flush_chunk_preserve_regs()
+    } else {
+        builder.flush_eu()
+    };
+    if let Some(eu) = flushed {
+        result_eus.push(eu);
+        if !options.preserve_register_chunks {
+            lower_cache.clear();
+        }
+    } else if result_eus.is_empty() {
+        builder.seal_block(SIRTerminator::Return);
+        let (blocks, reg_map, _) = builder.drain();
+        result_eus.push(ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map: reg_map,
+        });
+    }
+    if trace_scheduler {
+        let eu_count = result_eus.len();
+        let total_blocks: usize = result_eus.iter().map(|eu| eu.blocks.len()).sum();
+        let total_regs: usize = result_eus.iter().map(|eu| eu.register_map.len()).sum();
+        eprintln!(
+            "[sched] result_eus={} total_blocks={} total_regs={}",
+            eu_count, total_blocks, total_regs
+        );
+    }
     Ok(result_eus)
+}
+
+fn def_reg_local<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
+    match inst {
+        SIRInstruction::Imm(dst, _)
+        | SIRInstruction::Binary(dst, _, _, _)
+        | SIRInstruction::Unary(dst, _, _)
+        | SIRInstruction::Load(dst, _, _, _)
+        | SIRInstruction::Concat(dst, _)
+        | SIRInstruction::Slice(dst, _, _, _)
+        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+        SIRInstruction::Store(..) | SIRInstruction::Commit(..) => None,
+    }
+}
+
+fn collect_used_regs_local<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
+    match inst {
+        SIRInstruction::Imm(_, _) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            out.push(*lhs);
+            out.push(*rhs);
+        }
+        SIRInstruction::Unary(_, _, src) => out.push(*src),
+        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => out.push(*off),
+        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+            out.push(*off);
+            out.push(*src);
+        }
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => out.push(*src),
+        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => out.push(*off),
+        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
+        SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
+        SIRInstruction::Slice(_, src, _, _) => out.push(*src),
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            out.push(*cond);
+            out.push(*then_val);
+            out.push(*else_val);
+        }
+    }
+}
+
+fn collect_terminator_used_regs_local(term: &SIRTerminator, out: &mut Vec<RegisterId>) {
+    match term {
+        SIRTerminator::Jump(_, args) => out.extend(args.iter().copied()),
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            out.push(*cond);
+            out.extend(true_block.1.iter().copied());
+            out.extend(false_block.1.iter().copied());
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
+}
+
+fn compute_chunk_liveness(chunks: &mut [TailCallChunk]) {
+    use crate::HashSet;
+
+    if chunks.len() <= 1 {
+        return;
+    }
+
+    let mut defs = Vec::with_capacity(chunks.len());
+    let mut uses = Vec::with_capacity(chunks.len());
+
+    for chunk in chunks.iter() {
+        let unit = &chunk.units[0];
+        let mut def_set: HashSet<RegisterId> = HashSet::default();
+        let mut use_set: HashSet<RegisterId> = HashSet::default();
+        for block in unit.blocks.values() {
+            for &p in &block.params {
+                def_set.insert(p);
+            }
+            for inst in &block.instructions {
+                let mut used = Vec::new();
+                collect_used_regs_local(inst, &mut used);
+                for reg in used {
+                    if !def_set.contains(&reg) {
+                        use_set.insert(reg);
+                    }
+                }
+                if let Some(def) = def_reg_local(inst) {
+                    def_set.insert(def);
+                }
+            }
+            let mut term_used = Vec::new();
+            collect_terminator_used_regs_local(&block.terminator, &mut term_used);
+            for reg in term_used {
+                if !def_set.contains(&reg) {
+                    use_set.insert(reg);
+                }
+            }
+        }
+        defs.push(def_set);
+        uses.push(use_set);
+    }
+
+    let mut live_in: Vec<HashSet<RegisterId>> = vec![HashSet::default(); chunks.len()];
+    let mut live_out: Vec<HashSet<RegisterId>> = vec![HashSet::default(); chunks.len()];
+
+    for i in (0..chunks.len()).rev() {
+        if i + 1 < chunks.len() {
+            live_out[i] = live_in[i + 1].clone();
+        }
+        let mut set = live_out[i].clone();
+        for def in &defs[i] {
+            set.remove(def);
+        }
+        set.extend(uses[i].iter().copied());
+        live_in[i] = set;
+    }
+
+    for i in 0..chunks.len() {
+        let reg_map = &chunks[i].units[0].register_map;
+        chunks[i].incoming_live_regs = if i == 0 {
+            Vec::new()
+        } else {
+            let mut regs: Vec<_> = live_in[i]
+                .iter()
+                .filter_map(|reg| reg_map.get(reg).cloned().map(|ty| (*reg, ty)))
+                .collect();
+            regs.sort_by_key(|(reg, _)| *reg);
+            regs
+        };
+        let mut outgoing: Vec<_> = live_out[i]
+            .iter()
+            .filter_map(|reg| reg_map.get(reg).cloned().map(|ty| (*reg, ty)))
+            .collect();
+        if std::env::var("CELOX_EVENT_CHUNK_TRACE").is_ok() {
+            for reg in &live_in[i] {
+                if i != 0 && !reg_map.contains_key(reg) {
+                    eprintln!("[event-chunk-miss] chunk={i} incoming reg={reg}");
+                }
+            }
+            for reg in &live_out[i] {
+                if !reg_map.contains_key(reg) {
+                    eprintln!("[event-chunk-miss] chunk={i} outgoing reg={reg}");
+                }
+            }
+        }
+        outgoing.sort_by_key(|(reg, _)| *reg);
+        chunks[i].outgoing_live_regs = outgoing;
+    }
+}
+
+pub fn sort_tail_chunks(
+    input: Vec<LogicPath<crate::ir::AbsoluteAddr>>,
+    arena: &SLTNodeArena<crate::ir::AbsoluteAddr>,
+    ignored_loops: &HashSet<(crate::ir::AbsoluteAddr, crate::ir::AbsoluteAddr)>,
+    true_loops: &HashMap<(crate::ir::AbsoluteAddr, crate::ir::AbsoluteAddr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<crate::ir::AbsoluteAddr, usize>,
+) -> Result<Vec<TailCallChunk>, SchedulerError<crate::ir::AbsoluteAddr>> {
+    let units = sort_with_options(
+        input,
+        arena,
+        ignored_loops,
+        true_loops,
+        four_state,
+        var_widths,
+        SchedulerOptions {
+            preserve_dag_regions: true,
+            preserve_register_chunks: true,
+        },
+    )?;
+
+    let mut chunks: Vec<TailCallChunk> = units
+        .into_iter()
+        .map(|eu| TailCallChunk {
+            units: vec![ExecutionUnit {
+                entry_block_id: eu.entry_block_id,
+                blocks: eu
+                    .blocks
+                    .into_iter()
+                    .map(|(id, bb)| {
+                        (
+                            id,
+                            crate::ir::BasicBlock {
+                                id: bb.id,
+                                params: bb.params,
+                                instructions: bb
+                                    .instructions
+                                    .into_iter()
+                                    .map(|inst| {
+                                        inst.into_map_addr(|addr| crate::ir::RegionedAbsoluteAddr {
+                                            region: crate::ir::STABLE_REGION,
+                                            instance_id: addr.instance_id,
+                                            var_id: addr.var_id,
+                                        })
+                                    })
+                                    .collect(),
+                                terminator: bb.terminator,
+                            },
+                        )
+                    })
+                    .collect(),
+                register_map: eu.register_map,
+            }],
+            incoming_live_regs: Vec::new(),
+            outgoing_live_regs: Vec::new(),
+        })
+        .collect();
+    compute_chunk_liveness(&mut chunks);
+    Ok(chunks)
 }
