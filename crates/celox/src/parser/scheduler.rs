@@ -189,6 +189,37 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             ));
             set
         }
+        crate::logic_tree::SLTNode::ForFold {
+            loop_var,
+            start,
+            end,
+            updates,
+            ..
+        } => {
+            let mut set = HashSet::default();
+            match start {
+                crate::logic_tree::SLTLoopBound::Const(_) => {}
+                crate::logic_tree::SLTLoopBound::Expr(node) => {
+                    set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
+                }
+            }
+            match end {
+                crate::logic_tree::SLTLoopBound::Const(_) => {}
+                crate::logic_tree::SLTLoopBound::Expr(node) => {
+                    set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
+                }
+            }
+            for update in updates {
+                set.extend(collect_node_input_deps(
+                    update.expr,
+                    arena,
+                    memo,
+                    inverse_memo,
+                ));
+                set.remove(loop_var);
+            }
+            set
+        }
         crate::logic_tree::SLTNode::Constant(_, _, _, _) => HashSet::default(),
     };
 

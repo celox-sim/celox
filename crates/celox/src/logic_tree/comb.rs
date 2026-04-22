@@ -17,8 +17,9 @@ use crate::{
 use num_bigint::BigUint;
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignStatement, CombDeclaration, Comptime, Expression, Factor, IfStatement,
-    Module, Op, Statement, ValueVariant, VarId, VarIndex, VarSelect, VarSelectOp,
+    ArrayLiteralItem, AssignStatement, CombDeclaration, Comptime, Expression, Factor, ForBound,
+    ForRange, ForStatement, IfStatement, Module, Op, Statement, ValueVariant, VarId, VarIndex,
+    VarSelect, VarSelectOp,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -35,21 +36,21 @@ pub struct NodeId(pub usize);
     serialize = "A: Serialize + std::hash::Hash + Eq + Clone",
     deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
 ))]
-pub struct SLTNodeArena<A> {
+pub struct SLTNodeArena<A: Hash + Eq + Clone> {
     pub nodes: Vec<SLTNode<A>>,
     #[serde(skip, default = "crate::HashMap::default")]
     pub cache: crate::HashMap<SLTNode<A>, NodeId>,
 }
 
-impl<A: PartialEq> PartialEq for SLTNodeArena<A> {
+impl<A: PartialEq + Hash + Eq + Clone> PartialEq for SLTNodeArena<A> {
     fn eq(&self, other: &Self) -> bool {
         self.nodes == other.nodes
     }
 }
 
-impl<A: Eq> Eq for SLTNodeArena<A> {}
+impl<A: Eq + Hash + Clone> Eq for SLTNodeArena<A> {}
 
-impl<A> SLTNodeArena<A> {
+impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
@@ -79,19 +80,19 @@ impl<A> SLTNodeArena<A> {
     }
 }
 
-pub struct NodeDisplay<'a, A> {
+pub struct NodeDisplay<'a, A: Hash + Eq + Clone> {
     arena: &'a SLTNodeArena<A>,
     id: NodeId,
 }
 
-impl<'a, A: std::fmt::Display> std::fmt::Display for NodeDisplay<'a, A> {
+impl<'a, A: Hash + Eq + Clone + std::fmt::Display> std::fmt::Display for NodeDisplay<'a, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "n{}: ", self.id.0)?;
         self.arena.get(self.id).fmt_expression(f, self.arena)
     }
 }
 
-impl<A> SLTNode<A> {
+impl<A: Hash + Eq + Clone> SLTNode<A> {
     pub fn fmt_expression(
         &self,
         f: &mut std::fmt::Formatter<'_>,
@@ -195,6 +196,66 @@ impl<A> SLTNode<A> {
                 arena.get(*else_expr).fmt_expression(f, arena)?;
                 write!(f, ")")
             }
+            SLTNode::ForFold {
+                loop_var,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result,
+                initials,
+                updates,
+                ..
+            } => {
+                let fmt_bound = |f: &mut std::fmt::Formatter<'_>, bound: &SLTLoopBound| -> std::fmt::Result {
+                    match bound {
+                        SLTLoopBound::Const(v) => write!(f, "{v}"),
+                        SLTLoopBound::Expr(node) => {
+                            write!(f, "n{}:", node.0)?;
+                            arena.get(*node).fmt_expression(f, arena)
+                        }
+                    }
+                };
+                write!(f, "for {loop_var} in ")?;
+                if *reverse {
+                    write!(f, "rev ")?;
+                }
+                fmt_bound(f, start)?;
+                if *inclusive {
+                    write!(f, "..=")?;
+                } else {
+                    write!(f, "..")?;
+                }
+                fmt_bound(f, end)?;
+                if *step != 1 || *step_op != SLTStepOp::Add {
+                    write!(f, " step ")?;
+                    match step_op {
+                        SLTStepOp::Add => write!(f, "+=")?,
+                        SLTStepOp::Mul => write!(f, "*=")?,
+                        SLTStepOp::Shl => write!(f, "<<=")?,
+                    }
+                    write!(f, " {step}")?;
+                }
+                write!(f, " => {result} init[")?;
+                for (i, init) in initials.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{} = n{}:", init.target, init.expr.0)?;
+                    arena.get(init.expr).fmt_expression(f, arena)?;
+                }
+                write!(f, "] {{ ")?;
+                for (i, update) in updates.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{} = n{}:", update.target, update.expr.0)?;
+                    arena.get(update.expr).fmt_expression(f, arena)?;
+                }
+                write!(f, " }}")
+            }
             SLTNode::Concat(parts) => {
                 write!(f, "{{")?;
                 for (i, (part, w)) in parts.iter().enumerate() {
@@ -215,7 +276,7 @@ impl<A> SLTNode<A> {
     }
 }
 
-impl<A> Default for SLTNodeArena<A> {
+impl<A: Hash + Eq + Clone> Default for SLTNodeArena<A> {
     fn default() -> Self {
         Self::new()
     }
@@ -228,6 +289,29 @@ pub struct SLTIndex {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SLTLoopBound {
+    Const(usize),
+    Expr(NodeId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SLTStepOp {
+    Add,
+    Mul,
+    Shl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + std::hash::Hash + Eq + Clone",
+    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
+pub struct SLTForUpdate<A: Hash + Eq + Clone> {
+    pub target: VarAtomBase<A>,
+    pub expr: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(
     into = "SLTNodeSerde<A>",
     from = "SLTNodeSerde<A>",
@@ -236,7 +320,7 @@ pub struct SLTIndex {
         deserialize = "A: Deserialize<'de>"
     )
 )]
-pub enum SLTNode<A> {
+pub enum SLTNode<A: Hash + Eq + Clone> {
     Input {
         variable: A,
         index: Vec<SLTIndex>,
@@ -250,6 +334,19 @@ pub enum SLTNode<A> {
         then_expr: NodeId,
         else_expr: NodeId,
     },
+    ForFold {
+        loop_var: A,
+        loop_width: usize,
+        start: SLTLoopBound,
+        end: SLTLoopBound,
+        inclusive: bool,
+        step: usize,
+        step_op: SLTStepOp,
+        reverse: bool,
+        result: VarAtomBase<A>,
+        initials: Vec<SLTForUpdate<A>>,
+        updates: Vec<SLTForUpdate<A>>,
+    },
     // Concat/Slice are primarily used for RHS expression evaluation.
     // On the LHS (assignments), bit manipulation is handled implicitly by RangeStore atomization.
     Concat(Vec<(NodeId, usize)>),
@@ -262,7 +359,7 @@ pub enum SLTNode<A> {
 /// Serde-friendly mirror of [`SLTNode`] that replaces [`BigUint`] with `Vec<u8>` (little-endian).
 #[derive(Serialize, Deserialize)]
 #[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
-enum SLTNodeSerde<A> {
+enum SLTNodeSerde<A: Hash + Eq + Clone> {
     Input {
         variable: A,
         index: Vec<SLTIndex>,
@@ -281,6 +378,19 @@ enum SLTNodeSerde<A> {
         then_expr: NodeId,
         else_expr: NodeId,
     },
+    ForFold {
+        loop_var: A,
+        loop_width: usize,
+        start: SLTLoopBound,
+        end: SLTLoopBound,
+        inclusive: bool,
+        step: usize,
+        step_op: SLTStepOp,
+        reverse: bool,
+        result: VarAtomBase<A>,
+        initials: Vec<SLTForUpdate<A>>,
+        updates: Vec<SLTForUpdate<A>>,
+    },
     Concat(Vec<(NodeId, usize)>),
     Slice {
         expr: NodeId,
@@ -288,7 +398,7 @@ enum SLTNodeSerde<A> {
     },
 }
 
-impl<A> From<SLTNode<A>> for SLTNodeSerde<A> {
+impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
     fn from(node: SLTNode<A>) -> Self {
         match node {
             SLTNode::Input {
@@ -317,13 +427,38 @@ impl<A> From<SLTNode<A>> for SLTNodeSerde<A> {
                 then_expr,
                 else_expr,
             },
+            SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result,
+                initials,
+                updates,
+            } => SLTNodeSerde::ForFold {
+                loop_var,
+                loop_width,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result,
+                initials,
+                updates,
+            },
             SLTNode::Concat(parts) => SLTNodeSerde::Concat(parts),
             SLTNode::Slice { expr, access } => SLTNodeSerde::Slice { expr, access },
         }
     }
 }
 
-impl<A> From<SLTNodeSerde<A>> for SLTNode<A> {
+impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
     fn from(node: SLTNodeSerde<A>) -> Self {
         match node {
             SLTNodeSerde::Input {
@@ -357,12 +492,37 @@ impl<A> From<SLTNodeSerde<A>> for SLTNode<A> {
                 then_expr,
                 else_expr,
             },
+            SLTNodeSerde::ForFold {
+                loop_var,
+                loop_width,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result,
+                initials,
+                updates,
+            } => SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result,
+                initials,
+                updates,
+            },
             SLTNodeSerde::Concat(parts) => SLTNode::Concat(parts),
             SLTNodeSerde::Slice { expr, access } => SLTNode::Slice { expr, access },
         }
     }
 }
-impl<A> SLTNode<A> {
+impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
     /// Maps the address type A to B recursively throughout the tree.
     pub fn map_addr<B, F>(
         &self,
@@ -448,6 +608,81 @@ impl<A> SLTNode<A> {
                 }
             }
 
+            SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result,
+                initials,
+                updates,
+            } => {
+                let map_bound = |bound: &SLTLoopBound,
+                                 cache: &mut HashMap<NodeId, NodeId>,
+                                 target_arena: &mut SLTNodeArena<B>|
+                 -> SLTLoopBound {
+                    match bound {
+                        SLTLoopBound::Const(v) => SLTLoopBound::Const(*v),
+                        SLTLoopBound::Expr(node) => SLTLoopBound::Expr(
+                            arena
+                                .get(*node)
+                                .map_addr(*node, arena, target_arena, cache, f),
+                        ),
+                    }
+                };
+                let mapped_initials = initials
+                    .iter()
+                    .map(|update| SLTForUpdate {
+                        target: VarAtomBase::new(
+                            f(&update.target.id),
+                            update.target.access.lsb,
+                            update.target.access.msb,
+                        ),
+                        expr: arena.get(update.expr).map_addr(
+                            update.expr,
+                            arena,
+                            target_arena,
+                            cache,
+                            f,
+                        ),
+                    })
+                    .collect();
+                let mapped_updates = updates
+                    .iter()
+                    .map(|update| SLTForUpdate {
+                        target: VarAtomBase::new(
+                            f(&update.target.id),
+                            update.target.access.lsb,
+                            update.target.access.msb,
+                        ),
+                        expr: arena.get(update.expr).map_addr(
+                            update.expr,
+                            arena,
+                            target_arena,
+                            cache,
+                            f,
+                        ),
+                    })
+                    .collect();
+                SLTNode::ForFold {
+                    loop_var: f(loop_var),
+                    loop_width: *loop_width,
+                    start: map_bound(start, cache, target_arena),
+                    end: map_bound(end, cache, target_arena),
+                    inclusive: *inclusive,
+                    step: *step,
+                    step_op: *step_op,
+                    reverse: *reverse,
+                    result: VarAtomBase::new(f(&result.id), result.access.lsb, result.access.msb),
+                    initials: mapped_initials,
+                    updates: mapped_updates,
+                }
+            }
+
             SLTNode::Concat(parts) => {
                 let mapped_parts = parts
                     .iter()
@@ -512,13 +747,13 @@ impl<A> SLTNode<A> {
 ///     Const(0x3, 32bits)
 ///     Const(0x4, 32bits)
 /// ```
-impl<A: fmt::Debug> SLTNode<A> {
+impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
     pub fn fmt_display(&self, f: &mut fmt::Formatter<'_>, arena: &SLTNodeArena<A>) -> fmt::Result {
         self.fmt_recursive(f, 0, arena)
     }
 }
 
-impl<A: fmt::Debug> SLTNode<A> {
+impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
     fn fmt_recursive(
         &self,
         f: &mut fmt::Formatter<'_>,
@@ -577,6 +812,38 @@ impl<A: fmt::Debug> SLTNode<A> {
                 writeln!(f, "\n{}else:", child_indent)?;
                 arena.get(*else_expr).fmt_recursive(f, depth + 2, arena)
             }
+            SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result,
+                initials,
+                updates,
+            } => {
+                writeln!(
+                    f,
+                    "{}ForFold(loop_var={}, width={}, inclusive={}, step={}, step_op={:?}, reverse={}, result={})",
+                    indent, loop_var, loop_width, inclusive, step, step_op, reverse, result
+                )?;
+                writeln!(f, "{}start: {:?}", child_indent, start)?;
+                writeln!(f, "{}end: {:?}", child_indent, end)?;
+                for init in initials {
+                    writeln!(f, "{}init {}:", child_indent, init.target)?;
+                    arena.get(init.expr).fmt_recursive(f, depth + 2, arena)?;
+                    writeln!(f)?;
+                }
+                for update in updates {
+                    writeln!(f, "{}update {}:", child_indent, update.target)?;
+                    arena.get(update.expr).fmt_recursive(f, depth + 2, arena)?;
+                    writeln!(f)?;
+                }
+                Ok(())
+            }
             SLTNode::Concat(parts) => {
                 writeln!(f, "{}Concat", indent)?;
                 for (i, (part, width)) in parts.iter().enumerate() {
@@ -613,7 +880,7 @@ impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for LogicPath<A> {
     }
 }
 
-impl<A: Hash + Eq + Clone> LogicPath<A> {
+impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
     pub fn map_addr<B: Hash + Eq + Clone, F>(
         &self,
         arena: &SLTNodeArena<A>,
@@ -714,6 +981,7 @@ fn eval_statement(
     match stmt {
         Statement::Assign(assign) => eval_assign(module, store, boundaries, assign, arena),
         Statement::If(if_stmt) => eval_if(module, store, boundaries, if_stmt, arena),
+        Statement::For(for_stmt) => eval_for(module, store, boundaries, for_stmt, arena),
         Statement::IfReset(ir) => Err(ParserError::unsupported(
             LoweringPhase::SimulatorParser,
             "unsupported statement in always_comb",
@@ -732,13 +1000,299 @@ fn eval_statement(
             "illegal statement in always_comb: function call".to_string(),
             Some(&fc.comptime.token),
         )),
-        _ => Err(ParserError::unsupported(
+        Statement::TbMethodCall(_) => Err(ParserError::unsupported(
             LoweringPhase::SimulatorParser,
             "unsupported statement in always_comb",
-            "illegal statement in always_comb".to_string(),
+            "illegal statement in always_comb: testbench method call".to_string(),
+            None,
+        )),
+        Statement::Break => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: break".to_string(),
+            None,
+        )),
+        Statement::Unsupported(_) => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: unsupported".to_string(),
+            None,
+        )),
+        Statement::Null => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: null".to_string(),
             None,
         )),
     }
+}
+
+fn extract_store_updates(
+    store_before: &SymbolicStore<VarId>,
+    store_after: &SymbolicStore<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Vec<(VarAtomBase<VarId>, NodeId, HashSet<VarAtomBase<VarId>>)> {
+    let mut updates = Vec::new();
+
+    for (id, range_store_after) in store_after {
+        let Some(range_store_before) = store_before.get(id) else {
+            continue;
+        };
+
+        for (&lsb, (val_opt, width, origin)) in &range_store_after.ranges {
+            if range_store_before.ranges.get(&lsb) == Some(&(val_opt.clone(), *width, *origin)) {
+                continue;
+            }
+
+            let Some((expr, sources)) = val_opt else {
+                continue;
+            };
+
+            let msb = lsb + width - 1;
+            let rel_lsb = lsb - origin;
+            let rel_msb = msb - origin;
+            let original_width = get_width(*expr, arena);
+            let final_expr = if rel_lsb == 0 && *width == original_width {
+                *expr
+            } else {
+                arena.alloc(SLTNode::Slice {
+                    expr: *expr,
+                    access: BitAccess::new(rel_lsb, rel_msb),
+                })
+            };
+
+            updates.push((VarAtomBase::new(*id, lsb, msb), final_expr, sources.clone()));
+        }
+    }
+
+    updates
+}
+
+fn eval_for_bound(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    bound: &ForBound,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SLTLoopBound, HashSet<VarAtomBase<VarId>>, BoundaryMap<VarId>), ParserError> {
+    match bound {
+        ForBound::Const(v) => Ok((SLTLoopBound::Const(*v), HashSet::default(), BoundaryMap::default())),
+        ForBound::Expression(expr) => {
+            let ((node, sources), bounds) = eval_expression(module, store, expr, arena, None)?;
+            Ok((SLTLoopBound::Expr(node), sources, bounds))
+        }
+    }
+}
+
+fn collect_written_vars(statements: &[Statement], out: &mut HashSet<VarId>) {
+    for stmt in statements {
+        match stmt {
+            Statement::Assign(assign) => {
+                for dst in &assign.dst {
+                    out.insert(dst.id);
+                }
+            }
+            Statement::If(if_stmt) => {
+                collect_written_vars(&if_stmt.true_side, out);
+                collect_written_vars(&if_stmt.false_side, out);
+            }
+            Statement::For(for_stmt) => collect_written_vars(&for_stmt.body, out),
+            Statement::IfReset(if_reset) => {
+                collect_written_vars(&if_reset.true_side, out);
+                collect_written_vars(&if_reset.false_side, out);
+            }
+            Statement::SystemFunctionCall(_)
+            | Statement::FunctionCall(_)
+            | Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => {}
+        }
+    }
+}
+
+fn eval_for(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: HashMap<VarId, BTreeSet<usize>>,
+    for_stmt: &ForStatement,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
+    let Some(loop_width) = for_stmt.var_type.total_width() else {
+        return Err(ParserError::unsupported(
+            LoweringPhase::CombLowering,
+            "for loop variable width",
+            format!("{:?}", for_stmt.var_name),
+            Some(&for_stmt.token),
+        ));
+    };
+
+    let mut symbolic_store = store.clone();
+    let mut written_vars = HashSet::default();
+    collect_written_vars(&for_stmt.body, &mut written_vars);
+    for id in written_vars {
+        let width = resolve_total_width(module, &module.variables[&id])?;
+        symbolic_store.insert(id, RangeStore::new(None, width));
+    }
+    symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+    let iter_store_before = symbolic_store.clone();
+
+    let (iter_store_after, mut merged_boundaries) = for_stmt
+        .body
+        .iter()
+        .try_fold((symbolic_store, boundaries), |(s, b), stmt| {
+            eval_statement(module, s, b, stmt, arena)
+        })?;
+
+    let (start, end, start_sources, end_sources, start_bounds, end_bounds, inclusive, step, step_op, reverse) = match &for_stmt.range {
+        ForRange::Forward {
+            start: range_start,
+            end: range_end,
+            inclusive,
+            step,
+        } => {
+            let (start, start_sources, start_bounds) =
+                eval_for_bound(module, &store, range_start, arena)?;
+            let (end, end_sources, end_bounds) =
+                eval_for_bound(module, &store, range_end, arena)?;
+            (
+                start,
+                end,
+                start_sources,
+                end_sources,
+                start_bounds,
+                end_bounds,
+                *inclusive,
+                *step,
+                SLTStepOp::Add,
+                false,
+            )
+        }
+        ForRange::Reverse {
+            start: range_start,
+            end: range_end,
+            inclusive,
+            step,
+        } => {
+            let (start, start_sources, start_bounds) =
+                eval_for_bound(module, &store, range_start, arena)?;
+            let (end, end_sources, end_bounds) =
+                eval_for_bound(module, &store, range_end, arena)?;
+            (
+                start,
+                end,
+                start_sources,
+                end_sources,
+                start_bounds,
+                end_bounds,
+                *inclusive,
+                *step,
+                SLTStepOp::Add,
+                true,
+            )
+        }
+        ForRange::Stepped {
+            start: range_start,
+            end: range_end,
+            inclusive,
+            step,
+            op,
+        } => {
+            let (start, start_sources, start_bounds) =
+                eval_for_bound(module, &store, range_start, arena)?;
+            let (end, end_sources, end_bounds) =
+                eval_for_bound(module, &store, range_end, arena)?;
+            let step_op = match op {
+                Op::Mul => SLTStepOp::Mul,
+                Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
+                other => {
+                    return Err(ParserError::unsupported(
+                        LoweringPhase::CombLowering,
+                        "for loop step operator",
+                        format!("{other:?}"),
+                        Some(&for_stmt.token),
+                    ));
+                }
+            };
+            (
+                start,
+                end,
+                start_sources,
+                end_sources,
+                start_bounds,
+                end_bounds,
+                *inclusive,
+                *step,
+                step_op,
+                false,
+            )
+        }
+    };
+
+    merged_boundaries = merge_boundaries(merged_boundaries, start_bounds);
+    merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
+
+    let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena);
+    if updates.is_empty() {
+        let mut store = store;
+        store.remove(&for_stmt.var_id);
+        return Ok((store, merged_boundaries));
+    }
+
+    let folded_updates: Vec<_> = updates
+        .iter()
+        .map(|(target, expr, _)| SLTForUpdate {
+            target: *target,
+            expr: *expr,
+        })
+        .collect();
+    let loop_updated_vars: HashSet<_> = folded_updates.iter().map(|update| update.target.id).collect();
+    let initial_updates: Vec<_> = updates
+        .iter()
+        .map(|(target, _, _)| {
+            let parts = store[&target.id].get_parts(target.access);
+            let (expr, _) = combine_parts_with_default(target.id, target.access.lsb, parts, arena);
+            SLTForUpdate {
+                target: *target,
+                expr,
+            }
+        })
+        .collect();
+
+    let mut result_store = store;
+    for (target, _expr, sources) in updates {
+        let mut all_sources = start_sources.clone();
+        all_sources.extend(end_sources.iter().copied());
+        all_sources.extend(
+            sources
+                .into_iter()
+                .filter(|src| src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)),
+        );
+
+        let folded_expr = arena.alloc(SLTNode::ForFold {
+            loop_var: for_stmt.var_id,
+            loop_width,
+            start: start.clone(),
+            end: end.clone(),
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            result: target,
+            initials: initial_updates.clone(),
+            updates: folded_updates.clone(),
+        });
+
+        result_store
+            .entry(target.id)
+            .or_insert_with(|| {
+                let width = resolve_total_width(module, &module.variables[&target.id]).unwrap_or(0);
+                RangeStore::new(None, width)
+            })
+            .update(target.access, Some((folded_expr, all_sources)));
+    }
+
+    result_store.remove(&for_stmt.var_id);
+    Ok((result_store, merged_boundaries))
 }
 
 fn eval_assign(
@@ -2343,7 +2897,7 @@ fn eval_factor(
         )),
     }
 }
-pub fn get_width<A>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
+pub fn get_width<A: Hash + Eq + Clone>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
     match arena.get(expr) {
         SLTNode::Input { access, .. } => access.msb - access.lsb + 1,
         SLTNode::Constant(_, _, width, _) => *width,
@@ -2378,6 +2932,7 @@ pub fn get_width<A>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
             _ => get_width(*inner, arena),
         },
         SLTNode::Mux { then_expr, .. } => get_width(*then_expr, arena),
+        SLTNode::ForFold { result, .. } => result.access.msb - result.access.lsb + 1,
         SLTNode::Concat(parts) => parts.iter().map(|(_, w)| *w).sum(),
         SLTNode::Slice { access, .. } => access.msb - access.lsb + 1,
     }
@@ -2398,6 +2953,7 @@ fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarId>) -> bool
         SLTNode::Unary(UnaryOp::Minus, _) => true,
         SLTNode::Unary(_, inner) => is_signed(module, *inner, arena),
         SLTNode::Mux { then_expr, .. } => is_signed(module, *then_expr, arena),
+        SLTNode::ForFold { result, .. } => module.variables[&result.id].r#type.signed,
         SLTNode::Slice { expr, .. } => is_signed(module, *expr, arena),
         SLTNode::Concat(_) => false,
     }

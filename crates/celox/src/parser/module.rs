@@ -459,6 +459,24 @@ fn collect_glue_sources_with_window(
             collect_glue_sources_with_window(*then_expr, None, arena, set);
             collect_glue_sources_with_window(*else_expr, None, arena, set);
         }
+        SLTNode::ForFold {
+            loop_var,
+            start,
+            end,
+            updates,
+            ..
+        } => {
+            if let crate::logic_tree::SLTLoopBound::Expr(node) = start {
+                collect_glue_sources_with_window(*node, None, arena, set);
+            }
+            if let crate::logic_tree::SLTLoopBound::Expr(node) = end {
+                collect_glue_sources_with_window(*node, None, arena, set);
+            }
+            for update in updates {
+                collect_glue_sources_with_window(update.expr, None, arena, set);
+            }
+            set.retain(|atom| atom.id != *loop_var);
+        }
         SLTNode::Constant(_, _, _, _) => {}
     }
 }

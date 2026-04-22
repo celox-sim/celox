@@ -297,10 +297,28 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             collect_inputs_with_window(*then_expr, None, arena, set, visited);
             collect_inputs_with_window(*else_expr, None, arena, set, visited);
         }
+        SLTNode::ForFold {
+            loop_var,
+            start,
+            end,
+            updates,
+            ..
+        } => {
+            if let crate::logic_tree::SLTLoopBound::Expr(node) = start {
+                collect_inputs_with_window(*node, None, arena, set, visited);
+            }
+            if let crate::logic_tree::SLTLoopBound::Expr(node) = end {
+                collect_inputs_with_window(*node, None, arena, set, visited);
+            }
+            for update in updates {
+                collect_inputs_with_window(update.expr, None, arena, set, visited);
+            }
+            set.retain(|atom| atom.id != *loop_var);
+        }
         SLTNode::Constant(_, _, _, _) => {}
     }
 }
-fn convert_logic_path<A: Hash + Eq + Clone, B: Hash + Eq + Clone>(
+fn convert_logic_path<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display, B: Hash + Eq + Clone>(
     lp: &LogicPath<A>,
     arena: &SLTNodeArena<A>,
     target_arena: &mut SLTNodeArena<B>,

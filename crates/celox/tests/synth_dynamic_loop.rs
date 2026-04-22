@@ -1,0 +1,112 @@
+use celox::Simulator;
+
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
+all_backends! {
+
+fn test_expression_bounds_in_synth_for_loops(sim) {
+    @setup { let code = r#"
+        module Top #(
+            param LIMIT: u32 = 4,
+        ) (
+            sum_fwd: output logic<32>,
+            sum_rev: output logic<32>,
+            sum_inc: output logic<32>,
+            sum_step: output logic<32>,
+        ) {
+            always_comb {
+                sum_fwd = 0;
+                for i: u32 in 0..(LIMIT + 1) {
+                    sum_fwd += i;
+                }
+
+                sum_rev = 0;
+                for i: i32 in rev 0..LIMIT {
+                    sum_rev = sum_rev * 10 + i as 32;
+                }
+
+                sum_inc = 0;
+                for i: u32 in 0..=LIMIT {
+                    sum_inc += i;
+                }
+
+                sum_step = 0;
+                for i: u32 in 1..(LIMIT + 4) step *= 2 {
+                    sum_step += i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    sim.eval_comb().unwrap();
+
+    let sum_fwd = sim.signal("sum_fwd");
+    let sum_rev = sim.signal("sum_rev");
+    let sum_inc = sim.signal("sum_inc");
+    let sum_step = sim.signal("sum_step");
+
+    assert_eq!(sim.get(sum_fwd), 10u32.into());
+    assert_eq!(sim.get(sum_rev), 3210u32.into());
+    assert_eq!(sim.get(sum_inc), 10u32.into());
+    assert_eq!(sim.get(sum_step), 7u32.into());
+}
+
+fn test_runtime_bounds_in_synth_for_loops(sim) {
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            sum_fwd: output logic<32>,
+            sum_rev: output logic<32>,
+            sum_inc: output logic<32>,
+            sum_step: output logic<32>,
+        ) {
+            always_comb {
+                sum_fwd = 0;
+                for i: u32 in 0..count {
+                    sum_fwd += i;
+                }
+
+                sum_rev = 0;
+                for i: i32 in rev 0..count {
+                    sum_rev = sum_rev * 10 + i as 32;
+                }
+
+                sum_inc = 0;
+                for i: u32 in 0..=count {
+                    sum_inc += i;
+                }
+
+                sum_step = 0;
+                for i: u32 in 1..(count + 4) step *= 2 {
+                    sum_step += i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let sum_fwd = sim.signal("sum_fwd");
+    let sum_rev = sim.signal("sum_rev");
+    let sum_inc = sim.signal("sum_inc");
+    let sum_step = sim.signal("sum_step");
+
+    sim.set(count, 4u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sum_fwd), 6u32.into());
+    assert_eq!(sim.get(sum_rev), 3210u32.into());
+    assert_eq!(sim.get(sum_inc), 10u32.into());
+    assert_eq!(sim.get(sum_step), 7u32.into());
+
+    sim.set(count, 5u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sum_fwd), 10u32.into());
+    assert_eq!(sim.get(sum_rev), 43210u32.into());
+    assert_eq!(sim.get(sum_inc), 15u32.into());
+    assert_eq!(sim.get(sum_step), 15u32.into());
+}
+
+}

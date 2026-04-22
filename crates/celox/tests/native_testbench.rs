@@ -257,6 +257,122 @@ fn test_for_loop_rev() {
     );
 }
 
+#[test]
+fn test_for_loop_expression_bound_forward() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                for _i: u32 in 0..(cnt >> 1) {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd15);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_for_loop_expression_bound_reverse() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                for _i: i32 in rev 0..(cnt >> 1) {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd15);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_for_loop_expression_bound_inclusive() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(3);
+                for _i: u32 in 0..=(cnt + 32'd2) {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd9);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_for_loop_expression_bound_stepped() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                for _i: u32 in 1..(cnt >> 1) step *= 2 {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd13);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Function call in testbench ──────────────────────────────────────────
 
 #[test]

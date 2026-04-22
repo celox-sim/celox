@@ -225,6 +225,68 @@ fn test_dynamic_write_then_read_is_ok() {
 }
 
 #[test]
+fn test_runtime_for_loop_state_does_not_trigger_scheduler_loop() {
+    let code = r#"
+        module Top (
+            count: input logic<8>,
+            o: output logic<8>
+        ) {
+            var acc: logic<8>;
+            always_comb {
+                acc = 0;
+                for i: u32 in 0..count {
+                    acc += i as 8;
+                }
+            }
+            always_comb {
+                o = acc + 1;
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "Top").build();
+    assert!(
+        result.is_ok(),
+        "runtime ForFold self-state must not be treated as a scheduler loop: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_runtime_for_loop_external_feedback_is_still_scheduler_loop() {
+    let code = r#"
+        module Top (
+            count: input logic<8>,
+            o: output logic<8>
+        ) {
+            var acc: logic<8>;
+            var y: logic<8>;
+            always_comb {
+                acc = 0;
+                for i: u32 in 0..count {
+                    acc += y;
+                }
+            }
+            always_comb {
+                y = acc;
+                o = y;
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "Top").build();
+    match result.as_ref().map_err(|e| e.kind()) {
+        Err(SimulatorErrorKind::SIRParser(ParserError::Scheduler(
+            SchedulerError::CombinationalLoop { blocks },
+        ))) => {
+            assert_eq!(blocks.len(), 2);
+        }
+        Err(k) => panic!("Expected CombinationalLoop error, but got: {:?}", k),
+        Ok(_) => panic!("Should have failed with CombinationalLoop"),
+    }
+}
+
+#[test]
 fn test_multiple_driver_error() {
     let code = r#"
         module Top (a: input logic, b: input logic, o: output logic) {

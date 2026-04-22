@@ -10,6 +10,7 @@ use crate::backend::traits::SimBackend;
 use crate::ir::{AbsoluteAddr, SignalRef};
 use crate::simulator::Simulator;
 use num_bigint::BigUint;
+use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     Expression, Factor, ForBound, ForRange, Op, Statement, SystemFunctionKind, TbMethod,
     TbMethodCall, VarId,
@@ -53,6 +54,11 @@ pub enum ClockCount {
     Dynamic(CompiledExpr),
 }
 
+pub enum LoopBound {
+    Static(usize),
+    Dynamic(CompiledExpr),
+}
+
 pub enum TestbenchStatement<B: SimBackend> {
     ClockNext {
         clock_event: B::Event,
@@ -79,9 +85,11 @@ pub enum TestbenchStatement<B: SimBackend> {
     },
     For {
         loop_var: Option<(SignalRef, usize)>,
-        start: usize,
-        end: usize,
+        start: LoopBound,
+        end: LoopBound,
+        inclusive: bool,
         step: usize,
+        step_op: Option<Op>,
         reverse: bool,
         body: Vec<TestbenchStatement<B>>,
     },
@@ -1101,10 +1109,13 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         stmt: &Statement,
         ec: &ExprCompiler<'_, B>,
     ) -> Option<TestbenchStatement<B>> {
-        fn const_for_bound(bound: &ForBound) -> Option<usize> {
+        fn convert_for_bound<B: SimBackend>(
+            bound: &ForBound,
+            ec: &ExprCompiler<'_, B>,
+        ) -> LoopBound {
             match bound {
-                ForBound::Const(x) => Some(*x),
-                ForBound::Expression(_) => None,
+                ForBound::Const(x) => LoopBound::Static(*x),
+                ForBound::Expression(expr) => LoopBound::Dynamic(ec.compile(expr.as_ref())),
             }
         }
 
@@ -1147,9 +1158,11 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         step,
                     } => Some(TestbenchStatement::For {
                         loop_var: lv,
-                        start: const_for_bound(start)?,
-                        end: const_for_bound(end)? + usize::from(*inclusive),
+                        start: convert_for_bound(start, ec),
+                        end: convert_for_bound(end, ec),
+                        inclusive: *inclusive,
                         step: *step,
+                        step_op: None,
                         reverse: false,
                         body,
                     }),
@@ -1160,9 +1173,11 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         step,
                     } => Some(TestbenchStatement::For {
                         loop_var: lv,
-                        start: const_for_bound(start)?,
-                        end: const_for_bound(end)? + usize::from(*inclusive),
+                        start: convert_for_bound(start, ec),
+                        end: convert_for_bound(end, ec),
+                        inclusive: *inclusive,
                         step: *step,
+                        step_op: None,
                         reverse: true,
                         body,
                     }),
@@ -1171,12 +1186,14 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         end,
                         inclusive,
                         step,
-                        ..
+                        op,
                     } => Some(TestbenchStatement::For {
                         loop_var: lv,
-                        start: const_for_bound(start)?,
-                        end: const_for_bound(end)? + usize::from(*inclusive),
+                        start: convert_for_bound(start, ec),
+                        end: convert_for_bound(end, ec),
+                        inclusive: *inclusive,
                         step: *step,
+                        step_op: Some(*op),
                         reverse: false,
                         body,
                     }),
@@ -1403,6 +1420,89 @@ fn exec_clock_next<B: SimBackend>(
     ExecResult::Continue
 }
 
+fn eval_loop_bound<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    bound: &LoopBound,
+) -> Result<usize, String> {
+    match bound {
+        LoopBound::Static(v) => Ok(*v),
+        LoopBound::Dynamic(expr) => {
+            sim.eval_comb().map_err(|e| format!("eval_comb: {e}"))?;
+            let (ptr, _) = sim.memory_as_mut_ptr();
+            match expr.eval_value(ptr) {
+                TbValue::U64(v) => Ok(v as usize),
+                TbValue::Wide(v) => Ok(v.to_usize().unwrap_or(0)),
+            }
+        }
+    }
+}
+
+fn exec_for_loop<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    loop_var: &Option<(SignalRef, usize)>,
+    start: &LoopBound,
+    end: &LoopBound,
+    inclusive: bool,
+    step: usize,
+    step_op: Option<Op>,
+    reverse: bool,
+    mut exec_body: impl FnMut(&mut Simulator<B>) -> ExecResult,
+) -> ExecResult {
+    let start = match eval_loop_bound(sim, start) {
+        Ok(v) => v,
+        Err(e) => return ExecResult::Fail(e),
+    };
+    let mut end = match eval_loop_bound(sim, end) {
+        Ok(v) => v,
+        Err(e) => return ExecResult::Fail(e),
+    };
+    if inclusive {
+        end = end.saturating_add(1);
+    }
+
+    let mut step_body = |sim: &mut Simulator<B>, i: usize| -> ExecResult {
+        if let Some((sig, _)) = loop_var {
+            sim_set_u64(sim, *sig, i as u64);
+        }
+        exec_body(sim)
+    };
+
+    if reverse {
+        let mut i = end;
+        while i.checked_sub(step).is_some_and(|next| next >= start) {
+            i -= step;
+            let r = step_body(sim, i);
+            if r.should_stop() {
+                return r;
+            }
+        }
+    } else if let Some(op) = step_op {
+        let mut i = start;
+        while i < end {
+            let r = step_body(sim, i);
+            if r.should_stop() {
+                return r;
+            }
+            i = match op {
+                Op::Mul => i.saturating_mul(step),
+                Op::LogicShiftL => i.checked_shl(step as u32).unwrap_or(0),
+                _ => i.saturating_add(step),
+            };
+        }
+    } else {
+        let mut i = start;
+        while i < end {
+            let r = step_body(sim, i);
+            if r.should_stop() {
+                return r;
+            }
+            i = i.saturating_add(step);
+        }
+    }
+
+    ExecResult::Continue
+}
+
 pub fn run_testbench<B: SimBackend>(
     sim: &mut Simulator<B>,
     stmts: &[TestbenchStatement<B>],
@@ -1509,37 +1609,22 @@ fn exec_one_detailed<B: SimBackend>(
             loop_var,
             start,
             end,
+            inclusive,
             step,
+            step_op,
             reverse,
             body,
-        } => {
-            if *reverse {
-                let mut i = *end;
-                while i.checked_sub(*step).is_some_and(|next| next >= *start) {
-                    i -= step;
-                    if let Some((sig, _)) = loop_var {
-                        sim_set_u64(sim, *sig, i as u64);
-                    }
-                    let r = exec_detailed(sim, body, ctx);
-                    if matches!(r, ExecResult::Finished | ExecResult::Fail(_)) {
-                        return r;
-                    }
-                }
-            } else {
-                let mut i = *start;
-                while i < *end {
-                    if let Some((sig, _)) = loop_var {
-                        sim_set_u64(sim, *sig, i as u64);
-                    }
-                    let r = exec_detailed(sim, body, ctx);
-                    if matches!(r, ExecResult::Finished | ExecResult::Fail(_)) {
-                        return r;
-                    }
-                    i += step;
-                }
-            }
-            ExecResult::Continue
-        }
+        } => exec_for_loop(
+            sim,
+            loop_var,
+            start,
+            end,
+            *inclusive,
+            *step,
+            *step_op,
+            *reverse,
+            |sim| exec_detailed(sim, body, ctx),
+        ),
         TestbenchStatement::Assign { dst, expr } => {
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
@@ -1617,37 +1702,22 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
             loop_var,
             start,
             end,
+            inclusive,
             step,
+            step_op,
             reverse,
             body,
-        } => {
-            if *reverse {
-                let mut i = *end;
-                while i.checked_sub(*step).is_some_and(|next| next >= *start) {
-                    i -= step;
-                    if let Some((sig, _)) = loop_var {
-                        sim_set_u64(sim, *sig, i as u64);
-                    }
-                    let r = exec(sim, body);
-                    if r.should_stop() {
-                        return r;
-                    }
-                }
-            } else {
-                let mut i = *start;
-                while i < *end {
-                    if let Some((sig, _)) = loop_var {
-                        sim_set_u64(sim, *sig, i as u64);
-                    }
-                    let r = exec(sim, body);
-                    if r.should_stop() {
-                        return r;
-                    }
-                    i += step;
-                }
-            }
-            ExecResult::Continue
-        }
+        } => exec_for_loop(
+            sim,
+            loop_var,
+            start,
+            end,
+            *inclusive,
+            *step,
+            *step_op,
+            *reverse,
+            |sim| exec(sim, body),
+        ),
         TestbenchStatement::Assign { dst, expr } => {
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
