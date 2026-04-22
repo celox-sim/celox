@@ -511,6 +511,16 @@ impl SLTToSIRLowerer {
         }
     }
 
+    fn bound_width(bound: &SLTLoopBound) -> usize {
+        match bound {
+            SLTLoopBound::Const(v) => {
+                let bits = usize::BITS as usize - v.leading_zeros() as usize;
+                bits.max(1)
+            }
+            SLTLoopBound::Expr(_) => 0,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn lower_for_fold<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
@@ -530,6 +540,8 @@ impl SLTToSIRLowerer {
         updates: &[crate::logic_tree::comb::SLTForUpdate<A>],
     ) -> RegisterId {
         let mut counter_width = loop_width.max(1);
+        counter_width = counter_width.max(Self::bound_width(start));
+        counter_width = counter_width.max(Self::bound_width(end));
         if let SLTLoopBound::Expr(node) = start {
             counter_width = counter_width.max(self.get_width(*node, arena));
         }
@@ -677,27 +689,27 @@ impl SLTToSIRLowerer {
             builder.emit(SIRInstruction::Binary(reg, body_counter, op, step_reg));
             reg
         };
-        if Self::step_can_stall(step_op, step) {
-            builder.seal_block(SIRTerminator::Jump(exit_block, next_states.clone()));
-        } else {
-            let progress = builder.alloc_bit(1, false);
-            builder.emit(SIRInstruction::Binary(
-                progress,
-                next_counter,
-                BinaryOp::Ne,
-                body_counter,
-            ));
-            builder.seal_block(SIRTerminator::Branch {
-                cond: progress,
-                true_block: (
-                    header_block,
-                    std::iter::once(next_counter)
-                        .chain(next_states.iter().copied())
-                        .collect(),
-                ),
-                false_block: (exit_block, next_states.clone()),
-            });
-        }
+        let progress = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(
+            progress,
+            next_counter,
+            BinaryOp::Ne,
+            body_counter,
+        ));
+        let stall_block = builder.new_block();
+        builder.seal_block(SIRTerminator::Branch {
+            cond: progress,
+            true_block: (
+                header_block,
+                std::iter::once(next_counter)
+                    .chain(next_states.iter().copied())
+                    .collect(),
+            ),
+            false_block: (stall_block, vec![]),
+        });
+
+        builder.switch_to_block(stall_block);
+        builder.seal_block(SIRTerminator::Error(1));
 
         builder.switch_to_block(exit_block);
         let result_idx = updates
@@ -705,13 +717,5 @@ impl SLTToSIRLowerer {
             .position(|update| update.target == *result)
             .expect("ForFold result target must be present in updates");
         exit_states[result_idx]
-    }
-
-    fn step_can_stall(step_op: SLTStepOp, step: usize) -> bool {
-        match step_op {
-            SLTStepOp::Add => step == 0,
-            SLTStepOp::Mul => step == 1,
-            SLTStepOp::Shl => step == 0,
-        }
     }
 }

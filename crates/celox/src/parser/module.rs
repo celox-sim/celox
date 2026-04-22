@@ -463,6 +463,7 @@ fn collect_glue_sources_with_window(
             loop_var,
             start,
             end,
+            initials,
             updates,
             ..
         } => {
@@ -471,6 +472,9 @@ fn collect_glue_sources_with_window(
             }
             if let crate::logic_tree::SLTLoopBound::Expr(node) = end {
                 collect_glue_sources_with_window(*node, None, arena, set);
+            }
+            for init in initials {
+                collect_glue_sources_with_window(init.expr, None, arena, set);
             }
             for update in updates {
                 collect_glue_sources_with_window(update.expr, None, arena, set);

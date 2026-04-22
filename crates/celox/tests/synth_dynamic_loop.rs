@@ -1,4 +1,4 @@
-use celox::Simulator;
+use celox::{RuntimeErrorCode, Simulator};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -136,6 +136,33 @@ fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
     assert_eq!(sim.get(wrapped_hits), 4u32.into());
 }
 
+fn test_constant_bounds_preserve_wide_limit_above_loop_width(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            wrapped_hits: output logic<32>
+        ) {
+            always_comb {
+                wrapped_hits = 0;
+                for i: u8 in start..260 {
+                    if i <: 8'd4 {
+                        wrapped_hits += 1;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let wrapped_hits = sim.signal("wrapped_hits");
+
+    sim.set(start, 254u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(wrapped_hits), 4u32.into());
+}
+
 fn test_runtime_bounds_track_initial_seed_dependency(sim) {
     @setup { let code = r#"
         module Top (
@@ -167,6 +194,79 @@ fn test_runtime_bounds_track_initial_seed_dependency(sim) {
     sim.set(seed, 20u32);
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(out), 23u32.into());
+}
+
+fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim) {
+    @setup { let code = r#"
+        module Child (
+            seed: input logic<32>,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            var acc: logic<32>;
+            always_comb {
+                acc = seed;
+                for i: u32 in 0..count {
+                    acc += 1;
+                }
+                out = acc;
+            }
+        }
+
+        module Top (
+            seed: input logic<32>,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            var child_out: logic<32>;
+            inst u_child: Child (
+                seed: seed,
+                count: count,
+                out: child_out
+            );
+            assign out = child_out;
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let seed = sim.signal("seed");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(seed, 10u32);
+    sim.set(count, 3u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 13u32.into());
+
+    sim.set(seed, 20u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 23u32.into());
+}
+
+fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in start..count step *= 2 {
+                    out += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+
+    sim.set(start, 0u32);
+    sim.set(count, 4u32);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
 fn test_runtime_bounds_inclusive_max_bound_runs_full_range(sim) {
