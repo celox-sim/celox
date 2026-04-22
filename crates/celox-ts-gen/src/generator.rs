@@ -479,6 +479,25 @@ fn ts_type_for_width(_width: usize) -> &'static str {
     "bigint"
 }
 
+fn ts_setter_type(port: &PortInfo) -> &'static str {
+    if port.is_4state {
+        "FourStateSignalValue"
+    } else {
+        ts_type_for_width(port.width)
+    }
+}
+
+fn port_needs_four_state_type(port: &PortInfo) -> bool {
+    port.type_info != TypeInfo::Clock && !port.is_output && port.is_4state
+}
+
+fn module_needs_four_state_type(ports: &[PortInfo], instances: &[InstanceInfo]) -> bool {
+    ports.iter().any(port_needs_four_state_type)
+        || instances.iter().any(|inst| {
+            module_needs_four_state_type(&inst.ports, &inst.children)
+        })
+}
+
 fn type_info_str(info: TypeInfo) -> &'static str {
     match info {
         TypeInfo::Clock => "clock",
@@ -492,7 +511,13 @@ fn type_info_str(info: TypeInfo) -> &'static str {
 fn generate_dts(module_name: &str, ports: &[PortInfo], instances: &[InstanceInfo]) -> String {
     let mut out = String::new();
 
-    out.push_str("import type { ModuleDefinition } from \"@celox-sim/celox\";\n\n");
+    if module_needs_four_state_type(ports, instances) {
+        out.push_str(
+            "import type { FourStateSignalValue, ModuleDefinition } from \"@celox-sim/celox\";\n\n",
+        );
+    } else {
+        out.push_str("import type { ModuleDefinition } from \"@celox-sim/celox\";\n\n");
+    }
 
     // Ports interface — exclude clock ports (they go to events)
     out.push_str(&format!("export interface {}Ports {{\n", module_name));
@@ -540,22 +565,29 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
     // Emit scalar ports
     for port in scalar {
         let ts_type = ts_type_for_width(port.width);
-        let readonly = if port.is_output { "readonly " } else { "" };
         if port.array_dims.is_some() {
+            let readonly = if port.is_output { "readonly " } else { "" };
             let set_method = if port.is_output {
                 String::new()
             } else {
-                format!(" set(i: number, value: {}): void;", ts_type)
+                format!(" set(i: number, value: {}): void;", ts_setter_type(port))
             };
             out.push_str(&format!(
                 "{}{}{}: {{ at(i: number): {};{} readonly length: number }};\n",
                 indent, readonly, port.name, ts_type, set_method,
             ));
-        } else {
+        } else if port.is_output {
+            out.push_str(&format!("{}readonly {}: {};\n", indent, port.name, ts_type));
+        } else if port.is_4state {
+            out.push_str(&format!("{}get {}(): {};\n", indent, port.name, ts_type));
             out.push_str(&format!(
-                "{}{}{}: {};\n",
-                indent, readonly, port.name, ts_type
+                "{}set {}(value: {});\n",
+                indent,
+                port.name,
+                ts_setter_type(port)
             ));
+        } else {
+            out.push_str(&format!("{}{}: {};\n", indent, port.name, ts_type));
         }
     }
 
@@ -568,21 +600,37 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
         for member in members {
             let member_name = &member.name[member.name.find('.').unwrap() + 1..];
             let ts_type = ts_type_for_width(member.width);
-            let readonly = if member.is_output { "readonly " } else { "" };
             if member.array_dims.is_some() {
+                let readonly = if member.is_output { "readonly " } else { "" };
                 let set_method = if member.is_output {
                     String::new()
                 } else {
-                    format!(" set(i: number, value: {}): void;", ts_type)
+                    format!(" set(i: number, value: {}): void;", ts_setter_type(member))
                 };
                 out.push_str(&format!(
                     "{}{}{}: {{ at(i: number): {};{} readonly length: number }};\n",
                     child_indent, readonly, member_name, ts_type, set_method,
                 ));
+            } else if member.is_output {
+                out.push_str(&format!(
+                    "{}readonly {}: {};\n",
+                    child_indent, member_name, ts_type
+                ));
+            } else if member.is_4state {
+                out.push_str(&format!(
+                    "{}get {}(): {};\n",
+                    child_indent, member_name, ts_type
+                ));
+                out.push_str(&format!(
+                    "{}set {}(value: {});\n",
+                    child_indent,
+                    member_name,
+                    ts_setter_type(member)
+                ));
             } else {
                 out.push_str(&format!(
-                    "{}{}{}: {};\n",
-                    child_indent, readonly, member_name, ts_type
+                    "{}{}: {};\n",
+                    child_indent, member_name, ts_type
                 ));
             }
         }
@@ -1284,7 +1332,7 @@ module Top (
 
         // DTS must be valid (no duplicate property names)
         let dts = &modules[0].dts_content;
-        assert!(dts.contains("a: bigint"));
+        assert!(dts.contains("get a(): bigint;"));
         assert!(dts.contains("readonly o: bigint"));
     }
 
@@ -1328,7 +1376,7 @@ module Top (
         assert!(top.ports.contains_key("o_data"));
 
         // DTS must not contain duplicate property names from scoped vars
-        assert!(top.dts_content.contains("i_data: bigint"));
+        assert!(top.dts_content.contains("get i_data(): bigint;"));
     }
 
     /// Multiple always_comb blocks with same-named scoped vars across
@@ -1398,5 +1446,37 @@ module Top (
             port_names.iter().filter(|n| s.insert(n.as_str())).count()
         };
         assert_eq!(port_names.len(), unique_count, "no duplicate port keys");
+    }
+
+    #[test]
+    fn test_four_state_inputs_use_setters() {
+        let code = r#"
+module Top (
+    a: input logic<8>,
+    b: input bit<8>,
+    y: output logic<8>,
+) {
+    assign y = a;
+}
+"#;
+        let modules = generate_from_source(code);
+        let top = modules.iter().find(|m| m.module_name == "Top").unwrap();
+
+        assert!(
+            top.dts_content.contains("get a(): bigint;"),
+            "4-state input must keep bigint getter"
+        );
+        assert!(
+            top.dts_content.contains("set a(value: FourStateSignalValue);"),
+            "4-state input must accept FourStateSignalValue"
+        );
+        assert!(
+            top.dts_content.contains("b: bigint;"),
+            "2-state input should remain a plain bigint property"
+        );
+        assert!(
+            top.dts_content.contains("readonly y: bigint;"),
+            "outputs should remain readonly bigint properties"
+        );
     }
 }

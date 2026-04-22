@@ -2,11 +2,13 @@
 source: crates/celox-ts-gen/src/generator.rs
 expression: "modules[0].dts_content"
 ---
-import type { ModuleDefinition } from "@celox-sim/celox";
+import type { FourStateSignalValue, ModuleDefinition } from "@celox-sim/celox";
 
 export interface WideAdderPorts {
-  a: bigint;
-  b: bigint;
+  get a(): bigint;
+  set a(value: FourStateSignalValue);
+  get b(): bigint;
+  set b(value: FourStateSignalValue);
   readonly sum: bigint;
 }
 

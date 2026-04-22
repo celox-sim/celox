@@ -2,14 +2,17 @@
 source: crates/celox-ts-gen/src/generator.rs
 expression: top.dts_content
 ---
-import type { ModuleDefinition } from "@celox-sim/celox";
+import type { FourStateSignalValue, ModuleDefinition } from "@celox-sim/celox";
 
 export interface TopPorts {
-  rst: bigint;
-  top_in: bigint;
+  get rst(): bigint;
+  set rst(value: FourStateSignalValue);
+  get top_in(): bigint;
+  set top_in(value: FourStateSignalValue);
   readonly top_out: bigint;
   readonly u_sub: {
-    i_data: bigint;
+    get i_data(): bigint;
+    set i_data(value: FourStateSignalValue);
     readonly o_data: bigint;
   };
 }

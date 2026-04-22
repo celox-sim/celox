@@ -42,6 +42,7 @@ export { Simulator } from "./simulator.js";
 export type {
 	CreateResult,
 	EventHandle,
+	FourStateSignalValue,
 	FourStateValue,
 	LoopBreak,
 	ModuleDefinition,
