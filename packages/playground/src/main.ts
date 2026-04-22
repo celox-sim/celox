@@ -274,7 +274,7 @@ describe("FourStateDemo", () => {
     it("writes and reads all-X", () => {
         const sim = Simulator.create(FourStateDemo, { fourState: true });
 
-        (sim.dut as any).a = X;
+        sim.dut.a = X;
 
         const a = sim.fourState("a");
         expect(a.value).toBe(0xffn);
@@ -286,7 +286,7 @@ describe("FourStateDemo", () => {
     it("round-trips partial X and clears mask on defined write", () => {
         const sim = Simulator.create(FourStateDemo, { fourState: true });
 
-        (sim.dut as any).b = FourState(0x05, 0xf0);
+        sim.dut.b = FourState(0x05, 0xf0);
 
         const partial = sim.fourState("b");
         expect(partial.value).toBe(0x05n);

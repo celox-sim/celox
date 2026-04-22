@@ -22,7 +22,12 @@ import {
 } from "./napi-helpers.js";
 import { Simulation } from "./simulation.js";
 import { Simulator } from "./simulator.js";
-import { FourState, SimulationTimeoutError, X } from "./types.js";
+import {
+	FourState,
+	SimulationTimeoutError,
+	type FourStateSignalValue,
+	X,
+} from "./types.js";
 
 // Fixture project directories
 const FIXTURES_DIR = path.resolve(
@@ -522,7 +527,8 @@ module InitTest (
 
 	test("writing X clears value and sets mask", () => {
 		interface Ports {
-			a: bigint;
+			get a(): bigint;
+			set a(value: FourStateSignalValue);
 			readonly y_and: bigint;
 		}
 
@@ -532,7 +538,7 @@ module InitTest (
 		raw = undefined; // sim manages its own handle
 
 		// Write X to input 'a' via DUT
-		(sim.dut as any).a = X;
+		sim.dut.a = X;
 
 		// We can't inspect mask through DUT getter (it only returns value),
 		// so this test verifies X write doesn't throw and propagation works.
@@ -832,8 +838,10 @@ module InitTest (
 
 	test("4-state through DUT high-level API (fromSource with fourState)", () => {
 		interface Ports {
-			a: bigint;
-			b: bigint;
+			get a(): bigint;
+			set a(value: FourStateSignalValue);
+			get b(): bigint;
+			set b(value: FourStateSignalValue);
 			readonly y: bigint;
 		}
 
@@ -847,14 +855,14 @@ module InitTest (
 		expect(sim.dut.y).toBe(155n);
 
 		// Write X to a — output should propagate X (value reads as 0)
-		(sim.dut as any).a = X;
+		sim.dut.a = X;
 		// After writing X, the value part of 'y' is implementation-defined
 		// but the read should not throw
 		const _yVal = sim.dut.y;
 		expect(typeof _yVal).toBe("bigint");
 
 		// Write FourState with partial X
-		(sim.dut as any).a = FourState(0xa0, 0x0f);
+		sim.dut.a = FourState(0xa0, 0x0f);
 		const _yVal2 = sim.dut.y;
 		expect(typeof _yVal2).toBe("bigint");
 
@@ -942,7 +950,8 @@ describe("E2E: 4-state high-level DUT API", () => {
 	test("FF via DUT API: write X input, tick, read output", () => {
 		interface FFPorts {
 			rst: bigint;
-			d: bigint;
+			get d(): bigint;
+			set d(value: FourStateSignalValue);
 			readonly q: bigint;
 		}
 
@@ -962,7 +971,7 @@ describe("E2E: 4-state high-level DUT API", () => {
 		expect(sim.dut.q).toBe(0x42n);
 
 		// Write X to d, tick — q should capture it (value read still returns a bigint)
-		(sim.dut as any).d = X;
+		sim.dut.d = X;
 		sim.tick();
 		expect(typeof sim.dut.q).toBe("bigint");
 
@@ -976,8 +985,10 @@ describe("E2E: 4-state high-level DUT API", () => {
 
 	test("X to defined transition: adder recovers from X", () => {
 		interface Ports {
-			a: bigint;
-			b: bigint;
+			get a(): bigint;
+			set a(value: FourStateSignalValue);
+			get b(): bigint;
+			set b(value: FourStateSignalValue);
 			readonly y: bigint;
 		}
 
@@ -986,7 +997,7 @@ describe("E2E: 4-state high-level DUT API", () => {
 		});
 
 		// Start with X
-		(sim.dut as any).a = X;
+		sim.dut.a = X;
 		sim.dut.b = 10n;
 		// Output has X — just verify it doesn't crash
 		expect(typeof sim.dut.y).toBe("bigint");
@@ -1345,8 +1356,10 @@ describe("E2E: fourState() method", () => {
 
 	test("Simulator.fourState: reads X mask when input is X", () => {
 		interface Ports {
-			a: bigint;
-			b: bigint;
+			get a(): bigint;
+			set a(value: FourStateSignalValue);
+			get b(): bigint;
+			set b(value: FourStateSignalValue);
 			readonly y: bigint;
 		}
 
@@ -1354,7 +1367,7 @@ describe("E2E: fourState() method", () => {
 			fourState: true,
 		});
 
-		(sim.dut as any).a = X;
+		sim.dut.a = X;
 		sim.dut.b = 10n;
 		// Trigger evalComb via output read
 		sim.dut.y;

@@ -1,6 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
 import { createDut, type DirtyState, readFourState } from "./dut.js";
-import type { NativeSimulatorHandle, PortInfo, SignalLayout } from "./types.js";
+import type {
+	FourStateSignalValue,
+	NativeSimulatorHandle,
+	PortInfo,
+	SignalLayout,
+} from "./types.js";
 import { FourState, X } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -19,6 +24,11 @@ function mockHandle(): NativeSimulatorHandle {
 
 function makeBuffer(size: number): SharedArrayBuffer {
 	return new SharedArrayBuffer(size);
+}
+
+interface WritableFourStatePort {
+	get a(): bigint;
+	set a(value: FourStateSignalValue);
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +444,15 @@ describe("createDut — 4-state", () => {
 		const handle = mockHandle();
 		const state: DirtyState = { dirty: false };
 
-		const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
+		const dut = createDut<WritableFourStatePort>(
+			buffer,
+			layout,
+			ports,
+			handle,
+			state,
+		);
 
-		(dut as any).a = X;
+		dut.a = X;
 		// X = (v=1, m=1) per bit: value should be 0xFF, mask should be 0xFF
 		const [value, mask] = readFourState(buffer, layout.a);
 		expect(value).toBe(0xffn);
@@ -460,9 +476,15 @@ describe("createDut — 4-state", () => {
 		const handle = mockHandle();
 		const state: DirtyState = { dirty: false };
 
-		const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
+		const dut = createDut<WritableFourStatePort>(
+			buffer,
+			layout,
+			ports,
+			handle,
+			state,
+		);
 
-		(dut as any).a = FourState(0b1010, 0b0100);
+		dut.a = FourState(0b1010, 0b0100);
 		const [value, mask] = readFourState(buffer, layout.a);
 		expect(value).toBe(0b1010n);
 		expect(mask).toBe(0b0100n);
@@ -485,10 +507,16 @@ describe("createDut — 4-state", () => {
 		const handle = mockHandle();
 		const state: DirtyState = { dirty: false };
 
-		const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
+		const dut = createDut<WritableFourStatePort>(
+			buffer,
+			layout,
+			ports,
+			handle,
+			state,
+		);
 
 		expect(() => {
-			(dut as any).a = X;
+			dut.a = X;
 		}).toThrow("not 4-state");
 	});
 
@@ -509,10 +537,16 @@ describe("createDut — 4-state", () => {
 		const handle = mockHandle();
 		const state: DirtyState = { dirty: false };
 
-		const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
+		const dut = createDut<WritableFourStatePort>(
+			buffer,
+			layout,
+			ports,
+			handle,
+			state,
+		);
 
 		expect(() => {
-			(dut as any).a = FourState(0xa5, 0x0f);
+			dut.a = FourState(0xa5, 0x0f);
 		}).toThrow("not 4-state");
 	});
 
@@ -533,10 +567,16 @@ describe("createDut — 4-state", () => {
 		const handle = mockHandle();
 		const state: DirtyState = { dirty: false };
 
-		const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
+		const dut = createDut<WritableFourStatePort>(
+			buffer,
+			layout,
+			ports,
+			handle,
+			state,
+		);
 
 		// First write X
-		(dut as any).a = X;
+		dut.a = X;
 		const [, maskBefore] = readFourState(buffer, layout.a);
 		expect(maskBefore).toBe(0xffn);
 
@@ -598,9 +638,15 @@ describe("createDut — 4-state", () => {
 		const handle = mockHandle();
 		const state: DirtyState = { dirty: false };
 
-		const dut = createDut<{ a: bigint }>(buffer, layout, ports, handle, state);
+		const dut = createDut<WritableFourStatePort>(
+			buffer,
+			layout,
+			ports,
+			handle,
+			state,
+		);
 
-		(dut as any).a = X;
+		dut.a = X;
 		expect(state.dirty).toBe(true);
 	});
 });

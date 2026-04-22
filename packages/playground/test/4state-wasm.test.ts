@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { FourState, Simulator, X } from "@celox-sim/celox";
+import {
+	FourState,
+	type FourStateSignalValue,
+	Simulator,
+	X,
+} from "@celox-sim/celox";
 
 const FOUR_STATE_SOURCE = `\
 module FourStateDemo (
@@ -15,11 +20,22 @@ const isWasm = !!process.env.NAPI_RS_FORCE_WASI;
 
 describe.skipIf(!isWasm)("FourState (WASM bridge)", () => {
 	test("writes and reads all-X", () => {
-		const sim = Simulator.fromSource(FOUR_STATE_SOURCE, "FourStateDemo", {
-			fourState: true,
-		});
+		interface Ports {
+			get a(): bigint;
+			set a(value: FourStateSignalValue);
+			get b(): bigint;
+			set b(value: FourStateSignalValue);
+			readonly snapshot: bigint;
+		}
+		const sim = Simulator.fromSource<Ports>(
+			FOUR_STATE_SOURCE,
+			"FourStateDemo",
+			{
+				fourState: true,
+			},
+		);
 
-		(sim.dut as any).a = X;
+		sim.dut.a = X;
 
 		const a = sim.fourState("a");
 
@@ -30,11 +46,22 @@ describe.skipIf(!isWasm)("FourState (WASM bridge)", () => {
 	});
 
 	test("round-trips partial X and clears mask on defined write", () => {
-		const sim = Simulator.fromSource(FOUR_STATE_SOURCE, "FourStateDemo", {
-			fourState: true,
-		});
+		interface Ports {
+			get a(): bigint;
+			set a(value: FourStateSignalValue);
+			get b(): bigint;
+			set b(value: FourStateSignalValue);
+			readonly snapshot: bigint;
+		}
+		const sim = Simulator.fromSource<Ports>(
+			FOUR_STATE_SOURCE,
+			"FourStateDemo",
+			{
+				fourState: true,
+			},
+		);
 
-		(sim.dut as any).b = FourState(0x05, 0xf0);
+		sim.dut.b = FourState(0x05, 0xf0);
 
 		const partial = sim.fourState("b");
 		expect(partial.value).toBe(0x05n);
