@@ -521,6 +521,17 @@ impl SLTToSIRLowerer {
         }
     }
 
+    fn step_math_width(base_width: usize, step_op: SLTStepOp, step: usize) -> usize {
+        match step_op {
+            SLTStepOp::Add => base_width.saturating_add(1),
+            SLTStepOp::Mul => {
+                let step_bits = (usize::BITS as usize - step.leading_zeros() as usize).max(1);
+                base_width.saturating_add(step_bits)
+            }
+            SLTStepOp::Shl => base_width.saturating_add(step.max(1)),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn lower_for_fold<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
@@ -623,32 +634,66 @@ impl SLTToSIRLowerer {
         ));
 
         builder.switch_to_block(header_block);
-        let cond = builder.alloc_bit(1, false);
-        builder.emit(SIRInstruction::Binary(
-            cond,
-            header_counter,
-            if reverse { BinaryOp::GtU } else { BinaryOp::LtU },
-            if reverse { start_reg } else { end_limit },
-        ));
-        builder.seal_block(SIRTerminator::Branch {
-            cond,
-            true_block: (
-                body_block,
-                std::iter::once(header_counter)
-                    .chain(header_states.iter().copied())
-                    .collect(),
-            ),
-            false_block: (exit_block, header_states.clone()),
-        });
+        if reverse {
+            let reverse_width = compare_width.saturating_add(1);
+            let header_counter_ext = self.cast_reg_width(builder, header_counter, reverse_width);
+            let start_ext = self.cast_reg_width(builder, start_reg, reverse_width);
+            let reverse_step = builder.alloc_bit(reverse_width, false);
+            builder.emit(SIRInstruction::Imm(reverse_step, SIRValue::new(step as u64)));
+            let threshold = builder.alloc_bit(reverse_width, false);
+            builder.emit(SIRInstruction::Binary(
+                threshold,
+                start_ext,
+                BinaryOp::Add,
+                reverse_step,
+            ));
+            let cond = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(
+                cond,
+                header_counter_ext,
+                BinaryOp::GeU,
+                threshold,
+            ));
+            let next_counter_ext = builder.alloc_bit(reverse_width, false);
+            builder.emit(SIRInstruction::Binary(
+                next_counter_ext,
+                header_counter_ext,
+                BinaryOp::Sub,
+                reverse_step,
+            ));
+            let next_counter = self.cast_reg_width(builder, next_counter_ext, compare_width);
+            builder.seal_block(SIRTerminator::Branch {
+                cond,
+                true_block: (
+                    body_block,
+                    std::iter::once(next_counter)
+                        .chain(header_states.iter().copied())
+                        .collect(),
+                ),
+                false_block: (exit_block, header_states.clone()),
+            });
+        } else {
+            let cond = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(
+                cond,
+                header_counter,
+                BinaryOp::LtU,
+                end_limit,
+            ));
+            builder.seal_block(SIRTerminator::Branch {
+                cond,
+                true_block: (
+                    body_block,
+                    std::iter::once(header_counter)
+                        .chain(header_states.iter().copied())
+                        .collect(),
+                ),
+                false_block: (exit_block, header_states.clone()),
+            });
+        }
 
         builder.switch_to_block(body_block);
-        let loop_value = if reverse {
-            let reg = builder.alloc_bit(compare_width, false);
-            builder.emit(SIRInstruction::Binary(reg, body_counter, BinaryOp::Sub, step_reg));
-            reg
-        } else {
-            body_counter
-        };
+        let loop_value = body_counter;
         let loop_value_trunc = self.cast_reg_width(builder, loop_value, loop_width);
 
         let mut env_inputs = crate::HashMap::default();
@@ -677,39 +722,65 @@ impl SLTToSIRLowerer {
             })
             .collect();
 
-        let next_counter = if reverse {
-            loop_value
+        if reverse {
+            builder.seal_block(SIRTerminator::Jump(
+                header_block,
+                std::iter::once(body_counter)
+                    .chain(next_states.iter().copied())
+                    .collect(),
+            ));
         } else {
-            let reg = builder.alloc_bit(compare_width, false);
+            let math_width = Self::step_math_width(compare_width, step_op, step);
+            let current_math = self.cast_reg_width(builder, body_counter, math_width);
+            let step_math = builder.alloc_bit(math_width, false);
+            builder.emit(SIRInstruction::Imm(step_math, SIRValue::new(step as u64)));
+            let next_math = builder.alloc_bit(math_width, false);
             let op = match step_op {
                 SLTStepOp::Add => BinaryOp::Add,
                 SLTStepOp::Mul => BinaryOp::Mul,
                 SLTStepOp::Shl => BinaryOp::Shl,
             };
-            builder.emit(SIRInstruction::Binary(reg, body_counter, op, step_reg));
-            reg
-        };
-        let progress = builder.alloc_bit(1, false);
-        builder.emit(SIRInstruction::Binary(
-            progress,
-            next_counter,
-            BinaryOp::Ne,
-            body_counter,
-        ));
-        let stall_block = builder.new_block();
-        builder.seal_block(SIRTerminator::Branch {
-            cond: progress,
-            true_block: (
-                header_block,
-                std::iter::once(next_counter)
-                    .chain(next_states.iter().copied())
-                    .collect(),
-            ),
-            false_block: (stall_block, vec![]),
-        });
+            builder.emit(SIRInstruction::Binary(next_math, current_math, op, step_math));
 
-        builder.switch_to_block(stall_block);
-        builder.seal_block(SIRTerminator::Error(1));
+            let progress = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(
+                progress,
+                next_math,
+                BinaryOp::Ne,
+                current_math,
+            ));
+            let check_block = builder.new_block();
+            let stall_block = builder.new_block();
+            builder.seal_block(SIRTerminator::Branch {
+                cond: progress,
+                true_block: (check_block, vec![]),
+                false_block: (stall_block, vec![]),
+            });
+
+            builder.switch_to_block(check_block);
+            let end_math = self.cast_reg_width(builder, end_limit, math_width);
+            let in_range = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(
+                in_range,
+                next_math,
+                BinaryOp::LtU,
+                end_math,
+            ));
+            let next_counter = self.cast_reg_width(builder, next_math, compare_width);
+            builder.seal_block(SIRTerminator::Branch {
+                cond: in_range,
+                true_block: (
+                    header_block,
+                    std::iter::once(next_counter)
+                        .chain(next_states.iter().copied())
+                        .collect(),
+                ),
+                false_block: (exit_block, next_states.clone()),
+            });
+
+            builder.switch_to_block(stall_block);
+            builder.seal_block(SIRTerminator::Error(1));
+        }
 
         builder.switch_to_block(exit_block);
         let result_idx = updates

@@ -1485,7 +1485,7 @@ fn exec_for_loop<B: SimBackend>(
             }
             let new_i = match op {
                 Op::Mul => i.saturating_mul(step),
-                Op::LogicShiftL => i.checked_shl(step as u32).unwrap_or(0),
+                Op::LogicShiftL | Op::ArithShiftL => i.checked_shl(step as u32).unwrap_or(0),
                 _ => i.saturating_add(step),
             };
             if new_i == i {

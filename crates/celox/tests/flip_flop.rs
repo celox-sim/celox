@@ -129,6 +129,37 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
     assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
+fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input logic<8>,
+            q_hits: output logic<8>,
+            q_last: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                q_last = 8'hee;
+                for i: u8 in start..255 step += 10 {
+                    q_hits += 1;
+                    q_last = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let q_hits = sim.signal("q_hits");
+    let q_last = sim.signal("q_last");
+
+    sim.modify(|io| io.set(start, 250u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_hits), 1u32.into());
+    assert_eq!(sim.get(q_last), 250u32.into());
+}
+
 fn test_ff_if_reset_basic(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
