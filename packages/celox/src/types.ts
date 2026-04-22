@@ -273,7 +273,11 @@ export interface FourStateValue {
 }
 
 /** Values assignable to a writable 4-state signal. */
-export type FourStateSignalValue = bigint | typeof X | typeof Z | FourStateValue;
+export type FourStateSignalValue =
+	| bigint
+	| typeof X
+	| typeof Z
+	| FourStateValue;
 
 /**
  * Construct a 4-state value with explicit value and mask.

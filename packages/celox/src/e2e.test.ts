@@ -24,8 +24,8 @@ import { Simulation } from "./simulation.js";
 import { Simulator } from "./simulator.js";
 import {
 	FourState,
-	SimulationTimeoutError,
 	type FourStateSignalValue,
+	SimulationTimeoutError,
 	X,
 } from "./types.js";
 
