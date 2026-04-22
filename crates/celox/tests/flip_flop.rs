@@ -1,4 +1,4 @@
-use celox::{BigUint, Simulation, Simulator, SimulatorBuilder};
+use celox::{BigUint, RuntimeErrorCode, Simulation, Simulator, SimulatorBuilder};
 use insta::assert_snapshot;
 
 #[path = "test_utils/mod.rs"]
@@ -97,6 +97,36 @@ fn test_ff_runtime_for_bounds(sim) {
     assert_eq!(sim.get(q_rev), 0u32.into());
     assert_eq!(sim.get(q_inc), 5u32.into());
     assert_eq!(sim.get(q_step), 8u32.into());
+}
+
+fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input logic<8>,
+            count: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i: u32 in start..count step *= 2 {
+                    q = i as 8;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+
+    sim.modify(|io| {
+        io.set(start, 0u8);
+        io.set(count, 4u8);
+    })
+    .unwrap();
+    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
 fn test_ff_if_reset_basic(sim) {

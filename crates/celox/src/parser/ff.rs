@@ -437,6 +437,8 @@ impl<'a> FfParser<'a> {
 
         let header_bb = ir_builder.new_block();
         let body_bb = ir_builder.new_block();
+        let progress_bb = ir_builder.new_block();
+        let stall_bb = ir_builder.new_block();
         let exit_bb = ir_builder.new_block();
         ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![]));
 
@@ -541,6 +543,19 @@ impl<'a> FfParser<'a> {
                 }
             };
             ir_builder.emit(SIRInstruction::Binary(next_reg, loop_reg, op, step_reg));
+            let progress_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                progress_reg,
+                next_reg,
+                crate::ir::BinaryOp::Ne,
+                loop_reg,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: progress_reg,
+                true_block: (progress_bb, vec![]),
+                false_block: (stall_bb, vec![]),
+            });
+            ir_builder.switch_to_block(progress_bb);
             ir_builder.emit(SIRInstruction::Store(
                 convert(stmt.var_id, domain.region()),
                 crate::ir::SIROffset::Static(0),
@@ -548,10 +563,14 @@ impl<'a> FfParser<'a> {
                 next_reg,
                 Vec::new(),
             ));
+            ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![]));
+            ir_builder.switch_to_block(stall_bb);
+            ir_builder.seal_block(SIRTerminator::Error(1));
+        } else {
+            ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![]));
         }
 
         self.local_working_vars.remove(&stmt.var_id);
-        ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![]));
         ir_builder.switch_to_block(exit_bb);
         self.defined_ranges = pre_loop_defined;
         self.dynamic_defined_vars = pre_loop_dynamic;

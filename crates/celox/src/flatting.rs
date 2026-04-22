@@ -301,6 +301,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             loop_var,
             start,
             end,
+            initials,
             updates,
             ..
         } => {
@@ -309,6 +310,9 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             }
             if let crate::logic_tree::SLTLoopBound::Expr(node) = end {
                 collect_inputs_with_window(*node, None, arena, set, visited);
+            }
+            for init in initials {
+                collect_inputs_with_window(init.expr, None, arena, set, visited);
             }
             for update in updates {
                 collect_inputs_with_window(update.expr, None, arena, set, visited);
