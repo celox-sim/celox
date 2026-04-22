@@ -537,12 +537,18 @@ impl SLTToSIRLowerer {
             counter_width = counter_width.max(self.get_width(*node, arena));
         }
 
-        let start_reg = self.lower_bound(builder, start, counter_width, arena, cache);
-        let end_reg = self.lower_bound(builder, end, counter_width, arena, cache);
-        let one_reg = builder.alloc_bit(counter_width, false);
+        let compare_width = if inclusive {
+            counter_width + 1
+        } else {
+            counter_width
+        };
+
+        let start_reg = self.lower_bound(builder, start, compare_width, arena, cache);
+        let end_reg = self.lower_bound(builder, end, compare_width, arena, cache);
+        let one_reg = builder.alloc_bit(compare_width, false);
         builder.emit(SIRInstruction::Imm(one_reg, SIRValue::new(1u64)));
         let end_limit = if inclusive {
-            let reg = builder.alloc_bit(counter_width, false);
+            let reg = builder.alloc_bit(compare_width, false);
             builder.emit(SIRInstruction::Binary(reg, end_reg, BinaryOp::Add, one_reg));
             reg
         } else {
@@ -550,7 +556,7 @@ impl SLTToSIRLowerer {
         };
 
         let init_counter = if reverse { end_limit } else { start_reg };
-        let step_reg = builder.alloc_bit(counter_width, false);
+        let step_reg = builder.alloc_bit(compare_width, false);
         builder.emit(SIRInstruction::Imm(step_reg, SIRValue::new(step as u64)));
 
         let initial_states: Vec<RegisterId> = initials
@@ -563,7 +569,7 @@ impl SLTToSIRLowerer {
             })
             .collect();
 
-        let header_counter = builder.alloc_bit(counter_width, false);
+        let header_counter = builder.alloc_bit(compare_width, false);
         let header_states: Vec<_> = updates
             .iter()
             .map(|update| {
@@ -571,7 +577,7 @@ impl SLTToSIRLowerer {
                 builder.alloc_logic(width)
             })
             .collect();
-        let body_counter = builder.alloc_bit(counter_width, false);
+        let body_counter = builder.alloc_bit(compare_width, false);
         let body_states: Vec<_> = updates
             .iter()
             .map(|update| {
@@ -625,7 +631,7 @@ impl SLTToSIRLowerer {
 
         builder.switch_to_block(body_block);
         let loop_value = if reverse {
-            let reg = builder.alloc_bit(counter_width, false);
+            let reg = builder.alloc_bit(compare_width, false);
             builder.emit(SIRInstruction::Binary(reg, body_counter, BinaryOp::Sub, step_reg));
             reg
         } else {
@@ -662,7 +668,7 @@ impl SLTToSIRLowerer {
         let next_counter = if reverse {
             loop_value
         } else {
-            let reg = builder.alloc_bit(counter_width, false);
+            let reg = builder.alloc_bit(compare_width, false);
             let op = match step_op {
                 SLTStepOp::Add => BinaryOp::Add,
                 SLTStepOp::Mul => BinaryOp::Mul,

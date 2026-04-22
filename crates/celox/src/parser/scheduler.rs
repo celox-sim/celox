@@ -193,6 +193,7 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             loop_var,
             start,
             end,
+            initials,
             updates,
             ..
         } => {
@@ -208,6 +209,14 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                 crate::logic_tree::SLTLoopBound::Expr(node) => {
                     set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
                 }
+            }
+            for init in initials {
+                set.extend(collect_node_input_deps(
+                    init.expr,
+                    arena,
+                    memo,
+                    inverse_memo,
+                ));
             }
             for update in updates {
                 set.extend(collect_node_input_deps(

@@ -136,4 +136,62 @@ fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
     assert_eq!(sim.get(wrapped_hits), 4u32.into());
 }
 
+fn test_runtime_bounds_track_initial_seed_dependency(sim) {
+    @setup { let code = r#"
+        module Top (
+            seed: input logic<32>,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            var acc: logic<32>;
+            always_comb {
+                acc = seed;
+                for i: u32 in 0..count {
+                    acc += 1;
+                }
+                out = acc;
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let seed = sim.signal("seed");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(seed, 10u32);
+    sim.set(count, 3u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 13u32.into());
+
+    sim.set(seed, 20u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 23u32.into());
+}
+
+fn test_runtime_bounds_inclusive_max_bound_runs_full_range(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            count: input logic<8>,
+            hits: output logic<32>
+        ) {
+            always_comb {
+                hits = 0;
+                for i: u8 in 0..=count {
+                    hits += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let hits = sim.signal("hits");
+
+    sim.set(count, 255u8);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(hits), 256u32.into());
+}
+
 }
