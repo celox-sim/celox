@@ -56,26 +56,6 @@ pub trait SimBackend {
     // ── evaluation ──────────────────────────────────────────────
     fn eval_comb(&mut self) -> Result<(), super::SimulatorErrorCode>;
 
-    /// Execute a full eval-apply-ff cycle for the given event and then
-    /// evaluate combinational logic in a single merged call.
-    /// Returns `Err` if the backend does not support merged calls.
-    fn eval_apply_ff_and_comb(
-        &mut self,
-        event: Self::Event,
-    ) -> Result<(), super::SimulatorErrorCode>;
-
-    /// Execute pre-clock combinational evaluation, apply the FF domain for the
-    /// given event, then evaluate post-clock combinational logic. Backends may
-    /// provide a specialized merged implementation; the default falls back to
-    /// two calls.
-    fn eval_dirty_apply_ff_and_comb(
-        &mut self,
-        event: Self::Event,
-    ) -> Result<(), super::SimulatorErrorCode> {
-        self.eval_comb()?;
-        self.eval_apply_ff_and_comb(event)
-    }
-
     /// Evaluate and apply a flip-flop domain for the given event.
     fn eval_apply_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;
 

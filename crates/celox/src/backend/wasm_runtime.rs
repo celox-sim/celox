@@ -49,13 +49,6 @@ impl super::traits::SimBackend for WasmBackend {
     fn eval_comb(&mut self) -> Result<(), super::SimulatorErrorCode> {
         WasmBackend::eval_comb(self)
     }
-    fn eval_apply_ff_and_comb(
-        &mut self,
-        event: WasmEventRef,
-    ) -> Result<(), super::SimulatorErrorCode> {
-        WasmBackend::eval_apply_ff_at(self, &event)?;
-        WasmBackend::eval_comb(self)
-    }
     fn eval_apply_ff_at(&mut self, event: WasmEventRef) -> Result<(), super::SimulatorErrorCode> {
         WasmBackend::eval_apply_ff_at(self, &event)
     }

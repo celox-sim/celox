@@ -323,12 +323,12 @@ impl<B: SimBackend> Simulation<B> {
 
                     if can_use_eval_apply {
                         if let Some(ev) = info.eval_ff_event {
-                            // Use merged eval_apply + comb (saves function calls)
                             discovered_in_this_step.insert(single_id);
                             triggered_domains.insert(info.canonical_id);
                             any_new_outer_loop_trigger = true;
 
-                            self.simulator.backend.eval_apply_ff_and_comb(ev)?;
+                            self.simulator.backend.eval_apply_ff_at(ev)?;
+                            self.simulator.backend.eval_comb()?;
                             comb_already_done = true;
                             break;
                         }
@@ -379,7 +379,7 @@ impl<B: SimBackend> Simulation<B> {
             }
 
             // Phase 3: Evaluate combinational logic on stable region to propagate FF outputs.
-            // Skip if already done by the merged eval_apply_ff_and_comb function.
+            // Skip if it was already done in the single-trigger fast path above.
             if comb_already_done {
                 comb_already_done = false;
             } else {

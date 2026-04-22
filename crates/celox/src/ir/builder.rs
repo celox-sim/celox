@@ -169,42 +169,4 @@ impl<Addr> SIRBuilder<Addr> {
             register_map: regs,
         })
     }
-
-    /// Flush the current blocks into an ExecutionUnit but keep the register file
-    /// and register id allocation alive for subsequent chunks.
-    #[allow(dead_code)]
-    pub fn flush_chunk_preserve_regs(&mut self) -> Option<crate::ir::ExecutionUnit<Addr>>
-    where
-        Addr: Clone,
-    {
-        if self.blocks.len() == 1 {
-            let block = self.blocks.values().next().unwrap();
-            if block.instructions.is_empty() && self.current_block_id.is_some() {
-                return None;
-            }
-        }
-
-        if self.current_block_id.is_some() {
-            self.seal_block(SIRTerminator::Return);
-        }
-
-        let blocks = std::mem::take(&mut self.blocks);
-        let regs = self.registers.clone();
-
-        let new_block = BasicBlock {
-            id: BlockId(0),
-            instructions: vec![],
-            params: vec![],
-            terminator: SIRTerminator::Return,
-        };
-        self.blocks.insert(BlockId(0), new_block);
-        self.next_block_id = 1;
-        self.current_block_id = Some(BlockId(0));
-
-        Some(crate::ir::ExecutionUnit {
-            entry_block_id: BlockId(0),
-            blocks,
-            register_map: regs,
-        })
-    }
 }

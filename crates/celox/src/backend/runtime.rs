@@ -18,10 +18,6 @@ pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 #[derive(Clone, Copy)]
 pub struct EventRef {
     pub func: SimFunc,
-    /// Merged eval_apply_ff + eval_comb function, if available.
-    pub merged_func: Option<SimFunc>,
-    /// Merged eval_comb + eval_apply_ff + eval_comb function, if available.
-    pub dirty_merged_func: Option<SimFunc>,
     pub addr: AbsoluteAddr,
     pub id: usize,
 }
@@ -30,11 +26,6 @@ impl std::fmt::Debug for EventRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventRef")
             .field("func", &(self.func as usize))
-            .field("merged_func", &self.merged_func.map(|f| f as usize))
-            .field(
-                "dirty_merged_func",
-                &self.dirty_merged_func.map(|f| f as usize),
-            )
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
@@ -363,8 +354,6 @@ impl JitBackend {
                     *clock,
                     EventRef {
                         func,
-                        merged_func: None,
-                        dirty_merged_func: None,
                         addr: *clock,
                         id,
                     },
@@ -406,101 +395,6 @@ impl JitBackend {
             }
             if let Some(&ev) = apply_event_map.get(canonical) {
                 apply_event_map.insert(*alias, ev);
-            }
-        }
-
-        // Compile merged eval_apply_ff + eval_comb functions per domain and
-        // patch the merged_func/dirty_merged_func into existing event_map entries.
-        // Only when eval_comb uses the simple (non-chunked) compilation path.
-        let mut eval_apply_and_comb_map: HashMap<AbsoluteAddr, SimFunc> = HashMap::default();
-        let mut dirty_eval_apply_and_comb_map: HashMap<AbsoluteAddr, SimFunc> = HashMap::default();
-        if sir.eval_comb_plan.is_none() {
-            for (clock, units) in &sir.eval_apply_ffs {
-                if units.is_empty() {
-                    continue;
-                }
-                let ptr = if let Some(post_chunks) = sir.event_post_comb_chunks.get(clock) {
-                    let mut merged_chunks = vec![crate::optimizer::coalescing::TailCallChunk {
-                        units: units.clone(),
-                        incoming_live_regs: Vec::new(),
-                        outgoing_live_regs: Vec::new(),
-                    }];
-                    merged_chunks.extend(post_chunks.iter().cloned());
-                    engine
-                        .compile_chunks(&merged_chunks, None, None, None)
-                        .map_err(SimulatorError::from)?
-                } else {
-                    let mut merged_units: Vec<_> = units.clone();
-                    if let Some(post_units) = sir.event_post_comb.get(clock) {
-                        merged_units.extend(post_units.iter().cloned());
-                    } else {
-                        merged_units.extend(sir.eval_comb.iter().cloned());
-                    }
-                    engine
-                        .compile_units(&merged_units, None, None, None)
-                        .map_err(SimulatorError::from)?
-                };
-                let func: SimFunc = unsafe { std::mem::transmute(ptr) };
-                eval_apply_and_comb_map.insert(*clock, func);
-
-                let dirty_ptr = if sir.event_pre_comb_chunks.contains_key(clock)
-                    || sir.event_post_comb_chunks.contains_key(clock)
-                {
-                    let mut merged_chunks = sir
-                        .event_pre_comb_chunks
-                        .get(clock)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            vec![crate::optimizer::coalescing::TailCallChunk {
-                                units: sir.eval_comb.clone(),
-                                incoming_live_regs: Vec::new(),
-                                outgoing_live_regs: Vec::new(),
-                            }]
-                        });
-                    merged_chunks.push(crate::optimizer::coalescing::TailCallChunk {
-                        units: units.clone(),
-                        incoming_live_regs: Vec::new(),
-                        outgoing_live_regs: Vec::new(),
-                    });
-                    if let Some(post_chunks) = sir.event_post_comb_chunks.get(clock) {
-                        merged_chunks.extend(post_chunks.iter().cloned());
-                    } else {
-                        merged_chunks.push(crate::optimizer::coalescing::TailCallChunk {
-                            units: sir.eval_comb.clone(),
-                            incoming_live_regs: Vec::new(),
-                            outgoing_live_regs: Vec::new(),
-                        });
-                    }
-                    engine
-                        .compile_chunks(&merged_chunks, None, None, None)
-                        .map_err(SimulatorError::from)?
-                } else {
-                    let mut dirty_merged_units: Vec<_> = sir
-                        .event_pre_comb
-                        .get(clock)
-                        .cloned()
-                        .unwrap_or_else(|| sir.eval_comb.clone());
-                    dirty_merged_units.extend(units.clone());
-                    if let Some(post_units) = sir.event_post_comb.get(clock) {
-                        dirty_merged_units.extend(post_units.iter().cloned());
-                    } else {
-                        dirty_merged_units.extend(sir.eval_comb.iter().cloned());
-                    }
-                    engine
-                        .compile_units(&dirty_merged_units, None, None, None)
-                        .map_err(SimulatorError::from)?
-                };
-                let dirty_func: SimFunc = unsafe { std::mem::transmute(dirty_ptr) };
-                dirty_eval_apply_and_comb_map.insert(*clock, dirty_func);
-            }
-            // Patch merged functions into event_map entries
-            for (addr, ev) in &mut event_map {
-                if let Some(&merged) = eval_apply_and_comb_map.get(addr) {
-                    ev.merged_func = Some(merged);
-                }
-                if let Some(&merged) = dirty_eval_apply_and_comb_map.get(addr) {
-                    ev.dirty_merged_func = Some(merged);
-                }
             }
         }
 
@@ -837,13 +731,6 @@ impl JitBackend {
         self.run_sim_func(event.func)
     }
 
-    pub fn eval_apply_ff_and_comb_at(
-        &mut self,
-        merged_func: SimFunc,
-    ) -> Result<(), SimulatorErrorCode> {
-        self.run_sim_func(merged_func)
-    }
-
     pub fn eval_only_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
         self.run_sim_func(event.func)
     }
@@ -953,24 +840,6 @@ impl super::SimBackend for JitBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         self.eval_comb()
-    }
-
-    fn eval_apply_ff_and_comb(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
-        if let Some(merged) = event.merged_func {
-            self.eval_apply_ff_and_comb_at(merged)
-        } else {
-            self.eval_apply_ff_at(event)?;
-            self.eval_comb()
-        }
-    }
-
-    fn eval_dirty_apply_ff_and_comb(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
-        if let Some(merged) = event.dirty_merged_func {
-            self.eval_apply_ff_and_comb_at(merged)
-        } else {
-            self.eval_comb()?;
-            self.eval_apply_ff_and_comb(event)
-        }
     }
 
     fn eval_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {

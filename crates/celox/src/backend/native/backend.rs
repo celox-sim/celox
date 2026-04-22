@@ -27,8 +27,6 @@ pub type NativeSimFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
 #[derive(Clone, Copy)]
 pub struct NativeEventRef {
     pub func: NativeSimFunc,
-    pub merged_func: NativeSimFunc,
-    pub dirty_merged_func: NativeSimFunc,
     pub addr: AbsoluteAddr,
     pub id: usize,
 }
@@ -37,8 +35,6 @@ impl std::fmt::Debug for NativeEventRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeEventRef")
             .field("func", &(self.func as usize))
-            .field("merged_func", &(self.merged_func as usize))
-            .field("dirty_merged_func", &(self.dirty_merged_func as usize))
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
@@ -164,8 +160,6 @@ fn compile_program(
 
             let event = NativeEventRef {
                 func,
-                merged_func: func,
-                dirty_merged_func: func,
                 addr: *addr,
                 id,
             };
@@ -203,50 +197,6 @@ fn compile_program(
         &mut id_to_addr,
         &mut id_to_event,
     )?;
-
-    let mut eval_apply_and_comb_map = HashMap::default();
-    let mut dirty_eval_apply_and_comb_map = HashMap::default();
-    for (clock, units) in &sir.eval_apply_ffs {
-        if units.is_empty() {
-            continue;
-        }
-
-        let mut merged_units: Vec<_> = units.clone();
-        if let Some(post_units) = sir.event_post_comb.get(clock) {
-            merged_units.extend(post_units.iter().cloned());
-        } else {
-            merged_units.extend(sir.eval_comb.iter().cloned());
-        }
-        let merged_code = compile_units(&merged_units, layout, options.four_state)?;
-        let merged_func = merged_code.fn_ptr;
-        all_jit_codes.push(merged_code);
-        eval_apply_and_comb_map.insert(*clock, merged_func);
-
-        let mut dirty_merged_units = sir
-            .event_pre_comb
-            .get(clock)
-            .cloned()
-            .unwrap_or_else(|| sir.eval_comb.clone());
-        dirty_merged_units.extend(units.clone());
-        if let Some(post_units) = sir.event_post_comb.get(clock) {
-            dirty_merged_units.extend(post_units.iter().cloned());
-        } else {
-            dirty_merged_units.extend(sir.eval_comb.iter().cloned());
-        }
-        let dirty_merged_code = compile_units(&dirty_merged_units, layout, options.four_state)?;
-        let dirty_merged_func = dirty_merged_code.fn_ptr;
-        all_jit_codes.push(dirty_merged_code);
-        dirty_eval_apply_and_comb_map.insert(*clock, dirty_merged_func);
-    }
-
-    for (addr, ev) in &mut event_map {
-        if let Some(&merged) = eval_apply_and_comb_map.get(addr) {
-            ev.merged_func = merged;
-        }
-        if let Some(&merged) = dirty_eval_apply_and_comb_map.get(addr) {
-            ev.dirty_merged_func = merged;
-        }
-    }
 
     // Pre-compute 4-state initialization regions
     let mut four_state_inits = Vec::new();
@@ -363,17 +313,6 @@ impl super::super::SimBackend for NativeBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         Self::call_func(&mut self.memory, self.compiled.comb_func)
-    }
-
-    fn eval_apply_ff_and_comb(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
-        Self::call_func(&mut self.memory, event.merged_func)
-    }
-
-    fn eval_dirty_apply_ff_and_comb(
-        &mut self,
-        event: NativeEventRef,
-    ) -> Result<(), SimulatorErrorCode> {
-        Self::call_func(&mut self.memory, event.dirty_merged_func)
     }
 
     fn eval_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
