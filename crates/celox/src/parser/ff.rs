@@ -361,7 +361,7 @@ impl<'a> FfParser<'a> {
             ));
         };
 
-        let (start_reg, end_reg, inclusive, step, reverse, stepped_op) = match &stmt.range {
+        let (start_reg, end_reg, inclusive, step, reverse, stepped_op, start_const) = match &stmt.range {
             ForRange::Forward {
                 start,
                 end,
@@ -374,6 +374,7 @@ impl<'a> FfParser<'a> {
                 *step,
                 false,
                 None,
+                Self::bound_const_value(start),
             ),
             ForRange::Reverse {
                 start,
@@ -387,6 +388,7 @@ impl<'a> FfParser<'a> {
                 *step,
                 true,
                 None,
+                Self::bound_const_value(start),
             ),
             ForRange::Stepped {
                 start,
@@ -401,10 +403,11 @@ impl<'a> FfParser<'a> {
                 *step,
                 false,
                 Some(*op),
+                Self::bound_const_value(start),
             ),
         };
 
-        if Self::step_can_stall(reverse, stepped_op, step) {
+        if Self::step_can_stall(reverse, stepped_op, step, start_const) {
             return Err(ParserError::unsupported(
                 LoweringPhase::FfLowering,
                 "non-progressing for loop in always_ff",
@@ -820,13 +823,25 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn step_can_stall(reverse: bool, stepped_op: Option<Op>, step: usize) -> bool {
+    fn bound_const_value(bound: &ForBound) -> Option<usize> {
+        match bound {
+            ForBound::Const(v) => Some(*v),
+            ForBound::Expression(expr) => eval_constexpr(expr)?.to_usize(),
+        }
+    }
+
+    fn step_can_stall(
+        reverse: bool,
+        stepped_op: Option<Op>,
+        step: usize,
+        start_const: Option<usize>,
+    ) -> bool {
         if reverse {
             return step == 0;
         }
         match stepped_op {
-            Some(Op::Mul) => step == 1,
-            Some(Op::LogicShiftL | Op::ArithShiftL) => step == 0,
+            Some(Op::Mul) => step == 0 || step == 1 || start_const == Some(0),
+            Some(Op::LogicShiftL | Op::ArithShiftL) => step == 0 || start_const == Some(0),
             Some(Op::Add) | None => step == 0,
             Some(_) => false,
         }
