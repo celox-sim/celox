@@ -1175,8 +1175,8 @@ fn eval_for(
         let mut loop_store = RangeStore::new(None, width);
         let mut covered = vec![false; width];
         for access in accesses {
-            for bit in access.lsb..=access.msb {
-                covered[bit] = true;
+            for slot in covered.iter_mut().take(access.msb + 1).skip(access.lsb) {
+                *slot = true;
             }
         }
         let original = store

@@ -1215,7 +1215,7 @@ impl<'a> FfParser<'a> {
     }
 
     fn const_range_is_singleton(
-        reverse: bool,
+        _reverse: bool,
         start_const: Option<usize>,
         end_const: Option<usize>,
         inclusive: bool,
@@ -1226,6 +1226,6 @@ impl<'a> FfParser<'a> {
         if !inclusive {
             return false;
         }
-        if reverse { end == start } else { start == end }
+        start == end
     }
 }

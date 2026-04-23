@@ -1534,8 +1534,6 @@ fn sim_set_i128<B: SimBackend>(
 ) {
     if width <= 64 {
         sim_set_u64(sim, sig, value as u64);
-    } else if width <= 128 {
-        sim.set_wide(sig, BigUint::from(value as u128));
     } else if value >= 0 {
         sim.set_wide(sig, BigUint::from(value as u128));
     } else {
