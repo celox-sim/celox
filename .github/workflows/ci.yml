@@ -137,7 +137,6 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        working-directory: crates/celox-napi
         run: pnpm install --frozen-lockfile
 
       - name: Build NAPI (Linux ARM64 GNU)
@@ -180,6 +179,16 @@ jobs:
 
       - name: Build packages
         run: pnpm run build
+
+      - name: Prepare template for local package validation
+        working-directory: examples/template
+        run: |
+          node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.devDependencies['@celox-sim/celox']='link:../../packages/celox'; pkg.devDependencies['@celox-sim/vite-plugin']='link:../../packages/vite-plugin'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+          pnpm install --no-frozen-lockfile
+
+      - name: Run template tests
+        working-directory: examples/template
+        run: pnpm test
 
       - name: Run tests
         run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r test
