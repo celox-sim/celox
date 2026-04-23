@@ -465,6 +465,7 @@ fn collect_glue_sources_with_window(
             end,
             initials,
             updates,
+            continue_cond,
             ..
         } => {
             if let crate::logic_tree::SLTLoopBound::Expr(node) = start {
@@ -479,6 +480,7 @@ fn collect_glue_sources_with_window(
             for update in updates {
                 collect_glue_sources_with_window(update.expr, None, arena, set);
             }
+            collect_glue_sources_with_window(*continue_cond, None, arena, set);
             set.retain(|atom| atom.id != *loop_var);
         }
         SLTNode::Constant(_, _, _, _) => {}

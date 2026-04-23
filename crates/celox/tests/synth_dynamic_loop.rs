@@ -189,6 +189,61 @@ fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
     assert_eq!(sim.get(hits), 1u32.into());
 }
 
+fn test_runtime_break_in_synth_comb_loop(sim) {
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            sum: output logic<32>
+        ) {
+            always_comb {
+                sum = 0;
+                for i: u32 in 0..count {
+                    if i == 3 {
+                        break;
+                    }
+                    sum += i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let sum = sim.signal("sum");
+
+    sim.set(count, 8u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sum), 3u32.into());
+}
+
+fn test_runtime_break_after_assign_in_synth_comb_loop(sim) {
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            sum: output logic<32>
+        ) {
+            always_comb {
+                sum = 0;
+                for i: u32 in 0..count {
+                    if i == 2 {
+                        sum += 10;
+                        break;
+                    }
+                    sum += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let sum = sim.signal("sum");
+
+    sim.set(count, 8u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sum), 12u32.into());
+}
+
 fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

@@ -195,6 +195,7 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             end,
             initials,
             updates,
+            continue_cond,
             ..
         } => {
             let mut set = HashSet::default();
@@ -227,6 +228,13 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                 ));
                 set.remove(loop_var);
             }
+            set.extend(collect_node_input_deps(
+                *continue_cond,
+                arena,
+                memo,
+                inverse_memo,
+            ));
+            set.remove(loop_var);
             set
         }
         crate::logic_tree::SLTNode::Constant(_, _, _, _) => HashSet::default(),
