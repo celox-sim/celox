@@ -2,3 +2,4 @@ packages:
   - "packages/*"
   - "examples/*"
   - "crates/celox-napi"
+minimumReleaseAge: 10080

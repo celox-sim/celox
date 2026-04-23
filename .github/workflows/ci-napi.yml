@@ -67,7 +67,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/celox-napi
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build (napi-cross)
         if: matrix.napi-cross
@@ -126,7 +126,7 @@ jobs:
           path: crates/celox-napi/
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build packages
         run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r build
@@ -152,7 +152,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/celox-napi
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Set version from tag
         working-directory: crates/celox-napi
@@ -242,7 +242,7 @@ jobs:
       - uses: pnpm/action-setup@v4
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Set version from tag
         run: |

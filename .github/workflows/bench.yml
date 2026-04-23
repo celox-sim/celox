@@ -28,7 +28,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run Rust benchmarks
-        run: cargo bench -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
+        run: cargo bench --locked -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -76,7 +76,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build NAPI (release)
         run: pnpm run build:napi:release

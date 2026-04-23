@@ -29,7 +29,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets --no-deps
+        run: cargo clippy --locked -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets --no-deps
 
       - uses: pnpm/action-setup@v4
 
@@ -39,7 +39,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Biome check
         run: pnpm run lint
@@ -57,7 +57,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked
 
       - uses: pnpm/action-setup@v4
 
@@ -67,7 +67,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build NAPI (debug)
         run: pnpm run build:napi
@@ -101,7 +101,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build NAPI (debug)
         run: pnpm run build:napi
@@ -138,7 +138,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/celox-napi
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build NAPI (Linux ARM64 GNU)
         working-directory: crates/celox-napi
@@ -176,7 +176,7 @@ jobs:
           path: crates/celox-napi
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build packages
         run: pnpm run build
@@ -207,7 +207,7 @@ jobs:
           path: crates/celox-napi
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build packages
         run: pnpm run build
