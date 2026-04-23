@@ -54,6 +54,38 @@ fn test_expression_bounds_in_synth_for_loops(sim) {
     assert_eq!(sim.get(sum_step), 7u32.into());
 }
 
+#[ignore]
+fn test_constant_signed_bounds_in_unrolled_synth_loops(sim) {
+    // Constant signed reverse bounds are currently broken in the upstream
+    // Veryl analyzer unroller, so this regression is parked until deps/veryl
+    // is fixed.
+    @setup { let code = r#"
+        module Top (
+            sum_fwd: output logic<32>,
+            sum_rev: output logic<32>
+        ) {
+            always_comb {
+                sum_fwd = 0;
+                for i: i32 in (0 - 1)..=1 {
+                    sum_fwd += i as 32;
+                }
+
+                sum_rev = 0;
+                for i: i32 in rev (0 - 1)..=1 {
+                    sum_rev = sum_rev * 10 + (i + 1) as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let sum_fwd = sim.signal("sum_fwd");
+    let sum_rev = sim.signal("sum_rev");
+
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sum_fwd), 0u32.into());
+    assert_eq!(sim.get(sum_rev), 210u32.into());
+}
+
 fn test_runtime_bounds_in_synth_for_loops(sim) {
     @setup { let code = r#"
         module Top (
@@ -132,6 +164,39 @@ fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
     sim.set(count, 0u32);
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(hits), 1u32.into());
+}
+
+fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            count: input logic<32>,
+            hits: output logic<32>,
+            sum: output logic<32>
+        ) {
+            always_comb {
+                hits = 0;
+                sum = 0;
+                for i: i32 in start..=count {
+                    hits += 1;
+                    sum += i as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let hits = sim.signal("hits");
+    let sum = sim.signal("sum");
+
+    sim.set(start, 0xffff_ffffu32);
+    sim.set(count, 1u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(hits), 3u32.into());
+    assert_eq!(sim.get(sum), 0u32.into());
 }
 
 fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {

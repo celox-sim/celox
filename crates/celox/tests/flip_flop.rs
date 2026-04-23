@@ -99,6 +99,40 @@ fn test_ff_runtime_for_bounds(sim) {
     assert_eq!(sim.get(q_step), 8u32.into());
 }
 
+#[ignore]
+fn test_ff_constant_signed_bounds_in_unrolled_loops(sim) {
+    // Constant signed reverse bounds are currently broken in the upstream
+    // Veryl analyzer unroller, so this regression is parked until deps/veryl
+    // is fixed.
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            q_fwd: output logic<32>,
+            q_rev_last: output logic<32>
+        ) {
+            always_ff (clk) {
+                q_fwd = 0;
+                for i: i32 in (0 - 1)..=1 {
+                    q_fwd += i as 32;
+                }
+
+                q_rev_last = 32'hdead_beef;
+                for i: i32 in rev (0 - 1)..=1 {
+                    q_rev_last = (i + 1) as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let q_fwd = sim.signal("q_fwd");
+    let q_rev_last = sim.signal("q_rev_last");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_fwd), 0u32.into());
+    assert_eq!(sim.get(q_rev_last), 0u32.into());
+}
+
 fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
@@ -176,6 +210,38 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
     sim.modify(|io| io.set(count, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u32.into());
+}
+
+fn test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input logic<32>,
+            count: input logic<32>,
+            q_last: output logic<32>
+        ) {
+            always_ff (clk) {
+                q_last = 32'hdead_beef;
+                for i: i32 in start..=count {
+                    q_last = i as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let q_last = sim.signal("q_last");
+
+    sim.modify(|io| {
+        io.set(start, 0xffff_ffffu32);
+        io.set(count, 1u32);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_last), 1u32.into());
 }
 
 fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {

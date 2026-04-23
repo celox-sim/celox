@@ -85,24 +85,47 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn cast_reg_width<A>(
+    fn cast_reg_width_ext<A>(
         &self,
         ir_builder: &mut SIRBuilder<A>,
         reg: RegisterId,
         target_width: usize,
+        signed: bool,
     ) -> RegisterId {
         let src_width = ir_builder.register(&reg).width();
         if src_width == target_width {
             reg
         } else if src_width < target_width {
-            let dest = ir_builder.alloc_logic(target_width);
-            ir_builder.emit(SIRInstruction::Unary(dest, UnaryOp::Ident, reg));
+            let dest = ir_builder.alloc_bit(target_width, signed);
+            if signed {
+                let sign = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Slice(
+                    sign,
+                    reg,
+                    src_width - 1,
+                    1,
+                ));
+                let pad_width = target_width - src_width;
+                let pad = if pad_width == 1 {
+                    sign
+                } else {
+                    let ext = ir_builder.alloc_bit(pad_width, true);
+                    ir_builder.emit(SIRInstruction::Concat(
+                        ext,
+                        std::iter::repeat_n(sign, pad_width).collect(),
+                    ));
+                    ext
+                };
+                ir_builder.emit(SIRInstruction::Concat(dest, vec![pad, reg]));
+            } else {
+                ir_builder.emit(SIRInstruction::Unary(dest, UnaryOp::Ident, reg));
+            }
             dest
         } else {
             let mask_val = (crate::BigUint::from(1u64) << target_width) - crate::BigUint::from(1u64);
             let mask = ir_builder.alloc_bit(target_width, false);
             ir_builder.emit(SIRInstruction::Imm(mask, crate::ir::SIRValue::new(mask_val)));
-            let dest = ir_builder.alloc_logic(target_width);
+            let dest = ir_builder.alloc_bit(target_width, signed);
             ir_builder.emit(SIRInstruction::Binary(
                 dest,
                 reg,
@@ -380,7 +403,9 @@ impl<'a> FfParser<'a> {
     fn parse_for_bound<A>(
         &mut self,
         bound: &ForBound,
+        canonical_width: usize,
         width: usize,
+        signed: bool,
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
@@ -389,14 +414,19 @@ impl<'a> FfParser<'a> {
     ) -> Result<RegisterId, ParserError> {
         match bound {
             ForBound::Const(v) => {
-                let reg = ir_builder.alloc_bit(width, false);
+                let reg = ir_builder.alloc_bit(width, signed);
                 ir_builder.emit(SIRInstruction::Imm(reg, crate::ir::SIRValue::new(*v as u64)));
                 Ok(reg)
             }
             ForBound::Expression(expr) => {
                 self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
                 let reg = self.stack.pop_back().unwrap();
-                Ok(self.cast_reg_width(ir_builder, reg, width))
+                let canonical = if signed {
+                    self.cast_reg_width_ext(ir_builder, reg, canonical_width, signed)
+                } else {
+                    reg
+                };
+                Ok(self.cast_reg_width_ext(ir_builder, canonical, width, signed))
             }
         }
     }
@@ -418,6 +448,7 @@ impl<'a> FfParser<'a> {
                 Some(&stmt.token),
             ));
         };
+        let loop_signed = stmt.var_type.signed;
 
         let (start_bound, end_bound, inclusive, step, reverse, stepped_op, start_const, end_const) = match &stmt.range {
             ForRange::Forward {
@@ -488,7 +519,8 @@ impl<'a> FfParser<'a> {
         let mut counter_width = loop_width.max(1);
         counter_width = counter_width.max(self.bound_width(start_bound));
         counter_width = counter_width.max(self.bound_width(end_bound));
-        let compare_width = if inclusive {
+        let widen_inclusive = inclusive && !loop_signed;
+        let compare_width = if widen_inclusive {
             counter_width.saturating_add(1)
         } else {
             counter_width
@@ -501,7 +533,9 @@ impl<'a> FfParser<'a> {
 
         let start_reg = self.parse_for_bound(
             start_bound,
+            loop_width,
             compare_width,
+            loop_signed,
             targets,
             domain,
             convert,
@@ -510,7 +544,9 @@ impl<'a> FfParser<'a> {
         )?;
         let end_reg = self.parse_for_bound(
             end_bound,
+            loop_width,
             compare_width,
+            loop_signed,
             targets,
             domain,
             convert,
@@ -518,10 +554,10 @@ impl<'a> FfParser<'a> {
             ir_builder,
         )?;
 
-        let one_reg = ir_builder.alloc_bit(compare_width, false);
+        let one_reg = ir_builder.alloc_bit(compare_width, loop_signed);
         ir_builder.emit(SIRInstruction::Imm(one_reg, crate::ir::SIRValue::new(1u64)));
-        let end_limit = if inclusive {
-            let reg = ir_builder.alloc_bit(compare_width, false);
+        let end_limit = if widen_inclusive {
+            let reg = ir_builder.alloc_bit(compare_width, loop_signed);
             ir_builder.emit(SIRInstruction::Binary(reg, end_reg, crate::ir::BinaryOp::Add, one_reg));
             reg
         } else {
@@ -534,8 +570,8 @@ impl<'a> FfParser<'a> {
             start_reg
         };
 
-        let header_counter = ir_builder.alloc_bit(compare_width, false);
-        let body_counter = ir_builder.alloc_bit(compare_width, false);
+        let header_counter = ir_builder.alloc_bit(compare_width, loop_signed);
+        let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
         let stall_bb = ir_builder.new_block();
@@ -547,14 +583,14 @@ impl<'a> FfParser<'a> {
 
         ir_builder.switch_to_block(header_bb);
         if reverse {
-            let loop_math = self.cast_reg_width(ir_builder, header_counter, math_width);
-            let start_math = self.cast_reg_width(ir_builder, start_reg, math_width);
-            let step_reg = ir_builder.alloc_bit(math_width, false);
+            let loop_math = self.cast_reg_width_ext(ir_builder, header_counter, math_width, loop_signed);
+            let start_math = self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
+            let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Imm(
                 step_reg,
                 crate::ir::SIRValue::new(step as u64),
             ));
-            let threshold_reg = ir_builder.alloc_bit(math_width, false);
+            let threshold_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Binary(
                 threshold_reg,
                 start_math,
@@ -566,20 +602,20 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 cond_reg,
                 loop_math,
-                crate::ir::BinaryOp::GeU,
+                if loop_signed { crate::ir::BinaryOp::GeS } else { crate::ir::BinaryOp::GeU },
                 cond_lhs,
             ));
             let body_counter_reg = if inclusive {
                 header_counter
             } else {
-                let body_math = ir_builder.alloc_bit(math_width, false);
+                let body_math = ir_builder.alloc_bit(math_width, loop_signed);
                 ir_builder.emit(SIRInstruction::Binary(
                     body_math,
                     loop_math,
                     crate::ir::BinaryOp::Sub,
                     step_reg,
                 ));
-                self.cast_reg_width(ir_builder, body_math, compare_width)
+                self.cast_reg_width_ext(ir_builder, body_math, compare_width, loop_signed)
             };
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: cond_reg,
@@ -591,7 +627,15 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 cond_reg,
                 header_counter,
-                crate::ir::BinaryOp::LtU,
+                if loop_signed {
+                    if inclusive {
+                        crate::ir::BinaryOp::LeS
+                    } else {
+                        crate::ir::BinaryOp::LtS
+                    }
+                } else {
+                    crate::ir::BinaryOp::LtU
+                },
                 end_limit,
             ));
             ir_builder.seal_block(SIRTerminator::Branch {
@@ -606,7 +650,7 @@ impl<'a> FfParser<'a> {
         // always_ff uses NBA semantics: this loop variable is the only value
         // made visible intra-block, while all other reads still observe the
         // pre-commit old state until WORKING -> STABLE commits happen later.
-        let visible_loop_reg = self.cast_reg_width(ir_builder, body_counter, loop_width);
+        let visible_loop_reg = self.cast_reg_width_ext(ir_builder, body_counter, loop_width, loop_signed);
         ir_builder.emit(SIRInstruction::Store(
             convert(stmt.var_id, domain.region()),
             crate::ir::SIROffset::Static(0),
@@ -647,13 +691,13 @@ impl<'a> FfParser<'a> {
                 ir_builder.switch_to_block(advance_bb);
             }
 
-            let current_math = self.cast_reg_width(ir_builder, body_counter, math_width);
-            let step_reg = ir_builder.alloc_bit(math_width, false);
+            let current_math = self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
+            let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Imm(
                 step_reg,
                 crate::ir::SIRValue::new(step as u64),
             ));
-            let next_reg = ir_builder.alloc_bit(math_width, false);
+            let next_reg = ir_builder.alloc_bit(math_width, loop_signed);
             let op = match stepped_op {
                 Some(Op::Mul) => crate::ir::BinaryOp::Mul,
                 Some(Op::LogicShiftL | Op::ArithShiftL) => crate::ir::BinaryOp::Shl,
@@ -687,15 +731,23 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 increasing_reg,
                 next_reg,
-                crate::ir::BinaryOp::GtU,
+                if loop_signed { crate::ir::BinaryOp::GtS } else { crate::ir::BinaryOp::GtU },
                 current_math,
             ));
-            let end_reg = self.cast_reg_width(ir_builder, end_limit, math_width);
+            let end_reg = self.cast_reg_width_ext(ir_builder, end_limit, math_width, loop_signed);
             let in_range_reg = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
                 in_range_reg,
                 next_reg,
-                crate::ir::BinaryOp::LtU,
+                if loop_signed {
+                    if inclusive {
+                        crate::ir::BinaryOp::LeS
+                    } else {
+                        crate::ir::BinaryOp::LtS
+                    }
+                } else {
+                    crate::ir::BinaryOp::LtU
+                },
                 end_reg,
             ));
             let can_continue_reg = ir_builder.alloc_bit(1, false);
@@ -705,7 +757,7 @@ impl<'a> FfParser<'a> {
                 crate::ir::BinaryOp::LogicAnd,
                 in_range_reg,
             ));
-            let next_counter = self.cast_reg_width(ir_builder, next_reg, compare_width);
+            let next_counter = self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: can_continue_reg,
                 true_block: (header_bb, vec![next_counter]),
@@ -714,14 +766,14 @@ impl<'a> FfParser<'a> {
             ir_builder.switch_to_block(stall_bb);
             ir_builder.seal_block(SIRTerminator::Error(1));
         } else {
-            let current_math = self.cast_reg_width(ir_builder, body_counter, math_width);
-            let start_math = self.cast_reg_width(ir_builder, start_reg, math_width);
-            let step_reg = ir_builder.alloc_bit(math_width, false);
+            let current_math = self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
+            let start_math = self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
+            let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Imm(
                 step_reg,
                 crate::ir::SIRValue::new(step as u64),
             ));
-            let threshold_reg = ir_builder.alloc_bit(math_width, false);
+            let threshold_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Binary(
                 threshold_reg,
                 start_math,
@@ -732,17 +784,17 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 can_continue,
                 current_math,
-                crate::ir::BinaryOp::GeU,
+                if loop_signed { crate::ir::BinaryOp::GeS } else { crate::ir::BinaryOp::GeU },
                 threshold_reg,
             ));
-            let next_reg = ir_builder.alloc_bit(math_width, false);
+            let next_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Binary(
                 next_reg,
                 current_math,
                 crate::ir::BinaryOp::Sub,
                 step_reg,
             ));
-            let next_counter = self.cast_reg_width(ir_builder, next_reg, compare_width);
+            let next_counter = self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: can_continue,
                 true_block: (

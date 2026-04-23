@@ -337,6 +337,7 @@ pub enum SLTNode<A: Hash + Eq + Clone> {
     ForFold {
         loop_var: A,
         loop_width: usize,
+        loop_signed: bool,
         start: SLTLoopBound,
         end: SLTLoopBound,
         inclusive: bool,
@@ -381,6 +382,7 @@ enum SLTNodeSerde<A: Hash + Eq + Clone> {
     ForFold {
         loop_var: A,
         loop_width: usize,
+        loop_signed: bool,
         start: SLTLoopBound,
         end: SLTLoopBound,
         inclusive: bool,
@@ -430,6 +432,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
             SLTNode::ForFold {
                 loop_var,
                 loop_width,
+                loop_signed,
                 start,
                 end,
                 inclusive,
@@ -442,6 +445,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
             } => SLTNodeSerde::ForFold {
                 loop_var,
                 loop_width,
+                loop_signed,
                 start,
                 end,
                 inclusive,
@@ -495,6 +499,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
             SLTNodeSerde::ForFold {
                 loop_var,
                 loop_width,
+                loop_signed,
                 start,
                 end,
                 inclusive,
@@ -507,6 +512,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
             } => SLTNode::ForFold {
                 loop_var,
                 loop_width,
+                loop_signed,
                 start,
                 end,
                 inclusive,
@@ -611,6 +617,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             SLTNode::ForFold {
                 loop_var,
                 loop_width,
+                loop_signed,
                 start,
                 end,
                 inclusive,
@@ -671,6 +678,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 SLTNode::ForFold {
                     loop_var: f(loop_var),
                     loop_width: *loop_width,
+                    loop_signed: *loop_signed,
                     start: map_bound(start, cache, target_arena),
                     end: map_bound(end, cache, target_arena),
                     inclusive: *inclusive,
@@ -815,6 +823,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             SLTNode::ForFold {
                 loop_var,
                 loop_width,
+                loop_signed,
                 start,
                 end,
                 inclusive,
@@ -827,8 +836,8 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             } => {
                 writeln!(
                     f,
-                    "{}ForFold(loop_var={}, width={}, inclusive={}, step={}, step_op={:?}, reverse={}, result={})",
-                    indent, loop_var, loop_width, inclusive, step, step_op, reverse, result
+                    "{}ForFold(loop_var={}, width={}, signed={}, inclusive={}, step={}, step_op={:?}, reverse={}, result={})",
+                    indent, loop_var, loop_width, loop_signed, inclusive, step, step_op, reverse, result
                 )?;
                 writeln!(f, "{}start: {:?}", child_indent, start)?;
                 writeln!(f, "{}end: {:?}", child_indent, end)?;
@@ -1306,6 +1315,7 @@ fn eval_for(
         let folded_expr = arena.alloc(SLTNode::ForFold {
             loop_var: for_stmt.var_id,
             loop_width,
+            loop_signed: for_stmt.var_type.signed,
             start: start.clone(),
             end: end.clone(),
             inclusive,
