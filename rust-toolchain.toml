@@ -1,0 +1,5 @@
+[toolchain]
+# renovate: datasource=github-tags depName=rust-lang/rust versioning=semver
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

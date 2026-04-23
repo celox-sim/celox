@@ -51,7 +51,7 @@ jobs:
       - uses: pnpm/action-setup@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
         with:
           targets: ${{ matrix.target }}
 

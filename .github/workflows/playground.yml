@@ -33,7 +33,7 @@ jobs:
           cache: pnpm
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip1-threads
 

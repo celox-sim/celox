@@ -1,0 +1,46 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "^rust-toolchain\\.toml$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[^ ]+) depName=(?<depName>[^ ]+) versioning=(?<versioning>[^\\s]+)\\s+channel = \"(?<currentValue>[^\"]+)\""
+      ]
+    },
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "^Cargo\\.toml$"
+      ],
+      "matchStrings": [
+        "rust-version = \"(?<currentValue>[^\"]+)\"\\n"
+      ],
+      "depNameTemplate": "rust-lang/rust",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "rust-lang/rust"
+      ],
+      "groupName": "rust stable toolchain",
+      "commitMessageTopic": "Rust toolchain",
+      "rangeStrategy": "replace",
+      "labels": [
+        "dependencies",
+        "rust"
+      ]
+    }
+  ]
+}

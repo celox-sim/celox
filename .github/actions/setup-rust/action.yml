@@ -1,0 +1,33 @@
+name: Setup Rust
+description: Install the repository-pinned Rust toolchain from rust-toolchain.toml
+
+inputs:
+  components:
+    description: Additional comma-separated Rust components to install
+    required: false
+    default: ""
+  targets:
+    description: Additional comma-separated Rust targets to install
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Read toolchain channel
+      id: toolchain
+      shell: bash
+      run: |
+        channel="$(sed -nE 's/^channel = "(.*)"/\1/p' rust-toolchain.toml)"
+        if [ -z "$channel" ]; then
+          echo "failed to read [toolchain].channel from rust-toolchain.toml" >&2
+          exit 1
+        fi
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.toolchain.outputs.channel }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
