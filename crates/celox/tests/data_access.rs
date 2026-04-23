@@ -281,7 +281,6 @@ assign o_hi = regs[idx][63:32];
     }
 
     fn test_let_index_with_bitslice_write(sim) {
-        @ignore_on(veryl);
         @setup { // Regression: using a `let`-bound variable as an array index combined
 // with a bitslice write (e.g. data[idx][63:32]) produced wrong values
 // because eval_dynamic_assign treated the Colon MSB anchor as a

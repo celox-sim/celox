@@ -164,7 +164,6 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
 }
 
 fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -277,7 +276,6 @@ fn test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds(sim) {
 }
 
 fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,

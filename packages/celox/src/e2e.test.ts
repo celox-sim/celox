@@ -1720,7 +1720,7 @@ describe("E2E: parameter override — DUT correctness", () => {
 		sim.dispose();
 	});
 
-	test.skip("param value reflected in logic via fromSource", () => {
+	test("param value reflected in logic via fromSource", () => {
 		// blocked by upstream Veryl IR bug
 		interface Ports {
 			a: bigint;

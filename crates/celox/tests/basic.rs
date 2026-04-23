@@ -92,9 +92,6 @@ assign b[7:3]    = a;
     }
 
     fn test_overlapping_override(sim) {
-        // Veryl direct simulator path currently returns 0xFF here,
-        // while the same code passes via native testbench and should produce 0xF0.
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (x: input logic<8>, y: input logic<4>, o: output logic<8>) {
 var a: logic<8>;
