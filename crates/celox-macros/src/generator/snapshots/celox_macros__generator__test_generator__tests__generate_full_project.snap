@@ -1,6 +1,5 @@
 ---
 source: crates/celox-macros/src/generator/test_generator.rs
-assertion_line: 105
 expression: code
 ---
 pub struct Module04 {
@@ -6252,6 +6251,210 @@ impl<'a, 'b> lfsr_galoisIO<'a, 'b> {
         self.io.set_four_state(self.ids.i_set, val, mask);
     }
 }
+pub struct test_lzc_4 {}
+impl test_lzc_4 {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_lzc_4Bound<'a> {
+        test_lzc_4Bound { sim, ids: self }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_lzc_4Bound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_lzc_4,
+}
+impl<'a> test_lzc_4Bound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_lzc_4IO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_lzc_4IO { io, ids: self.ids };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_lzc_4IO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_lzc_4,
+}
+impl<'a, 'b> test_lzc_4IO<'a, 'b> {}
+pub struct test_lzc_8 {}
+impl test_lzc_8 {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_lzc_8Bound<'a> {
+        test_lzc_8Bound { sim, ids: self }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_lzc_8Bound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_lzc_8,
+}
+impl<'a> test_lzc_8Bound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_lzc_8IO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_lzc_8IO { io, ids: self.ids };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_lzc_8IO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_lzc_8,
+}
+impl<'a, 'b> test_lzc_8IO<'a, 'b> {}
+pub struct test_lzc_16 {}
+impl test_lzc_16 {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_lzc_16Bound<'a> {
+        test_lzc_16Bound { sim, ids: self }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_lzc_16Bound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_lzc_16,
+}
+impl<'a> test_lzc_16Bound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_lzc_16IO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_lzc_16IO { io, ids: self.ids };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_lzc_16IO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_lzc_16,
+}
+impl<'a, 'b> test_lzc_16IO<'a, 'b> {}
+pub struct test_lzc_32 {}
+impl test_lzc_32 {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_lzc_32Bound<'a> {
+        test_lzc_32Bound { sim, ids: self }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_lzc_32Bound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_lzc_32,
+}
+impl<'a> test_lzc_32Bound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_lzc_32IO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_lzc_32IO { io, ids: self.ids };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_lzc_32IO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_lzc_32,
+}
+impl<'a, 'b> test_lzc_32IO<'a, 'b> {}
+pub struct test_lzc_64 {}
+impl test_lzc_64 {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_lzc_64Bound<'a> {
+        test_lzc_64Bound { sim, ids: self }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_lzc_64Bound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_lzc_64,
+}
+impl<'a> test_lzc_64Bound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_lzc_64IO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_lzc_64IO { io, ids: self.ids };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_lzc_64IO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_lzc_64,
+}
+impl<'a, 'b> test_lzc_64IO<'a, 'b> {}
+pub struct test_lzc_128 {}
+impl test_lzc_128 {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> test_lzc_128Bound<'a> {
+        test_lzc_128Bound {
+            sim,
+            ids: self,
+        }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_lzc_128Bound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_lzc_128,
+}
+impl<'a> test_lzc_128Bound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_lzc_128IO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_lzc_128IO {
+                    io,
+                    ids: self.ids,
+                };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_lzc_128IO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_lzc_128,
+}
+impl<'a, 'b> test_lzc_128IO<'a, 'b> {}
 pub struct ram {
     pub i_adrb: celox::SignalRef,
     pub i_adra: celox::SignalRef,
@@ -6664,17 +6867,38 @@ impl<'a, 'b> ramIO<'a, 'b> {
     }
 }
 pub struct demux {
+    pub i_select: celox::SignalRef,
     pub o_data: celox::SignalRef,
     pub i_data: celox::SignalRef,
-    pub i_select: celox::SignalRef,
 }
 impl demux {
     pub fn new(sim: &celox::Simulator) -> Self {
         Self {
+            i_select: sim.signal("i_select"),
             o_data: sim.signal("o_data"),
             i_data: sim.signal("i_data"),
-            i_select: sim.signal("i_select"),
         }
+    }
+    pub fn set_i_select(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_select, val)).unwrap();
+    }
+    pub fn get_i_select(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_select);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_select"))
+    }
+    pub fn set_i_select_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.i_select, val, mask)).unwrap();
+    }
+    pub fn get_i_select_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.i_select)
     }
     pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.o_data, val)).unwrap();
@@ -6718,27 +6942,6 @@ impl demux {
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.i_data)
     }
-    pub fn set_i_select(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_select, val)).unwrap();
-    }
-    pub fn get_i_select(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_select);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_select"))
-    }
-    pub fn set_i_select_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_select, val, mask)).unwrap();
-    }
-    pub fn get_i_select_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_select)
-    }
     pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> demuxBound<'a> {
         demuxBound { sim, ids: self }
     }
@@ -6749,6 +6952,18 @@ pub struct demuxBound<'a> {
     ids: &'a demux,
 }
 impl<'a> demuxBound<'a> {
+    pub fn set_i_select(&mut self, val: u8) {
+        self.ids.set_i_select(self.sim, val);
+    }
+    pub fn get_i_select(&mut self) -> u8 {
+        self.ids.get_i_select(self.sim)
+    }
+    pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_i_select_4state(self.sim, val, mask);
+    }
+    pub fn get_i_select_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_i_select_4state(self.sim)
+    }
     pub fn set_o_data(&mut self, val: u8) {
         self.ids.set_o_data(self.sim, val);
     }
@@ -6772,18 +6987,6 @@ impl<'a> demuxBound<'a> {
     }
     pub fn get_i_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_i_data_4state(self.sim)
-    }
-    pub fn set_i_select(&mut self, val: u8) {
-        self.ids.set_i_select(self.sim, val);
-    }
-    pub fn get_i_select(&mut self) -> u8 {
-        self.ids.get_i_select(self.sim)
-    }
-    pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_i_select_4state(self.sim, val, mask);
-    }
-    pub fn get_i_select_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_i_select_4state(self.sim)
     }
     pub fn tick(&mut self) {}
     pub fn modify<F>(&mut self, f: F)
@@ -6803,6 +7006,12 @@ pub struct demuxIO<'a, 'b> {
     ids: &'a demux,
 }
 impl<'a, 'b> demuxIO<'a, 'b> {
+    pub fn set_i_select(&mut self, val: u8) {
+        self.io.set(self.ids.i_select, val);
+    }
+    pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.i_select, val, mask);
+    }
     pub fn set_o_data(&mut self, val: u8) {
         self.io.set(self.ids.o_data, val);
     }
@@ -6815,46 +7024,19 @@ impl<'a, 'b> demuxIO<'a, 'b> {
     pub fn set_i_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.i_data, val, mask);
     }
-    pub fn set_i_select(&mut self, val: u8) {
-        self.io.set(self.ids.i_select, val);
-    }
-    pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.i_select, val, mask);
-    }
 }
 pub struct mux {
-    pub o_data: celox::SignalRef,
     pub i_data: celox::SignalRef,
     pub i_select: celox::SignalRef,
+    pub o_data: celox::SignalRef,
 }
 impl mux {
     pub fn new(sim: &celox::Simulator) -> Self {
         Self {
-            o_data: sim.signal("o_data"),
             i_data: sim.signal("i_data"),
             i_select: sim.signal("i_select"),
+            o_data: sim.signal("o_data"),
         }
-    }
-    pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.o_data, val)).unwrap();
-    }
-    pub fn get_o_data(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.o_data);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_data"))
-    }
-    pub fn set_o_data_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.o_data, val, mask)).unwrap();
-    }
-    pub fn get_o_data_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.o_data)
     }
     pub fn set_i_data(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.i_data, val)).unwrap();
@@ -6898,6 +7080,27 @@ impl mux {
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.i_select)
     }
+    pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.o_data, val)).unwrap();
+    }
+    pub fn get_o_data(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.o_data);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_data"))
+    }
+    pub fn set_o_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.o_data, val, mask)).unwrap();
+    }
+    pub fn get_o_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.o_data)
+    }
     pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> muxBound<'a> {
         muxBound { sim, ids: self }
     }
@@ -6908,18 +7111,6 @@ pub struct muxBound<'a> {
     ids: &'a mux,
 }
 impl<'a> muxBound<'a> {
-    pub fn set_o_data(&mut self, val: u8) {
-        self.ids.set_o_data(self.sim, val);
-    }
-    pub fn get_o_data(&mut self) -> u8 {
-        self.ids.get_o_data(self.sim)
-    }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_o_data_4state(self.sim, val, mask);
-    }
-    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_o_data_4state(self.sim)
-    }
     pub fn set_i_data(&mut self, val: u8) {
         self.ids.set_i_data(self.sim, val);
     }
@@ -6944,6 +7135,18 @@ impl<'a> muxBound<'a> {
     pub fn get_i_select_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_i_select_4state(self.sim)
     }
+    pub fn set_o_data(&mut self, val: u8) {
+        self.ids.set_o_data(self.sim, val);
+    }
+    pub fn get_o_data(&mut self) -> u8 {
+        self.ids.get_o_data(self.sim)
+    }
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_o_data_4state(self.sim, val, mask);
+    }
+    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_o_data_4state(self.sim)
+    }
     pub fn tick(&mut self) {}
     pub fn modify<F>(&mut self, f: F)
     where
@@ -6962,12 +7165,6 @@ pub struct muxIO<'a, 'b> {
     ids: &'a mux,
 }
 impl<'a, 'b> muxIO<'a, 'b> {
-    pub fn set_o_data(&mut self, val: u8) {
-        self.io.set(self.ids.o_data, val);
-    }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.o_data, val, mask);
-    }
     pub fn set_i_data(&mut self, val: u8) {
         self.io.set(self.ids.i_data, val);
     }
@@ -6980,29 +7177,203 @@ impl<'a, 'b> muxIO<'a, 'b> {
     pub fn set_i_select_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.i_select, val, mask);
     }
+    pub fn set_o_data(&mut self, val: u8) {
+        self.io.set(self.ids.o_data, val);
+    }
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.o_data, val, mask);
+    }
 }
+pub struct test_binary_mux {}
+impl test_binary_mux {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(
+        &'a self,
+        sim: &'a mut celox::Simulator,
+    ) -> test_binary_muxBound<'a> {
+        test_binary_muxBound {
+            sim,
+            ids: self,
+        }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_binary_muxBound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_binary_mux,
+}
+impl<'a> test_binary_muxBound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_binary_muxIO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_binary_muxIO {
+                    io,
+                    ids: self.ids,
+                };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_binary_muxIO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_binary_mux,
+}
+impl<'a, 'b> test_binary_muxIO<'a, 'b> {}
+pub struct test_vector_mux {}
+impl test_vector_mux {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(
+        &'a self,
+        sim: &'a mut celox::Simulator,
+    ) -> test_vector_muxBound<'a> {
+        test_vector_muxBound {
+            sim,
+            ids: self,
+        }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_vector_muxBound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_vector_mux,
+}
+impl<'a> test_vector_muxBound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_vector_muxIO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_vector_muxIO {
+                    io,
+                    ids: self.ids,
+                };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_vector_muxIO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_vector_mux,
+}
+impl<'a, 'b> test_vector_muxIO<'a, 'b> {}
+pub struct test_onehot_mux {}
+impl test_onehot_mux {
+    pub fn new(sim: &celox::Simulator) -> Self {
+        Self {}
+    }
+    pub fn bind<'a>(
+        &'a self,
+        sim: &'a mut celox::Simulator,
+    ) -> test_onehot_muxBound<'a> {
+        test_onehot_muxBound {
+            sim,
+            ids: self,
+        }
+    }
+    pub fn tick(&self, sim: &mut celox::Simulator) {}
+}
+pub struct test_onehot_muxBound<'a> {
+    sim: &'a mut celox::Simulator,
+    ids: &'a test_onehot_mux,
+}
+impl<'a> test_onehot_muxBound<'a> {
+    pub fn tick(&mut self) {}
+    pub fn modify<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut test_onehot_muxIO<'_, '_>),
+    {
+        self.sim
+            .modify(|io| {
+                let mut a_io = test_onehot_muxIO {
+                    io,
+                    ids: self.ids,
+                };
+                f(&mut a_io);
+            })
+            .unwrap();
+    }
+}
+pub struct test_onehot_muxIO<'a, 'b> {
+    io: &'a mut celox::IOContext<'b>,
+    ids: &'a test_onehot_mux,
+}
+impl<'a, 'b> test_onehot_muxIO<'a, 'b> {}
 pub struct slicer {
+    pub o_data: celox::SignalRef,
+    pub o_ready: celox::SignalRef,
     pub i_data: celox::SignalRef,
     pub o_valid: celox::SignalRef,
-    pub i_valid: celox::SignalRef,
     pub i_clk: celox::NativeEventRef,
-    pub o_ready: celox::SignalRef,
-    pub i_ready: celox::SignalRef,
+    pub i_valid: celox::SignalRef,
     pub i_rst: celox::SignalRef,
-    pub o_data: celox::SignalRef,
+    pub i_ready: celox::SignalRef,
 }
 impl slicer {
     pub fn new(sim: &celox::Simulator) -> Self {
         Self {
+            o_data: sim.signal("o_data"),
+            o_ready: sim.signal("o_ready"),
             i_data: sim.signal("i_data"),
             o_valid: sim.signal("o_valid"),
-            i_valid: sim.signal("i_valid"),
             i_clk: sim.event("i_clk"),
-            o_ready: sim.signal("o_ready"),
-            i_ready: sim.signal("i_ready"),
+            i_valid: sim.signal("i_valid"),
             i_rst: sim.signal("i_rst"),
-            o_data: sim.signal("o_data"),
+            i_ready: sim.signal("i_ready"),
         }
+    }
+    pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.o_data, val)).unwrap();
+    }
+    pub fn get_o_data(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.o_data);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_data"))
+    }
+    pub fn set_o_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.o_data, val, mask)).unwrap();
+    }
+    pub fn get_o_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.o_data)
+    }
+    pub fn set_o_ready(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.o_ready, val)).unwrap();
+    }
+    pub fn get_o_ready(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.o_ready);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_ready"))
+    }
+    pub fn set_o_ready_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.o_ready, val, mask)).unwrap();
+    }
+    pub fn get_o_ready_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.o_ready)
     }
     pub fn set_i_data(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.i_data, val)).unwrap();
@@ -7067,26 +7438,26 @@ impl slicer {
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.i_valid)
     }
-    pub fn set_o_ready(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.o_ready, val)).unwrap();
+    pub fn set_i_rst(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_rst, val)).unwrap();
     }
-    pub fn get_o_ready(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.o_ready);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_ready"))
+    pub fn get_i_rst(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_rst);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_rst"))
     }
-    pub fn set_o_ready_4state(
+    pub fn set_i_rst_4state(
         &self,
         sim: &mut celox::Simulator,
         val: celox::BigUint,
         mask: celox::BigUint,
     ) {
-        sim.modify(|io| io.set_four_state(self.o_ready, val, mask)).unwrap();
+        sim.modify(|io| io.set_four_state(self.i_rst, val, mask)).unwrap();
     }
-    pub fn get_o_ready_4state(
+    pub fn get_i_rst_4state(
         &self,
         sim: &mut celox::Simulator,
     ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.o_ready)
+        sim.get_four_state(self.i_rst)
     }
     pub fn set_i_ready(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.i_ready, val)).unwrap();
@@ -7109,48 +7480,6 @@ impl slicer {
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.i_ready)
     }
-    pub fn set_i_rst(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_rst, val)).unwrap();
-    }
-    pub fn get_i_rst(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_rst);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_rst"))
-    }
-    pub fn set_i_rst_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_rst, val, mask)).unwrap();
-    }
-    pub fn get_i_rst_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_rst)
-    }
-    pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.o_data, val)).unwrap();
-    }
-    pub fn get_o_data(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.o_data);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_data"))
-    }
-    pub fn set_o_data_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.o_data, val, mask)).unwrap();
-    }
-    pub fn get_o_data_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.o_data)
-    }
     pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> slicerBound<'a> {
         slicerBound { sim, ids: self }
     }
@@ -7163,6 +7492,30 @@ pub struct slicerBound<'a> {
     ids: &'a slicer,
 }
 impl<'a> slicerBound<'a> {
+    pub fn set_o_data(&mut self, val: u8) {
+        self.ids.set_o_data(self.sim, val);
+    }
+    pub fn get_o_data(&mut self) -> u8 {
+        self.ids.get_o_data(self.sim)
+    }
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_o_data_4state(self.sim, val, mask);
+    }
+    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_o_data_4state(self.sim)
+    }
+    pub fn set_o_ready(&mut self, val: u8) {
+        self.ids.set_o_ready(self.sim, val);
+    }
+    pub fn get_o_ready(&mut self) -> u8 {
+        self.ids.get_o_ready(self.sim)
+    }
+    pub fn set_o_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_o_ready_4state(self.sim, val, mask);
+    }
+    pub fn get_o_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_o_ready_4state(self.sim)
+    }
     pub fn set_i_data(&mut self, val: u8) {
         self.ids.set_i_data(self.sim, val);
     }
@@ -7199,30 +7552,6 @@ impl<'a> slicerBound<'a> {
     pub fn get_i_valid_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_i_valid_4state(self.sim)
     }
-    pub fn set_o_ready(&mut self, val: u8) {
-        self.ids.set_o_ready(self.sim, val);
-    }
-    pub fn get_o_ready(&mut self) -> u8 {
-        self.ids.get_o_ready(self.sim)
-    }
-    pub fn set_o_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_o_ready_4state(self.sim, val, mask);
-    }
-    pub fn get_o_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_o_ready_4state(self.sim)
-    }
-    pub fn set_i_ready(&mut self, val: u8) {
-        self.ids.set_i_ready(self.sim, val);
-    }
-    pub fn get_i_ready(&mut self) -> u8 {
-        self.ids.get_i_ready(self.sim)
-    }
-    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_i_ready_4state(self.sim, val, mask);
-    }
-    pub fn get_i_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_i_ready_4state(self.sim)
-    }
     pub fn set_i_rst(&mut self, val: u8) {
         self.ids.set_i_rst(self.sim, val);
     }
@@ -7235,17 +7564,17 @@ impl<'a> slicerBound<'a> {
     pub fn get_i_rst_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_i_rst_4state(self.sim)
     }
-    pub fn set_o_data(&mut self, val: u8) {
-        self.ids.set_o_data(self.sim, val);
+    pub fn set_i_ready(&mut self, val: u8) {
+        self.ids.set_i_ready(self.sim, val);
     }
-    pub fn get_o_data(&mut self) -> u8 {
-        self.ids.get_o_data(self.sim)
+    pub fn get_i_ready(&mut self) -> u8 {
+        self.ids.get_i_ready(self.sim)
     }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_o_data_4state(self.sim, val, mask);
+    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_i_ready_4state(self.sim, val, mask);
     }
-    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_o_data_4state(self.sim)
+    pub fn get_i_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_i_ready_4state(self.sim)
     }
     pub fn tick(&mut self) {
         self.sim.tick(self.ids.i_clk).unwrap();
@@ -7267,6 +7596,18 @@ pub struct slicerIO<'a, 'b> {
     ids: &'a slicer,
 }
 impl<'a, 'b> slicerIO<'a, 'b> {
+    pub fn set_o_data(&mut self, val: u8) {
+        self.io.set(self.ids.o_data, val);
+    }
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.o_data, val, mask);
+    }
+    pub fn set_o_ready(&mut self, val: u8) {
+        self.io.set(self.ids.o_ready, val);
+    }
+    pub fn set_o_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.o_ready, val, mask);
+    }
     pub fn set_i_data(&mut self, val: u8) {
         self.io.set(self.ids.i_data, val);
     }
@@ -7285,11 +7626,11 @@ impl<'a, 'b> slicerIO<'a, 'b> {
     pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.i_valid, val, mask);
     }
-    pub fn set_o_ready(&mut self, val: u8) {
-        self.io.set(self.ids.o_ready, val);
+    pub fn set_i_rst(&mut self, val: u8) {
+        self.io.set(self.ids.i_rst, val);
     }
-    pub fn set_o_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.o_ready, val, mask);
+    pub fn set_i_rst_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.i_rst, val, mask);
     }
     pub fn set_i_ready(&mut self, val: u8) {
         self.io.set(self.ids.i_ready, val);
@@ -7297,41 +7638,50 @@ impl<'a, 'b> slicerIO<'a, 'b> {
     pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.i_ready, val, mask);
     }
-    pub fn set_i_rst(&mut self, val: u8) {
-        self.io.set(self.ids.i_rst, val);
-    }
-    pub fn set_i_rst_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.i_rst, val, mask);
-    }
-    pub fn set_o_data(&mut self, val: u8) {
-        self.io.set(self.ids.o_data, val);
-    }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.o_data, val, mask);
-    }
 }
 pub struct slicer_unit_fb {
+    pub o_data: celox::SignalRef,
     pub o_ready: celox::SignalRef,
-    pub i_valid: celox::SignalRef,
     pub i_data: celox::SignalRef,
     pub o_valid: celox::SignalRef,
     pub i_clk: celox::NativeEventRef,
-    pub i_ready: celox::SignalRef,
+    pub i_valid: celox::SignalRef,
     pub i_rst: celox::SignalRef,
-    pub o_data: celox::SignalRef,
+    pub i_ready: celox::SignalRef,
 }
 impl slicer_unit_fb {
     pub fn new(sim: &celox::Simulator) -> Self {
         Self {
+            o_data: sim.signal("o_data"),
             o_ready: sim.signal("o_ready"),
-            i_valid: sim.signal("i_valid"),
             i_data: sim.signal("i_data"),
             o_valid: sim.signal("o_valid"),
             i_clk: sim.event("i_clk"),
-            i_ready: sim.signal("i_ready"),
+            i_valid: sim.signal("i_valid"),
             i_rst: sim.signal("i_rst"),
-            o_data: sim.signal("o_data"),
+            i_ready: sim.signal("i_ready"),
         }
+    }
+    pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.o_data, val)).unwrap();
+    }
+    pub fn get_o_data(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.o_data);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_data"))
+    }
+    pub fn set_o_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.o_data, val, mask)).unwrap();
+    }
+    pub fn get_o_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.o_data)
     }
     pub fn set_o_ready(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.o_ready, val)).unwrap();
@@ -7353,27 +7703,6 @@ impl slicer_unit_fb {
         sim: &mut celox::Simulator,
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.o_ready)
-    }
-    pub fn set_i_valid(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_valid, val)).unwrap();
-    }
-    pub fn get_i_valid(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_valid);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_valid"))
-    }
-    pub fn set_i_valid_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_valid, val, mask)).unwrap();
-    }
-    pub fn get_i_valid_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_valid)
     }
     pub fn set_i_data(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.i_data, val)).unwrap();
@@ -7417,26 +7746,26 @@ impl slicer_unit_fb {
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.o_valid)
     }
-    pub fn set_i_ready(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_ready, val)).unwrap();
+    pub fn set_i_valid(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_valid, val)).unwrap();
     }
-    pub fn get_i_ready(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_ready);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_ready"))
+    pub fn get_i_valid(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_valid);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_valid"))
     }
-    pub fn set_i_ready_4state(
+    pub fn set_i_valid_4state(
         &self,
         sim: &mut celox::Simulator,
         val: celox::BigUint,
         mask: celox::BigUint,
     ) {
-        sim.modify(|io| io.set_four_state(self.i_ready, val, mask)).unwrap();
+        sim.modify(|io| io.set_four_state(self.i_valid, val, mask)).unwrap();
     }
-    pub fn get_i_ready_4state(
+    pub fn get_i_valid_4state(
         &self,
         sim: &mut celox::Simulator,
     ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_ready)
+        sim.get_four_state(self.i_valid)
     }
     pub fn set_i_rst(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.i_rst, val)).unwrap();
@@ -7459,26 +7788,26 @@ impl slicer_unit_fb {
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.i_rst)
     }
-    pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.o_data, val)).unwrap();
+    pub fn set_i_ready(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_ready, val)).unwrap();
     }
-    pub fn get_o_data(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.o_data);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_data"))
+    pub fn get_i_ready(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_ready);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_ready"))
     }
-    pub fn set_o_data_4state(
+    pub fn set_i_ready_4state(
         &self,
         sim: &mut celox::Simulator,
         val: celox::BigUint,
         mask: celox::BigUint,
     ) {
-        sim.modify(|io| io.set_four_state(self.o_data, val, mask)).unwrap();
+        sim.modify(|io| io.set_four_state(self.i_ready, val, mask)).unwrap();
     }
-    pub fn get_o_data_4state(
+    pub fn get_i_ready_4state(
         &self,
         sim: &mut celox::Simulator,
     ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.o_data)
+        sim.get_four_state(self.i_ready)
     }
     pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> slicer_unit_fbBound<'a> {
         slicer_unit_fbBound {
@@ -7495,6 +7824,18 @@ pub struct slicer_unit_fbBound<'a> {
     ids: &'a slicer_unit_fb,
 }
 impl<'a> slicer_unit_fbBound<'a> {
+    pub fn set_o_data(&mut self, val: u8) {
+        self.ids.set_o_data(self.sim, val);
+    }
+    pub fn get_o_data(&mut self) -> u8 {
+        self.ids.get_o_data(self.sim)
+    }
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_o_data_4state(self.sim, val, mask);
+    }
+    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_o_data_4state(self.sim)
+    }
     pub fn set_o_ready(&mut self, val: u8) {
         self.ids.set_o_ready(self.sim, val);
     }
@@ -7506,18 +7847,6 @@ impl<'a> slicer_unit_fbBound<'a> {
     }
     pub fn get_o_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_o_ready_4state(self.sim)
-    }
-    pub fn set_i_valid(&mut self, val: u8) {
-        self.ids.set_i_valid(self.sim, val);
-    }
-    pub fn get_i_valid(&mut self) -> u8 {
-        self.ids.get_i_valid(self.sim)
-    }
-    pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_i_valid_4state(self.sim, val, mask);
-    }
-    pub fn get_i_valid_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_i_valid_4state(self.sim)
     }
     pub fn set_i_data(&mut self, val: u8) {
         self.ids.set_i_data(self.sim, val);
@@ -7543,17 +7872,17 @@ impl<'a> slicer_unit_fbBound<'a> {
     pub fn get_o_valid_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_o_valid_4state(self.sim)
     }
-    pub fn set_i_ready(&mut self, val: u8) {
-        self.ids.set_i_ready(self.sim, val);
+    pub fn set_i_valid(&mut self, val: u8) {
+        self.ids.set_i_valid(self.sim, val);
     }
-    pub fn get_i_ready(&mut self) -> u8 {
-        self.ids.get_i_ready(self.sim)
+    pub fn get_i_valid(&mut self) -> u8 {
+        self.ids.get_i_valid(self.sim)
     }
-    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_i_ready_4state(self.sim, val, mask);
+    pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_i_valid_4state(self.sim, val, mask);
     }
-    pub fn get_i_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_i_ready_4state(self.sim)
+    pub fn get_i_valid_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_i_valid_4state(self.sim)
     }
     pub fn set_i_rst(&mut self, val: u8) {
         self.ids.set_i_rst(self.sim, val);
@@ -7567,17 +7896,17 @@ impl<'a> slicer_unit_fbBound<'a> {
     pub fn get_i_rst_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_i_rst_4state(self.sim)
     }
-    pub fn set_o_data(&mut self, val: u8) {
-        self.ids.set_o_data(self.sim, val);
+    pub fn set_i_ready(&mut self, val: u8) {
+        self.ids.set_i_ready(self.sim, val);
     }
-    pub fn get_o_data(&mut self) -> u8 {
-        self.ids.get_o_data(self.sim)
+    pub fn get_i_ready(&mut self) -> u8 {
+        self.ids.get_i_ready(self.sim)
     }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_o_data_4state(self.sim, val, mask);
+    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_i_ready_4state(self.sim, val, mask);
     }
-    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_o_data_4state(self.sim)
+    pub fn get_i_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_i_ready_4state(self.sim)
     }
     pub fn tick(&mut self) {
         self.sim.tick(self.ids.i_clk).unwrap();
@@ -7602,17 +7931,17 @@ pub struct slicer_unit_fbIO<'a, 'b> {
     ids: &'a slicer_unit_fb,
 }
 impl<'a, 'b> slicer_unit_fbIO<'a, 'b> {
+    pub fn set_o_data(&mut self, val: u8) {
+        self.io.set(self.ids.o_data, val);
+    }
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.o_data, val, mask);
+    }
     pub fn set_o_ready(&mut self, val: u8) {
         self.io.set(self.ids.o_ready, val);
     }
     pub fn set_o_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.o_ready, val, mask);
-    }
-    pub fn set_i_valid(&mut self, val: u8) {
-        self.io.set(self.ids.i_valid, val);
-    }
-    pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.i_valid, val, mask);
     }
     pub fn set_i_data(&mut self, val: u8) {
         self.io.set(self.ids.i_data, val);
@@ -7626,11 +7955,11 @@ impl<'a, 'b> slicer_unit_fbIO<'a, 'b> {
     pub fn set_o_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.o_valid, val, mask);
     }
-    pub fn set_i_ready(&mut self, val: u8) {
-        self.io.set(self.ids.i_ready, val);
+    pub fn set_i_valid(&mut self, val: u8) {
+        self.io.set(self.ids.i_valid, val);
     }
-    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.i_ready, val, mask);
+    pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.i_valid, val, mask);
     }
     pub fn set_i_rst(&mut self, val: u8) {
         self.io.set(self.ids.i_rst, val);
@@ -7638,161 +7967,35 @@ impl<'a, 'b> slicer_unit_fbIO<'a, 'b> {
     pub fn set_i_rst_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.i_rst, val, mask);
     }
-    pub fn set_o_data(&mut self, val: u8) {
-        self.io.set(self.ids.o_data, val);
+    pub fn set_i_ready(&mut self, val: u8) {
+        self.io.set(self.ids.i_ready, val);
     }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.o_data, val, mask);
+    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.i_ready, val, mask);
     }
 }
 pub struct slicer_unit_hb {
-    pub i_data: celox::SignalRef,
-    pub i_valid: celox::SignalRef,
+    pub o_data: celox::SignalRef,
     pub o_ready: celox::SignalRef,
+    pub i_data: celox::SignalRef,
     pub o_valid: celox::SignalRef,
     pub i_clk: celox::NativeEventRef,
-    pub i_ready: celox::SignalRef,
+    pub i_valid: celox::SignalRef,
     pub i_rst: celox::SignalRef,
-    pub o_data: celox::SignalRef,
+    pub i_ready: celox::SignalRef,
 }
 impl slicer_unit_hb {
     pub fn new(sim: &celox::Simulator) -> Self {
         Self {
-            i_data: sim.signal("i_data"),
-            i_valid: sim.signal("i_valid"),
+            o_data: sim.signal("o_data"),
             o_ready: sim.signal("o_ready"),
+            i_data: sim.signal("i_data"),
             o_valid: sim.signal("o_valid"),
             i_clk: sim.event("i_clk"),
-            i_ready: sim.signal("i_ready"),
+            i_valid: sim.signal("i_valid"),
             i_rst: sim.signal("i_rst"),
-            o_data: sim.signal("o_data"),
+            i_ready: sim.signal("i_ready"),
         }
-    }
-    pub fn set_i_data(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_data, val)).unwrap();
-    }
-    pub fn get_i_data(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_data);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_data"))
-    }
-    pub fn set_i_data_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_data, val, mask)).unwrap();
-    }
-    pub fn get_i_data_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_data)
-    }
-    pub fn set_i_valid(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_valid, val)).unwrap();
-    }
-    pub fn get_i_valid(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_valid);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_valid"))
-    }
-    pub fn set_i_valid_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_valid, val, mask)).unwrap();
-    }
-    pub fn get_i_valid_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_valid)
-    }
-    pub fn set_o_ready(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.o_ready, val)).unwrap();
-    }
-    pub fn get_o_ready(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.o_ready);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_ready"))
-    }
-    pub fn set_o_ready_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.o_ready, val, mask)).unwrap();
-    }
-    pub fn get_o_ready_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.o_ready)
-    }
-    pub fn set_o_valid(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.o_valid, val)).unwrap();
-    }
-    pub fn get_o_valid(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.o_valid);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_valid"))
-    }
-    pub fn set_o_valid_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.o_valid, val, mask)).unwrap();
-    }
-    pub fn get_o_valid_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.o_valid)
-    }
-    pub fn set_i_ready(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_ready, val)).unwrap();
-    }
-    pub fn get_i_ready(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_ready);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_ready"))
-    }
-    pub fn set_i_ready_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_ready, val, mask)).unwrap();
-    }
-    pub fn get_i_ready_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_ready)
-    }
-    pub fn set_i_rst(&self, sim: &mut celox::Simulator, val: u8) {
-        sim.modify(|io| io.set(self.i_rst, val)).unwrap();
-    }
-    pub fn get_i_rst(&self, sim: &mut celox::Simulator) -> u8 {
-        let val = sim.get(self.i_rst);
-        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_rst"))
-    }
-    pub fn set_i_rst_4state(
-        &self,
-        sim: &mut celox::Simulator,
-        val: celox::BigUint,
-        mask: celox::BigUint,
-    ) {
-        sim.modify(|io| io.set_four_state(self.i_rst, val, mask)).unwrap();
-    }
-    pub fn get_i_rst_4state(
-        &self,
-        sim: &mut celox::Simulator,
-    ) -> (celox::BigUint, celox::BigUint) {
-        sim.get_four_state(self.i_rst)
     }
     pub fn set_o_data(&self, sim: &mut celox::Simulator, val: u8) {
         sim.modify(|io| io.set(self.o_data, val)).unwrap();
@@ -7815,6 +8018,132 @@ impl slicer_unit_hb {
     ) -> (celox::BigUint, celox::BigUint) {
         sim.get_four_state(self.o_data)
     }
+    pub fn set_o_ready(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.o_ready, val)).unwrap();
+    }
+    pub fn get_o_ready(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.o_ready);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_ready"))
+    }
+    pub fn set_o_ready_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.o_ready, val, mask)).unwrap();
+    }
+    pub fn get_o_ready_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.o_ready)
+    }
+    pub fn set_i_data(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_data, val)).unwrap();
+    }
+    pub fn get_i_data(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_data);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_data"))
+    }
+    pub fn set_i_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.i_data, val, mask)).unwrap();
+    }
+    pub fn get_i_data_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.i_data)
+    }
+    pub fn set_o_valid(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.o_valid, val)).unwrap();
+    }
+    pub fn get_o_valid(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.o_valid);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "o_valid"))
+    }
+    pub fn set_o_valid_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.o_valid, val, mask)).unwrap();
+    }
+    pub fn get_o_valid_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.o_valid)
+    }
+    pub fn set_i_valid(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_valid, val)).unwrap();
+    }
+    pub fn get_i_valid(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_valid);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_valid"))
+    }
+    pub fn set_i_valid_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.i_valid, val, mask)).unwrap();
+    }
+    pub fn get_i_valid_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.i_valid)
+    }
+    pub fn set_i_rst(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_rst, val)).unwrap();
+    }
+    pub fn get_i_rst(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_rst);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_rst"))
+    }
+    pub fn set_i_rst_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.i_rst, val, mask)).unwrap();
+    }
+    pub fn get_i_rst_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.i_rst)
+    }
+    pub fn set_i_ready(&self, sim: &mut celox::Simulator, val: u8) {
+        sim.modify(|io| io.set(self.i_ready, val)).unwrap();
+    }
+    pub fn get_i_ready(&self, sim: &mut celox::Simulator) -> u8 {
+        let val = sim.get(self.i_ready);
+        val.try_into().unwrap_or_else(|_| panic!("Value overflow for {}", "i_ready"))
+    }
+    pub fn set_i_ready_4state(
+        &self,
+        sim: &mut celox::Simulator,
+        val: celox::BigUint,
+        mask: celox::BigUint,
+    ) {
+        sim.modify(|io| io.set_four_state(self.i_ready, val, mask)).unwrap();
+    }
+    pub fn get_i_ready_4state(
+        &self,
+        sim: &mut celox::Simulator,
+    ) -> (celox::BigUint, celox::BigUint) {
+        sim.get_four_state(self.i_ready)
+    }
     pub fn bind<'a>(&'a self, sim: &'a mut celox::Simulator) -> slicer_unit_hbBound<'a> {
         slicer_unit_hbBound {
             sim,
@@ -7830,29 +8159,17 @@ pub struct slicer_unit_hbBound<'a> {
     ids: &'a slicer_unit_hb,
 }
 impl<'a> slicer_unit_hbBound<'a> {
-    pub fn set_i_data(&mut self, val: u8) {
-        self.ids.set_i_data(self.sim, val);
+    pub fn set_o_data(&mut self, val: u8) {
+        self.ids.set_o_data(self.sim, val);
     }
-    pub fn get_i_data(&mut self) -> u8 {
-        self.ids.get_i_data(self.sim)
+    pub fn get_o_data(&mut self) -> u8 {
+        self.ids.get_o_data(self.sim)
     }
-    pub fn set_i_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_i_data_4state(self.sim, val, mask);
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_o_data_4state(self.sim, val, mask);
     }
-    pub fn get_i_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_i_data_4state(self.sim)
-    }
-    pub fn set_i_valid(&mut self, val: u8) {
-        self.ids.set_i_valid(self.sim, val);
-    }
-    pub fn get_i_valid(&mut self) -> u8 {
-        self.ids.get_i_valid(self.sim)
-    }
-    pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_i_valid_4state(self.sim, val, mask);
-    }
-    pub fn get_i_valid_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_i_valid_4state(self.sim)
+    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_o_data_4state(self.sim)
     }
     pub fn set_o_ready(&mut self, val: u8) {
         self.ids.set_o_ready(self.sim, val);
@@ -7866,6 +8183,18 @@ impl<'a> slicer_unit_hbBound<'a> {
     pub fn get_o_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_o_ready_4state(self.sim)
     }
+    pub fn set_i_data(&mut self, val: u8) {
+        self.ids.set_i_data(self.sim, val);
+    }
+    pub fn get_i_data(&mut self) -> u8 {
+        self.ids.get_i_data(self.sim)
+    }
+    pub fn set_i_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_i_data_4state(self.sim, val, mask);
+    }
+    pub fn get_i_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_i_data_4state(self.sim)
+    }
     pub fn set_o_valid(&mut self, val: u8) {
         self.ids.set_o_valid(self.sim, val);
     }
@@ -7878,17 +8207,17 @@ impl<'a> slicer_unit_hbBound<'a> {
     pub fn get_o_valid_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_o_valid_4state(self.sim)
     }
-    pub fn set_i_ready(&mut self, val: u8) {
-        self.ids.set_i_ready(self.sim, val);
+    pub fn set_i_valid(&mut self, val: u8) {
+        self.ids.set_i_valid(self.sim, val);
     }
-    pub fn get_i_ready(&mut self) -> u8 {
-        self.ids.get_i_ready(self.sim)
+    pub fn get_i_valid(&mut self) -> u8 {
+        self.ids.get_i_valid(self.sim)
     }
-    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_i_ready_4state(self.sim, val, mask);
+    pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_i_valid_4state(self.sim, val, mask);
     }
-    pub fn get_i_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_i_ready_4state(self.sim)
+    pub fn get_i_valid_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_i_valid_4state(self.sim)
     }
     pub fn set_i_rst(&mut self, val: u8) {
         self.ids.set_i_rst(self.sim, val);
@@ -7902,17 +8231,17 @@ impl<'a> slicer_unit_hbBound<'a> {
     pub fn get_i_rst_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
         self.ids.get_i_rst_4state(self.sim)
     }
-    pub fn set_o_data(&mut self, val: u8) {
-        self.ids.set_o_data(self.sim, val);
+    pub fn set_i_ready(&mut self, val: u8) {
+        self.ids.set_i_ready(self.sim, val);
     }
-    pub fn get_o_data(&mut self) -> u8 {
-        self.ids.get_o_data(self.sim)
+    pub fn get_i_ready(&mut self) -> u8 {
+        self.ids.get_i_ready(self.sim)
     }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.ids.set_o_data_4state(self.sim, val, mask);
+    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.ids.set_i_ready_4state(self.sim, val, mask);
     }
-    pub fn get_o_data_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
-        self.ids.get_o_data_4state(self.sim)
+    pub fn get_i_ready_4state(&mut self) -> (celox::BigUint, celox::BigUint) {
+        self.ids.get_i_ready_4state(self.sim)
     }
     pub fn tick(&mut self) {
         self.sim.tick(self.ids.i_clk).unwrap();
@@ -7937,17 +8266,11 @@ pub struct slicer_unit_hbIO<'a, 'b> {
     ids: &'a slicer_unit_hb,
 }
 impl<'a, 'b> slicer_unit_hbIO<'a, 'b> {
-    pub fn set_i_data(&mut self, val: u8) {
-        self.io.set(self.ids.i_data, val);
+    pub fn set_o_data(&mut self, val: u8) {
+        self.io.set(self.ids.o_data, val);
     }
-    pub fn set_i_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.i_data, val, mask);
-    }
-    pub fn set_i_valid(&mut self, val: u8) {
-        self.io.set(self.ids.i_valid, val);
-    }
-    pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.i_valid, val, mask);
+    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.o_data, val, mask);
     }
     pub fn set_o_ready(&mut self, val: u8) {
         self.io.set(self.ids.o_ready, val);
@@ -7955,17 +8278,23 @@ impl<'a, 'b> slicer_unit_hbIO<'a, 'b> {
     pub fn set_o_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.o_ready, val, mask);
     }
+    pub fn set_i_data(&mut self, val: u8) {
+        self.io.set(self.ids.i_data, val);
+    }
+    pub fn set_i_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.i_data, val, mask);
+    }
     pub fn set_o_valid(&mut self, val: u8) {
         self.io.set(self.ids.o_valid, val);
     }
     pub fn set_o_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.o_valid, val, mask);
     }
-    pub fn set_i_ready(&mut self, val: u8) {
-        self.io.set(self.ids.i_ready, val);
+    pub fn set_i_valid(&mut self, val: u8) {
+        self.io.set(self.ids.i_valid, val);
     }
-    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.i_ready, val, mask);
+    pub fn set_i_valid_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.i_valid, val, mask);
     }
     pub fn set_i_rst(&mut self, val: u8) {
         self.io.set(self.ids.i_rst, val);
@@ -7973,11 +8302,11 @@ impl<'a, 'b> slicer_unit_hbIO<'a, 'b> {
     pub fn set_i_rst_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.i_rst, val, mask);
     }
-    pub fn set_o_data(&mut self, val: u8) {
-        self.io.set(self.ids.o_data, val);
+    pub fn set_i_ready(&mut self, val: u8) {
+        self.io.set(self.ids.i_ready, val);
     }
-    pub fn set_o_data_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
-        self.io.set_four_state(self.ids.o_data, val, mask);
+    pub fn set_i_ready_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
+        self.io.set_four_state(self.ids.i_ready, val, mask);
     }
 }
 pub struct synchronizer_basic {
