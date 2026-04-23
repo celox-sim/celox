@@ -469,7 +469,14 @@ impl<'a> FfParser<'a> {
         };
 
         let const_empty = Self::const_range_is_empty(reverse, start_const, end_const, inclusive);
-        if Self::step_can_stall(reverse, stepped_op, step, start_const) && !const_empty {
+        let const_singleton =
+            Self::const_range_is_singleton(reverse, start_const, end_const, inclusive);
+        if start_const.is_some()
+            && end_const.is_some()
+            && Self::step_can_stall(reverse, stepped_op, step, start_const)
+            && !const_empty
+            && !const_singleton
+        {
             return Err(ParserError::unsupported(
                 LoweringPhase::FfLowering,
                 "non-progressing for loop in always_ff",
@@ -623,6 +630,23 @@ impl<'a> FfParser<'a> {
         self.dynamic_defined_vars = prev_dynamic;
 
         if !reverse {
+            if inclusive {
+                let terminal_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    terminal_reg,
+                    body_counter,
+                    crate::ir::BinaryOp::Eq,
+                    end_reg,
+                ));
+                let advance_bb = ir_builder.new_block();
+                ir_builder.seal_block(SIRTerminator::Branch {
+                    cond: terminal_reg,
+                    true_block: (exit_bb, vec![]),
+                    false_block: (advance_bb, vec![]),
+                });
+                ir_builder.switch_to_block(advance_bb);
+            }
+
             let current_math = self.cast_reg_width(ir_builder, body_counter, math_width);
             let step_reg = ir_builder.alloc_bit(math_width, false);
             ir_builder.emit(SIRInstruction::Imm(
@@ -1045,5 +1069,20 @@ impl<'a> FfParser<'a> {
         } else {
             start >= end
         }
+    }
+
+    fn const_range_is_singleton(
+        reverse: bool,
+        start_const: Option<usize>,
+        end_const: Option<usize>,
+        inclusive: bool,
+    ) -> bool {
+        let (Some(start), Some(end)) = (start_const, end_const) else {
+            return false;
+        };
+        if !inclusive {
+            return false;
+        }
+        if reverse { end == start } else { start == end }
     }
 }

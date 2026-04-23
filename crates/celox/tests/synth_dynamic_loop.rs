@@ -109,6 +109,31 @@ fn test_runtime_bounds_in_synth_for_loops(sim) {
     assert_eq!(sim.get(sum_step), 15u32.into());
 }
 
+fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            hits: output logic<32>
+        ) {
+            always_comb {
+                hits = 0;
+                for i: u32 in 0..=count step *= 2 {
+                    hits += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let hits = sim.signal("hits");
+
+    sim.set(count, 0u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(hits), 1u32.into());
+}
+
 fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

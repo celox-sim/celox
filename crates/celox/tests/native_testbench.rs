@@ -489,6 +489,35 @@ fn test_for_loop_expression_bound_non_progress_reports_failure() {
 }
 
 #[test]
+fn test_for_loop_expression_bound_terminal_inclusive_mul_succeeds() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                for _i: u32 in 0..=0 step *= 2 {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd11);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_for_loop_dynamic_wide_bound_overflow_reports_failure() {
     let code = format!(
         r#"

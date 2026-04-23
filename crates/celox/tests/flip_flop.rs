@@ -152,6 +152,32 @@ fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
     assert_eq!(sim.get(q), 0xaau32.into());
 }
 
+fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 8'haa;
+                for i: u32 in 0..=count step *= 2 {
+                    q = (i + 1) as 8;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let count = sim.signal("count");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(count, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u32.into());
+}
+
 fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

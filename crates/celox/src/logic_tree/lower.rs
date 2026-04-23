@@ -904,6 +904,23 @@ impl SLTToSIRLowerer {
                     .collect(),
             ));
         } else {
+            if inclusive {
+                let terminal = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    terminal,
+                    body_counter,
+                    BinaryOp::Eq,
+                    end_reg,
+                ));
+                let advance_block = builder.new_block();
+                builder.seal_block(SIRTerminator::Branch {
+                    cond: terminal,
+                    true_block: (exit_block, next_states.clone()),
+                    false_block: (advance_block, vec![]),
+                });
+                builder.switch_to_block(advance_block);
+            }
+
             let math_width = Self::step_math_width(compare_width, step_op, step);
             let current_math = self.cast_reg_width(builder, body_counter, math_width);
             let step_math = builder.alloc_bit(math_width, false);

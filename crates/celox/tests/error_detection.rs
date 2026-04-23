@@ -1,4 +1,4 @@
-use celox::{LoweringPhase, ParserError, SchedulerError, Simulator, SimulatorErrorKind};
+use celox::{LoweringPhase, ParserError, RuntimeErrorCode, SchedulerError, Simulator, SimulatorErrorKind};
 
 /// Helper: assert the error is either Analyzer or a specific SIRParser variant.
 /// The updated Veryl analyzer may catch issues before the SIR scheduler does.
@@ -303,14 +303,11 @@ fn test_always_ff_runtime_for_non_progress_is_rejected() {
         }
     "#;
 
-    let result = Simulator::builder(code, "Top").build();
-    assert!(result.is_err(), "non-progressing always_ff runtime for must be rejected");
-    let err = result.err().unwrap();
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("non-progressing for loop in always_ff"),
-        "Expected always_ff non-progress rejection, got: {err:?}"
-    );
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let count = sim.signal("count");
+    sim.modify(|io| io.set(count, 4u8)).unwrap();
+    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
 #[test]
@@ -330,14 +327,11 @@ fn test_always_ff_runtime_for_zero_start_mul_non_progress_is_rejected() {
         }
     "#;
 
-    let result = Simulator::builder(code, "Top").build();
-    assert!(result.is_err(), "zero-start multiplying always_ff runtime for must be rejected");
-    let err = result.err().unwrap();
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("non-progressing for loop in always_ff"),
-        "Expected always_ff non-progress rejection, got: {err:?}"
-    );
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let count = sim.signal("count");
+    sim.modify(|io| io.set(count, 4u8)).unwrap();
+    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
 #[test]

@@ -1491,6 +1491,9 @@ fn exec_for_loop<B: SimBackend>(
             if r.should_stop() {
                 return r;
             }
+            if inclusive && i == end {
+                break;
+            }
             let new_i = match op {
                 Op::Mul => i.saturating_mul(step),
                 Op::LogicShiftL | Op::ArithShiftL => {
