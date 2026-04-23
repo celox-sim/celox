@@ -28,6 +28,14 @@ use veryl_parser::token_range::TokenRange;
 pub type SymbolicStore<A> = HashMap<VarId, RangeStore<Option<(NodeId, HashSet<VarAtomBase<A>>)>>>;
 pub type BoundaryMap<A> = HashMap<A, BTreeSet<usize>>;
 
+#[derive(Clone)]
+struct LoopControlState {
+    store: SymbolicStore<VarId>,
+    boundaries: BoundaryMap<VarId>,
+    continue_expr: NodeId,
+    continue_sources: HashSet<VarAtomBase<VarId>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
@@ -348,6 +356,7 @@ pub enum SLTNode<A: Hash + Eq + Clone> {
         result: VarAtomBase<A>,
         initials: Vec<SLTForUpdate<A>>,
         updates: Vec<SLTForUpdate<A>>,
+        continue_cond: NodeId,
     },
     // Concat/Slice are primarily used for RHS expression evaluation.
     // On the LHS (assignments), bit manipulation is handled implicitly by RangeStore atomization.
@@ -393,6 +402,7 @@ enum SLTNodeSerde<A: Hash + Eq + Clone> {
         result: VarAtomBase<A>,
         initials: Vec<SLTForUpdate<A>>,
         updates: Vec<SLTForUpdate<A>>,
+        continue_cond: NodeId,
     },
     Concat(Vec<(NodeId, usize)>),
     Slice {
@@ -443,6 +453,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
                 result,
                 initials,
                 updates,
+                continue_cond,
             } => SLTNodeSerde::ForFold {
                 loop_var,
                 loop_width,
@@ -456,6 +467,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
                 result,
                 initials,
                 updates,
+                continue_cond,
             },
             SLTNode::Concat(parts) => SLTNodeSerde::Concat(parts),
             SLTNode::Slice { expr, access } => SLTNodeSerde::Slice { expr, access },
@@ -510,6 +522,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
                 result,
                 initials,
                 updates,
+                continue_cond,
             } => SLTNode::ForFold {
                 loop_var,
                 loop_width,
@@ -523,6 +536,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
                 result,
                 initials,
                 updates,
+                continue_cond,
             },
             SLTNodeSerde::Concat(parts) => SLTNode::Concat(parts),
             SLTNodeSerde::Slice { expr, access } => SLTNode::Slice { expr, access },
@@ -628,6 +642,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 result,
                 initials,
                 updates,
+                continue_cond,
             } => {
                 let map_bound =
                     |bound: &SLTLoopBound,
@@ -690,6 +705,13 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     result: VarAtomBase::new(f(&result.id), result.access.lsb, result.access.msb),
                     initials: mapped_initials,
                     updates: mapped_updates,
+                    continue_cond: arena.get(*continue_cond).map_addr(
+                        *continue_cond,
+                        arena,
+                        target_arena,
+                        cache,
+                        f,
+                    ),
                 }
             }
 
@@ -835,6 +857,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 result,
                 initials,
                 updates,
+                continue_cond,
             } => {
                 writeln!(
                     f,
@@ -861,6 +884,10 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     arena.get(update.expr).fmt_recursive(f, depth + 2, arena)?;
                     writeln!(f)?;
                 }
+                writeln!(f, "{}continue:", child_indent)?;
+                arena
+                    .get(*continue_cond)
+                    .fmt_recursive(f, depth + 2, arena)?;
                 Ok(())
             }
             SLTNode::Concat(parts) => {
@@ -1046,6 +1073,310 @@ fn eval_statement(
     }
 }
 
+fn bool_node(arena: &mut SLTNodeArena<VarId>, value: bool) -> NodeId {
+    arena.alloc(SLTNode::Constant(
+        BigUint::from(value as u8),
+        BigUint::from(0u8),
+        1,
+        false,
+    ))
+}
+
+fn constant_bool(arena: &SLTNodeArena<VarId>, node: NodeId) -> Option<bool> {
+    match arena.get(node) {
+        SLTNode::Constant(val, _, _, _) => Some(*val != BigUint::from(0u8)),
+        _ => None,
+    }
+}
+
+fn merge_control_expr(
+    cond_expr: NodeId,
+    then_expr: NodeId,
+    else_expr: NodeId,
+    arena: &mut SLTNodeArena<VarId>,
+) -> NodeId {
+    if then_expr == else_expr {
+        then_expr
+    } else {
+        arena.alloc(SLTNode::Mux {
+            cond: cond_expr,
+            then_expr,
+            else_expr,
+        })
+    }
+}
+
+fn merge_symbolic_stores(
+    module: &Module,
+    then_store: &SymbolicStore<VarId>,
+    else_store: &SymbolicStore<VarId>,
+    cond_expr: NodeId,
+    cond_sources: &HashSet<VarAtomBase<VarId>>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<SymbolicStore<VarId>, ParserError> {
+    let mut merged_store = SymbolicStore::default();
+    for id in then_store.keys() {
+        let t_range_store = &then_store[id];
+        let e_range_store = &else_store[id];
+
+        let mut merged_range_store = RangeStore {
+            ranges: std::collections::BTreeMap::new(),
+        };
+
+        let mut all_lsbs: BTreeSet<usize> = t_range_store.ranges.keys().cloned().collect();
+        all_lsbs.extend(e_range_store.ranges.keys().cloned());
+
+        let var = &module.variables[id];
+        let var_width = resolve_total_width(module, var)?;
+        let mut lsbs_vec: Vec<usize> = all_lsbs.into_iter().collect();
+        lsbs_vec.push(var_width);
+
+        for i in 0..lsbs_vec.len() - 1 {
+            let lsb = lsbs_vec[i];
+            let next_lsb = lsbs_vec[i + 1];
+            let access = BitAccess::new(lsb, next_lsb - 1);
+
+            let then_parts = t_range_store.get_parts(access);
+            let else_parts = e_range_store.get_parts(access);
+            let (t_expr, t_sources) =
+                combine_parts_with_default(*id, lsb, then_parts.clone(), arena);
+            let (e_expr, e_sources) =
+                combine_parts_with_default(*id, lsb, else_parts.clone(), arena);
+
+            let t_modified = then_parts.iter().any(|(v, _)| v.is_some());
+            let e_modified = else_parts.iter().any(|(v, _)| v.is_some());
+
+            let result_val = if !t_modified && !e_modified {
+                None
+            } else if t_expr == e_expr {
+                let mut sources = t_sources;
+                sources.extend(e_sources);
+                Some((t_expr, sources))
+            } else {
+                let mut sources = cond_sources.clone();
+                sources.extend(t_sources);
+                sources.extend(e_sources);
+
+                Some((
+                    arena.alloc(SLTNode::Mux {
+                        cond: cond_expr,
+                        then_expr: t_expr,
+                        else_expr: e_expr,
+                    }),
+                    sources,
+                ))
+            };
+
+            merged_range_store
+                .ranges
+                .insert(lsb, (result_val, next_lsb - lsb, lsb));
+        }
+
+        merged_store.insert(*id, merged_range_store);
+    }
+
+    Ok(merged_store)
+}
+
+fn apply_loop_continue_guard(
+    module: &Module,
+    state: LoopControlState,
+    next_store: SymbolicStore<VarId>,
+    next_boundaries: BoundaryMap<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<LoopControlState, ParserError> {
+    let base_store = state.store.clone();
+    let boundaries = merge_boundaries(state.boundaries, next_boundaries);
+
+    if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
+        Ok(LoopControlState {
+            store: next_store,
+            boundaries,
+            ..state
+        })
+    } else {
+        let merged_store = merge_symbolic_stores(
+            module,
+            &next_store,
+            &base_store,
+            state.continue_expr,
+            &state.continue_sources,
+            arena,
+        )?;
+        Ok(LoopControlState {
+            store: merged_store,
+            boundaries,
+            ..state
+        })
+    }
+}
+
+fn statement_contains_break(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Break => true,
+        Statement::If(if_stmt) => {
+            if_stmt.true_side.iter().any(statement_contains_break)
+                || if_stmt.false_side.iter().any(statement_contains_break)
+        }
+        Statement::For(for_stmt) => for_stmt.body.iter().any(statement_contains_break),
+        Statement::IfReset(if_reset) => {
+            if_reset.true_side.iter().any(statement_contains_break)
+                || if_reset.false_side.iter().any(statement_contains_break)
+        }
+        Statement::Assign(_)
+        | Statement::SystemFunctionCall(_)
+        | Statement::FunctionCall(_)
+        | Statement::TbMethodCall(_)
+        | Statement::Unsupported(_)
+        | Statement::Null => false,
+    }
+}
+
+fn eval_loop_statement(
+    module: &Module,
+    state: LoopControlState,
+    stmt: &Statement,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<LoopControlState, ParserError> {
+    if matches!(constant_bool(arena, state.continue_expr), Some(false)) {
+        return Ok(state);
+    }
+
+    match stmt {
+        Statement::Assign(assign) => {
+            let guard_state = state.clone();
+            let (next_store, next_boundaries) =
+                eval_assign(module, state.store, state.boundaries, assign, arena)?;
+            apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
+        }
+        Statement::If(if_stmt) => {
+            if statement_contains_break(stmt) {
+                eval_loop_if(module, state, if_stmt, arena)
+            } else {
+                let guard_state = state.clone();
+                let (next_store, next_boundaries) =
+                    eval_if(module, state.store, state.boundaries, if_stmt, arena)?;
+                apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
+            }
+        }
+        Statement::For(for_stmt) => {
+            let guard_state = state.clone();
+            let (next_store, next_boundaries) =
+                eval_for(module, state.store, state.boundaries, for_stmt, arena)?;
+            apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
+        }
+        Statement::Break => Ok(LoopControlState {
+            continue_expr: bool_node(arena, false),
+            continue_sources: HashSet::default(),
+            ..state
+        }),
+        Statement::IfReset(ir) => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: if_reset".to_string(),
+            Some(&ir.token),
+        )),
+        Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: system function call".to_string(),
+            Some(&fc.comptime.token),
+        )),
+        Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: function call".to_string(),
+            Some(&fc.comptime.token),
+        )),
+        Statement::TbMethodCall(_) => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: testbench method call".to_string(),
+            None,
+        )),
+        Statement::Unsupported(_) => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: unsupported".to_string(),
+            None,
+        )),
+        Statement::Null => Err(ParserError::unsupported(
+            LoweringPhase::SimulatorParser,
+            "unsupported statement in always_comb",
+            "illegal statement in always_comb: null".to_string(),
+            None,
+        )),
+    }
+}
+
+fn eval_loop_if(
+    module: &Module,
+    state: LoopControlState,
+    stmt: &IfStatement,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<LoopControlState, ParserError> {
+    let ((cond_expr, cond_sources), cond_bounds) =
+        eval_expression(module, &state.store, &stmt.cond, arena, None)?;
+    let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+
+    if let Some(cond_val) = constant_bool(arena, cond_expr) {
+        let side = if cond_val {
+            &stmt.true_side
+        } else {
+            &stmt.false_side
+        };
+        return side.iter().try_fold(
+            LoopControlState {
+                boundaries,
+                ..state
+            },
+            |s, step| eval_loop_statement(module, s, step, arena),
+        );
+    }
+
+    let then_state = stmt.true_side.iter().try_fold(
+        LoopControlState {
+            store: state.store.clone(),
+            boundaries: boundaries.clone(),
+            continue_expr: state.continue_expr,
+            continue_sources: state.continue_sources.clone(),
+        },
+        |s, step| eval_loop_statement(module, s, step, arena),
+    )?;
+    let else_state = stmt.false_side.iter().try_fold(
+        LoopControlState {
+            store: state.store,
+            boundaries,
+            continue_expr: state.continue_expr,
+            continue_sources: state.continue_sources,
+        },
+        |s, step| eval_loop_statement(module, s, step, arena),
+    )?;
+
+    let mut merged_sources = cond_sources;
+    merged_sources.extend(then_state.continue_sources);
+    merged_sources.extend(else_state.continue_sources);
+
+    Ok(LoopControlState {
+        store: merge_symbolic_stores(
+            module,
+            &then_state.store,
+            &else_state.store,
+            cond_expr,
+            &merged_sources,
+            arena,
+        )?,
+        boundaries: merge_boundaries(then_state.boundaries, else_state.boundaries),
+        continue_expr: merge_control_expr(
+            cond_expr,
+            then_state.continue_expr,
+            else_state.continue_expr,
+            arena,
+        ),
+        continue_sources: merged_sources,
+    })
+}
+
 fn extract_store_updates(
     store_before: &SymbolicStore<VarId>,
     store_after: &SymbolicStore<VarId>,
@@ -1204,12 +1535,17 @@ fn eval_for(
     symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
     let iter_store_before = symbolic_store.clone();
 
-    let (iter_store_after, mut merged_boundaries) = for_stmt
-        .body
-        .iter()
-        .try_fold((symbolic_store, boundaries), |(s, b), stmt| {
-            eval_statement(module, s, b, stmt, arena)
-        })?;
+    let loop_state = for_stmt.body.iter().try_fold(
+        LoopControlState {
+            store: symbolic_store,
+            boundaries,
+            continue_expr: bool_node(arena, true),
+            continue_sources: HashSet::default(),
+        },
+        |state, stmt| eval_loop_statement(module, state, stmt, arena),
+    )?;
+    let iter_store_after = loop_state.store;
+    let mut merged_boundaries = loop_state.boundaries;
 
     let (
         start,
@@ -1342,6 +1678,13 @@ fn eval_for(
         let mut all_sources = start_sources.clone();
         all_sources.extend(end_sources.iter().copied());
         all_sources.extend(
+            loop_state
+                .continue_sources
+                .iter()
+                .copied()
+                .filter(|src| src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)),
+        );
+        all_sources.extend(
             sources
                 .into_iter()
                 .filter(|src| src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)),
@@ -1360,6 +1703,7 @@ fn eval_for(
             result: target,
             initials: initial_updates.clone(),
             updates: folded_updates.clone(),
+            continue_cond: loop_state.continue_expr,
         });
 
         result_store
@@ -1640,79 +1984,17 @@ fn eval_if(
             eval_statement(module, s, b, step, arena)
         })?;
 
-    // Merge the store states for all variables across both paths using Mux (multiplexer) nodes.
-    let mut merged_store = SymbolicStore::default();
-    for id in then_store.keys() {
-        let t_range_store = &then_store[id];
-        let e_range_store = &else_store[id];
-
-        let mut merged_range_store = RangeStore {
-            ranges: std::collections::BTreeMap::new(),
-        };
-
-        // Collect unique boundaries (LSB) from both stores to create synchronized ranges
-        let mut all_lsbs: BTreeSet<usize> = t_range_store.ranges.keys().cloned().collect();
-        all_lsbs.extend(e_range_store.ranges.keys().cloned());
-
-        // Add total width including array elements as the terminator
-        let var = &module.variables[id];
-        let var_width = resolve_total_width(module, var)?;
-        let mut lsbs_vec: Vec<usize> = all_lsbs.into_iter().collect();
-        lsbs_vec.push(var_width);
-
-        for i in 0..lsbs_vec.len() - 1 {
-            let lsb = lsbs_vec[i];
-            let next_lsb = lsbs_vec[i + 1];
-            let width = next_lsb - lsb;
-            let access = BitAccess::new(lsb, next_lsb - 1);
-
-            // Extract expressions corresponding to this range from each branch (sliced based on new origin within get_parts)
-            let (t_expr, t_sources) =
-                combine_parts_with_default(*id, lsb, t_range_store.get_parts(access), arena);
-            let (e_expr, e_sources) =
-                combine_parts_with_default(*id, lsb, e_range_store.get_parts(access), arena);
-
-            let t_modified = t_range_store
-                .get_parts(access)
-                .iter()
-                .any(|(v, _)| v.is_some());
-            let e_modified = e_range_store
-                .get_parts(access)
-                .iter()
-                .any(|(v, _)| v.is_some());
-
-            let result_val = if !t_modified && !e_modified {
-                None
-            } else if t_expr == e_expr {
-                let mut sources = t_sources;
-                sources.extend(e_sources);
-                Some((t_expr, sources))
-            } else {
-                let mut sources = cond_sources.clone();
-                sources.extend(t_sources);
-                sources.extend(e_sources);
-
-                Some((
-                    arena.alloc(SLTNode::Mux {
-                        cond: cond_expr,
-                        then_expr: t_expr,
-                        else_expr: e_expr,
-                    }),
-                    sources,
-                ))
-            };
-
-            // RangeStore internal synchronization:
-            // The merged expression (result_val) effectively defines the range starting from its relative LSB.
-            // We set the origin of this new entry to the current absolute LSB.
-            merged_range_store
-                .ranges
-                .insert(lsb, (result_val, width, lsb));
-        }
-        merged_store.insert(*id, merged_range_store);
-    }
-
-    Ok((merged_store, b_else))
+    Ok((
+        merge_symbolic_stores(
+            module,
+            &then_store,
+            &else_store,
+            cond_expr,
+            &cond_sources,
+            arena,
+        )?,
+        b_else,
+    ))
 }
 
 fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(

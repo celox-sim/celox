@@ -189,6 +189,216 @@ fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
     assert_eq!(sim.get(hits), 1u32.into());
 }
 
+fn test_runtime_break_in_synth_comb_loop(sim) {
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            sum: output logic<32>
+        ) {
+            always_comb {
+                sum = 0;
+                for i: u32 in 0..count {
+                    if i == 3 {
+                        break;
+                    }
+                    sum += i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let sum = sim.signal("sum");
+
+    sim.set(count, 8u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sum), 3u32.into());
+}
+
+fn test_runtime_break_after_assign_in_synth_comb_loop(sim) {
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            sum: output logic<32>
+        ) {
+            always_comb {
+                sum = 0;
+                for i: u32 in 0..count {
+                    if i == 2 {
+                        sum += 10;
+                        break;
+                    }
+                    sum += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let sum = sim.signal("sum");
+
+    sim.set(count, 8u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sum), 12u32.into());
+}
+
+fn test_runtime_if_without_break_in_synth_comb_loop(sim) {
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            sel: input logic,
+            o: output logic<32>
+        ) {
+            always_comb {
+                o = 0;
+                for i: u32 in 0..count {
+                    if sel {
+                        o += 1;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let sel = sim.signal("sel");
+    let o = sim.signal("o");
+
+    sim.set(count, 5u32);
+    sim.set(sel, 1u8);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(o), 5u32.into());
+}
+
+fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            count: input logic<32>,
+            sel: input logic,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in start..count step *= 2 {
+                    out += 1;
+                    if sel {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let sel = sim.signal("sel");
+    let out = sim.signal("out");
+
+    sim.set(start, 0u32);
+    sim.set(count, 4u32);
+    sim.set(sel, 1u8);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 1u32.into());
+}
+
+fn test_runtime_bounds_reverse_stalled_step_with_break_exits_cleanly(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            sel: input logic,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in rev start..4 step += 0 {
+                    out += 1;
+                    if sel {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let sel = sim.signal("sel");
+    let out = sim.signal("out");
+
+    sim.set(start, 0u32);
+    sim.set(sel, 1u8);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 1u32.into());
+}
+
+fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            count: input logic<32>,
+            sel: input logic,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in start..count step *= 2 {
+                    out += 1;
+                    if sel {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let sel = sim.signal("sel");
+
+    sim.set(start, 0u32);
+    sim.set(count, 4u32);
+    sim.set(sel, 0u8);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+fn test_runtime_bounds_reverse_stalled_step_with_break_guard_false_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            sel: input logic,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in rev start..4 step += 0 {
+                    out += 1;
+                    if sel {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let sel = sim.signal("sel");
+
+    sim.set(start, 0u32);
+    sim.set(sel, 0u8);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
 fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
@@ -478,6 +688,57 @@ fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim)
     sim.set(seed, 20u32);
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(out), 23u32.into());
+}
+
+fn test_runtime_break_condition_dependency_across_module_boundary(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Child (
+            sel: input logic,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            var acc: logic<32>;
+            always_comb {
+                acc = 0;
+                for i: u32 in 0..count {
+                    acc += 1;
+                    if sel {
+                        break;
+                    }
+                }
+                out = acc;
+            }
+        }
+
+        module Top (
+            sel: input logic,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            var child_out: logic<32>;
+            inst u_child: Child (
+                sel: sel,
+                count: count,
+                out: child_out
+            );
+            assign out = child_out;
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let sel = sim.signal("sel");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(sel, false);
+    sim.set(count, 4u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 4u32.into());
+
+    sim.set(sel, true);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 1u32.into());
 }
 
 fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {

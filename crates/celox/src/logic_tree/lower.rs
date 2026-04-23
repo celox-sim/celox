@@ -182,6 +182,7 @@ impl SLTToSIRLowerer {
                 result,
                 initials,
                 updates,
+                continue_cond,
             } => self.lower_for_fold(
                 builder,
                 arena,
@@ -198,6 +199,7 @@ impl SLTToSIRLowerer {
                 result,
                 initials,
                 updates,
+                *continue_cond,
             ),
         };
 
@@ -799,6 +801,7 @@ impl SLTToSIRLowerer {
         result: &VarAtomBase<A>,
         initials: &[crate::logic_tree::comb::SLTForUpdate<A>],
         updates: &[crate::logic_tree::comb::SLTForUpdate<A>],
+        continue_cond: NodeId,
     ) -> RegisterId {
         let mut counter_width = loop_width.max(1);
         counter_width = counter_width.max(Self::bound_width(start));
@@ -955,7 +958,12 @@ impl SLTToSIRLowerer {
                     builder.seal_block(SIRTerminator::Jump(true_loop_block, vec![]));
                 }
                 builder.switch_to_block(true_loop_block);
-                builder.seal_block(SIRTerminator::Error(1));
+                builder.seal_block(SIRTerminator::Jump(
+                    body_block,
+                    std::iter::once(header_counter)
+                        .chain(header_states.iter().copied())
+                        .collect(),
+                ));
                 builder.switch_to_block(singleton_block);
                 builder.seal_block(SIRTerminator::Jump(
                     body_block,
@@ -1074,9 +1082,42 @@ impl SLTToSIRLowerer {
             })
             .collect();
 
+        let continue_reg = self.lower_inner(
+            builder,
+            continue_cond,
+            arena,
+            &mut local_cache,
+            Some(&env),
+            false,
+        );
+
+        let progress_block = builder.new_block();
+        builder.seal_block(SIRTerminator::Branch {
+            cond: continue_reg,
+            true_block: (progress_block, vec![]),
+            false_block: (exit_block, next_states.clone()),
+        });
+        builder.switch_to_block(progress_block);
+
         if reverse {
             if step == 0 {
-                builder.seal_block(SIRTerminator::Jump(exit_block, next_states.clone()));
+                if inclusive {
+                    let error_block = builder.new_block();
+                    let terminal = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Binary(
+                        terminal,
+                        body_counter,
+                        BinaryOp::Eq,
+                        start_reg,
+                    ));
+                    builder.seal_block(SIRTerminator::Branch {
+                        cond: terminal,
+                        true_block: (exit_block, next_states.clone()),
+                        false_block: (error_block, vec![]),
+                    });
+                    builder.switch_to_block(error_block);
+                }
+                builder.seal_block(SIRTerminator::Error(1));
             } else {
                 let reverse_width = Self::step_math_width(compare_width, SLTStepOp::Add, step);
                 let current_math =

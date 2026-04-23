@@ -255,6 +255,37 @@ fn test_runtime_for_loop_state_does_not_trigger_scheduler_loop() {
 }
 
 #[test]
+fn test_runtime_for_break_condition_on_accumulator_does_not_trigger_scheduler_loop() {
+    let code = r#"
+        module Top (
+            count: input logic<8>,
+            o: output logic<8>
+        ) {
+            var sum: logic<8>;
+            always_comb {
+                sum = 0;
+                for i: u32 in 0..count {
+                    sum += 1;
+                    if sum == 3 {
+                        break;
+                    }
+                }
+            }
+            always_comb {
+                o = sum;
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "Top").build();
+    assert!(
+        result.is_ok(),
+        "runtime ForFold break-state must not be treated as a scheduler loop: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn test_runtime_for_loop_external_feedback_is_still_scheduler_loop() {
     let code = r#"
         module Top (
@@ -591,43 +622,5 @@ fn test_generic_top_returns_error() {
         }
         Err(k) => panic!("expected GenericTop, got {k:?}"),
         Ok(_) => panic!("expected GenericTop, got Ok"),
-    }
-}
-
-#[test]
-fn test_break_in_always_comb_returns_unsupported_parser_error() {
-    let code = r#"
-        module Top (
-            a: input logic,
-            n: input logic<4>,
-            y: output logic,
-        ) {
-            always_comb {
-                for i: u32 in 0..n {
-                    if i == 2 {
-                        break;
-                    }
-                    y = a;
-                }
-            }
-        }
-    "#;
-
-    let result = Simulator::builder(code, "Top").build();
-
-    match result.as_ref().map_err(|e| e.kind()) {
-        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
-            phase: LoweringPhase::SimulatorParser,
-            feature,
-            detail,
-            ..
-        })) => {
-            assert_eq!(*feature, "unsupported statement in always_comb");
-            assert_eq!(detail, "illegal statement in always_comb: break");
-        }
-        Err(k) => {
-            panic!("expected Unsupported(SimulatorParser) for break in always_comb, got {k:?}")
-        }
-        Ok(_) => panic!("expected Unsupported(SimulatorParser) for break in always_comb, got Ok"),
     }
 }
