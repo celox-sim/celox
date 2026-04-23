@@ -99,6 +99,34 @@ fn test_ff_runtime_for_bounds(sim) {
     assert_eq!(sim.get(q_step), 8u32.into());
 }
 
+fn test_ff_runtime_for_break(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 8'hee;
+                for i: u32 in 0..count {
+                    if i == 3 {
+                        break;
+                    }
+                    q = i as 8;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let count = sim.signal("count");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(count, 8u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 2u8.into());
+}
+
 #[ignore]
 fn test_ff_constant_signed_bounds_in_unrolled_loops(sim) {
     // Constant signed reverse bounds are currently broken in the upstream
@@ -1078,7 +1106,6 @@ fn test_ff_dynamic_store_sir() {
 }
 
 #[test]
-#[ignore = "known issue: packed bit-select writes in always_ff do not match veryl backend"]
 fn test_ff_packed_bit_select_writes_regression() {
     let code = r#"
     module Top (
@@ -1100,7 +1127,7 @@ fn test_ff_packed_bit_select_writes_regression() {
 "#;
 
     let mut sim = Simulator::builder(code, "Top")
-        .optimize(false)
+        .optimize(true)
         .build_native()
         .unwrap();
     let clk = sim.event("clk");

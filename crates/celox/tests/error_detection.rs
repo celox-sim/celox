@@ -631,39 +631,3 @@ fn test_break_in_always_comb_returns_unsupported_parser_error() {
         Ok(_) => panic!("expected Unsupported(SimulatorParser) for break in always_comb, got Ok"),
     }
 }
-
-#[test]
-fn test_break_in_always_ff_returns_unsupported_parser_error() {
-    let code = r#"
-        module Top (
-            clk: input clock,
-            n: input logic<4>,
-            y: output logic,
-        ) {
-            always_ff {
-                for i: u32 in 0..n {
-                    if i == 2 {
-                        break;
-                    }
-                    y = i[0];
-                }
-            }
-        }
-    "#;
-
-    let result = Simulator::builder(code, "Top").build();
-
-    match result.as_ref().map_err(|e| e.kind()) {
-        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
-            phase: LoweringPhase::FfLowering,
-            feature,
-            detail,
-            ..
-        })) => {
-            assert_eq!(*feature, "unsupported statement");
-            assert_eq!(detail, "break;");
-        }
-        Err(k) => panic!("expected Unsupported(FfLowering) for break in always_ff, got {k:?}"),
-        Ok(_) => panic!("expected Unsupported(FfLowering) for break in always_ff, got Ok"),
-    }
-}

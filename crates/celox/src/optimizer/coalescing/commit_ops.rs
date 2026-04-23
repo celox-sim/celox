@@ -36,6 +36,8 @@ fn resolve_forward_src_from_pred(
     commit_off: usize,
     commit_bits: usize,
 ) -> Option<RegisterId> {
+    let commit_end = commit_off + commit_bits;
+
     for (idx, inst) in pred_block.instructions.iter().enumerate().rev() {
         let (store_addr, store_off, store_bits, store_src) = match inst {
             SIRInstruction::Store(addr, SIROffset::Static(off), bits, src, _) => {
@@ -44,13 +46,23 @@ fn resolve_forward_src_from_pred(
             _ => continue,
         };
 
-        if store_addr != commit_src || commit_off < store_off {
+        if store_addr != commit_src {
             continue;
+        }
+
+        let store_end = store_off + store_bits;
+        let overlaps = commit_off < store_end && store_off < commit_end;
+        if !overlaps {
+            continue;
+        }
+
+        if commit_off < store_off {
+            return None;
         }
 
         let rel_off = commit_off - store_off;
         if rel_off + commit_bits > store_bits {
-            continue;
+            return None;
         }
 
         if rel_off == 0 && commit_bits == store_bits {

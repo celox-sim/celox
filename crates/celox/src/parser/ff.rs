@@ -39,9 +39,16 @@ pub struct FfParser<'a> {
     defined_ranges: HashMap<VarId, BitSet>,
     dynamic_defined_vars: HashSet<VarId>,
     local_working_vars: HashSet<VarId>,
+    loop_exit_blocks: Vec<crate::ir::BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
     config: BuildConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlFlow {
+    Continue,
+    Break,
 }
 
 impl<'a> FfParser<'a> {
@@ -52,6 +59,7 @@ impl<'a> FfParser<'a> {
             defined_ranges: HashMap::default(),
             dynamic_defined_vars: HashSet::default(),
             local_working_vars: HashSet::default(),
+            loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
             config,
@@ -211,6 +219,42 @@ impl<'a> FfParser<'a> {
     // expression / function-call lowering is split into submodules:
     // - parser/ff/expression.rs
     // - parser/ff/function_call.rs
+    fn parse_statement_list<A>(
+        &mut self,
+        stmts: &[Statement],
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<ControlFlow, ParserError> {
+        for stmt in stmts {
+            let flow = self.parse_statement(stmt, targets, domain, convert, sources, ir_builder)?;
+            if matches!(flow, ControlFlow::Break) {
+                return Ok(ControlFlow::Break);
+            }
+        }
+        Ok(ControlFlow::Continue)
+    }
+
+    fn parse_statement_refs<A>(
+        &mut self,
+        stmts: &[&Statement],
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<ControlFlow, ParserError> {
+        for stmt in stmts {
+            let flow = self.parse_statement(stmt, targets, domain, convert, sources, ir_builder)?;
+            if matches!(flow, ControlFlow::Break) {
+                return Ok(ControlFlow::Break);
+            }
+        }
+        Ok(ControlFlow::Continue)
+    }
+
     fn parse_if_statement<A>(
         &mut self,
         stmt: &IfStatement,
@@ -219,7 +263,7 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<ControlFlow, ParserError> {
         // Constant folding: if condition is compile-time constant, inline the appropriate side
         if let Some(const_val) = self.get_constant_value(&stmt.cond) {
             let side = if const_val != 0 {
@@ -227,10 +271,9 @@ impl<'a> FfParser<'a> {
             } else {
                 &stmt.false_side
             };
-            for s in side {
-                self.parse_statement(s, targets, domain, convert, sources, ir_builder)?;
-            }
-            return Ok(());
+            return self.parse_statement_list(
+                side, targets, domain, convert, sources, ir_builder,
+            );
         }
 
         // 1. Evaluate condition expression
@@ -257,34 +300,62 @@ impl<'a> FfParser<'a> {
 
         // 3. Then Path
         ir_builder.switch_to_block(then_bb);
-        for stmt in &stmt.true_side {
-            self.parse_statement(stmt, targets, domain, convert, sources, ir_builder)?;
-        }
+        let then_flow = self.parse_statement_list(
+            &stmt.true_side,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
         // Collect state at the end of Then, and restore state at the beginning
         let then_defined = std::mem::replace(&mut self.defined_ranges, pre_if_defined.clone());
         let then_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, pre_if_dynamic); // 【追加】
 
-        ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        if matches!(then_flow, ControlFlow::Continue) {
+            ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        }
 
         // 4. Else Path
         ir_builder.switch_to_block(else_bb);
-        for stmt in &stmt.false_side {
-            self.parse_statement(stmt, targets, domain, convert, sources, ir_builder)?;
-        }
+        let else_flow = self.parse_statement_list(
+            &stmt.false_side,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
         // Collect state at the end of Else
         let else_defined = std::mem::take(&mut self.defined_ranges);
         let else_dynamic = std::mem::take(&mut self.dynamic_defined_vars); // 【追加】
 
-        ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        if matches!(else_flow, ControlFlow::Continue) {
+            ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        }
 
         // 5. Merge logic
-        // Take intersection of static and dynamic states respectively
-        self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
-        self.dynamic_defined_vars = self.intersect_dynamic_vars(then_dynamic, else_dynamic); // 【追加】
-
-        // 6. Set merge point as "next parse target"
-        ir_builder.switch_to_block(merge_bb);
-        Ok(())
+        match (then_flow, else_flow) {
+            (ControlFlow::Continue, ControlFlow::Continue) => {
+                self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
+                self.dynamic_defined_vars = self.intersect_dynamic_vars(then_dynamic, else_dynamic);
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Continue, ControlFlow::Break) => {
+                self.defined_ranges = then_defined;
+                self.dynamic_defined_vars = then_dynamic;
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Break, ControlFlow::Continue) => {
+                self.defined_ranges = else_defined;
+                self.dynamic_defined_vars = else_dynamic;
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Break, ControlFlow::Break) => Ok(ControlFlow::Break),
+        }
     }
 
     /// Helper to take intersection of dynamic defined variables
@@ -324,7 +395,7 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<ControlFlow, ParserError> {
         match stmt {
             Statement::Assign(assign_statement) => {
                 self.parse_assign_statement(
@@ -337,10 +408,14 @@ impl<'a> FfParser<'a> {
                 )?;
             }
             Statement::If(stmt) => {
-                self.parse_if_statement(stmt, targets, domain, convert, sources, ir_builder)?;
+                return self.parse_if_statement(
+                    stmt, targets, domain, convert, sources, ir_builder,
+                );
             }
             Statement::IfReset(stmt) => {
-                self.parse_if_reset_statement(stmt, targets, domain, convert, sources, ir_builder)?;
+                return self.parse_if_reset_statement(
+                    stmt, targets, domain, convert, sources, ir_builder,
+                );
             }
             Statement::Null => {}
             Statement::SystemFunctionCall(call) => {
@@ -359,7 +434,19 @@ impl<'a> FfParser<'a> {
             Statement::For(f) => {
                 self.parse_for_statement(f, targets, domain, convert, sources, ir_builder)?;
             }
-            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
+            Statement::Break => {
+                let Some(exit_bb) = self.loop_exit_blocks.last().copied() else {
+                    return Err(ParserError::unsupported(
+                        LoweringPhase::FfLowering,
+                        "unsupported statement",
+                        "break;".to_string(),
+                        None,
+                    ));
+                };
+                ir_builder.seal_block(SIRTerminator::Jump(exit_bb, vec![]));
+                return Ok(ControlFlow::Break);
+            }
+            Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                 return Err(ParserError::unsupported(
                     LoweringPhase::FfLowering,
                     "unsupported statement",
@@ -368,7 +455,7 @@ impl<'a> FfParser<'a> {
                 ));
             }
         }
-        Ok(())
+        Ok(ControlFlow::Continue)
     }
 
     fn bound_width(&self, bound: &ForBound) -> usize {
@@ -732,12 +819,27 @@ impl<'a> FfParser<'a> {
         local_dynamic.insert(stmt.var_id);
         let prev_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, local_dynamic);
 
-        for body_stmt in &stmt.body {
-            self.parse_statement(body_stmt, targets, domain, convert, sources, ir_builder)?;
-        }
+        self.loop_exit_blocks.push(exit_bb);
+        let body_flow = self.parse_statement_list(
+            &stmt.body,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        self.loop_exit_blocks.pop();
 
         self.defined_ranges = prev_defined;
         self.dynamic_defined_vars = prev_dynamic;
+
+        if matches!(body_flow, ControlFlow::Break) {
+            self.local_working_vars.remove(&stmt.var_id);
+            ir_builder.switch_to_block(exit_bb);
+            self.defined_ranges = pre_loop_defined;
+            self.dynamic_defined_vars = pre_loop_dynamic;
+            return Ok(());
+        }
 
         if !reverse {
             if inclusive {
@@ -911,7 +1013,7 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<ControlFlow, ParserError> {
         let true_side: Vec<&Statement> = stmt.true_side.iter().collect();
         let false_side: Vec<&Statement> = stmt.false_side.iter().collect();
         self.parse_if_reset_internal(
@@ -934,7 +1036,7 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<ControlFlow, ParserError> {
         // 1. Load reset signal (used as condition expression)
         let (reset_id, reset_index, reset_select, is_low) = {
             let reset = self
@@ -992,29 +1094,48 @@ impl<'a> FfParser<'a> {
 
         // 3. Then Path (Reset active)
         ir_builder.switch_to_block(then_bb);
-        for s in true_side {
-            self.parse_statement(s, targets, domain, convert, sources, ir_builder)?;
-        }
+        let then_flow = self.parse_statement_refs(
+            true_side, targets, domain, convert, sources, ir_builder,
+        )?;
         let then_defined = std::mem::replace(&mut self.defined_ranges, pre_if_defined.clone());
         let then_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, pre_if_dynamic);
-        ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        if matches!(then_flow, ControlFlow::Continue) {
+            ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        }
 
         // 4. Else Path (Normal operation)
         ir_builder.switch_to_block(else_bb);
-        for s in false_side {
-            self.parse_statement(s, targets, domain, convert, sources, ir_builder)?;
-        }
+        let else_flow = self.parse_statement_refs(
+            false_side, targets, domain, convert, sources, ir_builder,
+        )?;
         let else_defined = std::mem::take(&mut self.defined_ranges);
         let else_dynamic = std::mem::take(&mut self.dynamic_defined_vars);
-        ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        if matches!(else_flow, ControlFlow::Continue) {
+            ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        }
 
         // 5. Merge logic (Intersection of defined states of both paths)
-        self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
-        self.dynamic_defined_vars = self.intersect_dynamic_vars(then_dynamic, else_dynamic);
-
-        // 6. Set merge point as "next parse target"
-        ir_builder.switch_to_block(merge_bb);
-        Ok(())
+        match (then_flow, else_flow) {
+            (ControlFlow::Continue, ControlFlow::Continue) => {
+                self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
+                self.dynamic_defined_vars = self.intersect_dynamic_vars(then_dynamic, else_dynamic);
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Continue, ControlFlow::Break) => {
+                self.defined_ranges = then_defined;
+                self.dynamic_defined_vars = then_dynamic;
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Break, ControlFlow::Continue) => {
+                self.defined_ranges = else_defined;
+                self.dynamic_defined_vars = else_dynamic;
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Break, ControlFlow::Break) => Ok(ControlFlow::Break),
+        }
     }
 
     pub fn detect_trigger_set(&self, decl: &FfDeclaration) -> TriggerSet<VarId> {
