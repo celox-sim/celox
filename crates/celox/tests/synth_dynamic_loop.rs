@@ -329,6 +329,55 @@ fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
     assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
+fn test_runtime_bounds_reverse_stalled_step_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in rev start..4 step += 0 {
+                    out += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    sim.set(start, 0u32);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+fn test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            out: output logic<3>
+        ) {
+            var x: logic<3>;
+            always_comb {
+                x = 3'b100;
+                for i: u32 in 0..count {
+                    x[i + 1] = x[i];
+                }
+                out = x;
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(count, 2u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 0u32.into());
+}
+
 fn test_runtime_bounds_forward_overshoot_exits_without_wraparound(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

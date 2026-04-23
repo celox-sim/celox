@@ -289,7 +289,66 @@ impl SLTToSIRLowerer {
         dest
     }
 
-    fn lookup_override<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+    fn build_dynamic_offset<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: Option<&LowerEnv<A>>,
+        index: &[crate::logic_tree::comb::SLTIndex],
+        access: &BitAccess,
+    ) -> RegisterId {
+        let off_reg = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Imm(
+            off_reg,
+            SIRValue::new(access.lsb as u64),
+        ));
+
+        let mut total_dynamic = None;
+        for idx_entry in index {
+            let mut idx_val =
+                self.lower_inner(builder, idx_entry.node, arena, cache, env, env.is_none());
+
+            if idx_entry.stride > 1 {
+                let stride_reg = builder.alloc_bit(64, false);
+                builder.emit(SIRInstruction::Imm(
+                    stride_reg,
+                    SIRValue::new(idx_entry.stride as u64),
+                ));
+                let stepped_idx = builder.alloc_bit(64, false);
+                builder.emit(SIRInstruction::Binary(
+                    stepped_idx,
+                    idx_val,
+                    BinaryOp::Mul,
+                    stride_reg,
+                ));
+                idx_val = stepped_idx;
+            }
+
+            if let Some(acc) = total_dynamic {
+                let new_acc = builder.alloc_bit(64, false);
+                builder.emit(SIRInstruction::Binary(new_acc, acc, BinaryOp::Add, idx_val));
+                total_dynamic = Some(new_acc);
+            } else {
+                total_dynamic = Some(idx_val);
+            }
+        }
+
+        if let Some(dynamic_off) = total_dynamic {
+            let final_off = builder.alloc_bit(64, false);
+            builder.emit(SIRInstruction::Binary(
+                final_off,
+                off_reg,
+                BinaryOp::Add,
+                dynamic_off,
+            ));
+            final_off
+        } else {
+            off_reg
+        }
+    }
+
+    fn rebuild_override_range<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
@@ -299,10 +358,6 @@ impl SLTToSIRLowerer {
         index: &[crate::logic_tree::comb::SLTIndex],
         access: &BitAccess,
     ) -> Option<RegisterId> {
-        if !index.is_empty() {
-            return None;
-        }
-
         let exact = VarAtomBase::new(id.clone(), access.lsb, access.msb);
         if let Some(reg) = env.inputs.get(&exact) {
             return Some(*reg);
@@ -368,6 +423,50 @@ impl SLTToSIRLowerer {
             builder.emit(SIRInstruction::Concat(result, part_regs));
             Some(result)
         }
+    }
+
+    fn lookup_override<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: &LowerEnv<A>,
+        id: &A,
+        index: &[crate::logic_tree::comb::SLTIndex],
+        access: &BitAccess,
+    ) -> Option<RegisterId> {
+        if !index.is_empty() {
+            let full_msb = env
+                .inputs
+                .keys()
+                .filter(|target| target.id == *id)
+                .map(|target| target.access.msb)
+                .max()?;
+            let rebuilt = self.rebuild_override_range(
+                builder,
+                arena,
+                cache,
+                env,
+                id,
+                &[],
+                &BitAccess::new(0, full_msb),
+            )?;
+            let dynamic_off =
+                self.build_dynamic_offset(builder, arena, cache, Some(env), index, access);
+            let shifted = builder.alloc_logic(full_msb + 1);
+            builder.emit(SIRInstruction::Binary(
+                shifted,
+                rebuilt,
+                BinaryOp::Shr,
+                dynamic_off,
+            ));
+            return Some(self.cast_reg_width(
+                builder,
+                shifted,
+                access.msb - access.lsb + 1,
+            ));
+        }
+        self.rebuild_override_range(builder, arena, cache, env, id, index, access)
     }
 
     /// Get width (references information from veryl-analyzer)
@@ -687,6 +786,15 @@ impl SLTToSIRLowerer {
 
         builder.switch_to_block(header_block);
         if reverse {
+            if step == 0 {
+                builder.seal_block(SIRTerminator::Error(1));
+                builder.switch_to_block(exit_block);
+                let result_idx = updates
+                    .iter()
+                    .position(|update| update.target == *result)
+                    .expect("ForFold result target must be present in updates");
+                return exit_states[result_idx];
+            }
             let reverse_width = compare_width.saturating_add(1);
             let header_counter_ext = self.cast_reg_width(builder, header_counter, reverse_width);
             let start_ext = self.cast_reg_width(builder, start_reg, reverse_width);
@@ -713,9 +821,23 @@ impl SLTToSIRLowerer {
                 BinaryOp::Sub,
                 reverse_step,
             ));
+            let progress = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(
+                progress,
+                next_counter_ext,
+                BinaryOp::Ne,
+                header_counter_ext,
+            ));
+            let can_iterate = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(
+                can_iterate,
+                cond,
+                BinaryOp::LogicAnd,
+                progress,
+            ));
             let next_counter = self.cast_reg_width(builder, next_counter_ext, compare_width);
             builder.seal_block(SIRTerminator::Branch {
-                cond,
+                cond: can_iterate,
                 true_block: (
                     body_block,
                     std::iter::once(next_counter)
