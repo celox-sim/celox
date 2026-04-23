@@ -592,6 +592,9 @@ impl<'a> FfParser<'a> {
 
         ir_builder.switch_to_block(body_bb);
         self.local_working_vars.insert(stmt.var_id);
+        // always_ff uses NBA semantics: this loop variable is the only value
+        // made visible intra-block, while all other reads still observe the
+        // pre-commit old state until WORKING -> STABLE commits happen later.
         let visible_loop_reg = self.cast_reg_width(ir_builder, body_counter, loop_width);
         ir_builder.emit(SIRInstruction::Store(
             convert(stmt.var_id, domain.region()),
