@@ -1,5 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "prCreation": "not-pending",
+  "internalChecksFilter": "strict",
   "extends": [
     "config:recommended"
   ],
