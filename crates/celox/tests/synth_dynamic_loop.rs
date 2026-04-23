@@ -54,6 +54,29 @@ fn test_expression_bounds_in_synth_for_loops(sim) {
     assert_eq!(sim.get(sum_step), 7u32.into());
 }
 
+fn test_constant_break_in_synth_comb_loop(sim) {
+    @setup { let code = r#"
+        module Top (
+            sum: output logic<32>,
+        ) {
+            always_comb {
+                sum = 0;
+                for i: u32 in 0..8 {
+                    if i == 3 {
+                        break;
+                    }
+                    sum += i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let sum = sim.signal("sum");
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sum), 3u32.into());
+}
+
 #[ignore]
 fn test_constant_signed_bounds_in_unrolled_synth_loops(sim) {
     // Constant signed reverse bounds are currently broken in the upstream
