@@ -329,6 +329,36 @@ fn test_runtime_bounds_forward_overshoot_exits_without_wraparound(sim) {
     assert_eq!(sim.get(last), 250u32.into());
 }
 
+fn test_runtime_bounds_large_additive_step_exits_without_wraparound(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            hits: output logic<32>,
+            last: output logic<8>
+        ) {
+            always_comb {
+                hits = 0;
+                last = 8'hee;
+                for i: u8 in start..255 step += 300 {
+                    hits += 1;
+                    last = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let hits = sim.signal("hits");
+    let last = sim.signal("last");
+
+    sim.set(start, 250u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(hits), 1u32.into());
+    assert_eq!(sim.get(last), 250u32.into());
+}
+
 fn test_runtime_bounds_inclusive_max_bound_runs_full_range(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

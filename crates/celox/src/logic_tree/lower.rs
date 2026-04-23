@@ -523,7 +523,10 @@ impl SLTToSIRLowerer {
 
     fn step_math_width(base_width: usize, step_op: SLTStepOp, step: usize) -> usize {
         match step_op {
-            SLTStepOp::Add => base_width.saturating_add(1),
+            SLTStepOp::Add => {
+                let step_bits = (usize::BITS as usize - step.leading_zeros() as usize).max(1);
+                base_width.saturating_add(step_bits)
+            }
             SLTStepOp::Mul => {
                 let step_bits = (usize::BITS as usize - step.leading_zeros() as usize).max(1);
                 base_width.saturating_add(step_bits)
