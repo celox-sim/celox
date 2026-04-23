@@ -95,10 +95,45 @@ pub fn lower_execution_unit(
         wide_masks: WideRegMap::default(),
     };
 
+    // Pre-seed wide block params so instructions in those blocks can read the
+    // full chunked value before phi nodes are materialized in a later pass.
+    for sir_block in eu.blocks.values() {
+        for &param_reg in &sir_block.params {
+            let width = eu.register_map[&param_reg].width();
+            let num_chunks = width.div_ceil(64).max(1);
+            if num_chunks <= 1 {
+                continue;
+            }
+            if !ctx.wide_regs.contains_key(&param_reg) {
+                let mut chunks = Vec::with_capacity(num_chunks);
+                chunks.push((ctx.reg_map.get(param_reg), width.min(64)));
+                for chunk_idx in 1..num_chunks {
+                    let chunk_width = (width - chunk_idx * 64).min(64);
+                    let vreg = ctx.alloc_vreg(SpillDesc::transient());
+                    chunks.push((vreg, chunk_width));
+                }
+                ctx.wide_regs.insert(param_reg, chunks);
+            }
+            if four_state {
+                if !ctx.wide_masks.contains_key(&param_reg) {
+                    let mut chunks = Vec::with_capacity(num_chunks);
+                    let mask0 = ctx.mask_map.get(param_reg);
+                    chunks.push((mask0, width.min(64)));
+                    for chunk_idx in 1..num_chunks {
+                        let chunk_width = (width - chunk_idx * 64).min(64);
+                        let vreg = ctx.alloc_vreg(SpillDesc::transient());
+                        chunks.push((vreg, chunk_width));
+                    }
+                    ctx.wide_masks.insert(param_reg, chunks);
+                }
+            }
+        }
+    }
+
     // Collect mask phi sources per-block (captures mask state at each terminator)
     let mut mask_phi_sources: std::collections::HashMap<
         BlockId,
-        Vec<(BlockId, usize, Option<VReg>)>,
+        Vec<(BlockId, usize, usize, VReg)>,
     > = std::collections::HashMap::new();
 
     for &sir_block_id in &block_ids {
@@ -166,12 +201,21 @@ pub fn lower_execution_unit(
                 }
                 let target_mir_id = BlockId(target_sir_id.0 as u32);
                 for (i, arg_reg) in args.iter().enumerate() {
-                    let mask_vreg = ctx.mask_map.map.get(arg_reg.0).copied().flatten();
-                    mask_phi_sources.entry(target_mir_id).or_default().push((
-                        pred_mir_id,
-                        i,
-                        mask_vreg,
-                    ));
+                    if let Some(mask_chunks) = ctx.wide_masks.get(arg_reg) {
+                        for (chunk_idx, (mask_vreg, _)) in mask_chunks.iter().enumerate() {
+                            mask_phi_sources
+                                .entry(target_mir_id)
+                                .or_default()
+                                .push((pred_mir_id, i, chunk_idx, *mask_vreg));
+                        }
+                    } else if let Some(mask_vreg) =
+                        ctx.mask_map.map.get(arg_reg.0).copied().flatten()
+                    {
+                        mask_phi_sources
+                            .entry(target_mir_id)
+                            .or_default()
+                            .push((pred_mir_id, i, 0, mask_vreg));
+                    }
                 }
             }
         }
@@ -181,14 +225,16 @@ pub fn lower_execution_unit(
 
     // Extract mask_map for phi node construction (ctx borrows func fields)
     let saved_mask_map = std::mem::replace(&mut ctx.mask_map, RegMap::new(0));
+    let saved_wide_regs = std::mem::take(&mut ctx.wide_regs);
+    let saved_wide_masks = std::mem::take(&mut ctx.wide_masks);
     drop(ctx); // Release borrows on func
 
     // Build phi nodes from SIR block params and predecessor terminators.
     // For each SIR block with params, find all predecessors that pass args.
     {
         use std::collections::HashMap;
-        // Collect phi sources: target_block → [(pred_block, param_idx, arg_vreg)]
-        let mut phi_sources: HashMap<BlockId, Vec<(BlockId, usize, VReg)>> = HashMap::new();
+        // Collect phi sources: target_block → [(pred_block, param_idx, chunk_idx, arg_vreg)]
+        let mut phi_sources: HashMap<BlockId, Vec<(BlockId, usize, usize, VReg)>> = HashMap::new();
         for &sir_block_id in &block_ids {
             let sir_block = &eu.blocks[&sir_block_id];
             let pred_mir_id = BlockId(sir_block_id.0 as u32);
@@ -210,11 +256,20 @@ pub fn lower_execution_unit(
                 }
                 let target_mir_id = BlockId(target_sir_id.0 as u32);
                 for (i, arg_reg) in args.iter().enumerate() {
-                    let arg_vreg = reg_map.get(*arg_reg);
-                    phi_sources
-                        .entry(target_mir_id)
-                        .or_default()
-                        .push((pred_mir_id, i, arg_vreg));
+                    if let Some(chunks) = saved_wide_regs.get(arg_reg) {
+                        for (chunk_idx, (arg_vreg, _)) in chunks.iter().enumerate() {
+                            phi_sources
+                                .entry(target_mir_id)
+                                .or_default()
+                                .push((pred_mir_id, i, chunk_idx, *arg_vreg));
+                        }
+                    } else {
+                        let arg_vreg = reg_map.get(*arg_reg);
+                        phi_sources
+                            .entry(target_mir_id)
+                            .or_default()
+                            .push((pred_mir_id, i, 0, arg_vreg));
+                    }
                 }
             }
         }
@@ -224,29 +279,67 @@ pub fn lower_execution_unit(
                 let sir_block_id = crate::ir::BlockId(mblock.id.0 as usize);
                 let sir_block = &eu.blocks[&sir_block_id];
                 for (param_idx, param_reg) in sir_block.params.iter().enumerate() {
-                    let dst = reg_map.get(*param_reg);
-                    let phi_srcs: Vec<(BlockId, VReg)> = sources
-                        .iter()
-                        .filter(|(_, idx, _)| *idx == param_idx)
-                        .map(|(pred, _, vreg)| (*pred, *vreg))
-                        .collect();
-                    if !phi_srcs.is_empty() {
-                        mblock.phis.push(PhiNode {
-                            dst,
-                            sources: phi_srcs,
-                        });
+                    if let Some(dst_chunks) = saved_wide_regs.get(param_reg) {
+                        for (chunk_idx, (dst, _)) in dst_chunks.iter().enumerate() {
+                            let phi_srcs: Vec<(BlockId, VReg)> = sources
+                                .iter()
+                                .filter(|(_, idx, src_chunk_idx, _)| {
+                                    *idx == param_idx && *src_chunk_idx == chunk_idx
+                                })
+                                .map(|(pred, _, _, vreg)| (*pred, *vreg))
+                                .collect();
+                            if !phi_srcs.is_empty() {
+                                mblock.phis.push(PhiNode {
+                                    dst: *dst,
+                                    sources: phi_srcs,
+                                });
+                            }
+                        }
+                    } else {
+                        let dst = reg_map.get(*param_reg);
+                        let phi_srcs: Vec<(BlockId, VReg)> = sources
+                            .iter()
+                            .filter(|(_, idx, src_chunk_idx, _)| {
+                                *idx == param_idx && *src_chunk_idx == 0
+                            })
+                            .map(|(pred, _, _, vreg)| (*pred, *vreg))
+                            .collect();
+                        if !phi_srcs.is_empty() {
+                            mblock.phis.push(PhiNode {
+                                dst,
+                                sources: phi_srcs,
+                            });
+                        }
                     }
 
                     // 4-state: add mask phi node
                     if four_state {
-                        if let Some(mask_dst) =
-                            saved_mask_map.map.get(param_reg.0).copied().flatten()
-                        {
-                            if let Some(m_sources) = mask_phi_sources.get(&mblock.id) {
+                        if let Some(m_sources) = mask_phi_sources.get(&mblock.id) {
+                            if let Some(mask_chunks) = saved_wide_masks.get(param_reg) {
+                                for (chunk_idx, (mask_dst, _)) in mask_chunks.iter().enumerate() {
+                                    let mask_phi_srcs: Vec<(BlockId, VReg)> = m_sources
+                                        .iter()
+                                        .filter(|(_, idx, src_chunk_idx, _)| {
+                                            *idx == param_idx && *src_chunk_idx == chunk_idx
+                                        })
+                                        .map(|(pred, _, _, vreg)| (*pred, *vreg))
+                                        .collect();
+                                    if !mask_phi_srcs.is_empty() {
+                                        mblock.phis.push(PhiNode {
+                                            dst: *mask_dst,
+                                            sources: mask_phi_srcs,
+                                        });
+                                    }
+                                }
+                            } else if let Some(mask_dst) =
+                                saved_mask_map.map.get(param_reg.0).copied().flatten()
+                            {
                                 let mask_phi_srcs: Vec<(BlockId, VReg)> = m_sources
                                     .iter()
-                                    .filter(|(_, idx, _)| *idx == param_idx)
-                                    .filter_map(|(pred, _, m)| m.map(|mv| (*pred, mv)))
+                                    .filter(|(_, idx, src_chunk_idx, _)| {
+                                        *idx == param_idx && *src_chunk_idx == 0
+                                    })
+                                    .map(|(pred, _, _, vreg)| (*pred, *vreg))
                                     .collect();
                                 if !mask_phi_srcs.is_empty() {
                                     mblock.phis.push(PhiNode {
@@ -530,6 +623,11 @@ impl<'a> ISelContext<'a> {
 
     /// Store wide chunks for a SIR register in the wide_regs map.
     fn set_wide_chunks(&mut self, reg: RegisterId, chunks: Vec<(VReg, usize)>) {
+        if let Some(&(chunk0, _)) = chunks.first() {
+            // Keep the scalar slot pointing at chunk 0 so block args, stores,
+            // and other narrow consumers still see a defined VReg.
+            self.reg_map.set(reg, chunk0);
+        }
         self.wide_regs.insert(reg, chunks);
     }
 

@@ -29,34 +29,44 @@ impl SIRTranslator {
             crate::ir::SIRTerminator::Jump(to, params) => {
                 let target_cl_block = block_map[to];
                 // Collect expected param types before mutably borrowing the builder.
-                // Block params use one Cranelift param per SIR param in 2-state mode,
-                // and two (value + mask) in 4-state mode.
                 let param_types = collect_block_param_types(state, target_cl_block);
-                debug_assert_eq!(
-                    param_types.len(),
-                    if self.options.four_state {
-                        params.len() * 2
-                    } else {
-                        params.len()
-                    },
-                    "SIR Jump arg count does not match target block param count"
-                );
 
                 let mut cl_args: Vec<BlockArg> = Vec::new();
-                for (i, reg) in params.iter().enumerate() {
-                    let val = state.regs[reg].first_value(state.builder);
-                    let val_idx = if self.options.four_state { i * 2 } else { i };
-                    let cast_val = cast_type(state.builder, val, param_types[val_idx]);
-                    cl_args.push(BlockArg::Value(cast_val));
-                    if self.options.four_state {
-                        // Also pass the mask value
-                        let mask = state.regs[reg]
-                            .first_mask(state.builder)
-                            .unwrap_or_else(|| state.builder.ins().iconst(types::I8, 0));
-                        let cast_mask = cast_type(state.builder, mask, param_types[i * 2 + 1]);
-                        cl_args.push(BlockArg::Value(cast_mask));
+                let mut param_type_idx = 0;
+                for reg in params.iter() {
+                    let values = state.regs[reg].load_value_chunks(state.builder);
+                    let masks = if self.options.four_state {
+                        Some(match state.regs[reg].load_mask_chunks(state.builder) {
+                            Some(masks) => masks,
+                            None => {
+                                let mut zeros = Vec::with_capacity(values.len());
+                                for value in &values {
+                                    let ty = state.builder.func.dfg.value_type(*value);
+                                    zeros.push(state.builder.ins().iconst(ty, 0));
+                                }
+                                zeros
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    for (chunk_idx, value) in values.iter().enumerate() {
+                        let cast_val = cast_type(state.builder, *value, param_types[param_type_idx]);
+                        cl_args.push(BlockArg::Value(cast_val));
+                        param_type_idx += 1;
+                        if let Some(masks) = &masks {
+                            let cast_mask =
+                                cast_type(state.builder, masks[chunk_idx], param_types[param_type_idx]);
+                            cl_args.push(BlockArg::Value(cast_mask));
+                            param_type_idx += 1;
+                        }
                     }
                 }
+                debug_assert_eq!(
+                    param_type_idx,
+                    param_types.len(),
+                    "SIR Jump arg count does not match target block param count"
+                );
                 state.builder.ins().jump(target_cl_block, &cl_args);
             }
             crate::ir::SIRTerminator::Branch {
@@ -70,53 +80,86 @@ impl SIRTranslator {
 
                 let t_param_types = collect_block_param_types(state, block_map[t_id]);
                 let f_param_types = collect_block_param_types(state, block_map[f_id]);
-                debug_assert_eq!(
-                    t_param_types.len(),
-                    if self.options.four_state {
-                        t_args.len() * 2
+                let mut cl_t_args: Vec<BlockArg> = Vec::new();
+                let mut t_param_type_idx = 0;
+                for reg in t_args.iter() {
+                    let values = state.regs[reg].load_value_chunks(state.builder);
+                    let masks = if self.options.four_state {
+                        Some(match state.regs[reg].load_mask_chunks(state.builder) {
+                            Some(masks) => masks,
+                            None => {
+                                let mut zeros = Vec::with_capacity(values.len());
+                                for value in &values {
+                                    let ty = state.builder.func.dfg.value_type(*value);
+                                    zeros.push(state.builder.ins().iconst(ty, 0));
+                                }
+                                zeros
+                            }
+                        })
                     } else {
-                        t_args.len()
-                    },
+                        None
+                    };
+                    for (chunk_idx, value) in values.iter().enumerate() {
+                        let cast_val =
+                            cast_type(state.builder, *value, t_param_types[t_param_type_idx]);
+                        cl_t_args.push(BlockArg::Value(cast_val));
+                        t_param_type_idx += 1;
+                        if let Some(masks) = &masks {
+                            let cast_mask = cast_type(
+                                state.builder,
+                                masks[chunk_idx],
+                                t_param_types[t_param_type_idx],
+                            );
+                            cl_t_args.push(BlockArg::Value(cast_mask));
+                            t_param_type_idx += 1;
+                        }
+                    }
+                }
+                debug_assert_eq!(
+                    t_param_type_idx,
+                    t_param_types.len(),
                     "SIR Branch true-arg count does not match target block param count"
                 );
-                debug_assert_eq!(
-                    f_param_types.len(),
-                    if self.options.four_state {
-                        f_args.len() * 2
+                let mut cl_f_args: Vec<BlockArg> = Vec::new();
+                let mut f_param_type_idx = 0;
+                for reg in f_args.iter() {
+                    let values = state.regs[reg].load_value_chunks(state.builder);
+                    let masks = if self.options.four_state {
+                        Some(match state.regs[reg].load_mask_chunks(state.builder) {
+                            Some(masks) => masks,
+                            None => {
+                                let mut zeros = Vec::with_capacity(values.len());
+                                for value in &values {
+                                    let ty = state.builder.func.dfg.value_type(*value);
+                                    zeros.push(state.builder.ins().iconst(ty, 0));
+                                }
+                                zeros
+                            }
+                        })
                     } else {
-                        f_args.len()
-                    },
+                        None
+                    };
+                    for (chunk_idx, value) in values.iter().enumerate() {
+                        let cast_val =
+                            cast_type(state.builder, *value, f_param_types[f_param_type_idx]);
+                        cl_f_args.push(BlockArg::Value(cast_val));
+                        f_param_type_idx += 1;
+                        if let Some(masks) = &masks {
+                            let cast_mask = cast_type(
+                                state.builder,
+                                masks[chunk_idx],
+                                f_param_types[f_param_type_idx],
+                            );
+                            cl_f_args.push(BlockArg::Value(cast_mask));
+                            f_param_type_idx += 1;
+                        }
+                    }
+                }
+                debug_assert_eq!(
+                    f_param_type_idx,
+                    f_param_types.len(),
                     "SIR Branch false-arg count does not match target block param count"
                 );
-
-                let mut cl_t_args: Vec<BlockArg> = Vec::new();
-                for (i, reg) in t_args.iter().enumerate() {
-                    let val = state.regs[reg].first_value(state.builder);
-                    let val_idx = if self.options.four_state { i * 2 } else { i };
-                    let cast_val = cast_type(state.builder, val, t_param_types[val_idx]);
-                    cl_t_args.push(BlockArg::Value(cast_val));
-                    if self.options.four_state {
-                        let mask = state.regs[reg]
-                            .first_mask(state.builder)
-                            .unwrap_or_else(|| state.builder.ins().iconst(types::I8, 0));
-                        let cast_mask = cast_type(state.builder, mask, t_param_types[i * 2 + 1]);
-                        cl_t_args.push(BlockArg::Value(cast_mask));
-                    }
-                }
-                let mut cl_f_args: Vec<BlockArg> = Vec::new();
-                for (i, reg) in f_args.iter().enumerate() {
-                    let val = state.regs[reg].first_value(state.builder);
-                    let val_idx = if self.options.four_state { i * 2 } else { i };
-                    let cast_val = cast_type(state.builder, val, f_param_types[val_idx]);
-                    cl_f_args.push(BlockArg::Value(cast_val));
-                    if self.options.four_state {
-                        let mask = state.regs[reg]
-                            .first_mask(state.builder)
-                            .unwrap_or_else(|| state.builder.ins().iconst(types::I8, 0));
-                        let cast_mask = cast_type(state.builder, mask, f_param_types[i * 2 + 1]);
-                        cl_f_args.push(BlockArg::Value(cast_mask));
-                    }
-                }
 
                 state.builder.ins().brif(
                     condition,
