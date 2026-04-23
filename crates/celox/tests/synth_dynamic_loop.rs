@@ -279,13 +279,14 @@ fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
         module Top (
             start: input logic<32>,
             count: input logic<32>,
+            sel: input logic,
             out: output logic<32>
         ) {
             always_comb {
                 out = 0;
                 for i: u32 in start..count step *= 2 {
                     out += 1;
-                    if out == 3 {
+                    if sel {
                         break;
                     }
                 }
@@ -296,10 +297,12 @@ fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
 
     let start = sim.signal("start");
     let count = sim.signal("count");
+    let sel = sim.signal("sel");
     let out = sim.signal("out");
 
     sim.set(start, 0u32);
     sim.set(count, 4u32);
+    sim.set(sel, 1u8);
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(out), 1u32.into());
 }
@@ -309,13 +312,14 @@ fn test_runtime_bounds_reverse_stalled_step_with_break_exits_cleanly(sim) {
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
+            sel: input logic,
             out: output logic<32>
         ) {
             always_comb {
                 out = 0;
                 for i: u32 in rev start..4 step += 0 {
                     out += 1;
-                    if out == 2 {
+                    if sel {
                         break;
                     }
                 }
@@ -325,11 +329,74 @@ fn test_runtime_bounds_reverse_stalled_step_with_break_exits_cleanly(sim) {
     @build Simulator::builder(code, "Top");
 
     let start = sim.signal("start");
+    let sel = sim.signal("sel");
     let out = sim.signal("out");
 
     sim.set(start, 0u32);
+    sim.set(sel, 1u8);
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(out), 1u32.into());
+}
+
+fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            count: input logic<32>,
+            sel: input logic,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in start..count step *= 2 {
+                    out += 1;
+                    if sel {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let sel = sim.signal("sel");
+
+    sim.set(start, 0u32);
+    sim.set(count, 4u32);
+    sim.set(sel, 0u8);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+fn test_runtime_bounds_reverse_stalled_step_with_break_guard_false_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            sel: input logic,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in rev start..4 step += 0 {
+                    out += 1;
+                    if sel {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let sel = sim.signal("sel");
+
+    sim.set(start, 0u32);
+    sim.set(sel, 0u8);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
 fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
