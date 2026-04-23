@@ -2,3 +2,6 @@ packages:
   - "packages/*"
   - "crates/celox-napi"
 minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  # Renovate security update: vite@6.4.2
+  - vite@6.4.2
