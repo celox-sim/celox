@@ -518,6 +518,36 @@ fn test_for_loop_expression_bound_terminal_inclusive_mul_succeeds() {
 }
 
 #[test]
+#[ignore = "upstream Veryl does not preserve reverse zero-step loops into the native testbench IR path exercised by this test"]
+fn test_for_loop_expression_bound_reverse_zero_step_singleton_succeeds() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                for _i: u32 in rev 4..=4 step += 0 {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd11);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_for_loop_dynamic_wide_bound_overflow_reports_failure() {
     let code = format!(
         r#"

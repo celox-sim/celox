@@ -1467,6 +1467,19 @@ fn exec_for_loop<B: SimBackend>(
     };
 
     if reverse {
+        if step == 0 {
+            if inclusive {
+                if end < start {
+                    return ExecResult::Continue;
+                }
+                if end == start {
+                    return step_body(sim, end);
+                }
+            } else if end <= start {
+                return ExecResult::Continue;
+            }
+            return ExecResult::Fail("non-progressing stepped for loop".to_string());
+        }
         let mut i = if inclusive {
             end
         } else if let Some(v) = end.checked_sub(step) {

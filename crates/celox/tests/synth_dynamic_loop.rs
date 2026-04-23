@@ -346,6 +346,34 @@ fn test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state(si
     assert_eq!(sim.get(out), 2u32.into());
 }
 
+fn test_runtime_bounds_reverse_zero_step_singleton_exits_cleanly(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in rev start..=count step += 0 {
+                    out = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(start, 4u32);
+    sim.set(count, 4u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 4u32.into());
+}
+
 fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim) {
     @setup { let code = r#"
         module Child (

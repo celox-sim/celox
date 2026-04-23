@@ -583,45 +583,102 @@ impl<'a> FfParser<'a> {
 
         ir_builder.switch_to_block(header_bb);
         if reverse {
-            let loop_math = self.cast_reg_width_ext(ir_builder, header_counter, math_width, loop_signed);
-            let start_math = self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
-            let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
-            ir_builder.emit(SIRInstruction::Imm(
-                step_reg,
-                crate::ir::SIRValue::new(step as u64),
-            ));
-            let threshold_reg = ir_builder.alloc_bit(math_width, loop_signed);
-            ir_builder.emit(SIRInstruction::Binary(
-                threshold_reg,
-                start_math,
-                crate::ir::BinaryOp::Add,
-                step_reg,
-            ));
-            let cond_lhs = if inclusive { start_math } else { threshold_reg };
-            let cond_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                cond_reg,
-                loop_math,
-                if loop_signed { crate::ir::BinaryOp::GeS } else { crate::ir::BinaryOp::GeU },
-                cond_lhs,
-            ));
-            let body_counter_reg = if inclusive {
-                header_counter
-            } else {
-                let body_math = ir_builder.alloc_bit(math_width, loop_signed);
+            if step == 0 {
+                let cmp_op = if loop_signed {
+                    if inclusive {
+                        crate::ir::BinaryOp::GeS
+                    } else {
+                        crate::ir::BinaryOp::GtS
+                    }
+                } else if inclusive {
+                    crate::ir::BinaryOp::GeU
+                } else {
+                    crate::ir::BinaryOp::GtU
+                };
+                let in_range = ir_builder.alloc_bit(1, false);
                 ir_builder.emit(SIRInstruction::Binary(
-                    body_math,
-                    loop_math,
-                    crate::ir::BinaryOp::Sub,
+                    in_range,
+                    header_counter,
+                    cmp_op,
+                    start_reg,
+                ));
+                let singleton = if inclusive {
+                    let eq = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        eq,
+                        header_counter,
+                        crate::ir::BinaryOp::Eq,
+                        start_reg,
+                    ));
+                    Some(eq)
+                } else {
+                    None
+                };
+                let singleton_bb = ir_builder.new_block();
+                let true_loop_bb = ir_builder.new_block();
+                let in_range_bb = ir_builder.new_block();
+                ir_builder.seal_block(SIRTerminator::Branch {
+                    cond: in_range,
+                    true_block: (in_range_bb, vec![]),
+                    false_block: (exit_bb, vec![]),
+                });
+                ir_builder.switch_to_block(in_range_bb);
+                if let Some(singleton) = singleton {
+                    ir_builder.seal_block(SIRTerminator::Branch {
+                        cond: singleton,
+                        true_block: (singleton_bb, vec![header_counter]),
+                        false_block: (true_loop_bb, vec![]),
+                    });
+                } else {
+                    ir_builder.seal_block(SIRTerminator::Jump(true_loop_bb, vec![]));
+                }
+                ir_builder.switch_to_block(true_loop_bb);
+                ir_builder.seal_block(SIRTerminator::Error(1));
+                ir_builder.switch_to_block(singleton_bb);
+                ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![header_counter]));
+            } else {
+                let loop_math =
+                    self.cast_reg_width_ext(ir_builder, header_counter, math_width, loop_signed);
+                let start_math =
+                    self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
+                let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
+                ir_builder.emit(SIRInstruction::Imm(
+                    step_reg,
+                    crate::ir::SIRValue::new(step as u64),
+                ));
+                let threshold_reg = ir_builder.alloc_bit(math_width, loop_signed);
+                ir_builder.emit(SIRInstruction::Binary(
+                    threshold_reg,
+                    start_math,
+                    crate::ir::BinaryOp::Add,
                     step_reg,
                 ));
-                self.cast_reg_width_ext(ir_builder, body_math, compare_width, loop_signed)
-            };
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: cond_reg,
-                true_block: (body_bb, vec![body_counter_reg]),
-                false_block: (exit_bb, vec![]),
-            });
+                let cond_lhs = if inclusive { start_math } else { threshold_reg };
+                let cond_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    cond_reg,
+                    loop_math,
+                    if loop_signed { crate::ir::BinaryOp::GeS } else { crate::ir::BinaryOp::GeU },
+                    cond_lhs,
+                ));
+                let body_counter_reg = if inclusive {
+                    header_counter
+                } else {
+                    let body_math = ir_builder.alloc_bit(math_width, loop_signed);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        body_math,
+                        loop_math,
+                        crate::ir::BinaryOp::Sub,
+                        step_reg,
+                    ));
+                    self.cast_reg_width_ext(ir_builder, body_math, compare_width, loop_signed)
+                };
+                ir_builder.seal_block(SIRTerminator::Branch {
+                    cond: cond_reg,
+                    true_block: (body_bb, vec![body_counter_reg]),
+                    false_block: (exit_bb, vec![]),
+                });
+            }
         } else {
             let cond_reg = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
@@ -767,6 +824,14 @@ impl<'a> FfParser<'a> {
             ir_builder.seal_block(SIRTerminator::Error(1));
         } else {
             let current_math = self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
+            if step == 0 {
+                ir_builder.seal_block(SIRTerminator::Jump(exit_bb, vec![]));
+                self.local_working_vars.remove(&stmt.var_id);
+                ir_builder.switch_to_block(exit_bb);
+                self.defined_ranges = pre_loop_defined;
+                self.dynamic_defined_vars = pre_loop_dynamic;
+                return Ok(());
+            }
             let start_math = self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
             let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Imm(

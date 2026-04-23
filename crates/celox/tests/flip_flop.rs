@@ -212,6 +212,38 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
     assert_eq!(sim.get(q), 1u32.into());
 }
 
+fn test_ff_runtime_for_reverse_zero_step_singleton_exits_cleanly(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input logic<8>,
+            count: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 8'hee;
+                for i: u32 in rev start..=count step += 0 {
+                    q = i as 8;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(start, 4u8);
+        io.set(count, 4u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 4u32.into());
+}
+
 fn test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
