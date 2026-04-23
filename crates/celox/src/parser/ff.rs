@@ -271,9 +271,7 @@ impl<'a> FfParser<'a> {
             } else {
                 &stmt.false_side
             };
-            return self.parse_statement_list(
-                side, targets, domain, convert, sources, ir_builder,
-            );
+            return self.parse_statement_list(side, targets, domain, convert, sources, ir_builder);
         }
 
         // 1. Evaluate condition expression
@@ -408,14 +406,12 @@ impl<'a> FfParser<'a> {
                 )?;
             }
             Statement::If(stmt) => {
-                return self.parse_if_statement(
-                    stmt, targets, domain, convert, sources, ir_builder,
-                );
+                return self
+                    .parse_if_statement(stmt, targets, domain, convert, sources, ir_builder);
             }
             Statement::IfReset(stmt) => {
-                return self.parse_if_reset_statement(
-                    stmt, targets, domain, convert, sources, ir_builder,
-                );
+                return self
+                    .parse_if_reset_statement(stmt, targets, domain, convert, sources, ir_builder);
             }
             Statement::Null => {}
             Statement::SystemFunctionCall(call) => {
@@ -820,14 +816,8 @@ impl<'a> FfParser<'a> {
         let prev_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, local_dynamic);
 
         self.loop_exit_blocks.push(exit_bb);
-        let body_flow = self.parse_statement_list(
-            &stmt.body,
-            targets,
-            domain,
-            convert,
-            sources,
-            ir_builder,
-        )?;
+        let body_flow =
+            self.parse_statement_list(&stmt.body, targets, domain, convert, sources, ir_builder)?;
         self.loop_exit_blocks.pop();
 
         self.defined_ranges = prev_defined;
@@ -1094,9 +1084,8 @@ impl<'a> FfParser<'a> {
 
         // 3. Then Path (Reset active)
         ir_builder.switch_to_block(then_bb);
-        let then_flow = self.parse_statement_refs(
-            true_side, targets, domain, convert, sources, ir_builder,
-        )?;
+        let then_flow =
+            self.parse_statement_refs(true_side, targets, domain, convert, sources, ir_builder)?;
         let then_defined = std::mem::replace(&mut self.defined_ranges, pre_if_defined.clone());
         let then_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, pre_if_dynamic);
         if matches!(then_flow, ControlFlow::Continue) {
@@ -1105,9 +1094,8 @@ impl<'a> FfParser<'a> {
 
         // 4. Else Path (Normal operation)
         ir_builder.switch_to_block(else_bb);
-        let else_flow = self.parse_statement_refs(
-            false_side, targets, domain, convert, sources, ir_builder,
-        )?;
+        let else_flow =
+            self.parse_statement_refs(false_side, targets, domain, convert, sources, ir_builder)?;
         let else_defined = std::mem::take(&mut self.defined_ranges);
         let else_dynamic = std::mem::take(&mut self.dynamic_defined_vars);
         if matches!(else_flow, ControlFlow::Continue) {
