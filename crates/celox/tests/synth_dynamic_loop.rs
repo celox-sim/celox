@@ -346,6 +346,42 @@ fn test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state(si
     assert_eq!(sim.get(out), 2u32.into());
 }
 
+fn test_runtime_bounds_preserve_untouched_high_bits_for_dynamic_index_reads(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            seed: input logic<2>,
+            idx: input logic<32>,
+            count: input logic<32>,
+            out: output logic
+        ) {
+            var x: logic<2>;
+            var y: logic;
+            always_comb {
+                x = seed;
+                y = 0;
+                for i: u32 in 0..count {
+                    x[0] = 0;
+                    y = x[idx];
+                }
+                out = y;
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let seed = sim.signal("seed");
+    let idx = sim.signal("idx");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(seed, 2u8);
+    sim.set(idx, 1u32);
+    sim.set(count, 1u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 1u32.into());
+}
+
 fn test_runtime_bounds_reverse_zero_step_singleton_exits_cleanly(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

@@ -632,6 +632,37 @@ fn test_for_loop_dynamic_inclusive_max_bound_runs_terminal_iteration() {
     );
 }
 
+#[test]
+fn test_for_loop_dynamic_wide_singleton_bound_runs_once() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            var bound: logic<128>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                bound = (128'd1 << 100);
+                for _i: logic<128> in bound..=bound {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd11);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Function call in testbench ──────────────────────────────────────────
 
 #[test]

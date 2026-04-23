@@ -438,35 +438,82 @@ impl SLTToSIRLowerer {
         access: &BitAccess,
     ) -> Option<RegisterId> {
         if !index.is_empty() {
-            let full_msb = env
-                .inputs
-                .keys()
-                .filter(|target| target.id == *id)
-                .map(|target| target.access.msb)
-                .max()?;
-            let rebuilt = self.rebuild_override_range(
-                builder,
-                arena,
-                cache,
-                env,
-                id,
-                &[],
-                &BitAccess::new(0, full_msb),
-            )?;
             let dynamic_off =
                 self.build_dynamic_offset(builder, arena, cache, Some(env), index, access);
-            let shifted = builder.alloc_logic(full_msb + 1);
-            builder.emit(SIRInstruction::Binary(
-                shifted,
-                rebuilt,
-                BinaryOp::Shr,
-                dynamic_off,
-            ));
-            return Some(self.cast_reg_width(
-                builder,
-                shifted,
-                access.msb - access.lsb + 1,
-            ));
+            let mut result = self.lower_input(builder, id, index, access, arena, cache, Some(env));
+            let result_width = access.msb - access.lsb + 1;
+            for (target, reg) in &env.inputs {
+                if target.id != *id {
+                    continue;
+                }
+                let range_lo = target.access.lsb.checked_sub(access.lsb);
+                let range_hi = target.access.msb.checked_sub(access.msb);
+                let (Some(range_lo), Some(range_hi)) = (range_lo, range_hi) else {
+                    continue;
+                };
+                if range_lo > range_hi {
+                    continue;
+                }
+
+                let lo_reg = builder.alloc_bit(64, false);
+                builder.emit(SIRInstruction::Imm(
+                    lo_reg,
+                    SIRValue::new(range_lo as u64),
+                ));
+                let hi_reg = builder.alloc_bit(64, false);
+                builder.emit(SIRInstruction::Imm(
+                    hi_reg,
+                    SIRValue::new(range_hi as u64),
+                ));
+
+                let ge_lo = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    ge_lo,
+                    dynamic_off,
+                    BinaryOp::GeU,
+                    lo_reg,
+                ));
+                let le_hi = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    le_hi,
+                    dynamic_off,
+                    BinaryOp::LeU,
+                    hi_reg,
+                ));
+                let in_range = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    in_range,
+                    ge_lo,
+                    BinaryOp::And,
+                    le_hi,
+                ));
+
+                let rel_off = if range_lo == 0 {
+                    dynamic_off
+                } else {
+                    let rel = builder.alloc_bit(64, false);
+                    builder.emit(SIRInstruction::Binary(
+                        rel,
+                        dynamic_off,
+                        BinaryOp::Sub,
+                        lo_reg,
+                    ));
+                    rel
+                };
+
+                let shifted = builder.alloc_logic(target.access.msb - target.access.lsb + 1);
+                builder.emit(SIRInstruction::Binary(
+                    shifted,
+                    *reg,
+                    BinaryOp::Shr,
+                    rel_off,
+                ));
+                let candidate = self.cast_reg_width(builder, shifted, result_width);
+                let merged = builder.alloc_logic(result_width);
+                builder.emit(SIRInstruction::Mux(merged, in_range, candidate, result));
+                result = merged;
+            }
+            return Some(result);
         }
         self.rebuild_override_range(builder, arena, cache, env, id, index, access)
     }

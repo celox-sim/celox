@@ -9,7 +9,7 @@ use crate::backend::get_byte_size;
 use crate::backend::traits::SimBackend;
 use crate::ir::{AbsoluteAddr, SignalRef};
 use crate::simulator::Simulator;
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     Expression, Factor, ForBound, ForRange, Op, Statement, SystemFunctionKind, TbMethod,
@@ -88,7 +88,7 @@ pub enum TestbenchStatement<B: SimBackend> {
         else_block: Vec<TestbenchStatement<B>>,
     },
     For {
-        loop_var: Option<(SignalRef, usize)>,
+        loop_var: Option<(SignalRef, usize, bool)>,
         start: LoopBound,
         end: LoopBound,
         inclusive: bool,
@@ -1157,7 +1157,9 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     .iter()
                     .filter_map(|s| self.convert_stmt(s, ec))
                     .collect();
-                let lv = self.resolve_loop_var(&s.var_id);
+                let lv = self
+                    .resolve_loop_var(&s.var_id)
+                    .map(|(sig, width)| (sig, width, s.var_type.signed));
                 match &s.range {
                     ForRange::Forward {
                         start,
@@ -1444,15 +1446,16 @@ fn eval_loop_bound<B: SimBackend>(
             let value = expr.eval_value(ptr);
             if *signed {
                 decode_signed_loop_bound(value, *width)
-                    .map(EvaluatedLoopBound::Signed)
-                    .ok_or_else(|| "dynamic signed for-loop bound exceeds host i128".to_string())
             } else {
                 match value {
-                    TbValue::U64(v) => Ok(EvaluatedLoopBound::Unsigned(v as usize)),
-                    TbValue::Wide(v) => v
-                        .to_usize()
-                        .map(EvaluatedLoopBound::Unsigned)
-                        .ok_or_else(|| "dynamic for-loop bound exceeds host usize".to_string()),
+                    TbValue::U64(v) => match usize::try_from(v) {
+                        Ok(v) => Ok(EvaluatedLoopBound::Unsigned(v)),
+                        Err(_) => Ok(EvaluatedLoopBound::UnsignedWide(BigUint::from(v))),
+                    },
+                    TbValue::Wide(v) => match v.to_usize() {
+                        Some(v) => Ok(EvaluatedLoopBound::Unsigned(v)),
+                        None => Ok(EvaluatedLoopBound::UnsignedWide(v)),
+                    },
                 }
             }
         }
@@ -1461,10 +1464,12 @@ fn eval_loop_bound<B: SimBackend>(
 
 enum EvaluatedLoopBound {
     Unsigned(usize),
+    UnsignedWide(BigUint),
     Signed(i128),
+    SignedWide(BigInt),
 }
 
-fn decode_signed_loop_bound(value: TbValue, width: usize) -> Option<i128> {
+fn decode_signed_loop_bound(value: TbValue, width: usize) -> Result<EvaluatedLoopBound, String> {
     let width = width.max(1);
     match value {
         TbValue::U64(v) => {
@@ -1473,13 +1478,16 @@ fn decode_signed_loop_bound(value: TbValue, width: usize) -> Option<i128> {
             } else {
                 (v as u128) & ((1u128 << width) - 1)
             };
-            Some(sign_extend_u128(raw, width))
+            Ok(EvaluatedLoopBound::Signed(sign_extend_u128(raw, width)))
         }
         TbValue::Wide(v) => {
             if width > 128 {
-                return None;
+                return Ok(EvaluatedLoopBound::SignedWide(sign_extend_biguint(v, width)));
             }
-            Some(sign_extend_u128(v.to_u128()?, width))
+            let raw = v
+                .to_u128()
+                .ok_or_else(|| "dynamic signed for-loop bound exceeds host i128".to_string())?;
+            Ok(EvaluatedLoopBound::Signed(sign_extend_u128(raw, width)))
         }
     }
 }
@@ -1495,6 +1503,24 @@ fn sign_extend_u128(raw: u128, width: usize) -> i128 {
         } else {
             raw as i128 - ((1u128 << width) as i128)
         }
+    }
+}
+
+fn sign_extend_biguint(raw: BigUint, width: usize) -> BigInt {
+    let width = width.max(1);
+    let sign_bit = BigUint::from(1u8) << (width - 1);
+    if raw < sign_bit {
+        BigInt::from(raw)
+    } else {
+        BigInt::from(raw) - (BigInt::from(1u8) << width)
+    }
+}
+
+fn mask_to_width(value: BigUint, width: usize) -> BigUint {
+    if width == 0 {
+        BigUint::from(0u8)
+    } else {
+        value & ((BigUint::from(1u8) << width) - BigUint::from(1u8))
     }
 }
 
@@ -1517,9 +1543,52 @@ fn sim_set_i128<B: SimBackend>(
     }
 }
 
+fn sim_set_biguint<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef, value: BigUint) {
+    if sig.width <= 64 {
+        sim_set_u64(sim, sig, value.to_u64().unwrap_or(0));
+    } else {
+        sim.set_wide(sig, mask_to_width(value, sig.width));
+    }
+}
+
+fn sim_set_bigint<B: SimBackend>(
+    sim: &mut crate::Simulator<B>,
+    sig: SignalRef,
+    width: usize,
+    value: BigInt,
+) {
+    if width <= 128 {
+        sim_set_i128(sim, sig, width, value.try_into().unwrap_or(0));
+        return;
+    }
+    if value.sign() != Sign::Minus {
+        sim_set_biguint(sim, sig, value.try_into().unwrap_or_else(|_| BigUint::from(0u8)));
+    } else {
+        let modulus = BigUint::from(1u8) << width;
+        sim_set_biguint(sim, sig, modulus - value.magnitude().clone());
+    }
+}
+
+fn as_biguint_bound(bound: &EvaluatedLoopBound) -> Option<BigUint> {
+    match bound {
+        EvaluatedLoopBound::Unsigned(v) => Some(BigUint::from(*v)),
+        EvaluatedLoopBound::UnsignedWide(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+fn as_bigint_bound(bound: &EvaluatedLoopBound) -> Option<BigInt> {
+    match bound {
+        EvaluatedLoopBound::Unsigned(v) => Some(BigInt::from(*v)),
+        EvaluatedLoopBound::Signed(v) => Some(BigInt::from(*v)),
+        EvaluatedLoopBound::SignedWide(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
 fn exec_for_loop<B: SimBackend>(
     sim: &mut Simulator<B>,
-    loop_var: &Option<(SignalRef, usize)>,
+    loop_var: &Option<(SignalRef, usize, bool)>,
     start: &LoopBound,
     end: &LoopBound,
     inclusive: bool,
@@ -1537,6 +1606,75 @@ fn exec_for_loop<B: SimBackend>(
         Err(e) => return ExecResult::Fail(e),
     };
 
+    if matches!(start, EvaluatedLoopBound::UnsignedWide(_))
+        || matches!(end, EvaluatedLoopBound::UnsignedWide(_))
+    {
+            let start = as_biguint_bound(&start).expect("unsigned big bound");
+            let end = as_biguint_bound(&end).expect("unsigned big bound");
+            let mut step_body = |sim: &mut Simulator<B>, i: BigUint| -> ExecResult {
+                if let Some((sig, _, _)) = loop_var {
+                    sim_set_biguint(sim, *sig, i);
+                }
+                exec_body(sim)
+            };
+            if reverse {
+                if inclusive {
+                    if end < start {
+                        return ExecResult::Continue;
+                    }
+                    if end == start {
+                        return step_body(sim, end);
+                    }
+                } else if end <= start {
+                    return ExecResult::Continue;
+                }
+            } else if inclusive {
+                if start > end {
+                    return ExecResult::Continue;
+                }
+                if start == end {
+                    return step_body(sim, start);
+                }
+            } else if start >= end {
+                return ExecResult::Continue;
+            }
+            return ExecResult::Fail("dynamic for-loop bound exceeds host usize".to_string());
+    }
+    if matches!(start, EvaluatedLoopBound::SignedWide(_))
+        || matches!(end, EvaluatedLoopBound::SignedWide(_))
+    {
+            let start = as_bigint_bound(&start).expect("signed big bound");
+            let end = as_bigint_bound(&end).expect("signed big bound");
+            let mut step_body = |sim: &mut Simulator<B>, i: BigInt| -> ExecResult {
+                if let Some((sig, width, _)) = loop_var {
+                    sim_set_bigint(sim, *sig, *width, i);
+                }
+                exec_body(sim)
+            };
+            if reverse {
+                if inclusive {
+                    if end < start {
+                        return ExecResult::Continue;
+                    }
+                    if end == start {
+                        return step_body(sim, end);
+                    }
+                } else if end <= start {
+                    return ExecResult::Continue;
+                }
+            } else if inclusive {
+                if start > end {
+                    return ExecResult::Continue;
+                }
+                if start == end {
+                    return step_body(sim, start);
+                }
+            } else if start >= end {
+                return ExecResult::Continue;
+            }
+            return ExecResult::Fail("dynamic signed for-loop bound exceeds host i128".to_string());
+    }
+
     let (start_signed, end_signed) = match (start, end) {
         (EvaluatedLoopBound::Unsigned(start), EvaluatedLoopBound::Unsigned(end)) => {
             (None, Some((start, end)))
@@ -1550,11 +1688,12 @@ fn exec_for_loop<B: SimBackend>(
         (EvaluatedLoopBound::Unsigned(start), EvaluatedLoopBound::Signed(end)) => {
             (Some((start as i128, end)), None)
         }
+        _ => unreachable!("wide loop bounds handled above"),
     };
 
     if let Some((start, end)) = start_signed {
         let mut step_body = |sim: &mut Simulator<B>, i: i128| -> ExecResult {
-            if let Some((sig, width)) = loop_var {
+            if let Some((sig, width, _)) = loop_var {
                 sim_set_i128(sim, *sig, *width, i);
             }
             exec_body(sim)
@@ -1631,7 +1770,7 @@ fn exec_for_loop<B: SimBackend>(
     let (start, end) = end_signed.expect("unsigned loop bounds expected");
 
     let mut step_body = |sim: &mut Simulator<B>, i: usize| -> ExecResult {
-        if let Some((sig, _)) = loop_var {
+        if let Some((sig, _, _)) = loop_var {
             sim_set_u64(sim, *sig, i as u64);
         }
         exec_body(sim)
