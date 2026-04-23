@@ -1431,7 +1431,9 @@ fn eval_loop_bound<B: SimBackend>(
             let (ptr, _) = sim.memory_as_mut_ptr();
             match expr.eval_value(ptr) {
                 TbValue::U64(v) => Ok(v as usize),
-                TbValue::Wide(v) => Ok(v.to_usize().unwrap_or(0)),
+                TbValue::Wide(v) => v
+                    .to_usize()
+                    .ok_or_else(|| "dynamic for-loop bound exceeds host usize".to_string()),
             }
         }
     }
@@ -1466,25 +1468,25 @@ fn exec_for_loop<B: SimBackend>(
 
     if reverse {
         let mut i = if inclusive {
-            end.saturating_add(step)
-        } else {
             end
+        } else if let Some(v) = end.checked_sub(step) {
+            v
+        } else {
+            return ExecResult::Continue;
         };
-        while i.checked_sub(step).is_some_and(|next| next >= start) {
-            i -= step;
+        while i >= start {
             let r = step_body(sim, i);
             if r.should_stop() {
                 return r;
             }
+            let Some(next) = i.checked_sub(step) else {
+                break;
+            };
+            i = next;
         }
     } else if let Some(op) = step_op {
         let mut i = start;
-        let end = if inclusive {
-            end.saturating_add(1)
-        } else {
-            end
-        };
-        while i < end {
+        while if inclusive { i <= end } else { i < end } {
             let r = step_body(sim, i);
             if r.should_stop() {
                 return r;
@@ -1506,17 +1508,15 @@ fn exec_for_loop<B: SimBackend>(
         }
     } else {
         let mut i = start;
-        let end = if inclusive {
-            end.saturating_add(1)
-        } else {
-            end
-        };
-        while i < end {
+        while if inclusive { i <= end } else { i < end } {
             let r = step_body(sim, i);
             if r.should_stop() {
                 return r;
             }
-            i = i.saturating_add(step);
+            let Some(next) = i.checked_add(step) else {
+                break;
+            };
+            i = next;
         }
     }
 

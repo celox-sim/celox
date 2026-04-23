@@ -488,6 +488,67 @@ fn test_for_loop_expression_bound_non_progress_reports_failure() {
     ));
 }
 
+#[test]
+fn test_for_loop_dynamic_wide_bound_overflow_reports_failure() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            var bound: logic<128>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                bound = 128'd1;
+                for _i: u32 in 0..(bound << 64) {{
+                    clk.next();
+                }}
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert!(matches!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Fail(_),
+    ));
+}
+
+#[test]
+fn test_for_loop_dynamic_inclusive_max_bound_runs_terminal_iteration() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            var bound: logic<64>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                bound = 64'hffff_ffff_ffff_ffff;
+                for _i: u64 in bound..=bound {{
+                    clk.next();
+                }}
+                $assert(cnt == 32'd11);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Function call in testbench ──────────────────────────────────────────
 
 #[test]
