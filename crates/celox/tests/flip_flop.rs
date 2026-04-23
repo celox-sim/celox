@@ -1078,6 +1078,44 @@ fn test_ff_dynamic_store_sir() {
 }
 
 #[test]
+#[ignore = "known issue: packed bit-select writes in always_ff do not match veryl backend"]
+fn test_ff_packed_bit_select_writes_regression() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        rst: input reset,
+        o: output logic<4>
+    ) {
+        always_ff (clk, rst) {
+            if_reset {
+                o = 0;
+            } else {
+                o = 0;
+                o[0] = 1;
+                o[1] = 1;
+                o[2] = 1;
+            }
+        }
+    }
+"#;
+
+    let mut sim = Simulator::builder(code, "Top")
+        .optimize(false)
+        .build_native()
+        .unwrap();
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let o = sim.signal("o");
+
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o), 7u8.into());
+}
+
+#[test]
 fn test_commit_sinking_multi_store_sir() {
     let code = r#"
     module Top (
