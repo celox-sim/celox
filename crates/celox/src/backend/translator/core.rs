@@ -982,10 +982,14 @@ impl SIRTranslator {
             };
             for &param_reg in &block.params {
                 let width = eu.register_map[&param_reg].width();
-                let ty = get_cl_type(width);
-                builder.append_block_param(cl_bb, ty);
-                if self.options.four_state {
+                let nc = width.div_ceil(64).max(1);
+                for chunk_idx in 0..nc {
+                    let chunk_width = (width - chunk_idx * 64).min(64);
+                    let ty = get_cl_type(chunk_width);
                     builder.append_block_param(cl_bb, ty);
+                    if self.options.four_state {
+                        builder.append_block_param(cl_bb, ty);
+                    }
                 }
             }
             block_map.insert(*id, cl_bb);
@@ -998,10 +1002,16 @@ impl SIRTranslator {
         for &param_reg in &entry_sir_block.params {
             if let Some(tv) = spill_reg_values.get(&param_reg) {
                 match tv {
-                    TransValue::TwoState(vals) => entry_args.push(BlockArg::Value(vals[0])),
+                    TransValue::TwoState(vals) => {
+                        for &val in vals {
+                            entry_args.push(BlockArg::Value(val));
+                        }
+                    }
                     TransValue::FourState { values, masks } => {
-                        entry_args.push(BlockArg::Value(values[0]));
-                        entry_args.push(BlockArg::Value(masks[0]));
+                        for (&value, &mask) in values.iter().zip(masks.iter()) {
+                            entry_args.push(BlockArg::Value(value));
+                            entry_args.push(BlockArg::Value(mask));
+                        }
                     }
                     TransValue::MemBacked { .. } => {
                         // Spill values are loaded from scratch — never MemBacked
@@ -1010,11 +1020,15 @@ impl SIRTranslator {
                 }
             } else {
                 let width = eu.register_map[&param_reg].width();
-                let ty = get_cl_type(width);
-                let zero = builder.ins().iconst(ty, 0);
-                entry_args.push(BlockArg::Value(zero));
-                if self.options.four_state {
+                let nc = width.div_ceil(64).max(1);
+                for chunk_idx in 0..nc {
+                    let chunk_width = (width - chunk_idx * 64).min(64);
+                    let ty = get_cl_type(chunk_width);
+                    let zero = builder.ins().iconst(ty, 0);
                     entry_args.push(BlockArg::Value(zero));
+                    if self.options.four_state {
+                        entry_args.push(BlockArg::Value(zero));
+                    }
                 }
             }
         }
@@ -1059,17 +1073,29 @@ impl SIRTranslator {
             let sir_block = &eu.blocks[id];
 
             // Map block params
-            for (i, &sir_param_reg) in sir_block.params.iter().enumerate() {
+            let mut cl_param_idx = 0;
+            for &sir_param_reg in &sir_block.params {
+                let width = eu.register_map[&sir_param_reg].width();
+                let nc = width.div_ceil(64).max(1);
                 let tval = if self.options.four_state {
-                    let val = cl_params[i * 2];
-                    let mask = cl_params[i * 2 + 1];
+                    let mut values = Vec::with_capacity(nc);
+                    let mut masks = Vec::with_capacity(nc);
+                    for _ in 0..nc {
+                        values.push(cl_params[cl_param_idx]);
+                        masks.push(cl_params[cl_param_idx + 1]);
+                        cl_param_idx += 2;
+                    }
                     TransValue::FourState {
-                        values: vec![val],
-                        masks: vec![mask],
+                        values,
+                        masks,
                     }
                 } else {
-                    let val = cl_params[i];
-                    TransValue::TwoState(vec![val])
+                    let mut values = Vec::with_capacity(nc);
+                    for _ in 0..nc {
+                        values.push(cl_params[cl_param_idx]);
+                        cl_param_idx += 1;
+                    }
+                    TransValue::TwoState(values)
                 };
                 state.regs.insert(sir_param_reg, tval);
             }

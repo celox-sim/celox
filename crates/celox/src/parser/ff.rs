@@ -419,7 +419,7 @@ impl<'a> FfParser<'a> {
             ));
         };
 
-        let (start_bound, end_bound, inclusive, step, reverse, stepped_op, start_const) = match &stmt.range {
+        let (start_bound, end_bound, inclusive, step, reverse, stepped_op, start_const, end_const) = match &stmt.range {
             ForRange::Forward {
                 start,
                 end,
@@ -433,6 +433,7 @@ impl<'a> FfParser<'a> {
                 false,
                 None,
                 Self::bound_const_value(start),
+                Self::bound_const_value(end),
             ),
             ForRange::Reverse {
                 start,
@@ -447,6 +448,7 @@ impl<'a> FfParser<'a> {
                 true,
                 None,
                 Self::bound_const_value(start),
+                Self::bound_const_value(end),
             ),
             ForRange::Stepped {
                 start,
@@ -462,10 +464,12 @@ impl<'a> FfParser<'a> {
                 false,
                 Some(*op),
                 Self::bound_const_value(start),
+                Self::bound_const_value(end),
             ),
         };
 
-        if Self::step_can_stall(reverse, stepped_op, step, start_const) {
+        let const_empty = Self::const_range_is_empty(reverse, start_const, end_const, inclusive);
+        if Self::step_can_stall(reverse, stepped_op, step, start_const) && !const_empty {
             return Err(ParserError::unsupported(
                 LoweringPhase::FfLowering,
                 "non-progressing for loop in always_ff",
@@ -1018,6 +1022,28 @@ impl<'a> FfParser<'a> {
             Some(Op::LogicShiftL | Op::ArithShiftL) => step == 0 || start_const == Some(0),
             Some(Op::Add) | None => step == 0,
             Some(_) => false,
+        }
+    }
+
+    fn const_range_is_empty(
+        reverse: bool,
+        start_const: Option<usize>,
+        end_const: Option<usize>,
+        inclusive: bool,
+    ) -> bool {
+        let (Some(start), Some(end)) = (start_const, end_const) else {
+            return false;
+        };
+        if reverse {
+            if inclusive {
+                end < start
+            } else {
+                end <= start
+            }
+        } else if inclusive {
+            start > end
+        } else {
+            start >= end
         }
     }
 }

@@ -129,6 +129,29 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
     assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
+fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 8'haa;
+                for i: u8 in 0..0 step *= 2 {
+                    q = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let q = sim.signal("q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0xaau32.into());
+}
+
 fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
