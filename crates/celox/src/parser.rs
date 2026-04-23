@@ -198,16 +198,6 @@ impl miette::Diagnostic for ParserError {
     }
 }
 
-/// Resolve the total bit width of a variable (width * kind), returning
-/// `ParserError::UnresolvedWidth` when it cannot be determined at compile time.
-pub(crate) fn resolve_width(
-    module: &veryl_analyzer::ir::Module,
-    var: &veryl_analyzer::ir::Variable,
-) -> Result<usize, ParserError> {
-    var.total_width()
-        .ok_or_else(|| ParserError::unresolved_width(module, var, var.r#type.to_string()))
-}
-
 /// Resolve the total storage size of a variable (total_width * total_array),
 /// returning `ParserError::UnresolvedWidth` when it cannot be determined.
 pub(crate) fn resolve_total_width(
