@@ -454,7 +454,27 @@ impl<'a> FfParser<'a> {
             end_reg
         };
 
-        let init_reg = if reverse { end_limit } else { start_reg };
+        let init_reg = if reverse {
+            if inclusive {
+                let step_reg = ir_builder.alloc_bit(64, false);
+                ir_builder.emit(SIRInstruction::Imm(
+                    step_reg,
+                    crate::ir::SIRValue::new(step as u64),
+                ));
+                let reg = ir_builder.alloc_bit(64, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    reg,
+                    end_reg,
+                    crate::ir::BinaryOp::Add,
+                    step_reg,
+                ));
+                reg
+            } else {
+                end_reg
+            }
+        } else {
+            start_reg
+        };
         ir_builder.emit(SIRInstruction::Store(
             convert(stmt.var_id, domain.region()),
             crate::ir::SIROffset::Static(0),
@@ -485,6 +505,7 @@ impl<'a> FfParser<'a> {
         )?;
         let loop_reg = self.stack.pop_back().unwrap();
         if reverse {
+            let loop_reg = self.cast_reg_width(ir_builder, loop_reg, 64);
             let step_reg = ir_builder.alloc_bit(64, false);
             ir_builder.emit(SIRInstruction::Imm(
                 step_reg,
@@ -550,6 +571,7 @@ impl<'a> FfParser<'a> {
                 ir_builder,
             )?;
             let loop_reg = self.stack.pop_back().unwrap();
+            let loop_reg = self.cast_reg_width(ir_builder, loop_reg, 64);
             let step_reg = ir_builder.alloc_bit(64, false);
             ir_builder.emit(SIRInstruction::Imm(
                 step_reg,

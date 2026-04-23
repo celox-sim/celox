@@ -374,7 +374,7 @@ fn test_for_loop_expression_bound_stepped() {
 }
 
 #[test]
-fn test_for_loop_expression_bound_stepped_non_progress_breaks() {
+fn test_for_loop_expression_bound_stepped_non_progress_fails() {
     let code = format!(
         r#"
         {COUNTER}
@@ -396,10 +396,10 @@ fn test_for_loop_expression_bound_stepped_non_progress_breaks() {
         }}
     "#
     );
-    assert_eq!(
+    assert!(matches!(
         Simulator::builder(&code, "t").run_test().unwrap(),
-        TestResult::Pass,
-    );
+        TestResult::Fail(_),
+    ));
 }
 
 #[test]
@@ -458,6 +458,34 @@ fn test_for_loop_expression_bound_large_arith_shift_stops_after_first_iteration(
         Simulator::builder(&code, "t").run_test().unwrap(),
         TestResult::Pass,
     );
+}
+
+#[test]
+fn test_for_loop_expression_bound_non_progress_reports_failure() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                clk.next(10);
+                for _i: u32 in 1..cnt step *= 1 {{
+                    clk.next();
+                }}
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert!(matches!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Fail(_),
+    ));
 }
 
 // ── Function call in testbench ──────────────────────────────────────────

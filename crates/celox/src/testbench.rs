@@ -1452,13 +1452,10 @@ fn exec_for_loop<B: SimBackend>(
         Ok(v) => v,
         Err(e) => return ExecResult::Fail(e),
     };
-    let mut end = match eval_loop_bound(sim, end) {
+    let end = match eval_loop_bound(sim, end) {
         Ok(v) => v,
         Err(e) => return ExecResult::Fail(e),
     };
-    if inclusive {
-        end = end.saturating_add(1);
-    }
 
     let mut step_body = |sim: &mut Simulator<B>, i: usize| -> ExecResult {
         if let Some((sig, _)) = loop_var {
@@ -1468,7 +1465,11 @@ fn exec_for_loop<B: SimBackend>(
     };
 
     if reverse {
-        let mut i = end;
+        let mut i = if inclusive {
+            end.saturating_add(step)
+        } else {
+            end
+        };
         while i.checked_sub(step).is_some_and(|next| next >= start) {
             i -= step;
             let r = step_body(sim, i);
@@ -1478,6 +1479,11 @@ fn exec_for_loop<B: SimBackend>(
         }
     } else if let Some(op) = step_op {
         let mut i = start;
+        let end = if inclusive {
+            end.saturating_add(1)
+        } else {
+            end
+        };
         while i < end {
             let r = step_body(sim, i);
             if r.should_stop() {
@@ -1494,12 +1500,17 @@ fn exec_for_loop<B: SimBackend>(
                 _ => i.saturating_add(step),
             };
             if new_i == i {
-                break;
+                return ExecResult::Fail("non-progressing stepped for loop".to_string());
             }
             i = new_i;
         }
     } else {
         let mut i = start;
+        let end = if inclusive {
+            end.saturating_add(1)
+        } else {
+            end
+        };
         while i < end {
             let r = step_body(sim, i);
             if r.should_stop() {
