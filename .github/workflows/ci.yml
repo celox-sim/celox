@@ -184,7 +184,7 @@ jobs:
         working-directory: examples/template
         run: |
           node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.devDependencies['@celox-sim/celox']='link:../../packages/celox'; pkg.devDependencies['@celox-sim/vite-plugin']='link:../../packages/vite-plugin'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
-          pnpm install --no-frozen-lockfile
+          pnpm install --ignore-workspace --no-frozen-lockfile
 
       - name: Run template tests
         working-directory: examples/template
