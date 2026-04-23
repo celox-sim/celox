@@ -653,10 +653,7 @@ impl SIRTranslator {
                             masks.push(cl_params[cl_param_idx + 1]);
                             cl_param_idx += 2;
                         }
-                        TransValue::FourState {
-                            values,
-                            masks,
-                        }
+                        TransValue::FourState { values, masks }
                     } else {
                         let mut values = Vec::with_capacity(nc);
                         for _ in 0..nc {
@@ -840,10 +837,7 @@ impl SIRTranslator {
                             masks.push(cl_params[cl_param_idx + 1]);
                             cl_param_idx += 2;
                         }
-                        TransValue::FourState {
-                            values,
-                            masks,
-                        }
+                        TransValue::FourState { values, masks }
                     } else {
                         let mut values = Vec::with_capacity(nc);
                         for _ in 0..nc {
@@ -1085,10 +1079,7 @@ impl SIRTranslator {
                         masks.push(cl_params[cl_param_idx + 1]);
                         cl_param_idx += 2;
                     }
-                    TransValue::FourState {
-                        values,
-                        masks,
-                    }
+                    TransValue::FourState { values, masks }
                 } else {
                     let mut values = Vec::with_capacity(nc);
                     for _ in 0..nc {

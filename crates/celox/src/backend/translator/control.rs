@@ -51,12 +51,16 @@ impl SIRTranslator {
                         None
                     };
                     for (chunk_idx, value) in values.iter().enumerate() {
-                        let cast_val = cast_type(state.builder, *value, param_types[param_type_idx]);
+                        let cast_val =
+                            cast_type(state.builder, *value, param_types[param_type_idx]);
                         cl_args.push(BlockArg::Value(cast_val));
                         param_type_idx += 1;
                         if let Some(masks) = &masks {
-                            let cast_mask =
-                                cast_type(state.builder, masks[chunk_idx], param_types[param_type_idx]);
+                            let cast_mask = cast_type(
+                                state.builder,
+                                masks[chunk_idx],
+                                param_types[param_type_idx],
+                            );
                             cl_args.push(BlockArg::Value(cast_mask));
                             param_type_idx += 1;
                         }

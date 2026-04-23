@@ -322,7 +322,10 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
         SLTNode::Constant(_, _, _, _) => {}
     }
 }
-fn convert_logic_path<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display, B: Hash + Eq + Clone>(
+fn convert_logic_path<
+    A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
+    B: Hash + Eq + Clone,
+>(
     lp: &LogicPath<A>,
     arena: &SLTNodeArena<A>,
     target_arena: &mut SLTNodeArena<B>,

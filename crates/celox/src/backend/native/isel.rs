@@ -203,18 +203,22 @@ pub fn lower_execution_unit(
                 for (i, arg_reg) in args.iter().enumerate() {
                     if let Some(mask_chunks) = ctx.wide_masks.get(arg_reg) {
                         for (chunk_idx, (mask_vreg, _)) in mask_chunks.iter().enumerate() {
-                            mask_phi_sources
-                                .entry(target_mir_id)
-                                .or_default()
-                                .push((pred_mir_id, i, chunk_idx, *mask_vreg));
+                            mask_phi_sources.entry(target_mir_id).or_default().push((
+                                pred_mir_id,
+                                i,
+                                chunk_idx,
+                                *mask_vreg,
+                            ));
                         }
                     } else if let Some(mask_vreg) =
                         ctx.mask_map.map.get(arg_reg.0).copied().flatten()
                     {
-                        mask_phi_sources
-                            .entry(target_mir_id)
-                            .or_default()
-                            .push((pred_mir_id, i, 0, mask_vreg));
+                        mask_phi_sources.entry(target_mir_id).or_default().push((
+                            pred_mir_id,
+                            i,
+                            0,
+                            mask_vreg,
+                        ));
                     }
                 }
             }
@@ -258,17 +262,21 @@ pub fn lower_execution_unit(
                 for (i, arg_reg) in args.iter().enumerate() {
                     if let Some(chunks) = saved_wide_regs.get(arg_reg) {
                         for (chunk_idx, (arg_vreg, _)) in chunks.iter().enumerate() {
-                            phi_sources
-                                .entry(target_mir_id)
-                                .or_default()
-                                .push((pred_mir_id, i, chunk_idx, *arg_vreg));
+                            phi_sources.entry(target_mir_id).or_default().push((
+                                pred_mir_id,
+                                i,
+                                chunk_idx,
+                                *arg_vreg,
+                            ));
                         }
                     } else {
                         let arg_vreg = reg_map.get(*arg_reg);
-                        phi_sources
-                            .entry(target_mir_id)
-                            .or_default()
-                            .push((pred_mir_id, i, 0, arg_vreg));
+                        phi_sources.entry(target_mir_id).or_default().push((
+                            pred_mir_id,
+                            i,
+                            0,
+                            arg_vreg,
+                        ));
                     }
                 }
             }

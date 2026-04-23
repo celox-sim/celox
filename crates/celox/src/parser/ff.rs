@@ -15,8 +15,8 @@ use bit_set::BitSet;
 use num_traits::ToPrimitive;
 
 use veryl_analyzer::ir::{
-    Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange, ForStatement,
-    IfResetStatement, IfStatement, Module, Op, Statement, TypeKind, ValueVariant, VarId,
+    Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange, ForStatement, IfResetStatement,
+    IfStatement, Module, Op, Statement, TypeKind, ValueVariant, VarId,
 };
 
 mod expression;
@@ -99,12 +99,7 @@ impl<'a> FfParser<'a> {
             let dest = ir_builder.alloc_bit(target_width, signed);
             if signed {
                 let sign = ir_builder.alloc_bit(1, false);
-                ir_builder.emit(SIRInstruction::Slice(
-                    sign,
-                    reg,
-                    src_width - 1,
-                    1,
-                ));
+                ir_builder.emit(SIRInstruction::Slice(sign, reg, src_width - 1, 1));
                 let pad_width = target_width - src_width;
                 let pad = if pad_width == 1 {
                     sign
@@ -122,9 +117,13 @@ impl<'a> FfParser<'a> {
             }
             dest
         } else {
-            let mask_val = (crate::BigUint::from(1u64) << target_width) - crate::BigUint::from(1u64);
+            let mask_val =
+                (crate::BigUint::from(1u64) << target_width) - crate::BigUint::from(1u64);
             let mask = ir_builder.alloc_bit(target_width, false);
-            ir_builder.emit(SIRInstruction::Imm(mask, crate::ir::SIRValue::new(mask_val)));
+            ir_builder.emit(SIRInstruction::Imm(
+                mask,
+                crate::ir::SIRValue::new(mask_val),
+            ));
             let dest = ir_builder.alloc_bit(target_width, signed);
             ir_builder.emit(SIRInstruction::Binary(
                 dest,
@@ -415,7 +414,10 @@ impl<'a> FfParser<'a> {
         match bound {
             ForBound::Const(v) => {
                 let reg = ir_builder.alloc_bit(width, signed);
-                ir_builder.emit(SIRInstruction::Imm(reg, crate::ir::SIRValue::new(*v as u64)));
+                ir_builder.emit(SIRInstruction::Imm(
+                    reg,
+                    crate::ir::SIRValue::new(*v as u64),
+                ));
                 Ok(reg)
             }
             ForBound::Expression(expr) => {
@@ -450,54 +452,55 @@ impl<'a> FfParser<'a> {
         };
         let loop_signed = stmt.var_type.signed;
 
-        let (start_bound, end_bound, inclusive, step, reverse, stepped_op, start_const, end_const) = match &stmt.range {
-            ForRange::Forward {
-                start,
-                end,
-                inclusive,
-                step,
-            } => (
-                start,
-                end,
-                *inclusive,
-                *step,
-                false,
-                None,
-                Self::bound_const_value(start),
-                Self::bound_const_value(end),
-            ),
-            ForRange::Reverse {
-                start,
-                end,
-                inclusive,
-                step,
-            } => (
-                start,
-                end,
-                *inclusive,
-                *step,
-                true,
-                None,
-                Self::bound_const_value(start),
-                Self::bound_const_value(end),
-            ),
-            ForRange::Stepped {
-                start,
-                end,
-                inclusive,
-                step,
-                op,
-            } => (
-                start,
-                end,
-                *inclusive,
-                *step,
-                false,
-                Some(*op),
-                Self::bound_const_value(start),
-                Self::bound_const_value(end),
-            ),
-        };
+        let (start_bound, end_bound, inclusive, step, reverse, stepped_op, start_const, end_const) =
+            match &stmt.range {
+                ForRange::Forward {
+                    start,
+                    end,
+                    inclusive,
+                    step,
+                } => (
+                    start,
+                    end,
+                    *inclusive,
+                    *step,
+                    false,
+                    None,
+                    Self::bound_const_value(start),
+                    Self::bound_const_value(end),
+                ),
+                ForRange::Reverse {
+                    start,
+                    end,
+                    inclusive,
+                    step,
+                } => (
+                    start,
+                    end,
+                    *inclusive,
+                    *step,
+                    true,
+                    None,
+                    Self::bound_const_value(start),
+                    Self::bound_const_value(end),
+                ),
+                ForRange::Stepped {
+                    start,
+                    end,
+                    inclusive,
+                    step,
+                    op,
+                } => (
+                    start,
+                    end,
+                    *inclusive,
+                    *step,
+                    false,
+                    Some(*op),
+                    Self::bound_const_value(start),
+                    Self::bound_const_value(end),
+                ),
+            };
 
         let const_empty = Self::const_range_is_empty(reverse, start_const, end_const, inclusive);
         let const_singleton =
@@ -558,17 +561,18 @@ impl<'a> FfParser<'a> {
         ir_builder.emit(SIRInstruction::Imm(one_reg, crate::ir::SIRValue::new(1u64)));
         let end_limit = if widen_inclusive {
             let reg = ir_builder.alloc_bit(compare_width, loop_signed);
-            ir_builder.emit(SIRInstruction::Binary(reg, end_reg, crate::ir::BinaryOp::Add, one_reg));
+            ir_builder.emit(SIRInstruction::Binary(
+                reg,
+                end_reg,
+                crate::ir::BinaryOp::Add,
+                one_reg,
+            ));
             reg
         } else {
             end_reg
         };
 
-        let init_reg = if reverse {
-            end_reg
-        } else {
-            start_reg
-        };
+        let init_reg = if reverse { end_reg } else { start_reg };
 
         let header_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
@@ -658,7 +662,11 @@ impl<'a> FfParser<'a> {
                 ir_builder.emit(SIRInstruction::Binary(
                     cond_reg,
                     loop_math,
-                    if loop_signed { crate::ir::BinaryOp::GeS } else { crate::ir::BinaryOp::GeU },
+                    if loop_signed {
+                        crate::ir::BinaryOp::GeS
+                    } else {
+                        crate::ir::BinaryOp::GeU
+                    },
                     cond_lhs,
                 ));
                 let body_counter_reg = if inclusive {
@@ -707,7 +715,8 @@ impl<'a> FfParser<'a> {
         // always_ff uses NBA semantics: this loop variable is the only value
         // made visible intra-block, while all other reads still observe the
         // pre-commit old state until WORKING -> STABLE commits happen later.
-        let visible_loop_reg = self.cast_reg_width_ext(ir_builder, body_counter, loop_width, loop_signed);
+        let visible_loop_reg =
+            self.cast_reg_width_ext(ir_builder, body_counter, loop_width, loop_signed);
         ir_builder.emit(SIRInstruction::Store(
             convert(stmt.var_id, domain.region()),
             crate::ir::SIROffset::Static(0),
@@ -748,7 +757,8 @@ impl<'a> FfParser<'a> {
                 ir_builder.switch_to_block(advance_bb);
             }
 
-            let current_math = self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
+            let current_math =
+                self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
             let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Imm(
                 step_reg,
@@ -788,7 +798,11 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 increasing_reg,
                 next_reg,
-                if loop_signed { crate::ir::BinaryOp::GtS } else { crate::ir::BinaryOp::GtU },
+                if loop_signed {
+                    crate::ir::BinaryOp::GtS
+                } else {
+                    crate::ir::BinaryOp::GtU
+                },
                 current_math,
             ));
             let end_reg = self.cast_reg_width_ext(ir_builder, end_limit, math_width, loop_signed);
@@ -814,7 +828,8 @@ impl<'a> FfParser<'a> {
                 crate::ir::BinaryOp::LogicAnd,
                 in_range_reg,
             ));
-            let next_counter = self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
+            let next_counter =
+                self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: can_continue_reg,
                 true_block: (header_bb, vec![next_counter]),
@@ -823,7 +838,8 @@ impl<'a> FfParser<'a> {
             ir_builder.switch_to_block(stall_bb);
             ir_builder.seal_block(SIRTerminator::Error(1));
         } else {
-            let current_math = self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
+            let current_math =
+                self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
             if step == 0 {
                 ir_builder.seal_block(SIRTerminator::Jump(exit_bb, vec![]));
                 self.local_working_vars.remove(&stmt.var_id);
@@ -832,7 +848,8 @@ impl<'a> FfParser<'a> {
                 self.dynamic_defined_vars = pre_loop_dynamic;
                 return Ok(());
             }
-            let start_math = self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
+            let start_math =
+                self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
             let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
             ir_builder.emit(SIRInstruction::Imm(
                 step_reg,
@@ -849,7 +866,11 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 can_continue,
                 current_math,
-                if loop_signed { crate::ir::BinaryOp::GeS } else { crate::ir::BinaryOp::GeU },
+                if loop_signed {
+                    crate::ir::BinaryOp::GeS
+                } else {
+                    crate::ir::BinaryOp::GeU
+                },
                 threshold_reg,
             ));
             let next_reg = ir_builder.alloc_bit(math_width, loop_signed);
@@ -859,12 +880,17 @@ impl<'a> FfParser<'a> {
                 crate::ir::BinaryOp::Sub,
                 step_reg,
             ));
-            let next_counter = self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
+            let next_counter =
+                self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: can_continue,
                 true_block: (
                     header_bb,
-                    vec![if inclusive { next_counter } else { body_counter }],
+                    vec![if inclusive {
+                        next_counter
+                    } else {
+                        body_counter
+                    }],
                 ),
                 false_block: (exit_bb, vec![]),
             });
@@ -1132,7 +1158,11 @@ impl<'a> FfParser<'a> {
                 .chain(s.false_side.iter())
                 .flat_map(Self::collect_assigned_var_ids)
                 .collect(),
-            Statement::For(s) => s.body.iter().flat_map(Self::collect_assigned_var_ids).collect(),
+            Statement::For(s) => s
+                .body
+                .iter()
+                .flat_map(Self::collect_assigned_var_ids)
+                .collect(),
             Statement::FunctionCall(call) => call
                 .outputs
                 .values()
@@ -1176,11 +1206,7 @@ impl<'a> FfParser<'a> {
             return false;
         };
         if reverse {
-            if inclusive {
-                end < start
-            } else {
-                end <= start
-            }
+            if inclusive { end < start } else { end <= start }
         } else if inclusive {
             start > end
         } else {

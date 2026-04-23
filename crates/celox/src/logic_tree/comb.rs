@@ -209,15 +209,16 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                 updates,
                 ..
             } => {
-                let fmt_bound = |f: &mut std::fmt::Formatter<'_>, bound: &SLTLoopBound| -> std::fmt::Result {
-                    match bound {
-                        SLTLoopBound::Const(v) => write!(f, "{v}"),
-                        SLTLoopBound::Expr(node) => {
-                            write!(f, "n{}:", node.0)?;
-                            arena.get(*node).fmt_expression(f, arena)
+                let fmt_bound =
+                    |f: &mut std::fmt::Formatter<'_>, bound: &SLTLoopBound| -> std::fmt::Result {
+                        match bound {
+                            SLTLoopBound::Const(v) => write!(f, "{v}"),
+                            SLTLoopBound::Expr(node) => {
+                                write!(f, "n{}:", node.0)?;
+                                arena.get(*node).fmt_expression(f, arena)
+                            }
                         }
-                    }
-                };
+                    };
                 write!(f, "for {loop_var} in ")?;
                 if *reverse {
                     write!(f, "rev ")?;
@@ -628,19 +629,20 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 initials,
                 updates,
             } => {
-                let map_bound = |bound: &SLTLoopBound,
-                                 cache: &mut HashMap<NodeId, NodeId>,
-                                 target_arena: &mut SLTNodeArena<B>|
-                 -> SLTLoopBound {
-                    match bound {
-                        SLTLoopBound::Const(v) => SLTLoopBound::Const(*v),
-                        SLTLoopBound::Expr(node) => SLTLoopBound::Expr(
-                            arena
-                                .get(*node)
-                                .map_addr(*node, arena, target_arena, cache, f),
-                        ),
-                    }
-                };
+                let map_bound =
+                    |bound: &SLTLoopBound,
+                     cache: &mut HashMap<NodeId, NodeId>,
+                     target_arena: &mut SLTNodeArena<B>|
+                     -> SLTLoopBound {
+                        match bound {
+                            SLTLoopBound::Const(v) => SLTLoopBound::Const(*v),
+                            SLTLoopBound::Expr(node) => SLTLoopBound::Expr(
+                                arena
+                                    .get(*node)
+                                    .map_addr(*node, arena, target_arena, cache, f),
+                            ),
+                        }
+                    };
                 let mapped_initials = initials
                     .iter()
                     .map(|update| SLTForUpdate {
@@ -837,7 +839,15 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 writeln!(
                     f,
                     "{}ForFold(loop_var={}, width={}, signed={}, inclusive={}, step={}, step_op={:?}, reverse={}, result={})",
-                    indent, loop_var, loop_width, loop_signed, inclusive, step, step_op, reverse, result
+                    indent,
+                    loop_var,
+                    loop_width,
+                    loop_signed,
+                    inclusive,
+                    step,
+                    step_op,
+                    reverse,
+                    result
                 )?;
                 writeln!(f, "{}start: {:?}", child_indent, start)?;
                 writeln!(f, "{}end: {:?}", child_indent, end)?;
@@ -1082,9 +1092,20 @@ fn eval_for_bound(
     store: &SymbolicStore<VarId>,
     bound: &ForBound,
     arena: &mut SLTNodeArena<VarId>,
-) -> Result<(SLTLoopBound, HashSet<VarAtomBase<VarId>>, BoundaryMap<VarId>), ParserError> {
+) -> Result<
+    (
+        SLTLoopBound,
+        HashSet<VarAtomBase<VarId>>,
+        BoundaryMap<VarId>,
+    ),
+    ParserError,
+> {
     match bound {
-        ForBound::Const(v) => Ok((SLTLoopBound::Const(*v), HashSet::default(), BoundaryMap::default())),
+        ForBound::Const(v) => Ok((
+            SLTLoopBound::Const(*v),
+            HashSet::default(),
+            BoundaryMap::default(),
+        )),
         ForBound::Expression(expr) => {
             let ((node, sources), bounds) = eval_expression(module, store, expr, arena, None)?;
             Ok((SLTLoopBound::Expr(node), sources, bounds))
@@ -1158,7 +1179,10 @@ fn eval_for(
                 covered[bit] = true;
             }
         }
-        let original = store.get(&id).cloned().unwrap_or_else(|| RangeStore::new(None, width));
+        let original = store
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| RangeStore::new(None, width));
         let mut bit = 0usize;
         while bit < width {
             if covered[bit] {
@@ -1187,7 +1211,18 @@ fn eval_for(
             eval_statement(module, s, b, stmt, arena)
         })?;
 
-    let (start, end, start_sources, end_sources, start_bounds, end_bounds, inclusive, step, step_op, reverse) = match &for_stmt.range {
+    let (
+        start,
+        end,
+        start_sources,
+        end_sources,
+        start_bounds,
+        end_bounds,
+        inclusive,
+        step,
+        step_op,
+        reverse,
+    ) = match &for_stmt.range {
         ForRange::Forward {
             start: range_start,
             end: range_end,
@@ -1196,8 +1231,7 @@ fn eval_for(
         } => {
             let (start, start_sources, start_bounds) =
                 eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) =
-                eval_for_bound(module, &store, range_end, arena)?;
+            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
             (
                 start,
                 end,
@@ -1219,8 +1253,7 @@ fn eval_for(
         } => {
             let (start, start_sources, start_bounds) =
                 eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) =
-                eval_for_bound(module, &store, range_end, arena)?;
+            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
             (
                 start,
                 end,
@@ -1243,8 +1276,7 @@ fn eval_for(
         } => {
             let (start, start_sources, start_bounds) =
                 eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) =
-                eval_for_bound(module, &store, range_end, arena)?;
+            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
             let step_op = match op {
                 Op::Mul => SLTStepOp::Mul,
                 Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
@@ -1289,7 +1321,10 @@ fn eval_for(
             expr: *expr,
         })
         .collect();
-    let loop_updated_vars: HashSet<_> = folded_updates.iter().map(|update| update.target.id).collect();
+    let loop_updated_vars: HashSet<_> = folded_updates
+        .iter()
+        .map(|update| update.target.id)
+        .collect();
     let initial_updates: Vec<_> = updates
         .iter()
         .map(|(target, _, _)| {

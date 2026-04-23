@@ -456,15 +456,9 @@ impl SLTToSIRLowerer {
                 }
 
                 let lo_reg = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Imm(
-                    lo_reg,
-                    SIRValue::new(range_lo as u64),
-                ));
+                builder.emit(SIRInstruction::Imm(lo_reg, SIRValue::new(range_lo as u64)));
                 let hi_reg = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Imm(
-                    hi_reg,
-                    SIRValue::new(range_hi as u64),
-                ));
+                builder.emit(SIRInstruction::Imm(hi_reg, SIRValue::new(range_hi as u64)));
 
                 let ge_lo = builder.alloc_bit(1, false);
                 builder.emit(SIRInstruction::Binary(
@@ -551,7 +545,9 @@ impl SLTToSIRLowerer {
         allow_cache: bool,
     ) -> RegisterId {
         // Fast path: if all parts are constants, fold into a single wide Imm.
-        if env.is_none() && let Some(reg) = self.try_fold_const_concat(builder, parts, arena) {
+        if env.is_none()
+            && let Some(reg) = self.try_fold_const_concat(builder, parts, arena)
+        {
             return reg;
         }
 
@@ -661,11 +657,21 @@ impl SLTToSIRLowerer {
         builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
 
         let dest = builder.alloc_logic(width);
-        builder.emit(SIRInstruction::Binary(dest, shifted, BinaryOp::And, mask_reg));
+        builder.emit(SIRInstruction::Binary(
+            dest,
+            shifted,
+            BinaryOp::And,
+            mask_reg,
+        ));
         dest
     }
 
-    fn cast_reg_width<A>(&self, builder: &mut SIRBuilder<A>, reg: RegisterId, width: usize) -> RegisterId {
+    fn cast_reg_width<A>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        reg: RegisterId,
+        width: usize,
+    ) -> RegisterId {
         self.cast_reg_width_ext(builder, reg, width, false)
     }
 
@@ -683,8 +689,11 @@ impl SLTToSIRLowerer {
         if current_width < width {
             let pad_width = width - current_width;
             let pad = if signed {
-                let sign =
-                    self.slice_reg(builder, reg, &BitAccess::new(current_width - 1, current_width - 1));
+                let sign = self.slice_reg(
+                    builder,
+                    reg,
+                    &BitAccess::new(current_width - 1, current_width - 1),
+                );
                 if pad_width == 1 {
                     sign
                 } else {
@@ -712,7 +721,11 @@ impl SLTToSIRLowerer {
         builder.emit(SIRInstruction::Binary(masked, reg, BinaryOp::And, mask_reg));
         let sliced = self.slice_reg(builder, masked, &BitAccess::new(0, width - 1));
         let dest = builder.alloc_bit(width, signed);
-        builder.emit(SIRInstruction::Unary(dest, crate::ir::UnaryOp::Ident, sliced));
+        builder.emit(SIRInstruction::Unary(
+            dest,
+            crate::ir::UnaryOp::Ident,
+            sliced,
+        ));
         dest
     }
 
@@ -804,10 +817,24 @@ impl SLTToSIRLowerer {
             counter_width
         };
 
-        let start_reg =
-            self.lower_bound(builder, start, loop_width, compare_width, loop_signed, arena, cache);
-        let end_reg =
-            self.lower_bound(builder, end, loop_width, compare_width, loop_signed, arena, cache);
+        let start_reg = self.lower_bound(
+            builder,
+            start,
+            loop_width,
+            compare_width,
+            loop_signed,
+            arena,
+            cache,
+        );
+        let end_reg = self.lower_bound(
+            builder,
+            end,
+            loop_width,
+            compare_width,
+            loop_signed,
+            arena,
+            cache,
+        );
         let one_reg = builder.alloc_bit(compare_width, loop_signed);
         builder.emit(SIRInstruction::Imm(one_reg, SIRValue::new(1u64)));
         let end_limit = if widen_inclusive {
@@ -875,7 +902,11 @@ impl SLTToSIRLowerer {
         if reverse {
             if step == 0 {
                 let cmp_op = if loop_signed {
-                    if inclusive { BinaryOp::GeS } else { BinaryOp::GtS }
+                    if inclusive {
+                        BinaryOp::GeS
+                    } else {
+                        BinaryOp::GtS
+                    }
                 } else if inclusive {
                     BinaryOp::GeU
                 } else {
@@ -939,7 +970,10 @@ impl SLTToSIRLowerer {
                 let start_ext =
                     self.cast_reg_width_ext(builder, start_reg, reverse_width, loop_signed);
                 let reverse_step = builder.alloc_bit(reverse_width, loop_signed);
-                builder.emit(SIRInstruction::Imm(reverse_step, SIRValue::new(step as u64)));
+                builder.emit(SIRInstruction::Imm(
+                    reverse_step,
+                    SIRValue::new(step as u64),
+                ));
                 let threshold = builder.alloc_bit(reverse_width, loop_signed);
                 builder.emit(SIRInstruction::Binary(
                     threshold,
@@ -951,7 +985,11 @@ impl SLTToSIRLowerer {
                 builder.emit(SIRInstruction::Binary(
                     cond,
                     header_counter_ext,
-                    if loop_signed { BinaryOp::GeS } else { BinaryOp::GeU },
+                    if loop_signed {
+                        BinaryOp::GeS
+                    } else {
+                        BinaryOp::GeU
+                    },
                     if inclusive { start_ext } else { threshold },
                 ));
                 let body_counter_reg = if inclusive {
@@ -1040,46 +1078,57 @@ impl SLTToSIRLowerer {
             if step == 0 {
                 builder.seal_block(SIRTerminator::Jump(exit_block, next_states.clone()));
             } else {
-            let reverse_width = Self::step_math_width(compare_width, SLTStepOp::Add, step);
-            let current_math =
-                self.cast_reg_width_ext(builder, body_counter, reverse_width, loop_signed);
-            let start_math =
-                self.cast_reg_width_ext(builder, start_reg, reverse_width, loop_signed);
-            let reverse_step = builder.alloc_bit(reverse_width, loop_signed);
-            builder.emit(SIRInstruction::Imm(reverse_step, SIRValue::new(step as u64)));
-            let threshold = builder.alloc_bit(reverse_width, loop_signed);
-            builder.emit(SIRInstruction::Binary(
-                threshold,
-                start_math,
-                BinaryOp::Add,
-                reverse_step,
-            ));
-            let can_continue = builder.alloc_bit(1, false);
-            builder.emit(SIRInstruction::Binary(
-                can_continue,
-                current_math,
-                if loop_signed { BinaryOp::GeS } else { BinaryOp::GeU },
-                threshold,
-            ));
-            let next_counter_ext = builder.alloc_bit(reverse_width, loop_signed);
-            builder.emit(SIRInstruction::Binary(
-                next_counter_ext,
-                current_math,
-                BinaryOp::Sub,
-                reverse_step,
-            ));
-            let next_counter =
-                self.cast_reg_width_ext(builder, next_counter_ext, compare_width, loop_signed);
-            builder.seal_block(SIRTerminator::Branch {
-                cond: can_continue,
-                true_block: (
-                    header_block,
-                    std::iter::once(if inclusive { next_counter } else { body_counter })
+                let reverse_width = Self::step_math_width(compare_width, SLTStepOp::Add, step);
+                let current_math =
+                    self.cast_reg_width_ext(builder, body_counter, reverse_width, loop_signed);
+                let start_math =
+                    self.cast_reg_width_ext(builder, start_reg, reverse_width, loop_signed);
+                let reverse_step = builder.alloc_bit(reverse_width, loop_signed);
+                builder.emit(SIRInstruction::Imm(
+                    reverse_step,
+                    SIRValue::new(step as u64),
+                ));
+                let threshold = builder.alloc_bit(reverse_width, loop_signed);
+                builder.emit(SIRInstruction::Binary(
+                    threshold,
+                    start_math,
+                    BinaryOp::Add,
+                    reverse_step,
+                ));
+                let can_continue = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    can_continue,
+                    current_math,
+                    if loop_signed {
+                        BinaryOp::GeS
+                    } else {
+                        BinaryOp::GeU
+                    },
+                    threshold,
+                ));
+                let next_counter_ext = builder.alloc_bit(reverse_width, loop_signed);
+                builder.emit(SIRInstruction::Binary(
+                    next_counter_ext,
+                    current_math,
+                    BinaryOp::Sub,
+                    reverse_step,
+                ));
+                let next_counter =
+                    self.cast_reg_width_ext(builder, next_counter_ext, compare_width, loop_signed);
+                builder.seal_block(SIRTerminator::Branch {
+                    cond: can_continue,
+                    true_block: (
+                        header_block,
+                        std::iter::once(if inclusive {
+                            next_counter
+                        } else {
+                            body_counter
+                        })
                         .chain(next_states.iter().copied())
                         .collect(),
-                ),
-                false_block: (exit_block, next_states.clone()),
-            });
+                    ),
+                    false_block: (exit_block, next_states.clone()),
+                });
             }
         } else {
             if inclusive {
@@ -1110,7 +1159,12 @@ impl SLTToSIRLowerer {
                 SLTStepOp::Mul => BinaryOp::Mul,
                 SLTStepOp::Shl => BinaryOp::Shl,
             };
-            builder.emit(SIRInstruction::Binary(next_math, current_math, op, step_math));
+            builder.emit(SIRInstruction::Binary(
+                next_math,
+                current_math,
+                op,
+                step_math,
+            ));
 
             let progress = builder.alloc_bit(1, false);
             builder.emit(SIRInstruction::Binary(

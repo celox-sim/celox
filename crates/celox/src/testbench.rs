@@ -1482,7 +1482,9 @@ fn decode_signed_loop_bound(value: TbValue, width: usize) -> Result<EvaluatedLoo
         }
         TbValue::Wide(v) => {
             if width > 128 {
-                return Ok(EvaluatedLoopBound::SignedWide(sign_extend_biguint(v, width)));
+                return Ok(EvaluatedLoopBound::SignedWide(sign_extend_biguint(
+                    v, width,
+                )));
             }
             let raw = v
                 .to_u128()
@@ -1562,7 +1564,11 @@ fn sim_set_bigint<B: SimBackend>(
         return;
     }
     if value.sign() != Sign::Minus {
-        sim_set_biguint(sim, sig, value.try_into().unwrap_or_else(|_| BigUint::from(0u8)));
+        sim_set_biguint(
+            sim,
+            sig,
+            value.try_into().unwrap_or_else(|_| BigUint::from(0u8)),
+        );
     } else {
         let modulus = BigUint::from(1u8) << width;
         sim_set_biguint(sim, sig, modulus - value.magnitude().clone());
@@ -1609,70 +1615,70 @@ fn exec_for_loop<B: SimBackend>(
     if matches!(start, EvaluatedLoopBound::UnsignedWide(_))
         || matches!(end, EvaluatedLoopBound::UnsignedWide(_))
     {
-            let start = as_biguint_bound(&start).expect("unsigned big bound");
-            let end = as_biguint_bound(&end).expect("unsigned big bound");
-            let mut step_body = |sim: &mut Simulator<B>, i: BigUint| -> ExecResult {
-                if let Some((sig, _, _)) = loop_var {
-                    sim_set_biguint(sim, *sig, i);
-                }
-                exec_body(sim)
-            };
-            if reverse {
-                if inclusive {
-                    if end < start {
-                        return ExecResult::Continue;
-                    }
-                    if end == start {
-                        return step_body(sim, end);
-                    }
-                } else if end <= start {
+        let start = as_biguint_bound(&start).expect("unsigned big bound");
+        let end = as_biguint_bound(&end).expect("unsigned big bound");
+        let mut step_body = |sim: &mut Simulator<B>, i: BigUint| -> ExecResult {
+            if let Some((sig, _, _)) = loop_var {
+                sim_set_biguint(sim, *sig, i);
+            }
+            exec_body(sim)
+        };
+        if reverse {
+            if inclusive {
+                if end < start {
                     return ExecResult::Continue;
                 }
-            } else if inclusive {
-                if start > end {
-                    return ExecResult::Continue;
+                if end == start {
+                    return step_body(sim, end);
                 }
-                if start == end {
-                    return step_body(sim, start);
-                }
-            } else if start >= end {
+            } else if end <= start {
                 return ExecResult::Continue;
             }
-            return ExecResult::Fail("dynamic for-loop bound exceeds host usize".to_string());
+        } else if inclusive {
+            if start > end {
+                return ExecResult::Continue;
+            }
+            if start == end {
+                return step_body(sim, start);
+            }
+        } else if start >= end {
+            return ExecResult::Continue;
+        }
+        return ExecResult::Fail("dynamic for-loop bound exceeds host usize".to_string());
     }
     if matches!(start, EvaluatedLoopBound::SignedWide(_))
         || matches!(end, EvaluatedLoopBound::SignedWide(_))
     {
-            let start = as_bigint_bound(&start).expect("signed big bound");
-            let end = as_bigint_bound(&end).expect("signed big bound");
-            let mut step_body = |sim: &mut Simulator<B>, i: BigInt| -> ExecResult {
-                if let Some((sig, width, _)) = loop_var {
-                    sim_set_bigint(sim, *sig, *width, i);
-                }
-                exec_body(sim)
-            };
-            if reverse {
-                if inclusive {
-                    if end < start {
-                        return ExecResult::Continue;
-                    }
-                    if end == start {
-                        return step_body(sim, end);
-                    }
-                } else if end <= start {
+        let start = as_bigint_bound(&start).expect("signed big bound");
+        let end = as_bigint_bound(&end).expect("signed big bound");
+        let mut step_body = |sim: &mut Simulator<B>, i: BigInt| -> ExecResult {
+            if let Some((sig, width, _)) = loop_var {
+                sim_set_bigint(sim, *sig, *width, i);
+            }
+            exec_body(sim)
+        };
+        if reverse {
+            if inclusive {
+                if end < start {
                     return ExecResult::Continue;
                 }
-            } else if inclusive {
-                if start > end {
-                    return ExecResult::Continue;
+                if end == start {
+                    return step_body(sim, end);
                 }
-                if start == end {
-                    return step_body(sim, start);
-                }
-            } else if start >= end {
+            } else if end <= start {
                 return ExecResult::Continue;
             }
-            return ExecResult::Fail("dynamic signed for-loop bound exceeds host i128".to_string());
+        } else if inclusive {
+            if start > end {
+                return ExecResult::Continue;
+            }
+            if start == end {
+                return step_body(sim, start);
+            }
+        } else if start >= end {
+            return ExecResult::Continue;
+        }
+        return ExecResult::Fail("dynamic signed for-loop bound exceeds host i128".to_string());
     }
 
     let (start_signed, end_signed) = match (start, end) {
