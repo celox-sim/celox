@@ -56,7 +56,11 @@ pub enum ClockCount {
 
 pub enum LoopBound {
     Static(usize),
-    Dynamic(CompiledExpr),
+    Dynamic {
+        expr: CompiledExpr,
+        width: usize,
+        signed: bool,
+    },
 }
 
 pub enum TestbenchStatement<B: SimBackend> {
@@ -1115,7 +1119,11 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         ) -> LoopBound {
             match bound {
                 ForBound::Const(x) => LoopBound::Static(*x),
-                ForBound::Expression(expr) => LoopBound::Dynamic(ec.compile(expr.as_ref())),
+                ForBound::Expression(expr) => LoopBound::Dynamic {
+                    expr: ec.compile(expr.as_ref()),
+                    width: expr.comptime().expr_context.width,
+                    signed: expr.comptime().expr_context.signed,
+                },
             }
         }
 
@@ -1423,19 +1431,89 @@ fn exec_clock_next<B: SimBackend>(
 fn eval_loop_bound<B: SimBackend>(
     sim: &mut Simulator<B>,
     bound: &LoopBound,
-) -> Result<usize, String> {
+) -> Result<EvaluatedLoopBound, String> {
     match bound {
-        LoopBound::Static(v) => Ok(*v),
-        LoopBound::Dynamic(expr) => {
+        LoopBound::Static(v) => Ok(EvaluatedLoopBound::Unsigned(*v)),
+        LoopBound::Dynamic {
+            expr,
+            width,
+            signed,
+        } => {
             sim.eval_comb().map_err(|e| format!("eval_comb: {e}"))?;
             let (ptr, _) = sim.memory_as_mut_ptr();
-            match expr.eval_value(ptr) {
-                TbValue::U64(v) => Ok(v as usize),
-                TbValue::Wide(v) => v
-                    .to_usize()
-                    .ok_or_else(|| "dynamic for-loop bound exceeds host usize".to_string()),
+            let value = expr.eval_value(ptr);
+            if *signed {
+                decode_signed_loop_bound(value, *width)
+                    .map(EvaluatedLoopBound::Signed)
+                    .ok_or_else(|| "dynamic signed for-loop bound exceeds host i128".to_string())
+            } else {
+                match value {
+                    TbValue::U64(v) => Ok(EvaluatedLoopBound::Unsigned(v as usize)),
+                    TbValue::Wide(v) => v
+                        .to_usize()
+                        .map(EvaluatedLoopBound::Unsigned)
+                        .ok_or_else(|| "dynamic for-loop bound exceeds host usize".to_string()),
+                }
             }
         }
+    }
+}
+
+enum EvaluatedLoopBound {
+    Unsigned(usize),
+    Signed(i128),
+}
+
+fn decode_signed_loop_bound(value: TbValue, width: usize) -> Option<i128> {
+    let width = width.max(1);
+    match value {
+        TbValue::U64(v) => {
+            let raw = if width >= 64 {
+                v as u128
+            } else {
+                (v as u128) & ((1u128 << width) - 1)
+            };
+            Some(sign_extend_u128(raw, width))
+        }
+        TbValue::Wide(v) => {
+            if width > 128 {
+                return None;
+            }
+            Some(sign_extend_u128(v.to_u128()?, width))
+        }
+    }
+}
+
+fn sign_extend_u128(raw: u128, width: usize) -> i128 {
+    let width = width.max(1);
+    if width >= 128 {
+        raw as i128
+    } else {
+        let sign_bit = 1u128 << (width - 1);
+        if raw & sign_bit == 0 {
+            raw as i128
+        } else {
+            raw as i128 - ((1u128 << width) as i128)
+        }
+    }
+}
+
+fn sim_set_i128<B: SimBackend>(
+    sim: &mut crate::Simulator<B>,
+    sig: SignalRef,
+    width: usize,
+    value: i128,
+) {
+    if width <= 64 {
+        sim_set_u64(sim, sig, value as u64);
+    } else if width <= 128 {
+        sim.set_wide(sig, BigUint::from(value as u128));
+    } else if value >= 0 {
+        sim.set_wide(sig, BigUint::from(value as u128));
+    } else {
+        let modulus = BigUint::from(1u8) << width;
+        let mag = BigUint::from(value.unsigned_abs());
+        sim.set_wide(sig, modulus - mag);
     }
 }
 
@@ -1458,6 +1536,99 @@ fn exec_for_loop<B: SimBackend>(
         Ok(v) => v,
         Err(e) => return ExecResult::Fail(e),
     };
+
+    let (start_signed, end_signed) = match (start, end) {
+        (EvaluatedLoopBound::Unsigned(start), EvaluatedLoopBound::Unsigned(end)) => {
+            (None, Some((start, end)))
+        }
+        (EvaluatedLoopBound::Signed(start), EvaluatedLoopBound::Signed(end)) => {
+            (Some((start, end)), None)
+        }
+        (EvaluatedLoopBound::Signed(start), EvaluatedLoopBound::Unsigned(end)) => {
+            (Some((start, end as i128)), None)
+        }
+        (EvaluatedLoopBound::Unsigned(start), EvaluatedLoopBound::Signed(end)) => {
+            (Some((start as i128, end)), None)
+        }
+    };
+
+    if let Some((start, end)) = start_signed {
+        let mut step_body = |sim: &mut Simulator<B>, i: i128| -> ExecResult {
+            if let Some((sig, width)) = loop_var {
+                sim_set_i128(sim, *sig, *width, i);
+            }
+            exec_body(sim)
+        };
+
+        let step_i = step as i128;
+        if reverse {
+            if step == 0 {
+                if inclusive {
+                    if end < start {
+                        return ExecResult::Continue;
+                    }
+                    if end == start {
+                        return step_body(sim, end);
+                    }
+                } else if end <= start {
+                    return ExecResult::Continue;
+                }
+                return ExecResult::Fail("non-progressing stepped for loop".to_string());
+            }
+            let mut i = if inclusive { end } else { end - step_i };
+            while i >= start {
+                let r = step_body(sim, i);
+                if r.should_stop() {
+                    return r;
+                }
+                let Some(next) = i.checked_sub(step_i) else {
+                    break;
+                };
+                i = next;
+            }
+        } else if let Some(op) = step_op {
+            let mut i = start;
+            while if inclusive { i <= end } else { i < end } {
+                let r = step_body(sim, i);
+                if r.should_stop() {
+                    return r;
+                }
+                if inclusive && i == end {
+                    break;
+                }
+                let new_i = match op {
+                    Op::Mul => i.saturating_mul(step_i),
+                    Op::LogicShiftL | Op::ArithShiftL => {
+                        if step >= i128::BITS as usize {
+                            break;
+                        }
+                        i.checked_shl(step as u32).unwrap_or(0)
+                    }
+                    _ => i.saturating_add(step_i),
+                };
+                if new_i == i {
+                    return ExecResult::Fail("non-progressing stepped for loop".to_string());
+                }
+                i = new_i;
+            }
+        } else {
+            let mut i = start;
+            while if inclusive { i <= end } else { i < end } {
+                let r = step_body(sim, i);
+                if r.should_stop() {
+                    return r;
+                }
+                let Some(next) = i.checked_add(step_i) else {
+                    break;
+                };
+                i = next;
+            }
+        }
+
+        return ExecResult::Continue;
+    }
+
+    let (start, end) = end_signed.expect("unsigned loop bounds expected");
 
     let mut step_body = |sim: &mut Simulator<B>, i: usize| -> ExecResult {
         if let Some((sig, _)) = loop_var {

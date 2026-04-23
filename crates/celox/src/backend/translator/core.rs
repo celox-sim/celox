@@ -1357,17 +1357,27 @@ impl SIRTranslator {
     ) -> Vec<BlockArg> {
         let param_types = collect_block_param_types(state, target);
         let mut cl_args: Vec<BlockArg> = Vec::new();
-        for (i, reg) in args.iter().enumerate() {
-            let val = state.regs[reg].first_value(state.builder);
-            let val_idx = if self.options.four_state { i * 2 } else { i };
-            let cast_val = cast_type(state.builder, val, param_types[val_idx]);
-            cl_args.push(BlockArg::Value(cast_val));
-            if self.options.four_state {
-                let mask = state.regs[reg]
-                    .first_mask(state.builder)
-                    .unwrap_or_else(|| state.builder.ins().iconst(types::I8, 0));
-                let cast_mask = cast_type(state.builder, mask, param_types[i * 2 + 1]);
-                cl_args.push(BlockArg::Value(cast_mask));
+        let mut param_idx = 0;
+        for reg in args {
+            let values = state.regs[reg].load_value_chunks(state.builder);
+            let masks = if self.options.four_state {
+                state.regs[reg].load_mask_chunks(state.builder)
+            } else {
+                None
+            };
+            for (chunk_idx, value) in values.into_iter().enumerate() {
+                let cast_val = cast_type(state.builder, value, param_types[param_idx]);
+                cl_args.push(BlockArg::Value(cast_val));
+                param_idx += 1;
+                if self.options.four_state {
+                    let mask = masks
+                        .as_ref()
+                        .and_then(|masks| masks.get(chunk_idx).copied())
+                        .unwrap_or_else(|| state.builder.ins().iconst(types::I8, 0));
+                    let cast_mask = cast_type(state.builder, mask, param_types[param_idx]);
+                    cl_args.push(BlockArg::Value(cast_mask));
+                    param_idx += 1;
+                }
             }
         }
         cl_args
