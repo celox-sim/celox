@@ -258,6 +258,37 @@ fn test_for_loop_rev() {
 }
 
 #[test]
+fn test_for_loop_break_exits_testbench_loop() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen;
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                for i: u32 in 0..10 {{
+                    if i == 3 {{
+                        break;
+                    }}
+                    clk.next();
+                }}
+                $assert(cnt == 32'd3);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_for_loop_expression_bound_forward() {
     let code = format!(
         r#"

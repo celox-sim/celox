@@ -101,6 +101,7 @@ pub enum TestbenchStatement<B: SimBackend> {
         dst: SignalRef,
         expr: CompiledExpr,
     },
+    Break,
     Finish,
 }
 
@@ -1219,6 +1220,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         expr: compiled,
                     })
             }
+            Statement::Break => Some(TestbenchStatement::Break),
             Statement::FunctionCall(fc) => self.convert_function_call(fc, ec),
             _ => None,
         }
@@ -1389,6 +1391,7 @@ fn extract_source_location(
 
 enum ExecResult {
     Continue,
+    Break,
     Finished,
     Fail(String),
 }
@@ -1402,7 +1405,7 @@ impl ExecResult {
 impl From<ExecResult> for TestResult {
     fn from(r: ExecResult) -> Self {
         match r {
-            ExecResult::Continue | ExecResult::Finished => TestResult::Pass,
+            ExecResult::Continue | ExecResult::Break | ExecResult::Finished => TestResult::Pass,
             ExecResult::Fail(m) => TestResult::Fail(m),
         }
     }
@@ -1721,6 +1724,9 @@ fn exec_for_loop<B: SimBackend>(
             let mut i = if inclusive { end } else { end - step_i };
             while i >= start {
                 let r = step_body(sim, i);
+                if matches!(r, ExecResult::Break) {
+                    return ExecResult::Continue;
+                }
                 if r.should_stop() {
                     return r;
                 }
@@ -1733,6 +1739,9 @@ fn exec_for_loop<B: SimBackend>(
             let mut i = start;
             while if inclusive { i <= end } else { i < end } {
                 let r = step_body(sim, i);
+                if matches!(r, ExecResult::Break) {
+                    return ExecResult::Continue;
+                }
                 if r.should_stop() {
                     return r;
                 }
@@ -1758,6 +1767,9 @@ fn exec_for_loop<B: SimBackend>(
             let mut i = start;
             while if inclusive { i <= end } else { i < end } {
                 let r = step_body(sim, i);
+                if matches!(r, ExecResult::Break) {
+                    return ExecResult::Continue;
+                }
                 if r.should_stop() {
                     return r;
                 }
@@ -1803,6 +1815,9 @@ fn exec_for_loop<B: SimBackend>(
         };
         while i >= start {
             let r = step_body(sim, i);
+            if matches!(r, ExecResult::Break) {
+                return ExecResult::Continue;
+            }
             if r.should_stop() {
                 return r;
             }
@@ -1815,6 +1830,9 @@ fn exec_for_loop<B: SimBackend>(
         let mut i = start;
         while if inclusive { i <= end } else { i < end } {
             let r = step_body(sim, i);
+            if matches!(r, ExecResult::Break) {
+                return ExecResult::Continue;
+            }
             if r.should_stop() {
                 return r;
             }
@@ -1840,6 +1858,9 @@ fn exec_for_loop<B: SimBackend>(
         let mut i = start;
         while if inclusive { i <= end } else { i < end } {
             let r = step_body(sim, i);
+            if matches!(r, ExecResult::Break) {
+                return ExecResult::Continue;
+            }
             if r.should_stop() {
                 return r;
             }
@@ -1987,6 +2008,7 @@ fn exec_one_detailed<B: SimBackend>(
             }
             ExecResult::Continue
         }
+        TestbenchStatement::Break => ExecResult::Break,
         TestbenchStatement::Finish => ExecResult::Finished,
     }
 }
@@ -2080,6 +2102,7 @@ fn exec_one<B: SimBackend>(sim: &mut Simulator<B>, stmt: &TestbenchStatement<B>)
             }
             ExecResult::Continue
         }
+        TestbenchStatement::Break => ExecResult::Break,
         TestbenchStatement::Finish => ExecResult::Finished,
     }
 }
