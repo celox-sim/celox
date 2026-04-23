@@ -29,6 +29,50 @@
   "packageRules": [
     {
       "matchManagers": [
+        "cargo",
+        "npm"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "minimumReleaseAge": "3 days",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "labels": [
+        "dependencies"
+      ]
+    },
+    {
+      "matchManagers": [
+        "npm"
+      ],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "pinDigests": true,
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "minimumReleaseAge": "3 days",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "labels": [
+        "dependencies"
+      ]
+    },
+    {
+      "matchManagers": [
         "custom.regex"
       ],
       "matchPackageNames": [
@@ -37,6 +81,10 @@
       "groupName": "rust stable toolchain",
       "commitMessageTopic": "Rust toolchain",
       "rangeStrategy": "replace",
+      "minimumReleaseAge": "3 days",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
       "labels": [
         "dependencies",
         "rust"
