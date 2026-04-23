@@ -255,6 +255,37 @@ fn test_runtime_for_loop_state_does_not_trigger_scheduler_loop() {
 }
 
 #[test]
+fn test_runtime_for_break_condition_on_accumulator_does_not_trigger_scheduler_loop() {
+    let code = r#"
+        module Top (
+            count: input logic<8>,
+            o: output logic<8>
+        ) {
+            var sum: logic<8>;
+            always_comb {
+                sum = 0;
+                for i: u32 in 0..count {
+                    sum += 1;
+                    if sum == 3 {
+                        break;
+                    }
+                }
+            }
+            always_comb {
+                o = sum;
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "Top").build();
+    assert!(
+        result.is_ok(),
+        "runtime ForFold break-state must not be treated as a scheduler loop: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn test_runtime_for_loop_external_feedback_is_still_scheduler_loop() {
     let code = r#"
         module Top (

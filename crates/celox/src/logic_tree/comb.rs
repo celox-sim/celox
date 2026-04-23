@@ -1659,7 +1659,13 @@ fn eval_for(
     for (target, _expr, sources) in updates {
         let mut all_sources = start_sources.clone();
         all_sources.extend(end_sources.iter().copied());
-        all_sources.extend(loop_state.continue_sources.iter().copied());
+        all_sources.extend(
+            loop_state
+                .continue_sources
+                .iter()
+                .copied()
+                .filter(|src| src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)),
+        );
         all_sources.extend(
             sources
                 .into_iter()
