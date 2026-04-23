@@ -690,6 +690,57 @@ fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim)
     assert_eq!(sim.get(out), 23u32.into());
 }
 
+fn test_runtime_break_condition_dependency_across_module_boundary(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Child (
+            sel: input logic,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            var acc: logic<32>;
+            always_comb {
+                acc = 0;
+                for i: u32 in 0..count {
+                    acc += 1;
+                    if sel {
+                        break;
+                    }
+                }
+                out = acc;
+            }
+        }
+
+        module Top (
+            sel: input logic,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            var child_out: logic<32>;
+            inst u_child: Child (
+                sel: sel,
+                count: count,
+                out: child_out
+            );
+            assign out = child_out;
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let sel = sim.signal("sel");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(sel, false);
+    sim.set(count, 4u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 4u32.into());
+
+    sim.set(sel, true);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 1u32.into());
+}
+
 fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

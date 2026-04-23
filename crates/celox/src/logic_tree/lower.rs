@@ -1101,6 +1101,22 @@ impl SLTToSIRLowerer {
 
         if reverse {
             if step == 0 {
+                if inclusive {
+                    let error_block = builder.new_block();
+                    let terminal = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Binary(
+                        terminal,
+                        body_counter,
+                        BinaryOp::Eq,
+                        start_reg,
+                    ));
+                    builder.seal_block(SIRTerminator::Branch {
+                        cond: terminal,
+                        true_block: (exit_block, next_states.clone()),
+                        false_block: (error_block, vec![]),
+                    });
+                    builder.switch_to_block(error_block);
+                }
                 builder.seal_block(SIRTerminator::Error(1));
             } else {
                 let reverse_width = Self::step_math_width(compare_width, SLTStepOp::Add, step);

@@ -303,6 +303,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             end,
             initials,
             updates,
+            continue_cond,
             ..
         } => {
             if let crate::logic_tree::SLTLoopBound::Expr(node) = start {
@@ -317,6 +318,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             for update in updates {
                 collect_inputs_with_window(update.expr, None, arena, set, visited);
             }
+            collect_inputs_with_window(*continue_cond, None, arena, set, visited);
             set.retain(|atom| atom.id != *loop_var);
         }
         SLTNode::Constant(_, _, _, _) => {}
