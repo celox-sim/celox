@@ -226,6 +226,36 @@ fn test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates(sim) {
     assert_eq!(sim.get(out), 3u32.into());
 }
 
+fn test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            seed: input logic<2>,
+            count: input logic<32>,
+            out: output logic<2>
+        ) {
+            var x: logic<2>;
+            always_comb {
+                x = seed;
+                for i: u32 in 0..count {
+                    x[0] = x == 2'b10;
+                }
+                out = x;
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let seed = sim.signal("seed");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(seed, 2u8);
+    sim.set(count, 2u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 2u32.into());
+}
+
 fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim) {
     @setup { let code = r#"
         module Child (

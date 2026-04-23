@@ -118,7 +118,8 @@ impl SLTToSIRLowerer {
                 access,
             } => {
                 if let Some(env) = env
-                    && let Some(reg) = self.lookup_override(builder, env, id, index, access)
+                    && let Some(reg) =
+                        self.lookup_override(builder, arena, cache, env, id, index, access)
                 {
                     reg
                 } else {
@@ -291,6 +292,8 @@ impl SLTToSIRLowerer {
     fn lookup_override<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: &LowerEnv<A>,
         id: &A,
         index: &[crate::logic_tree::comb::SLTIndex],
@@ -318,7 +321,53 @@ impl SLTToSIRLowerer {
             }
         }
 
-        None
+        let mut cut_points = vec![access.lsb, access.msb + 1];
+        for target in env.inputs.keys() {
+            if target.id != *id {
+                continue;
+            }
+            if target.access.msb < access.lsb || access.msb < target.access.lsb {
+                continue;
+            }
+            cut_points.push(target.access.lsb.max(access.lsb));
+            cut_points.push((target.access.msb + 1).min(access.msb + 1));
+        }
+        cut_points.sort_unstable();
+        cut_points.dedup();
+        if cut_points.len() <= 2 {
+            return None;
+        }
+
+        let mut part_regs = Vec::new();
+        for window in cut_points.windows(2).rev() {
+            let part_access = BitAccess::new(window[0], window[1] - 1);
+            let mut part_reg = None;
+            for (target, reg) in &env.inputs {
+                if target.id != *id {
+                    continue;
+                }
+                if target.access.lsb <= part_access.lsb && part_access.msb <= target.access.msb {
+                    let rel = BitAccess::new(
+                        part_access.lsb - target.access.lsb,
+                        part_access.msb - target.access.lsb,
+                    );
+                    part_reg = Some(self.slice_reg(builder, *reg, &rel));
+                    break;
+                }
+            }
+            let reg = part_reg.unwrap_or_else(|| {
+                self.lower_input(builder, id, index, &part_access, arena, cache, None)
+            });
+            part_regs.push(reg);
+        }
+
+        if part_regs.len() == 1 {
+            part_regs.into_iter().next()
+        } else {
+            let result = builder.alloc_logic(access.msb - access.lsb + 1);
+            builder.emit(SIRInstruction::Concat(result, part_regs));
+            Some(result)
+        }
     }
 
     /// Get width (references information from veryl-analyzer)
