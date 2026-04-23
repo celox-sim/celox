@@ -859,6 +859,7 @@ impl SLTToSIRLowerer {
                 self.cast_reg_width(builder, reg, width)
             })
             .collect();
+        let may_break = !matches!(try_const_eval(continue_cond, arena), Some((ref v, ref m)) if *m == BigUint::from(0u32) && *v == BigUint::from(1u32));
 
         let header_counter = builder.alloc_bit(compare_width, loop_signed);
         let header_states: Vec<_> = updates
@@ -958,7 +959,16 @@ impl SLTToSIRLowerer {
                     builder.seal_block(SIRTerminator::Jump(true_loop_block, vec![]));
                 }
                 builder.switch_to_block(true_loop_block);
-                builder.seal_block(SIRTerminator::Error(1));
+                if may_break {
+                    builder.seal_block(SIRTerminator::Jump(
+                        body_block,
+                        std::iter::once(header_counter)
+                            .chain(header_states.iter().copied())
+                            .collect(),
+                    ));
+                } else {
+                    builder.seal_block(SIRTerminator::Error(1));
+                }
                 builder.switch_to_block(singleton_block);
                 builder.seal_block(SIRTerminator::Jump(
                     body_block,
@@ -1232,7 +1242,11 @@ impl SLTToSIRLowerer {
             });
 
             builder.switch_to_block(stall_block);
-            builder.seal_block(SIRTerminator::Error(1));
+            if may_break {
+                builder.seal_block(SIRTerminator::Jump(exit_block, next_states.clone()));
+            } else {
+                builder.seal_block(SIRTerminator::Error(1));
+            }
         }
 
         builder.switch_to_block(exit_block);

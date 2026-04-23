@@ -1178,6 +1178,60 @@ fn merge_symbolic_stores(
     Ok(merged_store)
 }
 
+fn apply_loop_continue_guard(
+    module: &Module,
+    state: LoopControlState,
+    next_store: SymbolicStore<VarId>,
+    next_boundaries: BoundaryMap<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<LoopControlState, ParserError> {
+    let base_store = state.store.clone();
+    let boundaries = merge_boundaries(state.boundaries, next_boundaries);
+
+    if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
+        Ok(LoopControlState {
+            store: next_store,
+            boundaries,
+            ..state
+        })
+    } else {
+        let merged_store = merge_symbolic_stores(
+            module,
+            &next_store,
+            &base_store,
+            state.continue_expr,
+            &state.continue_sources,
+            arena,
+        )?;
+        Ok(LoopControlState {
+            store: merged_store,
+            boundaries,
+            ..state
+        })
+    }
+}
+
+fn statement_contains_break(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Break => true,
+        Statement::If(if_stmt) => {
+            if_stmt.true_side.iter().any(statement_contains_break)
+                || if_stmt.false_side.iter().any(statement_contains_break)
+        }
+        Statement::For(for_stmt) => for_stmt.body.iter().any(statement_contains_break),
+        Statement::IfReset(if_reset) => {
+            if_reset.true_side.iter().any(statement_contains_break)
+                || if_reset.false_side.iter().any(statement_contains_break)
+        }
+        Statement::Assign(_)
+        | Statement::SystemFunctionCall(_)
+        | Statement::FunctionCall(_)
+        | Statement::TbMethodCall(_)
+        | Statement::Unsupported(_)
+        | Statement::Null => false,
+    }
+}
+
 fn eval_loop_statement(
     module: &Module,
     state: LoopControlState,
@@ -1190,62 +1244,26 @@ fn eval_loop_statement(
 
     match stmt {
         Statement::Assign(assign) => {
-            let base_store = state.store.clone();
-            let base_boundaries = state.boundaries.clone();
+            let guard_state = state.clone();
             let (next_store, next_boundaries) =
                 eval_assign(module, state.store, state.boundaries, assign, arena)?;
-            let boundaries = merge_boundaries(base_boundaries, next_boundaries);
-
-            if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
-                Ok(LoopControlState {
-                    store: next_store,
-                    boundaries,
-                    ..state
-                })
+            apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
+        }
+        Statement::If(if_stmt) => {
+            if statement_contains_break(stmt) {
+                eval_loop_if(module, state, if_stmt, arena)
             } else {
-                let merged_store = merge_symbolic_stores(
-                    module,
-                    &next_store,
-                    &base_store,
-                    state.continue_expr,
-                    &state.continue_sources,
-                    arena,
-                )?;
-                Ok(LoopControlState {
-                    store: merged_store,
-                    boundaries,
-                    ..state
-                })
+                let guard_state = state.clone();
+                let (next_store, next_boundaries) =
+                    eval_if(module, state.store, state.boundaries, if_stmt, arena)?;
+                apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
             }
         }
-        Statement::If(if_stmt) => eval_loop_if(module, state, if_stmt, arena),
         Statement::For(for_stmt) => {
-            let base_store = state.store.clone();
-            let base_boundaries = state.boundaries.clone();
+            let guard_state = state.clone();
             let (next_store, next_boundaries) =
                 eval_for(module, state.store, state.boundaries, for_stmt, arena)?;
-            let boundaries = merge_boundaries(base_boundaries, next_boundaries);
-            if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
-                Ok(LoopControlState {
-                    store: next_store,
-                    boundaries,
-                    ..state
-                })
-            } else {
-                let merged_store = merge_symbolic_stores(
-                    module,
-                    &next_store,
-                    &base_store,
-                    state.continue_expr,
-                    &state.continue_sources,
-                    arena,
-                )?;
-                Ok(LoopControlState {
-                    store: merged_store,
-                    boundaries,
-                    ..state
-                })
-            }
+            apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
         }
         Statement::Break => Ok(LoopControlState {
             continue_expr: bool_node(arena, false),

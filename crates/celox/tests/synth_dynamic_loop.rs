@@ -244,6 +244,94 @@ fn test_runtime_break_after_assign_in_synth_comb_loop(sim) {
     assert_eq!(sim.get(sum), 12u32.into());
 }
 
+fn test_runtime_if_without_break_in_synth_comb_loop(sim) {
+    @setup { let code = r#"
+        module Top (
+            count: input logic<32>,
+            sel: input logic,
+            o: output logic<32>
+        ) {
+            always_comb {
+                o = 0;
+                for i: u32 in 0..count {
+                    if sel {
+                        o += 1;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let count = sim.signal("count");
+    let sel = sim.signal("sel");
+    let o = sim.signal("o");
+
+    sim.set(count, 5u32);
+    sim.set(sel, 1u8);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(o), 5u32.into());
+}
+
+fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            count: input logic<32>,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in start..count step *= 2 {
+                    out += 1;
+                    if out == 3 {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.set(start, 0u32);
+    sim.set(count, 4u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 1u32.into());
+}
+
+fn test_runtime_bounds_reverse_stalled_step_with_break_exits_cleanly(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input logic<32>,
+            out: output logic<32>
+        ) {
+            always_comb {
+                out = 0;
+                for i: u32 in rev start..4 step += 0 {
+                    out += 1;
+                    if out == 2 {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let out = sim.signal("out");
+
+    sim.set(start, 0u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(out), 1u32.into());
+}
+
 fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
