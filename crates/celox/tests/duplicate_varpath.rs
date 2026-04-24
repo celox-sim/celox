@@ -31,14 +31,14 @@ fn test_duplicate_scoped_var_in_always_comb(sim) {
             var result: logic<4>;
             always_comb {
                 result = 0 as 4;
-                for i: u32 in 0..2 {
+                for i in 0..2 {
                     var tmp: logic<4>;
                     tmp = a + i as 4;
                     if sel && i == 1 {
                         result = tmp;
                     }
                 }
-                for j: u32 in 0..2 {
+                for j in 0..2 {
                     var tmp: logic<4>;
                     tmp = b + j as 4;
                     if !sel && j == 1 {
@@ -96,7 +96,7 @@ fn test_duplicate_scoped_var_with_generate_for(sim) {
                 }
 
                 always_comb {
-                    for k: u32 in 0..2 {
+                    for k in 0..2 {
                         var flag: logic;
                         flag = k == g;
                         if flag {

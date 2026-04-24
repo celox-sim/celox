@@ -182,7 +182,7 @@ fn test_for_loop_basic() {
                 rst.assert(clk);
                 clk.next(10);
                 $assert(cnt == 32'd10);
-                for _i: u32 in 0..5 {{
+                for _i in 0..5 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd15);
@@ -212,7 +212,7 @@ fn test_for_loop_step() {
                 rst.assert(clk);
                 clk.next(10);
                 $assert(cnt == 32'd10);
-                for _i: u32 in 0..10 step += 2 {{
+                for _i in 0..10 step += 2 {{
                     clk.next(2);
                 }}
                 $assert(cnt == 32'd20);
@@ -242,7 +242,7 @@ fn test_for_loop_rev() {
                 rst.assert(clk);
                 clk.next(10);
                 $assert(cnt == 32'd10);
-                for _i: i32 in rev 0..5 {{
+                for _i in rev 0..5 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd15);
@@ -270,7 +270,7 @@ fn test_for_loop_break_exits_testbench_loop() {
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
-                for i: u32 in 0..10 {{
+                for i in 0..10 {{
                     if i == 3 {{
                         break;
                     }}
@@ -302,7 +302,7 @@ fn test_for_loop_expression_bound_forward() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: u32 in 0..(cnt >> 1) {{
+                for _i in 0..(cnt >> 1) {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd15);
@@ -331,7 +331,7 @@ fn test_for_loop_expression_bound_reverse() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: i32 in rev 0..(cnt >> 1) {{
+                for _i in rev 0..(cnt >> 1) {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd15);
@@ -360,7 +360,7 @@ fn test_for_loop_expression_bound_inclusive() {
             initial {{
                 rst.assert(clk);
                 clk.next(3);
-                for _i: u32 in 0..=(cnt + 32'd2) {{
+                for _i in 0..=(cnt + 32'd2) {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd9);
@@ -389,7 +389,7 @@ fn test_for_loop_expression_bound_stepped() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: u32 in 1..(cnt >> 1) step *= 2 {{
+                for _i in 1..(cnt >> 1) step *= 2 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd13);
@@ -418,7 +418,7 @@ fn test_for_loop_expression_bound_stepped_non_progress_fails() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: u32 in 1..cnt step *= 1 {{
+                for _i in 1..cnt step *= 1 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -447,7 +447,7 @@ fn test_for_loop_expression_bound_arith_shift_step() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: u32 in 1..(cnt >> 1) step <<<= 1 {{
+                for _i in 1..(cnt >> 1) step <<<= 1 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd13);
@@ -476,7 +476,7 @@ fn test_for_loop_expression_bound_large_arith_shift_stops_after_first_iteration(
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: u32 in 1..cnt step <<<= 100 {{
+                for _i in 1..cnt step <<<= 100 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -505,7 +505,7 @@ fn test_for_loop_expression_bound_non_progress_reports_failure() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: u32 in 1..cnt step *= 1 {{
+                for _i in 1..cnt step *= 1 {{
                     clk.next();
                 }}
                 $finish();
@@ -533,7 +533,7 @@ fn test_for_loop_expression_bound_terminal_inclusive_mul_succeeds() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: u32 in 0..=0 step *= 2 {{
+                for _i in 0..=0 step *= 2 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -563,7 +563,7 @@ fn test_for_loop_expression_bound_reverse_zero_step_singleton_succeeds() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i: u32 in rev 4..=4 step += 0 {{
+                for _i in rev 4..=4 step += 0 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -594,7 +594,7 @@ fn test_for_loop_dynamic_wide_bound_overflow_reports_failure() {
                 rst.assert(clk);
                 clk.next(10);
                 bound = 128'd1;
-                for _i: u32 in 0..(bound << 64) {{
+                for _i in 0..(bound << 64) {{
                     clk.next();
                 }}
                 $finish();
@@ -618,7 +618,7 @@ fn test_for_loop_dynamic_signed_bound_preserves_negative_value() {
             initial {
                 start = (0 - 1) as 32;
                 hits = 0;
-                for _i: i32 in start..=1 {
+                for _i in start..=1 {
                     hits += 1;
                 }
                 $assert(hits == 32'd3);
@@ -648,7 +648,7 @@ fn test_for_loop_dynamic_inclusive_max_bound_runs_terminal_iteration() {
                 rst.assert(clk);
                 clk.next(10);
                 bound = 64'hffff_ffff_ffff_ffff;
-                for _i: u64 in bound..=bound {{
+                for _i in bound..=bound {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -679,7 +679,7 @@ fn test_for_loop_dynamic_wide_singleton_bound_runs_once() {
                 rst.assert(clk);
                 clk.next(10);
                 bound = (128'd1 << 100);
-                for _i: logic<128> in bound..=bound {{
+                for _i in bound..=bound {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -893,7 +893,7 @@ fn test_dynamic_array_index_in_for() {
                 rst.assert(clk);
                 clk.next(1);
                 // arr[0]=10, arr[1]=11, arr[2]=12, arr[3]=13
-                for i: u32 in 0..4 {
+                for i in 0..4 {
                     $assert(arr[i] == i as u8 + 8'd10);
                 }
                 $finish();

@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::ir::{
-    RegisterId, SIRBuilder, SIRInstruction, SIRTerminator, TriggerSet, UnaryOp, VarAtomBase,
-    WORKING_REGION,
+    RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIRTerminator, TriggerSet, UnaryOp,
+    VarAtomBase, WORKING_REGION,
 };
 use crate::{
     HashMap, HashSet,
@@ -459,7 +459,13 @@ impl<'a> FfParser<'a> {
                 let bits = usize::BITS as usize - v.leading_zeros() as usize;
                 bits.max(1)
             }
-            ForBound::Expression(expr) => self.get_expression_width(expr).max(1),
+            ForBound::Expression(expr) => expr
+                .comptime()
+                .expr_context
+                .width
+                .max(expr.comptime().r#type.total_width().unwrap_or(0))
+                .max(self.get_expression_width(expr))
+                .max(1),
         }
     }
 
@@ -505,12 +511,32 @@ impl<'a> FfParser<'a> {
             ForBound::Expression(expr) => {
                 self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
                 let reg = self.stack.pop_back().unwrap();
-                let canonical = if signed {
-                    self.cast_reg_width_ext(ir_builder, reg, canonical_width, signed)
-                } else {
-                    reg
+                let source_signed = expr.comptime().r#type.signed;
+                let canonical =
+                    self.cast_reg_width_ext(ir_builder, reg, canonical_width, source_signed);
+                let canonical = match ir_builder.register(&canonical) {
+                    RegisterType::Bit {
+                        width: reg_width,
+                        signed: reg_signed,
+                    } if *reg_width == canonical_width && *reg_signed == signed => canonical,
+                    _ => {
+                        let bit_reg = ir_builder.alloc_bit(canonical_width, signed);
+                        ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::Ident, canonical));
+                        bit_reg
+                    }
                 };
-                Ok(self.cast_reg_width_ext(ir_builder, canonical, width, signed))
+                let widened = self.cast_reg_width_ext(ir_builder, canonical, width, signed);
+                match ir_builder.register(&widened) {
+                    RegisterType::Bit {
+                        width: reg_width,
+                        signed: reg_signed,
+                    } if *reg_width == width && *reg_signed == signed => Ok(widened),
+                    _ => {
+                        let bit_reg = ir_builder.alloc_bit(width, signed);
+                        ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::Ident, widened));
+                        Ok(bit_reg)
+                    }
+                }
             }
         }
     }
@@ -524,7 +550,7 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
-        let Some(loop_width) = stmt.var_type.total_width() else {
+        let Some(base_loop_width) = stmt.var_type.total_width() else {
             return Err(ParserError::unsupported(
                 65,
                 LoweringPhase::FfLowering,
@@ -603,9 +629,11 @@ impl<'a> FfParser<'a> {
             ));
         }
 
-        let mut counter_width = loop_width.max(1);
-        counter_width = counter_width.max(self.bound_width(start_bound));
-        counter_width = counter_width.max(self.bound_width(end_bound));
+        let start_width = self.bound_width(start_bound);
+        let end_width = self.bound_width(end_bound);
+        let loop_width = base_loop_width.max(start_width).max(end_width).max(1);
+
+        let counter_width = loop_width;
         let widen_inclusive = inclusive && !loop_signed;
         let compare_width = if widen_inclusive {
             counter_width.saturating_add(1)

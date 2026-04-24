@@ -236,7 +236,7 @@ fn test_runtime_for_loop_state_does_not_trigger_scheduler_loop() {
             var acc: logic<8>;
             always_comb {
                 acc = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     acc += i as 8;
                 }
             }
@@ -264,7 +264,7 @@ fn test_runtime_for_break_condition_on_accumulator_does_not_trigger_scheduler_lo
             var sum: logic<8>;
             always_comb {
                 sum = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     sum += 1;
                     if sum == 3 {
                         break;
@@ -296,7 +296,7 @@ fn test_runtime_for_loop_external_feedback_is_still_scheduler_loop() {
             var y: logic<8>;
             always_comb {
                 acc = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     acc += y;
                 }
             }
@@ -329,7 +329,7 @@ fn test_always_ff_runtime_for_non_progress_is_rejected() {
         ) {
             always_ff (clk) {
                 q = 0;
-                for i: u32 in 1..count step *= 1 {
+                for i in 1..count step *= 1 {
                     q = i as 8;
                 }
             }
@@ -356,7 +356,7 @@ fn test_always_ff_runtime_for_zero_start_mul_non_progress_is_rejected() {
         ) {
             always_ff (clk) {
                 q = 0;
-                for i: u32 in 0..count step *= 2 {
+                for i in 0..count step *= 2 {
                     q = i as 8;
                 }
             }
@@ -668,7 +668,7 @@ fn test_comb_function_body_rejects_dynamic_for_break() {
             ) -> logic<8> {
                 var tmp: logic<8>;
                 tmp = 8'd0;
-                for i: logic<3> in 0..n {
+                for i in 0..n {
                     if x[i] {
                         tmp = i + 8'd1;
                         break;
@@ -706,8 +706,8 @@ fn test_comb_function_body_rejects_nested_break_in_dynamic_for_due_to_analyzer_u
             ) -> logic<8> {
                 var tmp: logic<8>;
                 tmp = 8'd0;
-                for i: logic<3> in 0..n {
-                    for j: logic<2> in 0..4 {
+                for i in 0..n {
+                    for j in 0..4 {
                         if x[j] {
                             break;
                         }

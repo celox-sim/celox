@@ -72,8 +72,8 @@ assign o = a[2];
 module Top (i: input logic<8>, o: output logic<8>) {
 var a: logic<8> [4, 2];
 always_comb {
-for i_idx: u32 in 0..4 {
-for j_idx: u32 in 0..2 {
+for i_idx in 0..4 {
+for j_idx in 0..2 {
 a[i_idx][j_idx] = 8'b0;
 }
 }
@@ -251,7 +251,7 @@ o_hi: output logic<32>
 ) {
 var regs: logic<64> [16];
 always_comb {
-for i: u32 in 0..16 {
+for i in 0..16 {
 regs[i] = 64'b0;
 }
 // regs[0] = 0x00000001_00000000
@@ -292,11 +292,11 @@ o_hi: output logic<32>
 ) {
 var data: logic<64> [4];
 always_comb {
-for i: u32 in 0..4 {
+for i in 0..4 {
 data[i] = 64'd0;
 }
-for g: u32 in 0..2 {
-for s: u32 in 0..2 {
+for g in 0..2 {
+for s in 0..2 {
 let idx: u32 = g * 2 + s;
 data[idx][63:32] = (g * 2 + s) as u32;
 data[idx][31:0]  = (g * 2 + s + 100) as u32;

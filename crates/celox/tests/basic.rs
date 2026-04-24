@@ -315,7 +315,7 @@ module Top (
     function f (
         x: input logic<4>,
     ) -> logic<8> {
-        for i: logic<2> in 0..4 {
+        for i in 0..4 {
             if x[i] {
                 return 8'd9;
             }
@@ -352,7 +352,7 @@ module Top (
     ) -> logic<8> {
         var tmp: logic<8>;
         tmp = 8'd0;
-        for i: logic<2> in 0..4 {
+        for i in 0..4 {
             if x[i] {
                 tmp = i + 8'd1;
                 break;
