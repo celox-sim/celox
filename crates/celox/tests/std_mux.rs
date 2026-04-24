@@ -14,8 +14,8 @@ all_backends! {
 
     // Build-only smoke test: mux with selector_pkg requires `calc_select_width` function
     // evaluation at compile time. Currently Celox cannot resolve this, so this test is ignored.
-    #[ignore = "Celox does not yet support const function evaluation in module params (calc_select_width)"]
     fn test_mux_build_smoke(sim) {
+        @ignore_on(veryl);
         @setup { let top = r#"
 module Top (
 i_select: input  logic<2>,
@@ -35,7 +35,7 @@ data_arr[3] = i_data3;
 inst u: mux #(
 WIDTH  : 8,
 ENTRIES: 4,
-KIND   : selector_kind::BINARY,
+KIND   : selector_pkg::selector_kind::BINARY,
 ) (
 i_select,
 i_data: data_arr,
@@ -49,8 +49,8 @@ let code = format!("{SELECTOR_PKG_SRC}\n{MUX_SRC}\n{top}"); }
     }
 
     // Build-only: binary demux
-    #[ignore = "Celox does not yet support const function evaluation in module params (calc_select_width)"]
     fn test_demux_build_smoke(sim) {
+        @ignore_on(veryl);
         @setup { let top = r#"
 module Top (
 i_select: input  logic<2>,
@@ -64,7 +64,7 @@ var data_arr: logic<8>[4];
 inst u: demux #(
 WIDTH  : 8,
 ENTRIES: 4,
-KIND   : selector_kind::BINARY,
+KIND   : selector_pkg::selector_kind::BINARY,
 ) (
 i_select,
 i_data,

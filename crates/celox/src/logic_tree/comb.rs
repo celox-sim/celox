@@ -5,23 +5,20 @@ use serde::{Deserialize, Serialize};
 use crate::ParserError;
 use crate::context_width::get_context_width;
 use crate::logic_tree::range_store::RangeStore;
-use crate::parser::{LoweringPhase, resolve_total_width, resolve_width};
+use crate::parser::{LoweringPhase, resolve_total_width};
 use crate::{
     HashMap, HashSet,
     ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
     parser::bitaccess::{
-        build_partial_assign_expr, celox_value_from_comptime, eval_constexpr, eval_var_select,
-        is_static_access,
+        celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
     },
 };
 use num_bigint::BigUint;
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignStatement, CombDeclaration, Comptime, Expression, Factor, ForBound,
-    ForRange, ForStatement, IfStatement, Module, Op, Statement, ValueVariant, VarId, VarIndex,
-    VarSelect, VarSelectOp,
+    ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
+    ForStatement, IfStatement, Module, Op, Statement, ValueVariant, VarId, VarSelectOp,
 };
-use veryl_parser::token_range::TokenRange;
 
 // SymbolicStore: Maps variable IDs to their current symbolic representation.
 // Each variable is managed by a RangeStore, which tracks bit-ranges and their associated SLT nodes.
@@ -2185,229 +2182,87 @@ fn eval_array_literal_expression(
     ))
 }
 
-fn extract_function_return_expr(
+fn eval_function_body_return(
     module: &Module,
-    body: &veryl_analyzer::ir::FunctionBody,
+    caller_store: &SymbolicStore<VarId>,
+    call: &veryl_analyzer::ir::FunctionCall,
+    function_body: &veryl_analyzer::ir::FunctionBody,
     ret_id: VarId,
-) -> Result<Expression, ParserError> {
-    fn substitute_expr(expr: &Expression, defs: &HashMap<VarId, Expression>) -> Expression {
-        substitute_expr_inner(expr, defs, &mut HashSet::default())
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let mut local_store = SymbolicStore::default();
+    let mut local_bounds = BoundaryMap::default();
+    let mut written = HashMap::default();
+
+    collect_written_accesses(module, &function_body.statements, &mut written)?;
+    written.entry(ret_id).or_default();
+
+    for var_id in written.keys() {
+        let Some(var) = module.variables.get(var_id) else {
+            return Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function local variable",
+                format!("unknown variable id: {:?}", var_id),
+                Some(&call.comptime.token),
+            ));
+        };
+        let width = resolve_total_width(module, var)?;
+        local_store.insert(*var_id, RangeStore::new(None, width));
     }
 
-    fn substitute_expr_inner(
-        expr: &Expression,
-        defs: &HashMap<VarId, Expression>,
-        expanding: &mut HashSet<VarId>,
-    ) -> Expression {
-        match expr {
-            Expression::Term(factor) => match factor.as_ref() {
-                Factor::Variable(var_id, index, select, _)
-                    if index.0.is_empty() && select.0.is_empty() && select.1.is_none() =>
-                {
-                    if let Some(bound) = defs.get(var_id) {
-                        if expanding.insert(*var_id) {
-                            let result = substitute_expr_inner(bound, defs, expanding);
-                            expanding.remove(var_id);
-                            return result;
-                        }
-                    }
-                    expr.clone()
-                }
-                Factor::FunctionCall(call) => {
-                    let mut call = call.clone();
-                    for input_expr in call.inputs.values_mut() {
-                        *input_expr = substitute_expr_inner(input_expr, defs, expanding);
-                    }
-                    Expression::Term(Box::new(Factor::FunctionCall(call)))
-                }
-                _ => expr.clone(),
-            },
-            Expression::Binary(lhs, op, rhs, _) => Expression::Binary(
-                Box::new(substitute_expr_inner(lhs, defs, expanding)),
-                *op,
-                Box::new(substitute_expr_inner(rhs, defs, expanding)),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
-            ),
-            Expression::Unary(op, inner, _) => Expression::Unary(
-                *op,
-                Box::new(substitute_expr_inner(inner, defs, expanding)),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
-            ),
-            Expression::Ternary(cond, then_expr, else_expr, _) => Expression::Ternary(
-                Box::new(substitute_expr_inner(cond, defs, expanding)),
-                Box::new(substitute_expr_inner(then_expr, defs, expanding)),
-                Box::new(substitute_expr_inner(else_expr, defs, expanding)),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
-            ),
-            Expression::Concatenation(parts, _) => Expression::Concatenation(
-                parts
-                    .iter()
-                    .map(|(x, rep)| {
-                        (
-                            substitute_expr_inner(x, defs, expanding),
-                            rep.as_ref()
-                                .map(|r| substitute_expr_inner(r, defs, expanding)),
-                        )
-                    })
-                    .collect(),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
-            ),
-            Expression::ArrayLiteral(items, _) => Expression::ArrayLiteral(
-                items
-                    .iter()
-                    .map(|item| match item {
-                        ArrayLiteralItem::Value(x, rep) => ArrayLiteralItem::Value(
-                            Box::new(substitute_expr_inner(x, defs, expanding)),
-                            rep.as_ref()
-                                .map(|r| Box::new(substitute_expr_inner(r, defs, expanding))),
-                        ),
-                        ArrayLiteralItem::Defaul(x) => ArrayLiteralItem::Defaul(Box::new(
-                            substitute_expr_inner(x, defs, expanding),
-                        )),
-                    })
-                    .collect(),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
-            ),
-            Expression::StructConstructor(ty, fields, _) => Expression::StructConstructor(
-                ty.clone(),
-                fields
-                    .iter()
-                    .map(|(name, x)| (*name, substitute_expr_inner(x, defs, expanding)))
-                    .collect(),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
-            ),
-        }
+    for (arg_path, arg_id) in &function_body.arg_map {
+        let Some(arg_expr) = call.inputs.get(arg_path) else {
+            return Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function call missing argument",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            ));
+        };
+
+        let ((arg_node, sources), bounds) =
+            eval_expression(module, caller_store, arg_expr, arena, None)?;
+        local_bounds = merge_boundaries(local_bounds, bounds);
+
+        let Some(arg_var) = module.variables.get(arg_id) else {
+            return Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function argument variable",
+                format!("unknown arg id: {:?}", arg_id),
+                Some(&call.comptime.token),
+            ));
+        };
+        let arg_width = resolve_total_width(module, arg_var)?;
+        local_store.insert(
+            *arg_id,
+            RangeStore::new(Some((arg_node, sources)), arg_width),
+        );
     }
 
-    fn resolve_return_expr(
-        module: &Module,
-        statements: &[Statement],
-        ret_id: VarId,
-        defs: &HashMap<VarId, Expression>,
-    ) -> Result<Option<Expression>, ParserError> {
-        if statements.is_empty() {
-            return Ok(None);
-        }
-
-        let stmt = &statements[0];
-        let rest = &statements[1..];
-
-        match stmt {
-            Statement::Assign(assign) => {
-                if assign.dst.len() != 1 {
-                    return Err(ParserError::unsupported(
-                        LoweringPhase::CombLowering,
-                        "function body assignment shape",
-                        format!("{stmt}"),
-                        Some(&assign.token),
-                    ));
-                }
-
-                let dst = &assign.dst[0];
-                let is_whole_var =
-                    dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-
-                let rhs = substitute_expr(&assign.expr, defs);
-
-                if is_whole_var {
-                    if dst.id == ret_id {
-                        // Assignment to return variable corresponds to `return` and terminates
-                        // this path.
-                        return Ok(Some(rhs));
-                    }
-
-                    let mut next_defs = defs.clone();
-                    next_defs.insert(dst.id, rhs);
-                    resolve_return_expr(module, rest, ret_id, &next_defs)
-                } else if is_static_access(&dst.index, &dst.select) {
-                    let old_value = defs.get(&dst.id).cloned().unwrap_or_else(|| {
-                        Expression::Term(Box::new(Factor::Variable(
-                            dst.id,
-                            VarIndex::default(),
-                            VarSelect::default(),
-                            dst.comptime.clone(),
-                        )))
-                    });
-                    let merged = build_partial_assign_expr(module, dst, rhs, old_value)?;
-
-                    // Partial write does NOT terminate the path.
-                    let mut next_defs = defs.clone();
-                    next_defs.insert(dst.id, merged);
-                    resolve_return_expr(module, rest, ret_id, &next_defs)
-                } else {
-                    Err(ParserError::unsupported(
-                        LoweringPhase::CombLowering,
-                        "function body non-whole assignment (dynamic index)",
-                        format!("{stmt}"),
-                        Some(&assign.token),
-                    ))
-                }
-            }
-            Statement::If(if_stmt) => {
-                let cond = substitute_expr(&if_stmt.cond, defs);
-
-                let mut then_stmts = if_stmt.true_side.clone();
-                then_stmts.extend_from_slice(rest);
-                let then_expr = resolve_return_expr(module, &then_stmts, ret_id, defs)?;
-
-                let mut else_stmts = if_stmt.false_side.clone();
-                else_stmts.extend_from_slice(rest);
-                let else_expr = resolve_return_expr(module, &else_stmts, ret_id, defs)?;
-
-                match (then_expr, else_expr) {
-                    (Some(then_expr), Some(else_expr)) => Ok(Some(Expression::Ternary(
-                        Box::new(cond),
-                        Box::new(then_expr),
-                        Box::new(else_expr),
-                        Box::new(Comptime::create_unknown(TokenRange::default())),
-                    ))),
-                    _ => Ok(None),
-                }
-            }
-            Statement::Null => resolve_return_expr(module, rest, ret_id, defs),
-            Statement::IfReset(ir) => Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function body control flow",
-                format!("{stmt}"),
-                Some(&ir.token),
-            )),
-            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function body control flow",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
-            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function body control flow",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
-            Statement::For(f) => Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "for loop in function body",
-                format!("{stmt}"),
-                Some(&f.token),
-            )),
-            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
-                Err(ParserError::unsupported(
-                    LoweringPhase::CombLowering,
-                    "function body control flow",
-                    format!("{stmt}"),
-                    None,
-                ))
-            }
-        }
+    for stmt in &function_body.statements {
+        let (next_store, next_bounds) =
+            eval_statement(module, local_store, local_bounds, stmt, arena)?;
+        local_store = next_store;
+        local_bounds = next_bounds;
     }
 
-    resolve_return_expr(module, &body.statements, ret_id, &HashMap::default())?.ok_or_else(|| {
-        ParserError::unsupported(
+    let Some(ret_var) = module.variables.get(&ret_id) else {
+        return Err(ParserError::unsupported(
             LoweringPhase::CombLowering,
-            "function return expression",
-            format!("function return var id: {:?}", ret_id),
-            None,
-        )
-    })
+            "function return variable",
+            format!("unknown return id: {:?}", ret_id),
+            Some(&call.comptime.token),
+        ));
+    };
+    let ret_width = resolve_total_width(module, ret_var)?;
+    let ret_range = BitAccess::new(0, ret_width - 1);
+    let ret_parts = local_store
+        .get(&ret_id)
+        .map(|range_store| range_store.get_parts(ret_range))
+        .unwrap_or_default();
+    let (ret_node, ret_sources) = combine_parts_with_default(ret_id, 0, ret_parts, arena);
+
+    Ok(((ret_node, ret_sources), local_bounds))
 }
 
 fn eval_function_call_expression(
@@ -2456,50 +2311,7 @@ fn eval_function_call_expression(
         ));
     };
 
-    let ret_expr = extract_function_return_expr(module, &function_body, ret_id)?;
-
-    let mut local_store = store.clone();
-    let mut arg_sources = HashSet::default();
-    let mut arg_bounds = BoundaryMap::default();
-
-    for (arg_path, arg_id) in &function_body.arg_map {
-        let Some(arg_expr) = call.inputs.get(arg_path) else {
-            return Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function call missing argument",
-                format!("{call}"),
-                Some(&call.comptime.token),
-            ));
-        };
-
-        let ((arg_node, sources), bounds) =
-            eval_expression(module, &local_store, arg_expr, arena, None)?;
-        arg_sources.extend(sources.clone());
-        arg_bounds = merge_boundaries(arg_bounds, bounds);
-
-        let Some(arg_var) = module.variables.get(arg_id) else {
-            return Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function argument variable",
-                format!("unknown arg id: {:?}", arg_id),
-                Some(&call.comptime.token),
-            ));
-        };
-        let arg_width = resolve_width(module, arg_var)?;
-        local_store.insert(
-            *arg_id,
-            RangeStore::new(Some((arg_node, sources)), arg_width),
-        );
-    }
-
-    let ((ret_node, ret_sources), ret_bounds) =
-        eval_expression(module, &local_store, &ret_expr, arena, None)?;
-
-    let mut merged_sources = ret_sources;
-    merged_sources.extend(arg_sources);
-    let merged_bounds = merge_boundaries(arg_bounds, ret_bounds);
-
-    Ok(((ret_node, merged_sources), merged_bounds))
+    eval_function_body_return(module, store, call, &function_body, ret_id, arena)
 }
 
 pub fn eval_expression(

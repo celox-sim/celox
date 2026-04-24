@@ -9,6 +9,7 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 // Import real .d.ts files from @celox-sim/celox for Monaco type injection
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
+import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	generateVcdText,
 	type VcdSignalInfo,
@@ -700,12 +701,24 @@ const editorOpts: monaco.editor.IStandaloneEditorConstructionOptions = {
 };
 
 // Configure TS compiler options for testbench files
+monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
 monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
-	target: monaco.languages.typescript.ScriptTarget.ESNext,
-	moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+	target: monaco.languages.typescript.ScriptTarget.ES2022,
+	module: monaco.languages.typescript.ModuleKind.ES2022,
+	moduleResolution: monaco.languages.typescript.ModuleResolutionKind.Bundler,
 	allowArbitraryExtensions: true,
-	strict: false,
+	esModuleInterop: true,
+	skipLibCheck: true,
+	strict: true,
 	noEmit: true,
+	rootDirs: ["file:///src", "file:///test", "file:///.celox/src"],
+	paths: {
+		"@celox-sim/celox": ["file:///node_modules/@celox-sim/celox/index.d.ts"],
+		"@celox-sim/celox/*": [
+			"file:///node_modules/@celox-sim/celox/*.d.ts",
+			"file:///node_modules/@celox-sim/celox/dist/*.d.ts",
+		],
+	},
 });
 monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
 	diagnosticsOptions: {
@@ -1040,6 +1053,10 @@ const celoxDtsFiles: Record<string, string> = {
 	"wasm-bridge": celoxWasmBridgeDts,
 	"napi-bridge": celoxNapiBridgeDts,
 };
+monaco.languages.typescript.typescriptDefaults.addExtraLib(
+	fixDtsImports(celoxIndexDts),
+	"file:///node_modules/@celox-sim/celox/index.d.ts",
+);
 for (const [name, content] of Object.entries(celoxDtsFiles)) {
 	const fixed = fixDtsImports(content);
 	// Register as both the sub-module path and the node_modules-style path
@@ -1945,18 +1962,7 @@ async function run() {
 		for (const { path: testPath, model: tbMdl } of testModels) {
 			const client = await tsWorker(tbMdl.uri);
 			const output = await client.getEmitOutput(tbMdl.uri.toString());
-			let jsCode = output.outputFiles[0]?.text ?? tbMdl.getValue();
-
-			// Strip import/export/require — we inject all bindings
-			jsCode = jsCode
-				.replace(
-					/^(?:import|export)\s+.*(?:from\s+)?["'][^"']*["'];?\s*$/gm,
-					"",
-				)
-				.replace(
-					/^(?:const|let|var)\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\);?\s*$/gm,
-					"",
-				);
+			const jsCode = transpileTestbench(tbMdl.getValue(), testPath, output);
 
 			const suiteStack: string[] = [];
 			function _describe(name: string, fn: () => void) {
