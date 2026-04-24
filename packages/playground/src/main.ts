@@ -1,6 +1,5 @@
 import { chai, JestAsymmetricMatchers, JestChaiExpect } from "@vitest/expect";
 import * as monaco from "monaco-editor";
-import { transform as transformWithSucrase } from "sucrase";
 import celoxDutDts from "../../celox/dist/dut.d.ts?raw";
 import celoxIndexDts from "../../celox/dist/index.d.ts?raw";
 import celoxNapiBridgeDts from "../../celox/dist/napi-bridge.d.ts?raw";
@@ -17,6 +16,7 @@ import {
 	type VcdTrace,
 	WaveformViewer,
 } from "./waveform-viewer.js";
+import { transpileTestbench } from "./testbench-transpile.js";
 
 // ── Examples ────────────────────────────────────────────
 
@@ -1962,31 +1962,7 @@ async function run() {
 		for (const { path: testPath, model: tbMdl } of testModels) {
 			const client = await tsWorker(tbMdl.uri);
 			const output = await client.getEmitOutput(tbMdl.uri.toString());
-			const tsCode = tbMdl.getValue();
-			let jsCode = output.outputFiles.find((f) => f.name.endsWith(".js"))?.text;
-			if (!jsCode) {
-				try {
-					jsCode = transformWithSucrase(tsCode, {
-						transforms: ["typescript"],
-						filePath: testPath,
-					}).code;
-				} catch (e: any) {
-					throw new Error(
-						`Failed to transpile ${testPath} as TypeScript: ${e.message ?? String(e)}`,
-					);
-				}
-			}
-
-			// Strip import/export/require — we inject all bindings
-			jsCode = jsCode
-				.replace(
-					/^(?:import|export)\s+.*(?:from\s+)?["'][^"']*["'];?\s*$/gm,
-					"",
-				)
-				.replace(
-					/^(?:const|let|var)\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\);?\s*$/gm,
-					"",
-				);
+			const jsCode = transpileTestbench(tbMdl.getValue(), testPath, output);
 
 			const suiteStack: string[] = [];
 			function _describe(name: string, fn: () => void) {
