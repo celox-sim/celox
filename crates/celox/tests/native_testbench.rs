@@ -994,6 +994,27 @@ fn test_assert_format_args_render_runtime_values() {
     );
 }
 
+#[test]
+fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert(1'b0, "first");
+                $assert(1'b0, "second");
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 2);
+    assert!(!detailed.assertions[0].passed);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("first"));
+    assert!(!detailed.assertions[1].passed);
+    assert_eq!(detailed.assertions[1].message.as_deref(), Some("second"));
+}
+
 // ── Array and bit select ───────────────────────────────────────────────
 
 #[test]

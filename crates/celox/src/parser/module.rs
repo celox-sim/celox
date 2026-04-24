@@ -108,6 +108,7 @@ impl<'a> ModuleParser<'a> {
             }
             let initial_node = self.arena.alloc(SLTNode::Input {
                 variable: *id,
+                signed: var.r#type.signed,
                 index: vec![],
                 access: BitAccess::new(0, width - 1),
             });
@@ -167,6 +168,7 @@ impl<'a> ModuleParser<'a> {
             let width = ty.width();
             let rhs_node = glue_arena.alloc(SLTNode::Input {
                 variable: GlueAddr::Child(child_port_id),
+                signed: child_module.variables[&child_port_id].r#type.signed,
                 index: vec![],
                 access: BitAccess::new(0, width - 1),
             });
@@ -416,6 +418,7 @@ fn collect_glue_sources_with_window(
             variable,
             access,
             index,
+            ..
         } => {
             let full_width = access.msb - access.lsb + 1;
             let win = window.unwrap_or(BitAccess::new(0, full_width - 1));

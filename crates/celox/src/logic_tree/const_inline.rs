@@ -232,6 +232,7 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
             variable,
             index,
             access,
+            ..
         } if index.is_empty() => {
             if let Some(cv) = const_vars.get(&variable) {
                 let width = access.msb - access.lsb + 1;

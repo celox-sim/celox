@@ -126,6 +126,7 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                 variable,
                 index,
                 access,
+                ..
             } => {
                 write!(f, "{}", variable)?;
                 for idx in index {
@@ -344,6 +345,7 @@ pub struct SLTForUpdate<A: Hash + Eq + Clone> {
 pub enum SLTNode<A: Hash + Eq + Clone> {
     Input {
         variable: A,
+        signed: bool,
         index: Vec<SLTIndex>,
         access: BitAccess,
     },
@@ -385,6 +387,7 @@ pub enum SLTNode<A: Hash + Eq + Clone> {
 enum SLTNodeSerde<A: Hash + Eq + Clone> {
     Input {
         variable: A,
+        signed: bool,
         index: Vec<SLTIndex>,
         access: BitAccess,
     },
@@ -428,10 +431,12 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
         match node {
             SLTNode::Input {
                 variable,
+                signed,
                 index,
                 access,
             } => SLTNodeSerde::Input {
                 variable,
+                signed,
                 index,
                 access,
             },
@@ -492,10 +497,12 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
         match node {
             SLTNodeSerde::Input {
                 variable,
+                signed,
                 index,
                 access,
             } => SLTNode::Input {
                 variable,
+                signed,
                 index,
                 access,
             },
@@ -578,6 +585,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             // Leaf: Transform address A to B
             SLTNode::Input {
                 variable: addr,
+                signed,
                 index,
                 access,
             } => {
@@ -592,6 +600,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     .collect();
                 SLTNode::Input {
                     variable: f(addr),
+                    signed: *signed,
                     index: mapped_index,
                     access: *access,
                 }
@@ -811,6 +820,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 variable,
                 index,
                 access,
+                ..
             } => {
                 write!(f, "{}Input({:?}", indent, variable)?;
                 if !index.is_empty() {
@@ -2015,6 +2025,7 @@ fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
             None => {
                 let input_node = arena.alloc(SLTNode::Input {
                     variable: var_id.clone(),
+                    signed: false,
                     index: vec![],
                     access: BitAccess::new(current_lsb, current_lsb + width - 1),
                 });
@@ -4171,6 +4182,7 @@ fn eval_factor(
                     // Since it's still None, pack index into Input and let Load instruction handle alignment
                     let raw_input = arena.alloc(SLTNode::Input {
                         variable: *var_id,
+                        signed: module.variables[var_id].r#type.signed,
                         index: dynamic_indices,
                         access: BitAccess::new(0, width - 1),
                     });

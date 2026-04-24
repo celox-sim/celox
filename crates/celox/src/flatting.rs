@@ -203,6 +203,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             variable,
             access,
             index,
+            ..
         } => {
             // Register the variable and its bit range as an input.
             if !index.is_empty() {

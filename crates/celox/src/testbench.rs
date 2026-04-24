@@ -2064,6 +2064,7 @@ pub(crate) fn run_testbench<B: SimBackend>(
 ) -> TestResult {
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
+        stop_on_fatal_assert: true,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
     match result {
@@ -2091,6 +2092,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
 ) -> TestResultDetailed {
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
+        stop_on_fatal_assert: false,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
     let passed = !matches!(result, ExecResult::Fail(_)) && ctx.assertions.iter().all(|a| a.passed);
@@ -2102,6 +2104,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
 
 struct DetailedExecContext {
     assertions: Vec<AssertionResult>,
+    stop_on_fatal_assert: bool,
 }
 
 /// Like [`exec`] but collects assertion results into `ctx` instead of
@@ -2167,7 +2170,7 @@ fn exec_one_detailed<B: SimBackend>(
                 message: rendered_message.clone(),
                 location: location.clone(),
             });
-            if !passed && !continue_on_fail {
+            if !passed && !continue_on_fail && ctx.stop_on_fatal_assert {
                 ExecResult::Fail(rendered_message.unwrap_or_else(|| "assertion failed".to_string()))
             } else {
                 ExecResult::Continue

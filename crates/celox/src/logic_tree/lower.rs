@@ -111,6 +111,7 @@ impl SLTToSIRLowerer {
                 variable: id,
                 index,
                 access,
+                ..
             } => {
                 if let Some(env) = env
                     && let Some(reg) =
@@ -524,7 +525,7 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
     ) -> bool {
         match arena.get(node) {
-            SLTNode::Input { .. } => false,
+            SLTNode::Input { signed, .. } => *signed,
             SLTNode::Constant(_, _, _, signed) => *signed,
             SLTNode::Binary(lhs, _, _) => self.get_signed(*lhs, arena),
             SLTNode::Unary(UnaryOp::Minus, _) => true,
@@ -1278,5 +1279,38 @@ impl SLTToSIRLowerer {
             .position(|update| update.target == *result)
             .expect("ForFold result target must be present in updates");
         exit_states[result_idx]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::BitAccess;
+    use crate::logic_tree::comb::SLTNodeArena;
+
+    #[test]
+    fn signed_inputs_report_signedness() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let node = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: true,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let lowerer = SLTToSIRLowerer::new(false);
+        assert!(lowerer.get_signed(node, &arena));
+    }
+
+    #[test]
+    fn unsigned_inputs_report_unsignedness() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let node = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: false,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let lowerer = SLTToSIRLowerer::new(false);
+        assert!(!lowerer.get_signed(node, &arena));
     }
 }
