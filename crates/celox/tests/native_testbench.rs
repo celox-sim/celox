@@ -939,6 +939,61 @@ fn test_multiple_assertions() {
     );
 }
 
+#[test]
+fn test_assert_continue_records_failure_and_continues() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                $assert_continue(cnt == 32'd99, "first failure: cnt=%d", cnt);
+                clk.next(1);
+                $assert(cnt == 32'd1, "second assertion");
+                $finish();
+            }}
+        }}
+    "#
+    );
+    let detailed = Simulator::builder(&code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 2);
+    assert!(!detailed.assertions[0].passed);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("first failure: cnt=0"),
+    );
+    assert!(detailed.assertions[1].passed);
+
+    let result = Simulator::builder(&code, "t").run_test().unwrap();
+    assert_eq!(result, TestResult::Fail("first failure: cnt=0".to_string()));
+}
+
+#[test]
+fn test_assert_format_args_render_runtime_values() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0, "mismatch: a=%d b=%d", 8'd3, 8'd7);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("mismatch: a=3 b=7"),
+    );
+}
+
 // ── Array and bit select ───────────────────────────────────────────────
 
 #[test]
