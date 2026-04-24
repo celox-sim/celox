@@ -7,24 +7,94 @@ use crate::{
         bitaccess::{build_partial_assign_expr, is_static_access},
     },
 };
+use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, Comptime, Expression, Factor, Statement, VarId, VarIndex, VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
-    fn actual_matches_formal_shape(&self, formal: &veryl_analyzer::ir::Variable, expr: &Expression) -> bool {
-        if formal.r#type.array.is_empty() {
+    fn expr_unpacked_shape(expr: &Expression) -> Option<Vec<usize>> {
+        match expr {
+            Expression::ArrayLiteral(items, _) => {
+                let mut explicit_len = 0usize;
+                let mut element_shape: Option<Vec<usize>> = None;
+
+                for item in items {
+                    match item {
+                        ArrayLiteralItem::Value(inner, repeat) => {
+                            let rep_count = if let Some(rep_expr) = repeat {
+                                crate::parser::bitaccess::eval_constexpr(rep_expr)
+                                    .and_then(|v| v.to_u64())
+                                    .map(|v| v as usize)?
+                            } else {
+                                1
+                            };
+                            explicit_len += rep_count;
+
+                            let inner_shape = Self::expr_unpacked_shape(inner)
+                                .or_else(|| {
+                                    let shape: Option<Vec<usize>> =
+                                        inner.comptime().r#type.array.iter().copied().collect();
+                                    shape
+                                })
+                                .unwrap_or_default();
+                            if let Some(existing) = &element_shape {
+                                if *existing != inner_shape {
+                                    return None;
+                                }
+                            } else {
+                                element_shape = Some(inner_shape);
+                            }
+                        }
+                        ArrayLiteralItem::Defaul(inner) => {
+                            let inner_shape = Self::expr_unpacked_shape(inner)
+                                .or_else(|| {
+                                    let shape: Option<Vec<usize>> =
+                                        inner.comptime().r#type.array.iter().copied().collect();
+                                    shape
+                                })
+                                .unwrap_or_default();
+                            if let Some(existing) = &element_shape {
+                                if *existing != inner_shape {
+                                    return None;
+                                }
+                            } else {
+                                element_shape = Some(inner_shape);
+                            }
+                        }
+                    }
+                }
+
+                let mut shape = vec![explicit_len];
+                if let Some(inner_shape) = element_shape {
+                    shape.extend(inner_shape);
+                }
+                Some(shape)
+            }
+            _ => {
+                let shape: Option<Vec<usize>> = expr.comptime().r#type.array.iter().copied().collect();
+                shape
+            }
+        }
+    }
+
+    fn actual_matches_formal_shape(
+        &self,
+        formal: &veryl_analyzer::ir::Variable,
+        expr: &Expression,
+    ) -> bool {
+        let formal_shape: Option<Vec<usize>> = formal.r#type.array.iter().copied().collect();
+        let formal_shape = formal_shape.unwrap_or_default();
+        if formal_shape.is_empty() {
             return true;
         }
 
-        match expr {
-            Expression::ArrayLiteral(_, _) => true,
-            Expression::Term(factor) if matches!(factor.as_ref(), Factor::Variable(_, _, _, _)) => {
-                !expr.comptime().r#type.array.is_empty()
-            }
-            _ => !expr.comptime().r#type.array.is_empty(),
-        }
+        let Some(actual_shape) = Self::expr_unpacked_shape(expr) else {
+            return false;
+        };
+
+        actual_shape == formal_shape
     }
 
     fn validate_function_call_bindings(

@@ -785,3 +785,28 @@ fn test_ff_function_call_rejects_wrapped_packed_concat_for_unpacked_array_formal
         );
     });
 }
+
+#[test]
+fn test_ff_function_call_rejects_mismatched_unpacked_array_shape() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2, 2]) -> logic<8> {
+                return x[1][0];
+            }
+            always_ff (clk) {
+                out_q = f('{'{8'h11, 8'h22, 8'h33}});
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("actual expression shape does not match unpacked array formal"),
+            "Expected mismatched unpacked shape error, got: {e:?}"
+        );
+    });
+}
