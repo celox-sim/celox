@@ -1146,7 +1146,7 @@ impl<'a> FfParser<'a> {
                             self.eval_formal_type_select(*var_id, var_index, var_select)
                         else {
                             return Err(ParserError::unsupported(
-                                 68,
+                                43,
                                 LoweringPhase::FfLowering,
                                 "function argument indexed access",
                                 format!(
@@ -1176,7 +1176,7 @@ impl<'a> FfParser<'a> {
                             self.eval_formal_type_select(*var_id, var_index, var_select)
                         else {
                             return Err(ParserError::unsupported(
-                                 68,
+                                43,
                                 LoweringPhase::FfLowering,
                                 "function argument indexed access",
                                 format!(
@@ -1204,7 +1204,7 @@ impl<'a> FfParser<'a> {
                             self.eval_formal_type_select(*var_id, var_index, var_select)
                         else {
                             return Err(ParserError::unsupported(
-                                 68,
+                                43,
                                 LoweringPhase::FfLowering,
                                 "function argument indexed access",
                                 format!(
@@ -1281,7 +1281,7 @@ impl<'a> FfParser<'a> {
             }
             Factor::SystemFunctionCall(call) => {
                 return Err(ParserError::unsupported(
-                     68,
+                    66,
                     LoweringPhase::FfLowering,
                     "system function call",
                     format!("{call}"),
