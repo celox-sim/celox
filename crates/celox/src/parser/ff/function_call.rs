@@ -13,6 +13,20 @@ use veryl_analyzer::ir::{
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
+    fn actual_matches_formal_shape(&self, formal: &veryl_analyzer::ir::Variable, expr: &Expression) -> bool {
+        if formal.r#type.array.is_empty() {
+            return true;
+        }
+
+        match expr {
+            Expression::ArrayLiteral(_, _) => true,
+            Expression::Term(factor) if matches!(factor.as_ref(), Factor::Variable(_, _, _, _)) => {
+                !expr.comptime().r#type.array.is_empty()
+            }
+            _ => !expr.comptime().r#type.array.is_empty(),
+        }
+    }
+
     fn validate_function_call_bindings(
         &self,
         call: &veryl_analyzer::ir::FunctionCall,
@@ -23,13 +37,12 @@ impl<'a> FfParser<'a> {
                 continue;
             };
             let formal = &self.module.variables[arg_id];
-            if !formal.r#type.array.is_empty() && matches!(arg_expr, Expression::Concatenation(_, _))
-            {
+            if !self.actual_matches_formal_shape(formal, arg_expr) {
                 return Err(ParserError::unsupported(
                     LoweringPhase::FfLowering,
                     "function call argument shape",
                     format!(
-                        "packed concatenation passed to unpacked array formal `{}`",
+                        "actual expression shape does not match unpacked array formal `{}`",
                         formal.path
                     ),
                     Some(&call.comptime.token),
