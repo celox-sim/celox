@@ -485,6 +485,7 @@ fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char
                 value.to_biguint().to_string()
             }
         }
+        'c' | 'C' => char::from((value.to_u64() & 0xff) as u8).to_string(),
         's' => tb_value_to_utf8(&value, arg.width).unwrap_or_else(|| format!("{:?}", value)),
         _ => {
             if arg.signed {
@@ -530,11 +531,7 @@ fn render_assert_message(message: &Option<AssertMessage>, memory: *mut u8) -> Op
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
                             | 'B' | 'c' | 'C' | 's' | 'S' => {
                                 if let Some(arg) = args.get(arg_idx) {
-                                    rendered.push_str(&format_assert_arg(
-                                        arg,
-                                        memory,
-                                        Some(spec.to_ascii_lowercase()),
-                                    ));
+                                    rendered.push_str(&format_assert_arg(arg, memory, Some(spec)));
                                 }
                                 arg_idx += 1;
                             }

@@ -792,8 +792,9 @@ impl SLTToSIRLowerer {
             SLTLoopBound::Expr(node) => {
                 let reg = self.lower_inner(builder, *node, arena, cache, None, true);
                 let source_signed = self.get_bound_signed(*node, arena);
-                let sized = self.cast_reg_width_ext(builder, reg, width, source_signed);
-                if source_signed == signed {
+                let extend_signed = source_signed && signed;
+                let sized = self.cast_reg_width_ext(builder, reg, width, extend_signed);
+                if extend_signed == signed {
                     sized
                 } else {
                     let dest = builder.alloc_bit(width, signed);
@@ -1375,5 +1376,36 @@ mod tests {
         let node = arena.alloc(SLTNode::Binary(lhs, BinaryOp::LtS, rhs));
         let lowerer = SLTToSIRLowerer::new(false);
         assert!(!lowerer.get_bound_signed(node, &arena));
+    }
+
+    #[test]
+    fn unsigned_target_bound_zero_extends_signed_slice() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let inner = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: true,
+            index: vec![],
+            access: BitAccess::new(0, 15),
+        });
+        let casted = arena.alloc(SLTNode::Slice {
+            expr: inner,
+            access: BitAccess::new(0, 7),
+        });
+        let mut builder = SIRBuilder::<u32>::new();
+        let mut cache = crate::HashMap::default();
+        let lowerer = SLTToSIRLowerer::new(false);
+        let reg = lowerer.lower_bound(
+            &mut builder,
+            &SLTLoopBound::Expr(casted),
+            8,
+            9,
+            false,
+            &arena,
+            &mut cache,
+        );
+        match builder.register(&reg) {
+            crate::ir::RegisterType::Bit { signed, .. } => assert!(!signed),
+            other => panic!("expected bit register, got {other:?}"),
+        }
     }
 }
