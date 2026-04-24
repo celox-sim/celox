@@ -82,16 +82,14 @@ fn setup_to_flatting(
     let sim_module = &modules[&top_module_id];
 
     // Assign IDs to children (simple 1-level support for tests)
-    let mut next_instance_id = 1;
     let mut glue_instance_map = HashMap::default(); // StrId -> InstanceId
 
-    for inst_name in sim_module.glue_blocks.keys() {
+    for (next_instance_id, inst_name) in (1..).zip(sim_module.glue_blocks.keys()) {
         let mut child_path = path.0.clone();
         child_path.push((*inst_name, 0));
         let child_id = InstanceId(next_instance_id);
         instance_ids.insert(InstancePath(child_path), child_id);
         glue_instance_map.insert(*inst_name, child_id);
-        next_instance_id += 1;
     }
 
     // Calculate global boundaries for the top module

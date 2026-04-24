@@ -106,18 +106,17 @@ fn forward_and_simplify(instructions: &mut [SIRInstruction<RegionedAbsoluteAddr>
                         aliases.insert(*dst, *rhs);
                     }
                     // and with all-ones mask → identity (check if mask matches dst width)
-                    (BinaryOp::And, _, Some(mask)) => {
-                        // Check if mask is (1 << width) - 1 for some width
-                        // If the mask covers the full width of lhs, it's identity
+                    (BinaryOp::And, _, Some(mask))
                         if mask == u64::MAX
-                            || (mask > 0 && mask.count_ones() == mask.trailing_ones())
-                        {
-                            // Only alias if mask covers all bits — we can't easily
-                            // know the bit width of lhs here, so only handle the
-                            // common case where the And itself produces a result
-                            // that is exactly the masked width.
-                            // This is conservative: we skip if unsure.
-                        }
+                            || (mask > 0 && mask.count_ones() == mask.trailing_ones()) =>
+                    {
+                        // Only alias if mask covers all bits — we can't easily
+                        // know the bit width of lhs here, so only handle the
+                        // common case where the And itself produces a result
+                        // that is exactly the masked width.
+                        // This is conservative: we skip if unsure.
+                    }
+                    (BinaryOp::And, _, Some(_)) => {
                         // Actually, let's just check the specific pattern:
                         // If the And mask is all-ones for the width of the result,
                         // this is identity. But we don't have the result width
