@@ -9,6 +9,7 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 // Import real .d.ts files from @celox-sim/celox for Monaco type injection
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
+import { buildMonacoTestbenchCompilerOptions } from "./monaco-testbench-options.js";
 import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	generateVcdText,
@@ -702,28 +703,9 @@ const editorOpts: monaco.editor.IStandaloneEditorConstructionOptions = {
 
 // Configure TS compiler options for testbench files
 monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
-const monacoTestbenchCompilerOptions: monaco.languages.typescript.CompilerOptions =
-	{
-	target: monaco.languages.typescript.ScriptTarget.ES2022,
-	module: monaco.languages.typescript.ModuleKind.ES2022,
-	moduleResolution: monaco.languages.typescript.ModuleResolutionKind.Bundler,
-	// Monaco's implicit lib selection can still drift to an older baseline.
-	// Keep BigInt support explicit so bigint literals in examples/tests stay valid.
-	lib: ["es2022", "es2020.bigint", "dom", "dom.iterable"],
-	allowArbitraryExtensions: true,
-	esModuleInterop: true,
-	skipLibCheck: true,
-	strict: true,
-	noEmit: true,
-	rootDirs: ["file:///src", "file:///test", "file:///.celox/src"],
-	paths: {
-		"@celox-sim/celox": ["file:///node_modules/@celox-sim/celox/index.d.ts"],
-		"@celox-sim/celox/*": [
-			"file:///node_modules/@celox-sim/celox/*.d.ts",
-			"file:///node_modules/@celox-sim/celox/dist/*.d.ts",
-		],
-	},
-	};
+const monacoTestbenchCompilerOptions = buildMonacoTestbenchCompilerOptions(
+	monaco.languages.typescript,
+);
 monaco.languages.typescript.typescriptDefaults.setCompilerOptions(
 	monacoTestbenchCompilerOptions,
 );
@@ -750,6 +732,23 @@ interface PlaygroundFile {
 	model: monaco.editor.ITextModel;
 	viewState: monaco.editor.ICodeEditorViewState | null;
 }
+
+type PlaygroundTestMarker = {
+	code: string | number | undefined;
+	message: string;
+	severity: number;
+	startLineNumber: number;
+	startColumn: number;
+	endLineNumber: number;
+	endColumn: number;
+};
+
+type PlaygroundTestApi = {
+	loadExample: (name: string) => void;
+	setFileContent: (path: string, content: string) => void;
+	getModelMarkers: (path: string) => PlaygroundTestMarker[];
+	getStatusText: () => string;
+};
 
 const files = new Map<string, PlaygroundFile>();
 let activeFilePath: string | null = null;
@@ -780,6 +779,10 @@ function createFile(path: string, content: string): PlaygroundFile {
 	}
 
 	return file;
+}
+
+function getFile(path: string): PlaygroundFile | null {
+	return files.get(path) ?? null;
 }
 
 function removeAllFiles() {
@@ -2121,6 +2124,42 @@ function loadExample(name: string) {
 	onVerylChange();
 }
 
+function installPlaygroundTestApi() {
+	const api: PlaygroundTestApi = {
+		loadExample,
+		setFileContent(path: string, content: string) {
+			const file = getFile(path);
+			if (!file) throw new Error(`File not found: ${path}`);
+			file.model.setValue(content);
+		},
+		getModelMarkers(path: string) {
+			const file = getFile(path);
+			if (!file) throw new Error(`File not found: ${path}`);
+			return monaco.editor
+				.getModelMarkers({ resource: file.model.uri })
+				.map((marker) => ({
+					code:
+						typeof marker.code === "object" ? marker.code.value : marker.code,
+					message: marker.message,
+					severity: marker.severity,
+					startLineNumber: marker.startLineNumber,
+					startColumn: marker.startColumn,
+					endLineNumber: marker.endLineNumber,
+					endColumn: marker.endColumn,
+				}));
+		},
+		getStatusText() {
+			return statusEl.textContent ?? "";
+		},
+	};
+
+	(
+		globalThis as typeof globalThis & {
+			__CELOX_PLAYGROUND_TEST_API__?: PlaygroundTestApi;
+		}
+	).__CELOX_PLAYGROUND_TEST_API__ = api;
+}
+
 examplesEl.addEventListener("change", () => {
 	if (examplesEl.value) loadExample(examplesEl.value);
 });
@@ -2131,4 +2170,5 @@ document.addEventListener("keydown", (e) => {
 
 loadExample("adder");
 onVerylChange(); // Inject types immediately from regex (no WASM needed)
+installPlaygroundTestApi();
 init();
