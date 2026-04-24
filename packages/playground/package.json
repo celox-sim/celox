@@ -8,10 +8,12 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "test:watch": "vitest",
     "test:wasm": "NAPI_RS_FORCE_WASI=1 vitest run --config vitest.wasm.config.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.1",
     "@celox-sim/celox": "workspace:*",
     "@celox-sim/vite-plugin": "workspace:*",
     "monaco-editor": "^0.55.1",

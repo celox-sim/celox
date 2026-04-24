@@ -9,6 +9,8 @@ node_modules/
 
 # TypeScript
 dist/
+playwright-report/
+test-results/
 
 # NAPI CI-generated files
 crates/celox-napi/npm/
