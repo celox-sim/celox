@@ -28,7 +28,7 @@ wasm-encoder          = "0.245"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 chrono                = "0.4"
-cranelift             = "0.128.0"
+cranelift             = "0.131.0"
 cranelift-module      = "0.128.0"
 cranelift-jit         = "0.128.0"
 cranelift-frontend    = "0.128.0"
