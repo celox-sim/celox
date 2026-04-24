@@ -305,6 +305,41 @@ module Top (
 
     }
 
+    fn test_comb_function_call_return_inside_for(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<4>,
+    ) -> logic<8> {
+        for i: logic<2> in 0..4 {
+            if x[i] {
+                return 8'd9;
+            }
+        }
+        return 8'd1;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0b0000u8)).unwrap();
+    assert_eq!(sim.get(q), 1u32.into());
+
+    sim.modify(|io| io.set(d, 0b0100u8)).unwrap();
+    assert_eq!(sim.get(q), 9u32.into());
+
+    }
+
     fn test_always_comb_blocking_assignment_chain(sim) {
         @setup { let code = r#"
 module Top (a: input logic<8>, o: output logic<8>) {
