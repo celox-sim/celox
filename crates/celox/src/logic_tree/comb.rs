@@ -2248,6 +2248,167 @@ fn eval_function_body_return(
         }
     }
 
+    fn for_range_is_dynamic(range: &ForRange) -> bool {
+        match range {
+            ForRange::Forward { start, end, .. }
+            | ForRange::Reverse { start, end, .. }
+            | ForRange::Stepped { start, end, .. } => {
+                matches!(start, ForBound::Expression(_)) || matches!(end, ForBound::Expression(_))
+            }
+        }
+    }
+
+    fn validate_function_body_expression(
+        module: &Module,
+        expr: &Expression,
+    ) -> Result<(), ParserError> {
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::SystemFunctionCall(call) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "system function call in comb function body",
+                    format!("module `{}`: {call}", module.name),
+                    Some(&call.comptime.token),
+                )),
+                Factor::FunctionCall(call) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "nested function call in comb function body",
+                    format!("module `{}`: {call}", module.name),
+                    Some(&call.comptime.token),
+                )),
+                Factor::Variable(_, _, _, _)
+                | Factor::Value(_)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => Ok(()),
+            },
+            Expression::Unary(_, inner, _) => validate_function_body_expression(module, inner),
+            Expression::Binary(lhs, _, rhs, _) => {
+                validate_function_body_expression(module, lhs)?;
+                validate_function_body_expression(module, rhs)
+            }
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                validate_function_body_expression(module, cond)?;
+                validate_function_body_expression(module, then_expr)?;
+                validate_function_body_expression(module, else_expr)
+            }
+            Expression::Concatenation(items, _) => {
+                for (item_expr, repeat_expr) in items {
+                    validate_function_body_expression(module, item_expr)?;
+                    if let Some(repeat_expr) = repeat_expr {
+                        validate_function_body_expression(module, repeat_expr)?;
+                    }
+                }
+                Ok(())
+            }
+            Expression::ArrayLiteral(items, _) => {
+                for item in items {
+                    match item {
+                        ArrayLiteralItem::Value(item_expr, repeat_expr) => {
+                            validate_function_body_expression(module, item_expr)?;
+                            if let Some(repeat_expr) = repeat_expr {
+                                validate_function_body_expression(module, repeat_expr)?;
+                            }
+                        }
+                        ArrayLiteralItem::Defaul(default_expr) => {
+                            validate_function_body_expression(module, default_expr)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Expression::StructConstructor(_, fields, _) => {
+                for (_, field_expr) in fields {
+                    validate_function_body_expression(module, field_expr)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn validate_function_body_statement(
+        module: &Module,
+        stmt: &Statement,
+    ) -> Result<(), ParserError> {
+        match stmt {
+            Statement::Assign(assign) => {
+                validate_function_body_expression(module, &assign.expr)?;
+                for dst in &assign.dst {
+                    for index_expr in &dst.index.0 {
+                        validate_function_body_expression(module, index_expr)?;
+                    }
+                    for select_expr in &dst.select.0 {
+                        validate_function_body_expression(module, select_expr)?;
+                    }
+                    if let Some((_, range_expr)) = &dst.select.1 {
+                        validate_function_body_expression(module, range_expr)?;
+                    }
+                }
+                Ok(())
+            }
+            Statement::If(if_stmt) => {
+                validate_function_body_expression(module, &if_stmt.cond)?;
+                for stmt in &if_stmt.true_side {
+                    validate_function_body_statement(module, stmt)?;
+                }
+                for stmt in &if_stmt.false_side {
+                    validate_function_body_statement(module, stmt)?;
+                }
+                Ok(())
+            }
+            Statement::For(for_stmt) => {
+                if for_range_is_dynamic(&for_stmt.range)
+                    && for_stmt.body.iter().any(statement_contains_break)
+                {
+                    return Err(ParserError::unsupported(
+                        LoweringPhase::CombLowering,
+                        "break in dynamic function-local for",
+                        format!("module `{}`", module.name),
+                        Some(&for_stmt.token),
+                    ));
+                }
+
+                match &for_stmt.range {
+                    ForRange::Forward { start, end, .. }
+                    | ForRange::Reverse { start, end, .. }
+                    | ForRange::Stepped { start, end, .. } => {
+                        if let ForBound::Expression(expr) = start {
+                            validate_function_body_expression(module, expr)?;
+                        }
+                        if let ForBound::Expression(expr) = end {
+                            validate_function_body_expression(module, expr)?;
+                        }
+                    }
+                }
+                for stmt in &for_stmt.body {
+                    validate_function_body_statement(module, stmt)?;
+                }
+                Ok(())
+            }
+            Statement::IfReset(ir) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&ir.token),
+            )),
+            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "system function call in comb function body",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "nested function call in comb function body",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::TbMethodCall(_)
+            | Statement::Unsupported(_)
+            | Statement::Break
+            | Statement::Null => Ok(()),
+        }
+    }
+
     fn function_return_value(
         module: &Module,
         store: &SymbolicStore<VarId>,
@@ -3236,6 +3397,10 @@ fn eval_function_body_return(
     let mut local_store = SymbolicStore::default();
     let local_bounds = BoundaryMap::default();
     let mut written = HashMap::default();
+
+    for stmt in &body.statements {
+        validate_function_body_statement(module, stmt)?;
+    }
 
     collect_written_accesses(module, &body.statements, &mut written)?;
     written.entry(ret_id).or_default();

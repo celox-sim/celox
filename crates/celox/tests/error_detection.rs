@@ -624,3 +624,104 @@ fn test_generic_top_returns_error() {
         Ok(_) => panic!("expected GenericTop, got Ok"),
     }
 }
+
+#[test]
+fn test_comb_function_body_rejects_nested_function_call() {
+    let code = r#"
+        module Top (
+            d: input logic<8>,
+            q: output logic<8>,
+        ) {
+            function g (
+                x: input logic<8>,
+            ) -> logic<8> {
+                return x + 8'd1;
+            }
+
+            function f (
+                x: input logic<8>,
+            ) -> logic<8> {
+                return g(x);
+            }
+
+            always_comb {
+                q = f(d);
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("nested function call in comb function body"),
+            "Expected nested function call error, got: {e:?}"
+        );
+    });
+}
+
+#[test]
+fn test_comb_function_body_rejects_system_function_call() {
+    let code = r#"
+        module Top (
+            d: input logic<8>,
+            q: output logic<8>,
+        ) {
+            function f (
+                x: input logic<8>,
+            ) -> logic<8> {
+                return $countones(x);
+            }
+
+            always_comb {
+                q = f(d);
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("system function call in comb function body")
+                || msg.contains("unresolved factor in comb expression"),
+            "Expected system function call error, got: {e:?}"
+        );
+    });
+}
+
+#[test]
+fn test_comb_function_body_rejects_dynamic_for_break() {
+    let code = r#"
+        module Top (
+            count: input logic<3>,
+            d: input logic<4>,
+            q: output logic<8>,
+        ) {
+            function f (
+                n: input logic<3>,
+                x: input logic<4>,
+            ) -> logic<8> {
+                var tmp: logic<8>;
+                tmp = 8'd0;
+                for i: logic<3> in 0..n {
+                    if x[i] {
+                        tmp = i + 8'd1;
+                        break;
+                    }
+                }
+                return tmp;
+            }
+
+            always_comb {
+                q = f(count, d);
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("break in dynamic function-local for"),
+            "Expected dynamic function-local for break error, got: {e:?}"
+        );
+    });
+}
