@@ -731,3 +731,82 @@ fn test_comb_function_body_rejects_nested_break_in_dynamic_for_due_to_analyzer_u
         );
     });
 }
+
+#[test]
+fn test_ff_function_call_rejects_packed_concat_for_unpacked_array_formal() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            in_hi: input logic<4>,
+            in_lo: input logic<4>,
+            out_q: output logic<4>
+        ) {
+            function f (x: input logic<4>[2]) -> logic<4> {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f({in_hi, in_lo});
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("actual expression shape does not match unpacked array formal"),
+            "Expected unpacked array formal shape error, got: {e:?}"
+        );
+    });
+}
+
+#[test]
+fn test_ff_function_call_rejects_wrapped_packed_concat_for_unpacked_array_formal() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            in_hi: input logic<4>,
+            in_lo: input logic<4>,
+            out_q: output logic<4>
+        ) {
+            function f (x: input logic<4>[2]) -> logic<4> {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f(({in_hi, in_lo}) as u8);
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("actual expression shape does not match unpacked array formal"),
+            "Expected wrapped packed concat shape error, got: {e:?}"
+        );
+    });
+}
+
+#[test]
+fn test_ff_function_call_rejects_mismatched_unpacked_array_shape() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2, 2]) -> logic<8> {
+                return x[1][0];
+            }
+            always_ff (clk) {
+                out_q = f('{'{8'h11, 8'h22, 8'h33}});
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("actual expression shape does not match unpacked array formal"),
+            "Expected mismatched unpacked shape error, got: {e:?}"
+        );
+    });
+}

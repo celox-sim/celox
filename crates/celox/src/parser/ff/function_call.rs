@@ -7,12 +7,113 @@ use crate::{
         bitaccess::{build_partial_assign_expr, is_static_access},
     },
 };
+use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, Comptime, Expression, Factor, Statement, VarId, VarIndex, VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
+    fn default_expr_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
+        Self::expr_shape_matches_formal(expr, formal_shape)
+            || (!formal_shape.is_empty() && expr.comptime().r#type.array.is_empty())
+    }
+
+    fn expr_shape_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
+        match expr {
+            Expression::ArrayLiteral(items, _) => {
+                let Some((&formal_len, formal_tail)) = formal_shape.split_first() else {
+                    return false;
+                };
+                let mut explicit_len = 0usize;
+                let mut saw_default = false;
+
+                for item in items {
+                    match item {
+                        ArrayLiteralItem::Value(inner, repeat) => {
+                            let rep_count = if let Some(rep_expr) = repeat {
+                                match crate::parser::bitaccess::eval_constexpr(rep_expr)
+                                    .and_then(|v| v.to_u64())
+                                {
+                                    Some(v) => v as usize,
+                                    None => return false,
+                                }
+                            } else {
+                                1
+                            };
+                            explicit_len += rep_count;
+                            if explicit_len > formal_len {
+                                return false;
+                            }
+                            if !Self::expr_shape_matches_formal(inner, formal_tail) {
+                                return false;
+                            }
+                        }
+                        ArrayLiteralItem::Defaul(inner) => {
+                            if saw_default {
+                                return false;
+                            }
+                            saw_default = true;
+                            if !Self::default_expr_matches_formal(inner, formal_tail) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+
+                if saw_default {
+                    explicit_len <= formal_len
+                } else {
+                    explicit_len == formal_len
+                }
+            }
+            _ => {
+                let shape: Option<Vec<usize>> =
+                    expr.comptime().r#type.array.iter().copied().collect();
+                shape.unwrap_or_default() == formal_shape
+            }
+        }
+    }
+
+    fn actual_matches_formal_shape(
+        &self,
+        formal: &veryl_analyzer::ir::Variable,
+        expr: &Expression,
+    ) -> bool {
+        let formal_shape: Option<Vec<usize>> = formal.r#type.array.iter().copied().collect();
+        let formal_shape = formal_shape.unwrap_or_default();
+        if formal_shape.is_empty() {
+            return true;
+        }
+        Self::expr_shape_matches_formal(expr, &formal_shape)
+    }
+
+    fn validate_function_call_bindings(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        function_body: &veryl_analyzer::ir::FunctionBody,
+    ) -> Result<(), ParserError> {
+        for (arg_path, arg_id) in &function_body.arg_map {
+            let Some(arg_expr) = call.inputs.get(arg_path) else {
+                continue;
+            };
+            let formal = &self.module.variables[arg_id];
+            if !self.actual_matches_formal_shape(formal, arg_expr) {
+                return Err(ParserError::unsupported(
+                    43,
+                    LoweringPhase::FfLowering,
+                    "function call argument shape",
+                    format!(
+                        "actual expression shape does not match unpacked array formal `{}`",
+                        formal.path
+                    ),
+                    Some(&call.comptime.token),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn apply_function_call_to_state(
         &self,
         call: &veryl_analyzer::ir::FunctionCall,
@@ -41,6 +142,8 @@ impl<'a> FfParser<'a> {
                 Some(&call.comptime.token),
             ));
         };
+
+        self.validate_function_call_bindings(call, &function_body)?;
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
@@ -552,6 +655,8 @@ impl<'a> FfParser<'a> {
             ));
         };
 
+        self.validate_function_call_bindings(call, &function_body)?;
+
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
             if let Some(arg_expr) = call.inputs.get(arg_path) {
@@ -637,6 +742,8 @@ impl<'a> FfParser<'a> {
                 Some(&call.comptime.token),
             ));
         };
+
+        self.validate_function_call_bindings(call, &function_body)?;
 
         if call.outputs.is_empty() {
             // No side effect through output arguments: statement-form function call

@@ -660,6 +660,71 @@ fn test_ff_struct_constructor_expression(sim) {
     assert_eq!(sim.get(out_b), 0x34u32.into());
 }
 
+fn test_ff_struct_constructor_expression_literal_order(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in_a: input logic<8>,
+            in_b: input logic<8>,
+            out_a: output logic<8>,
+            out_b: output logic<8>
+        ) {
+            struct S {
+                a: logic<8>,
+                b: logic<8>,
+            }
+            var r: S;
+            always_ff (clk) {
+                r = S'{a: in_a, b: in_b};
+            }
+            assign out_a = r.a;
+            assign out_b = r.b;
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let in_b = sim.signal("in_b");
+    let out_a = sim.signal("out_a");
+    let out_b = sim.signal("out_b");
+
+    sim.modify(|io| {
+        io.set(in_a, 0x12u8);
+        io.set(in_b, 0x34u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_a), 0x12u32.into());
+    assert_eq!(sim.get(out_b), 0x34u32.into());
+}
+
+fn test_ff_array_literal_expression_order(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            o0: output logic<8>,
+            o1: output logic<8>
+        ) {
+            var r: logic<8>[2];
+            always_ff (clk) {
+                r = '{8'h12, 8'h34};
+            }
+            assign o0 = r[0];
+            assign o1 = r[1];
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let o0 = sim.signal("o0");
+    let o1 = sim.signal("o1");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o0), 0x12u32.into());
+    assert_eq!(sim.get(o1), 0x34u32.into());
+}
+
 fn test_ff_array_literal_default_expression(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
@@ -959,6 +1024,368 @@ fn test_ff_function_call_nested_output_statement_in_function_body(sim) {
     assert_eq!(sim.get(out_q), 0u32.into());
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 8u32.into());
+}
+
+fn test_ff_function_call_indexed_nonvariable_argument_expression(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (clk: input clock, in_a: input logic<4>, out_q: output logic) {
+            function f (x: input logic<4>) -> logic {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f(in_a + 4'b0001);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(in_a, 0b0010u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 1u32.into());
+
+    sim.modify(|io| io.set(in_a, 0b0101u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 1u32.into());
+}
+
+fn test_ff_function_call_chained_range_access_on_argument(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<4>) {
+            function f (x: input logic<8>) -> logic<4> {
+                return x[5:2];
+            }
+            always_ff (clk) {
+                out_q = f(in_a[7:0]);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(in_a, 0b1101_0110u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0b0101u32.into());
+}
+
+fn test_ff_function_call_step_access_on_nonvariable_argument(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<4>) {
+            function f (x: input logic<8>) -> logic<4> {
+                return x[1 step 4];
+            }
+            always_ff (clk) {
+                out_q = f(in_a + 8'b0000_0001);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(in_a, 0b1010_0100u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0b1010u32.into());
+}
+
+fn test_ff_function_call_nonvariable_argument_uses_formal_width_before_slice(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (clk: input clock, out_q: output logic) {
+            function f (x: input logic<4>) -> logic {
+                return x[3];
+            }
+            always_ff (clk) {
+                out_q = f('1);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 1u32.into());
+}
+
+fn test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (clk: input clock, out_q: output logic) {
+            function f (x: input logic<4>) -> logic {
+                return x[2];
+            }
+            always_ff (clk) {
+                out_q = f(2'b11 + 2'b01);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0u32.into());
+}
+
+fn test_ff_function_call_nonvariable_argument_preserves_signed_logic_formal(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in_a: input signed logic<8>,
+            out_direct: output signed logic<8>,
+            out_expr: output signed logic<8>
+        ) {
+            function f (x: input signed logic<8>) -> signed logic<8> {
+                return x[7:0] >>> 1;
+            }
+            always_ff (clk) {
+                out_direct = f(in_a);
+                out_expr = f(in_a + 0);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let out_direct = sim.signal("out_direct");
+    let out_expr = sim.signal("out_expr");
+
+    sim.modify(|io| io.set(in_a, 0xFEu8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_direct), 0xFFu32.into());
+    assert_eq!(sim.get(out_expr), 0xFFu32.into());
+}
+
+fn test_ff_function_call_sign_extends_narrow_signed_actual_before_slice(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output signed logic<8>
+        ) {
+            function f (x: input signed logic<8>) -> signed logic<8> {
+                return x >>> 4;
+            }
+            always_ff (clk) {
+                out_q = f(4'shf);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0xFFu32.into());
+}
+
+fn test_ff_function_call_preserves_unsigned_actual_when_widening_to_signed_formal(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic
+        ) {
+            function f (x: input signed logic<8>) -> logic {
+                return x[7];
+            }
+            always_ff (clk) {
+                out_q = f(4'hf);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0u32.into());
+}
+
+fn test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_actual(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in_a: input signed logic<8>,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>) -> logic<8> {
+                return x[7:0] >>> 1;
+            }
+            always_ff (clk) {
+                out_q = f(in_a + 0);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(in_a, 0xFEu8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x7Fu32.into());
+}
+
+fn test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in_hi: input logic<4>,
+            in_lo: input logic<4>,
+            out_q: output logic<4>
+        ) {
+            function f (x: input logic<4>[2]) -> logic<4> {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f('{in_hi, in_lo});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_hi = sim.signal("in_hi");
+    let in_lo = sim.signal("in_lo");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| {
+        io.set(in_hi, 0xAu8);
+        io.set(in_lo, 0x3u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x3u32.into());
+}
+
+fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output signed logic<4>
+        ) {
+            function f (x: input signed logic<4>[2]) -> signed logic<4> {
+                return x[1] >>> 3;
+            }
+            always_ff (clk) {
+                out_q = f('{4'sh1, 4'sh8});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0xFu32.into());
+}
+
+fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[3]) -> logic<8> {
+                return x[2];
+            }
+            always_ff (clk) {
+                out_q = f('{default: 8'h55});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x55u32.into());
+}
+
+fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2, 2]) -> logic<8> {
+                return x[1][1];
+            }
+            always_ff (clk) {
+                out_q = f('{default: 8'h55});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x55u32.into());
+}
+
+fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2, 2]) -> logic<8> {
+                return x[0][0];
+            }
+            always_ff (clk) {
+                out_q = f('{'{8'h11, 8'h22}, '{8'h33, 8'h44}});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
+fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in_a: input logic,
+            out_q: output logic
+        ) {
+            function f (x: input logic) -> logic {
+                return x[0];
+            }
+            always_ff (clk) {
+                out_q = f(in_a | 1'b0);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(in_a, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 1u32.into());
 }
 
 }
