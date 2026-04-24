@@ -702,10 +702,14 @@ const editorOpts: monaco.editor.IStandaloneEditorConstructionOptions = {
 
 // Configure TS compiler options for testbench files
 monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
-monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
+const monacoTestbenchCompilerOptions: monaco.languages.typescript.CompilerOptions =
+	{
 	target: monaco.languages.typescript.ScriptTarget.ES2022,
 	module: monaco.languages.typescript.ModuleKind.ES2022,
 	moduleResolution: monaco.languages.typescript.ModuleResolutionKind.Bundler,
+	// Monaco's implicit lib selection can still drift to an older baseline.
+	// Keep BigInt support explicit so bigint literals in examples/tests stay valid.
+	lib: ["es2022", "es2020.bigint", "dom", "dom.iterable"],
 	allowArbitraryExtensions: true,
 	esModuleInterop: true,
 	skipLibCheck: true,
@@ -719,7 +723,13 @@ monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
 			"file:///node_modules/@celox-sim/celox/dist/*.d.ts",
 		],
 	},
-});
+	};
+monaco.languages.typescript.typescriptDefaults.setCompilerOptions(
+	monacoTestbenchCompilerOptions,
+);
+monaco.languages.typescript.javascriptDefaults.setCompilerOptions(
+	monacoTestbenchCompilerOptions,
+);
 monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
 	diagnosticsOptions: {
 		noSemanticValidation: false,
