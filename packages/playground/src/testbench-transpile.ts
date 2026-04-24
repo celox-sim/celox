@@ -11,10 +11,7 @@ type EmitOutputLike = {
 
 function stripInjectedModuleSyntax(jsCode: string): string {
 	return jsCode
-		.replace(
-			/^(?:import|export)\s+.*(?:from\s+)?["'][^"']*["'];?\s*$/gm,
-			"",
-		)
+		.replace(/^(?:import|export)\s+.*(?:from\s+)?["'][^"']*["'];?\s*$/gm, "")
 		.replace(/^\s*export\s*\{[^}]*\};?\s*$/gm, "")
 		.replace(
 			/^(?:const|let|var)\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\);?\s*$/gm,
@@ -28,7 +25,9 @@ export function transpileTestbench(
 	testPath: string,
 	emitOutput?: EmitOutputLike,
 ): string {
-	let jsCode = emitOutput?.outputFiles?.find((f) => f.name.endsWith(".js"))?.text;
+	let jsCode = emitOutput?.outputFiles?.find((f) =>
+		f.name.endsWith(".js"),
+	)?.text;
 
 	if (!jsCode) {
 		try {

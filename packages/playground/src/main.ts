@@ -9,6 +9,7 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 // Import real .d.ts files from @celox-sim/celox for Monaco type injection
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
+import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	generateVcdText,
 	type VcdSignalInfo,
@@ -16,7 +17,6 @@ import {
 	type VcdTrace,
 	WaveformViewer,
 } from "./waveform-viewer.js";
-import { transpileTestbench } from "./testbench-transpile.js";
 
 // ── Examples ────────────────────────────────────────────
 
