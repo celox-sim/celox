@@ -802,6 +802,7 @@ impl<'a> FfParser<'a> {
 
                     let Expression::Term(bound_factor) = &bound_expr else {
                         return Err(ParserError::unsupported(
+                            68,
                             LoweringPhase::FfLowering,
                             "function argument indexed access",
                             format!(
@@ -816,6 +817,7 @@ impl<'a> FfParser<'a> {
                         bound_factor.as_ref()
                     else {
                         return Err(ParserError::unsupported(
+                            68,
                             LoweringPhase::FfLowering,
                             "function argument indexed access",
                             format!(
@@ -828,6 +830,7 @@ impl<'a> FfParser<'a> {
 
                     if bound_var_select.1.is_some() {
                         return Err(ParserError::unsupported(
+                            68,
                             LoweringPhase::FfLowering,
                             "function argument indexed access",
                             format!("chained range access is unsupported: var_id={:?}", var_id),
@@ -889,6 +892,7 @@ impl<'a> FfParser<'a> {
             }
             Factor::SystemFunctionCall(call) => {
                 return Err(ParserError::unsupported(
+                    66,
                     LoweringPhase::FfLowering,
                     "system function call",
                     format!("{call}"),
@@ -1035,6 +1039,7 @@ impl<'a> FfParser<'a> {
                 self.get_cast_target_info(right)
             else {
                 return Err(ParserError::unsupported(
+                    68,
                     LoweringPhase::FfLowering,
                     "as cast target",
                     format!("{:?}", right),
@@ -1055,6 +1060,7 @@ impl<'a> FfParser<'a> {
         if matches!(op, Op::Pow) {
             let Some(exp) = self.get_constant_value(right) else {
                 return Err(ParserError::unsupported(
+                    68,
                     LoweringPhase::FfLowering,
                     "pow non-constant exponent",
                     format!("{:?}", right),
@@ -1420,6 +1426,7 @@ impl<'a> FfParser<'a> {
 
             let Some(member_type) = ty.get_member_type(*name) else {
                 return Err(ParserError::unsupported(
+                    68,
                     LoweringPhase::FfLowering,
                     "struct constructor member",
                     format!("unknown member: {:?} in {:?}", name, ty),
@@ -1428,6 +1435,7 @@ impl<'a> FfParser<'a> {
             };
             let Some(member_width) = member_type.total_width() else {
                 return Err(ParserError::unsupported(
+                    68,
                     LoweringPhase::FfLowering,
                     "struct constructor member width",
                     format!("member: {:?}, type: {:?}", name, member_type),
@@ -1493,6 +1501,7 @@ impl<'a> FfParser<'a> {
                     let rep_count = if let Some(rep_expr) = repeat {
                         self.get_constant_value(rep_expr).ok_or_else(|| {
                             ParserError::unsupported(
+                                68,
                                 LoweringPhase::FfLowering,
                                 "array literal non-constant repeat",
                                 format!("{:?}", rep_expr),
@@ -1511,6 +1520,7 @@ impl<'a> FfParser<'a> {
                 ArrayLiteralItem::Defaul(expr) => {
                     if default_part.is_some() {
                         return Err(ParserError::unsupported(
+                            68,
                             LoweringPhase::FfLowering,
                             "array literal multiple default",
                             format!("{:?}", items),
@@ -1534,6 +1544,7 @@ impl<'a> FfParser<'a> {
         if let Some((default_reg, default_width)) = default_part {
             let Some(target_width) = expected_width else {
                 return Err(ParserError::unsupported(
+                    68,
                     LoweringPhase::FfLowering,
                     "array literal default without context width",
                     format!("{:?}", items),
@@ -1543,6 +1554,7 @@ impl<'a> FfParser<'a> {
 
             if explicit_width > target_width {
                 return Err(ParserError::unsupported(
+                    68,
                     LoweringPhase::FfLowering,
                     "array literal width overflow",
                     format!("explicit_width={explicit_width}, target_width={target_width}"),
@@ -1553,6 +1565,7 @@ impl<'a> FfParser<'a> {
             let remaining = target_width - explicit_width;
             if default_width == 0 || !remaining.is_multiple_of(default_width) {
                 return Err(ParserError::unsupported(
+                    68,
                     LoweringPhase::FfLowering,
                     "array literal default width mismatch",
                     format!(

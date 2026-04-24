@@ -416,6 +416,7 @@ impl<'a> FfParser<'a> {
             Statement::Null => {}
             Statement::SystemFunctionCall(call) => {
                 return Err(ParserError::unsupported(
+                    66,
                     LoweringPhase::FfLowering,
                     "system function call",
                     format!("{call}"),
@@ -432,10 +433,9 @@ impl<'a> FfParser<'a> {
             }
             Statement::Break => {
                 let Some(exit_bb) = self.loop_exit_blocks.last().copied() else {
-                    return Err(ParserError::unsupported(
-                        LoweringPhase::FfLowering,
-                        "unsupported statement",
-                        "break;".to_string(),
+                    return Err(ParserError::illegal_context(
+                        "statement in always_ff",
+                        "break outside loop".to_string(),
                         None,
                     ));
                 };
@@ -443,9 +443,8 @@ impl<'a> FfParser<'a> {
                 return Ok(ControlFlow::Break);
             }
             Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
-                return Err(ParserError::unsupported(
-                    LoweringPhase::FfLowering,
-                    "unsupported statement",
+                return Err(ParserError::illegal_context(
+                    "statement in always_ff",
                     format!("{stmt}"),
                     None,
                 ));
@@ -527,6 +526,7 @@ impl<'a> FfParser<'a> {
     ) -> Result<(), ParserError> {
         let Some(loop_width) = stmt.var_type.total_width() else {
             return Err(ParserError::unsupported(
+                65,
                 LoweringPhase::FfLowering,
                 "for loop variable width",
                 format!("{:?}", stmt.var_name),
@@ -595,6 +595,7 @@ impl<'a> FfParser<'a> {
             && !const_singleton
         {
             return Err(ParserError::unsupported(
+                65,
                 LoweringPhase::FfLowering,
                 "non-progressing for loop in always_ff",
                 format!("{:?}", stmt.var_name),
@@ -864,6 +865,7 @@ impl<'a> FfParser<'a> {
                 Some(other) => {
                     self.local_working_vars.remove(&stmt.var_id);
                     return Err(ParserError::unsupported(
+                        65,
                         LoweringPhase::FfLowering,
                         "for loop step operator in always_ff",
                         format!("{other:?}"),
