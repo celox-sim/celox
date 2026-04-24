@@ -961,6 +961,54 @@ fn test_ff_function_call_nested_output_statement_in_function_body(sim) {
     assert_eq!(sim.get(out_q), 8u32.into());
 }
 
+fn test_ff_function_call_indexed_nonvariable_argument_expression(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (clk: input clock, in_a: input logic<4>, out_q: output logic) {
+            function f (x: input logic<4>) -> logic {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f(in_a + 4'b0001);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(in_a, 0b0010u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 1u32.into());
+
+    sim.modify(|io| io.set(in_a, 0b0101u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 1u32.into());
+}
+
+fn test_ff_function_call_chained_range_access_on_argument(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<4>) {
+            function f (x: input logic<8>) -> logic<4> {
+                return x[5:2];
+            }
+            always_ff (clk) {
+                out_q = f(in_a[7:0]);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_a = sim.signal("in_a");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(in_a, 0b1101_0110u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0b0101u32.into());
+}
+
 }
 
 // Tests that use setup_and_trace/snapshot/Simulation::builder stay as regular #[test]

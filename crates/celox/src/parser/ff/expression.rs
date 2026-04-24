@@ -6,6 +6,7 @@ use crate::ir::{
 use crate::parser::{
     LoweringPhase, ParserError,
     bitaccess::{celox_value_from_comptime, eval_var_select, get_access_width, is_static_access},
+    resolve_total_width,
 };
 use num_bigint::BigUint;
 
@@ -16,6 +17,335 @@ use veryl_analyzer::ir::{
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
+    fn eval_type_select(
+        &self,
+        typ: &Type,
+        index: &VarIndex,
+        select: &VarSelect,
+    ) -> Option<BitAccess> {
+        let mut dims: Vec<usize> = typ.array.iter().copied().collect::<Option<Vec<_>>>()?;
+        if typ.width().is_empty() {
+            if let Some(kind_width) = typ.kind.width() {
+                dims.push(kind_width);
+            }
+        } else {
+            dims.extend(typ.width().iter().copied().collect::<Option<Vec<_>>>()?);
+        }
+
+        let mut strides = vec![1; dims.len()];
+        let mut current_stride = 1usize;
+        for i in (0..dims.len()).rev() {
+            strides[i] = current_stride;
+            current_stride *= dims[i];
+        }
+        let total_width = current_stride;
+
+        let to_u = |e: &Expression| {
+            self.get_constant_value(e)
+                .or_else(|| {
+                    crate::parser::bitaccess::eval_constexpr(e)
+                        .and_then(|v| v.to_u64_digits().first().copied())
+                })
+                .map(|v| v as usize)
+        };
+
+        let get_slice_fallback = |base: usize, i: usize| -> BitAccess {
+            let width = if i == 0 { total_width } else { strides[i - 1] };
+            BitAccess::new(base, base + width - 1)
+        };
+
+        let mut all_indices = index.0.clone();
+        all_indices.extend(select.0.iter().cloned());
+
+        let mut base_offset = 0usize;
+        let mut processed_count = 0usize;
+        let limit = if select.1.is_some() {
+            all_indices.len().saturating_sub(1)
+        } else {
+            all_indices.len()
+        };
+
+        for (i, index_val) in all_indices[..limit].iter().enumerate() {
+            let idx = to_u(index_val)?;
+            let stride = *strides.get(i)?;
+            base_offset += idx * stride;
+            processed_count += 1;
+        }
+
+        if let Some((op, range_expr)) = &select.1 {
+            let anchor_expr = all_indices.last()?;
+            let anchor = to_u(anchor_expr)?;
+            let val = to_u(range_expr)?;
+            let weight = *strides.get(processed_count).unwrap_or(&1);
+            let (lsb_rel, msb_rel) = match op {
+                VarSelectOp::Colon => (val * weight, anchor * weight + (weight - 1)),
+                VarSelectOp::PlusColon => (anchor * weight, (anchor + val) * weight - 1),
+                VarSelectOp::MinusColon => {
+                    let msb = anchor * weight + (weight - 1);
+                    let lsb = (anchor + 1).checked_sub(val)? * weight;
+                    (lsb, msb)
+                }
+                VarSelectOp::Step => {
+                    let actual_lsb = anchor * val;
+                    let actual_msb = actual_lsb + val - 1;
+                    (actual_lsb * weight, (actual_msb + 1) * weight - 1)
+                }
+            };
+            Some(BitAccess::new(base_offset + lsb_rel, base_offset + msb_rel))
+        } else if processed_count == dims.len() {
+            Some(BitAccess::new(base_offset, base_offset))
+        } else {
+            Some(get_slice_fallback(base_offset, processed_count))
+        }
+    }
+
+    fn emit_register_slice<A>(
+        &mut self,
+        src_reg: RegisterId,
+        access: BitAccess,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> RegisterId {
+        let src_width = ir_builder.register(&src_reg).width();
+        if access.lsb == 0 && access.msb + 1 == src_width {
+            return src_reg;
+        }
+
+        let slice_width = access.msb - access.lsb + 1;
+        let shifted_reg = if access.lsb == 0 {
+            src_reg
+        } else {
+            let shift_amt_reg = ir_builder.alloc_bit(64, false);
+            ir_builder.emit(SIRInstruction::Imm(
+                shift_amt_reg,
+                SIRValue::new(access.lsb as u64),
+            ));
+            let shifted_reg = ir_builder.alloc_logic(src_width);
+            ir_builder.emit(SIRInstruction::Binary(
+                shifted_reg,
+                src_reg,
+                BinaryOp::Shr,
+                shift_amt_reg,
+            ));
+            shifted_reg
+        };
+
+        if slice_width == src_width && access.lsb == 0 {
+            shifted_reg
+        } else {
+            let mask_val = (BigUint::from(1u64) << slice_width) - BigUint::from(1u64);
+            let mask_reg = ir_builder.alloc_bit(slice_width, false);
+            ir_builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
+            let sliced_reg = if ir_builder.register(&src_reg).is_signed() {
+                ir_builder.alloc_bit(slice_width, true)
+            } else {
+                ir_builder.alloc_logic(slice_width)
+            };
+            ir_builder.emit(SIRInstruction::Binary(
+                sliced_reg,
+                shifted_reg,
+                BinaryOp::And,
+                mask_reg,
+            ));
+            sliced_reg
+        }
+    }
+
+    fn materialize_bound_function_access<A>(
+        &mut self,
+        var_id: VarId,
+        bound_expr: &Expression,
+        access: BitAccess,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let formal_width = self
+            .module
+            .variables
+            .get(&var_id)
+            .map(|var| resolve_total_width(self.module, var))
+            .transpose()?;
+        self.parse_expression(
+            bound_expr,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+            formal_width,
+        )?;
+        let bound_reg = self.stack.pop_back().unwrap();
+        let coerced_reg = if let Some(var) = self.module.variables.get(&var_id) {
+            let formal_width = formal_width.expect("formal width must exist for bound argument");
+            self.coerce_register_to_formal(
+                ir_builder,
+                bound_reg,
+                formal_width,
+                bound_expr.comptime().r#type.signed,
+                var.r#type.signed,
+            )
+        } else {
+            bound_reg
+        };
+        let sliced = self.emit_register_slice(coerced_reg, access, ir_builder);
+        self.stack.push_back(sliced);
+        Ok(())
+    }
+
+    fn coerce_register_to_formal<A>(
+        &self,
+        ir_builder: &mut SIRBuilder<A>,
+        reg: RegisterId,
+        target_width: usize,
+        extend_signed: bool,
+        result_signed: bool,
+    ) -> RegisterId {
+        let widened = self.cast_reg_width_ext(ir_builder, reg, target_width, extend_signed);
+        if result_signed {
+            if ir_builder.register(&widened).is_signed()
+                && ir_builder.register(&widened).width() == target_width
+            {
+                widened
+            } else {
+                let signed_reg = ir_builder.alloc_bit(target_width, true);
+                ir_builder.emit(SIRInstruction::Unary(signed_reg, UnaryOp::Ident, widened));
+                signed_reg
+            }
+        } else {
+            let src = ir_builder.register(&widened);
+            if src.width() == target_width && !src.is_signed() {
+                widened
+            } else {
+                let logic_reg = ir_builder.alloc_logic(target_width);
+                ir_builder.emit(SIRInstruction::Unary(logic_reg, UnaryOp::Ident, widened));
+                logic_reg
+            }
+        }
+    }
+
+    fn materialize_bound_array_literal_access<A>(
+        &mut self,
+        var_id: VarId,
+        items: &[ArrayLiteralItem],
+        index: &VarIndex,
+        select: &VarSelect,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<bool, ParserError> {
+        let Some(formal) = self.module.variables.get(&var_id) else {
+            return Ok(false);
+        };
+        if formal.r#type.array.is_empty() {
+            return Ok(false);
+        }
+        if select.1.is_some() {
+            return Ok(false);
+        }
+
+        let array_dims: Option<Vec<usize>> = formal.r#type.array.iter().copied().collect();
+        let Some(array_dims) = array_dims else {
+            return Ok(false);
+        };
+
+        let mut all_indices = index.0.clone();
+        all_indices.extend(select.0.iter().cloned());
+        if all_indices.len() != array_dims.len() {
+            return Ok(false);
+        }
+
+        let mut linear_index = 0usize;
+        for (i, expr) in all_indices.iter().enumerate() {
+            let Some(idx) = self.get_constant_value(expr).map(|x| x as usize) else {
+                return Ok(false);
+            };
+            let dim = array_dims[i];
+            if idx >= dim {
+                return Ok(false);
+            }
+            let stride = array_dims[i + 1..].iter().product::<usize>().max(1);
+            linear_index += idx * stride;
+        }
+
+        let mut expanded: Vec<&Expression> = Vec::new();
+        let mut default_expr: Option<&Expression> = None;
+        for item in items {
+            match item {
+                ArrayLiteralItem::Value(expr, repeat) => {
+                    let rep_count = if let Some(rep_expr) = repeat {
+                        self.get_constant_value(rep_expr).ok_or_else(|| {
+                            ParserError::unsupported(
+                                LoweringPhase::FfLowering,
+                                "array literal non-constant repeat",
+                                format!("{:?}", rep_expr),
+                                Some(&rep_expr.token_range()),
+                            )
+                        })? as usize
+                    } else {
+                        1
+                    };
+                    for _ in 0..rep_count {
+                        expanded.push(expr);
+                    }
+                }
+                ArrayLiteralItem::Defaul(expr) => {
+                    if default_expr.is_some() {
+                        return Err(ParserError::unsupported(
+                            LoweringPhase::FfLowering,
+                            "array literal multiple default",
+                            format!("{:?}", items),
+                            Some(&expr.token_range()),
+                        ));
+                    }
+                    default_expr = Some(expr);
+                }
+            }
+        }
+
+        let selected_expr = if let Some(expr) = expanded.get(linear_index) {
+            *expr
+        } else if let Some(default_expr) = default_expr {
+            default_expr
+        } else {
+            return Ok(false);
+        };
+
+        let access_width = get_access_width(self.module, var_id, index, select)?;
+        self.parse_expression(
+            selected_expr,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+            Some(access_width),
+        )?;
+        let selected_reg = self.stack.pop_back().unwrap();
+        let coerced = self.coerce_register_to_formal(
+            ir_builder,
+            selected_reg,
+            access_width,
+            selected_expr.comptime().r#type.signed,
+            formal.r#type.signed,
+        );
+        self.stack.push_back(coerced);
+        Ok(true)
+    }
+
+    fn eval_formal_type_select(
+        &self,
+        var_id: VarId,
+        index: &VarIndex,
+        select: &VarSelect,
+    ) -> Option<BitAccess> {
+        let formal_type = &self.module.variables.get(&var_id)?.r#type;
+        self.eval_type_select(formal_type, index, select)
+    }
+
     pub(super) fn emit_offset_calc<A>(
         &mut self,
         var_id: VarId,
@@ -800,42 +1130,96 @@ impl<'a> FfParser<'a> {
                         return Ok(());
                     }
 
+                    if let Expression::ArrayLiteral(items, _) = &bound_expr {
+                        if self.materialize_bound_array_literal_access(
+                            *var_id, items, var_index, var_select, targets, domain, convert,
+                            sources, ir_builder,
+                        )? {
+                            return Ok(());
+                        }
+                    }
+
                     let Expression::Term(bound_factor) = &bound_expr else {
-                        return Err(ParserError::unsupported(
-                            68,
-                            LoweringPhase::FfLowering,
-                            "function argument indexed access",
-                            format!(
-                                "non-variable argument expression with indexed access: var_id={:?}",
-                                var_id
-                            ),
-                            Some(&factor.token_range()),
-                        ));
+                        let Some(access) =
+                            self.eval_formal_type_select(*var_id, var_index, var_select)
+                        else {
+                            return Err(ParserError::unsupported(
+                                LoweringPhase::FfLowering,
+                                "function argument indexed access",
+                                format!(
+                                    "non-variable argument expression with dynamic indexed access: var_id={:?}",
+                                    var_id
+                                ),
+                                Some(&factor.token_range()),
+                            ));
+                        };
+                        self.materialize_bound_function_access(
+                            *var_id,
+                            &bound_expr,
+                            access,
+                            targets,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                        )?;
+                        return Ok(());
                     };
 
                     let Factor::Variable(bound_var_id, bound_var_index, bound_var_select, _) =
                         bound_factor.as_ref()
                     else {
-                        return Err(ParserError::unsupported(
-                            68,
-                            LoweringPhase::FfLowering,
-                            "function argument indexed access",
-                            format!(
-                                "non-variable argument expression with indexed access: var_id={:?}",
-                                var_id
-                            ),
-                            Some(&factor.token_range()),
-                        ));
+                        let Some(access) =
+                            self.eval_formal_type_select(*var_id, var_index, var_select)
+                        else {
+                            return Err(ParserError::unsupported(
+                                LoweringPhase::FfLowering,
+                                "function argument indexed access",
+                                format!(
+                                    "non-variable argument expression with dynamic indexed access: var_id={:?}",
+                                    var_id
+                                ),
+                                Some(&factor.token_range()),
+                            ));
+                        };
+                        self.materialize_bound_function_access(
+                            *var_id,
+                            &bound_expr,
+                            access,
+                            targets,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                        )?;
+                        return Ok(());
                     };
 
                     if bound_var_select.1.is_some() {
-                        return Err(ParserError::unsupported(
-                            68,
-                            LoweringPhase::FfLowering,
-                            "function argument indexed access",
-                            format!("chained range access is unsupported: var_id={:?}", var_id),
-                            Some(&factor.token_range()),
-                        ));
+                        let Some(access) =
+                            self.eval_formal_type_select(*var_id, var_index, var_select)
+                        else {
+                            return Err(ParserError::unsupported(
+                                LoweringPhase::FfLowering,
+                                "function argument indexed access",
+                                format!(
+                                    "chained range access with dynamic indices: var_id={:?}",
+                                    var_id
+                                ),
+                                Some(&factor.token_range()),
+                            ));
+                        };
+                        self.materialize_bound_function_access(
+                            *var_id,
+                            &bound_expr,
+                            access,
+                            targets,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                        )?;
+                        return Ok(());
                     }
 
                     let mut merged_index = bound_var_index.clone();
@@ -892,7 +1276,6 @@ impl<'a> FfParser<'a> {
             }
             Factor::SystemFunctionCall(call) => {
                 return Err(ParserError::unsupported(
-                    66,
                     LoweringPhase::FfLowering,
                     "system function call",
                     format!("{call}"),
@@ -1039,7 +1422,6 @@ impl<'a> FfParser<'a> {
                 self.get_cast_target_info(right)
             else {
                 return Err(ParserError::unsupported(
-                    68,
                     LoweringPhase::FfLowering,
                     "as cast target",
                     format!("{:?}", right),
@@ -1060,7 +1442,6 @@ impl<'a> FfParser<'a> {
         if matches!(op, Op::Pow) {
             let Some(exp) = self.get_constant_value(right) else {
                 return Err(ParserError::unsupported(
-                    68,
                     LoweringPhase::FfLowering,
                     "pow non-constant exponent",
                     format!("{:?}", right),
@@ -1426,7 +1807,6 @@ impl<'a> FfParser<'a> {
 
             let Some(member_type) = ty.get_member_type(*name) else {
                 return Err(ParserError::unsupported(
-                    68,
                     LoweringPhase::FfLowering,
                     "struct constructor member",
                     format!("unknown member: {:?} in {:?}", name, ty),
@@ -1435,7 +1815,6 @@ impl<'a> FfParser<'a> {
             };
             let Some(member_width) = member_type.total_width() else {
                 return Err(ParserError::unsupported(
-                    68,
                     LoweringPhase::FfLowering,
                     "struct constructor member width",
                     format!("member: {:?}, type: {:?}", name, member_type),
@@ -1501,7 +1880,6 @@ impl<'a> FfParser<'a> {
                     let rep_count = if let Some(rep_expr) = repeat {
                         self.get_constant_value(rep_expr).ok_or_else(|| {
                             ParserError::unsupported(
-                                68,
                                 LoweringPhase::FfLowering,
                                 "array literal non-constant repeat",
                                 format!("{:?}", rep_expr),
@@ -1520,7 +1898,6 @@ impl<'a> FfParser<'a> {
                 ArrayLiteralItem::Defaul(expr) => {
                     if default_part.is_some() {
                         return Err(ParserError::unsupported(
-                            68,
                             LoweringPhase::FfLowering,
                             "array literal multiple default",
                             format!("{:?}", items),
@@ -1544,7 +1921,6 @@ impl<'a> FfParser<'a> {
         if let Some((default_reg, default_width)) = default_part {
             let Some(target_width) = expected_width else {
                 return Err(ParserError::unsupported(
-                    68,
                     LoweringPhase::FfLowering,
                     "array literal default without context width",
                     format!("{:?}", items),
@@ -1554,7 +1930,6 @@ impl<'a> FfParser<'a> {
 
             if explicit_width > target_width {
                 return Err(ParserError::unsupported(
-                    68,
                     LoweringPhase::FfLowering,
                     "array literal width overflow",
                     format!("explicit_width={explicit_width}, target_width={target_width}"),
@@ -1565,7 +1940,6 @@ impl<'a> FfParser<'a> {
             let remaining = target_width - explicit_width;
             if default_width == 0 || !remaining.is_multiple_of(default_width) {
                 return Err(ParserError::unsupported(
-                    68,
                     LoweringPhase::FfLowering,
                     "array literal default width mismatch",
                     format!(
