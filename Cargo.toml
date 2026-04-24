@@ -19,7 +19,7 @@ license     = "MIT OR Apache-2.0"
 readme      = "README.md"
 edition     = "2024"
 description = "Celox HDL Simulator"
-rust-version = "1.94.1"
+rust-version = "1.95.0"
 
 [workspace.dependencies]
 # Veryl dependencies via submodule path
