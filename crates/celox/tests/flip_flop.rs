@@ -140,12 +140,12 @@ fn test_ff_constant_signed_bounds_in_unrolled_loops(sim) {
         ) {
             always_ff (clk) {
                 q_fwd = 0;
-                for i: i32 in (0 - 1)..=1 {
+                for i in (0 - 1)..=1 {
                     q_fwd += i as 32;
                 }
 
                 q_rev_last = 32'hdead_beef;
-                for i: i32 in rev (0 - 1)..=1 {
+                for i in rev (0 - 1)..=1 {
                     q_rev_last = (i + 1) as 32;
                 }
             }

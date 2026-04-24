@@ -89,12 +89,12 @@ fn test_constant_signed_bounds_in_unrolled_synth_loops(sim) {
         ) {
             always_comb {
                 sum_fwd = 0;
-                for i: i32 in (0 - 1)..=1 {
+                for i in (0 - 1)..=1 {
                     sum_fwd += i as 32;
                 }
 
                 sum_rev = 0;
-                for i: i32 in rev (0 - 1)..=1 {
+                for i in rev (0 - 1)..=1 {
                     sum_rev = sum_rev * 10 + (i + 1) as 32;
                 }
             }
