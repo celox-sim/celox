@@ -14,67 +14,58 @@ use veryl_analyzer::ir::{
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
-    fn expr_unpacked_shape(expr: &Expression) -> Option<Vec<usize>> {
+    fn expr_shape_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
         match expr {
             Expression::ArrayLiteral(items, _) => {
+                let Some((&formal_len, formal_tail)) = formal_shape.split_first() else {
+                    return false;
+                };
                 let mut explicit_len = 0usize;
-                let mut element_shape: Option<Vec<usize>> = None;
+                let mut saw_default = false;
 
                 for item in items {
                     match item {
                         ArrayLiteralItem::Value(inner, repeat) => {
                             let rep_count = if let Some(rep_expr) = repeat {
-                                crate::parser::bitaccess::eval_constexpr(rep_expr)
+                                match crate::parser::bitaccess::eval_constexpr(rep_expr)
                                     .and_then(|v| v.to_u64())
-                                    .map(|v| v as usize)?
+                                {
+                                    Some(v) => v as usize,
+                                    None => return false,
+                                }
                             } else {
                                 1
                             };
                             explicit_len += rep_count;
-
-                            let inner_shape = Self::expr_unpacked_shape(inner)
-                                .or_else(|| {
-                                    let shape: Option<Vec<usize>> =
-                                        inner.comptime().r#type.array.iter().copied().collect();
-                                    shape
-                                })
-                                .unwrap_or_default();
-                            if let Some(existing) = &element_shape {
-                                if *existing != inner_shape {
-                                    return None;
-                                }
-                            } else {
-                                element_shape = Some(inner_shape);
+                            if explicit_len > formal_len {
+                                return false;
+                            }
+                            if !Self::expr_shape_matches_formal(inner, formal_tail) {
+                                return false;
                             }
                         }
                         ArrayLiteralItem::Defaul(inner) => {
-                            let inner_shape = Self::expr_unpacked_shape(inner)
-                                .or_else(|| {
-                                    let shape: Option<Vec<usize>> =
-                                        inner.comptime().r#type.array.iter().copied().collect();
-                                    shape
-                                })
-                                .unwrap_or_default();
-                            if let Some(existing) = &element_shape {
-                                if *existing != inner_shape {
-                                    return None;
-                                }
-                            } else {
-                                element_shape = Some(inner_shape);
+                            if saw_default {
+                                return false;
+                            }
+                            saw_default = true;
+                            if !Self::expr_shape_matches_formal(inner, formal_tail) {
+                                return false;
                             }
                         }
                     }
                 }
 
-                let mut shape = vec![explicit_len];
-                if let Some(inner_shape) = element_shape {
-                    shape.extend(inner_shape);
+                if saw_default {
+                    explicit_len <= formal_len
+                } else {
+                    explicit_len == formal_len
                 }
-                Some(shape)
             }
             _ => {
-                let shape: Option<Vec<usize>> = expr.comptime().r#type.array.iter().copied().collect();
-                shape
+                let shape: Option<Vec<usize>> =
+                    expr.comptime().r#type.array.iter().copied().collect();
+                shape.unwrap_or_default() == formal_shape
             }
         }
     }
@@ -89,12 +80,7 @@ impl<'a> FfParser<'a> {
         if formal_shape.is_empty() {
             return true;
         }
-
-        let Some(actual_shape) = Self::expr_unpacked_shape(expr) else {
-            return false;
-        };
-
-        actual_shape == formal_shape
+        Self::expr_shape_matches_formal(expr, &formal_shape)
     }
 
     fn validate_function_call_bindings(
