@@ -1040,46 +1040,39 @@ fn eval_statement(
         Statement::Assign(assign) => eval_assign(module, store, boundaries, assign, arena),
         Statement::If(if_stmt) => eval_if(module, store, boundaries, if_stmt, arena),
         Statement::For(for_stmt) => eval_for(module, store, boundaries, for_stmt, arena),
-        Statement::IfReset(ir) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: if_reset".to_string(),
+        Statement::IfReset(ir) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: system function call".to_string(),
+        Statement::SystemFunctionCall(fc) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "system function call".to_string(),
             Some(&fc.comptime.token),
         )),
-        Statement::FunctionCall(fc) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: function call".to_string(),
+        Statement::FunctionCall(fc) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "function call".to_string(),
             Some(&fc.comptime.token),
         )),
-        Statement::TbMethodCall(_) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: testbench method call".to_string(),
+        Statement::TbMethodCall(_) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "testbench method call".to_string(),
             None,
         )),
-        Statement::Break => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: break".to_string(),
+        Statement::Break => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "break".to_string(),
             None,
         )),
-        Statement::Unsupported(_) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: unsupported".to_string(),
+        Statement::Unsupported(_) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "unsupported statement".to_string(),
             None,
         )),
-        Statement::Null => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: null".to_string(),
+        Statement::Null => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "null".to_string(),
             None,
         )),
     }
@@ -1282,40 +1275,34 @@ fn eval_loop_statement(
             continue_sources: HashSet::default(),
             ..state
         }),
-        Statement::IfReset(ir) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: if_reset".to_string(),
+        Statement::IfReset(ir) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: system function call".to_string(),
+        Statement::SystemFunctionCall(fc) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "system function call".to_string(),
             Some(&fc.comptime.token),
         )),
-        Statement::FunctionCall(fc) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: function call".to_string(),
+        Statement::FunctionCall(fc) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "function call".to_string(),
             Some(&fc.comptime.token),
         )),
-        Statement::TbMethodCall(_) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: testbench method call".to_string(),
+        Statement::TbMethodCall(_) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "testbench method call".to_string(),
             None,
         )),
-        Statement::Unsupported(_) => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: unsupported".to_string(),
+        Statement::Unsupported(_) => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "unsupported statement".to_string(),
             None,
         )),
-        Statement::Null => Err(ParserError::unsupported(
-            LoweringPhase::SimulatorParser,
-            "unsupported statement in always_comb",
-            "illegal statement in always_comb: null".to_string(),
+        Statement::Null => Err(ParserError::illegal_context(
+            "statement in always_comb",
+            "null".to_string(),
             None,
         )),
     }
@@ -1503,6 +1490,7 @@ fn eval_for(
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     let Some(loop_width) = for_stmt.var_type.total_width() else {
         return Err(ParserError::unsupported(
+            65,
             LoweringPhase::CombLowering,
             "for loop variable width",
             format!("{:?}", for_stmt.var_name),
@@ -1630,6 +1618,7 @@ fn eval_for(
                 Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
                 other => {
                     return Err(ParserError::unsupported(
+                        65,
                         LoweringPhase::CombLowering,
                         "for loop step operator",
                         format!("{other:?}"),
@@ -2116,6 +2105,7 @@ fn eval_array_literal_expression(
                 let rep_count = if let Some(rep_expr) = repeat {
                     let Some(rep_count) = eval_constexpr(rep_expr).and_then(|x| x.to_u64()) else {
                         return Err(ParserError::unsupported(
+                            43,
                             LoweringPhase::CombLowering,
                             "array literal non-constant repeat",
                             format!("{:?}", rep_expr),
@@ -2136,6 +2126,7 @@ fn eval_array_literal_expression(
                 if default_part.is_some() {
                     let token = default_expr.token_range();
                     return Err(ParserError::unsupported(
+                        43,
                         LoweringPhase::CombLowering,
                         "array literal multiple default",
                         format!("{:?}", items),
@@ -2157,6 +2148,7 @@ fn eval_array_literal_expression(
         let Some(target_width) = expected_width else {
             let token = items.first().map(|i| i.token_range());
             return Err(ParserError::unsupported(
+                43,
                 LoweringPhase::CombLowering,
                 "array literal default without context width",
                 format!("{:?}", items),
@@ -2167,6 +2159,7 @@ fn eval_array_literal_expression(
         if explicit_width > target_width {
             let token = items.first().map(|i| i.token_range());
             return Err(ParserError::unsupported(
+                43,
                 LoweringPhase::CombLowering,
                 "array literal width overflow",
                 format!("explicit_width={explicit_width}, target_width={target_width}"),
@@ -2177,6 +2170,7 @@ fn eval_array_literal_expression(
         let remaining = target_width - explicit_width;
         if default_width == 0 || !remaining.is_multiple_of(default_width) {
             return Err(ParserError::unsupported(
+                43,
                 LoweringPhase::CombLowering,
                 "array literal default width mismatch",
                 format!(
@@ -2265,6 +2259,7 @@ fn eval_function_body_return(
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::SystemFunctionCall(call) => Err(ParserError::unsupported(
+                    59,
                     LoweringPhase::CombLowering,
                     "system function call in comb function body",
                     format!("module `{}`: {call}", module.name),
@@ -2355,6 +2350,7 @@ fn eval_function_body_return(
                     && for_stmt.body.iter().any(statement_contains_break)
                 {
                     return Err(ParserError::unsupported(
+                        57,
                         LoweringPhase::CombLowering,
                         "break in dynamic function-local for",
                         format!("module `{}`", module.name),
@@ -2379,21 +2375,22 @@ fn eval_function_body_return(
                 }
                 Ok(())
             }
-            Statement::IfReset(ir) => Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function body control flow",
+            Statement::IfReset(ir) => Err(ParserError::illegal_context(
+                "statement in comb function body",
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
             Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                59,
                 LoweringPhase::CombLowering,
                 "system function call in comb function body",
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
             Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                58,
                 LoweringPhase::CombLowering,
-                "nested function call in comb function body",
+                "statement-form function call in comb function body",
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
@@ -2726,28 +2723,28 @@ fn eval_function_body_return(
                     continue_expr: bool_node(arena, false),
                     ..state
                 }),
-                Statement::IfReset(ir) => Err(ParserError::unsupported(
-                    LoweringPhase::CombLowering,
-                    "function body control flow",
+                Statement::IfReset(ir) => Err(ParserError::illegal_context(
+                    "statement in comb function body",
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
                 Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                    59,
                     LoweringPhase::CombLowering,
-                    "function body control flow",
+                    "system function call in comb function body",
                     format!("{stmt}"),
                     Some(&fc.comptime.token),
                 )),
                 Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                    58,
                     LoweringPhase::CombLowering,
-                    "function body control flow",
+                    "statement-form function call in comb function body",
                     format!("{stmt}"),
                     Some(&fc.comptime.token),
                 )),
                 Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
-                    Err(ParserError::unsupported(
-                        LoweringPhase::CombLowering,
-                        "function body control flow",
+                    Err(ParserError::illegal_context(
+                        "statement in comb function body",
                         format!("{stmt}"),
                         None,
                     ))
@@ -2757,6 +2754,7 @@ fn eval_function_body_return(
 
         let Some(loop_width) = for_stmt.var_type.total_width() else {
             return Err(ParserError::unsupported(
+                65,
                 LoweringPhase::CombLowering,
                 "for loop variable width",
                 format!("{:?}", for_stmt.var_name),
@@ -2892,6 +2890,7 @@ fn eval_function_body_return(
                     Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
                     other => {
                         return Err(ParserError::unsupported(
+                            65,
                             LoweringPhase::CombLowering,
                             "for loop step operator",
                             format!("{other:?}"),
@@ -3242,28 +3241,28 @@ fn eval_function_body_return(
                 continue_expr: bool_node(arena, false),
                 ..state
             }),
-            Statement::IfReset(ir) => Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function body control flow",
+            Statement::IfReset(ir) => Err(ParserError::illegal_context(
+                "statement in comb function body",
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
             Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                59,
                 LoweringPhase::CombLowering,
-                "function body control flow",
+                "system function call in comb function body",
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
             Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                58,
                 LoweringPhase::CombLowering,
-                "function body control flow",
+                "statement-form function call in comb function body",
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
             Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
-                Err(ParserError::unsupported(
-                    LoweringPhase::CombLowering,
-                    "function body control flow",
+                Err(ParserError::illegal_context(
+                    "statement in comb function body",
                     format!("{stmt}"),
                     None,
                 ))
@@ -3360,28 +3359,28 @@ fn eval_function_body_return(
             Statement::If(if_stmt) => eval_function_if(module, state, if_stmt, ret_id, arena),
             Statement::For(for_stmt) => eval_function_for(module, state, for_stmt, ret_id, arena),
             Statement::Null => Ok(state),
-            Statement::IfReset(ir) => Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function body control flow",
+            Statement::IfReset(ir) => Err(ParserError::illegal_context(
+                "statement in comb function body",
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
             Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                59,
                 LoweringPhase::CombLowering,
-                "function body control flow",
+                "system function call in comb function body",
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
             Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                58,
                 LoweringPhase::CombLowering,
-                "function body control flow",
+                "statement-form function call in comb function body",
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
             Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
-                Err(ParserError::unsupported(
-                    LoweringPhase::CombLowering,
-                    "function body control flow",
+                Err(ParserError::illegal_context(
+                    "statement in comb function body",
                     format!("{stmt}"),
                     None,
                 ))
@@ -3403,6 +3402,7 @@ fn eval_function_body_return(
     for var_id in written.keys() {
         let Some(var) = module.variables.get(var_id) else {
             return Err(ParserError::unsupported(
+                67,
                 LoweringPhase::CombLowering,
                 "function local variable",
                 format!("unknown variable id: {:?}", var_id),
@@ -3433,6 +3433,7 @@ fn eval_function_body_return(
     )?;
     if !matches!(constant_bool(arena, final_state.live_expr), Some(false)) {
         return Err(ParserError::unsupported(
+            67,
             LoweringPhase::CombLowering,
             "function return expression",
             format!("function return var id: {:?}", ret_id),
@@ -3451,6 +3452,7 @@ fn eval_function_call_expression(
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     if !call.outputs.is_empty() {
         return Err(ParserError::unsupported(
+            60,
             LoweringPhase::CombLowering,
             "function call with output arguments",
             format!("{call}"),
@@ -3460,6 +3462,7 @@ fn eval_function_call_expression(
 
     let Some(function) = module.functions.get(&call.id) else {
         return Err(ParserError::unsupported(
+            62,
             LoweringPhase::CombLowering,
             "function call",
             format!("unknown function id: {:?}", call.id),
@@ -3473,6 +3476,7 @@ fn eval_function_call_expression(
         function.get_function(&[])
     }) else {
         return Err(ParserError::unsupported(
+            62,
             LoweringPhase::CombLowering,
             "function call specialization",
             format!("{call}"),
@@ -3482,6 +3486,7 @@ fn eval_function_call_expression(
 
     let Some(ret_id) = function_body.ret else {
         return Err(ParserError::unsupported(
+            63,
             LoweringPhase::CombLowering,
             "void function call in comb expression",
             format!("{call}"),
@@ -3494,6 +3499,7 @@ fn eval_function_call_expression(
     for (arg_path, arg_id) in &function_body.arg_map {
         let Some(arg_expr) = call.inputs.get(arg_path) else {
             return Err(ParserError::unsupported(
+                61,
                 LoweringPhase::CombLowering,
                 "function call missing argument",
                 format!("{call}"),
@@ -3506,6 +3512,7 @@ fn eval_function_call_expression(
 
         let Some(arg_var) = module.variables.get(arg_id) else {
             return Err(ParserError::unsupported(
+                67,
                 LoweringPhase::CombLowering,
                 "function argument variable",
                 format!("unknown arg id: {:?}", arg_id),
@@ -3631,6 +3638,7 @@ pub fn eval_expression(
                 };
                 let Some(target_width) = target_width else {
                     return Err(ParserError::unsupported(
+                        67,
                         LoweringPhase::CombLowering,
                         "as cast target",
                         format!("{:?}", rhs),
@@ -3680,6 +3688,7 @@ pub fn eval_expression(
                 let Some(exp) = eval_constexpr(rhs).and_then(|x| x.to_u64().map(|v| v as usize))
                 else {
                     return Err(ParserError::unsupported(
+                        67,
                         LoweringPhase::CombLowering,
                         "pow non-constant exponent",
                         format!("{:?}", rhs),
@@ -3833,6 +3842,7 @@ pub fn eval_expression(
                     let v = eval_constexpr(rep_expr);
                     v.ok_or_else(|| {
                         ParserError::unsupported(
+                            67,
                             LoweringPhase::CombLowering,
                             "concatenation non-constant repeat",
                             format!("{:?}", rep_expr),
@@ -3911,6 +3921,7 @@ pub fn eval_expression(
 
                 let Some(member_type) = ty.get_member_type(*name) else {
                     return Err(ParserError::unsupported(
+                        67,
                         LoweringPhase::CombLowering,
                         "struct constructor member",
                         format!("unknown member: {:?} in {:?}", name, ty),
@@ -3919,6 +3930,7 @@ pub fn eval_expression(
                 };
                 let Some(member_width) = member_type.total_width() else {
                     return Err(ParserError::unsupported(
+                        67,
                         LoweringPhase::CombLowering,
                         "struct constructor member width",
                         format!("member: {:?}, type: {:?}", name, member_type),
@@ -4270,6 +4282,7 @@ fn eval_factor(
             ))
         }
         Factor::SystemFunctionCall(call) => Err(ParserError::unsupported(
+            59,
             LoweringPhase::CombLowering,
             "system function call in comb expression",
             format!("module `{}`: {call}", module.name),
@@ -4277,6 +4290,7 @@ fn eval_factor(
         )),
         Factor::FunctionCall(call) => eval_function_call_expression(module, store, call, arena),
         Factor::Anonymous(_) | Factor::Unknown(_) => Err(ParserError::unsupported(
+            67,
             LoweringPhase::CombLowering,
             "unresolved factor in comb expression",
             format!("{:?}", factor),

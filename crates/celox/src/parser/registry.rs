@@ -7,6 +7,7 @@ use veryl_analyzer::ir::{Module, VarId};
 pub fn get_port_type(module: &Module, port_id: &VarId) -> Result<RegisterType, ParserError> {
     let var = module.variables.get(port_id).ok_or_else(|| {
         ParserError::unsupported(
+            64,
             LoweringPhase::SimulatorParser,
             "port lookup",
             format!("port ID not found in child module: {}", module.name),

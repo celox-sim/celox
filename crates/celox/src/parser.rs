@@ -89,9 +89,17 @@ pub enum ParserError {
     #[error(transparent)]
     Scheduler(SchedulerError<String>),
 
-    #[error("Unsupported in {phase}: {feature} ({detail})")]
+    #[error("Unsupported in {phase}: {feature} [tracking issue #{issue}] ({detail})")]
     Unsupported {
+        issue: u32,
         phase: LoweringPhase,
+        feature: &'static str,
+        detail: String,
+        source_location: Option<SourceLocation>,
+    },
+
+    #[error("Illegal in current context: {feature} ({detail})")]
+    IllegalContext {
         feature: &'static str,
         detail: String,
         source_location: Option<SourceLocation>,
@@ -117,13 +125,27 @@ pub enum ParserError {
 
 impl ParserError {
     pub fn unsupported(
+        issue: u32,
         phase: LoweringPhase,
         feature: &'static str,
         detail: impl Into<String>,
         token: Option<&TokenRange>,
     ) -> Self {
         ParserError::Unsupported {
+            issue,
             phase,
+            feature,
+            detail: detail.into(),
+            source_location: token.map(SourceLocation::from_token),
+        }
+    }
+
+    pub fn illegal_context(
+        feature: &'static str,
+        detail: impl Into<String>,
+        token: Option<&TokenRange>,
+    ) -> Self {
+        ParserError::IllegalContext {
             feature,
             detail: detail.into(),
             source_location: token.map(SourceLocation::from_token),
@@ -155,6 +177,7 @@ impl miette::Diagnostic for ParserError {
                     LoweringPhase::SimulatorParser => "simulator_parser",
                 }
             ))),
+            ParserError::IllegalContext { .. } => Some(Box::new("illegal_context")),
             ParserError::UnresolvedWidth { .. } => Some(Box::new("unresolved_width")),
             ParserError::Scheduler(_) => Some(Box::new("scheduler")),
             ParserError::TopNotFound { .. } => Some(Box::new("top_not_found")),
@@ -171,6 +194,9 @@ impl miette::Diagnostic for ParserError {
             ParserError::Unsupported {
                 source_location, ..
             }
+            | ParserError::IllegalContext {
+                source_location, ..
+            }
             | ParserError::UnresolvedWidth {
                 source_location, ..
             } => source_location.as_ref(),
@@ -182,6 +208,9 @@ impl miette::Diagnostic for ParserError {
     fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
         let loc = match self {
             ParserError::Unsupported {
+                source_location, ..
+            }
+            | ParserError::IllegalContext {
                 source_location, ..
             }
             | ParserError::UnresolvedWidth {
@@ -264,6 +293,7 @@ pub fn parse_ir<'a>(
             }
             Component::SystemVerilog(sv) => {
                 return Err(ParserError::unsupported(
+                    64,
                     LoweringPhase::SimulatorParser,
                     "systemverilog component",
                     format!("name: \"{}\"", sv.name),

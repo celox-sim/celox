@@ -81,6 +81,7 @@ impl<'a> ModuleParser<'a> {
     ) -> Result<(), ParserError> {
         if let Component::SystemVerilog(system_verilog) = &*decl.component {
             return Err(ParserError::unsupported(
+                64,
                 LoweringPhase::SimulatorParser,
                 "systemverilog module instantiation",
                 format!("name: \"{}\"", system_verilog.name),
