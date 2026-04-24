@@ -41,6 +41,13 @@ struct FunctionControlState {
     live_sources: HashSet<VarAtomBase<VarId>>,
 }
 
+#[derive(Clone)]
+struct FunctionLoopControlState {
+    function: FunctionControlState,
+    continue_expr: NodeId,
+    continue_sources: HashSet<VarAtomBase<VarId>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
@@ -2326,32 +2333,41 @@ fn eval_function_body_return(
             } else {
                 &if_stmt.false_side
             };
-            return side.iter().try_fold(
+            return eval_function_statements(
+                module,
                 FunctionControlState {
                     boundaries,
                     ..state
                 },
-                |s, step| eval_function_statement(module, s, step, ret_id, arena),
+                side,
+                ret_id,
+                arena,
             );
         }
 
-        let then_state = if_stmt.true_side.iter().try_fold(
+        let then_state = eval_function_statements(
+            module,
             FunctionControlState {
                 store: state.store.clone(),
                 boundaries: boundaries.clone(),
                 live_expr: state.live_expr,
                 live_sources: state.live_sources.clone(),
             },
-            |s, step| eval_function_statement(module, s, step, ret_id, arena),
+            &if_stmt.true_side,
+            ret_id,
+            arena,
         )?;
-        let else_state = if_stmt.false_side.iter().try_fold(
+        let else_state = eval_function_statements(
+            module,
             FunctionControlState {
                 store: state.store,
                 boundaries,
                 live_expr: state.live_expr,
                 live_sources: state.live_sources,
             },
-            |s, step| eval_function_statement(module, s, step, ret_id, arena),
+            &if_stmt.false_side,
+            ret_id,
+            arena,
         )?;
 
         let mut live_sources = cond_sources;
@@ -2385,6 +2401,204 @@ fn eval_function_body_return(
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<FunctionControlState, ParserError> {
+        fn apply_function_loop_continue_guard(
+            module: &Module,
+            state: FunctionLoopControlState,
+            next_function: FunctionControlState,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionLoopControlState, ParserError> {
+            let boundaries =
+                merge_boundaries(state.function.boundaries.clone(), next_function.boundaries);
+
+            if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
+                Ok(FunctionLoopControlState {
+                    function: FunctionControlState {
+                        boundaries,
+                        ..next_function
+                    },
+                    ..state
+                })
+            } else {
+                let merged_store = merge_symbolic_stores(
+                    module,
+                    &next_function.store,
+                    &state.function.store,
+                    state.continue_expr,
+                    &state.continue_sources,
+                    arena,
+                )?;
+                let mut merged_live_sources = state.continue_sources.clone();
+                merged_live_sources.extend(next_function.live_sources);
+                merged_live_sources.extend(state.function.live_sources);
+                Ok(FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: merged_store,
+                        boundaries,
+                        live_expr: merge_control_expr(
+                            state.continue_expr,
+                            next_function.live_expr,
+                            state.function.live_expr,
+                            arena,
+                        ),
+                        live_sources: merged_live_sources,
+                    },
+                    ..state
+                })
+            }
+        }
+
+        fn eval_function_loop_if(
+            module: &Module,
+            state: FunctionLoopControlState,
+            if_stmt: &IfStatement,
+            ret_id: VarId,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionLoopControlState, ParserError> {
+            let ((cond_expr, cond_sources), cond_bounds) =
+                eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+            let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+
+            if let Some(cond_val) = constant_bool(arena, cond_expr) {
+                let side = if cond_val {
+                    &if_stmt.true_side
+                } else {
+                    &if_stmt.false_side
+                };
+                return side.iter().try_fold(
+                    FunctionLoopControlState {
+                        function: FunctionControlState {
+                            boundaries,
+                            ..state.function
+                        },
+                        ..state
+                    },
+                    |s, step| eval_function_loop_statement(module, s, step, ret_id, arena),
+                );
+            }
+
+            let then_state = if_stmt.true_side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store.clone(),
+                        boundaries: boundaries.clone(),
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources.clone(),
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources.clone(),
+                },
+                |s, step| eval_function_loop_statement(module, s, step, ret_id, arena),
+            )?;
+            let else_state = if_stmt.false_side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store,
+                        boundaries,
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources,
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources,
+                },
+                |s, step| eval_function_loop_statement(module, s, step, ret_id, arena),
+            )?;
+
+            let mut merged_sources = cond_sources;
+            merged_sources.extend(then_state.continue_sources);
+            merged_sources.extend(else_state.continue_sources);
+            let mut live_sources = merged_sources.clone();
+            live_sources.extend(then_state.function.live_sources);
+            live_sources.extend(else_state.function.live_sources);
+
+            Ok(FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: merge_symbolic_stores(
+                        module,
+                        &then_state.function.store,
+                        &else_state.function.store,
+                        cond_expr,
+                        &live_sources,
+                        arena,
+                    )?,
+                    boundaries: merge_boundaries(
+                        then_state.function.boundaries,
+                        else_state.function.boundaries,
+                    ),
+                    live_expr: merge_control_expr(
+                        cond_expr,
+                        then_state.function.live_expr,
+                        else_state.function.live_expr,
+                        arena,
+                    ),
+                    live_sources,
+                },
+                continue_expr: merge_control_expr(
+                    cond_expr,
+                    then_state.continue_expr,
+                    else_state.continue_expr,
+                    arena,
+                ),
+                continue_sources: merged_sources,
+            })
+        }
+
+        fn eval_function_loop_statement(
+            module: &Module,
+            state: FunctionLoopControlState,
+            stmt: &Statement,
+            ret_id: VarId,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionLoopControlState, ParserError> {
+            if matches!(constant_bool(arena, state.function.live_expr), Some(false))
+                || matches!(constant_bool(arena, state.continue_expr), Some(false))
+            {
+                return Ok(state);
+            }
+
+            match stmt {
+                Statement::If(if_stmt) => {
+                    eval_function_loop_if(module, state, if_stmt, ret_id, arena)
+                }
+                Statement::Assign(_) | Statement::For(_) | Statement::Null => {
+                    let guard_state = state.clone();
+                    let next_function =
+                        eval_function_statement(module, state.function, stmt, ret_id, arena)?;
+                    apply_function_loop_continue_guard(module, guard_state, next_function, arena)
+                }
+                Statement::Break => Ok(FunctionLoopControlState {
+                    continue_sources: HashSet::default(),
+                    continue_expr: bool_node(arena, false),
+                    ..state
+                }),
+                Statement::IfReset(ir) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&ir.token),
+                )),
+                Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&fc.comptime.token),
+                )),
+                Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&fc.comptime.token),
+                )),
+                Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                    Err(ParserError::unsupported(
+                        LoweringPhase::CombLowering,
+                        "function body control flow",
+                        format!("{stmt}"),
+                        None,
+                    ))
+                }
+            }
+        }
+
         let Some(loop_width) = for_stmt.var_type.total_width() else {
             return Err(ParserError::unsupported(
                 LoweringPhase::CombLowering,
@@ -2433,16 +2647,20 @@ fn eval_function_body_return(
         let iter_store_before = symbolic_store.clone();
 
         let iter_state = for_stmt.body.iter().try_fold(
-            FunctionControlState {
-                store: symbolic_store,
-                boundaries: state.boundaries.clone(),
-                live_expr: bool_node(arena, true),
-                live_sources: HashSet::default(),
+            FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: symbolic_store,
+                    boundaries: state.boundaries.clone(),
+                    live_expr: bool_node(arena, true),
+                    live_sources: HashSet::default(),
+                },
+                continue_expr: bool_node(arena, true),
+                continue_sources: HashSet::default(),
             },
-            |s, stmt| eval_function_statement(module, s, stmt, ret_id, arena),
+            |s, stmt| eval_function_loop_statement(module, s, stmt, ret_id, arena),
         )?;
-        let iter_store_after = iter_state.store;
-        let mut merged_boundaries = iter_state.boundaries;
+        let iter_store_after = iter_state.function.store;
+        let mut merged_boundaries = iter_state.function.boundaries;
 
         let (
             start,
@@ -2569,13 +2787,28 @@ fn eval_function_body_return(
             .collect();
 
         let mut result_store = state.store.clone();
+        let loop_effective_continue = arena.alloc(SLTNode::Binary(
+            iter_state.continue_expr,
+            BinaryOp::And,
+            iter_state.function.live_expr,
+        ));
         for (target, _expr, sources) in &updates {
             let mut all_sources = start_sources.clone();
             all_sources.extend(end_sources.iter().copied());
             all_sources.extend(
-                iter_state.live_sources.iter().copied().filter(|src| {
+                iter_state.continue_sources.iter().copied().filter(|src| {
                     src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)
                 }),
+            );
+            all_sources.extend(
+                iter_state
+                    .function
+                    .live_sources
+                    .iter()
+                    .copied()
+                    .filter(|src| {
+                        src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)
+                    }),
             );
             all_sources.extend(
                 sources.iter().copied().filter(|src| {
@@ -2596,7 +2829,7 @@ fn eval_function_body_return(
                 result: *target,
                 initials: initial_updates.clone(),
                 updates: folded_updates.clone(),
-                continue_cond: iter_state.live_expr,
+                continue_cond: loop_effective_continue,
             });
 
             result_store
@@ -2610,7 +2843,8 @@ fn eval_function_body_return(
         }
         result_store.remove(&for_stmt.var_id);
 
-        let mut next_live_sources = iter_state.live_sources.clone();
+        let mut next_live_sources = iter_state.continue_sources.clone();
+        next_live_sources.extend(iter_state.function.live_sources.iter().copied());
         next_live_sources.extend(start_sources.iter().copied());
         next_live_sources.extend(end_sources.iter().copied());
 
@@ -2625,7 +2859,7 @@ fn eval_function_body_return(
             let mut control_updates = folded_updates.clone();
             control_updates.push(SLTForUpdate {
                 target: control_target,
-                expr: iter_state.live_expr,
+                expr: iter_state.function.live_expr,
             });
             arena.alloc(SLTNode::ForFold {
                 loop_var: for_stmt.var_id,
@@ -2640,7 +2874,7 @@ fn eval_function_body_return(
                 result: control_target,
                 initials: control_initials,
                 updates: control_updates,
-                continue_cond: iter_state.live_expr,
+                continue_cond: iter_state.continue_expr,
             })
         } else {
             bool_node(arena, true)
@@ -2655,6 +2889,285 @@ fn eval_function_body_return(
             next_live_sources,
             arena,
         )
+    }
+
+    fn apply_function_break_guard(
+        module: &Module,
+        state: FunctionLoopControlState,
+        next_function: FunctionControlState,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionLoopControlState, ParserError> {
+        let boundaries =
+            merge_boundaries(state.function.boundaries.clone(), next_function.boundaries);
+
+        if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
+            Ok(FunctionLoopControlState {
+                function: FunctionControlState {
+                    boundaries,
+                    ..next_function
+                },
+                ..state
+            })
+        } else {
+            let merged_store = merge_symbolic_stores(
+                module,
+                &next_function.store,
+                &state.function.store,
+                state.continue_expr,
+                &state.continue_sources,
+                arena,
+            )?;
+            let mut merged_live_sources = state.continue_sources.clone();
+            merged_live_sources.extend(next_function.live_sources);
+            merged_live_sources.extend(state.function.live_sources);
+            Ok(FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: merged_store,
+                    boundaries,
+                    live_expr: merge_control_expr(
+                        state.continue_expr,
+                        next_function.live_expr,
+                        state.function.live_expr,
+                        arena,
+                    ),
+                    live_sources: merged_live_sources,
+                },
+                ..state
+            })
+        }
+    }
+
+    fn eval_function_break_if(
+        module: &Module,
+        state: FunctionLoopControlState,
+        if_stmt: &IfStatement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionLoopControlState, ParserError> {
+        let outer_state = state.clone();
+        let ((cond_expr, cond_sources), cond_bounds) =
+            eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+        let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+
+        let executed_state = if let Some(cond_val) = constant_bool(arena, cond_expr) {
+            let side = if cond_val {
+                &if_stmt.true_side
+            } else {
+                &if_stmt.false_side
+            };
+            side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        boundaries,
+                        ..state.function
+                    },
+                    ..state
+                },
+                |s, step| eval_function_break_statement(module, s, step, ret_id, arena),
+            )?
+        } else {
+            let then_state = if_stmt.true_side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store.clone(),
+                        boundaries: boundaries.clone(),
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources.clone(),
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources.clone(),
+                },
+                |s, step| eval_function_break_statement(module, s, step, ret_id, arena),
+            )?;
+            let else_state = if_stmt.false_side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store,
+                        boundaries,
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources,
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources,
+                },
+                |s, step| eval_function_break_statement(module, s, step, ret_id, arena),
+            )?;
+
+            let mut merged_sources = cond_sources;
+            merged_sources.extend(then_state.continue_sources);
+            merged_sources.extend(else_state.continue_sources);
+            let mut live_sources = merged_sources.clone();
+            live_sources.extend(then_state.function.live_sources);
+            live_sources.extend(else_state.function.live_sources);
+
+            FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: merge_symbolic_stores(
+                        module,
+                        &then_state.function.store,
+                        &else_state.function.store,
+                        cond_expr,
+                        &live_sources,
+                        arena,
+                    )?,
+                    boundaries: merge_boundaries(
+                        then_state.function.boundaries,
+                        else_state.function.boundaries,
+                    ),
+                    live_expr: merge_control_expr(
+                        cond_expr,
+                        then_state.function.live_expr,
+                        else_state.function.live_expr,
+                        arena,
+                    ),
+                    live_sources,
+                },
+                continue_expr: merge_control_expr(
+                    cond_expr,
+                    then_state.continue_expr,
+                    else_state.continue_expr,
+                    arena,
+                ),
+                continue_sources: merged_sources,
+            }
+        };
+
+        if matches!(constant_bool(arena, outer_state.continue_expr), Some(true)) {
+            return Ok(executed_state);
+        }
+
+        let guarded = apply_function_break_guard(
+            module,
+            outer_state.clone(),
+            executed_state.function,
+            arena,
+        )?;
+        let continue_expr = match constant_bool(arena, executed_state.continue_expr) {
+            Some(true) => outer_state.continue_expr,
+            Some(false) => bool_node(arena, false),
+            None => arena.alloc(SLTNode::Binary(
+                outer_state.continue_expr,
+                BinaryOp::And,
+                executed_state.continue_expr,
+            )),
+        };
+        let mut continue_sources = outer_state.continue_sources;
+        continue_sources.extend(executed_state.continue_sources);
+        Ok(FunctionLoopControlState {
+            function: guarded.function,
+            continue_expr,
+            continue_sources,
+        })
+    }
+
+    fn eval_function_break_statement(
+        module: &Module,
+        state: FunctionLoopControlState,
+        stmt: &Statement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionLoopControlState, ParserError> {
+        if matches!(constant_bool(arena, state.function.live_expr), Some(false))
+            || matches!(constant_bool(arena, state.continue_expr), Some(false))
+        {
+            return Ok(state);
+        }
+
+        match stmt {
+            Statement::If(if_stmt) => eval_function_break_if(module, state, if_stmt, ret_id, arena),
+            Statement::Assign(_) | Statement::For(_) | Statement::Null => {
+                let guard_state = state.clone();
+                let next_function =
+                    eval_function_statement(module, state.function, stmt, ret_id, arena)?;
+                apply_function_break_guard(module, guard_state, next_function, arena)
+            }
+            Statement::Break => Ok(FunctionLoopControlState {
+                continue_sources: HashSet::default(),
+                continue_expr: bool_node(arena, false),
+                ..state
+            }),
+            Statement::IfReset(ir) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&ir.token),
+            )),
+            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    None,
+                ))
+            }
+        }
+    }
+
+    fn eval_function_unrolled_loop_statements(
+        module: &Module,
+        state: FunctionControlState,
+        statements: &[Statement],
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        let loop_state = statements.iter().try_fold(
+            FunctionLoopControlState {
+                function: state,
+                continue_expr: bool_node(arena, true),
+                continue_sources: HashSet::default(),
+            },
+            |s, stmt| eval_function_break_statement(module, s, stmt, ret_id, arena),
+        )?;
+        Ok(loop_state.function)
+    }
+
+    fn eval_function_statements(
+        module: &Module,
+        mut state: FunctionControlState,
+        statements: &[Statement],
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        let mut i = 0;
+        while i < statements.len() {
+            if matches!(constant_bool(arena, state.live_expr), Some(false)) {
+                break;
+            }
+
+            if !statement_contains_break(&statements[i]) {
+                state = eval_function_statement(module, state, &statements[i], ret_id, arena)?;
+                i += 1;
+                continue;
+            }
+
+            let start = i;
+            i += 1;
+            while i < statements.len() && statement_contains_break(&statements[i]) {
+                i += 1;
+            }
+
+            state = eval_function_unrolled_loop_statements(
+                module,
+                state,
+                &statements[start..i],
+                ret_id,
+                arena,
+            )?;
+        }
+
+        Ok(state)
     }
 
     fn eval_function_statement(
@@ -2746,14 +3259,17 @@ fn eval_function_body_return(
         }
     }
 
-    let final_state = body.statements.iter().try_fold(
+    let final_state = eval_function_statements(
+        module,
         FunctionControlState {
             store: local_store,
             boundaries: local_bounds,
             live_expr: bool_node(arena, true),
             live_sources: HashSet::default(),
         },
-        |state, stmt| eval_function_statement(module, state, stmt, ret_id, arena),
+        &body.statements,
+        ret_id,
+        arena,
     )?;
     if !matches!(constant_bool(arena, final_state.live_expr), Some(false)) {
         return Err(ParserError::unsupported(
