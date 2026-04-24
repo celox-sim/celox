@@ -2270,13 +2270,8 @@ fn eval_function_body_return(
                     format!("module `{}`: {call}", module.name),
                     Some(&call.comptime.token),
                 )),
-                Factor::FunctionCall(call) => Err(ParserError::unsupported(
-                    LoweringPhase::CombLowering,
-                    "nested function call in comb function body",
-                    format!("module `{}`: {call}", module.name),
-                    Some(&call.comptime.token),
-                )),
                 Factor::Variable(_, _, _, _)
+                | Factor::FunctionCall(_)
                 | Factor::Value(_)
                 | Factor::Anonymous(_)
                 | Factor::Unknown(_) => Ok(()),

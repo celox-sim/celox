@@ -378,6 +378,39 @@ module Top (
 
     }
 
+    fn test_comb_function_call_nested_helper(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic<8> {
+        return x + 8'd1;
+    }
+
+    function g (
+        x: input logic<8>,
+    ) -> logic<8> {
+        return f(x) + 8'd1;
+    }
+
+    always_comb {
+        q = g(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 8u8)).unwrap();
+    assert_eq!(sim.get(q), 10u32.into());
+
+    }
+
     fn test_always_comb_blocking_assignment_chain(sim) {
         @setup { let code = r#"
 module Top (a: input logic<8>, o: output logic<8>) {

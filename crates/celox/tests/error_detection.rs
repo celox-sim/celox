@@ -626,40 +626,6 @@ fn test_generic_top_returns_error() {
 }
 
 #[test]
-fn test_comb_function_body_rejects_nested_function_call() {
-    let code = r#"
-        module Top (
-            d: input logic<8>,
-            q: output logic<8>,
-        ) {
-            function g (
-                x: input logic<8>,
-            ) -> logic<8> {
-                return x + 8'd1;
-            }
-
-            function f (
-                x: input logic<8>,
-            ) -> logic<8> {
-                return g(x);
-            }
-
-            always_comb {
-                q = f(d);
-            }
-        }
-    "#;
-
-    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
-        let msg = format!("{e:?}");
-        assert!(
-            msg.contains("nested function call in comb function body"),
-            "Expected nested function call error, got: {e:?}"
-        );
-    });
-}
-
-#[test]
 fn test_comb_function_body_rejects_system_function_call() {
     let code = r#"
         module Top (
