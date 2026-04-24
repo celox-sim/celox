@@ -282,6 +282,29 @@ module Top (
 
     }
 
+    fn test_comb_function_call_constant_folded_if_return(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    q: output logic<8>,
+) {
+    function f () -> logic<8> {
+        if 1'b1 {
+            return 8'd3;
+        }
+    }
+
+    always_comb {
+        q = f();
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let q = sim.signal("q");
+    assert_eq!(sim.get(q), 3u32.into());
+
+    }
+
     fn test_always_comb_blocking_assignment_chain(sim) {
         @setup { let code = r#"
 module Top (a: input logic<8>, o: output logic<8>) {

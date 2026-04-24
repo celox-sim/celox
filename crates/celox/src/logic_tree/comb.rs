@@ -2231,6 +2231,24 @@ fn eval_function_body_return(
                 let ((cond_expr, cond_sources), cond_bounds) =
                     eval_expression(module, &store, &if_stmt.cond, arena, Some(1))?;
 
+                if let SLTNode::Constant(val, _, _, _) = arena.get(cond_expr) {
+                    let side = if *val != BigUint::from(0u32) {
+                        &if_stmt.true_side
+                    } else {
+                        &if_stmt.false_side
+                    };
+                    let mut folded_stmts = side.clone();
+                    folded_stmts.extend_from_slice(rest);
+                    return resolve_return_value(
+                        module,
+                        store,
+                        merge_boundaries(boundaries, cond_bounds),
+                        &folded_stmts,
+                        ret_id,
+                        arena,
+                    );
+                }
+
                 let mut then_stmts = if_stmt.true_side.clone();
                 then_stmts.extend_from_slice(rest);
                 let then_value = resolve_return_value(
