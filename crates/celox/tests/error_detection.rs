@@ -731,3 +731,30 @@ fn test_comb_function_body_rejects_nested_break_in_dynamic_for_due_to_analyzer_u
         );
     });
 }
+
+#[test]
+fn test_ff_function_call_rejects_packed_concat_for_unpacked_array_formal() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            in_hi: input logic<4>,
+            in_lo: input logic<4>,
+            out_q: output logic<4>
+        ) {
+            function f (x: input logic<4>[2]) -> logic<4> {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f({in_hi, in_lo});
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("packed concatenation passed to unpacked array formal"),
+            "Expected unpacked array formal shape error, got: {e:?}"
+        );
+    });
+}

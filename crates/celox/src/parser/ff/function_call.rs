@@ -13,6 +13,32 @@ use veryl_analyzer::ir::{
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
+    fn validate_function_call_bindings(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        function_body: &veryl_analyzer::ir::FunctionBody,
+    ) -> Result<(), ParserError> {
+        for (arg_path, arg_id) in &function_body.arg_map {
+            let Some(arg_expr) = call.inputs.get(arg_path) else {
+                continue;
+            };
+            let formal = &self.module.variables[arg_id];
+            if !formal.r#type.array.is_empty() && matches!(arg_expr, Expression::Concatenation(_, _))
+            {
+                return Err(ParserError::unsupported(
+                    LoweringPhase::FfLowering,
+                    "function call argument shape",
+                    format!(
+                        "packed concatenation passed to unpacked array formal `{}`",
+                        formal.path
+                    ),
+                    Some(&call.comptime.token),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn apply_function_call_to_state(
         &self,
         call: &veryl_analyzer::ir::FunctionCall,
@@ -41,6 +67,8 @@ impl<'a> FfParser<'a> {
                 Some(&call.comptime.token),
             ));
         };
+
+        self.validate_function_call_bindings(call, &function_body)?;
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
@@ -552,6 +580,8 @@ impl<'a> FfParser<'a> {
             ));
         };
 
+        self.validate_function_call_bindings(call, &function_body)?;
+
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
             if let Some(arg_expr) = call.inputs.get(arg_path) {
@@ -637,6 +667,8 @@ impl<'a> FfParser<'a> {
                 Some(&call.comptime.token),
             ));
         };
+
+        self.validate_function_call_bindings(call, &function_body)?;
 
         if call.outputs.is_empty() {
             // No side effect through output arguments: statement-form function call
