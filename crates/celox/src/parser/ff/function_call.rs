@@ -14,6 +14,11 @@ use veryl_analyzer::ir::{
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
+    fn default_expr_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
+        Self::expr_shape_matches_formal(expr, formal_shape)
+            || (!formal_shape.is_empty() && expr.comptime().r#type.array.is_empty())
+    }
+
     fn expr_shape_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
         match expr {
             Expression::ArrayLiteral(items, _) => {
@@ -49,7 +54,7 @@ impl<'a> FfParser<'a> {
                                 return false;
                             }
                             saw_default = true;
-                            if !Self::expr_shape_matches_formal(inner, formal_tail) {
+                            if !Self::default_expr_matches_formal(inner, formal_tail) {
                                 return false;
                             }
                         }
