@@ -100,6 +100,7 @@ impl<'a> FfParser<'a> {
             let formal = &self.module.variables[arg_id];
             if !self.actual_matches_formal_shape(formal, arg_expr) {
                 return Err(ParserError::unsupported(
+                     66,
                     LoweringPhase::FfLowering,
                     "function call argument shape",
                     format!(
