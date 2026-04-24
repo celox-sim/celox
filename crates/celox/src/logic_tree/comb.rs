@@ -2610,6 +2610,10 @@ fn eval_function_body_return(
         }
         result_store.remove(&for_stmt.var_id);
 
+        let mut next_live_sources = iter_state.live_sources.clone();
+        next_live_sources.extend(start_sources.iter().copied());
+        next_live_sources.extend(end_sources.iter().copied());
+
         let next_live_expr = if statement_contains_return(&Statement::For(for_stmt.clone()), ret_id)
         {
             let control_target = function_control_target(module, ret_id)?;
@@ -2648,7 +2652,7 @@ fn eval_function_body_return(
             result_store,
             merged_boundaries,
             next_live_expr,
-            iter_state.live_sources,
+            next_live_sources,
             arena,
         )
     }
