@@ -1386,7 +1386,7 @@ fn split_live_ranges(func: &mut MFunction) {
     }
 
     // Sort splits by (block_idx, use_pos) descending to apply from end to start
-    splits.sort_by(|a, b| (b.block_idx, b.use_pos).cmp(&(a.block_idx, a.use_pos)));
+    splits.sort_by_key(|split| std::cmp::Reverse((split.block_idx, split.use_pos)));
 
     // Apply splits
     for split in splits {

@@ -252,7 +252,7 @@ pub(super) fn schedule_instructions<A: Clone + PartialEq + Eq + std::hash::Hash>
         ));
     }
 
-    for (dst, src) in instructions.iter_mut().zip(out.into_iter()) {
+    for (dst, src) in instructions.iter_mut().zip(out) {
         *dst = src;
     }
 }

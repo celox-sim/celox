@@ -26,13 +26,8 @@ fn try_const_eval<A: Hash + Eq + Clone>(
                 BinaryOp::Or => &lv | &rv,
                 BinaryOp::Xor => &lv ^ &rv,
                 BinaryOp::Add => &lv + &rv,
-                BinaryOp::Sub => {
-                    if lv >= rv {
-                        &lv - &rv
-                    } else {
-                        return None;
-                    }
-                }
+                BinaryOp::Sub if lv >= rv => &lv - &rv,
+                BinaryOp::Sub => return None,
                 _ => return None,
             };
             Some((result, BigUint::from(0u32)))

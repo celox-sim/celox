@@ -442,20 +442,8 @@ fn eval_binop_u64(l: u64, op: Op, r: u64) -> u64 {
         Op::Add => l.wrapping_add(r),
         Op::Sub => l.wrapping_sub(r),
         Op::Mul => l.wrapping_mul(r),
-        Op::Div => {
-            if r == 0 {
-                0
-            } else {
-                l / r
-            }
-        }
-        Op::Rem => {
-            if r == 0 {
-                0
-            } else {
-                l % r
-            }
-        }
+        Op::Div => l.checked_div(r).unwrap_or(0),
+        Op::Rem => l.checked_rem(r).unwrap_or(0),
         Op::BitAnd => l & r,
         Op::BitOr => l | r,
         Op::BitXor => l ^ r,
