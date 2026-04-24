@@ -148,6 +148,269 @@ o = tmp;
 
     }
 
+    fn test_comb_function_call_early_return(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic<8> {
+        if x == 8'd0 {
+            return x + 8'd1;
+        }
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0u8)).unwrap();
+    assert_eq!(sim.get(q), 1u32.into());
+
+    sim.modify(|io| io.set(d, 5u8)).unwrap();
+    assert_eq!(sim.get(q), 7u32.into());
+
+    }
+
+    fn test_comb_function_call_return_indexed_local_temp(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic {
+        var tmp: logic<8>;
+        tmp = x;
+        return tmp[0];
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0b1010u8)).unwrap();
+    assert_eq!(sim.get(q), 0u32.into());
+
+    sim.modify(|io| io.set(d, 0b1011u8)).unwrap();
+    assert_eq!(sim.get(q), 1u32.into());
+
+    }
+
+    fn test_comb_function_call_partial_write_local_temp(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp[7:4] = x[3:0];
+        tmp[3:0] = x[7:4];
+        return tmp;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0xABu8)).unwrap();
+    assert_eq!(sim.get(q), 0xBAu32.into());
+
+    }
+
+    fn test_comb_function_call_local_and_return_width_coercion(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    sel: input logic,
+    q0 : output logic<8>,
+    q1 : output logic<8>,
+) {
+    function f (
+        x: input logic,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 1'b1;
+        if x {
+            return 1'b1;
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q0 = f(1'b0);
+        q1 = f(sel);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let q0 = sim.signal("q0");
+    let q1 = sim.signal("q1");
+
+    sim.modify(|io| io.set(sel, 0u8)).unwrap();
+    assert_eq!(sim.get(q0), 1u32.into());
+    assert_eq!(sim.get(q1), 1u32.into());
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(q1), 1u32.into());
+
+    }
+
+    fn test_comb_function_call_constant_folded_if_return(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    q: output logic<8>,
+) {
+    function f () -> logic<8> {
+        if 1'b1 {
+            return 8'd3;
+        }
+    }
+
+    always_comb {
+        q = f();
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let q = sim.signal("q");
+    assert_eq!(sim.get(q), 3u32.into());
+
+    }
+
+    fn test_comb_function_call_return_inside_for(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<4>,
+    ) -> logic<8> {
+        for i: logic<2> in 0..4 {
+            if x[i] {
+                return 8'd9;
+            }
+        }
+        return 8'd1;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0b0000u8)).unwrap();
+    assert_eq!(sim.get(q), 1u32.into());
+
+    sim.modify(|io| io.set(d, 0b0100u8)).unwrap();
+    assert_eq!(sim.get(q), 9u32.into());
+
+    }
+
+    fn test_comb_function_call_break_inside_for(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<4>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 8'd0;
+        for i: logic<2> in 0..4 {
+            if x[i] {
+                tmp = i + 8'd1;
+                break;
+            }
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0b0000u8)).unwrap();
+    assert_eq!(sim.get(q), 0u32.into());
+
+    sim.modify(|io| io.set(d, 0b1010u8)).unwrap();
+    assert_eq!(sim.get(q), 2u32.into());
+
+    }
+
+    fn test_comb_function_call_nested_helper(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic<8> {
+        return x + 8'd1;
+    }
+
+    function g (
+        x: input logic<8>,
+    ) -> logic<8> {
+        return f(x) + 8'd1;
+    }
+
+    always_comb {
+        q = g(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 8u8)).unwrap();
+    assert_eq!(sim.get(q), 10u32.into());
+
+    }
+
     fn test_always_comb_blocking_assignment_chain(sim) {
         @setup { let code = r#"
 module Top (a: input logic<8>, o: output logic<8>) {

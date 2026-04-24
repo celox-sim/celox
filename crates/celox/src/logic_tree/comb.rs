@@ -33,6 +33,21 @@ struct LoopControlState {
     continue_sources: HashSet<VarAtomBase<VarId>>,
 }
 
+#[derive(Clone)]
+struct FunctionControlState {
+    store: SymbolicStore<VarId>,
+    boundaries: BoundaryMap<VarId>,
+    live_expr: NodeId,
+    live_sources: HashSet<VarAtomBase<VarId>>,
+}
+
+#[derive(Clone)]
+struct FunctionLoopControlState {
+    function: FunctionControlState,
+    continue_expr: NodeId,
+    continue_sources: HashSet<VarAtomBase<VarId>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
@@ -2185,16 +2200,1204 @@ fn eval_array_literal_expression(
 fn eval_function_body_return(
     module: &Module,
     caller_store: &SymbolicStore<VarId>,
-    call: &veryl_analyzer::ir::FunctionCall,
-    function_body: &veryl_analyzer::ir::FunctionBody,
+    body: &veryl_analyzer::ir::FunctionBody,
     ret_id: VarId,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    fn is_whole_var_assign_to(assign: &AssignStatement, var_id: VarId) -> bool {
+        assign.dst.len() == 1
+            && assign.dst[0].id == var_id
+            && assign.dst[0].index.0.is_empty()
+            && assign.dst[0].select.0.is_empty()
+            && assign.dst[0].select.1.is_none()
+    }
+
+    fn statement_contains_return(stmt: &Statement, ret_id: VarId) -> bool {
+        match stmt {
+            Statement::Assign(assign) => is_whole_var_assign_to(assign, ret_id),
+            Statement::If(if_stmt) => {
+                if_stmt
+                    .true_side
+                    .iter()
+                    .any(|stmt| statement_contains_return(stmt, ret_id))
+                    || if_stmt
+                        .false_side
+                        .iter()
+                        .any(|stmt| statement_contains_return(stmt, ret_id))
+            }
+            Statement::For(for_stmt) => for_stmt
+                .body
+                .iter()
+                .any(|stmt| statement_contains_return(stmt, ret_id)),
+            Statement::IfReset(if_reset) => {
+                if_reset
+                    .true_side
+                    .iter()
+                    .any(|stmt| statement_contains_return(stmt, ret_id))
+                    || if_reset
+                        .false_side
+                        .iter()
+                        .any(|stmt| statement_contains_return(stmt, ret_id))
+            }
+            Statement::SystemFunctionCall(_)
+            | Statement::FunctionCall(_)
+            | Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => false,
+        }
+    }
+
+    fn for_range_is_dynamic(range: &ForRange) -> bool {
+        match range {
+            ForRange::Forward { start, end, .. }
+            | ForRange::Reverse { start, end, .. }
+            | ForRange::Stepped { start, end, .. } => {
+                matches!(start, ForBound::Expression(_)) || matches!(end, ForBound::Expression(_))
+            }
+        }
+    }
+
+    fn validate_function_body_expression(
+        module: &Module,
+        expr: &Expression,
+    ) -> Result<(), ParserError> {
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::SystemFunctionCall(call) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "system function call in comb function body",
+                    format!("module `{}`: {call}", module.name),
+                    Some(&call.comptime.token),
+                )),
+                Factor::Variable(_, _, _, _)
+                | Factor::FunctionCall(_)
+                | Factor::Value(_)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => Ok(()),
+            },
+            Expression::Unary(_, inner, _) => validate_function_body_expression(module, inner),
+            Expression::Binary(lhs, _, rhs, _) => {
+                validate_function_body_expression(module, lhs)?;
+                validate_function_body_expression(module, rhs)
+            }
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                validate_function_body_expression(module, cond)?;
+                validate_function_body_expression(module, then_expr)?;
+                validate_function_body_expression(module, else_expr)
+            }
+            Expression::Concatenation(items, _) => {
+                for (item_expr, repeat_expr) in items {
+                    validate_function_body_expression(module, item_expr)?;
+                    if let Some(repeat_expr) = repeat_expr {
+                        validate_function_body_expression(module, repeat_expr)?;
+                    }
+                }
+                Ok(())
+            }
+            Expression::ArrayLiteral(items, _) => {
+                for item in items {
+                    match item {
+                        ArrayLiteralItem::Value(item_expr, repeat_expr) => {
+                            validate_function_body_expression(module, item_expr)?;
+                            if let Some(repeat_expr) = repeat_expr {
+                                validate_function_body_expression(module, repeat_expr)?;
+                            }
+                        }
+                        ArrayLiteralItem::Defaul(default_expr) => {
+                            validate_function_body_expression(module, default_expr)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Expression::StructConstructor(_, fields, _) => {
+                for (_, field_expr) in fields {
+                    validate_function_body_expression(module, field_expr)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn validate_function_body_statement(
+        module: &Module,
+        stmt: &Statement,
+    ) -> Result<(), ParserError> {
+        match stmt {
+            Statement::Assign(assign) => {
+                validate_function_body_expression(module, &assign.expr)?;
+                for dst in &assign.dst {
+                    for index_expr in &dst.index.0 {
+                        validate_function_body_expression(module, index_expr)?;
+                    }
+                    for select_expr in &dst.select.0 {
+                        validate_function_body_expression(module, select_expr)?;
+                    }
+                    if let Some((_, range_expr)) = &dst.select.1 {
+                        validate_function_body_expression(module, range_expr)?;
+                    }
+                }
+                Ok(())
+            }
+            Statement::If(if_stmt) => {
+                validate_function_body_expression(module, &if_stmt.cond)?;
+                for stmt in &if_stmt.true_side {
+                    validate_function_body_statement(module, stmt)?;
+                }
+                for stmt in &if_stmt.false_side {
+                    validate_function_body_statement(module, stmt)?;
+                }
+                Ok(())
+            }
+            Statement::For(for_stmt) => {
+                if for_range_is_dynamic(&for_stmt.range)
+                    && for_stmt.body.iter().any(statement_contains_break)
+                {
+                    return Err(ParserError::unsupported(
+                        LoweringPhase::CombLowering,
+                        "break in dynamic function-local for",
+                        format!("module `{}`", module.name),
+                        Some(&for_stmt.token),
+                    ));
+                }
+
+                match &for_stmt.range {
+                    ForRange::Forward { start, end, .. }
+                    | ForRange::Reverse { start, end, .. }
+                    | ForRange::Stepped { start, end, .. } => {
+                        if let ForBound::Expression(expr) = start {
+                            validate_function_body_expression(module, expr)?;
+                        }
+                        if let ForBound::Expression(expr) = end {
+                            validate_function_body_expression(module, expr)?;
+                        }
+                    }
+                }
+                for stmt in &for_stmt.body {
+                    validate_function_body_statement(module, stmt)?;
+                }
+                Ok(())
+            }
+            Statement::IfReset(ir) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&ir.token),
+            )),
+            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "system function call in comb function body",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "nested function call in comb function body",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::TbMethodCall(_)
+            | Statement::Unsupported(_)
+            | Statement::Break
+            | Statement::Null => Ok(()),
+        }
+    }
+
+    fn function_return_value(
+        module: &Module,
+        store: &SymbolicStore<VarId>,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<(NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
+        let ret_var = &module.variables[&ret_id];
+        let ret_width = resolve_total_width(module, ret_var)?;
+        let ret_access = BitAccess::new(0, ret_width - 1);
+        let ret_parts = store[&ret_id].get_parts(ret_access);
+        Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena))
+    }
+
+    fn function_control_target(
+        module: &Module,
+        ret_id: VarId,
+    ) -> Result<VarAtomBase<VarId>, ParserError> {
+        let ret_width = resolve_total_width(module, &module.variables[&ret_id])?;
+        Ok(VarAtomBase::new(ret_id, ret_width, ret_width))
+    }
+
+    fn apply_function_guard(
+        module: &Module,
+        state: FunctionControlState,
+        next_store: SymbolicStore<VarId>,
+        next_boundaries: BoundaryMap<VarId>,
+        next_live_expr: NodeId,
+        next_live_sources: HashSet<VarAtomBase<VarId>>,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        match constant_bool(arena, state.live_expr) {
+            Some(true) => Ok(FunctionControlState {
+                store: next_store,
+                boundaries: merge_boundaries(state.boundaries, next_boundaries),
+                live_expr: next_live_expr,
+                live_sources: next_live_sources,
+            }),
+            Some(false) => Ok(state),
+            None => {
+                let merged_store = merge_symbolic_stores(
+                    module,
+                    &next_store,
+                    &state.store,
+                    state.live_expr,
+                    &state.live_sources,
+                    arena,
+                )?;
+                let merged_live_expr = match constant_bool(arena, next_live_expr) {
+                    Some(true) => state.live_expr,
+                    Some(false) => bool_node(arena, false),
+                    None => arena.alloc(SLTNode::Binary(
+                        state.live_expr,
+                        BinaryOp::And,
+                        next_live_expr,
+                    )),
+                };
+                let mut merged_live_sources = state.live_sources;
+                merged_live_sources.extend(next_live_sources);
+                Ok(FunctionControlState {
+                    store: merged_store,
+                    boundaries: merge_boundaries(state.boundaries, next_boundaries),
+                    live_expr: merged_live_expr,
+                    live_sources: merged_live_sources,
+                })
+            }
+        }
+    }
+
+    fn eval_function_if(
+        module: &Module,
+        state: FunctionControlState,
+        if_stmt: &IfStatement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        let ((cond_expr, cond_sources), cond_bounds) =
+            eval_expression(module, &state.store, &if_stmt.cond, arena, Some(1))?;
+        let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+
+        if let Some(cond_val) = constant_bool(arena, cond_expr) {
+            let side = if cond_val {
+                &if_stmt.true_side
+            } else {
+                &if_stmt.false_side
+            };
+            return eval_function_statements(
+                module,
+                FunctionControlState {
+                    boundaries,
+                    ..state
+                },
+                side,
+                ret_id,
+                arena,
+            );
+        }
+
+        let then_state = eval_function_statements(
+            module,
+            FunctionControlState {
+                store: state.store.clone(),
+                boundaries: boundaries.clone(),
+                live_expr: state.live_expr,
+                live_sources: state.live_sources.clone(),
+            },
+            &if_stmt.true_side,
+            ret_id,
+            arena,
+        )?;
+        let else_state = eval_function_statements(
+            module,
+            FunctionControlState {
+                store: state.store,
+                boundaries,
+                live_expr: state.live_expr,
+                live_sources: state.live_sources,
+            },
+            &if_stmt.false_side,
+            ret_id,
+            arena,
+        )?;
+
+        let mut live_sources = cond_sources;
+        live_sources.extend(then_state.live_sources);
+        live_sources.extend(else_state.live_sources);
+
+        Ok(FunctionControlState {
+            store: merge_symbolic_stores(
+                module,
+                &then_state.store,
+                &else_state.store,
+                cond_expr,
+                &live_sources,
+                arena,
+            )?,
+            boundaries: merge_boundaries(then_state.boundaries, else_state.boundaries),
+            live_expr: merge_control_expr(
+                cond_expr,
+                then_state.live_expr,
+                else_state.live_expr,
+                arena,
+            ),
+            live_sources,
+        })
+    }
+
+    fn eval_function_for(
+        module: &Module,
+        state: FunctionControlState,
+        for_stmt: &ForStatement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        fn apply_function_loop_continue_guard(
+            module: &Module,
+            state: FunctionLoopControlState,
+            next_function: FunctionControlState,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionLoopControlState, ParserError> {
+            let boundaries =
+                merge_boundaries(state.function.boundaries.clone(), next_function.boundaries);
+
+            if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
+                Ok(FunctionLoopControlState {
+                    function: FunctionControlState {
+                        boundaries,
+                        ..next_function
+                    },
+                    ..state
+                })
+            } else {
+                let merged_store = merge_symbolic_stores(
+                    module,
+                    &next_function.store,
+                    &state.function.store,
+                    state.continue_expr,
+                    &state.continue_sources,
+                    arena,
+                )?;
+                let mut merged_live_sources = state.continue_sources.clone();
+                merged_live_sources.extend(next_function.live_sources);
+                merged_live_sources.extend(state.function.live_sources);
+                Ok(FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: merged_store,
+                        boundaries,
+                        live_expr: merge_control_expr(
+                            state.continue_expr,
+                            next_function.live_expr,
+                            state.function.live_expr,
+                            arena,
+                        ),
+                        live_sources: merged_live_sources,
+                    },
+                    ..state
+                })
+            }
+        }
+
+        fn eval_function_loop_if(
+            module: &Module,
+            state: FunctionLoopControlState,
+            if_stmt: &IfStatement,
+            ret_id: VarId,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionLoopControlState, ParserError> {
+            let ((cond_expr, cond_sources), cond_bounds) =
+                eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+            let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+
+            if let Some(cond_val) = constant_bool(arena, cond_expr) {
+                let side = if cond_val {
+                    &if_stmt.true_side
+                } else {
+                    &if_stmt.false_side
+                };
+                return side.iter().try_fold(
+                    FunctionLoopControlState {
+                        function: FunctionControlState {
+                            boundaries,
+                            ..state.function
+                        },
+                        ..state
+                    },
+                    |s, step| eval_function_loop_statement(module, s, step, ret_id, arena),
+                );
+            }
+
+            let then_state = if_stmt.true_side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store.clone(),
+                        boundaries: boundaries.clone(),
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources.clone(),
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources.clone(),
+                },
+                |s, step| eval_function_loop_statement(module, s, step, ret_id, arena),
+            )?;
+            let else_state = if_stmt.false_side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store,
+                        boundaries,
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources,
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources,
+                },
+                |s, step| eval_function_loop_statement(module, s, step, ret_id, arena),
+            )?;
+
+            let mut merged_sources = cond_sources;
+            merged_sources.extend(then_state.continue_sources);
+            merged_sources.extend(else_state.continue_sources);
+            let mut live_sources = merged_sources.clone();
+            live_sources.extend(then_state.function.live_sources);
+            live_sources.extend(else_state.function.live_sources);
+
+            Ok(FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: merge_symbolic_stores(
+                        module,
+                        &then_state.function.store,
+                        &else_state.function.store,
+                        cond_expr,
+                        &live_sources,
+                        arena,
+                    )?,
+                    boundaries: merge_boundaries(
+                        then_state.function.boundaries,
+                        else_state.function.boundaries,
+                    ),
+                    live_expr: merge_control_expr(
+                        cond_expr,
+                        then_state.function.live_expr,
+                        else_state.function.live_expr,
+                        arena,
+                    ),
+                    live_sources,
+                },
+                continue_expr: merge_control_expr(
+                    cond_expr,
+                    then_state.continue_expr,
+                    else_state.continue_expr,
+                    arena,
+                ),
+                continue_sources: merged_sources,
+            })
+        }
+
+        fn eval_function_loop_statement(
+            module: &Module,
+            state: FunctionLoopControlState,
+            stmt: &Statement,
+            ret_id: VarId,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionLoopControlState, ParserError> {
+            if matches!(constant_bool(arena, state.function.live_expr), Some(false))
+                || matches!(constant_bool(arena, state.continue_expr), Some(false))
+            {
+                return Ok(state);
+            }
+
+            match stmt {
+                Statement::If(if_stmt) => {
+                    eval_function_loop_if(module, state, if_stmt, ret_id, arena)
+                }
+                Statement::Assign(_) | Statement::For(_) | Statement::Null => {
+                    let guard_state = state.clone();
+                    let next_function =
+                        eval_function_statement(module, state.function, stmt, ret_id, arena)?;
+                    apply_function_loop_continue_guard(module, guard_state, next_function, arena)
+                }
+                Statement::Break => Ok(FunctionLoopControlState {
+                    continue_sources: HashSet::default(),
+                    continue_expr: bool_node(arena, false),
+                    ..state
+                }),
+                Statement::IfReset(ir) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&ir.token),
+                )),
+                Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&fc.comptime.token),
+                )),
+                Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    Some(&fc.comptime.token),
+                )),
+                Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                    Err(ParserError::unsupported(
+                        LoweringPhase::CombLowering,
+                        "function body control flow",
+                        format!("{stmt}"),
+                        None,
+                    ))
+                }
+            }
+        }
+
+        let Some(loop_width) = for_stmt.var_type.total_width() else {
+            return Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "for loop variable width",
+                format!("{:?}", for_stmt.var_name),
+                Some(&for_stmt.token),
+            ));
+        };
+
+        let mut symbolic_store = state.store.clone();
+        let mut written_accesses = HashMap::default();
+        collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
+        for (id, accesses) in &written_accesses {
+            let width = resolve_total_width(module, &module.variables[id])?;
+            let mut loop_store = RangeStore::new(None, width);
+            let mut covered = vec![false; width];
+            for access in accesses {
+                for slot in covered.iter_mut().take(access.msb + 1).skip(access.lsb) {
+                    *slot = true;
+                }
+            }
+            let original = state
+                .store
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| RangeStore::new(None, width));
+            let mut bit = 0usize;
+            while bit < width {
+                if covered[bit] {
+                    bit += 1;
+                    continue;
+                }
+                let start = bit;
+                while bit < width && !covered[bit] {
+                    bit += 1;
+                }
+                let end = bit - 1;
+                let access = BitAccess::new(start, end);
+                let parts = original.get_parts(access);
+                let (expr, sources) = combine_parts_with_default(*id, access.lsb, parts, arena);
+                loop_store.update(access, Some((expr, sources)));
+            }
+            symbolic_store.insert(*id, loop_store);
+        }
+        symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+        let iter_store_before = symbolic_store.clone();
+
+        let iter_state = for_stmt.body.iter().try_fold(
+            FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: symbolic_store,
+                    boundaries: state.boundaries.clone(),
+                    live_expr: bool_node(arena, true),
+                    live_sources: HashSet::default(),
+                },
+                continue_expr: bool_node(arena, true),
+                continue_sources: HashSet::default(),
+            },
+            |s, stmt| eval_function_loop_statement(module, s, stmt, ret_id, arena),
+        )?;
+        let iter_store_after = iter_state.function.store;
+        let mut merged_boundaries = iter_state.function.boundaries;
+
+        let (
+            start,
+            end,
+            start_sources,
+            end_sources,
+            start_bounds,
+            end_bounds,
+            inclusive,
+            step,
+            step_op,
+            reverse,
+        ) = match &for_stmt.range {
+            ForRange::Forward {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound(module, &state.store, range_start, arena)?;
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound(module, &state.store, range_end, arena)?;
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    start_bounds,
+                    end_bounds,
+                    *inclusive,
+                    *step,
+                    SLTStepOp::Add,
+                    false,
+                )
+            }
+            ForRange::Reverse {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound(module, &state.store, range_start, arena)?;
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound(module, &state.store, range_end, arena)?;
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    start_bounds,
+                    end_bounds,
+                    *inclusive,
+                    *step,
+                    SLTStepOp::Add,
+                    true,
+                )
+            }
+            ForRange::Stepped {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+                op,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound(module, &state.store, range_start, arena)?;
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound(module, &state.store, range_end, arena)?;
+                let step_op = match op {
+                    Op::Mul => SLTStepOp::Mul,
+                    Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
+                    other => {
+                        return Err(ParserError::unsupported(
+                            LoweringPhase::CombLowering,
+                            "for loop step operator",
+                            format!("{other:?}"),
+                            Some(&for_stmt.token),
+                        ));
+                    }
+                };
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    start_bounds,
+                    end_bounds,
+                    *inclusive,
+                    *step,
+                    step_op,
+                    false,
+                )
+            }
+        };
+
+        merged_boundaries = merge_boundaries(merged_boundaries, start_bounds);
+        merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
+
+        let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena);
+        let folded_updates: Vec<_> = updates
+            .iter()
+            .map(|(target, expr, _)| SLTForUpdate {
+                target: *target,
+                expr: *expr,
+            })
+            .collect();
+        let loop_updated_vars: HashSet<_> = folded_updates
+            .iter()
+            .map(|update| update.target.id)
+            .collect();
+        let initial_updates: Vec<_> = updates
+            .iter()
+            .map(|(target, _, _)| {
+                let parts = state.store[&target.id].get_parts(target.access);
+                let (expr, _) =
+                    combine_parts_with_default(target.id, target.access.lsb, parts, arena);
+                SLTForUpdate {
+                    target: *target,
+                    expr,
+                }
+            })
+            .collect();
+
+        let mut result_store = state.store.clone();
+        let loop_effective_continue = arena.alloc(SLTNode::Binary(
+            iter_state.continue_expr,
+            BinaryOp::And,
+            iter_state.function.live_expr,
+        ));
+        for (target, _expr, sources) in &updates {
+            let mut all_sources = start_sources.clone();
+            all_sources.extend(end_sources.iter().copied());
+            all_sources.extend(
+                iter_state.continue_sources.iter().copied().filter(|src| {
+                    src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)
+                }),
+            );
+            all_sources.extend(
+                iter_state
+                    .function
+                    .live_sources
+                    .iter()
+                    .copied()
+                    .filter(|src| {
+                        src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)
+                    }),
+            );
+            all_sources.extend(
+                sources.iter().copied().filter(|src| {
+                    src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)
+                }),
+            );
+
+            let folded_expr = arena.alloc(SLTNode::ForFold {
+                loop_var: for_stmt.var_id,
+                loop_width,
+                loop_signed: for_stmt.var_type.signed,
+                start: start.clone(),
+                end: end.clone(),
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result: *target,
+                initials: initial_updates.clone(),
+                updates: folded_updates.clone(),
+                continue_cond: loop_effective_continue,
+            });
+
+            result_store
+                .entry(target.id)
+                .or_insert_with(|| {
+                    let width =
+                        resolve_total_width(module, &module.variables[&target.id]).unwrap_or(0);
+                    RangeStore::new(None, width)
+                })
+                .update(target.access, Some((folded_expr, all_sources)));
+        }
+        result_store.remove(&for_stmt.var_id);
+
+        let mut next_live_sources = iter_state.continue_sources.clone();
+        next_live_sources.extend(iter_state.function.live_sources.iter().copied());
+        next_live_sources.extend(start_sources.iter().copied());
+        next_live_sources.extend(end_sources.iter().copied());
+
+        let next_live_expr = if statement_contains_return(&Statement::For(for_stmt.clone()), ret_id)
+        {
+            let control_target = function_control_target(module, ret_id)?;
+            let mut control_initials = initial_updates.clone();
+            control_initials.push(SLTForUpdate {
+                target: control_target,
+                expr: bool_node(arena, true),
+            });
+            let mut control_updates = folded_updates.clone();
+            control_updates.push(SLTForUpdate {
+                target: control_target,
+                expr: iter_state.function.live_expr,
+            });
+            arena.alloc(SLTNode::ForFold {
+                loop_var: for_stmt.var_id,
+                loop_width,
+                loop_signed: for_stmt.var_type.signed,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result: control_target,
+                initials: control_initials,
+                updates: control_updates,
+                continue_cond: iter_state.continue_expr,
+            })
+        } else {
+            bool_node(arena, true)
+        };
+
+        apply_function_guard(
+            module,
+            state,
+            result_store,
+            merged_boundaries,
+            next_live_expr,
+            next_live_sources,
+            arena,
+        )
+    }
+
+    fn apply_function_break_guard(
+        module: &Module,
+        state: FunctionLoopControlState,
+        next_function: FunctionControlState,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionLoopControlState, ParserError> {
+        let boundaries =
+            merge_boundaries(state.function.boundaries.clone(), next_function.boundaries);
+
+        if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
+            Ok(FunctionLoopControlState {
+                function: FunctionControlState {
+                    boundaries,
+                    ..next_function
+                },
+                ..state
+            })
+        } else {
+            let merged_store = merge_symbolic_stores(
+                module,
+                &next_function.store,
+                &state.function.store,
+                state.continue_expr,
+                &state.continue_sources,
+                arena,
+            )?;
+            let mut merged_live_sources = state.continue_sources.clone();
+            merged_live_sources.extend(next_function.live_sources);
+            merged_live_sources.extend(state.function.live_sources);
+            Ok(FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: merged_store,
+                    boundaries,
+                    live_expr: merge_control_expr(
+                        state.continue_expr,
+                        next_function.live_expr,
+                        state.function.live_expr,
+                        arena,
+                    ),
+                    live_sources: merged_live_sources,
+                },
+                ..state
+            })
+        }
+    }
+
+    fn eval_function_break_if(
+        module: &Module,
+        state: FunctionLoopControlState,
+        if_stmt: &IfStatement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionLoopControlState, ParserError> {
+        let outer_state = state.clone();
+        let ((cond_expr, cond_sources), cond_bounds) =
+            eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+        let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+
+        let executed_state = if let Some(cond_val) = constant_bool(arena, cond_expr) {
+            let side = if cond_val {
+                &if_stmt.true_side
+            } else {
+                &if_stmt.false_side
+            };
+            side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        boundaries,
+                        ..state.function
+                    },
+                    ..state
+                },
+                |s, step| eval_function_break_statement(module, s, step, ret_id, arena),
+            )?
+        } else {
+            let then_state = if_stmt.true_side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store.clone(),
+                        boundaries: boundaries.clone(),
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources.clone(),
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources.clone(),
+                },
+                |s, step| eval_function_break_statement(module, s, step, ret_id, arena),
+            )?;
+            let else_state = if_stmt.false_side.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store,
+                        boundaries,
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources,
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources,
+                },
+                |s, step| eval_function_break_statement(module, s, step, ret_id, arena),
+            )?;
+
+            let mut merged_sources = cond_sources;
+            merged_sources.extend(then_state.continue_sources);
+            merged_sources.extend(else_state.continue_sources);
+            let mut live_sources = merged_sources.clone();
+            live_sources.extend(then_state.function.live_sources);
+            live_sources.extend(else_state.function.live_sources);
+
+            FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: merge_symbolic_stores(
+                        module,
+                        &then_state.function.store,
+                        &else_state.function.store,
+                        cond_expr,
+                        &live_sources,
+                        arena,
+                    )?,
+                    boundaries: merge_boundaries(
+                        then_state.function.boundaries,
+                        else_state.function.boundaries,
+                    ),
+                    live_expr: merge_control_expr(
+                        cond_expr,
+                        then_state.function.live_expr,
+                        else_state.function.live_expr,
+                        arena,
+                    ),
+                    live_sources,
+                },
+                continue_expr: merge_control_expr(
+                    cond_expr,
+                    then_state.continue_expr,
+                    else_state.continue_expr,
+                    arena,
+                ),
+                continue_sources: merged_sources,
+            }
+        };
+
+        if matches!(constant_bool(arena, outer_state.continue_expr), Some(true)) {
+            return Ok(executed_state);
+        }
+
+        let guarded = apply_function_break_guard(
+            module,
+            outer_state.clone(),
+            executed_state.function,
+            arena,
+        )?;
+        let continue_expr = match constant_bool(arena, executed_state.continue_expr) {
+            Some(true) => outer_state.continue_expr,
+            Some(false) => bool_node(arena, false),
+            None => arena.alloc(SLTNode::Binary(
+                outer_state.continue_expr,
+                BinaryOp::And,
+                executed_state.continue_expr,
+            )),
+        };
+        let mut continue_sources = outer_state.continue_sources;
+        continue_sources.extend(executed_state.continue_sources);
+        Ok(FunctionLoopControlState {
+            function: guarded.function,
+            continue_expr,
+            continue_sources,
+        })
+    }
+
+    fn eval_function_break_statement(
+        module: &Module,
+        state: FunctionLoopControlState,
+        stmt: &Statement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionLoopControlState, ParserError> {
+        if matches!(constant_bool(arena, state.function.live_expr), Some(false))
+            || matches!(constant_bool(arena, state.continue_expr), Some(false))
+        {
+            return Ok(state);
+        }
+
+        match stmt {
+            Statement::If(if_stmt) => eval_function_break_if(module, state, if_stmt, ret_id, arena),
+            Statement::Assign(_) | Statement::For(_) | Statement::Null => {
+                let guard_state = state.clone();
+                let next_function =
+                    eval_function_statement(module, state.function, stmt, ret_id, arena)?;
+                apply_function_break_guard(module, guard_state, next_function, arena)
+            }
+            Statement::Break => Ok(FunctionLoopControlState {
+                continue_sources: HashSet::default(),
+                continue_expr: bool_node(arena, false),
+                ..state
+            }),
+            Statement::IfReset(ir) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&ir.token),
+            )),
+            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
+                Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    None,
+                ))
+            }
+        }
+    }
+
+    fn eval_function_unrolled_loop_statements(
+        module: &Module,
+        state: FunctionControlState,
+        statements: &[Statement],
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        let loop_state = statements.iter().try_fold(
+            FunctionLoopControlState {
+                function: state,
+                continue_expr: bool_node(arena, true),
+                continue_sources: HashSet::default(),
+            },
+            |s, stmt| eval_function_break_statement(module, s, stmt, ret_id, arena),
+        )?;
+        Ok(loop_state.function)
+    }
+
+    fn eval_function_statements(
+        module: &Module,
+        mut state: FunctionControlState,
+        statements: &[Statement],
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        let mut i = 0;
+        while i < statements.len() {
+            if matches!(constant_bool(arena, state.live_expr), Some(false)) {
+                break;
+            }
+
+            if !statement_contains_break(&statements[i]) {
+                state = eval_function_statement(module, state, &statements[i], ret_id, arena)?;
+                i += 1;
+                continue;
+            }
+
+            let start = i;
+            i += 1;
+            while i < statements.len() && statement_contains_break(&statements[i]) {
+                i += 1;
+            }
+
+            state = eval_function_unrolled_loop_statements(
+                module,
+                state,
+                &statements[start..i],
+                ret_id,
+                arena,
+            )?;
+        }
+
+        Ok(state)
+    }
+
+    fn eval_function_statement(
+        module: &Module,
+        state: FunctionControlState,
+        stmt: &Statement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        if matches!(constant_bool(arena, state.live_expr), Some(false)) {
+            return Ok(state);
+        }
+
+        match stmt {
+            Statement::Assign(assign) => {
+                let guard_state = state.clone();
+                let (next_store, next_bounds) =
+                    eval_assign(module, state.store, state.boundaries, assign, arena)?;
+                let next_live = if is_whole_var_assign_to(assign, ret_id) {
+                    bool_node(arena, false)
+                } else {
+                    bool_node(arena, true)
+                };
+                apply_function_guard(
+                    module,
+                    guard_state,
+                    next_store,
+                    next_bounds,
+                    next_live,
+                    HashSet::default(),
+                    arena,
+                )
+            }
+            Statement::If(if_stmt) => eval_function_if(module, state, if_stmt, ret_id, arena),
+            Statement::For(for_stmt) => eval_function_for(module, state, for_stmt, ret_id, arena),
+            Statement::Null => Ok(state),
+            Statement::IfReset(ir) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&ir.token),
+            )),
+            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function body control flow",
+                format!("{stmt}"),
+                Some(&fc.comptime.token),
+            )),
+            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
+                Err(ParserError::unsupported(
+                    LoweringPhase::CombLowering,
+                    "function body control flow",
+                    format!("{stmt}"),
+                    None,
+                ))
+            }
+        }
+    }
+
     let mut local_store = SymbolicStore::default();
-    let mut local_bounds = BoundaryMap::default();
+    let local_bounds = BoundaryMap::default();
     let mut written = HashMap::default();
 
-    collect_written_accesses(module, &function_body.statements, &mut written)?;
+    for stmt in &body.statements {
+        validate_function_body_statement(module, stmt)?;
+    }
+
+    collect_written_accesses(module, &body.statements, &mut written)?;
     written.entry(ret_id).or_default();
 
     for var_id in written.keys() {
@@ -2203,66 +3406,41 @@ fn eval_function_body_return(
                 LoweringPhase::CombLowering,
                 "function local variable",
                 format!("unknown variable id: {:?}", var_id),
-                Some(&call.comptime.token),
+                None,
             ));
         };
         let width = resolve_total_width(module, var)?;
         local_store.insert(*var_id, RangeStore::new(None, width));
     }
 
-    for (arg_path, arg_id) in &function_body.arg_map {
-        let Some(arg_expr) = call.inputs.get(arg_path) else {
-            return Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function call missing argument",
-                format!("{call}"),
-                Some(&call.comptime.token),
-            ));
-        };
-
-        let ((arg_node, sources), bounds) =
-            eval_expression(module, caller_store, arg_expr, arena, None)?;
-        local_bounds = merge_boundaries(local_bounds, bounds);
-
-        let Some(arg_var) = module.variables.get(arg_id) else {
-            return Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function argument variable",
-                format!("unknown arg id: {:?}", arg_id),
-                Some(&call.comptime.token),
-            ));
-        };
-        let arg_width = resolve_total_width(module, arg_var)?;
-        local_store.insert(
-            *arg_id,
-            RangeStore::new(Some((arg_node, sources)), arg_width),
-        );
+    for arg_id in body.arg_map.values() {
+        if let Some(arg_store) = caller_store.get(arg_id) {
+            local_store.insert(*arg_id, arg_store.clone());
+        }
     }
 
-    for stmt in &function_body.statements {
-        let (next_store, next_bounds) =
-            eval_statement(module, local_store, local_bounds, stmt, arena)?;
-        local_store = next_store;
-        local_bounds = next_bounds;
-    }
-
-    let Some(ret_var) = module.variables.get(&ret_id) else {
+    let final_state = eval_function_statements(
+        module,
+        FunctionControlState {
+            store: local_store,
+            boundaries: local_bounds,
+            live_expr: bool_node(arena, true),
+            live_sources: HashSet::default(),
+        },
+        &body.statements,
+        ret_id,
+        arena,
+    )?;
+    if !matches!(constant_bool(arena, final_state.live_expr), Some(false)) {
         return Err(ParserError::unsupported(
             LoweringPhase::CombLowering,
-            "function return variable",
-            format!("unknown return id: {:?}", ret_id),
-            Some(&call.comptime.token),
+            "function return expression",
+            format!("function return var id: {:?}", ret_id),
+            None,
         ));
-    };
-    let ret_width = resolve_total_width(module, ret_var)?;
-    let ret_range = BitAccess::new(0, ret_width - 1);
-    let ret_parts = local_store
-        .get(&ret_id)
-        .map(|range_store| range_store.get_parts(ret_range))
-        .unwrap_or_default();
-    let (ret_node, ret_sources) = combine_parts_with_default(ret_id, 0, ret_parts, arena);
-
-    Ok(((ret_node, ret_sources), local_bounds))
+    }
+    let (ret_expr, ret_sources) = function_return_value(module, &final_state.store, ret_id, arena)?;
+    Ok(((ret_expr, ret_sources), final_state.boundaries))
 }
 
 fn eval_function_call_expression(
@@ -2311,7 +3489,42 @@ fn eval_function_call_expression(
         ));
     };
 
-    eval_function_body_return(module, store, call, &function_body, ret_id, arena)
+    let mut local_store = store.clone();
+    let mut arg_bounds = BoundaryMap::default();
+    for (arg_path, arg_id) in &function_body.arg_map {
+        let Some(arg_expr) = call.inputs.get(arg_path) else {
+            return Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function call missing argument",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            ));
+        };
+
+        let ((arg_node, sources), bounds) = eval_expression(module, store, arg_expr, arena, None)?;
+        arg_bounds = merge_boundaries(arg_bounds, bounds);
+
+        let Some(arg_var) = module.variables.get(arg_id) else {
+            return Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function argument variable",
+                format!("unknown arg id: {:?}", arg_id),
+                Some(&call.comptime.token),
+            ));
+        };
+        let arg_width = resolve_total_width(module, arg_var)?;
+        local_store.insert(
+            *arg_id,
+            RangeStore::new(Some((arg_node, sources)), arg_width),
+        );
+    }
+
+    let ((ret_node, ret_sources), ret_bounds) =
+        eval_function_body_return(module, &local_store, &function_body, ret_id, arena)?;
+    Ok((
+        (ret_node, ret_sources),
+        merge_boundaries(arg_bounds, ret_bounds),
+    ))
 }
 
 pub fn eval_expression(

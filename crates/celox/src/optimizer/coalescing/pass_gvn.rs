@@ -127,7 +127,7 @@ impl ExecutionUnitPass for GvnPass {
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum ValueKey {
     /// Constant immediate
-    Imm(Vec<u64>),
+    Imm(Vec<u64>, usize),
     /// Binary operation: (op, lhs_value_number, rhs_value_number, result_width)
     Binary(BinaryOp, RegisterId, RegisterId, usize),
     /// Unary operation: (op, src_value_number, result_width)
@@ -172,7 +172,8 @@ fn gvn_block(
                 let mut key_data = val.payload.to_u64_digits();
                 key_data.push(u64::MAX); // separator
                 key_data.extend(val.mask.to_u64_digits());
-                Some(ValueKey::Imm(key_data))
+                let w = register_map.get(dst).map(|t| t.width()).unwrap_or(0);
+                Some(ValueKey::Imm(key_data, w))
             }
             SIRInstruction::Binary(dst, lhs, op, rhs) => {
                 let l = resolve(*lhs, &canonical);
