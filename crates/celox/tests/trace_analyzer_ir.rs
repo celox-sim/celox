@@ -41,8 +41,8 @@ fn test_trace_analyzer_ir_nested_static_break_escapes_dynamic_loop() {
             ) -> logic<8> {
                 var tmp: logic<8>;
                 tmp = 8'd0;
-                for i: logic<3> in 0..n {
-                    for j: logic<2> in 0..4 {
+                for i in 0..n {
+                    for j in 0..4 {
                         if x[j] {
                             break;
                         }

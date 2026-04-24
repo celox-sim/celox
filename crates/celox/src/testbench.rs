@@ -1119,9 +1119,14 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         match stmt {
             Statement::TbMethodCall(tb) => self.convert_tb_method(tb, ec),
             Statement::SystemFunctionCall(sf) => match &sf.kind {
-                SystemFunctionKind::Assert(cond, msg) => Some(TestbenchStatement::Assert {
+                SystemFunctionKind::Assert { cond, args, .. } => Some(TestbenchStatement::Assert {
                     expr: ec.compile(&cond.0),
-                    message: msg.as_ref().map(|m| format!("{}", m.0)),
+                    message: (!args.is_empty()).then(|| {
+                        args.iter()
+                            .map(|arg| format!("{}", arg.0))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }),
                     location: extract_source_location(&sf.comptime.token),
                 }),
                 SystemFunctionKind::Finish => Some(TestbenchStatement::Finish),
