@@ -429,7 +429,7 @@ dependencies = [
  "celox-macros",
  "chrono",
  "clap",
- "cranelift 0.128.4",
+ "cranelift",
  "cranelift-frontend 0.128.4",
  "cranelift-jit",
  "cranelift-module 0.128.4",
@@ -831,17 +831,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "cranelift"
-version = "0.128.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaf3136f47b893a9778d448b02594b25aaf4d9b39e483369ed6af2d0d0d736b4"
-dependencies = [
- "cranelift-codegen 0.128.4",
- "cranelift-frontend 0.128.4",
- "cranelift-module 0.128.4",
 ]
 
 [[package]]
@@ -6147,7 +6136,7 @@ version = "0.19.1"
 dependencies = [
  "clap",
  "codspeed-criterion-compat",
- "cranelift 0.131.0",
+ "cranelift",
  "daggy",
  "fst-writer",
  "fxhash",
