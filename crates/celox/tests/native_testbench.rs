@@ -1035,6 +1035,23 @@ fn test_assert_format_args_render_char_and_upper_hex() {
 }
 
 #[test]
+fn test_assert_format_args_render_uppercase_aliases_like_lowercase() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0, "%B %O %D %I %S", 4'b1010, 8'o17, 8'd12, 8'd34, 8'd65);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("1010 17 12 34 A"));
+}
+
+#[test]
 fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
     let code = r#"
         #[test(t)]

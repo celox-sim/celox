@@ -333,6 +333,32 @@ fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
     assert_eq!(sim.get(q_last), 250u32.into());
 }
 
+fn test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<16>,
+            q_last: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_last = 8'hee;
+                for i in start[7:0]..=8'hff {
+                    q_last = i as 8;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let q_last = sim.signal("q_last");
+
+    sim.modify(|io| io.set(start, 0xffffu16)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_last), 255u32.into());
+}
+
 fn test_ff_runtime_for_wide_dynamic_bound_uses_full_bound_width(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

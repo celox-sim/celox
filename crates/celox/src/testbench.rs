@@ -394,9 +394,21 @@ fn compile_assert_arg<B: SimBackend>(
     ec: &ExprCompiler<'_, B>,
 ) -> CompiledAssertArg {
     let expr = &input.0;
+    let width = {
+        let ctx_width = expr.comptime().expr_context.width;
+        if ctx_width > 0 {
+            ctx_width
+        } else if let Some(type_width) = expr.comptime().r#type.total_width() {
+            type_width
+        } else if let Ok(value) = expr.comptime().get_value() {
+            value.width()
+        } else {
+            0
+        }
+    };
     CompiledAssertArg {
         expr: ec.compile(expr),
-        width: expr.comptime().expr_context.width,
+        width,
         signed: expr.comptime().expr_context.signed,
         is_string: expr.comptime().r#type.is_string(),
     }
@@ -474,11 +486,11 @@ fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char
         return tb_value_to_utf8(&value, arg.width).unwrap_or_else(|| format!("{:?}", value));
     }
     match spec.unwrap_or('d') {
-        'b' => format!("{:b}", value.to_biguint()),
-        'o' => format!("{:o}", value.to_biguint()),
+        'b' | 'B' => format!("{:b}", value.to_biguint()),
+        'o' | 'O' => format!("{:o}", value.to_biguint()),
         'x' | 'h' => format!("{:x}", value.to_biguint()),
         'X' | 'H' => format!("{:X}", value.to_biguint()),
-        'd' | 'i' => {
+        'd' | 'D' | 'i' | 'I' => {
             if arg.signed {
                 tb_value_to_signed_bigint(&value, arg.width).to_string()
             } else {
@@ -486,7 +498,7 @@ fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char
             }
         }
         'c' | 'C' => char::from((value.to_u64() & 0xff) as u8).to_string(),
-        's' => tb_value_to_utf8(&value, arg.width).unwrap_or_else(|| format!("{:?}", value)),
+        's' | 'S' => tb_value_to_utf8(&value, arg.width).unwrap_or_else(|| format!("{:?}", value)),
         _ => {
             if arg.signed {
                 tb_value_to_signed_bigint(&value, arg.width).to_string()

@@ -512,8 +512,9 @@ impl<'a> FfParser<'a> {
                 self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
                 let reg = self.stack.pop_back().unwrap();
                 let source_signed = expr.comptime().r#type.signed;
+                let extend_signed = source_signed && signed;
                 let canonical =
-                    self.cast_reg_width_ext(ir_builder, reg, canonical_width, source_signed);
+                    self.cast_reg_width_ext(ir_builder, reg, canonical_width, extend_signed);
                 let canonical = match ir_builder.register(&canonical) {
                     RegisterType::Bit {
                         width: reg_width,
