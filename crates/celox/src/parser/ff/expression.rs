@@ -258,7 +258,7 @@ impl<'a> FfParser<'a> {
             return Ok(false);
         }
 
-        let mut linear_index = 0usize;
+        let mut resolved_indices = Vec::with_capacity(all_indices.len());
         for (i, expr) in all_indices.iter().enumerate() {
             let Some(idx) = self.get_constant_value(expr).map(|x| x as usize) else {
                 return Ok(false);
@@ -267,52 +267,12 @@ impl<'a> FfParser<'a> {
             if idx >= dim {
                 return Ok(false);
             }
-            let stride = array_dims[i + 1..].iter().product::<usize>().max(1);
-            linear_index += idx * stride;
+            resolved_indices.push(idx);
         }
 
-        let mut expanded: Vec<&Expression> = Vec::new();
-        let mut default_expr: Option<&Expression> = None;
-        for item in items {
-            match item {
-                ArrayLiteralItem::Value(expr, repeat) => {
-                    let rep_count = if let Some(rep_expr) = repeat {
-                        self.get_constant_value(rep_expr).ok_or_else(|| {
-                            ParserError::unsupported(
-                                 68,
-                                LoweringPhase::FfLowering,
-                                "array literal non-constant repeat",
-                                format!("{:?}", rep_expr),
-                                Some(&rep_expr.token_range()),
-                            )
-                        })? as usize
-                    } else {
-                        1
-                    };
-                    for _ in 0..rep_count {
-                        expanded.push(expr);
-                    }
-                }
-                ArrayLiteralItem::Defaul(expr) => {
-                    if default_expr.is_some() {
-                        return Err(ParserError::unsupported(
-                             68,
-                            LoweringPhase::FfLowering,
-                            "array literal multiple default",
-                            format!("{:?}", items),
-                            Some(&expr.token_range()),
-                        ));
-                    }
-                    default_expr = Some(expr);
-                }
-            }
-        }
-
-        let selected_expr = if let Some(expr) = expanded.get(linear_index) {
-            *expr
-        } else if let Some(default_expr) = default_expr {
-            default_expr
-        } else {
+        let Some(selected_expr) =
+            self.select_array_literal_element(items, &resolved_indices, &array_dims)?
+        else {
             return Ok(false);
         };
 
@@ -336,6 +296,83 @@ impl<'a> FfParser<'a> {
         );
         self.stack.push_back(coerced);
         Ok(true)
+    }
+
+    fn select_array_literal_element<'b>(
+        &self,
+        items: &'b [ArrayLiteralItem],
+        indices: &[usize],
+        dims: &[usize],
+    ) -> Result<Option<&'b Expression>, ParserError> {
+        let Some((&target_idx, rest_indices)) = indices.split_first() else {
+            return Ok(None);
+        };
+        let Some((_dim, rest_dims)) = dims.split_first() else {
+            return Ok(None);
+        };
+
+        let mut pos = 0usize;
+        let mut default_expr: Option<&Expression> = None;
+
+        for item in items {
+            match item {
+                ArrayLiteralItem::Value(expr, repeat) => {
+                    let rep_count = if let Some(rep_expr) = repeat {
+                        self.get_constant_value(rep_expr).ok_or_else(|| {
+                            ParserError::unsupported(
+                                68,
+                                LoweringPhase::FfLowering,
+                                "array literal non-constant repeat",
+                                format!("{:?}", rep_expr),
+                                Some(&rep_expr.token_range()),
+                            )
+                        })? as usize
+                    } else {
+                        1
+                    };
+
+                    if target_idx < pos + rep_count {
+                        if rest_dims.is_empty() {
+                            return Ok(Some(expr));
+                        }
+                        return match expr.as_ref() {
+                            Expression::ArrayLiteral(nested, _) => {
+                                self.select_array_literal_element(nested, rest_indices, rest_dims)
+                            }
+                            _ if expr.comptime().r#type.array.is_empty() => Ok(Some(expr)),
+                            _ => Ok(None),
+                        };
+                    }
+                    pos += rep_count;
+                }
+                ArrayLiteralItem::Defaul(expr) => {
+                    if default_expr.is_some() {
+                        return Err(ParserError::unsupported(
+                            68,
+                            LoweringPhase::FfLowering,
+                            "array literal multiple default",
+                            format!("{:?}", items),
+                            Some(&expr.token_range()),
+                        ));
+                    }
+                    default_expr = Some(expr);
+                }
+            }
+        }
+
+        let Some(default_expr) = default_expr else {
+            return Ok(None);
+        };
+        if rest_dims.is_empty() {
+            return Ok(Some(default_expr));
+        }
+        match default_expr {
+            Expression::ArrayLiteral(nested, _) => {
+                self.select_array_literal_element(nested, rest_indices, rest_dims)
+            }
+            _ if default_expr.comptime().r#type.array.is_empty() => Ok(Some(default_expr)),
+            _ => Ok(None),
+        }
     }
 
     fn eval_formal_type_select(
@@ -1428,7 +1465,7 @@ impl<'a> FfParser<'a> {
                 self.get_cast_target_info(right)
             else {
                 return Err(ParserError::unsupported(
-                     68,
+                    68,
                     LoweringPhase::FfLowering,
                     "as cast target",
                     format!("{:?}", right),
@@ -1449,7 +1486,7 @@ impl<'a> FfParser<'a> {
         if matches!(op, Op::Pow) {
             let Some(exp) = self.get_constant_value(right) else {
                 return Err(ParserError::unsupported(
-                     68,
+                    68,
                     LoweringPhase::FfLowering,
                     "pow non-constant exponent",
                     format!("{:?}", right),
@@ -1815,7 +1852,7 @@ impl<'a> FfParser<'a> {
 
             let Some(member_type) = ty.get_member_type(*name) else {
                 return Err(ParserError::unsupported(
-                     68,
+                    68,
                     LoweringPhase::FfLowering,
                     "struct constructor member",
                     format!("unknown member: {:?} in {:?}", name, ty),
@@ -1824,7 +1861,7 @@ impl<'a> FfParser<'a> {
             };
             let Some(member_width) = member_type.total_width() else {
                 return Err(ParserError::unsupported(
-                     68,
+                    68,
                     LoweringPhase::FfLowering,
                     "struct constructor member width",
                     format!("member: {:?}, type: {:?}", name, member_type),
@@ -1890,7 +1927,7 @@ impl<'a> FfParser<'a> {
                     let rep_count = if let Some(rep_expr) = repeat {
                         self.get_constant_value(rep_expr).ok_or_else(|| {
                             ParserError::unsupported(
-                                 68,
+                                68,
                                 LoweringPhase::FfLowering,
                                 "array literal non-constant repeat",
                                 format!("{:?}", rep_expr),
@@ -1909,7 +1946,7 @@ impl<'a> FfParser<'a> {
                 ArrayLiteralItem::Defaul(expr) => {
                     if default_part.is_some() {
                         return Err(ParserError::unsupported(
-                             68,
+                            68,
                             LoweringPhase::FfLowering,
                             "array literal multiple default",
                             format!("{:?}", items),
@@ -1933,7 +1970,7 @@ impl<'a> FfParser<'a> {
         if let Some((default_reg, default_width)) = default_part {
             let Some(target_width) = expected_width else {
                 return Err(ParserError::unsupported(
-                     68,
+                    68,
                     LoweringPhase::FfLowering,
                     "array literal default without context width",
                     format!("{:?}", items),
@@ -1943,7 +1980,7 @@ impl<'a> FfParser<'a> {
 
             if explicit_width > target_width {
                 return Err(ParserError::unsupported(
-                     68,
+                    68,
                     LoweringPhase::FfLowering,
                     "array literal width overflow",
                     format!("explicit_width={explicit_width}, target_width={target_width}"),
@@ -1954,7 +1991,7 @@ impl<'a> FfParser<'a> {
             let remaining = target_width - explicit_width;
             if default_width == 0 || !remaining.is_multiple_of(default_width) {
                 return Err(ParserError::unsupported(
-                     68,
+                    68,
                     LoweringPhase::FfLowering,
                     "array literal default width mismatch",
                     format!(

@@ -1339,6 +1339,29 @@ fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shap
     assert_eq!(sim.get(out_q), 0x55u32.into());
 }
 
+fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2, 2]) -> logic<8> {
+                return x[0][0];
+            }
+            always_ff (clk) {
+                out_q = f('{'{8'h11, 8'h22}, '{8'h33, 8'h44}});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
 fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
