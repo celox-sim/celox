@@ -213,6 +213,75 @@ module Top (
 
     }
 
+    fn test_comb_function_call_partial_write_local_temp(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp[7:4] = x[3:0];
+        tmp[3:0] = x[7:4];
+        return tmp;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0xABu8)).unwrap();
+    assert_eq!(sim.get(q), 0xBAu32.into());
+
+    }
+
+    fn test_comb_function_call_local_and_return_width_coercion(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    sel: input logic,
+    q0 : output logic<8>,
+    q1 : output logic<8>,
+) {
+    function f (
+        x: input logic,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 1'b1;
+        if x {
+            return 1'b1;
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q0 = f(1'b0);
+        q1 = f(sel);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let q0 = sim.signal("q0");
+    let q1 = sim.signal("q1");
+
+    sim.modify(|io| io.set(sel, 0u8)).unwrap();
+    assert_eq!(sim.get(q0), 1u32.into());
+    assert_eq!(sim.get(q1), 1u32.into());
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(q1), 1u32.into());
+
+    }
+
     fn test_always_comb_blocking_assignment_chain(sim) {
         @setup { let code = r#"
 module Top (a: input logic<8>, o: output logic<8>) {

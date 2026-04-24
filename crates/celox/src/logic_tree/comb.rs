@@ -10,16 +10,14 @@ use crate::{
     HashMap, HashSet,
     ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
     parser::bitaccess::{
-        build_partial_assign_expr, celox_value_from_comptime, eval_constexpr, eval_var_select,
-        is_static_access,
+        celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
     },
 };
 use num_bigint::BigUint;
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
-    ForStatement, IfStatement, Module, Op, Statement, ValueVariant, VarId, VarIndex, VarSelect,
-    VarSelectOp,
+    ForStatement, IfStatement, Module, Op, Statement, ValueVariant, VarId, VarSelectOp,
 };
 
 // SymbolicStore: Maps variable IDs to their current symbolic representation.
@@ -2191,172 +2189,12 @@ fn eval_function_body_return(
     ret_id: VarId,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
-    fn collect_local_deps(
-        expr: &Expression,
-        defs: &HashMap<VarId, Expression>,
-        out: &mut Vec<VarId>,
-        seen: &mut HashSet<VarId>,
-    ) {
-        match expr {
-            Expression::Term(factor) => match factor.as_ref() {
-                Factor::Variable(var_id, index, select, _) => {
-                    if defs.contains_key(var_id) && seen.insert(*var_id) {
-                        out.push(*var_id);
-                    }
-                    for idx in &index.0 {
-                        collect_local_deps(idx, defs, out, seen);
-                    }
-                    for sel in &select.0 {
-                        collect_local_deps(sel, defs, out, seen);
-                    }
-                    if let Some((_, range_expr)) = &select.1 {
-                        collect_local_deps(range_expr, defs, out, seen);
-                    }
-                }
-                Factor::FunctionCall(call) => {
-                    for input_expr in call.inputs.values() {
-                        collect_local_deps(input_expr, defs, out, seen);
-                    }
-                }
-                _ => {}
-            },
-            Expression::Binary(lhs, _, rhs, _) => {
-                collect_local_deps(lhs, defs, out, seen);
-                collect_local_deps(rhs, defs, out, seen);
-            }
-            Expression::Unary(_, inner, _) => collect_local_deps(inner, defs, out, seen),
-            Expression::Ternary(cond, then_expr, else_expr, _) => {
-                collect_local_deps(cond, defs, out, seen);
-                collect_local_deps(then_expr, defs, out, seen);
-                collect_local_deps(else_expr, defs, out, seen);
-            }
-            Expression::Concatenation(parts, _) => {
-                for (part_expr, rep) in parts {
-                    collect_local_deps(part_expr, defs, out, seen);
-                    if let Some(rep) = rep {
-                        collect_local_deps(rep, defs, out, seen);
-                    }
-                }
-            }
-            Expression::ArrayLiteral(items, _) => {
-                for item in items {
-                    match item {
-                        ArrayLiteralItem::Value(expr, rep) => {
-                            collect_local_deps(expr, defs, out, seen);
-                            if let Some(rep) = rep {
-                                collect_local_deps(rep, defs, out, seen);
-                            }
-                        }
-                        ArrayLiteralItem::Defaul(expr) => collect_local_deps(expr, defs, out, seen),
-                    }
-                }
-            }
-            Expression::StructConstructor(_, fields, _) => {
-                for (_, field_expr) in fields {
-                    collect_local_deps(field_expr, defs, out, seen);
-                }
-            }
-        }
-    }
-
-    fn materialize_local_var(
-        module: &Module,
-        caller_store: &SymbolicStore<VarId>,
-        defs: &HashMap<VarId, Expression>,
-        local_store: &mut SymbolicStore<VarId>,
-        local_bounds: &mut BoundaryMap<VarId>,
-        var_id: VarId,
-        arena: &mut SLTNodeArena<VarId>,
-        visiting: &mut HashSet<VarId>,
-    ) -> Result<(), ParserError> {
-        if local_store.contains_key(&var_id) {
-            return Ok(());
-        }
-        let Some(expr) = defs.get(&var_id) else {
-            return Ok(());
-        };
-        if !visiting.insert(var_id) {
-            return Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "recursive local dependency in function return",
-                format!("var id: {:?}", var_id),
-                None,
-            ));
-        }
-
-        let mut deps = Vec::new();
-        collect_local_deps(expr, defs, &mut deps, &mut HashSet::default());
-        for dep in deps {
-            materialize_local_var(
-                module,
-                caller_store,
-                defs,
-                local_store,
-                local_bounds,
-                dep,
-                arena,
-                visiting,
-            )?;
-        }
-
-        let mut eval_store = caller_store.clone();
-        eval_store.extend(local_store.clone());
-        let ((node, sources), bounds) = eval_expression(module, &eval_store, expr, arena, None)?;
-        *local_bounds = merge_boundaries(local_bounds.clone(), bounds);
-
-        let Some(var) = module.variables.get(&var_id) else {
-            return Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "function local variable",
-                format!("unknown variable id: {:?}", var_id),
-                None,
-            ));
-        };
-        let width = resolve_total_width(module, var)?;
-        local_store.insert(var_id, RangeStore::new(Some((node, sources)), width));
-        visiting.remove(&var_id);
-        Ok(())
-    }
-
-    fn eval_expr_with_defs(
-        module: &Module,
-        caller_store: &SymbolicStore<VarId>,
-        defs: &HashMap<VarId, Expression>,
-        expr: &Expression,
-        arena: &mut SLTNodeArena<VarId>,
-    ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
-        let mut local_store = SymbolicStore::default();
-        let mut local_bounds = BoundaryMap::default();
-        let mut deps = Vec::new();
-        let mut seen = HashSet::default();
-        let mut visiting = HashSet::default();
-
-        collect_local_deps(expr, defs, &mut deps, &mut seen);
-        for dep in deps {
-            materialize_local_var(
-                module,
-                caller_store,
-                defs,
-                &mut local_store,
-                &mut local_bounds,
-                dep,
-                arena,
-                &mut visiting,
-            )?;
-        }
-
-        let mut eval_store = caller_store.clone();
-        eval_store.extend(local_store);
-        let (value, bounds) = eval_expression(module, &eval_store, expr, arena, None)?;
-        Ok((value, merge_boundaries(local_bounds, bounds)))
-    }
-
     fn resolve_return_value(
         module: &Module,
-        caller_store: &SymbolicStore<VarId>,
+        store: SymbolicStore<VarId>,
+        boundaries: BoundaryMap<VarId>,
         statements: &[Statement],
         ret_id: VarId,
-        defs: &HashMap<VarId, Expression>,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<Option<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>)>, ParserError>
     {
@@ -2369,71 +2207,51 @@ fn eval_function_body_return(
 
         match stmt {
             Statement::Assign(assign) => {
-                if assign.dst.len() != 1 {
-                    return Err(ParserError::unsupported(
-                        LoweringPhase::CombLowering,
-                        "function body assignment shape",
-                        format!("{stmt}"),
-                        Some(&assign.token),
-                    ));
-                }
+                let (next_store, next_bounds) =
+                    eval_assign(module, store, boundaries, assign, arena)?;
 
-                let dst = &assign.dst[0];
-                let is_whole_var =
-                    dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-
-                if is_whole_var {
-                    if dst.id == ret_id {
-                        return eval_expr_with_defs(
-                            module,
-                            caller_store,
-                            defs,
-                            &assign.expr,
-                            arena,
-                        )
-                        .map(Some);
+                if assign.dst.len() == 1 {
+                    let dst = &assign.dst[0];
+                    let is_whole_var =
+                        dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+                    if is_whole_var && dst.id == ret_id {
+                        let ret_var = &module.variables[&ret_id];
+                        let ret_width = resolve_total_width(module, ret_var)?;
+                        let ret_access = BitAccess::new(0, ret_width - 1);
+                        let ret_parts = next_store[&ret_id].get_parts(ret_access);
+                        let (ret_node, ret_sources) =
+                            combine_parts_with_default(ret_id, 0, ret_parts, arena);
+                        return Ok(Some(((ret_node, ret_sources), next_bounds)));
                     }
-
-                    let mut next_defs = defs.clone();
-                    next_defs.insert(dst.id, assign.expr.clone());
-                    resolve_return_value(module, caller_store, rest, ret_id, &next_defs, arena)
-                } else if is_static_access(&dst.index, &dst.select) {
-                    let old_value = defs.get(&dst.id).cloned().unwrap_or_else(|| {
-                        Expression::Term(Box::new(Factor::Variable(
-                            dst.id,
-                            VarIndex::default(),
-                            VarSelect::default(),
-                            dst.comptime.clone(),
-                        )))
-                    });
-                    let merged =
-                        build_partial_assign_expr(module, dst, assign.expr.clone(), old_value)?;
-
-                    let mut next_defs = defs.clone();
-                    next_defs.insert(dst.id, merged);
-                    resolve_return_value(module, caller_store, rest, ret_id, &next_defs, arena)
-                } else {
-                    Err(ParserError::unsupported(
-                        LoweringPhase::CombLowering,
-                        "function body non-whole assignment (dynamic index)",
-                        format!("{stmt}"),
-                        Some(&assign.token),
-                    ))
                 }
+
+                resolve_return_value(module, next_store, next_bounds, rest, ret_id, arena)
             }
             Statement::If(if_stmt) => {
                 let ((cond_expr, cond_sources), cond_bounds) =
-                    eval_expr_with_defs(module, caller_store, defs, &if_stmt.cond, arena)?;
+                    eval_expression(module, &store, &if_stmt.cond, arena, Some(1))?;
 
                 let mut then_stmts = if_stmt.true_side.clone();
                 then_stmts.extend_from_slice(rest);
-                let then_value =
-                    resolve_return_value(module, caller_store, &then_stmts, ret_id, defs, arena)?;
+                let then_value = resolve_return_value(
+                    module,
+                    store.clone(),
+                    merge_boundaries(boundaries.clone(), cond_bounds.clone()),
+                    &then_stmts,
+                    ret_id,
+                    arena,
+                )?;
 
                 let mut else_stmts = if_stmt.false_side.clone();
                 else_stmts.extend_from_slice(rest);
-                let else_value =
-                    resolve_return_value(module, caller_store, &else_stmts, ret_id, defs, arena)?;
+                let else_value = resolve_return_value(
+                    module,
+                    store,
+                    merge_boundaries(boundaries, cond_bounds.clone()),
+                    &else_stmts,
+                    ret_id,
+                    arena,
+                )?;
 
                 match (then_value, else_value) {
                     (
@@ -2462,9 +2280,12 @@ fn eval_function_body_return(
                     _ => Ok(None),
                 }
             }
-            Statement::Null => {
-                resolve_return_value(module, caller_store, rest, ret_id, defs, arena)
+            Statement::For(for_stmt) => {
+                let (next_store, next_bounds) =
+                    eval_for(module, store, boundaries, for_stmt, arena)?;
+                resolve_return_value(module, next_store, next_bounds, rest, ret_id, arena)
             }
+            Statement::Null => resolve_return_value(module, store, boundaries, rest, ret_id, arena),
             Statement::IfReset(ir) => Err(ParserError::unsupported(
                 LoweringPhase::CombLowering,
                 "function body control flow",
@@ -2483,12 +2304,6 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
-            Statement::For(f) => Err(ParserError::unsupported(
-                LoweringPhase::CombLowering,
-                "for loop in function body",
-                format!("{stmt}"),
-                Some(&f.token),
-            )),
             Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                 Err(ParserError::unsupported(
                     LoweringPhase::CombLowering,
@@ -2500,12 +2315,38 @@ fn eval_function_body_return(
         }
     }
 
+    let mut local_store = SymbolicStore::default();
+    let local_bounds = BoundaryMap::default();
+    let mut written = HashMap::default();
+
+    collect_written_accesses(module, &body.statements, &mut written)?;
+    written.entry(ret_id).or_default();
+
+    for var_id in written.keys() {
+        let Some(var) = module.variables.get(var_id) else {
+            return Err(ParserError::unsupported(
+                LoweringPhase::CombLowering,
+                "function local variable",
+                format!("unknown variable id: {:?}", var_id),
+                None,
+            ));
+        };
+        let width = resolve_total_width(module, var)?;
+        local_store.insert(*var_id, RangeStore::new(None, width));
+    }
+
+    for arg_id in body.arg_map.values() {
+        if let Some(arg_store) = caller_store.get(arg_id) {
+            local_store.insert(*arg_id, arg_store.clone());
+        }
+    }
+
     resolve_return_value(
         module,
-        caller_store,
+        local_store,
+        local_bounds,
         &body.statements,
         ret_id,
-        &HashMap::default(),
         arena,
     )?
     .ok_or_else(|| {
@@ -2565,6 +2406,7 @@ fn eval_function_call_expression(
     };
 
     let mut local_store = store.clone();
+    let mut arg_bounds = BoundaryMap::default();
     for (arg_path, arg_id) in &function_body.arg_map {
         let Some(arg_expr) = call.inputs.get(arg_path) else {
             return Err(ParserError::unsupported(
@@ -2575,8 +2417,9 @@ fn eval_function_call_expression(
             ));
         };
 
-        let ((arg_node, sources), _bounds) =
+        let ((arg_node, sources), bounds) =
             eval_expression(module, &local_store, arg_expr, arena, None)?;
+        arg_bounds = merge_boundaries(arg_bounds, bounds);
 
         let Some(arg_var) = module.variables.get(arg_id) else {
             return Err(ParserError::unsupported(
@@ -2593,7 +2436,12 @@ fn eval_function_call_expression(
         );
     }
 
-    eval_function_body_return(module, &local_store, &function_body, ret_id, arena)
+    let ((ret_node, ret_sources), ret_bounds) =
+        eval_function_body_return(module, &local_store, &function_body, ret_id, arena)?;
+    Ok((
+        (ret_node, ret_sources),
+        merge_boundaries(arg_bounds, ret_bounds),
+    ))
 }
 
 pub fn eval_expression(
