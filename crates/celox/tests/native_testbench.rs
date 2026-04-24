@@ -995,6 +995,26 @@ fn test_assert_format_args_render_runtime_values() {
 }
 
 #[test]
+fn test_assert_format_args_follow_veryl_single_char_specifiers() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0, "cnt=%0d hex=%08x", 8'd3, 8'h0f);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("cnt=%0d hex=%08x"),
+    );
+}
+
+#[test]
 fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
     let code = r#"
         #[test(t)]

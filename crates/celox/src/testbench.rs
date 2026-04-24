@@ -522,28 +522,32 @@ fn render_assert_message(message: &Option<AssertMessage>, memory: *mut u8) -> Op
                     }
                     Some(spec) => {
                         chars.next();
-                        if let Some(arg) = args.get(arg_idx) {
-                            rendered.push_str(&format_assert_arg(arg, memory, Some(spec)));
-                            arg_idx += 1;
-                        } else {
-                            rendered.push('%');
-                            rendered.push(spec);
+                        // Keep native testbench formatting aligned with upstream Veryl's
+                        // `format_display_string()`: only single-character specifiers are
+                        // recognized today, so width/flag modifiers such as `%0d` and `%08x`
+                        // remain literal text rather than being parsed here independently.
+                        match spec {
+                            'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
+                            | 'B' | 'c' | 'C' | 's' | 'S' => {
+                                if let Some(arg) = args.get(arg_idx) {
+                                    rendered.push_str(&format_assert_arg(
+                                        arg,
+                                        memory,
+                                        Some(spec.to_ascii_lowercase()),
+                                    ));
+                                }
+                                arg_idx += 1;
+                            }
+                            'm' | 'M' => rendered.push_str("<hierarchy>"),
+                            't' | 'T' => rendered.push('0'),
+                            _ => {
+                                rendered.push('%');
+                                rendered.push(spec);
+                            }
                         }
                     }
                     None => rendered.push('%'),
                 }
-            }
-            if arg_idx < args.len() {
-                if !rendered.is_empty() {
-                    rendered.push(' ');
-                }
-                rendered.push_str(
-                    &args[arg_idx..]
-                        .iter()
-                        .map(|arg| format_assert_arg(arg, memory, None))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
             }
             Some(rendered)
         }
