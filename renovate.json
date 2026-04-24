@@ -8,8 +8,8 @@
   "customManagers": [
     {
       "customType": "regex",
-      "fileMatch": [
-        "^rust-toolchain\\.toml$"
+      "managerFilePatterns": [
+        "/^rust-toolchain\\.toml$/"
       ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>[^ ]+) depName=(?<depName>[^ ]+) versioning=(?<versioning>[^\\s]+)\\s+channel = \"(?<currentValue>[^\"]+)\""
@@ -17,8 +17,8 @@
     },
     {
       "customType": "regex",
-      "fileMatch": [
-        "^Cargo\\.toml$"
+      "managerFilePatterns": [
+        "/^Cargo\\.toml$/"
       ],
       "matchStrings": [
         "rust-version = \"(?<currentValue>[^\"]+)\"\\n"
