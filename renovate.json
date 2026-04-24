@@ -50,6 +50,12 @@
     },
     {
       "matchManagers": [
+        "cargo"
+      ],
+      "skipArtifactsUpdate": true
+    },
+    {
+      "matchManagers": [
         "npm"
       ],
       "minimumReleaseAge": "7 days"
