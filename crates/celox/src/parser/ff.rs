@@ -631,6 +631,12 @@ impl<'a> FfParser<'a> {
 
         let start_width = self.bound_width(start_bound);
         let end_width = self.bound_width(end_bound);
+        // Current Veryl syntax no longer accepts typed loop variables such as
+        // `for i: u8 in ...`; analyzer now produces an untyped `for i in ...`
+        // and `stmt.var_type` follows that inferred loop variable type.
+        // Because of that, widening the visible loop variable to track wide
+        // runtime bounds is not regressing a user-declared narrow loop-var
+        // annotation on the current language surface.
         let loop_width = base_loop_width.max(start_width).max(end_width).max(1);
 
         let counter_width = loop_width;
