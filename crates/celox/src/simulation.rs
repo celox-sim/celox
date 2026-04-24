@@ -310,7 +310,8 @@ impl<B: SimBackend> Simulation<B> {
                 // and exactly ONE trigger fired (from external events), we check
                 // if it's statically known to cascade. If it NEVER triggers another
                 // clock, we can safely evaluate and commit this FF domain in one shot.
-                let mut can_use_eval_apply = triggered_domains.is_empty() && marked_bits.len() == 1;
+                let mut can_use_eval_apply =
+                    triggered_domains.is_empty() && marked_bits.count() == 1;
 
                 if can_use_eval_apply {
                     // Peek at the single triggered ID
