@@ -1304,12 +1304,12 @@ module Top (
     var result: logic<8>;
     always_comb {
         result = 0;
-        for i: u32 in 0..2 {
+        for i in 0..2 {
             var tmp: logic<8>;
             tmp = a + i as 8;
             if i == 1 { result = tmp; }
         }
-        for j: u32 in 0..2 {
+        for j in 0..2 {
             var tmp: logic<8>;
             tmp = b + j as 8;
             if j == 0 { result = result + tmp; }
@@ -1354,7 +1354,7 @@ module Top (
 
         always_comb {
             o_data[g] = 0;
-            for k: u32 in 0..2 {
+            for k in 0..2 {
                 var flag: logic;
                 flag = k == g;
                 if flag {
@@ -1401,12 +1401,12 @@ module Top (
     var partial: logic<8>;
     always_comb {
         partial = 0;
-        for i: u32 in 0..4 {
+        for i in 0..4 {
             var masked: logic<8>;
             masked = a[i];
             if sel { partial = partial | masked; }
         }
-        for j: u32 in 0..4 {
+        for j in 0..4 {
             var masked: logic<8>;
             masked = a[j];
             if !sel { partial = partial ^ masked; }

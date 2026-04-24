@@ -83,7 +83,7 @@ module SorterTree::<PKG: SorterItemProto> #(
     var pop_cnt: logic<IF_W>;
     always_comb {
         pop_cnt = 0;
-        for i: u32 in 0..N {
+        for i in 0..N {
             if leaf_pop[i] {
                 pop_cnt = pop_cnt + 1;
             }
@@ -121,7 +121,7 @@ module SorterTree::<PKG: SorterItemProto> #(
     var valid_any: logic;
     always_comb {
         valid_any = 0;
-        for i: u32 in 0..N {
+        for i in 0..N {
             valid_any = valid_any || !leaf_empty[i];
         }
     }
@@ -131,7 +131,7 @@ module SorterTree::<PKG: SorterItemProto> #(
     var all_ge_tail : logic;
     always_comb {
         all_ge_tail = 1;
-        for i: u32 in 0..N {
+        for i in 0..N {
             if !leaf_empty[i] && PKG::lt(leaf_val[i], out_tail) {
                 all_ge_tail = 0;
             }

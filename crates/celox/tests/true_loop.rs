@@ -11,6 +11,7 @@ all_backends! {
 // assign passes the analyzer (no UnassignVariable), and true_loop
 // declaration allows the SIR scheduler to accept the cycle.
 fn test_converging_true_loop_with_assign(sim) {
+    @ignore_on(veryl); // Upstream Veryl simulator currently asserts on duplicate ProtoStatements in this true-loop shape.
     @setup { let code = r#"
         module Top (i: input logic<2>, o: output logic<2>) {
             var v: logic<2>;

@@ -213,7 +213,7 @@ module MinReductionTree::<PKG: SorterItemProto> #(
     var pe_any: logic;
     always_comb {
         pe_any = 0;
-        for i: u32 in 0..TOTAL {
+        for i in 0..TOTAL {
             pe_any = pe_any | buf_occ[i];
         }
     }

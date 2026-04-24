@@ -1,6 +1,6 @@
 use crate::ir::{
     BinaryOp, BitAccess, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue, VarAtomBase,
+    SIRValue, UnaryOp, VarAtomBase,
 };
 use crate::logic_tree::{NodeId, SLTLoopBound, SLTNode, SLTNodeArena, comb::SLTStepOp};
 use num_bigint::BigUint;
@@ -518,6 +518,24 @@ impl SLTToSIRLowerer {
         crate::logic_tree::comb::get_width(node, arena)
     }
 
+    fn get_signed<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        match arena.get(node) {
+            SLTNode::Input { .. } => false,
+            SLTNode::Constant(_, _, _, signed) => *signed,
+            SLTNode::Binary(lhs, _, _) => self.get_signed(*lhs, arena),
+            SLTNode::Unary(UnaryOp::Minus, _) => true,
+            SLTNode::Unary(_, inner) => self.get_signed(*inner, arena),
+            SLTNode::Mux { then_expr, .. } => self.get_signed(*then_expr, arena),
+            SLTNode::ForFold { .. } => false,
+            SLTNode::Slice { expr, .. } => self.get_signed(*expr, arena),
+            SLTNode::Concat(_) => false,
+        }
+    }
+
     fn lower_slice_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -730,7 +748,7 @@ impl SLTToSIRLowerer {
         &self,
         builder: &mut SIRBuilder<A>,
         bound: &SLTLoopBound,
-        canonical_width: usize,
+        _canonical_width: usize,
         width: usize,
         signed: bool,
         arena: &SLTNodeArena<A>,
@@ -744,12 +762,15 @@ impl SLTToSIRLowerer {
             }
             SLTLoopBound::Expr(node) => {
                 let reg = self.lower_inner(builder, *node, arena, cache, None, true);
-                let canonical = if signed {
-                    self.cast_reg_width_ext(builder, reg, canonical_width, signed)
+                let source_signed = self.get_signed(*node, arena);
+                let sized = self.cast_reg_width_ext(builder, reg, width, source_signed);
+                if source_signed == signed {
+                    sized
                 } else {
-                    reg
-                };
-                self.cast_reg_width_ext(builder, canonical, width, signed)
+                    let dest = builder.alloc_bit(width, signed);
+                    builder.emit(SIRInstruction::Unary(dest, UnaryOp::Ident, sized));
+                    dest
+                }
             }
         }
     }

@@ -442,7 +442,7 @@ fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
             always_comb {
                 wrapped_hits = 0;
                 for i in 254..count {
-                    if i <: 8'd4 {
+                    if (i as u8) <: 8'd4 {
                         wrapped_hits += 1;
                     }
                 }
@@ -469,7 +469,7 @@ fn test_constant_bounds_preserve_wide_limit_above_loop_width(sim) {
             always_comb {
                 wrapped_hits = 0;
                 for i in start..260 {
-                    if i <: 8'd4 {
+                    if (i as u8) <: 8'd4 {
                         wrapped_hits += 1;
                     }
                 }

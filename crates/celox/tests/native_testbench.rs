@@ -26,7 +26,7 @@ fn test_counter_pass() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -52,7 +52,7 @@ fn test_counter_fail() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -88,7 +88,7 @@ fn test_wide_128bit() {
         #[test(t)]
         module t {
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<128>;
             inst dut: W (clk, rst, cnt);
             initial {
@@ -116,7 +116,7 @@ fn test_reset_async_high() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -147,7 +147,7 @@ fn test_reset_explicit_duration() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -175,7 +175,7 @@ fn test_for_loop_basic() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -205,7 +205,7 @@ fn test_for_loop_step() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -235,7 +235,7 @@ fn test_for_loop_rev() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -265,7 +265,7 @@ fn test_for_loop_break_exits_testbench_loop() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -296,7 +296,7 @@ fn test_for_loop_expression_bound_forward() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -325,7 +325,7 @@ fn test_for_loop_expression_bound_reverse() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -354,7 +354,7 @@ fn test_for_loop_expression_bound_inclusive() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -383,7 +383,7 @@ fn test_for_loop_expression_bound_stepped() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -412,7 +412,7 @@ fn test_for_loop_expression_bound_stepped_non_progress_fails() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -441,7 +441,7 @@ fn test_for_loop_expression_bound_arith_shift_step() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -470,7 +470,7 @@ fn test_for_loop_expression_bound_large_arith_shift_stops_after_first_iteration(
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -499,7 +499,7 @@ fn test_for_loop_expression_bound_non_progress_reports_failure() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -527,7 +527,7 @@ fn test_for_loop_expression_bound_terminal_inclusive_mul_succeeds() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -557,7 +557,7 @@ fn test_for_loop_expression_bound_reverse_zero_step_singleton_succeeds() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -586,7 +586,7 @@ fn test_for_loop_dynamic_wide_bound_overflow_reports_failure() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             var bound: logic<128>;
             inst dut: Counter (clk, rst, cnt);
@@ -640,7 +640,7 @@ fn test_for_loop_dynamic_inclusive_max_bound_runs_terminal_iteration() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             var bound: logic<64>;
             inst dut: Counter (clk, rst, cnt);
@@ -671,7 +671,7 @@ fn test_for_loop_dynamic_wide_singleton_bound_runs_once() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             var bound: logic<128>;
             inst dut: Counter (clk, rst, cnt);
@@ -713,7 +713,7 @@ fn test_function_call() {
         #[test(t)]
         module t {
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter2 (clk, rst, cnt);
 
@@ -754,7 +754,7 @@ fn test_function_return_value_in_assert() {
         #[test(t)]
         module t {
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var val: logic<8>;
             inst dut: Dut (clk, rst, val);
 
@@ -808,9 +808,9 @@ fn test_dual_clock() {
         #[test(t)]
         module t {
             inst clk_a: $tb::clock_gen;
-            inst rst_a: $tb::reset_gen;
+            inst rst_a: $tb::reset_gen(clk: clk_a);
             inst clk_b: $tb::clock_gen;
-            inst rst_b: $tb::reset_gen;
+            inst rst_b: $tb::reset_gen(clk: clk_b);
 
             var cnt_a: logic<32>;
             var cnt_b: logic<32>;
@@ -848,7 +848,7 @@ fn test_no_finish_is_pass() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -886,7 +886,7 @@ fn test_dynamic_array_index_in_for() {
         #[test(t)]
         module t {
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var arr: logic<8>[4];
             inst dut: ArrayFill (clk, rst, arr);
             initial {
@@ -916,7 +916,7 @@ fn test_multiple_assertions() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -960,7 +960,7 @@ fn test_unpacked_array_index() {
         #[test(t)]
         module t {
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<8>[4];
             inst dut: ArrayCounter (clk, rst, cnt);
             initial {
@@ -997,7 +997,7 @@ fn test_bit_select() {
         #[test(t)]
         module t {
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var val: logic<16>;
             inst dut: BitSel (clk, rst, val);
             initial {
@@ -1036,7 +1036,7 @@ fn test_concatenation() {
         #[test(t)]
         module t {
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var hi: logic<8>;
             var lo: logic<8>;
             inst dut: ConcatDut (clk, rst, hi, lo);
@@ -1071,7 +1071,7 @@ fn test_repeat_concatenation() {
         #[test(t)]
         module t {
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var val: logic<4>;
             inst dut: RepDut (clk, rst, val);
             initial {
@@ -1098,7 +1098,7 @@ fn test_comparison_operators() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
@@ -1129,7 +1129,7 @@ fn test_arithmetic_in_assert() {
         #[test(t)]
         module t {{
             inst clk: $tb::clock_gen;
-            inst rst: $tb::reset_gen;
+            inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
