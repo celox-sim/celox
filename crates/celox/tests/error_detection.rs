@@ -725,3 +725,43 @@ fn test_comb_function_body_rejects_dynamic_for_break() {
         );
     });
 }
+
+#[test]
+fn test_comb_function_body_rejects_nested_break_in_dynamic_for_due_to_analyzer_unroll() {
+    let code = r#"
+        module Top (
+            count: input logic<3>,
+            d: input logic<4>,
+            q: output logic<8>,
+        ) {
+            function f (
+                n: input logic<3>,
+                x: input logic<4>,
+            ) -> logic<8> {
+                var tmp: logic<8>;
+                tmp = 8'd0;
+                for i: logic<3> in 0..n {
+                    for j: logic<2> in 0..4 {
+                        if x[j] {
+                            break;
+                        }
+                    }
+                    tmp = tmp + 8'd1;
+                }
+                return tmp;
+            }
+
+            always_comb {
+                q = f(count, d);
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        let msg = format!("{e:?}");
+        assert!(
+            msg.contains("break in dynamic function-local for"),
+            "Expected nested break case to stay unsupported until analyzer preserves loop ownership, got: {e:?}"
+        );
+    });
+}
