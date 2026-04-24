@@ -2821,8 +2821,7 @@ fn eval_function_call_expression(
             ));
         };
 
-        let ((arg_node, sources), bounds) =
-            eval_expression(module, &local_store, arg_expr, arena, None)?;
+        let ((arg_node, sources), bounds) = eval_expression(module, store, arg_expr, arena, None)?;
         arg_bounds = merge_boundaries(arg_bounds, bounds);
 
         let Some(arg_var) = module.variables.get(arg_id) else {
