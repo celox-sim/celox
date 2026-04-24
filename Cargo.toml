@@ -32,7 +32,7 @@ veryl-simulator = { path = "deps/veryl/crates/simulator" }
 
 # Shared dependencies (also needed by veryl submodule crates)
 anyhow          = "1.0"
-bit-set         = "0.8"
+bit-set         = "0.10"
 clap            = { version = "4.5.60", features = ["derive"] }
 daggy           = "0.9.0"
 fxhash          = "0.2.1"
