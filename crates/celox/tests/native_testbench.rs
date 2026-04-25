@@ -1015,6 +1015,44 @@ fn test_assert_format_args_follow_veryl_single_char_specifiers() {
 }
 
 #[test]
+fn test_assert_format_args_render_percent_m_and_t_without_args() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0, "loc=%m time=%t");
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("loc=<hierarchy> time=0"),
+    );
+}
+
+#[test]
+fn test_assert_format_args_render_const_string_template() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            const MSG: string = "x=%d";
+            initial {
+                $assert_continue(1'b0, MSG, 8'd3);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("x=3"));
+}
+
+#[test]
 fn test_assert_format_args_render_char_and_upper_hex() {
     let code = r#"
         #[test(t)]

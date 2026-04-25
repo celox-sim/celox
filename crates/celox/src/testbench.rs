@@ -50,7 +50,6 @@ pub struct TestResultDetailed {
 }
 
 pub(crate) enum AssertMessage {
-    Static(String),
     Formatted {
         template: String,
         args: Vec<CompiledAssertArg>,
@@ -376,16 +375,10 @@ impl CompiledExpr {
 }
 
 fn static_string_expr(expr: &Expression) -> Option<String> {
-    let Expression::Term(factor) = expr else {
-        return None;
-    };
-    let Factor::Value(comptime) = factor.as_ref() else {
-        return None;
-    };
-    if !comptime.r#type.is_string() {
+    if !expr.comptime().r#type.is_string() {
         return None;
     }
-    let value = comptime.get_value().ok()?;
+    let value = expr.comptime().get_value().ok()?;
     byte_value_to_string(&value)
 }
 
@@ -426,14 +419,10 @@ fn compile_assert_message<B: SimBackend>(
             .iter()
             .map(|arg| compile_assert_arg(arg, ec))
             .collect::<Vec<_>>();
-        if compiled_args.is_empty() {
-            Some(AssertMessage::Static(template))
-        } else {
-            Some(AssertMessage::Formatted {
-                template,
-                args: compiled_args,
-            })
-        }
+        Some(AssertMessage::Formatted {
+            template,
+            args: compiled_args,
+        })
     } else {
         Some(AssertMessage::DynamicArgs(
             args.iter().map(|arg| compile_assert_arg(arg, ec)).collect(),
@@ -512,7 +501,6 @@ fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char
 fn render_assert_message(message: &Option<AssertMessage>, memory: *mut u8) -> Option<String> {
     match message {
         None => None,
-        Some(AssertMessage::Static(message)) => Some(message.clone()),
         Some(AssertMessage::DynamicArgs(args)) => Some(
             args.iter()
                 .map(|arg| format_assert_arg(arg, memory, None))
