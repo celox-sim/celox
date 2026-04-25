@@ -13,6 +13,9 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint & Format

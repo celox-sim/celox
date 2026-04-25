@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -96,6 +96,8 @@ jobs:
   publish:
     needs: [bench-rust, bench-verilator, bench-ts]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
