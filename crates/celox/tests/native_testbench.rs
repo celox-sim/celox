@@ -975,6 +975,22 @@ fn test_assert_continue_records_failure_and_continues() {
 }
 
 #[test]
+fn test_run_test_collects_multiple_assert_continue_failures() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0, "first");
+                $assert_continue(1'b0, "second");
+                $finish();
+            }
+        }
+    "#;
+    let result = Simulator::builder(code, "t").run_test().unwrap();
+    assert_eq!(result, TestResult::Fail("first\nsecond".to_string()));
+}
+
+#[test]
 fn test_assert_format_args_render_runtime_values() {
     let code = r#"
         #[test(t)]
@@ -1050,6 +1066,23 @@ fn test_assert_format_args_render_const_string_template() {
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(detailed.assertions[0].message.as_deref(), Some("x=3"));
+}
+
+#[test]
+fn test_assert_dynamic_args_follow_display_style_formatting() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0, 8'hab, 4'b1010);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("ab a"));
 }
 
 #[test]

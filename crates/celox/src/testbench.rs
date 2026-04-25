@@ -503,9 +503,9 @@ fn render_assert_message(message: &Option<AssertMessage>, memory: *mut u8) -> Op
         None => None,
         Some(AssertMessage::DynamicArgs(args)) => Some(
             args.iter()
-                .map(|arg| format_assert_arg(arg, memory, None))
+                .map(|arg| format_assert_arg(arg, memory, Some('x')))
                 .collect::<Vec<_>>()
-                .join(", "),
+                .join(" "),
         ),
         Some(AssertMessage::Formatted { template, args }) => {
             let mut rendered = String::new();
@@ -2068,18 +2068,30 @@ pub(crate) fn run_testbench<B: SimBackend>(
         stop_on_fatal_assert: true,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
+    let failed_messages = ctx
+        .assertions
+        .iter()
+        .filter(|assertion| !assertion.passed)
+        .map(|assertion| {
+            assertion
+                .message
+                .clone()
+                .unwrap_or_else(|| "assertion failed".to_string())
+        })
+        .collect::<Vec<_>>();
     match result {
-        ExecResult::Fail(message) => TestResult::Fail(message),
-        ExecResult::Continue | ExecResult::Break | ExecResult::Finished => {
-            if let Some(failed) = ctx.assertions.iter().find(|assertion| !assertion.passed) {
-                TestResult::Fail(
-                    failed
-                        .message
-                        .clone()
-                        .unwrap_or_else(|| "assertion failed".to_string()),
-                )
+        ExecResult::Fail(message) => {
+            if failed_messages.is_empty() {
+                TestResult::Fail(message)
             } else {
+                TestResult::Fail(failed_messages.join("\n"))
+            }
+        }
+        ExecResult::Continue | ExecResult::Break | ExecResult::Finished => {
+            if failed_messages.is_empty() {
                 TestResult::Pass
+            } else {
+                TestResult::Fail(failed_messages.join("\n"))
             }
         }
     }
