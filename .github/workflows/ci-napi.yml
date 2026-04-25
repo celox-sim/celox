@@ -10,8 +10,7 @@ env:
   CARGO_INCREMENTAL: "0"
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   build:
@@ -137,6 +136,9 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     name: Publish
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -227,6 +229,9 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     name: Publish JS Packages
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
