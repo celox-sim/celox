@@ -498,7 +498,11 @@ fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char
     }
 }
 
-fn render_assert_message(message: &Option<AssertMessage>, memory: *mut u8) -> Option<String> {
+fn render_assert_message(
+    message: &Option<AssertMessage>,
+    memory: *mut u8,
+    current_time: u64,
+) -> Option<String> {
     match message {
         None => None,
         Some(AssertMessage::DynamicArgs(args)) => Some(
@@ -536,7 +540,7 @@ fn render_assert_message(message: &Option<AssertMessage>, memory: *mut u8) -> Op
                                 arg_idx += 1;
                             }
                             'm' | 'M' => rendered.push_str("<hierarchy>"),
-                            't' | 'T' => rendered.push('0'),
+                            't' | 'T' => rendered.push_str(&current_time.to_string()),
                             _ => {
                                 rendered.push('%');
                                 rendered.push(spec);
@@ -1597,25 +1601,18 @@ impl From<ExecResult> for TestResult {
 }
 
 #[inline(never)]
-fn exec_clock_next<B: SimBackend>(
+fn eval_clock_count<B: SimBackend>(
     sim: &mut Simulator<B>,
-    event: B::Event,
     count: &ClockCount,
-) -> ExecResult {
-    let n = match count {
+) -> Result<u64, String> {
+    Ok(match count {
         ClockCount::Static(n) => *n,
         ClockCount::Dynamic(expr) => {
-            if let Err(e) = sim.eval_comb() {
-                return ExecResult::Fail(format!("eval_comb: {e}"));
-            }
+            sim.eval_comb().map_err(|e| format!("eval_comb: {e}"))?;
             let (ptr, _) = sim.memory_as_mut_ptr();
             expr.eval_u64(ptr)
         }
-    };
-    for _ in 0..n {
-        sim.tick(event).unwrap();
-    }
-    ExecResult::Continue
+    })
 }
 
 fn eval_loop_bound<B: SimBackend>(
@@ -2066,6 +2063,7 @@ pub(crate) fn run_testbench<B: SimBackend>(
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         stop_on_fatal_assert: true,
+        current_time: 0,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
     let failed_messages = ctx
@@ -2110,6 +2108,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         stop_on_fatal_assert: false,
+        current_time: 0,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
     let passed = !matches!(result, ExecResult::Fail(_)) && ctx.assertions.iter().all(|a| a.passed);
@@ -2122,6 +2121,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
 struct DetailedExecContext {
     assertions: Vec<AssertionResult>,
     stop_on_fatal_assert: bool,
+    current_time: u64,
 }
 
 /// Like [`exec`] but collects assertion results into `ctx` instead of
@@ -2152,7 +2152,16 @@ fn exec_one_detailed<B: SimBackend>(
 ) -> ExecResult {
     match stmt {
         TestbenchStatement::ClockNext { clock_event, count } => {
-            exec_clock_next(sim, *clock_event, count)
+            match eval_clock_count(sim, count) {
+                Ok(n) => {
+                    for _ in 0..n {
+                        sim.tick(*clock_event).unwrap();
+                    }
+                    ctx.current_time = ctx.current_time.saturating_add(n);
+                    ExecResult::Continue
+                }
+                Err(e) => ExecResult::Fail(e),
+            }
         }
         TestbenchStatement::ResetAssert {
             reset_signal,
@@ -2167,6 +2176,7 @@ fn exec_one_detailed<B: SimBackend>(
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
             }
+            ctx.current_time = ctx.current_time.saturating_add(*duration as u64);
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
         }
@@ -2181,7 +2191,7 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let (ptr, _) = sim.memory_as_mut_ptr();
             let passed = expr.eval_bool(ptr);
-            let rendered_message = render_assert_message(message, ptr);
+            let rendered_message = render_assert_message(message, ptr, ctx.current_time);
             ctx.assertions.push(AssertionResult {
                 passed,
                 message: rendered_message.clone(),

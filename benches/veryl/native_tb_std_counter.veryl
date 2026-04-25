@@ -3,7 +3,7 @@
 #[test(bench_std_counter)]
 module bench_std_counter {
     inst clk: $tb::clock_gen;
-    inst rst: $tb::reset_gen;
+    inst rst: $tb::reset_gen(clk);
     var o_count: logic<32>;
 
     inst dut: Top (

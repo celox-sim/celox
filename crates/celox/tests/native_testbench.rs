@@ -16,6 +16,17 @@ const COUNTER: &str = r#"
     }
 "#;
 
+const BENCH_NATIVE_TB_COUNTER_N1000: &str = concat!(
+    include_str!("../../../benches/veryl/top_n1000.veryl"),
+    include_str!("../../../benches/veryl/native_tb_counter_n1000.veryl"),
+);
+
+const BENCH_NATIVE_TB_STD_COUNTER: &str = concat!(
+    include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
+    include_str!("../../../benches/veryl/std_counter_top.veryl"),
+    include_str!("../../../benches/veryl/native_tb_std_counter.veryl"),
+);
+
 // ── Basic ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -1057,6 +1068,16 @@ fn test_assert_format_args_render_runtime_values() {
 }
 
 #[test]
+fn test_benchmark_native_testbench_fixtures_build() {
+    Simulator::builder(BENCH_NATIVE_TB_COUNTER_N1000, "Top")
+        .build()
+        .unwrap();
+    Simulator::builder(BENCH_NATIVE_TB_STD_COUNTER, "Top")
+        .build()
+        .unwrap();
+}
+
+#[test]
 fn test_assert_format_args_follow_veryl_single_char_specifiers() {
     let code = r#"
         #[test(t)]
@@ -1094,6 +1115,25 @@ fn test_assert_format_args_render_percent_m_and_t_without_args() {
         detailed.assertions[0].message.as_deref(),
         Some("loc=<hierarchy> time=0"),
     );
+}
+
+#[test]
+fn test_assert_format_args_render_current_time_for_percent_t() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            initial {
+                clk.next(3);
+                $assert_continue(1'b0, "time=%t");
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("time=3"));
 }
 
 #[test]

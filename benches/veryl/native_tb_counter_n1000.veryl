@@ -3,7 +3,7 @@
 #[test(bench_counter_n1000)]
 module bench_counter_n1000 {
     inst clk: $tb::clock_gen;
-    inst rst: $tb::reset_gen;
+    inst rst: $tb::reset_gen(clk);
     var cnt: logic<32>[1000];
     var cnt0: logic<32>;
 
