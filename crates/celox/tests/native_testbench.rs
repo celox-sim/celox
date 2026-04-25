@@ -991,6 +991,37 @@ fn test_run_test_collects_multiple_assert_continue_failures() {
 }
 
 #[test]
+fn test_run_test_preserves_runtime_error_after_assert_continue_failures() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var cnt: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                $assert_continue(1'b0, "first");
+                clk.next(2);
+                for _i in 1..cnt step *= 1 {{
+                    clk.next();
+                }}
+                $finish();
+            }}
+        }}
+    "#
+    );
+    let result = Simulator::builder(&code, "t").run_test().unwrap();
+    let TestResult::Fail(message) = result else {
+        panic!("expected failure");
+    };
+    assert!(message.contains("first"));
+    assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
 fn test_assert_format_args_render_runtime_values() {
     let code = r#"
         #[test(t)]
@@ -1119,7 +1150,10 @@ fn test_assert_format_args_render_uppercase_aliases_like_lowercase() {
     let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("1010 17 12 34 A"));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("1010 17 12 34 A")
+    );
 }
 
 #[test]

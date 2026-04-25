@@ -556,11 +556,17 @@ impl SLTToSIRLowerer {
             },
             SLTNode::Unary(UnaryOp::Minus, _) => true,
             SLTNode::Unary(_, inner) => self.get_bound_signed(*inner, arena),
-            SLTNode::Mux { then_expr, else_expr, .. } => {
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => {
                 self.get_bound_signed(*then_expr, arena) || self.get_bound_signed(*else_expr, arena)
             }
             SLTNode::ForFold { loop_signed, .. } => *loop_signed,
-            SLTNode::Slice { expr, .. } => self.get_bound_signed(*expr, arena),
+            // Verilog/Veryl bit- and part-select expressions are unsigned even when
+            // the source signal is signed.
+            SLTNode::Slice { .. } => false,
             SLTNode::Concat(_) => false,
         }
     }
@@ -1407,5 +1413,6 @@ mod tests {
             crate::ir::RegisterType::Bit { signed, .. } => assert!(!signed),
             other => panic!("expected bit register, got {other:?}"),
         }
+        assert!(!lowerer.get_bound_signed(casted, &arena));
     }
 }
