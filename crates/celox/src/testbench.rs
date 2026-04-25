@@ -2083,6 +2083,8 @@ pub(crate) fn run_testbench<B: SimBackend>(
         ExecResult::Fail(message) => {
             if failed_messages.is_empty() {
                 TestResult::Fail(message)
+            } else if failed_messages.last().is_some_and(|m| m == &message) {
+                TestResult::Fail(failed_messages.join("\n"))
             } else {
                 let mut combined = failed_messages;
                 combined.push(message);

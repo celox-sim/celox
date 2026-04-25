@@ -1022,6 +1022,21 @@ fn test_run_test_preserves_runtime_error_after_assert_continue_failures() {
 }
 
 #[test]
+fn test_run_test_does_not_duplicate_fatal_assert_message() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert(1'b0, "bad");
+                $finish();
+            }
+        }
+    "#;
+    let result = Simulator::builder(code, "t").run_test().unwrap();
+    assert_eq!(result, TestResult::Fail("bad".to_string()));
+}
+
+#[test]
 fn test_assert_format_args_render_runtime_values() {
     let code = r#"
         #[test(t)]
