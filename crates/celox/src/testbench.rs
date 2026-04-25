@@ -49,6 +49,11 @@ pub struct TestResultDetailed {
     pub assertions: Vec<AssertionResult>,
 }
 
+/// Opaque, precompiled native testbench program for a built simulator.
+pub struct CompiledTestbench<B: SimBackend> {
+    stmts: Vec<TestbenchStatement<B>>,
+}
+
 pub(crate) enum AssertMessage {
     Formatted {
         template: String,
@@ -379,7 +384,7 @@ fn static_string_expr(expr: &Expression) -> Option<String> {
         return None;
     }
     let value = expr.comptime().get_value().ok()?;
-    byte_value_to_string(&value)
+    byte_value_to_string(value)
 }
 
 fn compile_assert_arg<B: SimBackend>(
@@ -2099,6 +2104,26 @@ pub(crate) fn run_testbench<B: SimBackend>(
     }
 }
 
+/// Compile the root module's initial block into an executable native testbench.
+pub fn compile_initial_testbench<B: SimBackend>(
+    sim: &Simulator<B>,
+) -> Option<CompiledTestbench<B>> {
+    let initial_stmts = sim.program().initial_statements.as_ref()?;
+    let mut tb_builder = TestbenchBuilder::new(sim);
+    tb_builder.build_event_map(initial_stmts);
+    Some(CompiledTestbench {
+        stmts: tb_builder.convert(initial_stmts),
+    })
+}
+
+/// Execute a previously compiled native testbench against a built simulator.
+pub fn run_compiled_testbench<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    tb: &CompiledTestbench<B>,
+) -> TestResult {
+    run_testbench(sim, &tb.stmts)
+}
+
 /// Run the testbench collecting **all** assertion results instead of stopping
 /// at the first failure.
 pub(crate) fn run_testbench_detailed<B: SimBackend>(
@@ -2176,7 +2201,7 @@ fn exec_one_detailed<B: SimBackend>(
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
             }
-            ctx.current_time = ctx.current_time.saturating_add(*duration as u64);
+            ctx.current_time = ctx.current_time.saturating_add(*duration);
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
         }
