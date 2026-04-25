@@ -30,7 +30,7 @@ jobs:
       - name: Run Rust benchmarks
         run: cargo bench --locked -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-rust
           path: rust-output.txt
@@ -54,7 +54,7 @@ jobs:
         shell: bash
         run: set -o pipefail && bash scripts/run-verilator-bench.sh | tee verilator-output.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-verilator
           path: verilator-output.txt
@@ -87,7 +87,7 @@ jobs:
       - name: Run TypeScript benchmarks
         run: pnpm --filter @celox-sim/celox bench --outputJson ts-output.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-ts
           path: packages/celox/ts-output.json
@@ -103,7 +103,7 @@ jobs:
         with:
           node-version: 22
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
