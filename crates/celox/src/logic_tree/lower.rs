@@ -551,7 +551,7 @@ impl SLTToSIRLowerer {
                 | BinaryOp::And
                 | BinaryOp::Or
                 | BinaryOp::Xor => {
-                    self.get_bound_signed(*lhs, arena) || self.get_bound_signed(*rhs, arena)
+                    self.get_bound_signed(*lhs, arena) && self.get_bound_signed(*rhs, arena)
                 }
             },
             SLTNode::Unary(UnaryOp::Minus, _) => true,
@@ -561,7 +561,7 @@ impl SLTToSIRLowerer {
                 else_expr,
                 ..
             } => {
-                self.get_bound_signed(*then_expr, arena) || self.get_bound_signed(*else_expr, arena)
+                self.get_bound_signed(*then_expr, arena) && self.get_bound_signed(*else_expr, arena)
             }
             SLTNode::ForFold { loop_signed, .. } => *loop_signed,
             // Verilog/Veryl bit- and part-select expressions are unsigned even when
@@ -1350,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_sign_subtraction_bound_is_signed() {
+    fn mixed_sign_subtraction_bound_is_unsigned() {
         let mut arena = SLTNodeArena::<u32>::new();
         let lhs = arena.alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 8, false));
         let rhs = arena.alloc(SLTNode::Input {
@@ -1361,7 +1361,32 @@ mod tests {
         });
         let node = arena.alloc(SLTNode::Binary(lhs, BinaryOp::Sub, rhs));
         let lowerer = SLTToSIRLowerer::new(false);
-        assert!(lowerer.get_bound_signed(node, &arena));
+        assert!(!lowerer.get_bound_signed(node, &arena));
+    }
+
+    #[test]
+    fn mixed_sign_mux_bound_is_unsigned() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let cond = arena.alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 1, false));
+        let then_expr = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: true,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let else_expr = arena.alloc(SLTNode::Input {
+            variable: 1,
+            signed: false,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let node = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        });
+        let lowerer = SLTToSIRLowerer::new(false);
+        assert!(!lowerer.get_bound_signed(node, &arena));
     }
 
     #[test]
