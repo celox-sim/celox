@@ -246,11 +246,11 @@ fn test_debug_let_bitslice_write() {
         ) {
             var data: logic<64> [4];
             always_comb {
-                for i: u32 in 0..4 {
+                for i in 0..4 {
                     data[i] = 64'd0;
                 }
-                for g: u32 in 0..2 {
-                    for s: u32 in 0..2 {
+                for g in 0..2 {
+                    for s in 0..2 {
                         let idx: u32 = g * 2 + s;
                         data[idx][63:32] = (g * 2 + s) as u32;
                         data[idx][31:0]  = (g * 2 + s + 100) as u32;

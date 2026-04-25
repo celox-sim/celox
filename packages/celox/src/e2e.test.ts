@@ -2727,7 +2727,7 @@ ${TB_COUNTER_SOURCE}
 #[test(t)]
 module CounterTbPass {
     inst clk: $tb::clock_gen;
-    inst rst: $tb::reset_gen;
+    inst rst: $tb::reset_gen(clk);
     var cnt: logic<32>;
     inst dut: Counter_tb (clk, rst, cnt);
     initial {
@@ -2744,7 +2744,7 @@ ${TB_COUNTER_SOURCE}
 #[test(t)]
 module CounterTbFail {
     inst clk: $tb::clock_gen;
-    inst rst: $tb::reset_gen;
+    inst rst: $tb::reset_gen(clk);
     var cnt: logic<32>;
     inst dut: Counter_tb (clk, rst, cnt);
     initial {

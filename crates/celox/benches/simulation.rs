@@ -794,14 +794,11 @@ fn benchmark_native_tb_counter(c: &mut Criterion) {
     let mut sim = Simulator::builder(NATIVE_TB_COUNTER_N1000, "bench_counter_n1000")
         .build()
         .unwrap();
-    let initial_stmts = sim.program().initial_statements.clone().unwrap();
-    let mut tb_builder = celox::testbench::TestbenchBuilder::new(&sim);
-    tb_builder.build_event_map(&initial_stmts);
-    let tb_stmts = tb_builder.convert(&initial_stmts);
+    let tb = celox::testbench::compile_initial_testbench(&sim).unwrap();
 
     c.bench_function("native_tb_exec_counter_n1000_x1000000", |b| {
         b.iter(|| {
-            let result = celox::testbench::run_testbench(&mut sim, &tb_stmts);
+            let result = celox::testbench::run_compiled_testbench(&mut sim, &tb);
             assert_eq!(result, TestResult::Pass);
         })
     });
@@ -830,14 +827,11 @@ fn benchmark_native_tb_std_counter(c: &mut Criterion) {
     let mut sim = Simulator::builder(NATIVE_TB_STD_COUNTER, "bench_std_counter")
         .build()
         .unwrap();
-    let initial_stmts = sim.program().initial_statements.clone().unwrap();
-    let mut tb_builder = celox::testbench::TestbenchBuilder::new(&sim);
-    tb_builder.build_event_map(&initial_stmts);
-    let tb_stmts = tb_builder.convert(&initial_stmts);
+    let tb = celox::testbench::compile_initial_testbench(&sim).unwrap();
 
     c.bench_function("native_tb_exec_std_counter_w32_x1000000", |b| {
         b.iter(|| {
-            let result = celox::testbench::run_testbench(&mut sim, &tb_stmts);
+            let result = celox::testbench::run_compiled_testbench(&mut sim, &tb);
             assert_eq!(result, TestResult::Pass);
         })
     });

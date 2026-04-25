@@ -69,7 +69,7 @@ fn test_four_state_initial_and_set(sim) {
     let id_a = sim.signal("a");
     let id_b = sim.signal("b");
 
-    // 1. Initial value is X for logic: X = (v=1, m=1) in new encoding
+    // 1. Initial value is X for logic in new encoding
     let (v_init_a, m_init_a) = sim.get_four_state(id_a);
     assert_eq!(v_init_a, BigUint::from(0xFFu32));
     assert_eq!(m_init_a, BigUint::from(0xFFu32));

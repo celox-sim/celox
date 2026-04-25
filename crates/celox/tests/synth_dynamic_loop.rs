@@ -19,22 +19,22 @@ fn test_expression_bounds_in_synth_for_loops(sim) {
         ) {
             always_comb {
                 sum_fwd = 0;
-                for i: u32 in 0..(LIMIT + 1) {
+                for i in 0..(LIMIT + 1) {
                     sum_fwd += i;
                 }
 
                 sum_rev = 0;
-                for i: i32 in rev 0..LIMIT {
+                for i in rev 0..LIMIT {
                     sum_rev = sum_rev * 10 + i as 32;
                 }
 
                 sum_inc = 0;
-                for i: u32 in 0..=LIMIT {
+                for i in 0..=LIMIT {
                     sum_inc += i;
                 }
 
                 sum_step = 0;
-                for i: u32 in 1..(LIMIT + 4) step *= 2 {
+                for i in 1..(LIMIT + 4) step *= 2 {
                     sum_step += i;
                 }
             }
@@ -61,7 +61,7 @@ fn test_constant_break_in_synth_comb_loop(sim) {
         ) {
             always_comb {
                 sum = 0;
-                for i: u32 in 0..8 {
+                for i in 0..8 {
                     if i == 3 {
                         break;
                     }
@@ -89,12 +89,12 @@ fn test_constant_signed_bounds_in_unrolled_synth_loops(sim) {
         ) {
             always_comb {
                 sum_fwd = 0;
-                for i: i32 in (0 - 1)..=1 {
+                for i in (0 - 1)..=1 {
                     sum_fwd += i as 32;
                 }
 
                 sum_rev = 0;
-                for i: i32 in rev (0 - 1)..=1 {
+                for i in rev (0 - 1)..=1 {
                     sum_rev = sum_rev * 10 + (i + 1) as 32;
                 }
             }
@@ -120,22 +120,22 @@ fn test_runtime_bounds_in_synth_for_loops(sim) {
         ) {
             always_comb {
                 sum_fwd = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     sum_fwd += i;
                 }
 
                 sum_rev = 0;
-                for i: i32 in rev 0..count {
+                for i in rev 0..count {
                     sum_rev = sum_rev * 10 + i as 32;
                 }
 
                 sum_inc = 0;
-                for i: u32 in 0..=count {
+                for i in 0..=count {
                     sum_inc += i;
                 }
 
                 sum_step = 0;
-                for i: u32 in 1..(count + 4) step *= 2 {
+                for i in 1..(count + 4) step *= 2 {
                     sum_step += i;
                 }
             }
@@ -173,7 +173,7 @@ fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
         ) {
             always_comb {
                 hits = 0;
-                for i: u32 in 0..=count step *= 2 {
+                for i in 0..=count step *= 2 {
                     hits += 1;
                 }
             }
@@ -197,7 +197,7 @@ fn test_runtime_break_in_synth_comb_loop(sim) {
         ) {
             always_comb {
                 sum = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     if i == 3 {
                         break;
                     }
@@ -224,7 +224,7 @@ fn test_runtime_break_after_assign_in_synth_comb_loop(sim) {
         ) {
             always_comb {
                 sum = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     if i == 2 {
                         sum += 10;
                         break;
@@ -253,7 +253,7 @@ fn test_runtime_if_without_break_in_synth_comb_loop(sim) {
         ) {
             always_comb {
                 o = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     if sel {
                         o += 1;
                     }
@@ -284,7 +284,7 @@ fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
         ) {
             always_comb {
                 out = 0;
-                for i: u32 in start..count step *= 2 {
+                for i in start..count step *= 2 {
                     out += 1;
                     if sel {
                         break;
@@ -317,7 +317,7 @@ fn test_runtime_bounds_reverse_stalled_step_with_break_exits_cleanly(sim) {
         ) {
             always_comb {
                 out = 0;
-                for i: u32 in rev start..4 step += 0 {
+                for i in rev start..4 step += 0 {
                     out += 1;
                     if sel {
                         break;
@@ -349,7 +349,7 @@ fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim
         ) {
             always_comb {
                 out = 0;
-                for i: u32 in start..count step *= 2 {
+                for i in start..count step *= 2 {
                     out += 1;
                     if sel {
                         break;
@@ -380,7 +380,7 @@ fn test_runtime_bounds_reverse_stalled_step_with_break_guard_false_reports_true_
         ) {
             always_comb {
                 out = 0;
-                for i: u32 in rev start..4 step += 0 {
+                for i in rev start..4 step += 0 {
                     out += 1;
                     if sel {
                         break;
@@ -411,7 +411,7 @@ fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
             always_comb {
                 hits = 0;
                 sum = 0;
-                for i: i32 in start..=count {
+                for i in start..=count {
                     hits += 1;
                     sum += i as 32;
                 }
@@ -441,8 +441,8 @@ fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
         ) {
             always_comb {
                 wrapped_hits = 0;
-                for i: u8 in 254..count {
-                    if i <: 8'd4 {
+                for i in 254..count {
+                    if (i as u8) <: 8'd4 {
                         wrapped_hits += 1;
                     }
                 }
@@ -468,8 +468,8 @@ fn test_constant_bounds_preserve_wide_limit_above_loop_width(sim) {
         ) {
             always_comb {
                 wrapped_hits = 0;
-                for i: u8 in start..260 {
-                    if i <: 8'd4 {
+                for i in start..260 {
+                    if (i as u8) <: 8'd4 {
                         wrapped_hits += 1;
                     }
                 }
@@ -496,7 +496,7 @@ fn test_runtime_bounds_track_initial_seed_dependency(sim) {
             var acc: logic<32>;
             always_comb {
                 acc = seed;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     acc += 1;
                 }
                 out = acc;
@@ -530,7 +530,7 @@ fn test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates(sim) {
             var x: logic<2>;
             always_comb {
                 x = seed;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     x[0] = x[1];
                 }
                 out = x;
@@ -560,7 +560,7 @@ fn test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state(si
             var x: logic<2>;
             always_comb {
                 x = seed;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     x[0] = x == 2'b10;
                 }
                 out = x;
@@ -593,7 +593,7 @@ fn test_runtime_bounds_preserve_untouched_high_bits_for_dynamic_index_reads(sim)
             always_comb {
                 x = seed;
                 y = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     x[0] = 0;
                     y = x[idx];
                 }
@@ -625,7 +625,7 @@ fn test_runtime_bounds_reverse_zero_step_singleton_exits_cleanly(sim) {
         ) {
             always_comb {
                 out = 0;
-                for i: u32 in rev start..=count step += 0 {
+                for i in rev start..=count step += 0 {
                     out = i;
                 }
             }
@@ -653,7 +653,7 @@ fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim)
             var acc: logic<32>;
             always_comb {
                 acc = seed;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     acc += 1;
                 }
                 out = acc;
@@ -701,7 +701,7 @@ fn test_runtime_break_condition_dependency_across_module_boundary(sim) {
             var acc: logic<32>;
             always_comb {
                 acc = 0;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     acc += 1;
                     if sel {
                         break;
@@ -751,7 +751,7 @@ fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
         ) {
             always_comb {
                 out = 0;
-                for i: u32 in start..count step *= 2 {
+                for i in start..count step *= 2 {
                     out += 1;
                 }
             }
@@ -776,7 +776,7 @@ fn test_runtime_bounds_reverse_stalled_step_reports_true_loop(sim) {
         ) {
             always_comb {
                 out = 0;
-                for i: u32 in rev start..4 step += 0 {
+                for i in rev start..4 step += 0 {
                     out += 1;
                 }
             }
@@ -799,7 +799,7 @@ fn test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads(sim) {
             var x: logic<3>;
             always_comb {
                 x = 3'b100;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     x[i + 1] = x[i];
                 }
                 out = x;
@@ -827,7 +827,7 @@ fn test_runtime_bounds_forward_overshoot_exits_without_wraparound(sim) {
             always_comb {
                 hits = 0;
                 last = 8'hee;
-                for i: u8 in start..255 step += 10 {
+                for i in start..255 step += 10 {
                     hits += 1;
                     last = i;
                 }
@@ -857,7 +857,7 @@ fn test_runtime_bounds_large_additive_step_exits_without_wraparound(sim) {
             always_comb {
                 hits = 0;
                 last = 8'hee;
-                for i: u8 in start..255 step += 300 {
+                for i in start..255 step += 300 {
                     hits += 1;
                     last = i;
                 }
@@ -885,7 +885,7 @@ fn test_runtime_bounds_inclusive_max_bound_runs_full_range(sim) {
         ) {
             always_comb {
                 hits = 0;
-                for i: u8 in 0..=count {
+                for i in 0..=count {
                     hits += 1;
                 }
             }

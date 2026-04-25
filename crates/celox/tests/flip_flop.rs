@@ -55,22 +55,22 @@ fn test_ff_runtime_for_bounds(sim) {
         ) {
             always_ff (clk) {
                 q_fwd = 8'hee;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     q_fwd = i as 8;
                 }
 
                 q_rev = 8'hee;
-                for i: i32 in rev 0..count {
+                for i in rev 0..count {
                     q_rev = i as 8;
                 }
 
                 q_inc = 8'hee;
-                for i: u32 in 0..=count {
+                for i in 0..=count {
                     q_inc = i as 8;
                 }
 
                 q_step = 8'hee;
-                for i: u32 in 1..(count + 4) step *= 2 {
+                for i in 1..(count + 4) step *= 2 {
                     q_step = i as 8;
                 }
             }
@@ -108,7 +108,7 @@ fn test_ff_runtime_for_break(sim) {
         ) {
             always_ff (clk) {
                 q = 8'hee;
-                for i: u32 in 0..count {
+                for i in 0..count {
                     if i == 3 {
                         break;
                     }
@@ -140,12 +140,12 @@ fn test_ff_constant_signed_bounds_in_unrolled_loops(sim) {
         ) {
             always_ff (clk) {
                 q_fwd = 0;
-                for i: i32 in (0 - 1)..=1 {
+                for i in (0 - 1)..=1 {
                     q_fwd += i as 32;
                 }
 
                 q_rev_last = 32'hdead_beef;
-                for i: i32 in rev (0 - 1)..=1 {
+                for i in rev (0 - 1)..=1 {
                     q_rev_last = (i + 1) as 32;
                 }
             }
@@ -172,7 +172,7 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
         ) {
             always_ff (clk) {
                 q = 0;
-                for i: u32 in start..count step *= 2 {
+                for i in start..count step *= 2 {
                     q = i as 8;
                 }
             }
@@ -199,7 +199,7 @@ fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
         ) {
             always_ff (clk) {
                 q = 8'haa;
-                for i: u8 in 0..0 step *= 2 {
+                for i in 0..0 step *= 2 {
                     q = i;
                 }
             }
@@ -223,7 +223,7 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
         ) {
             always_ff (clk) {
                 q = 8'haa;
-                for i: u32 in 0..=count step *= 2 {
+                for i in 0..=count step *= 2 {
                     q = (i + 1) as 8;
                 }
             }
@@ -250,7 +250,7 @@ fn test_ff_runtime_for_reverse_zero_step_singleton_exits_cleanly(sim) {
         ) {
             always_ff (clk) {
                 q = 8'hee;
-                for i: u32 in rev start..=count step += 0 {
+                for i in rev start..=count step += 0 {
                     q = i as 8;
                 }
             }
@@ -282,7 +282,7 @@ fn test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds(sim) {
         ) {
             always_ff (clk) {
                 q_last = 32'hdead_beef;
-                for i: i32 in start..=count {
+                for i in start..=count {
                     q_last = i as 32;
                 }
             }
@@ -314,7 +314,7 @@ fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
             always_ff (clk) {
                 q_hits = 0;
                 q_last = 8'hee;
-                for i: u8 in start..255 step += 10 {
+                for i in start..255 step += 10 {
                     q_hits += 1;
                     q_last = i;
                 }
@@ -333,6 +333,32 @@ fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
     assert_eq!(sim.get(q_last), 250u32.into());
 }
 
+fn test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<16>,
+            q_last: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_last = 8'hee;
+                for i in start[7:0]..=8'hff {
+                    q_last = i as 8;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let q_last = sim.signal("q_last");
+
+    sim.modify(|io| io.set(start, 0xffffu16)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_last), 255u32.into());
+}
+
 fn test_ff_runtime_for_wide_dynamic_bound_uses_full_bound_width(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
@@ -345,7 +371,7 @@ fn test_ff_runtime_for_wide_dynamic_bound_uses_full_bound_width(sim) {
             always_ff (clk) {
                 q_hits = 0;
                 q_last = 64'hffff_ffff_ffff_ffff;
-                for i: u64 in (bound - 1) .. bound {
+                for i in (bound - 1) .. bound {
                     q_hits += 1;
                     q_last = i;
                 }

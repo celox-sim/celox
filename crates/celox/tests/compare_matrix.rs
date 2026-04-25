@@ -62,8 +62,8 @@ module CompareMatrixStage1CM::<E: Element> #(
     var matrix: logic [P, P];
 
     always_comb {
-        for y: u32 in 0..P {
-            for x: u32 in 0..P {
+        for y in 0..P {
+            for x in 0..P {
                 if y >: x {
                     matrix[y][x] = E::ge(in_data[y], in_data[x]);
                 } else if y <: x {
@@ -76,9 +76,9 @@ module CompareMatrixStage1CM::<E: Element> #(
     }
 
     always_comb {
-        for y: u32 in 0..P {
+        for y in 0..P {
             out_score[y] = 0;
-            for x: u32 in 0..P {
+            for x in 0..P {
                 out_score[y] += matrix[y][x];
             }
         }
@@ -94,9 +94,9 @@ module CompareMatrixSelector::<E: Element> #(
 
 ) {
     always_comb {
-        for j: u32 in 0..P {
+        for j in 0..P {
             out_data[j] = E::max_value;
-            for i: u32 in 0..P {
+            for i in 0..P {
                 if in_scores[i] == j {
                     out_data[j] = in_data[i];
                 }
@@ -141,18 +141,18 @@ module CompareMatrixMerger::<E: Element> #(
     var scores_b: logic<$clog2(A + B)> [B];
 
     always_comb {
-        for i: u32 in 0..A {
+        for i in 0..A {
             scores_a[i] = i;
-            for j: u32 in 0..B {
+            for j in 0..B {
                 if E::gt(in_a[i],in_b[j]) {
                     scores_a[i] += 1;
                 }
             }
         }
 
-        for i: u32 in 0..B {
+        for i in 0..B {
             scores_b[i] = i;
-            for j: u32 in 0..A {
+            for j in 0..A {
                 if E::ge(in_b[i],in_a[j]) {
                     scores_b[i] += 1;
                 }
@@ -161,14 +161,14 @@ module CompareMatrixMerger::<E: Element> #(
     }
 
     always_comb {
-        for k: u32 in 0..(A + B) {
+        for k in 0..(A + B) {
             out_data[k] = E::max_value;
-            for i: u32 in 0..A {
+            for i in 0..A {
                 if scores_a[i] == k {
                     out_data[k] = in_a[i];
                 }
             }
-            for i: u32 in 0..B {
+            for i in 0..B {
                 if scores_b[i] == k {
                     out_data[k] = in_b[i];
                 }

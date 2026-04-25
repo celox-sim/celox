@@ -1,6 +1,6 @@
 use crate::ir::{
     BinaryOp, BitAccess, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue, VarAtomBase,
+    SIRValue, UnaryOp, VarAtomBase,
 };
 use crate::logic_tree::{NodeId, SLTLoopBound, SLTNode, SLTNodeArena, comb::SLTStepOp};
 use num_bigint::BigUint;
@@ -111,6 +111,7 @@ impl SLTToSIRLowerer {
                 variable: id,
                 index,
                 access,
+                ..
             } => {
                 if let Some(env) = env
                     && let Some(reg) =
@@ -518,6 +519,58 @@ impl SLTToSIRLowerer {
         crate::logic_tree::comb::get_width(node, arena)
     }
 
+    fn get_bound_signed<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        match arena.get(node) {
+            SLTNode::Input { signed, .. } => *signed,
+            SLTNode::Constant(_, _, _, signed) => *signed,
+            SLTNode::Binary(lhs, op, rhs) => match op {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::LtU
+                | BinaryOp::LtS
+                | BinaryOp::LeU
+                | BinaryOp::LeS
+                | BinaryOp::GtU
+                | BinaryOp::GtS
+                | BinaryOp::GeU
+                | BinaryOp::GeS
+                | BinaryOp::LogicAnd
+                | BinaryOp::LogicOr
+                | BinaryOp::EqWildcard
+                | BinaryOp::NeWildcard => false,
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => self.get_bound_signed(*lhs, arena),
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => {
+                    self.get_bound_signed(*lhs, arena) && self.get_bound_signed(*rhs, arena)
+                }
+            },
+            SLTNode::Unary(UnaryOp::Minus, _) => true,
+            SLTNode::Unary(_, inner) => self.get_bound_signed(*inner, arena),
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.get_bound_signed(*then_expr, arena) && self.get_bound_signed(*else_expr, arena)
+            }
+            SLTNode::ForFold { loop_signed, .. } => *loop_signed,
+            // Verilog/Veryl bit- and part-select expressions are unsigned even when
+            // the source signal is signed.
+            SLTNode::Slice { .. } => false,
+            SLTNode::Concat(_) => false,
+        }
+    }
+
     fn lower_slice_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -730,7 +783,7 @@ impl SLTToSIRLowerer {
         &self,
         builder: &mut SIRBuilder<A>,
         bound: &SLTLoopBound,
-        canonical_width: usize,
+        _canonical_width: usize,
         width: usize,
         signed: bool,
         arena: &SLTNodeArena<A>,
@@ -744,12 +797,16 @@ impl SLTToSIRLowerer {
             }
             SLTLoopBound::Expr(node) => {
                 let reg = self.lower_inner(builder, *node, arena, cache, None, true);
-                let canonical = if signed {
-                    self.cast_reg_width_ext(builder, reg, canonical_width, signed)
+                let source_signed = self.get_bound_signed(*node, arena);
+                let extend_signed = source_signed && signed;
+                let sized = self.cast_reg_width_ext(builder, reg, width, extend_signed);
+                if extend_signed == signed {
+                    sized
                 } else {
-                    reg
-                };
-                self.cast_reg_width_ext(builder, canonical, width, signed)
+                    let dest = builder.alloc_bit(width, signed);
+                    builder.emit(SIRInstruction::Unary(dest, UnaryOp::Ident, sized));
+                    dest
+                }
             }
         }
     }
@@ -1257,5 +1314,130 @@ impl SLTToSIRLowerer {
             .position(|update| update.target == *result)
             .expect("ForFold result target must be present in updates");
         exit_states[result_idx]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::BitAccess;
+    use crate::logic_tree::comb::SLTNodeArena;
+
+    #[test]
+    fn signed_inputs_report_signedness() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let node = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: true,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let lowerer = SLTToSIRLowerer::new(false);
+        assert!(lowerer.get_bound_signed(node, &arena));
+    }
+
+    #[test]
+    fn unsigned_inputs_report_unsignedness() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let node = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: false,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let lowerer = SLTToSIRLowerer::new(false);
+        assert!(!lowerer.get_bound_signed(node, &arena));
+    }
+
+    #[test]
+    fn mixed_sign_subtraction_bound_is_unsigned() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let lhs = arena.alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 8, false));
+        let rhs = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: true,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let node = arena.alloc(SLTNode::Binary(lhs, BinaryOp::Sub, rhs));
+        let lowerer = SLTToSIRLowerer::new(false);
+        assert!(!lowerer.get_bound_signed(node, &arena));
+    }
+
+    #[test]
+    fn mixed_sign_mux_bound_is_unsigned() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let cond = arena.alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 1, false));
+        let then_expr = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: true,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let else_expr = arena.alloc(SLTNode::Input {
+            variable: 1,
+            signed: false,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let node = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        });
+        let lowerer = SLTToSIRLowerer::new(false);
+        assert!(!lowerer.get_bound_signed(node, &arena));
+    }
+
+    #[test]
+    fn comparison_bound_is_not_signed() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let lhs = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: false,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let rhs = arena.alloc(SLTNode::Input {
+            variable: 1,
+            signed: true,
+            index: vec![],
+            access: BitAccess::new(0, 7),
+        });
+        let node = arena.alloc(SLTNode::Binary(lhs, BinaryOp::LtS, rhs));
+        let lowerer = SLTToSIRLowerer::new(false);
+        assert!(!lowerer.get_bound_signed(node, &arena));
+    }
+
+    #[test]
+    fn unsigned_target_bound_zero_extends_signed_slice() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let inner = arena.alloc(SLTNode::Input {
+            variable: 0,
+            signed: true,
+            index: vec![],
+            access: BitAccess::new(0, 15),
+        });
+        let casted = arena.alloc(SLTNode::Slice {
+            expr: inner,
+            access: BitAccess::new(0, 7),
+        });
+        let mut builder = SIRBuilder::<u32>::new();
+        let mut cache = crate::HashMap::default();
+        let lowerer = SLTToSIRLowerer::new(false);
+        let reg = lowerer.lower_bound(
+            &mut builder,
+            &SLTLoopBound::Expr(casted),
+            8,
+            9,
+            false,
+            &arena,
+            &mut cache,
+        );
+        match builder.register(&reg) {
+            crate::ir::RegisterType::Bit { signed, .. } => assert!(!signed),
+            other => panic!("expected bit register, got {other:?}"),
+        }
+        assert!(!lowerer.get_bound_signed(casted, &arena));
     }
 }

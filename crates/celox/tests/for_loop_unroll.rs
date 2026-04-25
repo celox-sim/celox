@@ -27,7 +27,7 @@ fn test_for_loop_unroll_shift_register(sim) {
                     delay = '{default: 8'h0};
                 } else {
                     delay[0] = i_d;
-                    for i: u32 in 1..DELAY {
+                    for i in 1..DELAY {
                         delay[i] = delay[i - 1];
                     }
                 }
@@ -74,7 +74,7 @@ fn test_for_loop_unroll_break_in_always_ff(sim) {
                     o2 = 0;
                     o3 = 0;
                 } else {
-                    for i: u32 in 0..8 {
+                    for i in 0..8 {
                         if i == 3 {
                             break;
                         }
@@ -123,7 +123,7 @@ fn test_for_loop_unroll_with_brace_zero_reset(sim) {
                     delay = '{0};
                 } else {
                     delay[0] = i_d;
-                    for i: u32 in 1..DELAY {
+                    for i in 1..DELAY {
                         delay[i] = delay[i - 1];
                     }
                 }

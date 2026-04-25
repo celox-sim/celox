@@ -71,7 +71,7 @@ a: input logic<32>,
 o: output logic<32>
 ) {
 always_ff (clk) {
-for _i: u32 in 0..1 {
+for _i in 0..1 {
 o = a << 4;
 }
 }
@@ -106,7 +106,7 @@ always_ff (clk, rst) {
 if_reset {
 r = 8'h00;
 } else {
-for _i: u32 in 0..1 {
+for _i in 0..1 {
 r = a << 1;
 }
 }
@@ -248,7 +248,7 @@ o3: output logic<8>
 ) {
 var arr: logic<8> [4];
 always_ff (clk) {
-for i: u32 in 0..4 {
+for i in 0..4 {
 arr[i] = a << i;
 }
 }
@@ -284,7 +284,7 @@ a: input logic<8>,
 o: output logic<8>
 ) {
 always_ff (clk) {
-for _i: u32 in 0..1 {
+for _i in 0..1 {
 o = a << 2;
 }
 }

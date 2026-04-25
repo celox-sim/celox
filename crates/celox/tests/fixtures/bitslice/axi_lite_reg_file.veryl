@@ -184,7 +184,7 @@ pub module AxiLiteRegFile #(
     // ================================================================
     always_ff (clk, rst) {
         if_reset {
-            for i: u32 in 0..N_CH {
+            for i in 0..N_CH {
                 reg_req_addr[i] = '0;
             }
             reg_req_last_vec = '0;
@@ -214,7 +214,7 @@ pub module AxiLiteRegFile #(
 
     always_comb {
         all_accepted = 1;
-        for i: u32 in 0..N_CH {
+        for i in 0..N_CH {
             if !ch_accepted[i] {
                 all_accepted = 0;
             }
@@ -224,20 +224,20 @@ pub module AxiLiteRegFile #(
     always_ff (clk, rst) {
         if_reset {
             start_pending = 0;
-            for i: u32 in 0..N_CH {
+            for i in 0..N_CH {
                 ch_accepted[i] = 0;
             }
         } else {
             // Start trigger
             if do_write && aw_buf[11:8] == 4'h0 && aw_buf[3:2] == 2'b00 && w_buf[0] {
                 start_pending = 1;
-                for i: u32 in 0..N_CH {
+                for i in 0..N_CH {
                     ch_accepted[i] = 0;
                 }
             }
             // Track acceptance
             if start_pending {
-                for i: u32 in 0..N_CH {
+                for i in 0..N_CH {
                     if req_ready[i] && !ch_accepted[i] {
                         ch_accepted[i] = 1;
                     }
@@ -270,7 +270,7 @@ pub module AxiLiteRegFile #(
             done_prev    = 0;
             done_rose_q  = 0;
             done_latched = 0;
-            for i: u32 in 0..OUT_DEPTH {
+            for i in 0..OUT_DEPTH {
                 result_regs[i] = '0;
             }
         } else {
@@ -278,7 +278,7 @@ pub module AxiLiteRegFile #(
             done_rose_q = done && !done_prev;
             // Latch d_out 1 cycle after done rising edge
             if done_rose_q {
-                for i: u32 in 0..OUT_DEPTH {
+                for i in 0..OUT_DEPTH {
                     result_regs[i] = d_out[i];
                 }
                 done_latched = 1;
