@@ -1443,6 +1443,31 @@ fn test_multi_clock_no_optimization() {
 }
 
 #[test]
+fn test_ff_dynamic_exclusive_end_preserves_sentinel_width_in_sir() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<128>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 0..count {
+                    q = i as 32;
+                }
+            }
+        }
+    "#;
+
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+    assert!(
+        output.contains("bit<33>"),
+        "dynamic exclusive end should keep a 33-bit sentinel compare path:\n{output}"
+    );
+}
+
+#[test]
 fn test_internal_generated_clock() {
     // Test: half-rate clock drives a downstream FF.
     // clk_div is provided externally as a clock input (half rate of clk).

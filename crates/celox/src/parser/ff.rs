@@ -697,8 +697,7 @@ impl<'a> FfParser<'a> {
         let loop_width = base_loop_width.max(1);
         let start_status = Self::loop_bound_status(start_bound, loop_width, loop_signed);
         let end_status = Self::loop_bound_status(end_bound, loop_width, loop_signed);
-        let end_is_exclusive_upper_sentinel =
-            !inclusive && end_status == Some(LoopBoundStatus::ExclusiveUpperSentinel);
+        let uses_exclusive_end_sentinel = !inclusive;
         // Veryl now models loop variables as i32. Reject statically invalid
         // bounds, but keep supporting the exclusive upper sentinel used for
         // full-range iteration such as `0..256` on an 8-bit loop variable.
@@ -718,7 +717,7 @@ impl<'a> FfParser<'a> {
         let widen_inclusive = inclusive && !loop_signed;
         let compare_width = if widen_inclusive {
             counter_width.saturating_add(1)
-        } else if end_is_exclusive_upper_sentinel {
+        } else if uses_exclusive_end_sentinel {
             counter_width.saturating_add(1)
         } else {
             counter_width
@@ -742,7 +741,7 @@ impl<'a> FfParser<'a> {
         )?;
         let end_reg = self.parse_for_bound(
             end_bound,
-            if end_is_exclusive_upper_sentinel {
+            if uses_exclusive_end_sentinel {
                 compare_width
             } else {
                 loop_width
