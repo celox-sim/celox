@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777083135388,
+  "lastUpdate": 1777234939221,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -21947,6 +21947,408 @@ window.BENCHMARK_DATA = {
             "name": "rust/native_tb_exec_std_counter_w32_x1000000",
             "value": 9372.738,
             "range": "± 225.117 us",
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b3216bd701bc5d007493ad856ee351a72b5cb0f5",
+          "message": "Merge pull request #77 from celox-sim/codex/fix-playground-bigint-diagnostics\n\n[codex] Fix playground bigint diagnostics",
+          "timestamp": "2026-04-26T19:48:50Z",
+          "tree_id": "deb9e6edd3a96428cc39873569b60f75250979a0",
+          "url": "https://github.com/celox-sim/celox/commit/b3216bd701bc5d007493ad856ee351a72b5cb0f5"
+        },
+        "date": 1777234928539,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "rust/simulator_tick_x10000",
+            "value": 3746.969,
+            "range": "± 26.489 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_step_x20000",
+            "value": 9061.634,
+            "range": "± 23.122 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_top_n1000",
+            "value": 252169.865,
+            "range": "± 3928.702 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1",
+            "value": 0.389,
+            "range": "± 0.001 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_top_n1000_x1000000",
+            "value": 387979.613,
+            "range": "± 551.362 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1",
+            "value": 0.394,
+            "range": "± 0.001 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_top_n1000_x1000000",
+            "value": 404117.849,
+            "range": "± 269.862 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_linear_sec_p6",
+            "value": 119765.823,
+            "range": "± 2725.515 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_linear_sec_p6_x1",
+            "value": 0.05,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_linear_sec_p6_x1000000",
+            "value": 50520.285,
+            "range": "± 257.137 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_eval_linear_sec_p6_x1000000",
+            "value": 50495.542,
+            "range": "± 318.886 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_eval_comb_linear_sec_p6",
+            "value": 0.045,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_eval_comb_linear_sec_p6_x1000000",
+            "value": 45530.919,
+            "range": "± 310.483 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_raw_io_eval_linear_sec_p6",
+            "value": 0.047,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_raw_io_eval_linear_sec_p6_x1000000",
+            "value": 48224.131,
+            "range": "± 360.536 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_set_eval_linear_sec_p6",
+            "value": 0.051,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_set_eval_linear_sec_p6_x1000000",
+            "value": 52863.914,
+            "range": "± 1064.104 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_set_eval_get_as_linear_sec_p6",
+            "value": 0.052,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/isolation_set_eval_get_as_linear_sec_p6_x1000000",
+            "value": 52228.131,
+            "range": "± 1797.900 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_countones_w64",
+            "value": 15303.015,
+            "range": "± 402.582 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_countones_w64_x1",
+            "value": 0.136,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_countones_w64_x1000000",
+            "value": 133335.553,
+            "range": "± 4373.250 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_std_counter_w32",
+            "value": 5090.055,
+            "range": "± 123.894 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_std_counter_w32_x1",
+            "value": 0.009,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_std_counter_w32_x1000000",
+            "value": 10010.298,
+            "range": "± 55.967 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_std_counter_w32_x1000000",
+            "value": 12652.08,
+            "range": "± 45.893 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_gray_counter_w32",
+            "value": 7199.891,
+            "range": "± 325.608 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_gray_counter_w32_x1",
+            "value": 0.012,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_gray_counter_w32_x1000000",
+            "value": 12056.032,
+            "range": "± 109.368 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_gray_counter_w32_x1000000",
+            "value": 15152.169,
+            "range": "± 104.410 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_build_countones_w64",
+            "value": 16110.942,
+            "range": "± 364.283 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_eval_countones_w64_x1",
+            "value": 0.058,
+            "range": "± 0.001 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_eval_countones_w64_x1000000",
+            "value": 56327.562,
+            "range": "± 265.480 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_build_linear_sec_p6",
+            "value": 116491.031,
+            "range": "± 1811.833 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_eval_linear_sec_p6_x1",
+            "value": 0.019,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_isolation_eval_comb_linear_sec_p6",
+            "value": 0.015,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_eval_linear_sec_p6_x1000000",
+            "value": 20073.379,
+            "range": "± 102.650 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_build_onehot_w64",
+            "value": 18859.01,
+            "range": "± 620.274 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_eval_onehot_w64_x1",
+            "value": 0.04,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust-dse/simulation_eval_onehot_w64_x1000000",
+            "value": 40165.333,
+            "range": "± 74.190 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_fifo_w8_d16",
+            "value": 24609.052,
+            "range": "± 931.307 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_fifo_w8_d16_x1",
+            "value": 0.074,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_fifo_w8_d16_x1000000",
+            "value": 75407.126,
+            "range": "± 240.827 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_fifo_w8_d16_x1000000",
+            "value": 76728.275,
+            "range": "± 775.247 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_gray_codec_w32",
+            "value": 10306.523,
+            "range": "± 190.829 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_gray_codec_w32_x1",
+            "value": 0.147,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_gray_codec_w32_x1000000",
+            "value": 144199.119,
+            "range": "± 263.927 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_edge_detector_w32",
+            "value": 2334.458,
+            "range": "± 50.972 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_edge_detector_w32_x1",
+            "value": 0.014,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_edge_detector_w32_x1000000",
+            "value": 17147.16,
+            "range": "± 100.944 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_onehot_w64",
+            "value": 29290.102,
+            "range": "± 620.520 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_onehot_w64_x1",
+            "value": 0.433,
+            "range": "± 0.002 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_eval_onehot_w64_x1000000",
+            "value": 433503.814,
+            "range": "± 2105.481 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_build_lfsr_w32",
+            "value": 9746.318,
+            "range": "± 209.502 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_lfsr_w32_x1",
+            "value": 0.038,
+            "range": "± 0.000 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/simulation_tick_lfsr_w32_x1000000",
+            "value": 38613.488,
+            "range": "± 79.310 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/testbench_tick_lfsr_w32_x1000000",
+            "value": 41428.649,
+            "range": "± 126.222 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/native_tb_build_counter_n1000",
+            "value": 278313.134,
+            "range": "± 1539.345 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/native_tb_run_counter_n1000_x1000000",
+            "value": 684121.57,
+            "range": "± 4729.995 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/native_tb_exec_counter_n1000_x1000000",
+            "value": 389652.222,
+            "range": "± 2400.608 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/native_tb_raw_tick_counter_n1000_x1000000",
+            "value": 410584.4,
+            "range": "± 386.009 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/native_tb_run_std_counter_w32_x1000000",
+            "value": 19000.259,
+            "range": "± 511.458 us",
+            "unit": "us"
+          },
+          {
+            "name": "rust/native_tb_exec_std_counter_w32_x1000000",
+            "value": 9369.129,
+            "range": "± 35.139 us",
             "unit": "us"
           }
         ]
