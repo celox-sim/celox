@@ -799,6 +799,8 @@ impl<'a> FfParser<'a> {
         let precheck_bb = ir_builder.new_block();
         let empty_exit_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let empty_exit_check_bb = ir_builder.new_block_with(vec![empty_exit_counter]);
+        let initial_header_bb =
+            (!reverse && compare_width != loop_width).then(|| ir_builder.new_block());
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
         let fitcheck_bb = ir_builder.new_block_with(vec![fitcheck_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
@@ -857,8 +859,36 @@ impl<'a> FfParser<'a> {
             };
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: end_allowed_reg,
-                true_block: (header_bb, vec![init_reg]),
+                true_block: if let Some(initial_header_bb) = initial_header_bb {
+                    (initial_header_bb, vec![])
+                } else {
+                    (header_bb, vec![init_reg])
+                },
                 false_block: (range_error_bb, vec![]),
+            });
+        }
+
+        if let Some(initial_header_bb) = initial_header_bb {
+            ir_builder.switch_to_block(initial_header_bb);
+            let cond_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                cond_reg,
+                start_reg,
+                if loop_signed {
+                    if inclusive {
+                        crate::ir::BinaryOp::LeS
+                    } else {
+                        crate::ir::BinaryOp::LtS
+                    }
+                } else {
+                    crate::ir::BinaryOp::LtU
+                },
+                end_limit,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: cond_reg,
+                true_block: (fitcheck_bb, vec![start_reg]),
+                false_block: (empty_exit_check_bb, vec![start_reg]),
             });
         }
 
@@ -991,11 +1021,7 @@ impl<'a> FfParser<'a> {
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: cond_reg,
                 true_block: (fitcheck_bb, vec![header_counter]),
-                false_block: if compare_width != loop_width {
-                    (empty_exit_check_bb, vec![header_counter])
-                } else {
-                    (exit_bb, vec![])
-                },
+                false_block: (exit_bb, vec![]),
             });
         }
 
