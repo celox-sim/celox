@@ -12,12 +12,14 @@ use crate::{
     },
 };
 use bit_set::BitSet;
+use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
 
 use veryl_analyzer::ir::{
     Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange, ForStatement, IfResetStatement,
     IfStatement, Module, Op, Statement, TypeKind, ValueVariant, VarId,
 };
+use veryl_analyzer::value::Value;
 
 mod expression;
 mod function_call;
@@ -453,19 +455,40 @@ impl<'a> FfParser<'a> {
         Ok(ControlFlow::Continue)
     }
 
-    fn bound_width(&self, bound: &ForBound) -> usize {
-        match bound {
-            ForBound::Const(v) => {
-                let bits = usize::BITS as usize - v.leading_zeros() as usize;
-                bits.max(1)
+    fn loop_bound_fits_type(bound: &ForBound, width: usize, signed: bool) -> Option<bool> {
+        let value = match bound {
+            ForBound::Const(v) => BigInt::from(*v),
+            ForBound::Expression(expr) => {
+                if !expr.comptime().is_const {
+                    return None;
+                }
+                let value = expr.comptime().get_value().ok()?;
+                match value {
+                    Value::U64(v) => {
+                        if v.signed {
+                            BigInt::from(v.to_i64()?)
+                        } else {
+                            BigInt::from(v.to_u64()?)
+                        }
+                    }
+                    Value::BigUint(v) => {
+                        if v.signed {
+                            v.to_bigint()?
+                        } else {
+                            BigInt::from_biguint(Sign::Plus, (*v.payload).clone())
+                        }
+                    }
+                }
             }
-            ForBound::Expression(expr) => expr
-                .comptime()
-                .expr_context
-                .width
-                .max(expr.comptime().r#type.total_width().unwrap_or(0))
-                .max(self.get_expression_width(expr))
-                .max(1),
+        };
+
+        if signed {
+            let max = (BigInt::from(1u8) << (width.saturating_sub(1))) - BigInt::from(1u8);
+            let min = -(BigInt::from(1u8) << (width.saturating_sub(1)));
+            Some(value >= min && value <= max)
+        } else {
+            let max = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+            Some(value.sign() != Sign::Minus && value <= BigInt::from_biguint(Sign::Plus, max))
         }
     }
 
@@ -630,22 +653,22 @@ impl<'a> FfParser<'a> {
             ));
         }
 
-        let start_width = self.bound_width(start_bound);
-        let end_width = self.bound_width(end_bound);
         let loop_width = base_loop_width.max(1);
         // Veryl now models loop variables as i32. Even if a wide-typed bound
         // happens to carry a small runtime value, widening always_ff loop
         // semantics from the RHS would diverge from the language model.
-        if start_width > loop_width || end_width > loop_width {
-            return Err(ParserError::unsupported(
-                65,
-                LoweringPhase::FfLowering,
+        // Reject only statically out-of-range bounds here; dynamic wide-typed
+        // bounds are still allowed and keep the i32 loop-variable semantics.
+        if Self::loop_bound_fits_type(start_bound, loop_width, loop_signed) == Some(false)
+            || Self::loop_bound_fits_type(end_bound, loop_width, loop_signed) == Some(false)
+        {
+            return Err(ParserError::illegal_context(
                 "for loop bound exceeding i32 loop variable",
                 format!("{:?}", stmt.var_name),
                 Some(&stmt.token),
             ));
         }
-        let counter_width = loop_width.max(start_width).max(end_width).max(1);
+        let counter_width = loop_width.max(1);
         let widen_inclusive = inclusive && !loop_signed;
         let compare_width = if widen_inclusive {
             counter_width.saturating_add(1)

@@ -13,12 +13,13 @@ use crate::{
         celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
     },
 };
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
     ForStatement, IfStatement, Module, Op, Statement, ValueVariant, VarId, VarSelectOp,
 };
+use veryl_analyzer::value::Value;
 
 // SymbolicStore: Maps variable IDs to their current symbolic representation.
 // Each variable is managed by a RangeStore, which tracks bit-ranges and their associated SLT nodes.
@@ -1453,6 +1454,43 @@ fn eval_for_bound(
     }
 }
 
+fn loop_bound_fits_type(bound: &ForBound, width: usize, signed: bool) -> Option<bool> {
+    let value = match bound {
+        ForBound::Const(v) => BigInt::from(*v),
+        ForBound::Expression(expr) => {
+            if !expr.comptime().is_const {
+                return None;
+            }
+            let value = expr.comptime().get_value().ok()?;
+            match value {
+                Value::U64(v) => {
+                    if v.signed {
+                        BigInt::from(v.to_i64()?)
+                    } else {
+                        BigInt::from(v.to_u64()?)
+                    }
+                }
+                Value::BigUint(v) => {
+                    if v.signed {
+                        v.to_bigint()?
+                    } else {
+                        BigInt::from_biguint(Sign::Plus, (*v.payload).clone())
+                    }
+                }
+            }
+        }
+    };
+
+    if signed {
+        let max = (BigInt::from(1u8) << (width.saturating_sub(1))) - BigInt::from(1u8);
+        let min = -(BigInt::from(1u8) << (width.saturating_sub(1)));
+        Some(value >= min && value <= max)
+    } else {
+        let max = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        Some(value.sign() != Sign::Minus && value <= BigInt::from_biguint(Sign::Plus, max))
+    }
+}
+
 fn collect_written_accesses(
     module: &Module,
     statements: &[Statement],
@@ -1507,6 +1545,24 @@ fn eval_for(
             Some(&for_stmt.token),
         ));
     };
+    let (start_bound, end_bound) = match &for_stmt.range {
+        ForRange::Forward { start, end, .. }
+        | ForRange::Reverse { start, end, .. }
+        | ForRange::Stepped { start, end, .. } => (start, end),
+    };
+    // Veryl now models loop variables as i32. Accepting wider always_comb
+    // bounds would make celox widen loop semantics from the RHS type.
+    // Reject only statically out-of-range bounds; dynamic wide-typed bounds
+    // are still allowed and keep the i32 loop-variable semantics.
+    if loop_bound_fits_type(start_bound, loop_width, for_stmt.var_type.signed) == Some(false)
+        || loop_bound_fits_type(end_bound, loop_width, for_stmt.var_type.signed) == Some(false)
+    {
+        return Err(ParserError::illegal_context(
+            "for loop bound exceeding i32 loop variable",
+            format!("{:?}", for_stmt.var_name),
+            Some(&for_stmt.token),
+        ));
+    }
 
     let mut symbolic_store = store.clone();
     let mut written_accesses = HashMap::default();
@@ -2772,6 +2828,25 @@ fn eval_function_body_return(
                 Some(&for_stmt.token),
             ));
         };
+        let (start_bound, end_bound) = match &for_stmt.range {
+            ForRange::Forward { start, end, .. }
+            | ForRange::Reverse { start, end, .. }
+            | ForRange::Stepped { start, end, .. } => (start, end),
+        };
+        // Veryl now models loop variables as i32. Accepting wider comb
+        // function-local bounds would widen loop semantics from the RHS type.
+        // Reject only statically out-of-range bounds; dynamic wide-typed bounds
+        // are still allowed and keep the i32 loop-variable semantics.
+        if loop_bound_fits_type(start_bound, loop_width, for_stmt.var_type.signed) == Some(false)
+            || loop_bound_fits_type(end_bound, loop_width, for_stmt.var_type.signed)
+                == Some(false)
+        {
+            return Err(ParserError::illegal_context(
+                "for loop bound exceeding i32 loop variable",
+                format!("{:?}", for_stmt.var_name),
+                Some(&for_stmt.token),
+            ));
+        }
 
         let mut symbolic_store = state.store.clone();
         let mut written_accesses = HashMap::default();

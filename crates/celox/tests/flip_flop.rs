@@ -1385,27 +1385,34 @@ fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
 // Tests that use setup_and_trace/snapshot/Simulation::builder stay as regular #[test]
 
 #[test]
-fn test_ff_runtime_for_wide_dynamic_bound_reports_error() {
+fn test_ff_runtime_for_wide_dynamic_bound_is_still_allowed() {
     let code = r#"
         module Top (
             clk: input clock,
             bound: input logic<128>,
             q_hits: output logic<8>,
-            q_last: output logic<64>
+            q_last: output logic<32>
         ) {
             always_ff (clk) {
                 q_hits = 0;
-                q_last = 64'hffff_ffff_ffff_ffff;
+                q_last = 32'hffff_ffff;
                 for i in (bound - 1) .. bound {
                     q_hits += 1;
-                    q_last = i;
+                    q_last = i as 32;
                 }
             }
         }
     "#;
 
-    let err = Simulator::builder(code, "Top").build().unwrap_err().to_string();
-    assert!(err.contains("for loop bound exceeding i32 loop variable"));
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let bound = sim.signal("bound");
+    let q_last = sim.signal("q_last");
+
+    sim.modify(|io| io.set_wide(bound, BigUint::from(2u32)))
+        .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_last), 1u32.into());
 }
 
 #[test]
