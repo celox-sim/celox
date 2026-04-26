@@ -7,6 +7,7 @@ pub mod emit;
 pub mod isel;
 pub mod jit_mem;
 pub mod mir;
+pub(crate) mod mir_legalize;
 pub(crate) mod mir_opt;
 pub mod regalloc;
 

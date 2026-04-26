@@ -794,11 +794,12 @@ impl<'a> FfParser<'a> {
         let init_reg = if reverse { end_reg } else { start_reg };
 
         let header_counter = ir_builder.alloc_bit(compare_width, loop_signed);
+        let fitcheck_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
-        let visible_body_value = ir_builder.alloc_bit(loop_width, loop_signed);
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
+        let fitcheck_bb = ir_builder.new_block_with(vec![fitcheck_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
-        let visible_body_bb = ir_builder.new_block_with(vec![visible_body_value]);
+        let range_error_bb = ir_builder.new_block();
         let stall_bb = ir_builder.new_block();
         let exit_bb = ir_builder.new_block();
         ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
@@ -860,7 +861,7 @@ impl<'a> FfParser<'a> {
                 ir_builder.switch_to_block(true_loop_bb);
                 ir_builder.seal_block(SIRTerminator::Error(1));
                 ir_builder.switch_to_block(singleton_bb);
-                ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![header_counter]));
+                ir_builder.seal_block(SIRTerminator::Jump(fitcheck_bb, vec![header_counter]));
             } else {
                 let loop_math =
                     self.cast_reg_width_ext(ir_builder, header_counter, math_width, loop_signed);
@@ -904,7 +905,7 @@ impl<'a> FfParser<'a> {
                 };
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: cond_reg,
-                    true_block: (body_bb, vec![body_counter_reg]),
+                    true_block: (fitcheck_bb, vec![body_counter_reg]),
                     false_block: (exit_bb, vec![]),
                 });
             }
@@ -926,47 +927,45 @@ impl<'a> FfParser<'a> {
             ));
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: cond_reg,
-                true_block: (body_bb, vec![header_counter]),
+                true_block: (fitcheck_bb, vec![header_counter]),
                 false_block: (exit_bb, vec![]),
             });
         }
 
-        ir_builder.switch_to_block(body_bb);
-        let visible_loop_reg =
-            self.cast_reg_width_ext(ir_builder, body_counter, loop_width, loop_signed);
+        ir_builder.switch_to_block(fitcheck_bb);
+        let fitcheck_visible_reg =
+            self.cast_reg_width_ext(ir_builder, fitcheck_counter, loop_width, loop_signed);
+        // Publish the loop variable before entering the body block so the
+        // body itself stays a single widened block for native codegen.
+        ir_builder.emit(SIRInstruction::Store(
+            convert(stmt.var_id, domain.region()),
+            crate::ir::SIROffset::Static(0),
+            loop_width,
+            fitcheck_visible_reg,
+            Vec::new(),
+        ));
         if compare_width != loop_width {
             let visible_roundtrip =
-                self.cast_reg_width_ext(ir_builder, visible_loop_reg, compare_width, loop_signed);
+                self.cast_reg_width_ext(ir_builder, fitcheck_visible_reg, compare_width, loop_signed);
             let fits_loop_reg = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
                 fits_loop_reg,
-                body_counter,
+                fitcheck_counter,
                 crate::ir::BinaryOp::Eq,
                 visible_roundtrip,
             ));
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: fits_loop_reg,
-                true_block: (visible_body_bb, vec![visible_loop_reg]),
-                false_block: (stall_bb, vec![]),
+                true_block: (body_bb, vec![fitcheck_counter]),
+                false_block: (range_error_bb, vec![]),
             });
-            ir_builder.switch_to_block(visible_body_bb);
-        }
-        self.local_working_vars.insert(stmt.var_id);
-        // always_ff uses NBA semantics: this loop variable is the only value
-        // made visible intra-block, while all other reads still observe the
-        // pre-commit old state until WORKING -> STABLE commits happen later.
-        let visible_loop_reg = if compare_width != loop_width {
-            visible_body_value
         } else {
-            visible_loop_reg
-        };
-        ir_builder.emit(SIRInstruction::Store(
-            convert(stmt.var_id, domain.region()),
-            crate::ir::SIROffset::Static(0),
-            loop_width,
-            visible_loop_reg,
-            Vec::new(),
-        ));
+            ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![fitcheck_counter]));
+        }
+        ir_builder.switch_to_block(range_error_bb);
+        ir_builder.seal_block(SIRTerminator::Error(1));
+        ir_builder.switch_to_block(body_bb);
+        self.local_working_vars.insert(stmt.var_id);
 
         let mut local_defined = self.defined_ranges.clone();
         local_defined.insert(stmt.var_id, (0..loop_width).collect());
