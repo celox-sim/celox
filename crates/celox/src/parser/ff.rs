@@ -21,6 +21,35 @@ use veryl_analyzer::ir::{
 };
 use veryl_analyzer::value::Value;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoopBoundStatus {
+    FitsLoopType,
+    ExclusiveUpperSentinel,
+    OutOfRange,
+}
+
+#[cfg(test)]
+mod loop_bound_status_tests {
+    use super::{FfParser, LoopBoundStatus};
+    use veryl_analyzer::ir::ForBound;
+
+    #[test]
+    fn allows_exclusive_upper_sentinel() {
+        assert_eq!(
+            FfParser::loop_bound_status(&ForBound::Const(255), 8, false),
+            Some(LoopBoundStatus::FitsLoopType)
+        );
+        assert_eq!(
+            FfParser::loop_bound_status(&ForBound::Const(256), 8, false),
+            Some(LoopBoundStatus::ExclusiveUpperSentinel)
+        );
+        assert_eq!(
+            FfParser::loop_bound_status(&ForBound::Const(257), 8, false),
+            Some(LoopBoundStatus::OutOfRange)
+        );
+    }
+}
+
 mod expression;
 mod function_call;
 
@@ -455,7 +484,7 @@ impl<'a> FfParser<'a> {
         Ok(ControlFlow::Continue)
     }
 
-    fn loop_bound_fits_type(bound: &ForBound, width: usize, signed: bool) -> Option<bool> {
+    fn loop_bound_status(bound: &ForBound, width: usize, signed: bool) -> Option<LoopBoundStatus> {
         let value = match bound {
             ForBound::Const(v) => BigInt::from(*v),
             ForBound::Expression(expr) => {
@@ -485,10 +514,23 @@ impl<'a> FfParser<'a> {
         if signed {
             let max = (BigInt::from(1u8) << (width.saturating_sub(1))) - BigInt::from(1u8);
             let min = -(BigInt::from(1u8) << (width.saturating_sub(1)));
-            Some(value >= min && value <= max)
+            Some(if value >= min && value <= max {
+                LoopBoundStatus::FitsLoopType
+            } else if value == max + BigInt::from(1u8) {
+                LoopBoundStatus::ExclusiveUpperSentinel
+            } else {
+                LoopBoundStatus::OutOfRange
+            })
         } else {
             let max = (BigUint::from(1u8) << width) - BigUint::from(1u8);
-            Some(value.sign() != Sign::Minus && value <= BigInt::from_biguint(Sign::Plus, max))
+            let max = BigInt::from_biguint(Sign::Plus, max);
+            Some(if value.sign() != Sign::Minus && value <= max {
+                LoopBoundStatus::FitsLoopType
+            } else if value == max + BigInt::from(1u8) {
+                LoopBoundStatus::ExclusiveUpperSentinel
+            } else {
+                LoopBoundStatus::OutOfRange
+            })
         }
     }
 
@@ -509,7 +551,6 @@ impl<'a> FfParser<'a> {
             Some(_) => base_width,
         }
     }
-
     fn parse_for_bound<A>(
         &mut self,
         bound: &ForBound,
@@ -654,13 +695,18 @@ impl<'a> FfParser<'a> {
         }
 
         let loop_width = base_loop_width.max(1);
-        // Veryl now models loop variables as i32. Even if a wide-typed bound
-        // happens to carry a small runtime value, widening always_ff loop
-        // semantics from the RHS would diverge from the language model.
-        // Reject only statically out-of-range bounds here; dynamic wide-typed
-        // bounds are still allowed and keep the i32 loop-variable semantics.
-        if Self::loop_bound_fits_type(start_bound, loop_width, loop_signed) == Some(false)
-            || Self::loop_bound_fits_type(end_bound, loop_width, loop_signed) == Some(false)
+        let start_status = Self::loop_bound_status(start_bound, loop_width, loop_signed);
+        let end_status = Self::loop_bound_status(end_bound, loop_width, loop_signed);
+        let end_is_exclusive_upper_sentinel =
+            !inclusive && end_status == Some(LoopBoundStatus::ExclusiveUpperSentinel);
+        // Veryl now models loop variables as i32. Reject statically invalid
+        // bounds, but keep supporting the exclusive upper sentinel used for
+        // full-range iteration such as `0..256` on an 8-bit loop variable.
+        if matches!(
+            start_status,
+            Some(LoopBoundStatus::OutOfRange | LoopBoundStatus::ExclusiveUpperSentinel)
+        ) || matches!(end_status, Some(LoopBoundStatus::OutOfRange))
+            || (inclusive && end_status == Some(LoopBoundStatus::ExclusiveUpperSentinel))
         {
             return Err(ParserError::illegal_context(
                 "for loop bound exceeding i32 loop variable",
@@ -671,6 +717,8 @@ impl<'a> FfParser<'a> {
         let counter_width = loop_width.max(1);
         let widen_inclusive = inclusive && !loop_signed;
         let compare_width = if widen_inclusive {
+            counter_width.saturating_add(1)
+        } else if end_is_exclusive_upper_sentinel {
             counter_width.saturating_add(1)
         } else {
             counter_width
@@ -694,7 +742,11 @@ impl<'a> FfParser<'a> {
         )?;
         let end_reg = self.parse_for_bound(
             end_bound,
-            loop_width,
+            if end_is_exclusive_upper_sentinel {
+                compare_width
+            } else {
+                loop_width
+            },
             compare_width,
             loop_signed,
             targets,
