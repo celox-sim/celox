@@ -796,16 +796,70 @@ impl<'a> FfParser<'a> {
         let header_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let fitcheck_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
+        let precheck_bb = ir_builder.new_block();
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
         let fitcheck_bb = ir_builder.new_block_with(vec![fitcheck_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
         let range_error_bb = ir_builder.new_block();
         let stall_bb = ir_builder.new_block();
         let exit_bb = ir_builder.new_block();
-        ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
+        if !reverse && compare_width != loop_width {
+            ir_builder.seal_block(SIRTerminator::Jump(precheck_bb, vec![]));
+        } else {
+            ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
+        }
 
         let pre_loop_defined = self.defined_ranges.clone();
         let pre_loop_dynamic = self.dynamic_defined_vars.clone();
+
+        if !reverse && compare_width != loop_width {
+            ir_builder.switch_to_block(precheck_bb);
+            let precheck_end_visible =
+                self.cast_reg_width_ext(ir_builder, end_reg, loop_width, loop_signed);
+            let precheck_end_roundtrip =
+                self.cast_reg_width_ext(ir_builder, precheck_end_visible, compare_width, loop_signed);
+            let end_fits_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                end_fits_reg,
+                end_reg,
+                crate::ir::BinaryOp::Eq,
+                precheck_end_roundtrip,
+            ));
+            let end_allowed_reg = if !inclusive {
+                let sentinel_reg = ir_builder.alloc_bit(compare_width, loop_signed);
+                let sentinel_value = if loop_signed {
+                    1u64 << (loop_width - 1)
+                } else {
+                    1u64 << loop_width
+                };
+                ir_builder.emit(SIRInstruction::Imm(
+                    sentinel_reg,
+                    crate::ir::SIRValue::new(sentinel_value),
+                ));
+                let end_is_sentinel_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    end_is_sentinel_reg,
+                    end_reg,
+                    crate::ir::BinaryOp::Eq,
+                    sentinel_reg,
+                ));
+                let allowed_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    allowed_reg,
+                    end_fits_reg,
+                    crate::ir::BinaryOp::LogicOr,
+                    end_is_sentinel_reg,
+                ));
+                allowed_reg
+            } else {
+                end_fits_reg
+            };
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: end_allowed_reg,
+                true_block: (header_bb, vec![init_reg]),
+                false_block: (range_error_bb, vec![]),
+            });
+        }
 
         ir_builder.switch_to_block(header_bb);
         if reverse {

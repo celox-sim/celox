@@ -37,6 +37,16 @@ fn eliminate_trivial_phis(func: &mut MFunction) {
         return;
     }
 
+    let mut resolved: HashMap<VReg, VReg> = HashMap::with_capacity(aliases.len());
+    for (&dst, &src) in &aliases {
+        let mut target = src;
+        while let Some(&next) = aliases.get(&target) {
+            target = next;
+        }
+        resolved.insert(dst, target);
+    }
+    aliases = resolved;
+
     for block in &mut func.blocks {
         for inst in &mut block.insts {
             rewrite_uses(inst, &aliases);

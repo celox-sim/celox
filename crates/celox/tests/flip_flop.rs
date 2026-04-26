@@ -1497,6 +1497,32 @@ fn test_ff_runtime_for_wide_dynamic_bound_out_of_i32_range_errors() {
 }
 
 #[test]
+fn test_ff_runtime_for_wide_dynamic_end_errors_before_iteration() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<128>,
+            q_hits: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                for i in 0..count {
+                    q_hits += 1;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let count = sim.signal("count");
+
+    sim.modify(|io| io.set_wide(count, BigUint::from(1u64) << 40))
+        .unwrap();
+    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+#[test]
 fn test_ff_dynamic_inclusive_end_preserves_bound_width_in_sir() {
     let code = r#"
         module Top (
