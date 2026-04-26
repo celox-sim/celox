@@ -747,6 +747,7 @@ type PlaygroundTestApi = {
 	loadExample: (name: string) => void;
 	setFileContent: (path: string, content: string) => void;
 	getModelMarkers: (path: string) => PlaygroundTestMarker[];
+	getTypeScriptDiagnostics: (path: string) => Promise<PlaygroundTestMarker[]>;
 	getStatusText: () => string;
 };
 
@@ -2125,6 +2126,18 @@ function loadExample(name: string) {
 }
 
 function installPlaygroundTestApi() {
+	function flattenDiagnosticMessageText(messageText: any): string {
+		if (typeof messageText === "string") return messageText;
+		if (!messageText || typeof messageText.messageText !== "string") return "";
+		const next = Array.isArray(messageText.next)
+			? messageText.next
+					.map((child: any) => flattenDiagnosticMessageText(child))
+					.filter(Boolean)
+					.join("\n")
+			: "";
+		return next ? `${messageText.messageText}\n${next}` : messageText.messageText;
+	}
+
 	const api: PlaygroundTestApi = {
 		loadExample,
 		setFileContent(path: string, content: string) {
@@ -2147,6 +2160,34 @@ function installPlaygroundTestApi() {
 					endLineNumber: marker.endLineNumber,
 					endColumn: marker.endColumn,
 				}));
+		},
+		async getTypeScriptDiagnostics(path: string) {
+			const file = getFile(path);
+			if (!file) throw new Error(`File not found: ${path}`);
+			const workerFactory =
+				await monaco.languages.typescript.getTypeScriptWorker();
+			const worker = await workerFactory(file.model.uri);
+			const uri = file.model.uri.toString();
+			const [semantic, syntactic, suggestion] = await Promise.all([
+				worker.getSemanticDiagnostics(uri),
+				worker.getSyntacticDiagnostics(uri),
+				worker.getSuggestionDiagnostics(uri),
+			]);
+			return [...semantic, ...syntactic, ...suggestion].map((diag: any) => {
+				const start = typeof diag.start === "number" ? diag.start : 0;
+				const length = typeof diag.length === "number" ? diag.length : 0;
+				const startPos = file.model.getPositionAt(start);
+				const endPos = file.model.getPositionAt(start + length);
+				return {
+					code: diag.code,
+					message: flattenDiagnosticMessageText(diag.messageText),
+					severity: monaco.MarkerSeverity.Error,
+					startLineNumber: startPos.lineNumber,
+					startColumn: startPos.column,
+					endLineNumber: endPos.lineNumber,
+					endColumn: endPos.column,
+					};
+				});
 		},
 		getStatusText() {
 			return statusEl.textContent ?? "";

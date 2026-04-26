@@ -25,6 +25,18 @@ describe("buildMonacoTestbenchCompilerOptions", () => {
 		]);
 	});
 
+	test("falls back to Monaco runtime enums that predate ES2022/Bundler", () => {
+		const options = buildMonacoTestbenchCompilerOptions({
+			ScriptTarget: { ES2020: "target-es2020" },
+			ModuleKind: { ESNext: "module-esnext" },
+			ModuleResolutionKind: { NodeJs: "resolution-nodejs" },
+		} as never);
+
+		expect(options.target).toBe("target-es2020");
+		expect(options.module).toBe("module-esnext");
+		expect(options.moduleResolution).toBe("resolution-nodejs");
+	});
+
 	test("keeps celox declaration paths resolvable for Monaco", () => {
 		const options = buildMonacoTestbenchCompilerOptions({
 			ScriptTarget: { ES2022: 1 },
