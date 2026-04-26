@@ -11,6 +11,7 @@ declare global {
 			loadExample: (name: string) => void;
 			setFileContent: (path: string, content: string) => void;
 			getModelMarkers: (path: string) => PlaygroundTestMarker[];
+			getTypeScriptDiagnostics: (path: string) => Promise<PlaygroundTestMarker[]>;
 			getStatusText: () => string;
 		};
 	}
@@ -43,12 +44,12 @@ test("playground does not report TS2737 for bigint literals", async ({ page }) =
 	await expect
 		.poll(
 			async () => {
-				const markers = await page.evaluate(() => {
+				const diagnostics = await page.evaluate(async () => {
 					const api = window.__CELOX_PLAYGROUND_TEST_API__;
 					if (!api) throw new Error("Missing playground test API");
-					return api.getModelMarkers("test/adder.test.ts");
+					return api.getTypeScriptDiagnostics("test/adder.test.ts");
 				});
-				return !markers.some((marker) => {
+				return !diagnostics.some((marker) => {
 					const code = String(marker.code ?? "");
 					return (
 						code === "2737" ||

@@ -5,6 +5,17 @@ type TypeScriptDefaultsApi = Pick<
 	"ScriptTarget" | "ModuleKind" | "ModuleResolutionKind"
 >;
 
+function pickEnumValue<T extends Record<string, string | number | undefined>>(
+	enumObject: T,
+	keys: readonly string[],
+): string | number {
+	for (const key of keys) {
+		const value = enumObject[key];
+		if (value !== undefined) return value;
+	}
+	throw new Error(`Missing Monaco enum value for ${keys.join(" / ")}`);
+}
+
 export const MONACO_TESTBENCH_LIBS = [
 	"es2022",
 	"es2020.bigint",
@@ -16,9 +27,15 @@ export function buildMonacoTestbenchCompilerOptions(
 	ts: TypeScriptDefaultsApi,
 ): monaco.languages.typescript.CompilerOptions {
 	return {
-		target: ts.ScriptTarget.ES2022,
-		module: ts.ModuleKind.ES2022,
-		moduleResolution: ts.ModuleResolutionKind.Bundler,
+		target: pickEnumValue(ts.ScriptTarget, ["ES2022", "ES2021", "ES2020"]),
+		module: pickEnumValue(ts.ModuleKind, ["ES2022", "ES2020", "ESNext"]),
+		moduleResolution: pickEnumValue(ts.ModuleResolutionKind, [
+			"Bundler",
+			"NodeNext",
+			"Node16",
+			"NodeJs",
+			"Node",
+		]),
 		// Keep BigInt support explicit so bigint literals in examples/tests stay valid.
 		lib: [...MONACO_TESTBENCH_LIBS],
 		allowArbitraryExtensions: true,
