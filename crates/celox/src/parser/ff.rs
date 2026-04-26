@@ -1012,8 +1012,30 @@ impl<'a> FfParser<'a> {
                 crate::ir::BinaryOp::Eq,
                 empty_roundtrip,
             ));
+            let empty_start_visible =
+                self.cast_reg_width_ext(ir_builder, start_reg, loop_width, loop_signed);
+            let empty_start_roundtrip = self.cast_reg_width_ext(
+                ir_builder,
+                empty_start_visible,
+                compare_width,
+                loop_signed,
+            );
+            let empty_start_fits_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                empty_start_fits_reg,
+                start_reg,
+                crate::ir::BinaryOp::Eq,
+                empty_start_roundtrip,
+            ));
+            let empty_allowed_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                empty_allowed_reg,
+                empty_fits_reg,
+                crate::ir::BinaryOp::LogicAnd,
+                empty_start_fits_reg,
+            ));
             ir_builder.seal_block(SIRTerminator::Branch {
-                cond: empty_fits_reg,
+                cond: empty_allowed_reg,
                 true_block: (exit_bb, vec![]),
                 false_block: (range_error_bb, vec![]),
             });
