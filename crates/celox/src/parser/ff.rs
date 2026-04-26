@@ -797,6 +797,8 @@ impl<'a> FfParser<'a> {
         let fitcheck_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let precheck_bb = ir_builder.new_block();
+        let empty_exit_counter = ir_builder.alloc_bit(compare_width, loop_signed);
+        let empty_exit_check_bb = ir_builder.new_block_with(vec![empty_exit_counter]);
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
         let fitcheck_bb = ir_builder.new_block_with(vec![fitcheck_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
@@ -814,16 +816,15 @@ impl<'a> FfParser<'a> {
 
         if !reverse && compare_width != loop_width {
             ir_builder.switch_to_block(precheck_bb);
-            let precheck_end_visible =
-                self.cast_reg_width_ext(ir_builder, end_reg, loop_width, loop_signed);
-            let precheck_end_roundtrip =
-                self.cast_reg_width_ext(ir_builder, precheck_end_visible, compare_width, loop_signed);
+            let end_visible = self.cast_reg_width_ext(ir_builder, end_reg, loop_width, loop_signed);
+            let end_roundtrip =
+                self.cast_reg_width_ext(ir_builder, end_visible, compare_width, loop_signed);
             let end_fits_reg = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
                 end_fits_reg,
                 end_reg,
                 crate::ir::BinaryOp::Eq,
-                precheck_end_roundtrip,
+                end_roundtrip,
             ));
             let end_allowed_reg = if !inclusive {
                 let sentinel_reg = ir_builder.alloc_bit(compare_width, loop_signed);
@@ -900,7 +901,11 @@ impl<'a> FfParser<'a> {
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: in_range,
                     true_block: (in_range_bb, vec![]),
-                    false_block: (exit_bb, vec![]),
+                    false_block: if compare_width != loop_width {
+                        (empty_exit_check_bb, vec![header_counter])
+                    } else {
+                        (exit_bb, vec![])
+                    },
                 });
                 ir_builder.switch_to_block(in_range_bb);
                 if let Some(singleton) = singleton {
@@ -960,7 +965,11 @@ impl<'a> FfParser<'a> {
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: cond_reg,
                     true_block: (fitcheck_bb, vec![body_counter_reg]),
-                    false_block: (exit_bb, vec![]),
+                    false_block: if compare_width != loop_width {
+                        (empty_exit_check_bb, vec![header_counter])
+                    } else {
+                        (exit_bb, vec![])
+                    },
                 });
             }
         } else {
@@ -982,7 +991,31 @@ impl<'a> FfParser<'a> {
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: cond_reg,
                 true_block: (fitcheck_bb, vec![header_counter]),
-                false_block: (exit_bb, vec![]),
+                false_block: if compare_width != loop_width {
+                    (empty_exit_check_bb, vec![header_counter])
+                } else {
+                    (exit_bb, vec![])
+                },
+            });
+        }
+
+        if compare_width != loop_width {
+            ir_builder.switch_to_block(empty_exit_check_bb);
+            let empty_visible =
+                self.cast_reg_width_ext(ir_builder, empty_exit_counter, loop_width, loop_signed);
+            let empty_roundtrip =
+                self.cast_reg_width_ext(ir_builder, empty_visible, compare_width, loop_signed);
+            let empty_fits_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                empty_fits_reg,
+                empty_exit_counter,
+                crate::ir::BinaryOp::Eq,
+                empty_roundtrip,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: empty_fits_reg,
+                true_block: (exit_bb, vec![]),
+                false_block: (range_error_bb, vec![]),
             });
         }
 
