@@ -2135,7 +2135,9 @@ function installPlaygroundTestApi() {
 					.filter(Boolean)
 					.join("\n")
 			: "";
-		return next ? `${messageText.messageText}\n${next}` : messageText.messageText;
+		return next
+			? `${messageText.messageText}\n${next}`
+			: messageText.messageText;
 	}
 
 	const api: PlaygroundTestApi = {
@@ -2186,8 +2188,8 @@ function installPlaygroundTestApi() {
 					startColumn: startPos.column,
 					endLineNumber: endPos.lineNumber,
 					endColumn: endPos.column,
-					};
-				});
+				};
+			});
 		},
 		getStatusText() {
 			return statusEl.textContent ?? "";
