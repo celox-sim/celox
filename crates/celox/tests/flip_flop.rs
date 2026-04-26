@@ -1493,7 +1493,10 @@ fn test_ff_runtime_for_wide_dynamic_bound_out_of_i32_range_errors() {
 
     sim.modify(|io| io.set_wide(bound, (BigUint::from(1u32) << 31) + BigUint::from(1u32)))
         .unwrap();
-    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+    assert_eq!(
+        sim.tick(clk).unwrap_err(),
+        RuntimeErrorCode::DetectedTrueLoop
+    );
 }
 
 #[test]
@@ -1519,7 +1522,10 @@ fn test_ff_runtime_for_wide_dynamic_end_errors_before_iteration() {
 
     sim.modify(|io| io.set_wide(count, BigUint::from(1u64) << 40))
         .unwrap();
-    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+    assert_eq!(
+        sim.tick(clk).unwrap_err(),
+        RuntimeErrorCode::DetectedTrueLoop
+    );
 }
 
 #[test]
@@ -1545,7 +1551,10 @@ fn test_ff_runtime_for_wide_dynamic_start_errors_before_empty_exit() {
 
     sim.modify(|io| io.set_wide(start, BigUint::from(1u64) << 40))
         .unwrap();
-    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+    assert_eq!(
+        sim.tick(clk).unwrap_err(),
+        RuntimeErrorCode::DetectedTrueLoop
+    );
 }
 
 #[test]
@@ -1571,7 +1580,10 @@ fn test_ff_runtime_for_wide_dynamic_reverse_start_errors_before_empty_exit() {
 
     sim.modify(|io| io.set_wide(start, BigUint::from(1u64) << 40))
         .unwrap();
-    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+    assert_eq!(
+        sim.tick(clk).unwrap_err(),
+        RuntimeErrorCode::DetectedTrueLoop
+    );
 }
 
 #[test]

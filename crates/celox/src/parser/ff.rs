@@ -831,8 +831,7 @@ impl<'a> FfParser<'a> {
         let loop_width = base_loop_width.max(1);
         let start_bound_width =
             Self::loop_bound_width(start_bound, loop_signed).unwrap_or(loop_width);
-        let end_bound_width =
-            Self::loop_bound_width(end_bound, loop_signed).unwrap_or(loop_width);
+        let end_bound_width = Self::loop_bound_width(end_bound, loop_signed).unwrap_or(loop_width);
         let start_status = Self::loop_bound_status(start_bound, loop_width, loop_signed);
         let end_status = Self::loop_bound_status(end_bound, loop_width, loop_signed);
         let uses_exclusive_end_sentinel = !inclusive;

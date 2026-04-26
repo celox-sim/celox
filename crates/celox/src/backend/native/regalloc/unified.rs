@@ -262,12 +262,14 @@ fn compute_entry_regfile(
         .iter()
         .copied()
         .filter(|v| analysis.entry_distances[block_idx].contains_key(v))
-        .filter(|v| regfile_exit.iter().enumerate().all(|(pred_idx, pred_rf)| {
-            if !preds.contains(&pred_idx) || pred_idx >= block_idx {
-                return true;
-            }
-            pred_rf.contains(*v) || s_exit[pred_idx].contains(v)
-        }))
+        .filter(|v| {
+            regfile_exit.iter().enumerate().all(|(pred_idx, pred_rf)| {
+                if !preds.contains(&pred_idx) || pred_idx >= block_idx {
+                    return true;
+                }
+                pred_rf.contains(*v) || s_exit[pred_idx].contains(v)
+            })
+        })
         .collect();
     all_sorted.sort();
     for vreg in &all_sorted {

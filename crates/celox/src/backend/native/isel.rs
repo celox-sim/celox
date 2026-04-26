@@ -4651,14 +4651,14 @@ fn lower_wide_extract(
             z
         };
 
-            if is == 0 {
-                if d_width < 64 {
-                    let mask = mask_for_width(d_width);
-                    ctx.emit_and_imm(block, dst_vreg, main_vreg, mask);
-                } else {
-                    ctx.emit_mov(block, dst_vreg, main_vreg);
-                }
+        if is == 0 {
+            if d_width < 64 {
+                let mask = mask_for_width(d_width);
+                ctx.emit_and_imm(block, dst_vreg, main_vreg, mask);
             } else {
+                ctx.emit_mov(block, dst_vreg, main_vreg);
+            }
+        } else {
             let shifted = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::ShrImm {
                 dst: shifted,
