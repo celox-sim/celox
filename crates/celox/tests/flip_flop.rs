@@ -1462,9 +1462,42 @@ fn test_ff_dynamic_exclusive_end_preserves_sentinel_width_in_sir() {
     let trace = setup_and_trace(code, "Top");
     let output = trace.format_program().unwrap();
     assert!(
-        output.contains("bit<33>"),
-        "dynamic exclusive end should keep a 33-bit sentinel compare path:\n{output}"
+        output.contains("bit<128>"),
+        "dynamic exclusive end should keep the dynamic bound width in the compare path:\n{output}"
     );
+}
+
+#[test]
+fn test_ff_runtime_for_wide_dynamic_bound_preserves_large_exclusive_range_relation() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            bound: input logic<128>,
+            q_hits: output logic<8>,
+            q_last: output logic<32>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                q_last = 32'hffff_ffff;
+                for i in (bound - 1) .. bound {
+                    q_hits += 1;
+                    q_last = i as 32;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let bound = sim.signal("bound");
+    let q_hits = sim.signal("q_hits");
+    let q_last = sim.signal("q_last");
+
+    sim.modify(|io| io.set_wide(bound, (BigUint::from(1u32) << 32) + BigUint::from(1u32)))
+        .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_hits), 1u32.into());
+    assert_eq!(sim.get(q_last), 0u32.into());
 }
 
 #[test]

@@ -534,6 +534,26 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    fn loop_bound_width(bound: &ForBound, signed: bool) -> Option<usize> {
+        match bound {
+            ForBound::Const(v) => {
+                let value = BigInt::from(*v);
+                Some(if signed {
+                    if value.sign() == Sign::Minus {
+                        let magnitude = (-value - BigInt::from(1u8)).to_biguint()?;
+                        magnitude.bits() as usize + 1
+                    } else {
+                        value.to_biguint()?.bits() as usize + 1
+                    }
+                } else {
+                    let magnitude = value.to_biguint()?;
+                    (magnitude.bits() as usize).max(1)
+                })
+            }
+            ForBound::Expression(expr) => expr.comptime().r#type.total_width(),
+        }
+    }
+
     fn step_math_width(base_width: usize, stepped_op: Option<Op>, step: usize) -> usize {
         match stepped_op {
             Some(Op::Mul) => {
@@ -695,6 +715,10 @@ impl<'a> FfParser<'a> {
         }
 
         let loop_width = base_loop_width.max(1);
+        let start_bound_width =
+            Self::loop_bound_width(start_bound, loop_signed).unwrap_or(loop_width);
+        let end_bound_width =
+            Self::loop_bound_width(end_bound, loop_signed).unwrap_or(loop_width);
         let start_status = Self::loop_bound_status(start_bound, loop_width, loop_signed);
         let end_status = Self::loop_bound_status(end_bound, loop_width, loop_signed);
         let uses_exclusive_end_sentinel = !inclusive;
@@ -714,13 +738,14 @@ impl<'a> FfParser<'a> {
             ));
         }
         let counter_width = loop_width.max(1);
+        let bound_width = counter_width.max(start_bound_width).max(end_bound_width);
         let widen_inclusive = inclusive && !loop_signed;
         let compare_width = if widen_inclusive {
-            counter_width.saturating_add(1)
+            bound_width.saturating_add(1)
         } else if uses_exclusive_end_sentinel {
-            counter_width.saturating_add(1)
+            bound_width.max(counter_width.saturating_add(1))
         } else {
-            counter_width
+            bound_width
         };
         let math_width = if reverse {
             Self::step_math_width(compare_width, Some(Op::Add), step)
@@ -730,7 +755,11 @@ impl<'a> FfParser<'a> {
 
         let start_reg = self.parse_for_bound(
             start_bound,
-            loop_width,
+            if uses_exclusive_end_sentinel {
+                compare_width
+            } else {
+                loop_width
+            },
             compare_width,
             loop_signed,
             targets,
