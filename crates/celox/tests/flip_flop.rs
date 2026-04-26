@@ -1473,12 +1473,15 @@ fn test_ff_runtime_for_wide_dynamic_bound_out_of_i32_range_errors() {
         module Top (
             clk: input clock,
             bound: input logic<128>,
-            q_hits: output logic<8>
+            q_hits: output logic<8>,
+            q_last: output logic<32>
         ) {
             always_ff (clk) {
                 q_hits = 0;
+                q_last = 0;
                 for i in (bound - 1) .. bound {
                     q_hits += 1;
+                    q_last = i as 32;
                 }
             }
         }
@@ -1491,6 +1494,31 @@ fn test_ff_runtime_for_wide_dynamic_bound_out_of_i32_range_errors() {
     sim.modify(|io| io.set_wide(bound, (BigUint::from(1u32) << 31) + BigUint::from(1u32)))
         .unwrap();
     assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+#[test]
+fn test_ff_dynamic_inclusive_end_preserves_bound_width_in_sir() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<128>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 0..=count {
+                    q += 1;
+                }
+            }
+        }
+    "#;
+
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+    assert!(
+        output.contains("bit<128>"),
+        "dynamic inclusive end should keep the dynamic bound width in the compare path:\n{output}"
+    );
 }
 
 #[test]
