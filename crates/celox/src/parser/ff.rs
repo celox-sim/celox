@@ -805,6 +805,7 @@ impl<'a> FfParser<'a> {
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
+        let visible_body_bb = ir_builder.new_block();
         let stall_bb = ir_builder.new_block();
         let exit_bb = ir_builder.new_block();
         ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
@@ -938,6 +939,25 @@ impl<'a> FfParser<'a> {
         }
 
         ir_builder.switch_to_block(body_bb);
+        if compare_width != loop_width {
+            let visible_loop_reg =
+                self.cast_reg_width_ext(ir_builder, body_counter, loop_width, loop_signed);
+            let visible_roundtrip =
+                self.cast_reg_width_ext(ir_builder, visible_loop_reg, compare_width, loop_signed);
+            let fits_loop_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                fits_loop_reg,
+                body_counter,
+                crate::ir::BinaryOp::Eq,
+                visible_roundtrip,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: fits_loop_reg,
+                true_block: (visible_body_bb, vec![]),
+                false_block: (stall_bb, vec![]),
+            });
+            ir_builder.switch_to_block(visible_body_bb);
+        }
         self.local_working_vars.insert(stmt.var_id);
         // always_ff uses NBA semantics: this loop variable is the only value
         // made visible intra-block, while all other reads still observe the
