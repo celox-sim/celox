@@ -130,6 +130,7 @@ pub fn unified_alloc(func: &mut MFunction, analysis: &AnalysisResult) -> (Assign
             bi,
             &entry_rf,
             &regfile_exit,
+            &mut s_exit,
             &mut slots,
             &mut result,
         );
@@ -320,17 +321,19 @@ fn insert_coupling_code(
     block_idx: usize,
     entry_rf: &RegFile,
     regfile_exit: &[RegFile],
+    s_exit: &mut [HashSet<VReg>],
     slots: &mut SpillSlotAllocator,
     result: &mut AssignmentMap,
 ) {
+    let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
+    let mut reload_set: HashSet<VReg> = HashSet::new();
+
     for &pred_idx in &analysis.predecessors[block_idx] {
         if pred_idx >= block_idx {
             continue;
         }
 
         let pred_rf = &regfile_exit[pred_idx];
-        let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
-
         let mut need_reload: Vec<VReg> = entry_rf
             .vregs()
             .filter(|v| {
@@ -342,16 +345,33 @@ fn insert_coupling_code(
         need_reload.sort();
 
         if !need_reload.is_empty() {
-            let term_idx = func.blocks[pred_idx].insts.len().saturating_sub(1);
-            for vreg in need_reload.iter().rev() {
-                let reload = make_reload(*vreg, func, slots);
-                // Assign the reload the same PhysReg as in entry
-                if let Some(preg) = entry_rf.get_preg(*vreg) {
-                    result.set(*vreg, preg);
+            for vreg in need_reload {
+                reload_set.insert(vreg);
+                if pred_rf.contains(vreg)
+                    && !s_exit[pred_idx].contains(&vreg)
+                    && let Some(spill_inst) = make_spill(vreg, func, slots)
+                {
+                    let term_idx = func.blocks[pred_idx].insts.len().saturating_sub(1);
+                    func.blocks[pred_idx].insts.insert(term_idx, spill_inst);
+                    s_exit[pred_idx].insert(vreg);
                 }
-                func.blocks[pred_idx].insts.insert(term_idx, reload);
             }
         }
+    }
+
+    if reload_set.is_empty() {
+        return;
+    }
+
+    let mut reloads: Vec<VReg> = reload_set.into_iter().collect();
+    reloads.sort();
+    for vreg in reloads.into_iter().rev() {
+        let Some(preg) = entry_rf.get_preg(vreg) else {
+            continue;
+        };
+        let reload = make_reload(vreg, func, slots);
+        result.set(vreg, preg);
+        func.blocks[block_idx].insts.insert(0, reload);
     }
 }
 

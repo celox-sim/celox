@@ -67,18 +67,13 @@ fn verify_assignment(
 
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             // Check uses: all used VRegs should be live and have unique PhysRegs
-            if !inst.is_terminator() {
-                for use_vreg in inst.uses() {
-                    if let Some(preg) = assignment.get(use_vreg) {
-                        // Terminators may legally reuse a register for the branch
-                        // condition and an unrelated live-out value because the
-                        // condition is consumed before control transfers.
-                        for (&other_vreg, &other_preg) in &live {
-                            if other_vreg != use_vreg && other_preg == preg {
-                                panic!(
-                                    "regalloc conflict: block {bi} inst {inst_idx}: use {use_vreg} and live {other_vreg} both at {preg} | inst: {inst}"
-                                );
-                            }
+            for use_vreg in inst.uses() {
+                if let Some(preg) = assignment.get(use_vreg) {
+                    for (&other_vreg, &other_preg) in &live {
+                        if other_vreg != use_vreg && other_preg == preg {
+                            panic!(
+                                "regalloc conflict: block {bi} inst {inst_idx}: use {use_vreg} and live {other_vreg} both at {preg} | inst: {inst}"
+                            );
                         }
                     }
                 }
