@@ -929,14 +929,57 @@ impl<'a> FfParser<'a> {
 
         if !reverse && compare_width != loop_width {
             ir_builder.switch_to_block(precheck_bb);
-            let end_allowed_reg = Self::emit_loop_value_fits(
-                ir_builder,
-                end_reg,
-                compare_width,
-                loop_width,
-                loop_signed,
-                !inclusive,
-            );
+            let end_allowed_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    end_reg,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    !inclusive,
+                )
+            } else {
+                let end_visible =
+                    self.cast_reg_width_ext(ir_builder, end_reg, loop_width, loop_signed);
+                let end_roundtrip =
+                    self.cast_reg_width_ext(ir_builder, end_visible, compare_width, loop_signed);
+                let end_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    end_fits_reg,
+                    end_reg,
+                    crate::ir::BinaryOp::Eq,
+                    end_roundtrip,
+                ));
+                if !inclusive {
+                    let sentinel_reg = ir_builder.alloc_bit(compare_width, loop_signed);
+                    let sentinel_value = if loop_signed {
+                        1u64 << (loop_width - 1)
+                    } else {
+                        1u64 << loop_width
+                    };
+                    ir_builder.emit(SIRInstruction::Imm(
+                        sentinel_reg,
+                        crate::ir::SIRValue::new(sentinel_value),
+                    ));
+                    let end_is_sentinel_reg = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        end_is_sentinel_reg,
+                        end_reg,
+                        crate::ir::BinaryOp::Eq,
+                        sentinel_reg,
+                    ));
+                    let allowed_reg = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        allowed_reg,
+                        end_fits_reg,
+                        crate::ir::BinaryOp::LogicOr,
+                        end_is_sentinel_reg,
+                    ));
+                    allowed_reg
+                } else {
+                    end_fits_reg
+                }
+            };
             let precheck_pass_bb = ir_builder.new_block();
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: end_allowed_reg,
@@ -1103,22 +1146,60 @@ impl<'a> FfParser<'a> {
 
         if compare_width != loop_width {
             ir_builder.switch_to_block(empty_exit_check_bb);
-            let empty_fits_reg = Self::emit_loop_value_fits(
-                ir_builder,
-                empty_exit_counter,
-                compare_width,
-                loop_width,
-                loop_signed,
-                false,
-            );
-            let empty_start_fits_reg = Self::emit_loop_value_fits(
-                ir_builder,
-                start_reg,
-                compare_width,
-                loop_width,
-                loop_signed,
-                false,
-            );
+            let empty_fits_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    empty_exit_counter,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let empty_visible = self.cast_reg_width_ext(
+                    ir_builder,
+                    empty_exit_counter,
+                    loop_width,
+                    loop_signed,
+                );
+                let empty_roundtrip =
+                    self.cast_reg_width_ext(ir_builder, empty_visible, compare_width, loop_signed);
+                let empty_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    empty_fits_reg,
+                    empty_exit_counter,
+                    crate::ir::BinaryOp::Eq,
+                    empty_roundtrip,
+                ));
+                empty_fits_reg
+            };
+            let empty_start_fits_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    start_reg,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let empty_start_visible =
+                    self.cast_reg_width_ext(ir_builder, start_reg, loop_width, loop_signed);
+                let empty_start_roundtrip = self.cast_reg_width_ext(
+                    ir_builder,
+                    empty_start_visible,
+                    compare_width,
+                    loop_signed,
+                );
+                let empty_start_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    empty_start_fits_reg,
+                    start_reg,
+                    crate::ir::BinaryOp::Eq,
+                    empty_start_roundtrip,
+                ));
+                empty_start_fits_reg
+            };
             let empty_allowed_reg = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
                 empty_allowed_reg,
@@ -1146,14 +1227,31 @@ impl<'a> FfParser<'a> {
             Vec::new(),
         ));
         if compare_width != loop_width {
-            let fits_loop_reg = Self::emit_loop_value_fits(
-                ir_builder,
-                fitcheck_counter,
-                compare_width,
-                loop_width,
-                loop_signed,
-                false,
-            );
+            let fits_loop_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    fitcheck_counter,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let visible_roundtrip = self.cast_reg_width_ext(
+                    ir_builder,
+                    fitcheck_visible_reg,
+                    compare_width,
+                    loop_signed,
+                );
+                let fits_loop_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    fits_loop_reg,
+                    fitcheck_counter,
+                    crate::ir::BinaryOp::Eq,
+                    visible_roundtrip,
+                ));
+                fits_loop_reg
+            };
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: fits_loop_reg,
                 true_block: (body_bb, vec![fitcheck_counter]),
