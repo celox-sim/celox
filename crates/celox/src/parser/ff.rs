@@ -633,6 +633,9 @@ impl<'a> FfParser<'a> {
         let start_width = self.bound_width(start_bound);
         let end_width = self.bound_width(end_bound);
         let loop_width = base_loop_width.max(1);
+        // Veryl now models loop variables as i32. Even if a wide-typed bound
+        // happens to carry a small runtime value, widening always_ff loop
+        // semantics from the RHS would diverge from the language model.
         if start_width > loop_width || end_width > loop_width {
             return Err(ParserError::unsupported(
                 65,
