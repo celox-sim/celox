@@ -359,40 +359,6 @@ fn test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source(sim) {
     assert_eq!(sim.get(q_last), 255u32.into());
 }
 
-fn test_ff_runtime_for_wide_dynamic_bound_uses_full_bound_width(sim) {
-    @ignore_on(veryl);
-    @setup { let code = r#"
-        module Top (
-            clk: input clock,
-            bound: input logic<128>,
-            q_hits: output logic<8>,
-            q_last: output logic<64>
-        ) {
-            always_ff (clk) {
-                q_hits = 0;
-                q_last = 64'hffff_ffff_ffff_ffff;
-                for i in (bound - 1) .. bound {
-                    q_hits += 1;
-                    q_last = i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-    let clk = sim.event("clk");
-    let bound = sim.signal("bound");
-    let q_hits = sim.signal("q_hits");
-    let q_last = sim.signal("q_last");
-
-    let wide_bound = (BigUint::from(1u32) << 64) + BigUint::from(2u32);
-    sim.modify(|io| io.set_wide(bound, wide_bound)).unwrap();
-    sim.tick(clk).unwrap();
-
-    assert_eq!(sim.get(q_hits), 1u32.into());
-    assert_eq!(sim.get(q_last), BigUint::from(1u32));
-}
-
-
 fn test_ff_if_reset_basic(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
@@ -1417,6 +1383,30 @@ fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
 }
 
 // Tests that use setup_and_trace/snapshot/Simulation::builder stay as regular #[test]
+
+#[test]
+fn test_ff_runtime_for_wide_dynamic_bound_reports_error() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            bound: input logic<128>,
+            q_hits: output logic<8>,
+            q_last: output logic<64>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                q_last = 64'hffff_ffff_ffff_ffff;
+                for i in (bound - 1) .. bound {
+                    q_hits += 1;
+                    q_last = i;
+                }
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top").build().unwrap_err().to_string();
+    assert!(err.contains("for loop bound exceeding i32 loop variable"));
+}
 
 #[test]
 fn test_single_clock_optimization() {
