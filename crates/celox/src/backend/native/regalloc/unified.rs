@@ -168,34 +168,88 @@ fn compute_entry_regfile(
     block_idx: usize,
     k: usize,
     regfile_exit: &[RegFile],
-    _s_exit: &[HashSet<VReg>],
+    s_exit: &[HashSet<VReg>],
     result: &AssignmentMap,
 ) -> (RegFile, HashSet<VReg>) {
     let preds = &analysis.predecessors[block_idx];
     let mut rf = RegFile::new();
-    let s = HashSet::new();
+    let forward_preds: Vec<usize> = preds.iter().copied().filter(|&p| p < block_idx).collect();
 
     if preds.is_empty() {
+        return (rf, HashSet::new());
+    }
+
+    if forward_preds.len() == 1 {
+        let pred_idx = forward_preds[0];
+        let pred_rf = &regfile_exit[pred_idx];
+        let mut s = s_exit[pred_idx].clone();
+        s.retain(|v| analysis.entry_distances[block_idx].contains_key(v));
+
+        let mut pred_live: Vec<VReg> = pred_rf
+            .vregs()
+            .filter(|v| analysis.entry_distances[block_idx].contains_key(v))
+            .collect();
+        pred_live.sort();
+        for vreg in pred_live {
+            if let Some(preg) = pred_rf.get_preg(vreg) {
+                if !rf.preg_occupied(preg) {
+                    rf.assign(vreg, preg);
+                }
+            }
+        }
+
+        for phi in &func.blocks[block_idx].phis {
+            if rf.contains(phi.dst) {
+                continue;
+            }
+            let src = phi
+                .sources
+                .iter()
+                .find_map(|(pred_id, src)| (*pred_id == BlockId(pred_idx as u32)).then_some(*src));
+            let preferred = src.and_then(|src_vreg| {
+                let preg = rf.get_preg(src_vreg)?;
+                if analysis.entry_distances[block_idx].contains_key(&src_vreg) {
+                    None
+                } else {
+                    rf.evict(src_vreg);
+                    Some(preg)
+                }
+            });
+            let preg = preferred
+                .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
+                .expect("no free register for phi dst");
+            rf.assign(phi.dst, preg);
+        }
+
         return (rf, s);
     }
 
-    // Collect VRegs in predecessor exits (forward edges only)
+    // Collect VRegs available in predecessor exits (in register or already spilled).
     let mut all: Option<HashSet<VReg>> = None;
     let mut some: HashSet<VReg> = HashSet::new();
+    let mut spilled_all: Option<HashSet<VReg>> = None;
 
     for &pred_idx in preds {
         if pred_idx >= block_idx {
             continue;
         } // skip back edges (assumes layout ≈ RPO)
         let pred_vregs: HashSet<VReg> = regfile_exit[pred_idx].vregs().collect();
-        some = some.union(&pred_vregs).copied().collect();
+        let pred_spilled = &s_exit[pred_idx];
+        let pred_available: HashSet<VReg> = pred_vregs.union(pred_spilled).copied().collect();
+        some = some.union(&pred_available).copied().collect();
         all = Some(match all {
-            None => pred_vregs,
-            Some(a) => a.intersection(&pred_vregs).copied().collect(),
+            None => pred_available,
+            Some(a) => a.intersection(&pred_available).copied().collect(),
+        });
+        spilled_all = Some(match spilled_all {
+            None => pred_spilled.clone(),
+            Some(a) => a.intersection(pred_spilled).copied().collect(),
         });
     }
 
     let all = all.unwrap_or_default();
+    let mut s = spilled_all.unwrap_or_default();
+    s.retain(|v| analysis.entry_distances[block_idx].contains_key(v));
 
     // Start with intersection: VRegs in registers in ALL predecessors.
     // If the preferred PhysReg is already taken, skip — the VReg will be
@@ -208,6 +262,12 @@ fn compute_entry_regfile(
         .iter()
         .copied()
         .filter(|v| analysis.entry_distances[block_idx].contains_key(v))
+        .filter(|v| regfile_exit.iter().enumerate().all(|(pred_idx, pred_rf)| {
+            if !preds.contains(&pred_idx) || pred_idx >= block_idx {
+                return true;
+            }
+            pred_rf.contains(*v) || s_exit[pred_idx].contains(v)
+        }))
         .collect();
     all_sorted.sort();
     for vreg in &all_sorted {
@@ -243,42 +303,6 @@ fn compute_entry_regfile(
             .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
             .expect("no free register for phi dst");
         rf.assign(phi.dst, preg);
-    }
-
-    // Fill remaining slots from `some` set by next-use distance
-    if rf.occupancy() < k {
-        let mut candidates: Vec<VReg> = some
-            .difference(&all)
-            .copied()
-            .filter(|v| !rf.contains(*v))
-            .collect();
-        candidates.sort_by_key(|v| {
-            (
-                analysis.entry_distances[block_idx]
-                    .get(v)
-                    .copied()
-                    .unwrap_or(u32::MAX),
-                *v,
-            )
-        });
-        for vreg in candidates {
-            if rf.occupancy() >= k {
-                break;
-            }
-            if !analysis.entry_distances[block_idx].contains_key(&vreg) {
-                continue;
-            }
-            if let Some(preg) = result.get(vreg) {
-                if !rf.preg_occupied(preg) {
-                    rf.assign(vreg, preg);
-                    continue;
-                }
-                // PhysReg conflict — skip; process_block will reload on demand
-            } else if let Some(preg) = rf.find_free_excluding(&PhysRegSet::new()) {
-                // No prior assignment — first time this VReg is assigned
-                rf.assign(vreg, preg);
-            }
-        }
     }
 
     (rf, s)
@@ -457,7 +481,11 @@ fn process_block(
                         // use_vreg is in some other register, create a copy to RCX
                         let fresh = func.vregs.alloc();
                         while func.spill_descs.len() <= fresh.0 as usize {
-                            func.spill_descs.push(SpillDesc::transient());
+                            func.spill_descs.push(
+                                func.spill_desc(use_vreg)
+                                    .cloned()
+                                    .unwrap_or(SpillDesc::transient()),
+                            );
                         }
                         new_insts.push(MInst::Mov {
                             dst: fresh,
@@ -484,7 +512,6 @@ fn process_block(
                         }
                         new_insts.push(reload);
                         rf.assign(fresh, *required_preg);
-                        s.insert(fresh);
                         result.set(fresh, *required_preg);
                         rewritten_inst.rewrite_use(use_vreg, fresh);
                         pinned.insert(fresh);
@@ -541,7 +568,6 @@ fn process_block(
                     }
                     new_insts.push(reload);
                     rf.assign(fresh, preg);
-                    s.insert(fresh);
                     result.set(fresh, preg);
                     rewritten_inst.rewrite_use(use_vreg, fresh);
                     pinned.insert(fresh);
@@ -661,6 +687,25 @@ fn process_block(
         }
 
         // (Live range splitting placeholder - currently no eager spill)
+    }
+
+    let needs_backedge_spills = analysis.successors[block_idx]
+        .iter()
+        .any(|&succ_idx| succ_idx <= block_idx);
+    if needs_backedge_spills {
+        let mut spill_live_out: Vec<VReg> = rf
+            .vregs()
+            .filter(|v| analysis.exit_distances[block_idx].contains_key(v))
+            .collect();
+        spill_live_out.sort();
+        let mut spill_insts = Vec::new();
+        for vreg in spill_live_out {
+            emit_spill(&mut spill_insts, vreg, &mut s, func, slots, result);
+        }
+        if !spill_insts.is_empty() {
+            let insert_at = new_insts.len().saturating_sub(1);
+            new_insts.splice(insert_at..insert_at, spill_insts);
+        }
     }
 
     (rf, s, new_insts)

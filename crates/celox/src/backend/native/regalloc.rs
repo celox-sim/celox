@@ -53,6 +53,9 @@ fn verify_assignment(
         // entry_distances (for cross-block liveness) but no longer
         // occupy a register.
         for &vreg in analysis.entry_distances[bi].keys() {
+            if !use_positions.contains_key(&vreg) {
+                continue;
+            }
             if let Some(preg) = assignment.get(vreg) {
                 // Skip if this PhysReg is already claimed by another VReg
                 if live.values().any(|&p| p == preg) {

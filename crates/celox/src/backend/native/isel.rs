@@ -505,7 +505,7 @@ impl<'a> ISelContext<'a> {
         if imm == u64::MAX {
             // AND with all-ones is identity
             if dst != src {
-                block.push(MInst::Mov { dst, src });
+                self.emit_mov(block, dst, src);
             }
             return;
         }
@@ -520,10 +520,7 @@ impl<'a> ISelContext<'a> {
             if imm == mask_for_width(mask_width) && src_bits <= mask_width {
                 // Redundant AND: src is already within mask
                 if dst != src {
-                    block.push(MInst::Mov { dst, src });
-                    self.known_bits.insert(dst, src_bits);
-                } else {
-                    // dst == src: complete no-op
+                    self.emit_mov(block, dst, src);
                 }
                 return;
             }
@@ -552,6 +549,21 @@ impl<'a> ISelContext<'a> {
         }
     }
 
+    fn emit_mov(&mut self, block: &mut MBlock, dst: VReg, src: VReg) {
+        if dst == src {
+            return;
+        }
+        block.push(MInst::Mov { dst, src });
+        if let Some(desc) = self.spill_descs.get(src.0 as usize).cloned() {
+            self.spill_descs[dst.0 as usize] = desc;
+        }
+        if let Some(bits) = self.known_bits.get(&src).copied() {
+            self.known_bits.insert(dst, bits);
+        } else {
+            self.known_bits.remove(&dst);
+        }
+    }
+
     /// Emit bitfield insert: dst = (base_word & ~(mask << shift)) | ((val & mask) << shift)
     /// Decomposes into basic ALU ops (no pseudo-instruction).
     fn emit_bfi(
@@ -572,10 +584,7 @@ impl<'a> ISelContext<'a> {
         if mask != u64::MAX {
             self.emit_and_imm(block, masked_val, val, mask);
         } else {
-            block.push(MInst::Mov {
-                dst: masked_val,
-                src: val,
-            });
+            self.emit_mov(block, masked_val, val);
         }
         // shifted_val = masked_val << shift
         if shift > 0 {
@@ -992,10 +1001,7 @@ fn lower_instruction(
                         }
                         // Also store chunk[0] in reg_map scalar slot for
                         // fallback paths that read the scalar VReg.
-                        block.push(MInst::Mov {
-                            dst: vreg,
-                            src: chunks[0].0,
-                        });
+                        ctx.emit_mov(block, vreg, chunks[0].0);
                         ctx.wide_regs.insert(*dst, chunks);
 
                         // 4-state: load wide mask chunks
@@ -1019,10 +1025,7 @@ fn lower_instruction(
                                 m_remaining -= chunk_bits;
                             }
                             let mvreg = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Mov {
-                                dst: mvreg,
-                                src: mchunks[0].0,
-                            });
+                            ctx.emit_mov(block, mvreg, mchunks[0].0);
                             ctx.set_mask(*dst, mvreg);
                             ctx.wide_masks.insert(*dst, mchunks);
                         } else if ctx.four_state {
@@ -1142,10 +1145,7 @@ fn lower_instruction(
                         let mask = mask_for_width(*width_bits);
                         ctx.emit_and_imm(block, vreg, shifted, mask);
                     } else {
-                        block.push(MInst::Mov {
-                            dst: vreg,
-                            src: shifted,
-                        });
+                        ctx.emit_mov(block, vreg, shifted);
                     }
                 }
             }
@@ -1253,10 +1253,7 @@ fn lower_instruction(
                         if *width_bits < 64 {
                             ctx.emit_and_imm(block, mvreg, shifted, mask_for_width(*width_bits));
                         } else {
-                            block.push(MInst::Mov {
-                                dst: mvreg,
-                                src: shifted,
-                            });
+                            ctx.emit_mov(block, mvreg, shifted);
                         }
                         ctx.set_mask(*dst, mvreg);
                     }
@@ -1671,10 +1668,7 @@ fn lower_instruction(
                             if width_mask != u64::MAX {
                                 ctx.emit_and_imm(block, masked_m, mask_vreg, width_mask);
                             } else {
-                                block.push(MInst::Mov {
-                                    dst: masked_m,
-                                    src: mask_vreg,
-                                });
+                                ctx.emit_mov(block, masked_m, mask_vreg);
                             }
 
                             // shifted_m = masked_m << bit_shift
@@ -2165,10 +2159,7 @@ fn lower_instruction(
                         ctx.known_bits.insert(shifted, shifted_bits);
                     } else {
                         let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Mov {
-                            dst: rhs_copy,
-                            src: rhs_vreg,
-                        });
+                        ctx.emit_mov(block, rhs_copy, rhs_vreg);
                         block.push(MInst::Shr {
                             dst: shifted,
                             lhs: lhs_vreg,
@@ -2180,10 +2171,7 @@ fn lower_instruction(
                         let mask = mask_for_width(d_width);
                         ctx.emit_and_imm(block, dst_vreg, shifted, mask);
                     } else {
-                        block.push(MInst::Mov {
-                            dst: dst_vreg,
-                            src: shifted,
-                        });
+                        ctx.emit_mov(block, dst_vreg, shifted);
                     }
                 }
                 BinaryOp::Shl => {
@@ -2196,10 +2184,7 @@ fn lower_instruction(
                         });
                     } else {
                         let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Mov {
-                            dst: rhs_copy,
-                            src: rhs_vreg,
-                        });
+                        ctx.emit_mov(block, rhs_copy, rhs_vreg);
                         block.push(MInst::Shl {
                             dst: shifted,
                             lhs: lhs_vreg,
@@ -2210,10 +2195,7 @@ fn lower_instruction(
                         let mask = mask_for_width(d_width);
                         ctx.emit_and_imm(block, dst_vreg, shifted, mask);
                     } else {
-                        block.push(MInst::Mov {
-                            dst: dst_vreg,
-                            src: shifted,
-                        });
+                        ctx.emit_mov(block, dst_vreg, shifted);
                     }
                 }
                 BinaryOp::Sar => {
@@ -2243,10 +2225,7 @@ fn lower_instruction(
                             });
                         } else {
                             let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Mov {
-                                dst: rhs_copy,
-                                src: rhs_vreg,
-                            });
+                            ctx.emit_mov(block, rhs_copy, rhs_vreg);
                             block.push(MInst::Sar {
                                 dst: sar_result,
                                 lhs: sign_extended,
@@ -2265,10 +2244,7 @@ fn lower_instruction(
                             });
                         } else {
                             let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Mov {
-                                dst: rhs_copy,
-                                src: rhs_vreg,
-                            });
+                            ctx.emit_mov(block, rhs_copy, rhs_vreg);
                             block.push(MInst::Sar {
                                 dst: dst_vreg,
                                 lhs: lhs_vreg,
@@ -2599,10 +2575,7 @@ fn lower_instruction(
 
             match op {
                 UnaryOp::Ident => {
-                    block.push(MInst::Mov {
-                        dst: dst_vreg,
-                        src: src_vreg,
-                    });
+                    ctx.emit_mov(block, dst_vreg, src_vreg);
                 }
                 UnaryOp::Minus => {
                     block.push(MInst::Neg {
@@ -2748,10 +2721,7 @@ fn lower_instruction(
 
                 if let Some(result) = accumulated {
                     if result != dst_vreg {
-                        block.push(MInst::Mov {
-                            dst: dst_vreg,
-                            src: result,
-                        });
+                        ctx.emit_mov(block, dst_vreg, result);
                     }
                 }
 
@@ -3038,10 +3008,7 @@ fn lower_instruction(
             if *width <= 64 && src_width <= 64 {
                 let src_vreg = ctx.reg_map.get(*src);
                 if *bit_offset == 0 && *width == src_width {
-                    block.push(MInst::Mov {
-                        dst: dst_vreg,
-                        src: src_vreg,
-                    });
+                    ctx.emit_mov(block, dst_vreg, src_vreg);
                 } else if *bit_offset == 0 {
                     let mask = mask_for_width(*width);
                     ctx.emit_and_imm(block, dst_vreg, src_vreg, mask);
@@ -4092,10 +4059,7 @@ fn lower_wide_binary(
             let chunk0 = chunks[0].0;
             let scalar = ctx.reg_map.get(dst);
             if chunk0 != scalar {
-                block.push(MInst::Mov {
-                    dst: scalar,
-                    src: chunk0,
-                });
+                ctx.emit_mov(block, scalar, chunk0);
             }
         }
     }
@@ -4296,15 +4260,9 @@ fn lower_wide_runtime_shift(
         // Apply intra-chunk shift: result = (main_chunk SHIFT bit_shift) | (carry_chunk INVSHIFT inv_bit_shift)
         // (debug removed)
         let bit_shift_copy = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Mov {
-            dst: bit_shift_copy,
-            src: bit_shift,
-        });
+        ctx.emit_mov(block, bit_shift_copy, bit_shift);
         let inv_copy = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Mov {
-            dst: inv_copy,
-            src: inv_bit_shift,
-        });
+        ctx.emit_mov(block, inv_copy, inv_bit_shift);
 
         let main_shifted = ctx.alloc_vreg(SpillDesc::transient());
         let carry_shifted = ctx.alloc_vreg(SpillDesc::transient());
@@ -4661,10 +4619,7 @@ fn lower_wide_unary(
             let chunk0 = chunks[0].0;
             let scalar = ctx.reg_map.get(dst);
             if chunk0 != scalar {
-                block.push(MInst::Mov {
-                    dst: scalar,
-                    src: chunk0,
-                });
+                ctx.emit_mov(block, scalar, chunk0);
             }
         }
     }
@@ -4696,17 +4651,14 @@ fn lower_wide_extract(
             z
         };
 
-        if is == 0 {
-            if d_width < 64 {
-                let mask = mask_for_width(d_width);
-                ctx.emit_and_imm(block, dst_vreg, main_vreg, mask);
+            if is == 0 {
+                if d_width < 64 {
+                    let mask = mask_for_width(d_width);
+                    ctx.emit_and_imm(block, dst_vreg, main_vreg, mask);
+                } else {
+                    ctx.emit_mov(block, dst_vreg, main_vreg);
+                }
             } else {
-                block.push(MInst::Mov {
-                    dst: dst_vreg,
-                    src: main_vreg,
-                });
-            }
-        } else {
             let shifted = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::ShrImm {
                 dst: shifted,
@@ -4733,19 +4685,13 @@ fn lower_wide_extract(
                     let mask = mask_for_width(d_width);
                     ctx.emit_and_imm(block, dst_vreg, combined, mask);
                 } else {
-                    block.push(MInst::Mov {
-                        dst: dst_vreg,
-                        src: combined,
-                    });
+                    ctx.emit_mov(block, dst_vreg, combined);
                 }
             } else if d_width < 64 {
                 let mask = mask_for_width(d_width);
                 ctx.emit_and_imm(block, dst_vreg, shifted, mask);
             } else {
-                block.push(MInst::Mov {
-                    dst: dst_vreg,
-                    src: shifted,
-                });
+                ctx.emit_mov(block, dst_vreg, shifted);
             }
         }
     } else {

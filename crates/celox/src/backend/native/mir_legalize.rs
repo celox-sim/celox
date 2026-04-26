@@ -11,6 +11,9 @@ fn eliminate_trivial_phis(func: &mut MFunction) {
 
     for block in &func.blocks {
         for phi in &block.phis {
+            if phi.sources.len() <= 1 {
+                continue;
+            }
             let mut unique_src = None;
             let mut trivial = true;
             for (_, src) in &phi.sources {
