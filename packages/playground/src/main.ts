@@ -10,12 +10,13 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
 import { buildMonacoTestbenchCompilerOptions } from "./monaco-testbench-options.js";
+import { FourState, X, Z } from "./playground-runtime-helpers.js";
+import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	buildVirtualModuleDts,
 	extractPortsFromSource,
 	type VirtualPortInfo,
-} from "./playground-dts.js";
-import { transpileTestbench } from "./testbench-transpile.js";
+} from "./virtual-module-dts.js";
 import {
 	generateVcdText,
 	type VcdSignalInfo,
@@ -1969,6 +1970,9 @@ async function run() {
 				"afterEach",
 				"Simulator",
 				"Simulation",
+				"FourState",
+				"X",
+				"Z",
 				"console",
 				...moduleNames,
 			];
@@ -1981,6 +1985,9 @@ async function run() {
 				() => {},
 				Simulator,
 				Simulation,
+				FourState,
+				X,
+				Z,
 				playgroundConsole,
 				...moduleNames.map((n: string) => moduleBindings[n]),
 			];
