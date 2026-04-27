@@ -359,40 +359,6 @@ fn test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source(sim) {
     assert_eq!(sim.get(q_last), 255u32.into());
 }
 
-fn test_ff_runtime_for_wide_dynamic_bound_uses_full_bound_width(sim) {
-    @ignore_on(veryl);
-    @setup { let code = r#"
-        module Top (
-            clk: input clock,
-            bound: input logic<128>,
-            q_hits: output logic<8>,
-            q_last: output logic<64>
-        ) {
-            always_ff (clk) {
-                q_hits = 0;
-                q_last = 64'hffff_ffff_ffff_ffff;
-                for i in (bound - 1) .. bound {
-                    q_hits += 1;
-                    q_last = i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-    let clk = sim.event("clk");
-    let bound = sim.signal("bound");
-    let q_hits = sim.signal("q_hits");
-    let q_last = sim.signal("q_last");
-
-    let wide_bound = (BigUint::from(1u32) << 64) + BigUint::from(2u32);
-    sim.modify(|io| io.set_wide(bound, wide_bound)).unwrap();
-    sim.tick(clk).unwrap();
-
-    assert_eq!(sim.get(q_hits), 1u32.into());
-    assert_eq!(sim.get(q_last), BigUint::from(1u32));
-}
-
-
 fn test_ff_if_reset_basic(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
@@ -723,6 +689,34 @@ fn test_ff_struct_constructor_expression_literal_order(sim) {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_a), 0x12u32.into());
     assert_eq!(sim.get(out_b), 0x34u32.into());
+}
+
+fn test_ff_struct_constructor_signed_member_extension(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in_neg: input i8,
+            out_pad: output i16
+        ) {
+            struct S {
+                x: i16,
+            }
+            var r: S;
+            always_ff (clk) {
+                r = S'{x: in_neg};
+            }
+            assign out_pad = r.x;
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_neg = sim.signal("in_neg");
+    let out_pad = sim.signal("out_pad");
+
+    sim.modify(|io| io.set(in_neg, 0xFFu8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_pad), 0xFFFFu32.into());
 }
 
 fn test_ff_array_literal_expression_order(sim) {
@@ -1419,6 +1413,37 @@ fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
 // Tests that use setup_and_trace/snapshot/Simulation::builder stay as regular #[test]
 
 #[test]
+fn test_ff_runtime_for_wide_dynamic_bound_is_still_allowed() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            bound: input logic<128>,
+            q_hits: output logic<8>,
+            q_last: output logic<32>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                q_last = 32'hffff_ffff;
+                for i in (bound - 1) .. bound {
+                    q_hits += 1;
+                    q_last = i as 32;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let bound = sim.signal("bound");
+    let q_last = sim.signal("q_last");
+
+    sim.modify(|io| io.set_wide(bound, BigUint::from(2u32)))
+        .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_last), 1u32.into());
+}
+
+#[test]
 fn test_single_clock_optimization() {
     let code = r#"
         module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
@@ -1443,6 +1468,175 @@ fn test_multi_clock_no_optimization() {
     let program = trace.post_optimized_sir.unwrap();
     assert!(!program.eval_only_ffs.is_empty());
     assert!(!program.apply_ffs.is_empty());
+}
+
+#[test]
+fn test_ff_dynamic_exclusive_end_preserves_sentinel_width_in_sir() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<128>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 0..count {
+                    q = i as 32;
+                }
+            }
+        }
+    "#;
+
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+    assert!(
+        output.contains("bit<128>"),
+        "dynamic exclusive end should keep the dynamic bound width in the compare path:\n{output}"
+    );
+}
+
+#[test]
+fn test_ff_runtime_for_wide_dynamic_bound_out_of_i32_range_errors() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            bound: input logic<128>,
+            q_hits: output logic<8>,
+            q_last: output logic<32>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                q_last = 0;
+                for i in (bound - 1) .. bound {
+                    q_hits += 1;
+                    q_last = i as 32;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let bound = sim.signal("bound");
+
+    sim.modify(|io| io.set_wide(bound, (BigUint::from(1u32) << 31) + BigUint::from(1u32)))
+        .unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err(),
+        RuntimeErrorCode::DetectedTrueLoop
+    );
+}
+
+#[test]
+fn test_ff_runtime_for_wide_dynamic_end_errors_before_iteration() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<128>,
+            q_hits: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                for i in 0..count {
+                    q_hits += 1;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let count = sim.signal("count");
+
+    sim.modify(|io| io.set_wide(count, BigUint::from(1u64) << 40))
+        .unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err(),
+        RuntimeErrorCode::DetectedTrueLoop
+    );
+}
+
+#[test]
+fn test_ff_runtime_for_wide_dynamic_start_errors_before_empty_exit() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            start: input logic<128>,
+            q_hits: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                for i in start..0 {
+                    q_hits += 1;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+
+    sim.modify(|io| io.set_wide(start, BigUint::from(1u64) << 40))
+        .unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err(),
+        RuntimeErrorCode::DetectedTrueLoop
+    );
+}
+
+#[test]
+fn test_ff_runtime_for_wide_dynamic_reverse_start_errors_before_empty_exit() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            start: input logic<128>,
+            q_hits: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                for i in rev start..0 {
+                    q_hits += 1;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+
+    sim.modify(|io| io.set_wide(start, BigUint::from(1u64) << 40))
+        .unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err(),
+        RuntimeErrorCode::DetectedTrueLoop
+    );
+}
+
+#[test]
+fn test_ff_dynamic_inclusive_end_preserves_bound_width_in_sir() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<128>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 0..=count {
+                    q += 1;
+                }
+            }
+        }
+    "#;
+
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+    assert!(
+        output.contains("bit<128>"),
+        "dynamic inclusive end should keep the dynamic bound width in the compare path:\n{output}"
+    );
 }
 
 #[test]

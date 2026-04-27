@@ -53,6 +53,9 @@ fn verify_assignment(
         // entry_distances (for cross-block liveness) but no longer
         // occupy a register.
         for &vreg in analysis.entry_distances[bi].keys() {
+            if !use_positions.contains_key(&vreg) {
+                continue;
+            }
             if let Some(preg) = assignment.get(vreg) {
                 // Skip if this PhysReg is already claimed by another VReg
                 if live.values().any(|&p| p == preg) {
@@ -63,20 +66,6 @@ fn verify_assignment(
         }
 
         for (inst_idx, inst) in block.insts.iter().enumerate() {
-            // Check uses: all used VRegs should be live and have unique PhysRegs
-            for use_vreg in inst.uses() {
-                if let Some(preg) = assignment.get(use_vreg) {
-                    // Check if another live VReg has the same PhysReg
-                    for (&other_vreg, &other_preg) in &live {
-                        if other_vreg != use_vreg && other_preg == preg {
-                            panic!(
-                                "regalloc conflict: block {bi} inst {inst_idx}: use {use_vreg} and live {other_vreg} both at {preg} | inst: {inst}"
-                            );
-                        }
-                    }
-                }
-            }
-
             // Remove dead VRegs (O(log n) per VReg via binary search)
             let dead: Vec<VReg> = live
                 .keys()

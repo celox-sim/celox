@@ -1191,6 +1191,7 @@ pub fn emit_chained_eus(
     if cfg!(debug_assertions) {
         mfunc.verify();
     }
+    super::mir_legalize::legalize(&mut mfunc);
     super::mir_opt::optimize(&mut mfunc);
     let ra = regalloc::run_regalloc(&mut mfunc);
     let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;

@@ -116,6 +116,43 @@ fn test_four_state_initial_and_set(sim) {
     );
 }
 
+fn test_ff_struct_logic_to_bit_coercion_clears_mask(sim) {
+    @ignore_on(veryl);
+    @setup {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            in_logic: input logic<8>,
+            out_bit: output bit<8>
+        ) {
+            struct S {
+                x: bit<8>,
+            }
+            var r: S;
+            always_ff (clk) {
+                r = S'{x: in_logic};
+            }
+            assign out_bit = r.x;
+        }
+    "#;
+    }
+    @build SimulatorBuilder::new(code, "Top")
+        .four_state(true);
+
+    let clk = sim.event("clk");
+    let in_logic = sim.signal("in_logic");
+    let out_bit = sim.signal("out_bit");
+
+    sim.modify(|io| {
+        io.set_four_state(in_logic, BigUint::from(0xA5u32), BigUint::from(0x0Fu32));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+
+    let (_value, mask) = sim.get_four_state(out_bit);
+    assert_eq!(mask, BigUint::from(0u32), "logic -> bit coercion must clear X/Z mask");
+}
+
 fn test_four_state_mixing(sim) {
     @ignore_on(veryl);
     @setup {

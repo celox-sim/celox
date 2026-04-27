@@ -150,6 +150,7 @@ export default defineConfig({
               link: "/internals/cascade-limitations",
             },
             { text: "Status", link: "/internals/status" },
+            { text: "Triage", link: "/internals/triage" },
           ],
         },
       ],

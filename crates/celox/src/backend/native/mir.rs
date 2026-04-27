@@ -153,6 +153,14 @@ pub enum SpillKind {
         bit_offset: usize,
         width_bits: usize,
     },
+    /// Alias of a simulation-state-backed value.
+    /// Unlike `SimState`, this is intended for backend-internal aliases that
+    /// may safely share the same reload home.
+    SimStateAlias {
+        addr: RegionedAbsoluteAddr,
+        bit_offset: usize,
+        width_bits: usize,
+    },
     /// Intermediate value with no home in simulation state.
     /// Spill to a stack slot.
     Stack,
@@ -202,6 +210,38 @@ impl SpillDesc {
             },
             reload_cost,
             spill_cost: if store_back_only { 0 } else { reload_cost },
+        }
+    }
+
+    /// Backend-internal alias of a simulation-state-backed value.
+    pub fn sim_state_alias(
+        addr: RegionedAbsoluteAddr,
+        bit_offset: usize,
+        width_bits: usize,
+        store_back_only: bool,
+    ) -> Self {
+        let reload_cost = if bit_offset.is_multiple_of(64) && matches!(width_bits, 8 | 16 | 32 | 64)
+        {
+            1
+        } else {
+            2
+        };
+        Self {
+            kind: SpillKind::SimStateAlias {
+                addr,
+                bit_offset,
+                width_bits,
+            },
+            reload_cost,
+            spill_cost: if store_back_only { 0 } else { reload_cost },
+        }
+    }
+
+    /// Copy semantics for a value snapshot created by `Mov`.
+    pub fn copy_for_snapshot(&self) -> Self {
+        match self.kind {
+            SpillKind::Remat { .. } => self.clone(),
+            _ => Self::transient(),
         }
     }
 

@@ -13,12 +13,13 @@ use crate::{
         celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
     },
 };
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
     ForStatement, IfStatement, Module, Op, Statement, ValueVariant, VarId, VarSelectOp,
 };
+use veryl_analyzer::value::Value;
 
 // SymbolicStore: Maps variable IDs to their current symbolic representation.
 // Each variable is managed by a RangeStore, which tracks bit-ranges and their associated SLT nodes.
@@ -1453,6 +1454,71 @@ fn eval_for_bound(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoopBoundStatus {
+    FitsLoopType,
+    ExclusiveUpperSentinel,
+    OutOfRange,
+}
+
+fn loop_bound_status(bound: &ForBound, width: usize, signed: bool) -> Option<LoopBoundStatus> {
+    let value = match bound {
+        ForBound::Const(v) => BigInt::from(*v),
+        ForBound::Expression(expr) => {
+            if !expr.comptime().is_const {
+                return None;
+            }
+            let value = expr.comptime().get_value().ok()?;
+            match value {
+                Value::U64(v) => {
+                    if v.signed {
+                        BigInt::from(v.to_i64()?)
+                    } else {
+                        BigInt::from(v.to_u64()?)
+                    }
+                }
+                Value::BigUint(v) => {
+                    if v.signed {
+                        v.to_bigint()?
+                    } else {
+                        BigInt::from_biguint(Sign::Plus, (*v.payload).clone())
+                    }
+                }
+            }
+        }
+    };
+
+    if signed {
+        let max = (BigInt::from(1u8) << (width.saturating_sub(1))) - BigInt::from(1u8);
+        let min = -(BigInt::from(1u8) << (width.saturating_sub(1)));
+        Some(if value >= min && value <= max {
+            LoopBoundStatus::FitsLoopType
+        } else if value == max + BigInt::from(1u8) {
+            LoopBoundStatus::ExclusiveUpperSentinel
+        } else {
+            LoopBoundStatus::OutOfRange
+        })
+    } else {
+        let max = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        let max = BigInt::from_biguint(Sign::Plus, max);
+        Some(if value.sign() != Sign::Minus && value <= max {
+            LoopBoundStatus::FitsLoopType
+        } else if value == max + BigInt::from(1u8) {
+            LoopBoundStatus::ExclusiveUpperSentinel
+        } else {
+            LoopBoundStatus::OutOfRange
+        })
+    }
+}
+
+fn inclusive_of(range: &ForRange) -> bool {
+    match range {
+        ForRange::Forward { inclusive, .. }
+        | ForRange::Reverse { inclusive, .. }
+        | ForRange::Stepped { inclusive, .. } => *inclusive,
+    }
+}
+
 fn collect_written_accesses(
     module: &Module,
     statements: &[Statement],
@@ -1507,6 +1573,29 @@ fn eval_for(
             Some(&for_stmt.token),
         ));
     };
+    let (start_bound, end_bound) = match &for_stmt.range {
+        ForRange::Forward { start, end, .. }
+        | ForRange::Reverse { start, end, .. }
+        | ForRange::Stepped { start, end, .. } => (start, end),
+    };
+    let start_status = loop_bound_status(start_bound, loop_width, for_stmt.var_type.signed);
+    let end_status = loop_bound_status(end_bound, loop_width, for_stmt.var_type.signed);
+    // Keep the exclusive upper sentinel used for full-range iteration such as
+    // `0..256` on an 8-bit loop variable, but reject bounds that would
+    // actually force the loop variable outside its representable range.
+    if matches!(
+        start_status,
+        Some(LoopBoundStatus::OutOfRange | LoopBoundStatus::ExclusiveUpperSentinel)
+    ) || matches!(end_status, Some(LoopBoundStatus::OutOfRange))
+        || (inclusive_of(&for_stmt.range)
+            && end_status == Some(LoopBoundStatus::ExclusiveUpperSentinel))
+    {
+        return Err(ParserError::illegal_context(
+            "for loop bound exceeding i32 loop variable",
+            format!("{:?}", for_stmt.var_name),
+            Some(&for_stmt.token),
+        ));
+    }
 
     let mut symbolic_store = store.clone();
     let mut written_accesses = HashMap::default();
@@ -2772,6 +2861,26 @@ fn eval_function_body_return(
                 Some(&for_stmt.token),
             ));
         };
+        let (start_bound, end_bound) = match &for_stmt.range {
+            ForRange::Forward { start, end, .. }
+            | ForRange::Reverse { start, end, .. }
+            | ForRange::Stepped { start, end, .. } => (start, end),
+        };
+        let start_status = loop_bound_status(start_bound, loop_width, for_stmt.var_type.signed);
+        let end_status = loop_bound_status(end_bound, loop_width, for_stmt.var_type.signed);
+        if matches!(
+            start_status,
+            Some(LoopBoundStatus::OutOfRange | LoopBoundStatus::ExclusiveUpperSentinel)
+        ) || matches!(end_status, Some(LoopBoundStatus::OutOfRange))
+            || (inclusive_of(&for_stmt.range)
+                && end_status == Some(LoopBoundStatus::ExclusiveUpperSentinel))
+        {
+            return Err(ParserError::illegal_context(
+                "for loop bound exceeding i32 loop variable",
+                format!("{:?}", for_stmt.var_name),
+                Some(&for_stmt.token),
+            ));
+        }
 
         let mut symbolic_store = state.store.clone();
         let mut written_accesses = HashMap::default();
@@ -4910,5 +5019,21 @@ mod tests {
         let sub_expr = arena.alloc(SLTNode::Binary(c, BinaryOp::Sub, d));
 
         let _mul_node = arena.alloc(SLTNode::Binary(add_expr, BinaryOp::Mul, sub_expr));
+    }
+
+    #[test]
+    fn loop_bound_status_allows_exclusive_upper_sentinel() {
+        assert_eq!(
+            super::loop_bound_status(&ForBound::Const(255), 8, false),
+            Some(super::LoopBoundStatus::FitsLoopType)
+        );
+        assert_eq!(
+            super::loop_bound_status(&ForBound::Const(256), 8, false),
+            Some(super::LoopBoundStatus::ExclusiveUpperSentinel)
+        );
+        assert_eq!(
+            super::loop_bound_status(&ForBound::Const(257), 8, false),
+            Some(super::LoopBoundStatus::OutOfRange)
+        );
     }
 }

@@ -10,7 +10,13 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
 import { buildMonacoTestbenchCompilerOptions } from "./monaco-testbench-options.js";
+import { FourState, X, Z } from "./playground-runtime-helpers.js";
 import { transpileTestbench } from "./testbench-transpile.js";
+import {
+	buildVirtualModuleDts,
+	extractPortsFromSource,
+	type VirtualPortInfo,
+} from "./virtual-module-dts.js";
 import {
 	generateVcdText,
 	type VcdSignalInfo,
@@ -1118,37 +1124,23 @@ function getTestModels(): { path: string; model: monaco.editor.ITextModel }[] {
 	return [];
 }
 
-function updateDutTypes(
-	ports: Record<string, { direction: string; width: number }>,
-) {
+function updateDutTypes(ports: Record<string, VirtualPortInfo>) {
 	if (currentExtraLib) currentExtraLib.dispose();
 
 	// Extract module name from Veryl source
 	const topMatch = getVerylSource().match(/module\s+(\w+)/);
 	const moduleName = topMatch?.[1] || "Top";
 
-	const portEntries = Object.entries(ports)
-		.filter(([_, p]) => p.direction === "input" || p.direction === "output")
-		.map(([name, _]) => `    ${name}: bigint;`)
-		.join("\n");
-
 	// Only generate .veryl module declarations — @celox-sim/celox types are
 	// registered once at startup from the real .d.ts files.
+	const virtualModuleDts = buildVirtualModuleDts(moduleName, ports);
 	const dts = `
 declare module "./${moduleName}.veryl" {
-  import type { ModuleDefinition } from "@celox-sim/celox";
-  export interface ${moduleName}Ports {
-${portEntries}
-  }
-  export const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
+${virtualModuleDts}
 }
 
 declare module "../src/${moduleName}.veryl" {
-  import type { ModuleDefinition } from "@celox-sim/celox";
-  export interface ${moduleName}Ports {
-${portEntries}
-  }
-  export const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
+${virtualModuleDts}
 }
 `;
 	currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(
@@ -1157,13 +1149,7 @@ ${portEntries}
 	);
 
 	// Also register the .veryl module as a virtual file so TS can resolve the import
-	const verylModuleDts = `
-import type { ModuleDefinition } from "@celox-sim/celox";
-export interface ${moduleName}Ports {
-${portEntries}
-}
-export declare const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
-`;
+	const verylModuleDts = virtualModuleDts;
 	// Register under multiple paths to ensure resolution works
 	// test/foo.test.ts imports "../src/Adder.veryl" → resolves to file:///src/Adder.veryl
 	monaco.languages.typescript.typescriptDefaults.addExtraLib(
@@ -1174,21 +1160,6 @@ export declare const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
 		verylModuleDts,
 		`file:///src/${moduleName}.d.veryl.ts`,
 	);
-}
-
-// Extract port names from Veryl source with regex (works without WASM)
-function extractPortsFromSource(
-	source: string,
-): Record<string, { direction: string; width: number }> {
-	const ports: Record<string, { direction: string; width: number }> = {};
-	// Match: name: input/output logic<N> or clock/reset
-	const portRe =
-		/(\w+)\s*:\s*(input|output|inout)\s+(?:'[_a-zA-Z]*\s+)?(logic|bit|clock|reset)(?:<(\d+)>)?/g;
-	let m;
-	while ((m = portRe.exec(source)) !== null) {
-		ports[m[1]] = { direction: m[2], width: m[4] ? parseInt(m[4], 10) : 1 };
-	}
-	return ports;
 }
 
 // Parse error messages from genTsFromSource/NativeSimulatorHandle into Monaco markers
@@ -1999,6 +1970,9 @@ async function run() {
 				"afterEach",
 				"Simulator",
 				"Simulation",
+				"FourState",
+				"X",
+				"Z",
 				"console",
 				...moduleNames,
 			];
@@ -2011,6 +1985,9 @@ async function run() {
 				() => {},
 				Simulator,
 				Simulation,
+				FourState,
+				X,
+				Z,
 				playgroundConsole,
 				...moduleNames.map((n: string) => moduleBindings[n]),
 			];

@@ -1672,9 +1672,11 @@ fn decode_signed_loop_bound(value: TbValue, width: usize) -> Result<EvaluatedLoo
         }
         TbValue::Wide(v) => {
             if width > 128 {
-                return Ok(EvaluatedLoopBound::SignedWide(sign_extend_biguint(
-                    v, width,
-                )));
+                let signed = sign_extend_biguint(v, width);
+                return Ok(match signed.to_i128() {
+                    Some(v) => EvaluatedLoopBound::Signed(v),
+                    None => EvaluatedLoopBound::SignedWide(signed),
+                });
             }
             let raw = v
                 .to_u128()

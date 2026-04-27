@@ -66,11 +66,13 @@ pub(super) fn make_spill(
             // Rematerializable: no spill store needed
             None
         }
-        Some(SpillKind::SimState { .. }) if desc.unwrap().spill_cost == 0 => {
+        Some(SpillKind::SimState { .. } | SpillKind::SimStateAlias { .. })
+            if desc.unwrap().spill_cost == 0 =>
+        {
             // Store-back-only: value is already in simulation state
             None
         }
-        Some(SpillKind::SimState { .. }) => {
+        Some(SpillKind::SimState { .. } | SpillKind::SimStateAlias { .. }) => {
             // Value was loaded from sim state but may have been modified;
             // spill to stack to be safe
             let offset = slots.slot_for(vreg);
@@ -105,11 +107,18 @@ pub(super) fn make_reload(vreg: VReg, func: &MFunction, slots: &mut SpillSlotAll
                 value: *value,
             }
         }
-        Some(SpillKind::SimState {
-            bit_offset,
-            width_bits,
-            ..
-        }) if desc.unwrap().spill_cost == 0 => {
+        Some(
+            SpillKind::SimState {
+                bit_offset,
+                width_bits,
+                ..
+            }
+            | SpillKind::SimStateAlias {
+                bit_offset,
+                width_bits,
+                ..
+            },
+        ) if desc.unwrap().spill_cost == 0 => {
             // Store-back-only: reload from simulation state.
             // The original Load instruction had the correct offset;
             // we reconstruct it from SpillDesc.
