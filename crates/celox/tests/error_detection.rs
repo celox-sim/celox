@@ -626,6 +626,46 @@ fn test_generic_top_returns_error() {
 }
 
 #[test]
+fn test_module_param_type_generic_argument_error_has_hint() {
+    let code = r#"
+        interface Bus::<T: type> {
+            var data: T;
+            modport consumer {
+                data: input,
+            }
+        }
+
+        module Top #(
+            param T: type = logic<8>,
+        ) (
+            bus: modport Bus::<T>::consumer,
+        ) {}
+    "#;
+
+    let result = Simulator::builder(code, "Top").build();
+    let err = result.expect_err("expected analyzer error");
+    match err.kind() {
+        SimulatorErrorKind::Analyzer(errors) => {
+            assert!(
+                format!("{errors:?}").contains("UnresolvableGenericExpression"),
+                "expected UnresolvableGenericExpression, got: {errors:?}"
+            );
+        }
+        other => panic!("expected analyzer error, got: {other:?}"),
+    }
+
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("if this is a module `param T: type`"),
+        "expected Celox hint in rendered error, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("module ModuleName::<T: type>"),
+        "expected generic parameter suggestion in rendered error, got:\n{rendered}"
+    );
+}
+
+#[test]
 fn test_comb_function_body_rejects_system_function_call() {
     let code = r#"
         module Top (

@@ -22,6 +22,20 @@ pub fn render_diagnostic(diag: &dyn miette::Diagnostic) -> String {
     }
 }
 
+fn render_analyzer_error(error: &veryl_analyzer::AnalyzerError) -> String {
+    let mut rendered = render_diagnostic(error);
+    if let veryl_analyzer::AnalyzerError::UnresolvableGenericExpression { identifier, .. } = error {
+        rendered.push_str("\nhelp: if this is a module `param ");
+        rendered.push_str(identifier);
+        rendered.push_str(
+            ": type`, declare it as a module generic parameter like `module ModuleName::<",
+        );
+        rendered.push_str(identifier);
+        rendered.push_str(": type>` instead");
+    }
+    rendered
+}
+
 /// The specific kind of simulator error.
 #[derive(Debug)]
 pub enum SimulatorErrorKind {
@@ -74,7 +88,7 @@ impl fmt::Display for SimulatorError {
                     if i > 0 {
                         f.write_str("\n")?;
                     }
-                    f.write_str(&render_diagnostic(e))?;
+                    f.write_str(&render_analyzer_error(e))?;
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
