@@ -10,17 +10,13 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
 import { buildMonacoTestbenchCompilerOptions } from "./monaco-testbench-options.js";
+import { FourState, X, Z } from "./playground-runtime-helpers.js";
+import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	buildVirtualModuleDts,
 	extractPortsFromSource,
 	type VirtualPortInfo,
 } from "./virtual-module-dts.js";
-import {
-	FourState,
-	X,
-	Z,
-} from "./playground-runtime-helpers.js";
-import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	generateVcdText,
 	type VcdSignalInfo,
