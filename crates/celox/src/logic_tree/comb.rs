@@ -1062,11 +1062,14 @@ fn eval_statement(
             "system function call".to_string(),
             Some(&fc.comptime.token),
         )),
-        Statement::FunctionCall(fc) => Err(ParserError::illegal_context(
-            "statement in always_comb",
-            "function call".to_string(),
-            Some(&fc.comptime.token),
-        )),
+        Statement::FunctionCall(fc) => eval_statement_form_function_call(
+            module,
+            store,
+            boundaries,
+            fc,
+            arena,
+            LoweringPhase::CombLowering,
+        ),
         Statement::TbMethodCall(_) => Err(ParserError::illegal_context(
             "statement in always_comb",
             "testbench method call".to_string(),
@@ -1297,11 +1300,18 @@ fn eval_loop_statement(
             "system function call".to_string(),
             Some(&fc.comptime.token),
         )),
-        Statement::FunctionCall(fc) => Err(ParserError::illegal_context(
-            "statement in always_comb",
-            "function call".to_string(),
-            Some(&fc.comptime.token),
-        )),
+        Statement::FunctionCall(fc) => {
+            let guard_state = state.clone();
+            let (next_store, next_boundaries) = eval_statement_form_function_call(
+                module,
+                state.store,
+                state.boundaries,
+                fc,
+                arena,
+                LoweringPhase::CombLowering,
+            )?;
+            apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
+        }
         Statement::TbMethodCall(_) => Err(ParserError::illegal_context(
             "statement in always_comb",
             "testbench method call".to_string(),
@@ -1529,13 +1539,7 @@ fn collect_written_accesses(
         match stmt {
             Statement::Assign(assign) => {
                 for dst in &assign.dst {
-                    let width = resolve_total_width(module, &module.variables[&dst.id])?;
-                    let access = if is_static_access(&dst.index, &dst.select) {
-                        eval_var_select(module, dst.id, &dst.index, &dst.select)?
-                    } else {
-                        BitAccess::new(0, width - 1)
-                    };
-                    out.entry(dst.id).or_default().push(access);
+                    collect_written_destination(module, out, dst)?;
                 }
             }
             Statement::If(if_stmt) => {
@@ -1547,14 +1551,35 @@ fn collect_written_accesses(
                 collect_written_accesses(module, &if_reset.true_side, out)?;
                 collect_written_accesses(module, &if_reset.false_side, out)?;
             }
+            Statement::FunctionCall(call) => {
+                for dsts in call.outputs.values() {
+                    for dst in dsts {
+                        collect_written_destination(module, out, dst)?;
+                    }
+                }
+            }
             Statement::SystemFunctionCall(_)
-            | Statement::FunctionCall(_)
             | Statement::TbMethodCall(_)
             | Statement::Break
             | Statement::Unsupported(_)
             | Statement::Null => {}
         }
     }
+    Ok(())
+}
+
+fn collect_written_destination(
+    module: &Module,
+    out: &mut HashMap<VarId, Vec<BitAccess>>,
+    dst: &veryl_analyzer::ir::AssignDestination,
+) -> Result<(), ParserError> {
+    let width = resolve_total_width(module, &module.variables[&dst.id])?;
+    let access = if is_static_access(&dst.index, &dst.select) {
+        eval_var_select(module, dst.id, &dst.index, &dst.select)?
+    } else {
+        BitAccess::new(0, width - 1)
+    };
+    out.entry(dst.id).or_default().push(access);
     Ok(())
 }
 
@@ -1913,6 +1938,182 @@ fn eval_assign(
             current_offset += part_width;
         }
     }
+    Ok((store, boundaries))
+}
+
+fn assign_node_to_dsts(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: BoundaryMap<VarId>,
+    dsts: &[veryl_analyzer::ir::AssignDestination],
+    rhs_expr: NodeId,
+    rhs_sources: HashSet<VarAtomBase<VarId>>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    if dsts.len() == 1 {
+        let dst = &dsts[0];
+        if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
+            let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
+
+            let b = boundaries.entry(dst.id).or_default();
+            b.insert(access.lsb);
+            b.insert(access.msb + 1);
+
+            if let Some(range_store) = store.get_mut(&dst.id) {
+                range_store.update(access, Some((rhs_expr, rhs_sources)));
+            }
+
+            return Ok((store, boundaries));
+        }
+
+        return eval_dynamic_assign(module, store, boundaries, dst, rhs_expr, rhs_sources, arena);
+    }
+
+    let mut current_offset = 0;
+    for dst in dsts.iter().rev() {
+        let part_width =
+            crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)?;
+        let slice_expr = arena.alloc(SLTNode::Slice {
+            expr: rhs_expr,
+            access: BitAccess::new(current_offset, current_offset + part_width - 1),
+        });
+
+        if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
+            let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
+
+            let b = boundaries.entry(dst.id).or_default();
+            b.insert(access.lsb);
+            b.insert(access.msb + 1);
+
+            if let Some(range_store) = store.get_mut(&dst.id) {
+                range_store.update(access, Some((slice_expr, rhs_sources.clone())));
+            }
+        } else {
+            let (next_store, next_boundaries) = eval_dynamic_assign(
+                module,
+                store,
+                boundaries,
+                dst,
+                slice_expr,
+                rhs_sources.clone(),
+                arena,
+            )?;
+            store = next_store;
+            boundaries = next_boundaries;
+        }
+
+        current_offset += part_width;
+    }
+
+    Ok((store, boundaries))
+}
+
+fn eval_statement_form_function_call(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: BoundaryMap<VarId>,
+    call: &veryl_analyzer::ir::FunctionCall,
+    arena: &mut SLTNodeArena<VarId>,
+    phase: LoweringPhase,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    if call.outputs.is_empty() {
+        return Err(ParserError::unsupported(
+            58,
+            phase,
+            "statement-form function call without output arguments",
+            format!("{call}"),
+            Some(&call.comptime.token),
+        ));
+    }
+
+    let Some(function) = module.functions.get(&call.id) else {
+        return Err(ParserError::unsupported(
+            60,
+            phase,
+            "function call",
+            format!("unknown function id: {:?}", call.id),
+            Some(&call.comptime.token),
+        ));
+    };
+
+    let Some(function_body) = (if let Some(index) = &call.index {
+        function.get_function(index)
+    } else {
+        function.get_function(&[])
+    }) else {
+        return Err(ParserError::unsupported(
+            60,
+            phase,
+            "function call specialization",
+            format!("{call}"),
+            Some(&call.comptime.token),
+        ));
+    };
+
+    let mut local_store = store.clone();
+
+    for (arg_path, arg_id) in &function_body.arg_map {
+        let Some(arg_expr) = call.inputs.get(arg_path) else {
+            continue;
+        };
+
+        let formal = &module.variables[arg_id];
+        let arg_width = resolve_total_width(module, formal)?;
+        let ((arg_node, arg_sources), arg_bounds) =
+            eval_expression(module, &store, arg_expr, arena, Some(arg_width))?;
+        boundaries = merge_boundaries(boundaries, arg_bounds);
+        local_store.insert(
+            *arg_id,
+            RangeStore::new(Some((arg_node, arg_sources)), arg_width),
+        );
+    }
+
+    let (final_local_store, local_boundaries) = if let Some(ret_id) = function_body.ret {
+        let ((_, _), local_boundaries, final_local_store) =
+            eval_function_body_return(module, &local_store, &function_body, ret_id, arena)?;
+        (final_local_store, local_boundaries)
+    } else {
+        function_body.statements.iter().try_fold(
+            (local_store, BoundaryMap::default()),
+            |(local_store, local_boundaries), stmt| {
+                eval_statement(module, local_store, local_boundaries, stmt, arena)
+            },
+        )?
+    };
+    boundaries = merge_boundaries(boundaries, local_boundaries);
+
+    for (arg_path, dsts) in &call.outputs {
+        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+            return Err(ParserError::unsupported(
+                61,
+                phase,
+                "function call missing argument",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            ));
+        };
+
+        let formal = &module.variables[arg_id];
+        let formal_width = resolve_total_width(module, formal)?;
+        let access = BitAccess::new(0, formal_width - 1);
+        let Some(range_store) = final_local_store.get(arg_id) else {
+            continue;
+        };
+        let (output_expr, output_sources) =
+            combine_parts_with_default(*arg_id, 0, range_store.get_parts(access), arena);
+        let (next_store, next_boundaries) = assign_node_to_dsts(
+            module,
+            store,
+            boundaries,
+            dsts,
+            output_expr,
+            output_sources,
+            arena,
+        )?;
+        store = next_store;
+        boundaries = next_boundaries;
+    }
+
     Ok((store, boundaries))
 }
 
@@ -2298,7 +2499,14 @@ fn eval_function_body_return(
     body: &veryl_analyzer::ir::FunctionBody,
     ret_id: VarId,
     arena: &mut SLTNodeArena<VarId>,
-) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+) -> Result<
+    (
+        (NodeId, HashSet<VarAtomBase<VarId>>),
+        BoundaryMap<VarId>,
+        SymbolicStore<VarId>,
+    ),
+    ParserError,
+> {
     fn is_whole_var_assign_to(assign: &AssignStatement, var_id: VarId) -> bool {
         assign.dst.len() == 1
             && assign.dst[0].id == var_id
@@ -2502,13 +2710,25 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
-            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
-                58,
-                LoweringPhase::CombLowering,
-                "statement-form function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
+            Statement::FunctionCall(call) => {
+                for expr in call.inputs.values() {
+                    validate_function_body_expression(module, expr)?;
+                }
+                for dsts in call.outputs.values() {
+                    for dst in dsts {
+                        for index_expr in &dst.index.0 {
+                            validate_function_body_expression(module, index_expr)?;
+                        }
+                        for select_expr in &dst.select.0 {
+                            validate_function_body_expression(module, select_expr)?;
+                        }
+                        if let Some((_, range_expr)) = &dst.select.1 {
+                            validate_function_body_expression(module, range_expr)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
             Statement::TbMethodCall(_)
             | Statement::Unsupported(_)
             | Statement::Break
@@ -2827,7 +3047,10 @@ fn eval_function_body_return(
                 Statement::If(if_stmt) => {
                     eval_function_loop_if(module, state, if_stmt, ret_id, arena)
                 }
-                Statement::Assign(_) | Statement::For(_) | Statement::Null => {
+                Statement::Assign(_)
+                | Statement::For(_)
+                | Statement::FunctionCall(_)
+                | Statement::Null => {
                     let guard_state = state.clone();
                     let next_function =
                         eval_function_statement(module, state.function, stmt, ret_id, arena)?;
@@ -2847,13 +3070,6 @@ fn eval_function_body_return(
                     59,
                     LoweringPhase::CombLowering,
                     "system function call in comb function body",
-                    format!("{stmt}"),
-                    Some(&fc.comptime.token),
-                )),
-                Statement::FunctionCall(fc) => Err(ParserError::unsupported(
-                    58,
-                    LoweringPhase::CombLowering,
-                    "statement-form function call in comb function body",
                     format!("{stmt}"),
                     Some(&fc.comptime.token),
                 )),
@@ -3365,7 +3581,10 @@ fn eval_function_body_return(
 
         match stmt {
             Statement::If(if_stmt) => eval_function_break_if(module, state, if_stmt, ret_id, arena),
-            Statement::Assign(_) | Statement::For(_) | Statement::Null => {
+            Statement::Assign(_)
+            | Statement::For(_)
+            | Statement::FunctionCall(_)
+            | Statement::Null => {
                 let guard_state = state.clone();
                 let next_function =
                     eval_function_statement(module, state.function, stmt, ret_id, arena)?;
@@ -3385,13 +3604,6 @@ fn eval_function_body_return(
                 59,
                 LoweringPhase::CombLowering,
                 "system function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
-            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
-                58,
-                LoweringPhase::CombLowering,
-                "statement-form function call in comb function body",
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
@@ -3493,6 +3705,26 @@ fn eval_function_body_return(
             }
             Statement::If(if_stmt) => eval_function_if(module, state, if_stmt, ret_id, arena),
             Statement::For(for_stmt) => eval_function_for(module, state, for_stmt, ret_id, arena),
+            Statement::FunctionCall(call) => {
+                let guard_state = state.clone();
+                let (next_store, next_bounds) = eval_statement_form_function_call(
+                    module,
+                    state.store,
+                    state.boundaries,
+                    call,
+                    arena,
+                    LoweringPhase::CombLowering,
+                )?;
+                apply_function_guard(
+                    module,
+                    guard_state,
+                    next_store,
+                    next_bounds,
+                    bool_node(arena, true),
+                    HashSet::default(),
+                    arena,
+                )
+            }
             Statement::Null => Ok(state),
             Statement::IfReset(ir) => Err(ParserError::illegal_context(
                 "statement in comb function body",
@@ -3506,13 +3738,6 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&fc.comptime.token),
             )),
-            Statement::FunctionCall(fc) => Err(ParserError::unsupported(
-                58,
-                LoweringPhase::CombLowering,
-                "statement-form function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
             Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                 Err(ParserError::illegal_context(
                     "statement in comb function body",
@@ -3523,7 +3748,7 @@ fn eval_function_body_return(
         }
     }
 
-    let mut local_store = SymbolicStore::default();
+    let mut local_store = caller_store.clone();
     let local_bounds = BoundaryMap::default();
     let mut written = HashMap::default();
 
@@ -3576,7 +3801,11 @@ fn eval_function_body_return(
         ));
     }
     let (ret_expr, ret_sources) = function_return_value(module, &final_state.store, ret_id, arena)?;
-    Ok(((ret_expr, ret_sources), final_state.boundaries))
+    Ok((
+        (ret_expr, ret_sources),
+        final_state.boundaries,
+        final_state.store,
+    ))
 }
 
 fn eval_function_call_expression(
@@ -3661,7 +3890,7 @@ fn eval_function_call_expression(
         );
     }
 
-    let ((ret_node, ret_sources), ret_bounds) =
+    let ((ret_node, ret_sources), ret_bounds, _) =
         eval_function_body_return(module, &local_store, &function_body, ret_id, arena)?;
     Ok((
         (ret_node, ret_sources),
@@ -4696,8 +4925,7 @@ mod tests {
         pub paths: Vec<LogicPath<VarId>>,
         pub boundaries: HashMap<VarId, BTreeSet<usize>>,
     }
-    /// 新しい parse_comb の出力を直接検査するためのヘルパー
-    pub fn inspect_comb(code: &str) -> (Module, CombResult) {
+    pub fn parse_top_module(code: &str) -> Module {
         symbol_table::clear();
         attribute_table::clear();
 
@@ -4719,14 +4947,18 @@ mod tests {
 
         // Top モジュールを探す
         let top_id = veryl_parser::resource_table::insert_str("Top");
-        let top_module = ir
-            .components
+        ir.components
             .into_iter()
             .find_map(|e| match e {
                 Component::Module(m) if m.name == top_id => Some(m),
                 _ => None,
             })
-            .expect("Top module not found");
+            .expect("Top module not found")
+    }
+
+    /// 新しい parse_comb の出力を直接検査するためのヘルパー
+    pub fn inspect_comb(code: &str) -> (Module, CombResult) {
+        let top_module = parse_top_module(code);
 
         // Top モジュール内の最初の always_comb をパース
         // (実際には複数の場合もあるので、必要に応じて loop させる)
@@ -4791,6 +5023,78 @@ mod tests {
         assert_eq!(a_deps[0].access.lsb, 0);
         assert_eq!(a_deps[0].access.msb, 3);
     }
+
+    #[test]
+    fn test_output_function_body_read_boundaries_propagate() {
+        let code = r#"
+            module Top (a: input logic<8>, q: output logic<4>) {
+                function f (
+                    y: output logic<4>,
+                ) {
+                    y = a[3:0];
+                }
+
+                always_comb {
+                    f(q);
+                }
+            }
+        "#;
+        let (module, result) = inspect_comb(code);
+        let a_id = var_id_of(&module, &["a"]);
+        let bounds = &result.boundaries[&a_id];
+
+        assert!(bounds.contains(&0));
+        assert!(bounds.contains(&4));
+    }
+
+    #[test]
+    fn test_collect_written_accesses_includes_function_call_outputs() {
+        let code = r#"
+            module Top (n: input logic<3>, q: output logic<4>) {
+                function set_bit (
+                    x: input logic,
+                    y: output logic,
+                ) {
+                    y = x;
+                }
+
+                always_comb {
+                    for i in 0..n {
+                        set_bit(1'b0, q[i]);
+                    }
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|d| {
+                if let Declaration::Comb(c) = d {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .expect("No always_comb found in Top");
+        let for_stmt = comb_decl
+            .statements
+            .iter()
+            .find_map(|stmt| {
+                if let Statement::For(for_stmt) = stmt {
+                    Some(for_stmt)
+                } else {
+                    None
+                }
+            })
+            .expect("No for statement found in Top");
+        let mut written = HashMap::default();
+        collect_written_accesses(&module, &for_stmt.body, &mut written).unwrap();
+
+        let q_id = var_id_of(&module, &["q"]);
+        assert_eq!(written[&q_id], vec![BitAccess::new(0, 3)]);
+    }
+
     #[test]
     fn test_dependency_override() {
         let code = r#"
