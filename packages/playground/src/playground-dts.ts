@@ -16,11 +16,10 @@ function setterTypeForPort(port: VirtualPortInfo): string {
 	return port.is4state ? "FourStateSignalValue" : "bigint";
 }
 
-function needsFourStateImport(
-	ports: Record<string, VirtualPortInfo>,
-): boolean {
+function needsFourStateImport(ports: Record<string, VirtualPortInfo>): boolean {
 	return Object.values(ports).some(
-		(port) => port.kind !== "clock" && port.direction !== "output" && port.is4state,
+		(port) =>
+			port.kind !== "clock" && port.direction !== "output" && port.is4state,
 	);
 }
 
