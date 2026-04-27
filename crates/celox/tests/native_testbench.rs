@@ -644,6 +644,30 @@ fn test_for_loop_dynamic_signed_bound_preserves_negative_value() {
 }
 
 #[test]
+fn test_for_loop_dynamic_wide_signed_bound_small_value_still_runs() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var start: signed logic<256>;
+            var hits: logic<32>;
+            initial {
+                start = 1;
+                hits = 0;
+                for _i in start..=3 {
+                    hits += 1;
+                }
+                $assert(hits == 32'd3);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_for_loop_dynamic_inclusive_max_bound_runs_terminal_iteration() {
     let code = format!(
         r#"

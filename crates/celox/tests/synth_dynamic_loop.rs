@@ -1,4 +1,4 @@
-use celox::{RuntimeErrorCode, Simulator};
+use celox::{BigUint, RuntimeErrorCode, Simulator};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -76,6 +76,7 @@ fn test_constant_break_in_synth_comb_loop(sim) {
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(sum), 3u32.into());
 }
+
 
 #[ignore]
 fn test_constant_signed_bounds_in_unrolled_synth_loops(sim) {
@@ -901,4 +902,35 @@ fn test_runtime_bounds_inclusive_max_bound_runs_full_range(sim) {
     assert_eq!(sim.get(hits), 256u32.into());
 }
 
+}
+
+#[test]
+fn test_runtime_bounds_wide_dynamic_bound_is_still_allowed() {
+    let code = r#"
+        module Top (
+            bound: input logic<128>,
+            hits: output logic<32>,
+            last: output logic<64>
+        ) {
+            always_comb {
+                hits = 0;
+                last = 64'hffff_ffff_ffff_ffff;
+                for i in (bound - 1) .. bound {
+                    hits += 1;
+                    last = i;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let bound = sim.signal("bound");
+    let hits = sim.signal("hits");
+    let last = sim.signal("last");
+
+    sim.modify(|io| io.set_wide(bound, BigUint::from(2u32)))
+        .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(hits), 1u32.into());
+    assert_eq!(sim.get(last), 1u32.into());
 }

@@ -21,6 +21,8 @@ pub struct AnalysisResult {
     pub exit_distances: Vec<HashMap<VReg, u32>>,
     /// Predecessor list for each block (by index).
     pub predecessors: Vec<Vec<usize>>,
+    /// Successor list for each block (by index).
+    pub successors: Vec<Vec<usize>>,
 }
 
 /// Compute liveness and next-use distances for the entire MFunction.
@@ -148,5 +150,6 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
         entry_distances,
         exit_distances,
         predecessors,
+        successors,
     }
 }

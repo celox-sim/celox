@@ -12,12 +12,43 @@ use crate::{
     },
 };
 use bit_set::BitSet;
+use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
 
 use veryl_analyzer::ir::{
     Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange, ForStatement, IfResetStatement,
     IfStatement, Module, Op, Statement, TypeKind, ValueVariant, VarId,
 };
+use veryl_analyzer::value::Value;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoopBoundStatus {
+    FitsLoopType,
+    ExclusiveUpperSentinel,
+    OutOfRange,
+}
+
+#[cfg(test)]
+mod loop_bound_status_tests {
+    use super::{FfParser, LoopBoundStatus};
+    use veryl_analyzer::ir::ForBound;
+
+    #[test]
+    fn allows_exclusive_upper_sentinel() {
+        assert_eq!(
+            FfParser::loop_bound_status(&ForBound::Const(255), 8, false),
+            Some(LoopBoundStatus::FitsLoopType)
+        );
+        assert_eq!(
+            FfParser::loop_bound_status(&ForBound::Const(256), 8, false),
+            Some(LoopBoundStatus::ExclusiveUpperSentinel)
+        );
+        assert_eq!(
+            FfParser::loop_bound_status(&ForBound::Const(257), 8, false),
+            Some(LoopBoundStatus::OutOfRange)
+        );
+    }
+}
 
 mod expression;
 mod function_call;
@@ -453,19 +484,84 @@ impl<'a> FfParser<'a> {
         Ok(ControlFlow::Continue)
     }
 
-    fn bound_width(&self, bound: &ForBound) -> usize {
+    fn loop_bound_status(bound: &ForBound, width: usize, signed: bool) -> Option<LoopBoundStatus> {
+        let value = match bound {
+            ForBound::Const(v) => BigInt::from(*v),
+            ForBound::Expression(expr) => {
+                if !expr.comptime().is_const {
+                    return None;
+                }
+                let value = expr.comptime().get_value().ok()?;
+                match value {
+                    Value::U64(v) => {
+                        if v.signed {
+                            BigInt::from(v.to_i64()?)
+                        } else {
+                            BigInt::from(v.to_u64()?)
+                        }
+                    }
+                    Value::BigUint(v) => {
+                        if v.signed {
+                            v.to_bigint()?
+                        } else {
+                            BigInt::from_biguint(Sign::Plus, (*v.payload).clone())
+                        }
+                    }
+                }
+            }
+        };
+
+        if signed {
+            let max = (BigInt::from(1u8) << (width.saturating_sub(1))) - BigInt::from(1u8);
+            let min = -(BigInt::from(1u8) << (width.saturating_sub(1)));
+            Some(if value >= min && value <= max {
+                LoopBoundStatus::FitsLoopType
+            } else if value == max + BigInt::from(1u8) {
+                LoopBoundStatus::ExclusiveUpperSentinel
+            } else {
+                LoopBoundStatus::OutOfRange
+            })
+        } else {
+            let max = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+            let max = BigInt::from_biguint(Sign::Plus, max);
+            Some(if value.sign() != Sign::Minus && value <= max {
+                LoopBoundStatus::FitsLoopType
+            } else if value == max + BigInt::from(1u8) {
+                LoopBoundStatus::ExclusiveUpperSentinel
+            } else {
+                LoopBoundStatus::OutOfRange
+            })
+        }
+    }
+
+    fn loop_bound_width(&self, bound: &ForBound, signed: bool) -> Option<usize> {
         match bound {
             ForBound::Const(v) => {
-                let bits = usize::BITS as usize - v.leading_zeros() as usize;
-                bits.max(1)
+                let value = BigInt::from(*v);
+                Some(if signed {
+                    if value.sign() == Sign::Minus {
+                        let magnitude = (-value - BigInt::from(1u8)).to_biguint()?;
+                        magnitude.bits() as usize + 1
+                    } else {
+                        value.to_biguint()?.bits() as usize + 1
+                    }
+                } else {
+                    let magnitude = value.to_biguint()?;
+                    (magnitude.bits() as usize).max(1)
+                })
             }
-            ForBound::Expression(expr) => expr
-                .comptime()
-                .expr_context
-                .width
-                .max(expr.comptime().r#type.total_width().unwrap_or(0))
-                .max(self.get_expression_width(expr))
-                .max(1),
+            ForBound::Expression(expr) => {
+                let comptime_width = expr.comptime().r#type.total_width();
+                let context_width = Some(expr.comptime().expr_context.width).filter(|w| *w > 0);
+                Some(
+                    comptime_width
+                        .into_iter()
+                        .chain(context_width)
+                        .chain(std::iter::once(self.get_expression_width(expr)))
+                        .max()
+                        .unwrap_or(1),
+                )
+            }
         }
     }
 
@@ -484,6 +580,119 @@ impl<'a> FfParser<'a> {
                 base_width.saturating_add(step_bits)
             }
             Some(_) => base_width,
+        }
+    }
+
+    fn emit_loop_value_fits<A>(
+        ir_builder: &mut SIRBuilder<A>,
+        value_reg: RegisterId,
+        compare_width: usize,
+        loop_width: usize,
+        loop_signed: bool,
+        allow_exclusive_upper_sentinel: bool,
+    ) -> RegisterId {
+        debug_assert!(compare_width >= loop_width);
+        let one = BigUint::from(1u8);
+        if loop_signed {
+            let min_payload = (&one << compare_width) - (&one << (loop_width - 1));
+            let max_payload = (&one << (loop_width - 1)) - &one;
+
+            let min_reg = ir_builder.alloc_bit(compare_width, true);
+            ir_builder.emit(SIRInstruction::Imm(
+                min_reg,
+                crate::ir::SIRValue::new(min_payload),
+            ));
+            let max_reg = ir_builder.alloc_bit(compare_width, true);
+            ir_builder.emit(SIRInstruction::Imm(
+                max_reg,
+                crate::ir::SIRValue::new(max_payload.clone()),
+            ));
+
+            let ge_min = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                ge_min,
+                value_reg,
+                crate::ir::BinaryOp::GeS,
+                min_reg,
+            ));
+            let le_max = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                le_max,
+                value_reg,
+                crate::ir::BinaryOp::LeS,
+                max_reg,
+            ));
+            let fits_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                fits_reg,
+                ge_min,
+                crate::ir::BinaryOp::LogicAnd,
+                le_max,
+            ));
+
+            if allow_exclusive_upper_sentinel {
+                let sentinel_reg = ir_builder.alloc_bit(compare_width, true);
+                ir_builder.emit(SIRInstruction::Imm(
+                    sentinel_reg,
+                    crate::ir::SIRValue::new(max_payload + &one),
+                ));
+                let is_sentinel = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    is_sentinel,
+                    value_reg,
+                    crate::ir::BinaryOp::Eq,
+                    sentinel_reg,
+                ));
+                let allowed_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    allowed_reg,
+                    fits_reg,
+                    crate::ir::BinaryOp::LogicOr,
+                    is_sentinel,
+                ));
+                allowed_reg
+            } else {
+                fits_reg
+            }
+        } else {
+            let max_payload = (&one << loop_width) - &one;
+            let max_reg = ir_builder.alloc_bit(compare_width, false);
+            ir_builder.emit(SIRInstruction::Imm(
+                max_reg,
+                crate::ir::SIRValue::new(max_payload.clone()),
+            ));
+            let fits_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                fits_reg,
+                value_reg,
+                crate::ir::BinaryOp::LeU,
+                max_reg,
+            ));
+
+            if allow_exclusive_upper_sentinel {
+                let sentinel_reg = ir_builder.alloc_bit(compare_width, false);
+                ir_builder.emit(SIRInstruction::Imm(
+                    sentinel_reg,
+                    crate::ir::SIRValue::new(max_payload + &one),
+                ));
+                let is_sentinel = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    is_sentinel,
+                    value_reg,
+                    crate::ir::BinaryOp::Eq,
+                    sentinel_reg,
+                ));
+                let allowed_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    allowed_reg,
+                    fits_reg,
+                    crate::ir::BinaryOp::LogicOr,
+                    is_sentinel,
+                ));
+                allowed_reg
+            } else {
+                fits_reg
+            }
         }
     }
 
@@ -630,22 +839,40 @@ impl<'a> FfParser<'a> {
             ));
         }
 
-        let start_width = self.bound_width(start_bound);
-        let end_width = self.bound_width(end_bound);
-        // Current Veryl syntax no longer accepts typed loop variables such as
-        // `for i: u8 in ...`; analyzer now produces an untyped `for i in ...`
-        // and `stmt.var_type` follows that inferred loop variable type.
-        // Because of that, widening the visible loop variable to track wide
-        // runtime bounds is not regressing a user-declared narrow loop-var
-        // annotation on the current language surface.
-        let loop_width = base_loop_width.max(start_width).max(end_width).max(1);
-
-        let counter_width = loop_width;
+        let loop_width = base_loop_width.max(1);
+        let start_bound_width = self
+            .loop_bound_width(start_bound, loop_signed)
+            .unwrap_or(loop_width);
+        let end_bound_width = self
+            .loop_bound_width(end_bound, loop_signed)
+            .unwrap_or(loop_width);
+        let start_status = Self::loop_bound_status(start_bound, loop_width, loop_signed);
+        let end_status = Self::loop_bound_status(end_bound, loop_width, loop_signed);
+        let uses_exclusive_end_sentinel = !inclusive;
+        // Veryl now models loop variables as i32. Reject statically invalid
+        // bounds, but keep supporting the exclusive upper sentinel used for
+        // full-range iteration such as `0..256` on an 8-bit loop variable.
+        if matches!(
+            start_status,
+            Some(LoopBoundStatus::OutOfRange | LoopBoundStatus::ExclusiveUpperSentinel)
+        ) || matches!(end_status, Some(LoopBoundStatus::OutOfRange))
+            || (inclusive && end_status == Some(LoopBoundStatus::ExclusiveUpperSentinel))
+        {
+            return Err(ParserError::illegal_context(
+                "for loop bound exceeding i32 loop variable",
+                format!("{:?}", stmt.var_name),
+                Some(&stmt.token),
+            ));
+        }
+        let counter_width = loop_width.max(1);
+        let bound_width = counter_width.max(start_bound_width).max(end_bound_width);
         let widen_inclusive = inclusive && !loop_signed;
         let compare_width = if widen_inclusive {
-            counter_width.saturating_add(1)
+            bound_width.saturating_add(1)
+        } else if uses_exclusive_end_sentinel {
+            bound_width.max(counter_width.saturating_add(1))
         } else {
-            counter_width
+            bound_width
         };
         let math_width = if reverse {
             Self::step_math_width(compare_width, Some(Op::Add), step)
@@ -655,7 +882,7 @@ impl<'a> FfParser<'a> {
 
         let start_reg = self.parse_for_bound(
             start_bound,
-            loop_width,
+            compare_width,
             compare_width,
             loop_signed,
             targets,
@@ -666,7 +893,7 @@ impl<'a> FfParser<'a> {
         )?;
         let end_reg = self.parse_for_bound(
             end_bound,
-            loop_width,
+            compare_width,
             compare_width,
             loop_signed,
             targets,
@@ -694,15 +921,109 @@ impl<'a> FfParser<'a> {
         let init_reg = if reverse { end_reg } else { start_reg };
 
         let header_counter = ir_builder.alloc_bit(compare_width, loop_signed);
+        let fitcheck_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
+        let precheck_bb = ir_builder.new_block();
+        let empty_exit_counter = ir_builder.alloc_bit(compare_width, loop_signed);
+        let empty_exit_check_bb = ir_builder.new_block_with(vec![empty_exit_counter]);
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
+        let fitcheck_bb = ir_builder.new_block_with(vec![fitcheck_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
+        let range_error_bb = ir_builder.new_block();
         let stall_bb = ir_builder.new_block();
         let exit_bb = ir_builder.new_block();
-        ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
+        if !reverse && compare_width != loop_width {
+            ir_builder.seal_block(SIRTerminator::Jump(precheck_bb, vec![]));
+        } else {
+            ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
+        }
 
         let pre_loop_defined = self.defined_ranges.clone();
         let pre_loop_dynamic = self.dynamic_defined_vars.clone();
+
+        if !reverse && compare_width != loop_width {
+            ir_builder.switch_to_block(precheck_bb);
+            let end_allowed_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    end_reg,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    !inclusive,
+                )
+            } else {
+                let end_visible =
+                    self.cast_reg_width_ext(ir_builder, end_reg, loop_width, loop_signed);
+                let end_roundtrip =
+                    self.cast_reg_width_ext(ir_builder, end_visible, compare_width, loop_signed);
+                let end_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    end_fits_reg,
+                    end_reg,
+                    crate::ir::BinaryOp::Eq,
+                    end_roundtrip,
+                ));
+                if !inclusive {
+                    let sentinel_reg = ir_builder.alloc_bit(compare_width, loop_signed);
+                    let sentinel_value = if loop_signed {
+                        1u64 << (loop_width - 1)
+                    } else {
+                        1u64 << loop_width
+                    };
+                    ir_builder.emit(SIRInstruction::Imm(
+                        sentinel_reg,
+                        crate::ir::SIRValue::new(sentinel_value),
+                    ));
+                    let end_is_sentinel_reg = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        end_is_sentinel_reg,
+                        end_reg,
+                        crate::ir::BinaryOp::Eq,
+                        sentinel_reg,
+                    ));
+                    let allowed_reg = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        allowed_reg,
+                        end_fits_reg,
+                        crate::ir::BinaryOp::LogicOr,
+                        end_is_sentinel_reg,
+                    ));
+                    allowed_reg
+                } else {
+                    end_fits_reg
+                }
+            };
+            let precheck_pass_bb = ir_builder.new_block();
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: end_allowed_reg,
+                true_block: (precheck_pass_bb, vec![]),
+                false_block: (range_error_bb, vec![]),
+            });
+            ir_builder.switch_to_block(precheck_pass_bb);
+            let cond_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                cond_reg,
+                start_reg,
+                if loop_signed {
+                    if inclusive {
+                        crate::ir::BinaryOp::LeS
+                    } else {
+                        crate::ir::BinaryOp::LtS
+                    }
+                } else {
+                    crate::ir::BinaryOp::LtU
+                },
+                end_limit,
+            ));
+            // Keep the initial widened-range decision in the precheck block so
+            // we do not reuse the same block-param SSA value across multiple blocks.
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: cond_reg,
+                true_block: (fitcheck_bb, vec![start_reg]),
+                false_block: (empty_exit_check_bb, vec![start_reg]),
+            });
+        }
 
         ir_builder.switch_to_block(header_bb);
         if reverse {
@@ -743,7 +1064,11 @@ impl<'a> FfParser<'a> {
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: in_range,
                     true_block: (in_range_bb, vec![]),
-                    false_block: (exit_bb, vec![]),
+                    false_block: if compare_width != loop_width {
+                        (empty_exit_check_bb, vec![header_counter])
+                    } else {
+                        (exit_bb, vec![])
+                    },
                 });
                 ir_builder.switch_to_block(in_range_bb);
                 if let Some(singleton) = singleton {
@@ -758,7 +1083,7 @@ impl<'a> FfParser<'a> {
                 ir_builder.switch_to_block(true_loop_bb);
                 ir_builder.seal_block(SIRTerminator::Error(1));
                 ir_builder.switch_to_block(singleton_bb);
-                ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![header_counter]));
+                ir_builder.seal_block(SIRTerminator::Jump(fitcheck_bb, vec![header_counter]));
             } else {
                 let loop_math =
                     self.cast_reg_width_ext(ir_builder, header_counter, math_width, loop_signed);
@@ -802,8 +1127,12 @@ impl<'a> FfParser<'a> {
                 };
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: cond_reg,
-                    true_block: (body_bb, vec![body_counter_reg]),
-                    false_block: (exit_bb, vec![]),
+                    true_block: (fitcheck_bb, vec![body_counter_reg]),
+                    false_block: if compare_width != loop_width {
+                        (empty_exit_check_bb, vec![header_counter])
+                    } else {
+                        (exit_bb, vec![])
+                    },
                 });
             }
         } else {
@@ -824,25 +1153,131 @@ impl<'a> FfParser<'a> {
             ));
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: cond_reg,
-                true_block: (body_bb, vec![header_counter]),
+                true_block: (fitcheck_bb, vec![header_counter]),
                 false_block: (exit_bb, vec![]),
             });
         }
 
-        ir_builder.switch_to_block(body_bb);
-        self.local_working_vars.insert(stmt.var_id);
-        // always_ff uses NBA semantics: this loop variable is the only value
-        // made visible intra-block, while all other reads still observe the
-        // pre-commit old state until WORKING -> STABLE commits happen later.
-        let visible_loop_reg =
-            self.cast_reg_width_ext(ir_builder, body_counter, loop_width, loop_signed);
+        if compare_width != loop_width {
+            ir_builder.switch_to_block(empty_exit_check_bb);
+            let empty_fits_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    empty_exit_counter,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let empty_visible = self.cast_reg_width_ext(
+                    ir_builder,
+                    empty_exit_counter,
+                    loop_width,
+                    loop_signed,
+                );
+                let empty_roundtrip =
+                    self.cast_reg_width_ext(ir_builder, empty_visible, compare_width, loop_signed);
+                let empty_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    empty_fits_reg,
+                    empty_exit_counter,
+                    crate::ir::BinaryOp::Eq,
+                    empty_roundtrip,
+                ));
+                empty_fits_reg
+            };
+            let empty_start_fits_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    start_reg,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let empty_start_visible =
+                    self.cast_reg_width_ext(ir_builder, start_reg, loop_width, loop_signed);
+                let empty_start_roundtrip = self.cast_reg_width_ext(
+                    ir_builder,
+                    empty_start_visible,
+                    compare_width,
+                    loop_signed,
+                );
+                let empty_start_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    empty_start_fits_reg,
+                    start_reg,
+                    crate::ir::BinaryOp::Eq,
+                    empty_start_roundtrip,
+                ));
+                empty_start_fits_reg
+            };
+            let empty_allowed_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                empty_allowed_reg,
+                empty_fits_reg,
+                crate::ir::BinaryOp::LogicAnd,
+                empty_start_fits_reg,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: empty_allowed_reg,
+                true_block: (exit_bb, vec![]),
+                false_block: (range_error_bb, vec![]),
+            });
+        }
+
+        ir_builder.switch_to_block(fitcheck_bb);
+        let fitcheck_visible_reg =
+            self.cast_reg_width_ext(ir_builder, fitcheck_counter, loop_width, loop_signed);
+        // Publish the loop variable before entering the body block so the
+        // body itself stays a single widened block for native codegen.
         ir_builder.emit(SIRInstruction::Store(
             convert(stmt.var_id, domain.region()),
             crate::ir::SIROffset::Static(0),
             loop_width,
-            visible_loop_reg,
+            fitcheck_visible_reg,
             Vec::new(),
         ));
+        if compare_width != loop_width {
+            let fits_loop_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    fitcheck_counter,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let visible_roundtrip = self.cast_reg_width_ext(
+                    ir_builder,
+                    fitcheck_visible_reg,
+                    compare_width,
+                    loop_signed,
+                );
+                let fits_loop_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    fits_loop_reg,
+                    fitcheck_counter,
+                    crate::ir::BinaryOp::Eq,
+                    visible_roundtrip,
+                ));
+                fits_loop_reg
+            };
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: fits_loop_reg,
+                true_block: (body_bb, vec![fitcheck_counter]),
+                false_block: (range_error_bb, vec![]),
+            });
+        } else {
+            ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![fitcheck_counter]));
+        }
+        ir_builder.switch_to_block(range_error_bb);
+        ir_builder.seal_block(SIRTerminator::Error(1));
+        ir_builder.switch_to_block(body_bb);
+        self.local_working_vars.insert(stmt.var_id);
 
         let mut local_defined = self.defined_ranges.clone();
         local_defined.insert(stmt.var_id, (0..loop_width).collect());

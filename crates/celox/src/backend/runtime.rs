@@ -227,6 +227,7 @@ impl JitBackend {
             #[cfg(target_arch = "x86_64")]
             if options.trace.mir {
                 use super::native::isel::lower_execution_unit;
+                use super::native::mir_legalize;
                 use super::native::mir_opt;
                 use super::native::regalloc::run_regalloc;
                 let mut mir_output = String::new();
@@ -235,6 +236,7 @@ impl JitBackend {
                 mir_output.push_str("=== MIR (eval_comb) ===\n");
                 for (idx, eu) in sir.eval_comb.iter().enumerate() {
                     let mut mfunc = lower_execution_unit(eu, layout_ref, options.four_state);
+                    mir_legalize::legalize(&mut mfunc);
                     mir_opt::optimize(&mut mfunc);
                     mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}\n"));
@@ -264,6 +266,7 @@ impl JitBackend {
                     ));
                     for (idx, eu) in units.iter().enumerate() {
                         let mut mfunc = lower_execution_unit(eu, layout_ref, options.four_state);
+                        mir_legalize::legalize(&mut mfunc);
                         mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                         mir_output.push_str(&format!("{mfunc}\n"));
                         let ra = run_regalloc(&mut mfunc);
