@@ -691,6 +691,34 @@ fn test_ff_struct_constructor_expression_literal_order(sim) {
     assert_eq!(sim.get(out_b), 0x34u32.into());
 }
 
+fn test_ff_struct_constructor_signed_member_extension(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in_neg: input i8,
+            out_pad: output i16
+        ) {
+            struct S {
+                x: i16,
+            }
+            var r: S;
+            always_ff (clk) {
+                r = S'{x: in_neg};
+            }
+            assign out_pad = r.x;
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in_neg = sim.signal("in_neg");
+    let out_pad = sim.signal("out_pad");
+
+    sim.modify(|io| io.set(in_neg, 0xFFu8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_pad), 0xFFFFu32.into());
+}
+
 fn test_ff_array_literal_expression_order(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

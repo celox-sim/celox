@@ -185,6 +185,7 @@ impl<'a> FfParser<'a> {
                 formal_width,
                 bound_expr.comptime().r#type.signed,
                 var.r#type.signed,
+                var.r#type.is_2state(),
             )
         } else {
             bound_reg
@@ -201,26 +202,47 @@ impl<'a> FfParser<'a> {
         target_width: usize,
         extend_signed: bool,
         result_signed: bool,
+        target_is_2state: bool,
     ) -> RegisterId {
         let widened = self.cast_reg_width_ext(ir_builder, reg, target_width, extend_signed);
-        if result_signed {
-            if ir_builder.register(&widened).is_signed()
-                && ir_builder.register(&widened).width() == target_width
-            {
-                widened
-            } else {
-                let signed_reg = ir_builder.alloc_bit(target_width, true);
-                ir_builder.emit(SIRInstruction::Unary(signed_reg, UnaryOp::Ident, widened));
-                signed_reg
+        if target_is_2state {
+            match ir_builder.register(&widened) {
+                crate::ir::RegisterType::Bit { width, signed }
+                    if *width == target_width && *signed == result_signed =>
+                {
+                    widened
+                }
+                _ => {
+                    let bit_reg = ir_builder.alloc_bit(target_width, result_signed);
+                    ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::Ident, widened));
+                    bit_reg
+                }
             }
         } else {
-            let src = ir_builder.register(&widened);
-            if src.width() == target_width && !src.is_signed() {
-                widened
+            if result_signed {
+                match ir_builder.register(&widened) {
+                    crate::ir::RegisterType::Bit { width, signed }
+                        if *width == target_width && *signed =>
+                    {
+                        widened
+                    }
+                    _ => {
+                        let signed_reg = ir_builder.alloc_bit(target_width, true);
+                        ir_builder.emit(SIRInstruction::Unary(signed_reg, UnaryOp::Ident, widened));
+                        signed_reg
+                    }
+                }
             } else {
-                let logic_reg = ir_builder.alloc_logic(target_width);
-                ir_builder.emit(SIRInstruction::Unary(logic_reg, UnaryOp::Ident, widened));
-                logic_reg
+                if matches!(
+                    ir_builder.register(&widened),
+                    crate::ir::RegisterType::Logic { .. }
+                ) {
+                    widened
+                } else {
+                    let logic_reg = ir_builder.alloc_logic(target_width);
+                    ir_builder.emit(SIRInstruction::Unary(logic_reg, UnaryOp::Ident, widened));
+                    logic_reg
+                }
             }
         }
     }
@@ -293,6 +315,7 @@ impl<'a> FfParser<'a> {
             access_width,
             selected_expr.comptime().r#type.signed,
             formal.r#type.signed,
+            formal.r#type.is_2state(),
         );
         self.stack.push_back(coerced);
         Ok(true)
@@ -1336,30 +1359,34 @@ impl<'a> FfParser<'a> {
         // Apply context_width adjustment
         if let Some(target_width) = context_width {
             let src_reg = self.stack.pop_back().unwrap();
-            let src_width = ir_builder.register(&src_reg).width();
+            let adjusted = match ir_builder.register(&src_reg) {
+                crate::ir::RegisterType::Bit { signed, .. } => {
+                    self.cast_reg_width_ext(ir_builder, src_reg, target_width, *signed)
+                }
+                crate::ir::RegisterType::Logic { width } => {
+                    if *width < target_width {
+                        let dest_reg = ir_builder.alloc_logic(target_width);
+                        ir_builder.emit(SIRInstruction::Unary(dest_reg, UnaryOp::Ident, src_reg));
+                        dest_reg
+                    } else if *width > target_width {
+                        let mask_val = (BigUint::from(1u64) << target_width) - BigUint::from(1u64);
+                        let mask_reg = ir_builder.alloc_bit(target_width, false);
+                        ir_builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
 
-            if src_width < target_width {
-                // Extension
-                let dest_reg = ir_builder.alloc_logic(target_width);
-                ir_builder.emit(SIRInstruction::Unary(dest_reg, UnaryOp::Ident, src_reg));
-                self.stack.push_back(dest_reg);
-            } else if src_width > target_width {
-                // Truncation
-                let mask_val = (BigUint::from(1u64) << target_width) - BigUint::from(1u64);
-                let mask_reg = ir_builder.alloc_bit(target_width, false);
-                ir_builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
-
-                let trunc_reg = ir_builder.alloc_logic(target_width);
-                ir_builder.emit(SIRInstruction::Binary(
-                    trunc_reg,
-                    src_reg,
-                    BinaryOp::And,
-                    mask_reg,
-                ));
-                self.stack.push_back(trunc_reg);
-            } else {
-                self.stack.push_back(src_reg);
-            }
+                        let trunc_reg = ir_builder.alloc_logic(target_width);
+                        ir_builder.emit(SIRInstruction::Binary(
+                            trunc_reg,
+                            src_reg,
+                            BinaryOp::And,
+                            mask_reg,
+                        ));
+                        trunc_reg
+                    } else {
+                        src_reg
+                    }
+                }
+            };
+            self.stack.push_back(adjusted);
         }
 
         Ok(())
@@ -1830,26 +1857,11 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-        context_width: Option<usize>,
+        _context_width: Option<usize>,
     ) -> Result<(), ParserError> {
         let mut parts: Vec<(RegisterId, usize)> = Vec::new();
 
         for (name, expr) in fields {
-            self.parse_expression(
-                expr,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-                context_width,
-            )?;
-            let mut reg = self
-                .stack
-                .pop_back()
-                .expect("Struct constructor part evaluation failed");
-            let src_width = ir_builder.register(&reg).width();
-
             let Some(member_type) = ty.get_member_type(*name) else {
                 return Err(ParserError::unsupported(
                     68,
@@ -1868,27 +1880,27 @@ impl<'a> FfParser<'a> {
                     Some(&expr.token_range()),
                 ));
             };
-
-            if src_width > member_width {
-                let mask_val = (BigUint::from(1u64) << member_width) - BigUint::from(1u64);
-                let mask_reg = ir_builder.alloc_bit(member_width, false);
-                ir_builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
-
-                let trunc_reg = ir_builder.alloc_logic(member_width);
-                ir_builder.emit(SIRInstruction::Binary(
-                    trunc_reg,
-                    reg,
-                    BinaryOp::And,
-                    mask_reg,
-                ));
-                reg = trunc_reg;
-            } else if src_width < member_width {
-                let pad_width = member_width - src_width;
-                let zero_reg = ir_builder.alloc_bit(pad_width, false);
-                ir_builder.emit(SIRInstruction::Imm(zero_reg, SIRValue::new(0u32)));
-                reg = self
-                    .emit_concat_registers(&[(zero_reg, pad_width), (reg, src_width)], ir_builder);
-            }
+            self.parse_expression(
+                expr,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                Some(member_width),
+            )?;
+            let mut reg = self
+                .stack
+                .pop_back()
+                .expect("Struct constructor part evaluation failed");
+            reg = self.coerce_register_to_formal(
+                ir_builder,
+                reg,
+                member_width,
+                expr.comptime().r#type.signed,
+                member_type.signed,
+                member_type.is_2state(),
+            );
 
             parts.push((reg, member_width));
         }
@@ -1926,9 +1938,7 @@ impl<'a> FfParser<'a> {
 
                     let rep_count = if let Some(rep_expr) = repeat {
                         self.get_constant_value(rep_expr).ok_or_else(|| {
-                            ParserError::unsupported(
-                                68,
-                                LoweringPhase::FfLowering,
+                            ParserError::illegal_context(
                                 "array literal non-constant repeat",
                                 format!("{:?}", rep_expr),
                                 Some(&rep_expr.token_range()),
@@ -1945,9 +1955,7 @@ impl<'a> FfParser<'a> {
                 }
                 ArrayLiteralItem::Defaul(expr) => {
                     if default_part.is_some() {
-                        return Err(ParserError::unsupported(
-                            68,
-                            LoweringPhase::FfLowering,
+                        return Err(ParserError::illegal_context(
                             "array literal multiple default",
                             format!("{:?}", items),
                             Some(&expr.token_range()),
@@ -1979,9 +1987,7 @@ impl<'a> FfParser<'a> {
             };
 
             if explicit_width > target_width {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::illegal_context(
                     "array literal width overflow",
                     format!("explicit_width={explicit_width}, target_width={target_width}"),
                     items.first().map(|it| it.token_range()).as_ref(),
@@ -1990,9 +1996,7 @@ impl<'a> FfParser<'a> {
 
             let remaining = target_width - explicit_width;
             if default_width == 0 || !remaining.is_multiple_of(default_width) {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::illegal_context(
                     "array literal default width mismatch",
                     format!(
                         "remaining={remaining}, default_width={default_width}, target_width={target_width}"
