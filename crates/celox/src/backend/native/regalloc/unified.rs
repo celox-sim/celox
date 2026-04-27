@@ -327,35 +327,47 @@ fn insert_coupling_code(
 ) {
     let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
     let mut reload_set: HashSet<VReg> = HashSet::new();
-    let mut reloads: Vec<VReg> = entry_rf
+    let mut live_ins: Vec<VReg> = entry_rf
         .vregs()
         .filter(|v| !phi_dsts.contains(v) && analysis.entry_distances[block_idx].contains_key(v))
         .collect();
-    reloads.sort();
+    live_ins.sort();
 
-    for &pred_idx in &analysis.predecessors[block_idx] {
-        if pred_idx >= block_idx {
-            continue;
-        }
+    for &vreg in &live_ins {
+        let mut resident_preds = Vec::new();
+        let mut needs_memory = false;
 
-        let pred_rf = &regfile_exit[pred_idx];
-        let term_idx = func.blocks[pred_idx].insts.len().saturating_sub(1);
+        for &pred_idx in &analysis.predecessors[block_idx] {
+            if pred_idx >= block_idx {
+                continue;
+            }
 
-        for &vreg in &reloads {
+            let pred_rf = &regfile_exit[pred_idx];
             if pred_rf.contains(vreg) {
-                if !s_exit[pred_idx].contains(&vreg)
-                    && let Some(spill_inst) = make_spill(vreg, func, slots)
-                {
-                    func.blocks[pred_idx].insts.insert(term_idx, spill_inst);
-                    s_exit[pred_idx].insert(vreg);
-                }
+                resident_preds.push(pred_idx);
             } else if s_exit[pred_idx].contains(&vreg) {
-                reload_set.insert(vreg);
+                needs_memory = true;
             } else {
                 debug_assert!(
                     false,
                     "live-in {vreg} for bb{block_idx} is neither resident nor spilled on predecessor bb{pred_idx}"
                 );
+            }
+        }
+
+        if !needs_memory {
+            continue;
+        }
+
+        reload_set.insert(vreg);
+        for pred_idx in resident_preds {
+            if s_exit[pred_idx].contains(&vreg) {
+                continue;
+            }
+            if let Some(spill_inst) = make_spill(vreg, func, slots) {
+                let term_idx = func.blocks[pred_idx].insts.len().saturating_sub(1);
+                func.blocks[pred_idx].insts.insert(term_idx, spill_inst);
+                s_exit[pred_idx].insert(vreg);
             }
         }
     }

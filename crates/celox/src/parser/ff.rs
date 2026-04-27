@@ -534,7 +534,7 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn loop_bound_width(bound: &ForBound, signed: bool) -> Option<usize> {
+    fn loop_bound_width(&self, bound: &ForBound, signed: bool) -> Option<usize> {
         match bound {
             ForBound::Const(v) => {
                 let value = BigInt::from(*v);
@@ -550,7 +550,18 @@ impl<'a> FfParser<'a> {
                     (magnitude.bits() as usize).max(1)
                 })
             }
-            ForBound::Expression(expr) => expr.comptime().r#type.total_width(),
+            ForBound::Expression(expr) => {
+                let comptime_width = expr.comptime().r#type.total_width();
+                let context_width = Some(expr.comptime().expr_context.width).filter(|w| *w > 0);
+                Some(
+                    comptime_width
+                        .into_iter()
+                        .chain(context_width)
+                        .chain(std::iter::once(self.get_expression_width(expr)))
+                        .max()
+                        .unwrap_or(1),
+                )
+            }
         }
     }
 
@@ -829,9 +840,12 @@ impl<'a> FfParser<'a> {
         }
 
         let loop_width = base_loop_width.max(1);
-        let start_bound_width =
-            Self::loop_bound_width(start_bound, loop_signed).unwrap_or(loop_width);
-        let end_bound_width = Self::loop_bound_width(end_bound, loop_signed).unwrap_or(loop_width);
+        let start_bound_width = self
+            .loop_bound_width(start_bound, loop_signed)
+            .unwrap_or(loop_width);
+        let end_bound_width = self
+            .loop_bound_width(end_bound, loop_signed)
+            .unwrap_or(loop_width);
         let start_status = Self::loop_bound_status(start_bound, loop_width, loop_signed);
         let end_status = Self::loop_bound_status(end_bound, loop_width, loop_signed);
         let uses_exclusive_end_sentinel = !inclusive;
