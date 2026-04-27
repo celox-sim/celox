@@ -17,7 +17,8 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
-    ForStatement, IfStatement, Module, Op, Statement, ValueVariant, VarId, VarSelectOp,
+    ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionKind,
+    ValueVariant, VarId, VarSelectOp,
 };
 use veryl_analyzer::value::Value;
 
@@ -2358,13 +2359,9 @@ fn eval_function_body_return(
     ) -> Result<(), ParserError> {
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
-                Factor::SystemFunctionCall(call) => Err(ParserError::unsupported(
-                    59,
-                    LoweringPhase::CombLowering,
-                    "system function call in comb function body",
-                    format!("module `{}`: {call}", module.name),
-                    Some(&call.comptime.token),
-                )),
+                Factor::SystemFunctionCall(call) => {
+                    validate_function_body_system_function(module, call)
+                }
                 Factor::Variable(_, _, _, _)
                 | Factor::FunctionCall(_)
                 | Factor::Value(_)
@@ -2412,6 +2409,24 @@ fn eval_function_body_return(
                 }
                 Ok(())
             }
+        }
+    }
+
+    fn validate_function_body_system_function(
+        module: &Module,
+        call: &SystemFunctionCall,
+    ) -> Result<(), ParserError> {
+        match &call.kind {
+            SystemFunctionKind::Onehot(input) => {
+                validate_function_body_expression(module, &input.0)
+            }
+            _ => Err(ParserError::unsupported(
+                59,
+                LoweringPhase::CombLowering,
+                "system function call in comb function body",
+                format!("module `{}`: {call}", module.name),
+                Some(&call.comptime.token),
+            )),
         }
     }
 
@@ -4402,13 +4417,7 @@ fn eval_factor(
                 BoundaryMap::default(),
             ))
         }
-        Factor::SystemFunctionCall(call) => Err(ParserError::unsupported(
-            59,
-            LoweringPhase::CombLowering,
-            "system function call in comb expression",
-            format!("module `{}`: {call}", module.name),
-            Some(&factor.token_range()),
-        )),
+        Factor::SystemFunctionCall(call) => eval_system_function_call(module, store, call, arena),
         Factor::FunctionCall(call) => eval_function_call_expression(module, store, call, arena),
         Factor::Anonymous(_) | Factor::Unknown(_) => Err(ParserError::unsupported(
             67,
@@ -4465,6 +4474,45 @@ fn merge_boundaries(mut base: BoundaryMap<VarId>, other: BoundaryMap<VarId>) -> 
         base.entry(id).or_default().extend(bits);
     }
     base
+}
+
+fn eval_system_function_call(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    call: &SystemFunctionCall,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    match &call.kind {
+        SystemFunctionKind::Onehot(input) => {
+            let ((arg, sources), bounds) = eval_expression(module, store, &input.0, arena, None)?;
+            let width = get_width(arg, arena);
+            let zero = arena.alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                width,
+                false,
+            ));
+            let one = arena.alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                width,
+                false,
+            ));
+            let arg_minus_one = arena.alloc(SLTNode::Binary(arg, BinaryOp::Sub, one));
+            let overlap = arena.alloc(SLTNode::Binary(arg, BinaryOp::And, arg_minus_one));
+            let non_zero = arena.alloc(SLTNode::Binary(arg, BinaryOp::Ne, zero));
+            let no_overlap = arena.alloc(SLTNode::Binary(overlap, BinaryOp::Eq, zero));
+            let result = arena.alloc(SLTNode::Binary(non_zero, BinaryOp::LogicAnd, no_overlap));
+            Ok(((result, sources), bounds))
+        }
+        _ => Err(ParserError::unsupported(
+            59,
+            LoweringPhase::CombLowering,
+            "system function call in comb expression",
+            format!("module `{}`: {call}", module.name),
+            Some(&call.comptime.token),
+        )),
+    }
 }
 
 fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
