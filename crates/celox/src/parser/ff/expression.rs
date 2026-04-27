@@ -219,15 +219,30 @@ impl<'a> FfParser<'a> {
                 }
             }
         } else {
-            if matches!(
-                ir_builder.register(&widened),
-                crate::ir::RegisterType::Logic { .. }
-            ) {
-                widened
+            if result_signed {
+                match ir_builder.register(&widened) {
+                    crate::ir::RegisterType::Bit { width, signed }
+                        if *width == target_width && *signed =>
+                    {
+                        widened
+                    }
+                    _ => {
+                        let signed_reg = ir_builder.alloc_bit(target_width, true);
+                        ir_builder.emit(SIRInstruction::Unary(signed_reg, UnaryOp::Ident, widened));
+                        signed_reg
+                    }
+                }
             } else {
-                let logic_reg = ir_builder.alloc_logic(target_width);
-                ir_builder.emit(SIRInstruction::Unary(logic_reg, UnaryOp::Ident, widened));
-                logic_reg
+                if matches!(
+                    ir_builder.register(&widened),
+                    crate::ir::RegisterType::Logic { .. }
+                ) {
+                    widened
+                } else {
+                    let logic_reg = ir_builder.alloc_logic(target_width);
+                    ir_builder.emit(SIRInstruction::Unary(logic_reg, UnaryOp::Ident, widened));
+                    logic_reg
+                }
             }
         }
     }

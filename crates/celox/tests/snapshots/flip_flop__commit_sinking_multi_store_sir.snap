@@ -1,5 +1,6 @@
 ---
 source: crates/celox/tests/flip_flop.rs
+assertion_line: 1816
 expression: output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -11,16 +12,16 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r1: bit<1>
       r2: bit<32>
       r3: bit<8>
-      r4: logic<8>
+      r4: bit<8>
       r5: bit<32>
       r6: bit<8>
-      r7: logic<8>
+      r7: bit<8>
       r8: bit<32>
       r9: bit<8>
-      r10: logic<8>
+      r10: bit<8>
       r11: bit<32>
       r12: bit<8>
-      r13: logic<8>
+      r13: bit<8>
     b0:
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
       r1 = LogicNot r0
@@ -51,16 +52,16 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
       r1: bit<1>
       r2: bit<32>
       r3: bit<8>
-      r4: logic<8>
+      r4: bit<8>
       r5: bit<32>
       r6: bit<8>
-      r7: logic<8>
+      r7: bit<8>
       r8: bit<32>
       r9: bit<8>
-      r10: logic<8>
+      r10: bit<8>
       r11: bit<32>
       r12: bit<8>
-      r13: logic<8>
+      r13: bit<8>
     b0:
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
       r1 = LogicNot r0
@@ -93,16 +94,16 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r1: bit<1>
       r2: bit<32>
       r3: bit<8>
-      r4: logic<8>
+      r4: bit<8>
       r5: bit<32>
       r6: bit<8>
-      r7: logic<8>
+      r7: bit<8>
       r8: bit<32>
       r9: bit<8>
-      r10: logic<8>
+      r10: bit<8>
       r11: bit<32>
       r12: bit<8>
-      r13: logic<8>
+      r13: bit<8>
     b0:
       Commit(src=a (region=0), dst=a (region=1), offset=0, bits=8)
       Commit(src=b (region=0), dst=b (region=1), offset=0, bits=8)
@@ -135,16 +136,16 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
       r1: bit<1>
       r2: bit<32>
       r3: bit<8>
-      r4: logic<8>
+      r4: bit<8>
       r5: bit<32>
       r6: bit<8>
-      r7: logic<8>
+      r7: bit<8>
       r8: bit<32>
       r9: bit<8>
-      r10: logic<8>
+      r10: bit<8>
       r11: bit<32>
       r12: bit<8>
-      r13: logic<8>
+      r13: bit<8>
     b0:
       Commit(src=a (region=0), dst=a (region=1), offset=0, bits=8)
       Commit(src=b (region=0), dst=b (region=1), offset=0, bits=8)
