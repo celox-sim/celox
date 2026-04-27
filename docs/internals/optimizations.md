@@ -68,7 +68,7 @@ Three strategies are applied in order of increasing cost:
 2.  **Intra-EU single-block splitting**: For a single-block EU that exceeds the threshold, splits at `Store` instruction boundaries. A dynamic programming pass minimizes the number of live registers that must be forwarded as tail-call arguments. A cost model (`cost_model.rs`) estimates per-instruction CLIF cost, calibrated against the actual translator (including quadratic costs for wide shifts, multiplication, and division).
 3.  **Memory-spilled multi-block splitting**: For multi-block EUs (containing branches and loops), splits the CFG into chunks with a single-entry-point guarantee. Inter-chunk live registers are passed through a scratch memory region appended to the unified memory buffer, rather than as function arguments. Each chunk is compiled with signature `(mem_ptr) -> i64`, and cross-chunk edges emit spill stores followed by a tail-call.
 
-This pass runs even when all SIRT passes are disabled (`OptimizeOptions::none()`) to prevent compilation failures.
+This pass runs even when all SIR passes are disabled (`OptimizeOptions::none()`) to prevent compilation failures.
 
 ## Per-Pass Control
 

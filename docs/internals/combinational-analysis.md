@@ -338,32 +338,22 @@ Key conversion rules:
 | `Constant` | `Imm` instruction |
 | `Binary` | Recursively lower left and right -> `Binary` instruction |
 | `Unary` | Recursively lower operand -> `Unary` instruction |
-| `Mux` | Conditional branch via `Branch` terminator instruction |
-| `Concat` | Lower each part -> combine with shift + OR |
-| `Slice` | Lower expression -> shift + mask |
+| `Mux` | Lower both arms and emit the dedicated `Mux` SIR instruction |
+| `Concat` | Lower each part and emit the dedicated `Concat` SIR instruction |
+| `Slice` | Lower expression -> `Slice` instruction |
 
 ### Mux Lowering
 
-`Mux` is converted into control flow:
+Expression-level `Mux` is now lowered to a data-select instruction:
 
-```
-Block_current:
-    cond_reg = lower(cond)
-    Branch { cond: cond_reg, true: (Block_then, []), false: (Block_else, []) }
-
-Block_then:
-    then_reg = lower(then_expr)
-    Jump(Block_merge, [then_reg])
-
-Block_else:
-    else_reg = lower(else_expr)
-    Jump(Block_merge, [else_reg])
-
-Block_merge (params: [result_reg]):
-    ... subsequent processing ...
+```text
+cond_reg = lower(cond)
+then_reg = lower(then_expr)
+else_reg = lower(else_expr)
+result = Mux(cond_reg, then_reg, else_reg)
 ```
 
-This naturally achieves short-circuit evaluation (the expression in the unselected branch is not evaluated).
+The dedicated instruction is important for 4-state simulation because it selects the exact value/mask pair of the chosen branch and preserves Z bits. Control-flow branches still exist in SIR for loops and dynamic convergence handling.
 
 ## Related Documents
 
