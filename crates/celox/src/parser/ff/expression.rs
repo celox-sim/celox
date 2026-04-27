@@ -1917,9 +1917,7 @@ impl<'a> FfParser<'a> {
 
                     let rep_count = if let Some(rep_expr) = repeat {
                         self.get_constant_value(rep_expr).ok_or_else(|| {
-                            ParserError::unsupported(
-                                68,
-                                LoweringPhase::FfLowering,
+                            ParserError::illegal_context(
                                 "array literal non-constant repeat",
                                 format!("{:?}", rep_expr),
                                 Some(&rep_expr.token_range()),
@@ -1936,9 +1934,7 @@ impl<'a> FfParser<'a> {
                 }
                 ArrayLiteralItem::Defaul(expr) => {
                     if default_part.is_some() {
-                        return Err(ParserError::unsupported(
-                            68,
-                            LoweringPhase::FfLowering,
+                        return Err(ParserError::illegal_context(
                             "array literal multiple default",
                             format!("{:?}", items),
                             Some(&expr.token_range()),
@@ -1970,9 +1966,7 @@ impl<'a> FfParser<'a> {
             };
 
             if explicit_width > target_width {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::illegal_context(
                     "array literal width overflow",
                     format!("explicit_width={explicit_width}, target_width={target_width}"),
                     items.first().map(|it| it.token_range()).as_ref(),
@@ -1981,9 +1975,7 @@ impl<'a> FfParser<'a> {
 
             let remaining = target_width - explicit_width;
             if default_width == 0 || !remaining.is_multiple_of(default_width) {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::illegal_context(
                     "array literal default width mismatch",
                     format!(
                         "remaining={remaining}, default_width={default_width}, target_width={target_width}"
