@@ -86,16 +86,14 @@ This snapshot reflects the open GitHub queue inspected on April 27, 2026.
 
 ### Now
 
-- PR [#79](https://github.com/celox-sim/celox/pull/79): playground 4-state virtual module port typing fix
-- PR [#78](https://github.com/celox-sim/celox/pull/78): align loop variables with Veryl `i32` semantics
+- No open PRs at the time of this snapshot. PR [#79](https://github.com/celox-sim/celox/pull/79) and PR [#78](https://github.com/celox-sim/celox/pull/78) were both merged on April 27, 2026.
 
 ### Next
 
-- Issue [#54](https://github.com/celox-sim/celox/issues/54): playground 4-state typing regression
-  This should close with PR #79, so it stays effectively in `Now` until merged.
 - Issue [#44](https://github.com/celox-sim/celox/issues/44): array literal lowering gaps
 - Issue [#45](https://github.com/celox-sim/celox/issues/45): expression lowering gaps
 - Issue [#33](https://github.com/celox-sim/celox/issues/33): report true loop location
+- Issue [#65](https://github.com/celox-sim/celox/issues/65): remaining unsupported `for`-loop shapes in simulator lowering
 
 ### Later
 
@@ -107,9 +105,14 @@ This snapshot reflects the open GitHub queue inspected on April 27, 2026.
 - Issue [#16](https://github.com/celox-sim/celox/issues/16): instance-contiguous `MemoryLayout`
 - Issue [#30](https://github.com/celox-sim/celox/issues/30): native testbench DSE
 - Issue [#25](https://github.com/celox-sim/celox/issues/25): support Veryl native testbench
+  Native testbench support now exists, so this issue likely needs closure or a narrower remaining-scope update.
 - Issue [#26](https://github.com/celox-sim/celox/issues/26): native ARM backend
 - Issue [#27](https://github.com/celox-sim/celox/issues/27): native RISC-V backend
 - Issue [#24](https://github.com/celox-sim/celox/issues/24): improve generic-argument error message
+- Issue [#64](https://github.com/celox-sim/celox/issues/64): SystemVerilog components/module instantiations in simulator parser
+- Issue [#66](https://github.com/celox-sim/celox/issues/66): system function calls in FF lowering
+- Issue [#67](https://github.com/celox-sim/celox/issues/67): remaining comb expression/function lowering shapes
+- Issue [#68](https://github.com/celox-sim/celox/issues/68): remaining FF expression-lowering shapes
 
 ### Tracking
 

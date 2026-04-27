@@ -43,7 +43,7 @@ pub struct Program {
 -   **`eval_apply_ffs`**: Standard synchronous flip-flop evaluation. Used when operating in a single domain.
 -   **`eval_only_ffs`**: Phase that only computes the next state and writes it to the Working region.
 -   **`apply_ffs`**: Phase that commits values from the Working region to the Stable region.
--   **`eval_comb_plan`**: Compilation plan for `eval_comb` when the estimated CLIF instruction count exceeds Cranelift's internal limit (~16M instructions). See [Tail-Call Splitting](./optimizations.md#27-tail-call-splitting) for details.
+-   **`eval_comb_plan`**: Compilation plan for `eval_comb` when the estimated CLIF instruction count exceeds the safety threshold used to stay below Cranelift's instruction/value limits. See [Tail-Call Splitting](./optimizations.md#214-tail-call-splitting) for details.
 -   **`reset_clock_map`**: Maps each reset `AbsoluteAddr` to its associated clock `AbsoluteAddr` (derived from `FfDeclaration`).
 -   **`address_aliases`**: Memory layout aliases mapping non-canonical → canonical addresses. Variables with identity `Store→Load` roundtrips share physical memory (populated by `IdentityStoreBypass`).
 -   **`layout`**: Pre-computed `MemoryLayout`. Built after optimization, before backend codegen. Centralizes offset calculation so all backends share the same layout.
@@ -56,9 +56,9 @@ Describes how `eval_comb` should be compiled when the default single-function ap
 
 ```rust
 pub enum EvalCombPlan {
-    /// Split into tail-call-chained functions with live regs passed as arguments.
+    /// EU-boundary or single-block splitting with live regs passed as tail-call args.
     TailCallChunks(Vec<TailCallChunk>),
-    /// Split with inter-chunk register values spilled through scratch memory.
+    /// Multi-block splitting with inter-chunk register values spilled through scratch memory.
     MemorySpilled(MemorySpilledPlan),
 }
 ```

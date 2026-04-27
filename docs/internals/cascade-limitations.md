@@ -47,7 +47,7 @@ always_ff (clk_div) {
 
 ## 2. Verified Tests
 
-These behaviors are verified in `tests/cascade_race.rs`, where all tests are confirmed to **PASS**.
+These behaviors are covered by `tests/cascade_race.rs`.
 
 -   `test_cascade_race_condition`: Verifies prevention of premature value capture in combinational cascades.
 -   `test_sequential_cascade_race_condition`: Verifies correctness of trigger propagation in sequential cascades (divided clocks).
