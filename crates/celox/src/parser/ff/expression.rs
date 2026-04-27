@@ -219,7 +219,10 @@ impl<'a> FfParser<'a> {
                 }
             }
         } else {
-            if matches!(ir_builder.register(&widened), crate::ir::RegisterType::Logic { .. }) {
+            if matches!(
+                ir_builder.register(&widened),
+                crate::ir::RegisterType::Logic { .. }
+            ) {
                 widened
             } else {
                 let logic_reg = ir_builder.alloc_logic(target_width);

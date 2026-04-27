@@ -826,11 +826,13 @@ fn test_ff_array_literal_multiple_default_is_illegal_context() {
         }
     "#;
 
-    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| match e.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
-            assert_eq!(*feature, "array literal multiple default");
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        match e.kind() {
+            SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+                assert_eq!(*feature, "array literal multiple default");
+            }
+            k => panic!("expected IllegalContext for multiple default array literal, got {k:?}"),
         }
-        k => panic!("expected IllegalContext for multiple default array literal, got {k:?}"),
     });
 }
 
@@ -850,11 +852,13 @@ fn test_ff_array_literal_non_constant_repeat_is_illegal_context() {
         }
     "#;
 
-    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| match e.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
-            assert_eq!(*feature, "array literal non-constant repeat");
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        match e.kind() {
+            SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+                assert_eq!(*feature, "array literal non-constant repeat");
+            }
+            k => panic!("expected IllegalContext for non-constant repeat array literal, got {k:?}"),
         }
-        k => panic!("expected IllegalContext for non-constant repeat array literal, got {k:?}"),
     });
 }
 
@@ -873,10 +877,12 @@ fn test_ff_array_literal_width_overflow_is_illegal_context() {
         }
     "#;
 
-    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| match e.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
-            assert_eq!(*feature, "array literal width overflow");
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        match e.kind() {
+            SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+                assert_eq!(*feature, "array literal width overflow");
+            }
+            k => panic!("expected IllegalContext for array literal width overflow, got {k:?}"),
         }
-        k => panic!("expected IllegalContext for array literal width overflow, got {k:?}"),
     });
 }
