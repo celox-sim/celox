@@ -206,14 +206,17 @@ impl<'a> FfParser<'a> {
     ) -> RegisterId {
         let widened = self.cast_reg_width_ext(ir_builder, reg, target_width, extend_signed);
         if target_is_2state {
-            if ir_builder.register(&widened).is_signed() == result_signed
-                && ir_builder.register(&widened).width() == target_width
-            {
-                widened
-            } else {
-                let bit_reg = ir_builder.alloc_bit(target_width, result_signed);
-                ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::Ident, widened));
-                bit_reg
+            match ir_builder.register(&widened) {
+                crate::ir::RegisterType::Bit { width, signed }
+                    if *width == target_width && *signed == result_signed =>
+                {
+                    widened
+                }
+                _ => {
+                    let bit_reg = ir_builder.alloc_bit(target_width, result_signed);
+                    ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::Ident, widened));
+                    bit_reg
+                }
             }
         } else {
             if matches!(ir_builder.register(&widened), crate::ir::RegisterType::Logic { .. }) {
