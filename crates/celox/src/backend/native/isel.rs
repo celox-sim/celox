@@ -555,7 +555,29 @@ impl<'a> ISelContext<'a> {
         }
         block.push(MInst::Mov { dst, src });
         if let Some(desc) = self.spill_descs.get(src.0 as usize).cloned() {
-            self.spill_descs[dst.0 as usize] = desc;
+            self.spill_descs[dst.0 as usize] = desc.copy_for_snapshot();
+        }
+        if let Some(bits) = self.known_bits.get(&src).copied() {
+            self.known_bits.insert(dst, bits);
+        } else {
+            self.known_bits.remove(&dst);
+        }
+    }
+
+    fn emit_alias_mov(&mut self, block: &mut MBlock, dst: VReg, src: VReg) {
+        if dst == src {
+            return;
+        }
+        block.push(MInst::Mov { dst, src });
+        if let Some(desc) = self.spill_descs.get(src.0 as usize).cloned() {
+            self.spill_descs[dst.0 as usize] = match desc.kind {
+                SpillKind::SimState {
+                    addr,
+                    bit_offset,
+                    width_bits,
+                } => SpillDesc::sim_state_alias(addr, bit_offset, width_bits, desc.spill_cost == 0),
+                _ => desc,
+            };
         }
         if let Some(bits) = self.known_bits.get(&src).copied() {
             self.known_bits.insert(dst, bits);
@@ -1001,7 +1023,7 @@ fn lower_instruction(
                         }
                         // Also store chunk[0] in reg_map scalar slot for
                         // fallback paths that read the scalar VReg.
-                        ctx.emit_mov(block, vreg, chunks[0].0);
+                        ctx.emit_alias_mov(block, vreg, chunks[0].0);
                         ctx.wide_regs.insert(*dst, chunks);
 
                         // 4-state: load wide mask chunks
@@ -1025,7 +1047,7 @@ fn lower_instruction(
                                 m_remaining -= chunk_bits;
                             }
                             let mvreg = ctx.alloc_vreg(SpillDesc::transient());
-                            ctx.emit_mov(block, mvreg, mchunks[0].0);
+                            ctx.emit_alias_mov(block, mvreg, mchunks[0].0);
                             ctx.set_mask(*dst, mvreg);
                             ctx.wide_masks.insert(*dst, mchunks);
                         } else if ctx.four_state {
@@ -4059,7 +4081,7 @@ fn lower_wide_binary(
             let chunk0 = chunks[0].0;
             let scalar = ctx.reg_map.get(dst);
             if chunk0 != scalar {
-                ctx.emit_mov(block, scalar, chunk0);
+                ctx.emit_alias_mov(block, scalar, chunk0);
             }
         }
     }
@@ -4619,7 +4641,7 @@ fn lower_wide_unary(
             let chunk0 = chunks[0].0;
             let scalar = ctx.reg_map.get(dst);
             if chunk0 != scalar {
-                ctx.emit_mov(block, scalar, chunk0);
+                ctx.emit_alias_mov(block, scalar, chunk0);
             }
         }
     }
