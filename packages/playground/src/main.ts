@@ -14,7 +14,12 @@ import {
 	buildVirtualModuleDts,
 	extractPortsFromSource,
 	type VirtualPortInfo,
-} from "./playground-dts.js";
+} from "./virtual-module-dts.js";
+import {
+	FourState,
+	X,
+	Z,
+} from "./playground-runtime-helpers.js";
 import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	generateVcdText,
@@ -1969,6 +1974,9 @@ async function run() {
 				"afterEach",
 				"Simulator",
 				"Simulation",
+				"FourState",
+				"X",
+				"Z",
 				"console",
 				...moduleNames,
 			];
@@ -1981,6 +1989,9 @@ async function run() {
 				() => {},
 				Simulator,
 				Simulation,
+				FourState,
+				X,
+				Z,
 				playgroundConsole,
 				...moduleNames.map((n: string) => moduleBindings[n]),
 			];
