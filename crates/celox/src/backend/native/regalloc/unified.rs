@@ -367,8 +367,8 @@ fn insert_coupling_code(
             if let Some(spill_inst) = make_spill(vreg, func, slots) {
                 let term_idx = func.blocks[pred_idx].insts.len().saturating_sub(1);
                 func.blocks[pred_idx].insts.insert(term_idx, spill_inst);
-                s_exit[pred_idx].insert(vreg);
             }
+            s_exit[pred_idx].insert(vreg);
         }
     }
 
