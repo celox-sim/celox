@@ -8,7 +8,6 @@ describe("Adder", () => {
 
     sim.dut.a = 100n;
     sim.dut.b = 200n;
-    sim.tick();
     expect(sim.dut.sum).toBe(300n);
 
     sim.dispose();
@@ -19,7 +18,6 @@ describe("Adder", () => {
 
     sim.dut.a = 0xffffn;
     sim.dut.b = 1n;
-    sim.tick();
     expect(sim.dut.sum).toBe(0x10000n);
 
     sim.dispose();
@@ -36,7 +34,6 @@ describe("Adder", () => {
     ] as const) {
       sim.dut.a = a;
       sim.dut.b = b;
-      sim.tick();
       expect(sim.dut.sum).toBe(expected);
     }
 

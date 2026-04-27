@@ -57,7 +57,6 @@ describe("Adder", () => {
 
     sim.dut.a = 100;
     sim.dut.b = 200;
-    sim.tick();
     expect(sim.dut.sum).toBe(300);
 
     sim.dispose();
