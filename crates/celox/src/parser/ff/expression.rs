@@ -11,8 +11,9 @@ use crate::parser::{
 use num_bigint::BigUint;
 
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignDestination, AssignStatement, Comptime, Expression, Factor, Op, Type,
-    ValueVariant, VarId, VarIndex, VarSelect, VarSelectOp,
+    ArrayLiteralItem, AssignDestination, AssignStatement, Comptime, Expression, Factor, Op,
+    SystemFunctionCall, SystemFunctionKind, Type, ValueVariant, VarId, VarIndex, VarSelect,
+    VarSelectOp,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -1127,6 +1128,75 @@ impl<'a> FfParser<'a> {
         self.stack.push_back(reg);
     }
 
+    fn parse_system_function_call<A>(
+        &mut self,
+        call: &SystemFunctionCall,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        match &call.kind {
+            SystemFunctionKind::Onehot(input) => {
+                self.parse_expression(
+                    &input.0, targets, domain, convert, sources, ir_builder, None,
+                )?;
+                let arg = self.stack.pop_back().expect("Invalid $onehot input");
+                let width = ir_builder.register(&arg).width();
+
+                let zero = ir_builder.alloc_bit(width, false);
+                ir_builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                let one = ir_builder.alloc_bit(width, false);
+                ir_builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+
+                let arg_minus_one = ir_builder.alloc_logic(width);
+                ir_builder.emit(SIRInstruction::Binary(
+                    arg_minus_one,
+                    arg,
+                    BinaryOp::Sub,
+                    one,
+                ));
+
+                let overlap = ir_builder.alloc_logic(width);
+                ir_builder.emit(SIRInstruction::Binary(
+                    overlap,
+                    arg,
+                    BinaryOp::And,
+                    arg_minus_one,
+                ));
+
+                let non_zero = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(non_zero, arg, BinaryOp::Ne, zero));
+
+                let no_overlap = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    no_overlap,
+                    overlap,
+                    BinaryOp::Eq,
+                    zero,
+                ));
+
+                let result = ir_builder.alloc_logic(1);
+                ir_builder.emit(SIRInstruction::Binary(
+                    result,
+                    non_zero,
+                    BinaryOp::LogicAnd,
+                    no_overlap,
+                ));
+                self.stack.push_back(result);
+                Ok(())
+            }
+            _ => Err(ParserError::unsupported(
+                66,
+                LoweringPhase::FfLowering,
+                "system function call",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            )),
+        }
+    }
+
     pub(super) fn parse_factor<A>(
         &mut self,
         factor: &Factor,
@@ -1340,13 +1410,9 @@ impl<'a> FfParser<'a> {
                 );
             }
             Factor::SystemFunctionCall(call) => {
-                return Err(ParserError::unsupported(
-                    66,
-                    LoweringPhase::FfLowering,
-                    "system function call",
-                    format!("{call}"),
-                    Some(&call.comptime.token),
-                ));
+                self.parse_system_function_call(
+                    call, targets, domain, convert, sources, ir_builder,
+                )?;
             }
             Factor::FunctionCall(call) => {
                 self.parse_function_call_expr(call, targets, domain, convert, sources, ir_builder)?;
