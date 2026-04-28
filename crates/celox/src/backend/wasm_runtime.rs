@@ -366,7 +366,8 @@ impl WasmBackend {
         let res = func.call(&mut self.store, ()).unwrap_or(2);
         match res {
             0 => Ok(()),
-            1 => Err(SimulatorErrorCode::DetectedTrueLoop),
+            1 => Err(SimulatorErrorCode::DetectedTrueLoopCode(1)),
+            code if code >= 2000 => Err(SimulatorErrorCode::DetectedTrueLoopCode(code)),
             _ => Err(SimulatorErrorCode::InternalError),
         }
     }

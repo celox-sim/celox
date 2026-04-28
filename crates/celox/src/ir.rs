@@ -88,11 +88,18 @@ pub enum EvalCombPlan {
 }
 
 #[derive(Clone)]
+pub struct RuntimeErrorInfo<Addr = AbsoluteAddr> {
+    pub message: String,
+    pub signals: Vec<Addr>,
+}
+
+#[derive(Clone)]
 pub struct Program {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     /// Tail-call chain compilation plan, populated by the optimizer when the
     /// estimated CLIF instruction count exceeds Cranelift's limit.
     pub eval_comb_plan: Option<EvalCombPlan>,
@@ -571,6 +578,7 @@ pub struct SimModule {
     pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
+    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     pub comb_boundaries: HashMap<VarId, std::collections::BTreeSet<usize>>,
     pub arena: SLTNodeArena<VarId>,
     pub store: SymbolicStore<VarId>,

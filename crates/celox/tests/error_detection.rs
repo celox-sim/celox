@@ -1,6 +1,4 @@
-use celox::{
-    LoweringPhase, ParserError, RuntimeErrorCode, SchedulerError, Simulator, SimulatorErrorKind,
-};
+use celox::{LoweringPhase, ParserError, SchedulerError, Simulator, SimulatorErrorKind};
 
 /// Helper: assert the error is either Analyzer or a specific SIRParser variant.
 /// The updated Veryl analyzer may catch issues before the SIR scheduler does.
@@ -38,9 +36,13 @@ fn test_scheduler_loop_detection() {
 
     if let Err(e) = result {
         match e.kind() {
-            SimulatorErrorKind::SIRParser(ParserError::Scheduler(
-                SchedulerError::CombinationalLoop { blocks },
-            )) => {
+            SimulatorErrorKind::SIRParser(
+                ParserError::Scheduler(SchedulerError::CombinationalLoop { blocks })
+                | ParserError::SchedulerWithLocation {
+                    error: SchedulerError::CombinationalLoop { blocks },
+                    ..
+                },
+            ) => {
                 assert_eq!(blocks.len(), 3, "Loop should involve exactly 3 blocks");
             }
             _ => panic!("Expected CombinationalLoop error, but got: {:?}", e),
@@ -65,9 +67,13 @@ fn test_combinational_loop() {
 
     let result = Simulator::builder(code, "Top").build();
     match result.as_ref().map_err(|e| e.kind()) {
-        Err(SimulatorErrorKind::SIRParser(ParserError::Scheduler(
-            SchedulerError::CombinationalLoop { blocks },
-        ))) => {
+        Err(SimulatorErrorKind::SIRParser(
+            ParserError::Scheduler(SchedulerError::CombinationalLoop { blocks })
+            | ParserError::SchedulerWithLocation {
+                error: SchedulerError::CombinationalLoop { blocks },
+                ..
+            },
+        )) => {
             assert_eq!(blocks.len(), 2);
         }
         Err(k) => panic!("Expected CombinationalLoop error, but got: {:?}", k),
@@ -309,9 +315,13 @@ fn test_runtime_for_loop_external_feedback_is_still_scheduler_loop() {
 
     let result = Simulator::builder(code, "Top").build();
     match result.as_ref().map_err(|e| e.kind()) {
-        Err(SimulatorErrorKind::SIRParser(ParserError::Scheduler(
-            SchedulerError::CombinationalLoop { blocks },
-        ))) => {
+        Err(SimulatorErrorKind::SIRParser(
+            ParserError::Scheduler(SchedulerError::CombinationalLoop { blocks })
+            | ParserError::SchedulerWithLocation {
+                error: SchedulerError::CombinationalLoop { blocks },
+                ..
+            },
+        )) => {
             assert_eq!(blocks.len(), 2);
         }
         Err(k) => panic!("Expected CombinationalLoop error, but got: {:?}", k),
@@ -340,9 +350,10 @@ fn test_always_ff_runtime_for_non_progress_is_rejected() {
     let clk = sim.event("clk");
     let count = sim.signal("count");
     sim.modify(|io| io.set(count, 4u8)).unwrap();
+    let err = sim.tick(clk).unwrap_err();
     assert_eq!(
-        sim.tick(clk).unwrap_err(),
-        RuntimeErrorCode::DetectedTrueLoop
+        err.to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
     );
 }
 
@@ -367,9 +378,10 @@ fn test_always_ff_runtime_for_zero_start_mul_non_progress_is_rejected() {
     let clk = sim.event("clk");
     let count = sim.signal("count");
     sim.modify(|io| io.set(count, 4u8)).unwrap();
+    let err = sim.tick(clk).unwrap_err();
     assert_eq!(
-        sim.tick(clk).unwrap_err(),
-        RuntimeErrorCode::DetectedTrueLoop
+        err.to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
     );
 }
 
@@ -383,9 +395,13 @@ fn test_multiple_driver_error() {
     "#;
     let result = Simulator::builder(code, "Top").build();
     assert_analyzer_or_sir(result, |e| match e.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Scheduler(SchedulerError::MultipleDriver {
-            ..
-        })) => {}
+        SimulatorErrorKind::SIRParser(
+            ParserError::Scheduler(SchedulerError::MultipleDriver { .. })
+            | ParserError::SchedulerWithLocation {
+                error: SchedulerError::MultipleDriver { .. },
+                ..
+            },
+        ) => {}
         _ => panic!("Expected MultipleDriver error, got: {e:?}"),
     });
 }
@@ -462,9 +478,13 @@ fn detect_hierarchical_true_concat_feedback_loop() {
     );
 
     match result.as_ref().map_err(|e| e.kind()) {
-        Err(SimulatorErrorKind::SIRParser(ParserError::Scheduler(
-            SchedulerError::CombinationalLoop { .. },
-        ))) => {}
+        Err(SimulatorErrorKind::SIRParser(
+            ParserError::Scheduler(SchedulerError::CombinationalLoop { .. })
+            | ParserError::SchedulerWithLocation {
+                error: SchedulerError::CombinationalLoop { .. },
+                ..
+            },
+        )) => {}
         Err(k) => panic!("expected CombinationalLoop error, got {k:?}"),
         Ok(_) => panic!("expected CombinationalLoop error, got Ok"),
     }

@@ -290,7 +290,7 @@ impl<B: SimBackend> Simulation<B> {
             }
         }
 
-        self.simulator.backend.eval_comb()?;
+        self.simulator.eval_comb_checked()?;
 
         let mut comb_already_done = false;
         loop {
@@ -328,8 +328,8 @@ impl<B: SimBackend> Simulation<B> {
                             triggered_domains.insert(info.canonical_id);
                             any_new_outer_loop_trigger = true;
 
-                            self.simulator.backend.eval_apply_ff_at(ev)?;
-                            self.simulator.backend.eval_comb()?;
+                            self.simulator.eval_apply_ff_at_checked(ev)?;
+                            self.simulator.eval_comb_checked()?;
                             comb_already_done = true;
                             break;
                         }
@@ -349,11 +349,11 @@ impl<B: SimBackend> Simulation<B> {
                         newly_triggered.push(info.canonical_id);
 
                         if let Some(ev) = info.eval_only_event {
-                            self.simulator.backend.eval_only_ff_at(ev)?;
+                            self.simulator.eval_only_ff_at_checked(ev)?;
                         } else if let Some(ev) = info.eval_ff_event {
                             // If this domain wasn't split into eval/apply, we can safely use the
                             // unified eval_apply_ff_at since no cascade optimizations applied to it.
-                            self.simulator.backend.eval_apply_ff_at(ev)?;
+                            self.simulator.eval_apply_ff_at_checked(ev)?;
                         } else {
                             unreachable!(
                                 "FF trigger discovered but no corresponding execution unit found for domain"
@@ -375,7 +375,7 @@ impl<B: SimBackend> Simulation<B> {
             for id in &newly_triggered {
                 let info = self.event_info[*id];
                 if let Some(ev) = info.apply_event {
-                    self.simulator.backend.apply_ff_at(ev)?;
+                    self.simulator.apply_ff_at_checked(ev)?;
                 }
             }
 
@@ -384,7 +384,7 @@ impl<B: SimBackend> Simulation<B> {
             if comb_already_done {
                 comb_already_done = false;
             } else {
-                self.simulator.backend.eval_comb()?;
+                self.simulator.eval_comb_checked()?;
             }
 
             if !any_new_outer_loop_trigger && newly_triggered.is_empty() {

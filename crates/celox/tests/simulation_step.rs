@@ -64,3 +64,38 @@ fn test_next_event_time() {
     vsim.step().unwrap();
     assert_eq!(vsim.next_event_time(), Some(100));
 }
+
+#[test]
+fn test_step_decorates_runtime_errors() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            start: input logic<8>,
+            count: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in start..count step *= 2 {
+                    q = i as 8;
+                }
+            }
+        }
+    "#;
+
+    let mut vsim = Simulation::builder(code, "Top").build().unwrap();
+    let start = vsim.signal("start");
+    let count = vsim.signal("count");
+
+    vsim.modify(|io| {
+        io.set(start, 0u8);
+        io.set(count, 4u8);
+    })
+    .unwrap();
+    vsim.add_clock("clk", 10, 0);
+
+    assert_eq!(
+        vsim.step().unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}

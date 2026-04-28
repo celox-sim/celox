@@ -865,4 +865,4 @@ Execution Unit 0:
     Store(addr=o (region=0), offset=0, bits=20, src_reg = 310)
     Return
   b4:
-    Error(1)
+    Error(2000)
