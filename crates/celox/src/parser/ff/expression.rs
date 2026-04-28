@@ -1,7 +1,7 @@
 use super::{Domain, FfParser};
 use crate::ir::{
-    BinaryOp, BitAccess, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
+    SIRTerminator, SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use crate::parser::{
     LoweringPhase, ParserError,
@@ -1128,6 +1128,18 @@ impl<'a> FfParser<'a> {
         self.stack.push_back(reg);
     }
 
+    fn system_function_input_width(
+        &self,
+        input: &veryl_analyzer::ir::SystemFunctionInput,
+    ) -> usize {
+        input
+            .0
+            .comptime()
+            .r#type
+            .total_width()
+            .unwrap_or_else(|| self.get_expression_width(&input.0))
+    }
+
     fn parse_system_function_call<A>(
         &mut self,
         call: &SystemFunctionCall,
@@ -1136,8 +1148,45 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
+        context_width: Option<usize>,
     ) -> Result<(), ParserError> {
         match &call.kind {
+            SystemFunctionKind::Bits(input) => {
+                let width = self.system_function_input_width(input);
+                self.op_constant(SIRValue::new(width as u64), 32, ir_builder);
+                Ok(())
+            }
+            SystemFunctionKind::Size(input) => {
+                let size = input.0.comptime().r#type.total_width().unwrap_or(0);
+                self.op_constant(SIRValue::new(size as u64), 32, ir_builder);
+                Ok(())
+            }
+            SystemFunctionKind::Clog2(input) => {
+                self.parse_expression(
+                    &input.0, targets, domain, convert, sources, ir_builder, None,
+                )?;
+                let arg = self.stack.pop_back().expect("Invalid $clog2 input");
+                let width = ir_builder.register(&arg).width();
+
+                let mut result = ir_builder.alloc_bit(32, false);
+                ir_builder.emit(SIRInstruction::Imm(result, SIRValue::new(0u8)));
+                for k in 1..=width {
+                    let threshold = ir_builder.alloc_bit(width, false);
+                    ir_builder.emit(SIRInstruction::Imm(
+                        threshold,
+                        SIRValue::new(BigUint::from(1u8) << (k - 1)),
+                    ));
+                    let cond = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(cond, arg, BinaryOp::GtU, threshold));
+                    let value = ir_builder.alloc_bit(32, false);
+                    ir_builder.emit(SIRInstruction::Imm(value, SIRValue::new(k as u64)));
+                    let next = ir_builder.alloc_logic(32);
+                    ir_builder.emit(SIRInstruction::Mux(next, cond, value, result));
+                    result = next;
+                }
+                self.stack.push_back(result);
+                Ok(())
+            }
             SystemFunctionKind::Onehot(input) => {
                 self.parse_expression(
                     &input.0, targets, domain, convert, sources, ir_builder, None,
@@ -1185,6 +1234,27 @@ impl<'a> FfParser<'a> {
                     no_overlap,
                 ));
                 self.stack.push_back(result);
+                Ok(())
+            }
+            SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
+                self.parse_expression(
+                    &input.0,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                    context_width,
+                )?;
+                let src = self
+                    .stack
+                    .pop_back()
+                    .expect("Invalid $signed/$unsigned input");
+                let width = ir_builder.register(&src).width();
+                let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
+                let casted = ir_builder.alloc_reg(RegisterType::Bit { width, signed });
+                ir_builder.emit(SIRInstruction::Unary(casted, UnaryOp::Ident, src));
+                self.stack.push_back(casted);
                 Ok(())
             }
             _ => Err(ParserError::unsupported(
@@ -1411,7 +1481,13 @@ impl<'a> FfParser<'a> {
             }
             Factor::SystemFunctionCall(call) => {
                 self.parse_system_function_call(
-                    call, targets, domain, convert, sources, ir_builder,
+                    call,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                    context_width,
                 )?;
             }
             Factor::FunctionCall(call) => {

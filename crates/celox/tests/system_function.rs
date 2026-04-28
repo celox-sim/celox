@@ -85,8 +85,8 @@ module Top (
         assert_eq!(sim.get_as::<u32>(q), 8);
     }
 
-    #[ignore = "direct $size on an array in always_ff reaches Celox FF lowering but is not supported there yet"]
     fn test_direct_ff_size_system_function(sim) {
+        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -103,7 +103,7 @@ module Top (
         let q = sim.signal("q");
 
         sim.tick(clk).unwrap();
-        assert_eq!(sim.get_as::<u32>(q), 32);
+        assert_eq!(sim.get_as::<u32>(q), 8);
     }
 
     #[ignore = "direct $clog2 in always_ff is folded from X payload by Veryl analyzer before Celox FF lowering"]
@@ -137,7 +137,43 @@ module Top (
         }
     }
 
-    #[ignore = "direct $signed in always_ff reaches Celox FF lowering but is not supported there yet"]
+    fn test_ff_function_body_clog2_system_function(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<8>,
+    q: output logic<32>,
+) {
+    function clog2_value (
+        x: input logic<8>,
+    ) -> logic<32> {
+        return $clog2(x);
+    }
+
+    always_ff (clk) {
+        q = clog2_value(d);
+    }
+}
+"#, "Top");
+
+        let clk = sim.event("clk");
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        for value in 0u16..256 {
+            let value = value as u8;
+            sim.modify(|io| io.set(d, value)).unwrap();
+            sim.tick(clk).unwrap();
+            let expected = if value == 0 {
+                0
+            } else {
+                u32::BITS - (u32::from(value) - 1).leading_zeros()
+            };
+            assert_eq!(sim.get_as::<u32>(q), expected, "value={value}");
+        }
+    }
+
     fn test_direct_ff_signed_system_function(sim) {
         @build Simulator::builder(r#"
 module Top (
@@ -160,7 +196,6 @@ module Top (
         assert_eq!(sim.get_as::<u8>(q), 0x80);
     }
 
-    #[ignore = "direct $unsigned in always_ff reaches Celox FF lowering but is not supported there yet"]
     fn test_direct_ff_unsigned_system_function(sim) {
         @build Simulator::builder(r#"
 module Top (
