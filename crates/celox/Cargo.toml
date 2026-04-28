@@ -39,7 +39,7 @@ memmap2               = "0.9"
 
 [dev-dependencies]
 insta      = "1.46"
-criterion  = "0.5"
+criterion  = "0.8"
 proptest   = "1.10"
 test-case  = "3"
 tempfile.workspace = true
