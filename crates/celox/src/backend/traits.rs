@@ -14,6 +14,7 @@ pub use super::runtime::SimulatorErrorCode;
 #[allow(dead_code)]
 pub enum SimulatorErrorCode {
     DetectedTrueLoop,
+    DetectedTrueLoopCode(i64),
     DetectedTrueLoopAt { signals: Vec<String> },
     InternalError,
     NotAnEvent(String),
@@ -23,7 +24,11 @@ impl PartialEq for SimulatorErrorCode {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::DetectedTrueLoop, Self::DetectedTrueLoop)
+            | (Self::DetectedTrueLoop, Self::DetectedTrueLoopCode(_))
             | (Self::DetectedTrueLoop, Self::DetectedTrueLoopAt { .. })
+            | (Self::DetectedTrueLoopCode(_), Self::DetectedTrueLoop)
+            | (Self::DetectedTrueLoopCode(_), Self::DetectedTrueLoopAt { .. })
+            | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoopCode(_))
             | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoop)
             | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoopAt { .. }) => true,
             (Self::InternalError, Self::InternalError) => true,
@@ -36,7 +41,9 @@ impl PartialEq for SimulatorErrorCode {
 impl std::fmt::Display for SimulatorErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DetectedTrueLoop => write!(f, "Detected True Loop"),
+            Self::DetectedTrueLoop | Self::DetectedTrueLoopCode(_) => {
+                write!(f, "Detected True Loop")
+            }
             Self::DetectedTrueLoopAt { signals } if signals.is_empty() => {
                 write!(f, "Detected True Loop")
             }

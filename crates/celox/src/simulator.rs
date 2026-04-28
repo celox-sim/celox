@@ -78,8 +78,8 @@ impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
 impl<B: SimBackend> Simulator<B> {
     fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
         match err {
-            RuntimeErrorCode::DetectedTrueLoop => {
-                let Some(addrs) = self.program.runtime_error_sources.get(&1) else {
+            RuntimeErrorCode::DetectedTrueLoopCode(code) => {
+                let Some(addrs) = self.program.runtime_error_sources.get(&code) else {
                     return RuntimeErrorCode::DetectedTrueLoop;
                 };
                 let signals = addrs

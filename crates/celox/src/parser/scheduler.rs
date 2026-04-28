@@ -319,6 +319,11 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
     }
 }
 
+pub struct ScheduleResult<Addr> {
+    pub execution_units: Vec<ExecutionUnit<Addr>>,
+    pub runtime_error_sources: HashMap<i64, Vec<Addr>>,
+}
+
 /// Flush pending DAG nodes, optionally coalescing contiguous stores to the
 /// same variable into a single `Concat` + `Store`.
 fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
@@ -500,7 +505,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     true_loops: &HashMap<(Addr, Addr), usize>,
     four_state: bool,
     var_widths: &HashMap<Addr, usize>,
-) -> Result<Vec<ExecutionUnit<Addr>>, SchedulerError<Addr>> {
+) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
     // 1. Build Atom Map & Multiple Driver Check
     let mut atoms_map: HashMap<Addr, Vec<(BitAccess, usize)>> = HashMap::default();
     for (i, path) in input.iter().enumerate() {
@@ -634,6 +639,8 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     const EU_BLOCK_LIMIT: usize = 20_000;
 
     let mut result_eus: Vec<ExecutionUnit<Addr>> = Vec::new();
+    let mut runtime_error_sources: HashMap<i64, Vec<Addr>> = HashMap::default();
+    let mut next_runtime_error_code = 1000;
 
     let mut pending_indices: Vec<usize> = Vec::new();
     let mut pending_target: Option<Addr> = None;
@@ -709,6 +716,18 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     }
                 }
             } else {
+                let runtime_error_code = next_runtime_error_code;
+                next_runtime_error_code += 1;
+                let mut seen = HashSet::default();
+                let sources = scc
+                    .iter()
+                    .filter_map(|idx| {
+                        let addr = input[*idx].target.id;
+                        seen.insert(addr).then_some(addr)
+                    })
+                    .collect::<Vec<_>>();
+                runtime_error_sources.insert(runtime_error_code, sources);
+
                 // Strategy B: Dynamic Convergence
                 // Implements a runtime loop that continues executing the SCC until all signals converge (dirty flag is false).
                 // Includes a safety limit to detect non-converging "True Loops" and avoid infinite hang.
@@ -838,7 +857,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 builder.switch_to_block(error_block);
                 // Emit a trap or special instruction to indicate "Combinational Loop Oscillation"
                 // builder.emit(SIRInstruction::Trap(1));
-                builder.seal_block(SIRTerminator::Error(1));
+                builder.seal_block(SIRTerminator::Error(runtime_error_code));
 
                 // 5. Exit Block
                 builder.switch_to_block(exit_block);
@@ -916,5 +935,8 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         blocks,
         register_map: reg_map,
     });
-    Ok(result_eus)
+    Ok(ScheduleResult {
+        execution_units: result_eus,
+        runtime_error_sources,
+    })
 }

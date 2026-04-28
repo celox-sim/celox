@@ -302,7 +302,7 @@ impl NativeBackend {
         let ret = unsafe { func(ptr) };
         match ret {
             0 => Ok(()),
-            1 => Err(SimulatorErrorCode::DetectedTrueLoop),
+            code if code > 0 => Err(SimulatorErrorCode::DetectedTrueLoopCode(code)),
             _ => Err(SimulatorErrorCode::InternalError),
         }
     }

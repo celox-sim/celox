@@ -68,4 +68,55 @@ fn test_true_loop_oscillation_detected(sim) {
     assert_eq!(err.to_string(), "Detected True Loop: v");
 }
 
+fn test_runtime_true_loop_reports_only_failing_scc(sim) {
+    @omit_veryl;
+    @setup {
+    let code = r#"
+        module Top (
+            a: input logic,
+            b: input logic,
+            y: output logic
+        ) {
+            var v: logic<2>;
+            var w: logic<2>;
+            assign v[0] = ~v[1] & a;
+            assign v[1] = v[0];
+            assign w[0] = ~w[1] & b;
+            assign w[1] = w[0];
+            assign y = v[0] ^ w[0];
+        }
+    "#;
+    }
+    @build SimulatorBuilder::new(code, "Top")
+        .true_loop(
+            (vec![], vec!["v".to_string()]),
+            (vec![], vec!["v".to_string()]),
+            10,
+        )
+        .true_loop(
+            (vec![], vec!["w".to_string()]),
+            (vec![], vec!["w".to_string()]),
+            10,
+        );
+
+    let id_a = sim.signal("a");
+    let id_b = sim.signal("b");
+
+    sim.modify(|io| {
+        io.set(id_a, 1u8);
+        io.set(id_b, 0u8);
+    })
+    .unwrap();
+    let err = sim.eval_comb().unwrap_err().to_string();
+    assert_eq!(err, "Detected True Loop: v");
+
+    sim.modify(|io| {
+        io.set(id_a, 0u8);
+        io.set(id_b, 1u8);
+    })
+    .unwrap();
+    let err = sim.eval_comb().unwrap_err().to_string();
+    assert_eq!(err, "Detected True Loop: w");
+}
+
 }

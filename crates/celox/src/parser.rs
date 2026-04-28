@@ -564,26 +564,6 @@ fn scheduler_source_locations(
         .collect()
 }
 
-fn runtime_error_sources(
-    true_loops: &HashMap<(AbsoluteAddr, AbsoluteAddr), usize>,
-) -> HashMap<i64, Vec<AbsoluteAddr>> {
-    let mut sources = Vec::new();
-    let mut seen = HashSet::default();
-    for &(from, to) in true_loops.keys() {
-        if seen.insert(from) {
-            sources.push(from);
-        }
-        if seen.insert(to) {
-            sources.push(to);
-        }
-    }
-    if sources.is_empty() {
-        HashMap::default()
-    } else {
-        HashMap::from_iter([(1, sources)])
-    }
-}
-
 pub(crate) fn flatten(
     root_id: &ModuleId,
     module_ir: &HashMap<ModuleId, &Module>,
@@ -721,7 +701,7 @@ pub(crate) fn flatten(
         .collect();
 
     let sched_start = flatten_timing.then(crate::timing::now);
-    let schduled = scheduler::sort(
+    let schedule = scheduler::sort(
         comb_blocks,
         &global_arena,
         &ignored_loops,
@@ -771,7 +751,9 @@ pub(crate) fn flatten(
     if let Some(s) = sched_start {
         eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
-    let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schduled
+    let runtime_error_sources = schedule.runtime_error_sources;
+    let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schedule
+        .execution_units
         .into_iter()
         .map(|eu| crate::ir::ExecutionUnit {
             entry_block_id: eu.entry_block_id,
@@ -836,7 +818,6 @@ pub(crate) fn flatten(
 
     let num_events = topological_clocks.len();
     let (mod_vars, mod_path_idx) = module_variables(module_ir, config)?;
-    let runtime_error_sources = runtime_error_sources(&true_loops);
     let program = Program {
         eval_apply_ffs,
         eval_only_ffs,
