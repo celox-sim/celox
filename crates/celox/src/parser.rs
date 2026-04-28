@@ -564,6 +564,26 @@ fn scheduler_source_locations(
         .collect()
 }
 
+fn runtime_error_sources(
+    true_loops: &HashMap<(AbsoluteAddr, AbsoluteAddr), usize>,
+) -> HashMap<i64, Vec<AbsoluteAddr>> {
+    let mut sources = Vec::new();
+    let mut seen = HashSet::default();
+    for &(from, to) in true_loops.keys() {
+        if seen.insert(from) {
+            sources.push(from);
+        }
+        if seen.insert(to) {
+            sources.push(to);
+        }
+    }
+    if sources.is_empty() {
+        HashMap::default()
+    } else {
+        HashMap::from_iter([(1, sources)])
+    }
+}
+
 pub(crate) fn flatten(
     root_id: &ModuleId,
     module_ir: &HashMap<ModuleId, &Module>,
@@ -716,6 +736,7 @@ pub(crate) fn flatten(
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             eval_comb: Vec::new(),
+            runtime_error_sources: HashMap::default(),
             eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
@@ -815,11 +836,13 @@ pub(crate) fn flatten(
 
     let num_events = topological_clocks.len();
     let (mod_vars, mod_path_idx) = module_variables(module_ir, config)?;
+    let runtime_error_sources = runtime_error_sources(&true_loops);
     let program = Program {
         eval_apply_ffs,
         eval_only_ffs,
         apply_ffs,
         eval_comb: schduled,
+        runtime_error_sources,
         eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,

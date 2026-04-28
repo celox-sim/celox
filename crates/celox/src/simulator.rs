@@ -76,6 +76,22 @@ impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
 // ── Generic methods available for any backend ────────────────────────
 #[cfg(not(target_arch = "wasm32"))]
 impl<B: SimBackend> Simulator<B> {
+    fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
+        match err {
+            RuntimeErrorCode::DetectedTrueLoop => {
+                let Some(addrs) = self.program.runtime_error_sources.get(&1) else {
+                    return RuntimeErrorCode::DetectedTrueLoop;
+                };
+                let signals = addrs
+                    .iter()
+                    .map(|addr| self.program.get_path(addr))
+                    .collect::<Vec<_>>();
+                RuntimeErrorCode::DetectedTrueLoopAt { signals }
+            }
+            other => other,
+        }
+    }
+
     pub fn with_backend_and_program(
         backend: B,
         program: Program,
@@ -152,13 +168,21 @@ impl<B: SimBackend> Simulator<B> {
     /// Manually triggers a clock or event to process sequential logic.
     pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
         if self.dirty {
-            self.backend.eval_comb()?;
-            self.backend.eval_apply_ff_at(event)?;
+            self.backend
+                .eval_comb()
+                .map_err(|e| self.decorate_runtime_error(e))?;
+            self.backend
+                .eval_apply_ff_at(event)
+                .map_err(|e| self.decorate_runtime_error(e))?;
             self.dirty = false;
         } else {
-            self.backend.eval_apply_ff_at(event)?;
+            self.backend
+                .eval_apply_ff_at(event)
+                .map_err(|e| self.decorate_runtime_error(e))?;
         }
-        self.backend.eval_comb()?;
+        self.backend
+            .eval_comb()
+            .map_err(|e| self.decorate_runtime_error(e))?;
         self.dirty = false;
         Ok(())
     }
@@ -220,7 +244,9 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Directly execute combinational logic evaluation.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
-        self.backend.eval_comb()?;
+        self.backend
+            .eval_comb()
+            .map_err(|e| self.decorate_runtime_error(e))?;
         self.dirty = false;
         Ok(())
     }

@@ -10,18 +10,39 @@ use super::MemoryLayout;
 pub use super::runtime::SimulatorErrorCode;
 
 #[cfg(target_arch = "wasm32")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 #[allow(dead_code)]
 pub enum SimulatorErrorCode {
     DetectedTrueLoop,
+    DetectedTrueLoopAt { signals: Vec<String> },
     InternalError,
     NotAnEvent(String),
+}
+#[cfg(target_arch = "wasm32")]
+impl PartialEq for SimulatorErrorCode {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::DetectedTrueLoop, Self::DetectedTrueLoop)
+            | (Self::DetectedTrueLoop, Self::DetectedTrueLoopAt { .. })
+            | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoop)
+            | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoopAt { .. }) => true,
+            (Self::InternalError, Self::InternalError) => true,
+            (Self::NotAnEvent(a), Self::NotAnEvent(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 #[cfg(target_arch = "wasm32")]
 impl std::fmt::Display for SimulatorErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DetectedTrueLoop => write!(f, "Detected True Loop"),
+            Self::DetectedTrueLoopAt { signals } if signals.is_empty() => {
+                write!(f, "Detected True Loop")
+            }
+            Self::DetectedTrueLoopAt { signals } => {
+                write!(f, "Detected True Loop: {}", signals.join(", "))
+            }
             Self::InternalError => write!(f, "Internal Error"),
             Self::NotAnEvent(name) => write!(f, "Not an event: {name}"),
         }

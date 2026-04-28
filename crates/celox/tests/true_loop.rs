@@ -63,7 +63,9 @@ fn test_true_loop_oscillation_detected(sim) {
     sim.modify(|io| io.set(id_a, 1u8)).unwrap();
     let res = sim.eval_comb();
     assert!(res.is_err());
-    assert_eq!(res.unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+    let err = res.unwrap_err();
+    assert_eq!(err, RuntimeErrorCode::DetectedTrueLoop);
+    assert_eq!(err.to_string(), "Detected True Loop: v");
 }
 
 }

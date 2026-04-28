@@ -8,7 +8,6 @@ use crate::{
 };
 
 use super::{JitEngine, MemoryLayout, get_byte_size};
-use thiserror::Error;
 pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 
 /// Opaque handle to a compiled event (clock / async-reset) function.
@@ -41,16 +40,38 @@ impl super::EventHandle for EventRef {
         self.addr
     }
 }
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub enum SimulatorErrorCode {
     DetectedTrueLoop,
+    DetectedTrueLoopAt { signals: Vec<String> },
     InternalError,
     NotAnEvent(String),
 }
+
+impl PartialEq for SimulatorErrorCode {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::DetectedTrueLoop, Self::DetectedTrueLoop)
+            | (Self::DetectedTrueLoop, Self::DetectedTrueLoopAt { .. })
+            | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoop)
+            | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoopAt { .. }) => true,
+            (Self::InternalError, Self::InternalError) => true,
+            (Self::NotAnEvent(a), Self::NotAnEvent(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 impl std::fmt::Display for SimulatorErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DetectedTrueLoop => write!(f, "Detected True Loop"),
+            Self::DetectedTrueLoopAt { signals } if signals.is_empty() => {
+                write!(f, "Detected True Loop")
+            }
+            Self::DetectedTrueLoopAt { signals } => {
+                write!(f, "Detected True Loop: {}", signals.join(", "))
+            }
             Self::InternalError => write!(f, "Internal Error"),
             Self::NotAnEvent(name) => write!(
                 f,
@@ -60,6 +81,8 @@ impl std::fmt::Display for SimulatorErrorCode {
         }
     }
 }
+
+impl std::error::Error for SimulatorErrorCode {}
 
 /// Immutable compilation result that can be shared across simulator instances.
 ///
