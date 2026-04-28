@@ -1128,16 +1128,36 @@ impl<'a> FfParser<'a> {
         self.stack.push_back(reg);
     }
 
-    fn system_function_input_width(
+    fn system_function_type_bits_width(ty: &Type) -> Option<usize> {
+        ty.total_width()
+            .map(|width| width * ty.total_array().unwrap_or(1))
+    }
+
+    fn system_function_type_size(ty: &Type) -> Option<usize> {
+        if let Some(size) = ty.array.first() {
+            *size
+        } else {
+            ty.total_width()
+        }
+    }
+
+    fn system_function_input_bits_width(
         &self,
         input: &veryl_analyzer::ir::SystemFunctionInput,
     ) -> usize {
         let comptime = input.0.comptime();
         match &comptime.value {
-            ValueVariant::Type(ty) => ty.total_width().unwrap_or(0),
-            _ => comptime
-                .r#type
-                .total_width()
+            ValueVariant::Type(ty) => Self::system_function_type_bits_width(ty).unwrap_or(0),
+            _ => Self::system_function_type_bits_width(&comptime.r#type)
+                .unwrap_or_else(|| self.get_expression_width(&input.0)),
+        }
+    }
+
+    fn system_function_input_size(&self, input: &veryl_analyzer::ir::SystemFunctionInput) -> usize {
+        let comptime = input.0.comptime();
+        match &comptime.value {
+            ValueVariant::Type(ty) => Self::system_function_type_size(ty).unwrap_or(0),
+            _ => Self::system_function_type_size(&comptime.r#type)
                 .unwrap_or_else(|| self.get_expression_width(&input.0)),
         }
     }
@@ -1153,12 +1173,12 @@ impl<'a> FfParser<'a> {
     ) -> Result<(), ParserError> {
         match &call.kind {
             SystemFunctionKind::Bits(input) => {
-                let width = self.system_function_input_width(input);
+                let width = self.system_function_input_bits_width(input);
                 self.op_constant(SIRValue::new(width as u64), 32, ir_builder);
                 Ok(())
             }
             SystemFunctionKind::Size(input) => {
-                let size = self.system_function_input_width(input);
+                let size = self.system_function_input_size(input);
                 self.op_constant(SIRValue::new(size as u64), 32, ir_builder);
                 Ok(())
             }

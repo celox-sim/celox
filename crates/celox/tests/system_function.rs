@@ -104,6 +104,27 @@ module Top (
         assert_eq!(sim.get_as::<u32>(q), 8);
     }
 
+    fn test_direct_ff_bits_array_system_function(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<8>[4],
+    q: output logic<32>,
+) {
+    always_ff (clk) {
+        q = $bits(d);
+    }
+}
+"#, "Top");
+
+        let clk = sim.event("clk");
+        let q = sim.signal("q");
+
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u32>(q), 32);
+    }
+
     fn test_direct_ff_size_system_function(sim) {
         @ignore_on(veryl);
         @build Simulator::builder(r#"
@@ -122,7 +143,7 @@ module Top (
         let q = sim.signal("q");
 
         sim.tick(clk).unwrap();
-        assert_eq!(sim.get_as::<u32>(q), 8);
+        assert_eq!(sim.get_as::<u32>(q), 4);
     }
 
     fn test_direct_ff_size_type_system_function(sim) {
