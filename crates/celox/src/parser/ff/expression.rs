@@ -1136,6 +1136,10 @@ impl<'a> FfParser<'a> {
     fn system_function_type_size(ty: &Type) -> Option<usize> {
         if let Some(size) = ty.array.first() {
             *size
+        } else if let Some(size) = ty.width_expr().first().and_then(|expr| expr.numeric()) {
+            Some(size)
+        } else if let Some(size) = ty.width().first() {
+            *size
         } else {
             ty.total_width()
         }

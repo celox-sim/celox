@@ -166,6 +166,47 @@ module Top (
         assert_eq!(sim.get_as::<u32>(q), 8);
     }
 
+    #[ignore = "$size on packed multidimensional types is folded to total width by Veryl analyzer before Celox FF lowering"]
+    fn test_direct_ff_size_packed_multidimensional_system_function(sim) {
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<10, 20>,
+    q: output logic<32>,
+) {
+    always_ff (clk) {
+        q = $size(d);
+    }
+}
+"#, "Top");
+
+        let clk = sim.event("clk");
+        let q = sim.signal("q");
+
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u32>(q), 10);
+    }
+
+    #[ignore = "$size on packed multidimensional type arguments is folded to total width by Veryl analyzer before Celox FF lowering"]
+    fn test_direct_ff_size_packed_multidimensional_type_system_function(sim) {
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    q: output logic<32>,
+) {
+    always_ff (clk) {
+        q = $size(logic<10, 20>);
+    }
+}
+"#, "Top");
+
+        let clk = sim.event("clk");
+        let q = sim.signal("q");
+
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u32>(q), 10);
+    }
+
     #[ignore = "direct $clog2 in always_ff is folded from X payload by Veryl analyzer before Celox FF lowering"]
     fn test_direct_ff_clog2_system_function(sim) {
         @build Simulator::builder(r#"
