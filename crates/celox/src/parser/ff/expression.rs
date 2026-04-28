@@ -1132,12 +1132,14 @@ impl<'a> FfParser<'a> {
         &self,
         input: &veryl_analyzer::ir::SystemFunctionInput,
     ) -> usize {
-        input
-            .0
-            .comptime()
-            .r#type
-            .total_width()
-            .unwrap_or_else(|| self.get_expression_width(&input.0))
+        let comptime = input.0.comptime();
+        match &comptime.value {
+            ValueVariant::Type(ty) => ty.total_width().unwrap_or(0),
+            _ => comptime
+                .r#type
+                .total_width()
+                .unwrap_or_else(|| self.get_expression_width(&input.0)),
+        }
     }
 
     fn parse_system_function_call<A>(
@@ -1156,7 +1158,7 @@ impl<'a> FfParser<'a> {
                 Ok(())
             }
             SystemFunctionKind::Size(input) => {
-                let size = input.0.comptime().r#type.total_width().unwrap_or(0);
+                let size = self.system_function_input_width(input);
                 self.op_constant(SIRValue::new(size as u64), 32, ir_builder);
                 Ok(())
             }
