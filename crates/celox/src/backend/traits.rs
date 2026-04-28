@@ -33,6 +33,7 @@ impl PartialEq for SimulatorErrorCode {
             | (Self::DetectedTrueLoop, Self::DetectedTrueLoopCode(_))
             | (Self::DetectedTrueLoop, Self::DetectedTrueLoopAt { .. })
             | (Self::DetectedTrueLoopCode(_), Self::DetectedTrueLoop)
+            | (Self::DetectedTrueLoopCode(_), Self::DetectedTrueLoopCode(_))
             | (Self::DetectedTrueLoopCode(_), Self::DetectedTrueLoopAt { .. })
             | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoopCode(_))
             | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoop)

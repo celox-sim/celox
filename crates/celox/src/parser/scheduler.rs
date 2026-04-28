@@ -505,6 +505,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     true_loops: &HashMap<(Addr, Addr), usize>,
     four_state: bool,
     var_widths: &HashMap<Addr, usize>,
+    first_runtime_error_code: i64,
 ) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
     // 1. Build Atom Map & Multiple Driver Check
     let mut atoms_map: HashMap<Addr, Vec<(BitAccess, usize)>> = HashMap::default();
@@ -640,7 +641,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
 
     let mut result_eus: Vec<ExecutionUnit<Addr>> = Vec::new();
     let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
-    let mut next_runtime_error_code = 1000;
+    let mut next_runtime_error_code = first_runtime_error_code;
 
     let mut pending_indices: Vec<usize> = Vec::new();
     let mut pending_target: Option<Addr> = None;

@@ -621,6 +621,7 @@ pub(crate) fn flatten(
         apply_ffs,
         mut comb_blocks,
         mut runtime_errors,
+        next_runtime_error_code,
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
@@ -715,6 +716,7 @@ pub(crate) fn flatten(
         &true_loops,
         four_state,
         &var_widths,
+        next_runtime_error_code,
     )
     .map_err(|e| {
         let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
@@ -1528,6 +1530,7 @@ fn relocate_units(
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
     HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+    i64,
 ) {
     let mut global_arena = SLTNodeArena::<AbsoluteAddr>::new();
     let mut eval_apply_ffs: HashMap<
@@ -1721,6 +1724,7 @@ fn relocate_units(
         apply_ffs,
         comb_blocks,
         runtime_errors,
+        next_runtime_error_code,
     )
 }
 
