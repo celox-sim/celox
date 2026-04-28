@@ -5,6 +5,13 @@ expression: err
 scheduler
 
   × Combinational loop detected: y[0]
+   ╭─[:4:13]
+ 3 │             a: input logic,
+ 4 │             y: output logic
+   ·             ┬
+   ·             ╰── loop participant
+ 5 │         ) {
+   ╰────
 
 
 --- warnings ---

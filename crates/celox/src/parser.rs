@@ -64,6 +64,13 @@ impl SourceLocation {
             span: token.into(),
         }
     }
+
+    fn path(&self) -> Option<&str> {
+        self.source
+            .sources
+            .first()
+            .map(|source| source.path.as_str())
+    }
 }
 
 /// The compilation phase where an unsupported feature was encountered.
@@ -88,6 +95,12 @@ impl std::fmt::Display for LoweringPhase {
 pub enum ParserError {
     #[error(transparent)]
     Scheduler(SchedulerError<String>),
+
+    #[error("{error}")]
+    SchedulerWithLocation {
+        error: SchedulerError<String>,
+        source_locations: Vec<SourceLocation>,
+    },
 
     #[error("Unsupported in {phase}: {feature} [tracking issue #{issue}] ({detail})")]
     Unsupported {
@@ -179,7 +192,9 @@ impl miette::Diagnostic for ParserError {
             ))),
             ParserError::IllegalContext { .. } => Some(Box::new("illegal_context")),
             ParserError::UnresolvedWidth { .. } => Some(Box::new("unresolved_width")),
-            ParserError::Scheduler(_) => Some(Box::new("scheduler")),
+            ParserError::Scheduler(_) | ParserError::SchedulerWithLocation { .. } => {
+                Some(Box::new("scheduler"))
+            }
             ParserError::TopNotFound { .. } => Some(Box::new("top_not_found")),
             ParserError::GenericTop { .. } => Some(Box::new("generic_top")),
         }
@@ -200,6 +215,9 @@ impl miette::Diagnostic for ParserError {
             | ParserError::UnresolvedWidth {
                 source_location, ..
             } => source_location.as_ref(),
+            ParserError::SchedulerWithLocation {
+                source_locations, ..
+            } => source_locations.first(),
             _ => None,
         };
         loc.map(|l| &l.source as &dyn miette::SourceCode)
@@ -218,12 +236,35 @@ impl miette::Diagnostic for ParserError {
             } => source_location.as_ref(),
             _ => None,
         };
-        loc.map(|l| {
-            Box::new(std::iter::once(miette::LabeledSpan::new_with_span(
-                Some("Error location".to_string()),
-                l.span,
-            ))) as Box<dyn Iterator<Item = miette::LabeledSpan>>
-        })
+        if let Some(loc) = loc {
+            return Some(Box::new(std::iter::once(
+                miette::LabeledSpan::new_with_span(Some("Error location".to_string()), loc.span),
+            )));
+        }
+
+        match self {
+            ParserError::SchedulerWithLocation {
+                source_locations, ..
+            } => {
+                let first_path = source_locations.first().and_then(SourceLocation::path)?;
+                let labels = source_locations
+                    .iter()
+                    .filter(move |loc| loc.path() == Some(first_path))
+                    .map(|loc| {
+                        miette::LabeledSpan::new_with_span(
+                            Some("loop participant".to_string()),
+                            loc.span,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if labels.is_empty() {
+                    None
+                } else {
+                    Some(Box::new(labels.into_iter()))
+                }
+            }
+            _ => None,
+        }
     }
 }
 
@@ -497,6 +538,32 @@ fn parse_true_loops(
     }
     res
 }
+
+fn scheduler_source_locations(
+    error: &SchedulerError<AbsoluteAddr>,
+    module_ir: &HashMap<ModuleId, &Module>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+) -> Vec<SourceLocation> {
+    let blocks = match error {
+        SchedulerError::CombinationalLoop { blocks } => blocks,
+        SchedulerError::MultipleDriver { blocks } => blocks,
+    };
+    let mut seen = HashSet::default();
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let addr = block.target.id;
+            if !seen.insert(addr) {
+                return None;
+            }
+            let module_id = instance_modules.get(&addr.instance_id)?;
+            let module = module_ir.get(module_id)?;
+            let var = module.variables.get(&addr.var_id)?;
+            Some(SourceLocation::from_token(&var.token))
+        })
+        .collect()
+}
+
 pub(crate) fn flatten(
     root_id: &ModuleId,
     module_ir: &HashMap<ModuleId, &Module>,
@@ -666,10 +733,19 @@ pub(crate) fn flatten(
             initial_statements: None,
             tb_functions: fxhash::FxHashMap::default(),
         };
+        let source_locations = scheduler_source_locations(&e, module_ir, &instance_modules);
         let mut target_arena = SLTNodeArena::new();
-        ParserError::Scheduler(e.map_addr(&global_arena, &mut target_arena, &|addr| {
+        let error = e.map_addr(&global_arena, &mut target_arena, &|addr| {
             program.get_path(addr)
-        }))
+        });
+        if source_locations.is_empty() {
+            ParserError::Scheduler(error)
+        } else {
+            ParserError::SchedulerWithLocation {
+                error,
+                source_locations,
+            }
+        }
     })?;
     if let Some(s) = sched_start {
         eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
