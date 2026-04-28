@@ -1,7 +1,7 @@
 use super::{Domain, FfParser};
 use crate::ir::{
-    BinaryOp, BitAccess, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
+    SIRTerminator, SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use crate::parser::{
     LoweringPhase, ParserError,
@@ -11,8 +11,9 @@ use crate::parser::{
 use num_bigint::BigUint;
 
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignDestination, AssignStatement, Comptime, Expression, Factor, Op, Type,
-    ValueVariant, VarId, VarIndex, VarSelect, VarSelectOp,
+    ArrayLiteralItem, AssignDestination, AssignStatement, Comptime, Expression, Factor, Op,
+    SystemFunctionCall, SystemFunctionKind, Type, ValueVariant, VarId, VarIndex, VarSelect,
+    VarSelectOp,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -1127,6 +1128,164 @@ impl<'a> FfParser<'a> {
         self.stack.push_back(reg);
     }
 
+    fn system_function_type_bits_width(ty: &Type) -> Option<usize> {
+        ty.total_width()
+            .map(|width| width * ty.total_array().unwrap_or(1))
+    }
+
+    fn system_function_type_size(ty: &Type) -> Option<usize> {
+        if let Some(size) = ty.array.first() {
+            *size
+        } else if let Some(size) = ty.width_expr().first().and_then(|expr| expr.numeric()) {
+            Some(size)
+        } else if let Some(size) = ty.width().first() {
+            *size
+        } else {
+            ty.total_width()
+        }
+    }
+
+    fn system_function_input_bits_width(
+        &self,
+        input: &veryl_analyzer::ir::SystemFunctionInput,
+    ) -> usize {
+        let comptime = input.0.comptime();
+        match &comptime.value {
+            ValueVariant::Type(ty) => Self::system_function_type_bits_width(ty).unwrap_or(0),
+            _ => Self::system_function_type_bits_width(&comptime.r#type)
+                .unwrap_or_else(|| self.get_expression_width(&input.0)),
+        }
+    }
+
+    fn system_function_input_size(&self, input: &veryl_analyzer::ir::SystemFunctionInput) -> usize {
+        let comptime = input.0.comptime();
+        match &comptime.value {
+            ValueVariant::Type(ty) => Self::system_function_type_size(ty).unwrap_or(0),
+            _ => Self::system_function_type_size(&comptime.r#type)
+                .unwrap_or_else(|| self.get_expression_width(&input.0)),
+        }
+    }
+
+    fn parse_system_function_call<A>(
+        &mut self,
+        call: &SystemFunctionCall,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        match &call.kind {
+            SystemFunctionKind::Bits(input) => {
+                let width = self.system_function_input_bits_width(input);
+                self.op_constant(SIRValue::new(width as u64), 32, ir_builder);
+                Ok(())
+            }
+            SystemFunctionKind::Size(input) => {
+                let size = self.system_function_input_size(input);
+                self.op_constant(SIRValue::new(size as u64), 32, ir_builder);
+                Ok(())
+            }
+            SystemFunctionKind::Clog2(input) => {
+                self.parse_expression(
+                    &input.0, targets, domain, convert, sources, ir_builder, None,
+                )?;
+                let arg = self.stack.pop_back().expect("Invalid $clog2 input");
+                let width = ir_builder.register(&arg).width();
+
+                let mut result = ir_builder.alloc_bit(32, false);
+                ir_builder.emit(SIRInstruction::Imm(result, SIRValue::new(0u8)));
+                for k in 1..=width {
+                    let threshold = ir_builder.alloc_bit(width, false);
+                    ir_builder.emit(SIRInstruction::Imm(
+                        threshold,
+                        SIRValue::new(BigUint::from(1u8) << (k - 1)),
+                    ));
+                    let cond = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(cond, arg, BinaryOp::GtU, threshold));
+                    let value = ir_builder.alloc_bit(32, false);
+                    ir_builder.emit(SIRInstruction::Imm(value, SIRValue::new(k as u64)));
+                    let next = ir_builder.alloc_logic(32);
+                    ir_builder.emit(SIRInstruction::Mux(next, cond, value, result));
+                    result = next;
+                }
+                self.stack.push_back(result);
+                Ok(())
+            }
+            SystemFunctionKind::Onehot(input) => {
+                self.parse_expression(
+                    &input.0, targets, domain, convert, sources, ir_builder, None,
+                )?;
+                let arg = self.stack.pop_back().expect("Invalid $onehot input");
+                let width = ir_builder.register(&arg).width();
+
+                let zero = ir_builder.alloc_bit(width, false);
+                ir_builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                let one = ir_builder.alloc_bit(width, false);
+                ir_builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+
+                let arg_minus_one = ir_builder.alloc_logic(width);
+                ir_builder.emit(SIRInstruction::Binary(
+                    arg_minus_one,
+                    arg,
+                    BinaryOp::Sub,
+                    one,
+                ));
+
+                let overlap = ir_builder.alloc_logic(width);
+                ir_builder.emit(SIRInstruction::Binary(
+                    overlap,
+                    arg,
+                    BinaryOp::And,
+                    arg_minus_one,
+                ));
+
+                let non_zero = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(non_zero, arg, BinaryOp::Ne, zero));
+
+                let no_overlap = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    no_overlap,
+                    overlap,
+                    BinaryOp::Eq,
+                    zero,
+                ));
+
+                let result = ir_builder.alloc_logic(1);
+                ir_builder.emit(SIRInstruction::Binary(
+                    result,
+                    non_zero,
+                    BinaryOp::LogicAnd,
+                    no_overlap,
+                ));
+                self.stack.push_back(result);
+                Ok(())
+            }
+            SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
+                self.parse_expression(
+                    &input.0, targets, domain, convert, sources, ir_builder, None,
+                )?;
+                let src = self
+                    .stack
+                    .pop_back()
+                    .expect("Invalid $signed/$unsigned input");
+                let width = ir_builder.register(&src).width();
+                let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
+                let casted = ir_builder.alloc_reg(RegisterType::Bit { width, signed });
+                ir_builder.emit(SIRInstruction::Unary(casted, UnaryOp::Ident, src));
+                self.stack.push_back(casted);
+                Ok(())
+            }
+            _ => Err(ParserError::unsupported(
+                66,
+                LoweringPhase::FfLowering,
+                "system function call",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            )),
+        }
+    }
+
     pub(super) fn parse_factor<A>(
         &mut self,
         factor: &Factor,
@@ -1340,13 +1499,9 @@ impl<'a> FfParser<'a> {
                 );
             }
             Factor::SystemFunctionCall(call) => {
-                return Err(ParserError::unsupported(
-                    66,
-                    LoweringPhase::FfLowering,
-                    "system function call",
-                    format!("{call}"),
-                    Some(&call.comptime.token),
-                ));
+                self.parse_system_function_call(
+                    call, targets, domain, convert, sources, ir_builder,
+                )?;
             }
             Factor::FunctionCall(call) => {
                 self.parse_function_call_expr(call, targets, domain, convert, sources, ir_builder)?;
