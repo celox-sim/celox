@@ -1148,7 +1148,6 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-        context_width: Option<usize>,
     ) -> Result<(), ParserError> {
         match &call.kind {
             SystemFunctionKind::Bits(input) => {
@@ -1238,13 +1237,7 @@ impl<'a> FfParser<'a> {
             }
             SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
                 self.parse_expression(
-                    &input.0,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    context_width,
+                    &input.0, targets, domain, convert, sources, ir_builder, None,
                 )?;
                 let src = self
                     .stack
@@ -1481,13 +1474,7 @@ impl<'a> FfParser<'a> {
             }
             Factor::SystemFunctionCall(call) => {
                 self.parse_system_function_call(
-                    call,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    context_width,
+                    call, targets, domain, convert, sources, ir_builder,
                 )?;
             }
             Factor::FunctionCall(call) => {

@@ -196,6 +196,29 @@ module Top (
         assert_eq!(sim.get_as::<u8>(q), 0x80);
     }
 
+    fn test_direct_ff_signed_system_function_sign_extends_to_context(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<8>,
+    q: output logic<16>,
+) {
+    always_ff (clk) {
+        q = $signed(d);
+    }
+}
+"#, "Top");
+
+        let clk = sim.event("clk");
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        sim.modify(|io| io.set(d, 0x80u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u16>(q), 0xff80);
+    }
+
     fn test_direct_ff_unsigned_system_function(sim) {
         @build Simulator::builder(r#"
 module Top (
@@ -216,6 +239,28 @@ module Top (
         sim.modify(|io| io.set(d, 0x80u8)).unwrap();
         sim.tick(clk).unwrap();
         assert_eq!(sim.get_as::<u8>(q), 0x80);
+    }
+
+    fn test_direct_ff_unsigned_system_function_zero_extends_to_context(sim) {
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<8>,
+    q: output logic<16>,
+) {
+    always_ff (clk) {
+        q = $unsigned(d);
+    }
+}
+"#, "Top");
+
+        let clk = sim.event("clk");
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        sim.modify(|io| io.set(d, 0x80u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u16>(q), 0x0080);
     }
 
     #[ignore = "direct $onehot in always_ff is folded to 1'h0 by Veryl analyzer before Celox FF lowering"]
