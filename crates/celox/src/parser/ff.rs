@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::ir::{
-    RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIRTerminator, TriggerSet, UnaryOp,
-    VarAtomBase, WORKING_REGION,
+    RegisterId, RegisterType, RuntimeErrorInfo, SIRBuilder, SIRInstruction, SIRTerminator,
+    TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use crate::{
     HashMap, HashSet,
@@ -73,6 +73,8 @@ pub struct FfParser<'a> {
     loop_exit_blocks: Vec<crate::ir::BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
+    runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
+    next_runtime_error_code: i64,
     config: BuildConfig,
 }
 
@@ -93,8 +95,27 @@ impl<'a> FfParser<'a> {
             loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
+            runtime_errors: HashMap::default(),
+            next_runtime_error_code: 2000,
             config,
         }
+    }
+
+    pub fn runtime_errors(&self) -> &HashMap<i64, RuntimeErrorInfo<VarId>> {
+        &self.runtime_errors
+    }
+
+    fn runtime_error(&mut self, message: impl Into<String>, signals: Vec<VarId>) -> i64 {
+        let code = self.next_runtime_error_code;
+        self.next_runtime_error_code += 1;
+        self.runtime_errors.insert(
+            code,
+            RuntimeErrorInfo {
+                message: message.into(),
+                signals,
+            },
+        );
+        code
     }
 
     fn get_constant_value(&self, expr: &Expression) -> Option<u64> {
@@ -820,6 +841,13 @@ impl<'a> FfParser<'a> {
                     Self::bound_const_value(end),
                 ),
             };
+        let loop_var_name = veryl_parser::resource_table::get_str_value(stmt.var_name)
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let non_progress_message =
+            format!("Non-progressing for loop in always_ff (loop variable `{loop_var_name}`)");
+        let range_message = format!(
+            "For loop value exceeds loop variable range in always_ff (loop variable `{loop_var_name}`)"
+        );
 
         let const_empty = Self::const_range_is_empty(reverse, start_const, end_const, inclusive);
         let const_singleton =
@@ -1081,7 +1109,9 @@ impl<'a> FfParser<'a> {
                     ir_builder.seal_block(SIRTerminator::Jump(true_loop_bb, vec![]));
                 }
                 ir_builder.switch_to_block(true_loop_bb);
-                ir_builder.seal_block(SIRTerminator::Error(1));
+                let error_code =
+                    self.runtime_error(non_progress_message.clone(), vec![stmt.var_id]);
+                ir_builder.seal_block(SIRTerminator::Error(error_code));
                 ir_builder.switch_to_block(singleton_bb);
                 ir_builder.seal_block(SIRTerminator::Jump(fitcheck_bb, vec![header_counter]));
             } else {
@@ -1275,7 +1305,8 @@ impl<'a> FfParser<'a> {
             ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![fitcheck_counter]));
         }
         ir_builder.switch_to_block(range_error_bb);
-        ir_builder.seal_block(SIRTerminator::Error(1));
+        let error_code = self.runtime_error(range_message, vec![stmt.var_id]);
+        ir_builder.seal_block(SIRTerminator::Error(error_code));
         ir_builder.switch_to_block(body_bb);
         self.local_working_vars.insert(stmt.var_id);
 
@@ -1400,7 +1431,8 @@ impl<'a> FfParser<'a> {
                 false_block: (exit_bb, vec![]),
             });
             ir_builder.switch_to_block(stall_bb);
-            ir_builder.seal_block(SIRTerminator::Error(1));
+            let error_code = self.runtime_error(non_progress_message, vec![stmt.var_id]);
+            ir_builder.seal_block(SIRTerminator::Error(error_code));
         } else {
             let current_math =
                 self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);

@@ -79,14 +79,22 @@ impl<B: SimBackend> Simulator<B> {
     fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
         match err {
             RuntimeErrorCode::DetectedTrueLoopCode(code) => {
-                let Some(addrs) = self.program.runtime_error_sources.get(&code) else {
+                let Some(info) = self.program.runtime_errors.get(&code) else {
                     return RuntimeErrorCode::DetectedTrueLoop;
                 };
-                let signals = addrs
+                let signals = info
+                    .signals
                     .iter()
                     .map(|addr| self.program.get_path(addr))
                     .collect::<Vec<_>>();
-                RuntimeErrorCode::DetectedTrueLoopAt { signals }
+                if info.message == "Detected True Loop" {
+                    RuntimeErrorCode::DetectedTrueLoopAt { signals }
+                } else {
+                    RuntimeErrorCode::Runtime {
+                        message: info.message.clone(),
+                        signals,
+                    }
+                }
             }
             other => other,
         }

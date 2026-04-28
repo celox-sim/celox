@@ -44,7 +44,13 @@ impl super::EventHandle for EventRef {
 pub enum SimulatorErrorCode {
     DetectedTrueLoop,
     DetectedTrueLoopCode(i64),
-    DetectedTrueLoopAt { signals: Vec<String> },
+    DetectedTrueLoopAt {
+        signals: Vec<String>,
+    },
+    Runtime {
+        message: String,
+        signals: Vec<String>,
+    },
     InternalError,
     NotAnEvent(String),
 }
@@ -61,6 +67,16 @@ impl PartialEq for SimulatorErrorCode {
             | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoop)
             | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoopAt { .. }) => true,
             (Self::InternalError, Self::InternalError) => true,
+            (
+                Self::Runtime {
+                    message: a,
+                    signals: sa,
+                },
+                Self::Runtime {
+                    message: b,
+                    signals: sb,
+                },
+            ) => a == b && sa == sb,
             (Self::NotAnEvent(a), Self::NotAnEvent(b)) => a == b,
             _ => false,
         }
@@ -78,6 +94,10 @@ impl std::fmt::Display for SimulatorErrorCode {
             }
             Self::DetectedTrueLoopAt { signals } => {
                 write!(f, "Detected True Loop: {}", signals.join(", "))
+            }
+            Self::Runtime { message, signals } if signals.is_empty() => write!(f, "{message}"),
+            Self::Runtime { message, signals } => {
+                write!(f, "{}: {}", message, signals.join(", "))
             }
             Self::InternalError => write!(f, "Internal Error"),
             Self::NotAnEvent(name) => write!(

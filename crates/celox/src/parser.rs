@@ -39,7 +39,7 @@ pub mod registry;
 mod scheduler;
 use crate::ir::{
     AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, ModuleId, Program,
-    RegionedAbsoluteAddr, STABLE_REGION, SimModule, VariableInfo,
+    RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule, VariableInfo,
 };
 use crate::logic_tree::{LogicPath, SLTNodeArena};
 pub use scheduler::SchedulerError;
@@ -614,7 +614,14 @@ pub(crate) fn flatten(
         "unify_clock_domains",
         unify_clock_domains(&expanded, &instance_modules, &modules)
     );
-    let (mut global_arena, mut eval_apply_ffs, eval_only_ffs, apply_ffs, mut comb_blocks) = timed_sub!(
+    let (
+        mut global_arena,
+        mut eval_apply_ffs,
+        eval_only_ffs,
+        apply_ffs,
+        mut comb_blocks,
+        mut runtime_errors,
+    ) = timed_sub!(
         "relocate_units",
         relocate_units(
             &expanded,
@@ -716,7 +723,7 @@ pub(crate) fn flatten(
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             eval_comb: Vec::new(),
-            runtime_error_sources: HashMap::default(),
+            runtime_errors: HashMap::default(),
             eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
@@ -751,7 +758,7 @@ pub(crate) fn flatten(
     if let Some(s) = sched_start {
         eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
-    let runtime_error_sources = schedule.runtime_error_sources;
+    runtime_errors.extend(schedule.runtime_errors);
     let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schedule
         .execution_units
         .into_iter()
@@ -823,7 +830,7 @@ pub(crate) fn flatten(
         eval_only_ffs,
         apply_ffs,
         eval_comb: schduled,
-        runtime_error_sources,
+        runtime_errors,
         eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
@@ -1346,9 +1353,10 @@ pub fn parse(
     Ok(program)
 }
 
-fn relocate_executation_unit<A, B>(
+fn relocate_executation_unit_with_errors<A, B>(
     eu: &ExecutionUnit<A>,
     f: &impl Fn(&A) -> B,
+    runtime_error_codes: &HashMap<i64, i64>,
 ) -> ExecutionUnit<B> {
     ExecutionUnit {
         entry_block_id: eu.entry_block_id,
@@ -1366,7 +1374,14 @@ fn relocate_executation_unit<A, B>(
                             .map(|inst| inst.map_addr(f))
                             .collect(),
                         params: block.params.clone(),
-                        terminator: block.terminator.clone(),
+                        terminator: match block.terminator {
+                            crate::ir::SIRTerminator::Error(code) => {
+                                crate::ir::SIRTerminator::Error(
+                                    runtime_error_codes.get(&code).copied().unwrap_or(code),
+                                )
+                            }
+                            ref terminator => terminator.clone(),
+                        },
                     },
                 )
             })
@@ -1512,6 +1527,7 @@ fn relocate_units(
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
+    HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
 ) {
     let mut global_arena = SLTNodeArena::<AbsoluteAddr>::new();
     let mut eval_apply_ffs: HashMap<
@@ -1525,10 +1541,33 @@ fn relocate_units(
     let mut apply_ffs: HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>> =
         HashMap::default();
     let mut comb_blocks = Vec::new();
+    let mut runtime_errors = HashMap::default();
+    let mut next_runtime_error_code = 2000;
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
+        let mut runtime_error_codes = HashMap::default();
+        for (&local_code, info) in &sim_module.runtime_errors {
+            let global_code = next_runtime_error_code;
+            next_runtime_error_code += 1;
+            runtime_error_codes.insert(local_code, global_code);
+            runtime_errors.insert(
+                global_code,
+                RuntimeErrorInfo {
+                    message: info.message.clone(),
+                    signals: info
+                        .signals
+                        .iter()
+                        .filter(|var_id| sim_module.variables.contains_key(var_id))
+                        .map(|&var_id| AbsoluteAddr {
+                            instance_id: *id,
+                            var_id,
+                        })
+                        .collect(),
+                },
+            );
+        }
 
         let relocated_module = flatting::flatting(
             sim_module,
@@ -1552,16 +1591,17 @@ fn relocate_units(
                 .copied()
                 .unwrap_or(clock_addr);
 
-            eval_apply_ffs
-                .entry(canonical_addr)
-                .or_default()
-                .push(relocate_executation_unit(eu, &|addr| {
-                    RegionedAbsoluteAddr {
+            eval_apply_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| RegionedAbsoluteAddr {
                         region: addr.region,
                         instance_id: *id,
                         var_id: addr.var_id,
-                    }
-                }));
+                    },
+                    &runtime_error_codes,
+                ),
+            );
 
             for &reset in &trigger_set.resets {
                 let reset_addr = AbsoluteAddr {
@@ -1572,16 +1612,17 @@ fn relocate_units(
                     .get(&reset_addr)
                     .copied()
                     .unwrap_or(reset_addr);
-                eval_apply_ffs
-                    .entry(canonical_addr)
-                    .or_default()
-                    .push(relocate_executation_unit(eu, &|addr| {
-                        RegionedAbsoluteAddr {
+                eval_apply_ffs.entry(canonical_addr).or_default().push(
+                    relocate_executation_unit_with_errors(
+                        eu,
+                        &|addr| RegionedAbsoluteAddr {
                             region: addr.region,
                             instance_id: *id,
                             var_id: addr.var_id,
-                        }
-                    }));
+                        },
+                        &runtime_error_codes,
+                    ),
+                );
             }
         }
 
@@ -1594,16 +1635,17 @@ fn relocate_units(
                 .get(&clock_addr)
                 .copied()
                 .unwrap_or(clock_addr);
-            eval_only_ffs
-                .entry(canonical_addr)
-                .or_default()
-                .push(relocate_executation_unit(eu, &|addr| {
-                    RegionedAbsoluteAddr {
+            eval_only_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| RegionedAbsoluteAddr {
                         region: addr.region,
                         instance_id: *id,
                         var_id: addr.var_id,
-                    }
-                }));
+                    },
+                    &runtime_error_codes,
+                ),
+            );
 
             for &reset in &trigger_set.resets {
                 let reset_addr = AbsoluteAddr {
@@ -1614,16 +1656,17 @@ fn relocate_units(
                     .get(&reset_addr)
                     .copied()
                     .unwrap_or(reset_addr);
-                eval_only_ffs
-                    .entry(canonical_addr)
-                    .or_default()
-                    .push(relocate_executation_unit(eu, &|addr| {
-                        RegionedAbsoluteAddr {
+                eval_only_ffs.entry(canonical_addr).or_default().push(
+                    relocate_executation_unit_with_errors(
+                        eu,
+                        &|addr| RegionedAbsoluteAddr {
                             region: addr.region,
                             instance_id: *id,
                             var_id: addr.var_id,
-                        }
-                    }));
+                        },
+                        &runtime_error_codes,
+                    ),
+                );
             }
         }
 
@@ -1636,16 +1679,17 @@ fn relocate_units(
                 .get(&clock_addr)
                 .copied()
                 .unwrap_or(clock_addr);
-            apply_ffs
-                .entry(canonical_addr)
-                .or_default()
-                .push(relocate_executation_unit(eu, &|addr| {
-                    RegionedAbsoluteAddr {
+            apply_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| RegionedAbsoluteAddr {
                         region: addr.region,
                         instance_id: *id,
                         var_id: addr.var_id,
-                    }
-                }));
+                    },
+                    &runtime_error_codes,
+                ),
+            );
 
             for &reset in &trigger_set.resets {
                 let reset_addr = AbsoluteAddr {
@@ -1656,16 +1700,17 @@ fn relocate_units(
                     .get(&reset_addr)
                     .copied()
                     .unwrap_or(reset_addr);
-                apply_ffs
-                    .entry(canonical_addr)
-                    .or_default()
-                    .push(relocate_executation_unit(eu, &|addr| {
-                        RegionedAbsoluteAddr {
+                apply_ffs.entry(canonical_addr).or_default().push(
+                    relocate_executation_unit_with_errors(
+                        eu,
+                        &|addr| RegionedAbsoluteAddr {
                             region: addr.region,
                             instance_id: *id,
                             var_id: addr.var_id,
-                        }
-                    }));
+                        },
+                        &runtime_error_codes,
+                    ),
+                );
             }
         }
     }
@@ -1675,6 +1720,7 @@ fn relocate_units(
         eval_only_ffs,
         apply_ffs,
         comb_blocks,
+        runtime_errors,
     )
 }
 

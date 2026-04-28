@@ -652,7 +652,7 @@ type SharedCode = celox::SharedJitCode;
 /// Cached compilation result shared across simulator instances.
 struct CachedBuild {
     shared_code: Arc<SharedCode>,
-    runtime_error_sources: HashMap<i64, Vec<String>>,
+    runtime_errors: HashMap<i64, (String, Vec<String>)>,
     layout_json: String,
     events_json: String,
     hierarchy_json: String,
@@ -757,14 +757,20 @@ fn build_cache_key(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn runtime_error_sources_by_name(program: &celox::Program) -> HashMap<i64, Vec<String>> {
+fn runtime_errors_by_name(program: &celox::Program) -> HashMap<i64, (String, Vec<String>)> {
     program
-        .runtime_error_sources
+        .runtime_errors
         .iter()
-        .map(|(&code, addrs)| {
+        .map(|(&code, info)| {
             (
                 code,
-                addrs.iter().map(|addr| program.get_path(addr)).collect(),
+                (
+                    info.message.clone(),
+                    info.signals
+                        .iter()
+                        .map(|addr| program.get_path(addr))
+                        .collect(),
+                ),
             )
         })
         .collect()
@@ -772,18 +778,28 @@ fn runtime_error_sources_by_name(program: &celox::Program) -> HashMap<i64, Vec<S
 
 #[cfg(not(target_arch = "wasm32"))]
 fn napi_runtime_error(
-    runtime_error_sources: &HashMap<i64, Vec<String>>,
+    runtime_errors: &HashMap<i64, (String, Vec<String>)>,
     err: celox::RuntimeErrorCode,
 ) -> Error {
     match err {
         celox::RuntimeErrorCode::DetectedTrueLoopCode(code) => {
-            if let Some(signals) = runtime_error_sources.get(&code) {
-                Error::from_reason(format!(
-                    "{}",
-                    celox::RuntimeErrorCode::DetectedTrueLoopAt {
-                        signals: signals.clone(),
-                    }
-                ))
+            if let Some((message, signals)) = runtime_errors.get(&code) {
+                if message == "Detected True Loop" {
+                    Error::from_reason(format!(
+                        "{}",
+                        celox::RuntimeErrorCode::DetectedTrueLoopAt {
+                            signals: signals.clone(),
+                        }
+                    ))
+                } else {
+                    Error::from_reason(format!(
+                        "{}",
+                        celox::RuntimeErrorCode::Runtime {
+                            message: message.clone(),
+                            signals: signals.clone(),
+                        }
+                    ))
+                }
             } else {
                 Error::from_reason(format!("{}", celox::RuntimeErrorCode::DetectedTrueLoop))
             }
@@ -799,7 +815,7 @@ fn napi_runtime_error(
 #[napi]
 pub struct NativeSimulatorHandle {
     backend: Option<celox::DefaultBackend>,
-    runtime_error_sources: HashMap<i64, Vec<String>>,
+    runtime_errors: HashMap<i64, (String, Vec<String>)>,
     vcd_writer: Option<celox::VcdWriter>,
     layout_json: String,
     events_json: String,
@@ -827,7 +843,7 @@ impl NativeSimulatorHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
         let vcd_descs = sim.build_vcd_descs(four_state);
-        let runtime_error_sources = runtime_error_sources_by_name(sim.program());
+        let runtime_errors = runtime_errors_by_name(sim.program());
 
         let layout_map = build_signal_layout(&signals, four_state);
         let event_map = build_event_map(&events);
@@ -844,7 +860,7 @@ impl NativeSimulatorHandle {
         if let Some(key) = cache_key {
             let cached = Arc::new(CachedBuild {
                 shared_code: sim.shared_code(),
-                runtime_error_sources: runtime_error_sources.clone(),
+                runtime_errors: runtime_errors.clone(),
                 layout_json: layout_json.clone(),
                 events_json: events_json.clone(),
                 hierarchy_json: hierarchy_json.clone(),
@@ -872,7 +888,7 @@ impl NativeSimulatorHandle {
 
         Ok(Self {
             backend: Some(backend),
-            runtime_error_sources,
+            runtime_errors,
             vcd_writer,
             layout_json,
             events_json,
@@ -899,7 +915,7 @@ impl NativeSimulatorHandle {
         };
         Ok(Self {
             backend: Some(backend),
-            runtime_error_sources: cached.runtime_error_sources.clone(),
+            runtime_errors: cached.runtime_errors.clone(),
             vcd_writer,
             layout_json: cached.layout_json.clone(),
             events_json: cached.events_json.clone(),
@@ -1024,24 +1040,24 @@ impl NativeSimulatorHandle {
     /// Trigger a clock/event by its numeric ID.
     #[napi]
     pub fn tick(&mut self, event_id: u32) -> Result<()> {
-        let runtime_error_sources = self.runtime_error_sources.clone();
+        let runtime_errors = self.runtime_errors.clone();
         let b = self
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         let event = b.id_to_event_slice()[event_id as usize];
         b.eval_comb()
-            .map_err(|e| napi_runtime_error(&runtime_error_sources, e))?;
+            .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
         b.eval_apply_ff_at(event)
-            .map_err(|e| napi_runtime_error(&runtime_error_sources, e))?;
+            .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
         b.eval_comb()
-            .map_err(|e| napi_runtime_error(&runtime_error_sources, e))
+            .map_err(|e| napi_runtime_error(&runtime_errors, e))
     }
 
     /// Trigger a clock/event N times in a single NAPI call.
     #[napi]
     pub fn tick_n(&mut self, event_id: u32, count: u32) -> Result<()> {
-        let runtime_error_sources = self.runtime_error_sources.clone();
+        let runtime_errors = self.runtime_errors.clone();
         let b = self
             .backend
             .as_mut()
@@ -1049,11 +1065,11 @@ impl NativeSimulatorHandle {
         let event = b.id_to_event_slice()[event_id as usize];
         for _ in 0..count {
             b.eval_comb()
-                .map_err(|e| napi_runtime_error(&runtime_error_sources, e))?;
+                .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
             b.eval_apply_ff_at(event)
-                .map_err(|e| napi_runtime_error(&runtime_error_sources, e))?;
+                .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
             b.eval_comb()
-                .map_err(|e| napi_runtime_error(&runtime_error_sources, e))?;
+                .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
         }
         Ok(())
     }
@@ -1061,13 +1077,13 @@ impl NativeSimulatorHandle {
     /// Evaluate combinational logic.
     #[napi]
     pub fn eval_comb(&mut self) -> Result<()> {
-        let runtime_error_sources = self.runtime_error_sources.clone();
+        let runtime_errors = self.runtime_errors.clone();
         let b = self
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         b.eval_comb()
-            .map_err(|e| napi_runtime_error(&runtime_error_sources, e))
+            .map_err(|e| napi_runtime_error(&runtime_errors, e))
     }
 
     /// Write VCD dump at the given timestamp.

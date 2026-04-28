@@ -1,6 +1,4 @@
-use celox::{
-    LoweringPhase, ParserError, RuntimeErrorCode, SchedulerError, Simulator, SimulatorErrorKind,
-};
+use celox::{LoweringPhase, ParserError, SchedulerError, Simulator, SimulatorErrorKind};
 
 /// Helper: assert the error is either Analyzer or a specific SIRParser variant.
 /// The updated Veryl analyzer may catch issues before the SIR scheduler does.
@@ -352,9 +350,10 @@ fn test_always_ff_runtime_for_non_progress_is_rejected() {
     let clk = sim.event("clk");
     let count = sim.signal("count");
     sim.modify(|io| io.set(count, 4u8)).unwrap();
+    let err = sim.tick(clk).unwrap_err();
     assert_eq!(
-        sim.tick(clk).unwrap_err(),
-        RuntimeErrorCode::DetectedTrueLoop
+        err.to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
     );
 }
 
@@ -379,9 +378,10 @@ fn test_always_ff_runtime_for_zero_start_mul_non_progress_is_rejected() {
     let clk = sim.event("clk");
     let count = sim.signal("count");
     sim.modify(|io| io.set(count, 4u8)).unwrap();
+    let err = sim.tick(clk).unwrap_err();
     assert_eq!(
-        sim.tick(clk).unwrap_err(),
-        RuntimeErrorCode::DetectedTrueLoop
+        err.to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
     );
 }
 

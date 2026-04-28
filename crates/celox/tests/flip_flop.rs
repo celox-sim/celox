@@ -1,4 +1,4 @@
-use celox::{BigUint, RuntimeErrorCode, Simulation, Simulator, SimulatorBuilder};
+use celox::{BigUint, Simulation, Simulator, SimulatorBuilder};
 use insta::assert_snapshot;
 
 #[path = "test_utils/mod.rs"]
@@ -188,7 +188,10 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
         io.set(count, 4u8);
     })
     .unwrap();
-    assert_eq!(sim.tick(clk).unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
 }
 
 fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
@@ -1522,8 +1525,8 @@ fn test_ff_runtime_for_wide_dynamic_bound_out_of_i32_range_errors() {
     sim.modify(|io| io.set_wide(bound, (BigUint::from(1u32) << 31) + BigUint::from(1u32)))
         .unwrap();
     assert_eq!(
-        sim.tick(clk).unwrap_err(),
-        RuntimeErrorCode::DetectedTrueLoop
+        sim.tick(clk).unwrap_err().to_string(),
+        "For loop value exceeds loop variable range in always_ff (loop variable `i`): i"
     );
 }
 
@@ -1551,8 +1554,8 @@ fn test_ff_runtime_for_wide_dynamic_end_errors_before_iteration() {
     sim.modify(|io| io.set_wide(count, BigUint::from(1u64) << 40))
         .unwrap();
     assert_eq!(
-        sim.tick(clk).unwrap_err(),
-        RuntimeErrorCode::DetectedTrueLoop
+        sim.tick(clk).unwrap_err().to_string(),
+        "For loop value exceeds loop variable range in always_ff (loop variable `i`): i"
     );
 }
 
@@ -1580,8 +1583,8 @@ fn test_ff_runtime_for_wide_dynamic_start_errors_before_empty_exit() {
     sim.modify(|io| io.set_wide(start, BigUint::from(1u64) << 40))
         .unwrap();
     assert_eq!(
-        sim.tick(clk).unwrap_err(),
-        RuntimeErrorCode::DetectedTrueLoop
+        sim.tick(clk).unwrap_err().to_string(),
+        "For loop value exceeds loop variable range in always_ff (loop variable `i`): i"
     );
 }
 
@@ -1609,8 +1612,8 @@ fn test_ff_runtime_for_wide_dynamic_reverse_start_errors_before_empty_exit() {
     sim.modify(|io| io.set_wide(start, BigUint::from(1u64) << 40))
         .unwrap();
     assert_eq!(
-        sim.tick(clk).unwrap_err(),
-        RuntimeErrorCode::DetectedTrueLoop
+        sim.tick(clk).unwrap_err().to_string(),
+        "For loop value exceeds loop variable range in always_ff (loop variable `i`): i"
     );
 }
 

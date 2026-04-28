@@ -7,7 +7,7 @@ use crate::ir::SIRInstruction;
 use crate::ir::SIROffset;
 use crate::ir::SIRTerminator;
 use crate::ir::SIRValue;
-use crate::ir::{BitAccess, BlockId, ExecutionUnit};
+use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo};
 use crate::logic_tree::NodeId;
 use crate::logic_tree::{LogicPath, SLTNodeArena};
 use std::fmt::Debug;
@@ -321,7 +321,7 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
 
 pub struct ScheduleResult<Addr> {
     pub execution_units: Vec<ExecutionUnit<Addr>>,
-    pub runtime_error_sources: HashMap<i64, Vec<Addr>>,
+    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>>,
 }
 
 /// Flush pending DAG nodes, optionally coalescing contiguous stores to the
@@ -639,7 +639,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     const EU_BLOCK_LIMIT: usize = 20_000;
 
     let mut result_eus: Vec<ExecutionUnit<Addr>> = Vec::new();
-    let mut runtime_error_sources: HashMap<i64, Vec<Addr>> = HashMap::default();
+    let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
     let mut next_runtime_error_code = 1000;
 
     let mut pending_indices: Vec<usize> = Vec::new();
@@ -726,7 +726,13 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                         seen.insert(addr).then_some(addr)
                     })
                     .collect::<Vec<_>>();
-                runtime_error_sources.insert(runtime_error_code, sources);
+                runtime_errors.insert(
+                    runtime_error_code,
+                    RuntimeErrorInfo {
+                        message: "Detected True Loop".to_string(),
+                        signals: sources,
+                    },
+                );
 
                 // Strategy B: Dynamic Convergence
                 // Implements a runtime loop that continues executing the SCC until all signals converge (dirty flag is false).
@@ -937,6 +943,6 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     });
     Ok(ScheduleResult {
         execution_units: result_eus,
-        runtime_error_sources,
+        runtime_errors,
     })
 }
