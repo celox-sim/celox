@@ -93,6 +93,21 @@ pub struct RuntimeErrorInfo<Addr = AbsoluteAddr> {
     pub signals: Vec<Addr>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum RuntimeEventKind {
+    Display,
+    AssertContinue,
+    AssertFatal,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeEventSite {
+    pub kind: RuntimeEventKind,
+    pub template: Option<String>,
+    pub arg_widths: Vec<usize>,
+    pub arg_signed: Vec<bool>,
+}
+
 #[derive(Clone)]
 pub struct Program {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
@@ -100,6 +115,7 @@ pub struct Program {
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+    pub runtime_event_sites: Vec<RuntimeEventSite>,
     /// Tail-call chain compilation plan, populated by the optimizer when the
     /// estimated CLIF instruction count exceeds Cranelift's limit.
     pub eval_comb_plan: Option<EvalCombPlan>,
@@ -579,6 +595,7 @@ pub struct SimModule {
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
+    pub runtime_event_sites: Vec<RuntimeEventSite>,
     pub comb_boundaries: HashMap<VarId, std::collections::BTreeSet<usize>>,
     pub arena: SLTNodeArena<VarId>,
     pub store: SymbolicStore<VarId>,
@@ -771,6 +788,10 @@ fn renumber_sir_inst<A: Clone>(
         SIRInstruction::Mux(dst, cond, then_val, else_val) => {
             SIRInstruction::Mux(r(*dst), r(*cond), r(*then_val), r(*else_val))
         }
+        SIRInstruction::RuntimeEvent { site_id, args } => SIRInstruction::RuntimeEvent {
+            site_id: *site_id,
+            args: args.iter().map(|a| r(*a)).collect(),
+        },
     }
 }
 
@@ -1071,6 +1092,10 @@ pub enum SIRInstruction<Addr> {
     /// In 4-state mode, preserves exact mask bits (including Z) of the selected branch.
     /// When cond has X/Z bits, result is all-X.
     Mux(RegisterId, RegisterId, RegisterId, RegisterId), // dst, cond, then_val, else_val
+    RuntimeEvent {
+        site_id: u32,
+        args: Vec<RegisterId>,
+    },
 }
 
 impl<A: Display> fmt::Display for SIRInstruction<A> {
@@ -1130,6 +1155,16 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     dst.0, cond.0, then_val.0, else_val.0
                 )
             }
+            SIRInstruction::RuntimeEvent { site_id, args } => {
+                write!(f, "RuntimeEvent(site={}, args=[", site_id)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "r{}", arg.0)?;
+                }
+                write!(f, "])")
+            }
         }
     }
 }
@@ -1154,6 +1189,9 @@ impl<A> SIRInstruction<A> {
             }
             SIRInstruction::Mux(dst, cond, then_val, else_val) => {
                 SIRInstruction::Mux(dst, cond, then_val, else_val)
+            }
+            SIRInstruction::RuntimeEvent { site_id, args } => {
+                SIRInstruction::RuntimeEvent { site_id, args }
             }
         }
     }
@@ -1182,6 +1220,10 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Mux(dst, cond, then_val, else_val) => {
                 SIRInstruction::Mux(*dst, *cond, *then_val, *else_val)
             }
+            SIRInstruction::RuntimeEvent { site_id, args } => SIRInstruction::RuntimeEvent {
+                site_id: *site_id,
+                args: args.clone(),
+            },
         }
     }
 }

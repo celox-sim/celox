@@ -217,6 +217,13 @@ fn apply_aliases_to_inst(
                 *src = to;
             }
         }
+        SIRInstruction::RuntimeEvent { args, .. } => {
+            for arg in args {
+                if let Some(&to) = aliases.get(arg) {
+                    *arg = to;
+                }
+            }
+        }
     }
 }
 

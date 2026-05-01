@@ -218,7 +218,9 @@ fn gvn_block(
             // (Store-Load forwarding handles Load redundancy separately)
             SIRInstruction::Load(..) => None,
             // Store/Commit: side-effecting. Invalidate all Load-derived values.
-            SIRInstruction::Store(..) | SIRInstruction::Commit(..) => {
+            SIRInstruction::Store(..)
+            | SIRInstruction::Commit(..)
+            | SIRInstruction::RuntimeEvent { .. } => {
                 // Conservative: don't invalidate value table for pure
                 // computations (Binary/Unary/Concat/Slice/Imm are
                 // memory-independent). Only Loads would be affected by
@@ -315,6 +317,13 @@ fn apply_aliases(
             }
             if let Some(&a) = aliases.get(else_val) {
                 *else_val = a;
+            }
+        }
+        SIRInstruction::RuntimeEvent { args, .. } => {
+            for arg in args {
+                if let Some(&a) = aliases.get(arg) {
+                    *arg = a;
+                }
             }
         }
     }

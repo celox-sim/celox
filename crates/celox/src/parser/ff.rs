@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::ir::{
-    RegisterId, RegisterType, RuntimeErrorInfo, SIRBuilder, SIRInstruction, SIRTerminator,
-    TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    RegisterId, RegisterType, RuntimeErrorInfo, RuntimeEventSite, SIRBuilder, SIRInstruction,
+    SIRTerminator, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use crate::{
     HashMap, HashSet,
@@ -16,9 +16,11 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
 
 use veryl_analyzer::ir::{
-    Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange, ForStatement, IfResetStatement,
-    IfStatement, Module, Op, Statement, TypeKind, ValueVariant, VarId,
+    AssertKind, Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange, ForStatement,
+    IfResetStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionInput,
+    SystemFunctionKind, TypeKind, ValueVariant, VarId,
 };
+use veryl_analyzer::value::byte_value_to_string;
 use veryl_analyzer::value::Value;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +76,7 @@ pub struct FfParser<'a> {
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
+    runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
     config: BuildConfig,
 }
@@ -96,6 +99,7 @@ impl<'a> FfParser<'a> {
             reset: None,
             function_arg_stack: Vec::new(),
             runtime_errors: HashMap::default(),
+            runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,
             config,
         }
@@ -103,6 +107,10 @@ impl<'a> FfParser<'a> {
 
     pub fn runtime_errors(&self) -> &HashMap<i64, RuntimeErrorInfo<VarId>> {
         &self.runtime_errors
+    }
+
+    pub fn runtime_event_sites(&self) -> &Vec<RuntimeEventSite> {
+        &self.runtime_event_sites
     }
 
     fn runtime_error(&mut self, message: impl Into<String>, signals: Vec<VarId>) -> i64 {
@@ -116,6 +124,147 @@ impl<'a> FfParser<'a> {
             },
         );
         code
+    }
+
+    fn static_string_expr(expr: &Expression) -> Option<String> {
+        if !expr.comptime().r#type.is_string() {
+            return None;
+        }
+        let value = expr.comptime().get_value().ok()?;
+        byte_value_to_string(value)
+    }
+
+    fn register_runtime_event_site(
+        &mut self,
+        kind: crate::ir::RuntimeEventKind,
+        args: &[SystemFunctionInput],
+    ) -> u32 {
+        let (template, value_args) = if args
+            .first()
+            .and_then(|arg| Self::static_string_expr(&arg.0))
+            .is_some()
+        {
+            (
+                args.first().and_then(|arg| Self::static_string_expr(&arg.0)),
+                &args[1..],
+            )
+        } else {
+            (None, args)
+        };
+        let site = RuntimeEventSite {
+            kind,
+            template,
+            arg_widths: value_args
+                .iter()
+                .map(|arg| self.get_expression_width(&arg.0))
+                .collect(),
+            arg_signed: value_args
+                .iter()
+                .map(|arg| arg.0.comptime().expr_context.signed)
+                .collect(),
+        };
+        let id = self.runtime_event_sites.len() as u32;
+        self.runtime_event_sites.push(site);
+        id
+    }
+
+    fn emit_runtime_event<A>(
+        &mut self,
+        site_id: u32,
+        args: &[SystemFunctionInput],
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let value_args = if args
+            .first()
+            .and_then(|arg| Self::static_string_expr(&arg.0))
+            .is_some()
+        {
+            &args[1..]
+        } else {
+            args
+        };
+        let mut regs = Vec::new();
+        for arg in value_args {
+            self.parse_expression(&arg.0, targets, domain, convert, sources, ir_builder, None)?;
+            regs.push(self.stack.pop_back().unwrap());
+        }
+        ir_builder.emit(SIRInstruction::RuntimeEvent {
+            site_id,
+            args: regs,
+        });
+        Ok(())
+    }
+
+    fn parse_system_task_statement<A>(
+        &mut self,
+        call: &SystemFunctionCall,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<ControlFlow, ParserError> {
+        match &call.kind {
+            SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                let site_id =
+                    self.register_runtime_event_site(crate::ir::RuntimeEventKind::Display, args);
+                self.emit_runtime_event(
+                    site_id, args, targets, domain, convert, sources, ir_builder,
+                )?;
+                Ok(ControlFlow::Continue)
+            }
+            SystemFunctionKind::Assert { kind, cond, args } => {
+                self.parse_expression(
+                    &cond.0, targets, domain, convert, sources, ir_builder, None,
+                )?;
+                let cond_reg = self.stack.pop_back().unwrap();
+                let pass_bb = ir_builder.new_block();
+                let fail_bb = ir_builder.new_block();
+                let event_kind = match kind {
+                    AssertKind::Fatal => crate::ir::RuntimeEventKind::AssertFatal,
+                    AssertKind::Continue => crate::ir::RuntimeEventKind::AssertContinue,
+                };
+                let site_id = self.register_runtime_event_site(event_kind, args);
+                ir_builder.seal_block(SIRTerminator::Branch {
+                    cond: cond_reg,
+                    true_block: (pass_bb, vec![]),
+                    false_block: (fail_bb, vec![]),
+                });
+                ir_builder.switch_to_block(fail_bb);
+                self.emit_runtime_event(
+                    site_id, args, targets, domain, convert, sources, ir_builder,
+                )?;
+                match kind {
+                    AssertKind::Fatal => {
+                        let message = if let Some(template) =
+                            args.first().and_then(|arg| Self::static_string_expr(&arg.0))
+                        {
+                            template
+                        } else {
+                            "assertion failed".to_string()
+                        };
+                        let code = self.runtime_error(message, Vec::new());
+                        ir_builder.seal_block(SIRTerminator::Error(code));
+                    }
+                    AssertKind::Continue => {
+                        ir_builder.seal_block(SIRTerminator::Jump(pass_bb, vec![]));
+                    }
+                }
+                ir_builder.switch_to_block(pass_bb);
+                Ok(ControlFlow::Continue)
+            }
+            _ => Err(ParserError::unsupported(
+                66,
+                LoweringPhase::FfLowering,
+                "system function call",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            )),
+        }
     }
 
     fn get_constant_value(&self, expr: &Expression) -> Option<u64> {
@@ -467,13 +616,9 @@ impl<'a> FfParser<'a> {
             }
             Statement::Null => {}
             Statement::SystemFunctionCall(call) => {
-                return Err(ParserError::unsupported(
-                    66,
-                    LoweringPhase::FfLowering,
-                    "system function call",
-                    format!("{call}"),
-                    Some(&call.comptime.token),
-                ));
+                return self.parse_system_task_statement(
+                    call, targets, domain, convert, sources, ir_builder,
+                );
             }
             Statement::FunctionCall(call) => {
                 self.parse_function_call_statement(

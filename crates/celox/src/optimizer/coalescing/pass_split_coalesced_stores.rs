@@ -184,6 +184,8 @@ fn inst_def(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
         | SIRInstruction::Concat(d, _)
         | SIRInstruction::Slice(d, _, _, _)
         | SIRInstruction::Mux(d, _, _, _) => Some(*d),
-        SIRInstruction::Store(..) | SIRInstruction::Commit(..) => None,
+        SIRInstruction::Store(..)
+        | SIRInstruction::Commit(..)
+        | SIRInstruction::RuntimeEvent { .. } => None,
     }
 }

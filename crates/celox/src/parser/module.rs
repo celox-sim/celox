@@ -391,6 +391,7 @@ impl<'a> ModuleParser<'a> {
             eval_apply_ff_blocks,
             comb_blocks: self.comb_blocks,
             runtime_errors: self.ff_parser.runtime_errors().clone(),
+            runtime_event_sites: self.ff_parser.runtime_event_sites().clone(),
             comb_boundaries,
             arena: self.arena,
             store: self.store,

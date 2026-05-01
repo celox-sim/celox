@@ -97,6 +97,8 @@ pub use simulator::SimulatorBuilder;
 pub use simulator::SimulatorError;
 pub use simulator::SimulatorErrorKind;
 #[cfg(not(target_arch = "wasm32"))]
+pub use simulator::RuntimeEvent;
+#[cfg(not(target_arch = "wasm32"))]
 pub use simulator::SimulatorOptions;
 pub use simulator::render_diagnostic;
 #[cfg(not(target_arch = "wasm32"))]

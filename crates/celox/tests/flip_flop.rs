@@ -43,6 +43,63 @@ fn test_ff_nonblocking(sim) {
     assert_eq!(sim.get(q), 0x11111111u32.into());
 }
 
+fn test_ff_runtime_display_and_assert_continue(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<8>, q: output logic<8>) {
+            always_ff (clk) {
+                q = a;
+                $display("a=%0d", a);
+                $assert_continue(a != 8'd3, "bad a=%0d", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| io.set(a, 3u8)).unwrap();
+    sim.tick(clk).unwrap();
+    let events = sim.drain_runtime_events();
+    assert_eq!(
+        events,
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "a=3".to_string(),
+            },
+            celox::RuntimeEvent::AssertContinue {
+                message: "bad a=3".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_ff_runtime_fatal_assert_records_event(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<8>) {
+            always_ff (clk) {
+                $assert(a != 8'd7, "fatal a=%0d", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| io.set(a, 7u8)).unwrap();
+    assert!(sim.tick(clk).is_err());
+    let events = sim.drain_runtime_events();
+    assert_eq!(
+        events,
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "fatal a=7".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_for_bounds(sim) {
     @setup { let code = r#"
         module Top (

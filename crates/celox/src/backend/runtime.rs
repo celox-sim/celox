@@ -462,8 +462,10 @@ impl JitBackend {
         );
         debug_assert_eq!(
             engine.translator.layout.merged_total_size,
-            (engine.translator.layout.triggered_bits_offset
-                + engine.translator.layout.triggered_bits_total_size
+            (engine.translator.layout.runtime_event_base_offset
+                + crate::backend::memory_layout::RUNTIME_EVENT_HEADER_SIZE
+                + engine.translator.layout.runtime_event_capacity
+                    * engine.translator.layout.runtime_event_slot_size
                 + 7)
                 & !7
         );

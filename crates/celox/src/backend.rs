@@ -1,6 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod jit_engine;
-mod memory_layout;
+pub(crate) mod memory_layout;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod native;
 #[cfg(not(target_arch = "wasm32"))]

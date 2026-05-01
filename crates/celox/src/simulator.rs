@@ -7,7 +7,7 @@ use crate::backend::native::{NativeBackend, SharedNativeCode};
 use crate::{
     IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
-    ir::{InstancePath, Program, SignalRef, VariableInfo},
+    ir::{InstancePath, Program, RuntimeEventKind, SignalRef, VariableInfo},
 };
 #[cfg(not(target_arch = "wasm32"))]
 use num_bigint::BigUint;
@@ -64,6 +64,15 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(crate) vcd_writer: Option<crate::vcd::VcdWriter>,
     pub(crate) dirty: bool,
     pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
+    runtime_event_read_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeEvent {
+    Display { message: String },
+    AssertContinue { message: String },
+    AssertFatal { message: String },
+    Missed { count: u64 },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -71,6 +80,45 @@ impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Simulator").finish()
     }
+}
+
+fn render_runtime_event_message(template: Option<&str>, args: &[u64]) -> String {
+    let Some(template) = template else {
+        return args
+            .iter()
+            .map(|arg| format!("{arg}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+    };
+    let mut out = String::new();
+    let mut arg_idx = 0usize;
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        if matches!(chars.peek(), Some('%')) {
+            chars.next();
+            out.push('%');
+            continue;
+        }
+        while matches!(chars.peek(), Some('0'..='9')) {
+            chars.next();
+        }
+        let spec = chars.next().unwrap_or('d');
+        let value = args.get(arg_idx).copied().unwrap_or(0);
+        arg_idx += 1;
+        match spec {
+            'x' => out.push_str(&format!("{value:x}")),
+            'X' => out.push_str(&format!("{value:X}")),
+            'b' | 'B' => out.push_str(&format!("{value:b}")),
+            'o' | 'O' => out.push_str(&format!("{value:o}")),
+            'c' => out.push(char::from_u32(value as u32).unwrap_or('\u{fffd}')),
+            _ => out.push_str(&format!("{value}")),
+        }
+    }
+    out
 }
 
 // ── Generic methods available for any backend ────────────────────────
@@ -111,7 +159,64 @@ impl<B: SimBackend> Simulator<B> {
             vcd_writer: None,
             dirty: false,
             warnings,
+            runtime_event_read_seq: 0,
         }
+    }
+
+    pub fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+        use crate::backend::memory_layout::{
+            RUNTIME_EVENT_CAPACITY, RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_MAX_ARGS,
+            RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET, RUNTIME_EVENT_SLOT_ARGS_OFFSET,
+            RUNTIME_EVENT_SLOT_SEQ_OFFSET, RUNTIME_EVENT_SLOT_SITE_OFFSET,
+            RUNTIME_EVENT_WRITING,
+        };
+
+        let layout = self.backend.layout();
+        let (ptr, size) = self.backend.memory_as_ptr();
+        let base = layout.runtime_event_base_offset;
+        if base + RUNTIME_EVENT_HEADER_SIZE > size {
+            return Vec::new();
+        }
+        let read_u64 = |offset: usize| -> u64 {
+            unsafe { std::ptr::read_volatile(ptr.add(offset) as *const u64) }
+        };
+        let write_seq = read_u64(base);
+        let mut events = Vec::new();
+        let capacity = RUNTIME_EVENT_CAPACITY as u64;
+        if self.runtime_event_read_seq + capacity < write_seq {
+            let new_read = write_seq - capacity;
+            events.push(RuntimeEvent::Missed {
+                count: new_read - self.runtime_event_read_seq,
+            });
+            self.runtime_event_read_seq = new_read;
+        }
+        while self.runtime_event_read_seq < write_seq {
+            let seq = self.runtime_event_read_seq;
+            let slot = (seq as usize) & (layout.runtime_event_capacity - 1);
+            let slot_base =
+                base + RUNTIME_EVENT_HEADER_SIZE + slot * layout.runtime_event_slot_size;
+            let published = read_u64(slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET);
+            if published == RUNTIME_EVENT_WRITING || published != seq {
+                break;
+            }
+            let site_id = read_u64(slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET) as usize;
+            let arg_count = (read_u64(slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET) as usize)
+                .min(RUNTIME_EVENT_MAX_ARGS);
+            let mut args = Vec::with_capacity(arg_count);
+            for idx in 0..arg_count {
+                args.push(read_u64(slot_base + RUNTIME_EVENT_SLOT_ARGS_OFFSET + idx * 8));
+            }
+            if let Some(site) = self.program.runtime_event_sites.get(site_id) {
+                let message = render_runtime_event_message(site.template.as_deref(), &args);
+                events.push(match site.kind {
+                    RuntimeEventKind::Display => RuntimeEvent::Display { message },
+                    RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
+                    RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
+                });
+            }
+            self.runtime_event_read_seq += 1;
+        }
+        events
     }
 
     /// Returns a reference to the compiled SIR program.

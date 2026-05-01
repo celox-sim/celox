@@ -370,7 +370,89 @@ impl SIRTranslator {
             SIRInstruction::Mux(dst, cond, then_val, else_val) => {
                 self.translate_mux_inst(state, dst, cond, then_val, else_val);
             }
+            SIRInstruction::RuntimeEvent { site_id, args } => {
+                self.translate_runtime_event_inst(state, *site_id, args);
+            }
         }
+    }
+
+    fn translate_runtime_event_inst(
+        &self,
+        state: &mut TranslationState,
+        site_id: u32,
+        args: &[RegisterId],
+    ) {
+        use crate::backend::memory_layout::{
+            RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_MAX_ARGS, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+            RUNTIME_EVENT_SLOT_ARGS_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+            RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+        };
+
+        let base = self.layout.runtime_event_base_offset as i64;
+        let write_seq_addr = state.builder.ins().iadd_imm(state.mem_ptr, base);
+        let seq = state
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::new(), write_seq_addr, 0);
+        let mask = state
+            .builder
+            .ins()
+            .iconst(types::I64, (self.layout.runtime_event_capacity as i64) - 1);
+        let slot_idx = state.builder.ins().band(seq, mask);
+        let slot_size = state
+            .builder
+            .ins()
+            .iconst(types::I64, self.layout.runtime_event_slot_size as i64);
+        let slot_off = state.builder.ins().imul(slot_idx, slot_size);
+        let slot_base_off = state.builder.ins().iadd_imm(
+            slot_off,
+            base + RUNTIME_EVENT_HEADER_SIZE as i64,
+        );
+        let slot_addr = state.builder.ins().iadd(state.mem_ptr, slot_base_off);
+
+        let writing = state
+            .builder
+            .ins()
+            .iconst(types::I64, RUNTIME_EVENT_WRITING as i64);
+        state.builder.ins().store(
+            MemFlags::new(),
+            writing,
+            slot_addr,
+            RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
+        );
+        let site = state.builder.ins().iconst(types::I64, site_id as i64);
+        state.builder.ins().store(
+            MemFlags::new(),
+            site,
+            slot_addr,
+            RUNTIME_EVENT_SLOT_SITE_OFFSET as i32,
+        );
+        let arg_count = args.len().min(RUNTIME_EVENT_MAX_ARGS);
+        let arg_count_v = state.builder.ins().iconst(types::I64, arg_count as i64);
+        state.builder.ins().store(
+            MemFlags::new(),
+            arg_count_v,
+            slot_addr,
+            RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET as i32,
+        );
+        for (idx, arg) in args.iter().take(RUNTIME_EVENT_MAX_ARGS).enumerate() {
+            let value = state.regs[arg].first_value(state.builder);
+            let value = cast_type(state.builder, value, types::I64);
+            state.builder.ins().store(
+                MemFlags::new(),
+                value,
+                slot_addr,
+                (RUNTIME_EVENT_SLOT_ARGS_OFFSET + idx * 8) as i32,
+            );
+        }
+        state.builder.ins().store(
+            MemFlags::new(),
+            seq,
+            slot_addr,
+            RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
+        );
+        let next = state.builder.ins().iadd_imm(seq, 1);
+        state.builder.ins().store(MemFlags::new(), next, write_seq_addr, 0);
     }
 
     /// Slice: extract bits [bit_offset, bit_offset+width) from src register.
