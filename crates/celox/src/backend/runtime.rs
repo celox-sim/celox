@@ -464,7 +464,8 @@ impl JitBackend {
         );
         debug_assert_eq!(
             engine.translator.layout.merged_total_size,
-            (engine.translator.layout.scratch_base_offset + engine.translator.layout.scratch_size
+            (engine.translator.layout.scratch_base_offset
+                + engine.translator.layout.scratch_size
                 + 7)
                 & !7
         );

@@ -20,8 +20,8 @@ use veryl_analyzer::ir::{
     IfResetStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionInput,
     SystemFunctionKind, TypeKind, ValueVariant, VarId,
 };
-use veryl_analyzer::value::byte_value_to_string;
 use veryl_analyzer::value::Value;
+use veryl_analyzer::value::byte_value_to_string;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoopBoundStatus {
@@ -145,7 +145,8 @@ impl<'a> FfParser<'a> {
             .is_some()
         {
             (
-                args.first().and_then(|arg| Self::static_string_expr(&arg.0)),
+                args.first()
+                    .and_then(|arg| Self::static_string_expr(&arg.0)),
                 &args[1..],
             )
         } else {
@@ -240,8 +241,9 @@ impl<'a> FfParser<'a> {
                 )?;
                 match kind {
                     AssertKind::Fatal => {
-                        let message = if let Some(template) =
-                            args.first().and_then(|arg| Self::static_string_expr(&arg.0))
+                        let message = if let Some(template) = args
+                            .first()
+                            .and_then(|arg| Self::static_string_expr(&arg.0))
                         {
                             template
                         } else {

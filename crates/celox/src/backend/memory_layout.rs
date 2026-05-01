@@ -1,5 +1,5 @@
-use crate::ir::{AbsoluteAddr, Program, SIRInstruction};
 use crate::HashMap;
+use crate::ir::{AbsoluteAddr, Program, SIRInstruction};
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]

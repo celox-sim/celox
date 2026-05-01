@@ -2978,11 +2978,7 @@ fn lower_instruction(
                 for chunk_i in 0..n_dst_chunks {
                     let chunk_width = if chunk_i == n_dst_chunks - 1 {
                         let rem = total_width % 64;
-                        if rem == 0 {
-                            64
-                        } else {
-                            rem
-                        }
+                        if rem == 0 { 64 } else { rem }
                     } else {
                         64
                     };
@@ -3068,11 +3064,7 @@ fn lower_instruction(
                             for (i, mv) in mc.into_iter().enumerate() {
                                 let cw = if i == ISelContext::num_chunks(arg_width) - 1 {
                                     let r = arg_width % 64;
-                                    if r == 0 {
-                                        64
-                                    } else {
-                                        r
-                                    }
+                                    if r == 0 { 64 } else { r }
                                 } else {
                                     64
                                 };
@@ -3091,11 +3083,7 @@ fn lower_instruction(
                     for chunk_i in 0..n_dst_chunks {
                         let chunk_width = if chunk_i == n_dst_chunks - 1 {
                             let rem = total_width % 64;
-                            if rem == 0 {
-                                64
-                            } else {
-                                rem
-                            }
+                            if rem == 0 { 64 } else { rem }
                         } else {
                             64
                         };
@@ -4410,11 +4398,7 @@ fn lower_wide_runtime_shift(
                 let carry_i = match dir {
                     ShiftDir::Left => {
                         // carry comes from chunk below: i-1
-                        if i == 0 {
-                            usize::MAX
-                        } else {
-                            i - 1
-                        }
+                        if i == 0 { usize::MAX } else { i - 1 }
                     }
                     ShiftDir::Right | ShiftDir::ArithRight => {
                         // carry comes from chunk above: i+1
@@ -4966,8 +4950,8 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
             let cond_vreg = ctx.reg_map.get(*cond);
             block.push(MInst::Branch {
                 cond: cond_vreg,
-                true_bb: BlockId(true_block.0 .0 as u32),
-                false_bb: BlockId(false_block.0 .0 as u32),
+                true_bb: BlockId(true_block.0.0 as u32),
+                false_bb: BlockId(false_block.0.0 as u32),
             });
         }
         SIRTerminator::Return => {
@@ -5732,11 +5716,7 @@ fn lower_wide_binary_mask(
                 let rv = ctx.wide_chunk_or_zero(&rv_chunks, i, block);
                 let chunk_w = if i == n_dst - 1 {
                     let r = d_width % 64;
-                    if r == 0 {
-                        64
-                    } else {
-                        r
-                    }
+                    if r == 0 { 64 } else { r }
                 } else {
                     64
                 };
@@ -5964,11 +5944,7 @@ fn lower_wide_binary_mask(
                 for (i, (m, w)) in dst_m_chunks.into_iter().enumerate() {
                     let chunk_w = if i == n_dst - 1 {
                         let r = d_width % 64;
-                        if r == 0 {
-                            64
-                        } else {
-                            r
-                        }
+                        if r == 0 { 64 } else { r }
                     } else {
                         64
                     };
@@ -6039,11 +6015,7 @@ fn lower_wide_binary_mask(
                 for i in 0..n_dst {
                     let chunk_w = if i == n_dst - 1 {
                         let r = d_width % 64;
-                        if r == 0 {
-                            64
-                        } else {
-                            r
-                        }
+                        if r == 0 { 64 } else { r }
                     } else {
                         64
                     };
@@ -6118,11 +6090,7 @@ fn lower_wide_binary_mask(
                     let chunk_m = ctx.alloc_vreg(SpillDesc::transient());
                     let chunk_w = if i == n_dst - 1 {
                         let r = d_width % 64;
-                        if r == 0 {
-                            64
-                        } else {
-                            r
-                        }
+                        if r == 0 { 64 } else { r }
                     } else {
                         64
                     };
@@ -6219,11 +6187,7 @@ fn lower_wide_unary_mask(
                     let chunk_m = ctx.alloc_vreg(SpillDesc::transient());
                     let chunk_w = if i == n_dst - 1 {
                         let r = d_width % 64;
-                        if r == 0 {
-                            64
-                        } else {
-                            r
-                        }
+                        if r == 0 { 64 } else { r }
                     } else {
                         64
                     };

@@ -3,13 +3,13 @@ use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
 
 use crate::{
+    HashMap, SimulatorOptions,
     ir::{
         AbsoluteAddr, BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType,
         SIRInstruction, STABLE_REGION,
     },
-    optimizer::coalescing::pass_tail_call_split::{SpillSlot, SpilledChunk},
     optimizer::coalescing::TailCallChunk,
-    HashMap, SimulatorOptions,
+    optimizer::coalescing::pass_tail_call_split::{SpillSlot, SpilledChunk},
 };
 
 use super::MemoryLayout;
