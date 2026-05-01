@@ -22,10 +22,8 @@ use std::time::Instant;
 // ---------------------------------------------------------------------------
 
 fn linear_sec_source(p: u32) -> String {
-    let encoder =
-        include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_encoder.veryl");
-    let decoder =
-        include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_decoder.veryl");
+    let encoder = test_utils::veryl_std::source(&["coding", "linear_sec_encoder.veryl"]);
+    let decoder = test_utils::veryl_std::source(&["coding", "linear_sec_decoder.veryl"]);
     let top = format!(
         r#"
 module Top #(

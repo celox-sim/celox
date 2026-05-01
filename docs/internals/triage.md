@@ -100,7 +100,6 @@ This snapshot reflects the open GitHub queue inspected on April 27, 2026.
 - Issue [#42](https://github.com/celox-sim/celox/issues/42): const function evaluation in module params
   The current `std_mux` / `std_demux` smoke tests pass on Celox backends, so this issue likely
   needs closure or scope correction rather than new implementation work.
-- Issue [#72](https://github.com/celox-sim/celox/issues/72): remove `deps/veryl` submodule once `veryl` `0.20.0` is available
 - Issue [#36](https://github.com/celox-sim/celox/issues/36): dependency dashboard
 - Issue [#16](https://github.com/celox-sim/celox/issues/16): instance-contiguous `MemoryLayout`
 - Issue [#30](https://github.com/celox-sim/celox/issues/30): native testbench DSE

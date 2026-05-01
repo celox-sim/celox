@@ -4,11 +4,6 @@ use celox::Simulator;
 #[macro_use]
 mod test_utils;
 
-const BINARY_ENCODER_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/binary_enc_dec/binary_encoder.veryl");
-const BINARY_DECODER_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/binary_enc_dec/binary_decoder.veryl");
-
 all_backends! {
 
     // Binary encoder: onehot input -> binary output (UNARY_WIDTH=8, BIN_WIDTH=3)
@@ -25,7 +20,7 @@ o_bin,
 );
 }
 "#;
-let code = format!("{BINARY_ENCODER_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["binary_enc_dec", "binary_encoder.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let i_unary = sim.signal("i_unary");
     let o_bin = sim.signal("o_bin");
@@ -57,7 +52,7 @@ o_unary,
 );
 }
 "#;
-let code = format!("{BINARY_DECODER_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["binary_enc_dec", "binary_decoder.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let i_bin = sim.signal("i_bin");
     let o_unary = sim.signal("o_unary");
@@ -95,7 +90,11 @@ o_unary,
 );
 }
 "#;
-let code = format!("{BINARY_ENCODER_SRC}\n{BINARY_DECODER_SRC}\n{top}"); }
+let code = format!(
+    "{}\n{}\n{top}",
+    test_utils::veryl_std::source(&["binary_enc_dec", "binary_encoder.veryl"]),
+    test_utils::veryl_std::source(&["binary_enc_dec", "binary_decoder.veryl"]),
+); }
         @build Simulator::builder(&code, "Top");
     let i_unary = sim.signal("i_unary");
     let o_unary = sim.signal("o_unary");
@@ -128,7 +127,7 @@ o_bin,
 );
 }
 "#;
-let code = format!("{BINARY_ENCODER_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["binary_enc_dec", "binary_encoder.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let i_en = sim.signal("i_en");
     let i_unary = sim.signal("i_unary");

@@ -11,6 +11,7 @@ veryl-analyzer = { workspace = true }
 veryl-emitter  = { workspace = true }
 veryl-metadata = { workspace = true }
 veryl-parser   = { workspace = true }
+veryl-std      = { workspace = true }
 
 [lints]
 workspace = true

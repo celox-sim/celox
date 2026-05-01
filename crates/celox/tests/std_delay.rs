@@ -4,8 +4,6 @@ use celox::Simulator;
 #[macro_use]
 mod test_utils;
 
-const DELAY_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/delay/delay.veryl");
-
 all_backends! {
 
     // DELAY=0: passthrough (no delay)
@@ -25,7 +23,7 @@ o_d,
 );
 }
 "#;
-let code = format!("{DELAY_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["delay", "delay.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let i_d = sim.signal("i_d");
     let o_d = sim.signal("o_d");
@@ -56,7 +54,7 @@ o_d,
 );
 }
 "#;
-let code = format!("{DELAY_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["delay", "delay.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -104,7 +102,7 @@ o_d,
 );
 }
 "#;
-let code = format!("{DELAY_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["delay", "delay.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");

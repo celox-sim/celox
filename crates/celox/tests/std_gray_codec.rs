@@ -4,11 +4,6 @@ use celox::Simulator;
 #[macro_use]
 mod test_utils;
 
-const GRAY_ENCODER_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_encoder.veryl");
-const GRAY_DECODER_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_decoder.veryl");
-
 all_backends! {
 
     // Gray encode → decode roundtrip: o_bin == i_bin for all 8-bit values
@@ -29,7 +24,11 @@ o_bin,
 );
 }
 "#;
-let code = format!("{GRAY_ENCODER_SRC}\n{GRAY_DECODER_SRC}\n{top}"); }
+let code = format!(
+    "{}\n{}\n{top}",
+    test_utils::veryl_std::source(&["gray", "gray_encoder.veryl"]),
+    test_utils::veryl_std::source(&["gray", "gray_decoder.veryl"]),
+); }
         @build Simulator::builder(&code, "Top");
     let i_bin = sim.signal("i_bin");
     let o_gray = sim.signal("o_gray");
@@ -62,7 +61,7 @@ o_gray,
 );
 }
 "#;
-let code = format!("{GRAY_ENCODER_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["gray", "gray_encoder.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let i_bin = sim.signal("i_bin");
     let o_gray = sim.signal("o_gray");

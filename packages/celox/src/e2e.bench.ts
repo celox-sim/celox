@@ -9,7 +9,8 @@
  *   4. Simulator::tick vs Simulation::step overhead
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, bench, describe } from "vitest";
@@ -25,10 +26,17 @@ import type { ModuleDefinition } from "./types.js";
 const addon = loadNativeAddon();
 
 const __benchDir = dirname(fileURLToPath(import.meta.url));
-const VERYL_STD = resolve(
-	__benchDir,
-	"../../../deps/veryl/crates/std/veryl/src",
-);
+function resolveVerylStd(): string {
+	const cargoHome = process.env.CARGO_HOME ?? resolve(homedir(), ".cargo");
+	const registrySrc = resolve(cargoHome, "registry/src");
+	for (const registry of readdirSync(registrySrc)) {
+		const source = resolve(registrySrc, registry, "veryl-std-0.20.0/veryl/src");
+		if (existsSync(source)) return source;
+	}
+	throw new Error("veryl-std 0.20.0 source not found; run cargo fetch first");
+}
+
+const VERYL_STD = resolveVerylStd();
 function readVeryl(...parts: string[]): string {
 	return readFileSync(resolve(VERYL_STD, ...parts), "utf8");
 }

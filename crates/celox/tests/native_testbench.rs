@@ -1,5 +1,10 @@
 use celox::{ResetType, Simulator, TestResult};
 
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
 const COUNTER: &str = r#"
     module Counter (
         clk: input  clock    ,
@@ -21,11 +26,14 @@ const BENCH_NATIVE_TB_COUNTER_N1000: &str = concat!(
     include_str!("../../../benches/veryl/native_tb_counter_n1000.veryl"),
 );
 
-const BENCH_NATIVE_TB_STD_COUNTER: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
-    include_str!("../../../benches/veryl/std_counter_top.veryl"),
-    include_str!("../../../benches/veryl/native_tb_std_counter.veryl"),
-);
+fn bench_native_tb_std_counter() -> String {
+    format!(
+        "{}\n{}\n{}",
+        test_utils::veryl_std::source(&["counter", "counter.veryl"]),
+        include_str!("../../../benches/veryl/std_counter_top.veryl"),
+        include_str!("../../../benches/veryl/native_tb_std_counter.veryl"),
+    )
+}
 
 // ── Basic ──────────────────────────────────────────────────────────────
 
@@ -1096,7 +1104,7 @@ fn test_benchmark_native_testbench_fixtures_build() {
     Simulator::builder(BENCH_NATIVE_TB_COUNTER_N1000, "Top")
         .build()
         .unwrap();
-    Simulator::builder(BENCH_NATIVE_TB_STD_COUNTER, "Top")
+    Simulator::builder(&bench_native_tb_std_counter(), "Top")
         .build()
         .unwrap();
 }

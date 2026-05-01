@@ -16,13 +16,19 @@ use celox::{
     SimulatorBuilder, SirPass,
 };
 
+#[path = "../tests/fixtures/veryl_std.rs"]
+mod veryl_std;
+
 const TOP_N1000: &str = include_str!("../../../benches/veryl/top_n1000.veryl");
 
-const LINEAR_SEC_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_encoder.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_decoder.veryl"),
-    include_str!("../../../benches/veryl/linear_sec_top.veryl"),
-);
+fn linear_sec_source() -> String {
+    format!(
+        "{}\n{}\n{}",
+        veryl_std::source(&["coding", "linear_sec_encoder.veryl"]),
+        veryl_std::source(&["coding", "linear_sec_decoder.veryl"]),
+        include_str!("../../../benches/veryl/linear_sec_top.veryl"),
+    )
+}
 
 const WARMUP_ITERS: u32 = 2;
 const BENCH_ITERS: u32 = 5;
@@ -187,6 +193,7 @@ fn main() {
         ("reschedule", SirPass::Reschedule),
     ];
 
+    let linear_sec_src = linear_sec_source();
     for (design_name, code, top, sim_label, sim_count, is_seq) in [
         (
             "top_n1000 (sequential)",
@@ -198,7 +205,7 @@ fn main() {
         ),
         (
             "linear_sec_p6 (combinational)",
-            LINEAR_SEC_SRC,
+            &linear_sec_src,
             "Top",
             "eval",
             EVAL_COUNT,
@@ -290,6 +297,7 @@ fn main() {
         ),
     ];
 
+    let linear_sec_src = linear_sec_source();
     for (design_name, code, top, sim_label, sim_count, is_seq) in [
         (
             "top_n1000 (sequential)",
@@ -301,7 +309,7 @@ fn main() {
         ),
         (
             "linear_sec_p6 (combinational)",
-            LINEAR_SEC_SRC,
+            &linear_sec_src,
             "Top",
             "eval",
             EVAL_COUNT,
@@ -372,6 +380,7 @@ fn main() {
         ("fast_compile()", |c| *c = CraneliftOptions::fast_compile()),
     ];
 
+    let linear_sec_src = linear_sec_source();
     for (design_name, code, top, sim_label, sim_count, is_seq) in [
         (
             "top_n1000 (sequential)",
@@ -383,7 +392,7 @@ fn main() {
         ),
         (
             "linear_sec_p6 (combinational)",
-            LINEAR_SEC_SRC,
+            &linear_sec_src,
             "Top",
             "eval",
             EVAL_COUNT,
@@ -475,7 +484,7 @@ fn main() {
         ),
         (
             "linear_sec_p6 (combinational)",
-            LINEAR_SEC_SRC,
+            &linear_sec_src,
             "Top",
             "eval",
             EVAL_COUNT,

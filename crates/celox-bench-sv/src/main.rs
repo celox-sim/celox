@@ -4,11 +4,14 @@
 //!
 //! Outputs .sv files to benches/verilator/
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use veryl_analyzer::{Analyzer, Context, attribute_table, symbol_table};
 use veryl_emitter::Emitter;
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
+
+#[path = "../../celox/tests/fixtures/veryl_std.rs"]
+mod veryl_std;
 
 #[allow(clippy::needless_borrow)]
 fn emit_sv(code: &str) -> String {
@@ -84,15 +87,8 @@ fn strip_test_blocks(code: &str) -> String {
     result
 }
 
-fn read_veryl(veryl_std: &Path, parts: &[&str]) -> String {
-    let mut path = veryl_std.to_path_buf();
-    for p in parts {
-        path = path.join(p);
-    }
-    strip_test_blocks(
-        &std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e)),
-    )
+fn read_veryl(parts: &[&str]) -> String {
+    strip_test_blocks(&veryl_std::source(parts))
 }
 
 /// Strip the sourceMappingURL comment from emitter output.
@@ -108,7 +104,6 @@ fn main() {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let veryl_std = project_root.join("deps/veryl/crates/std/veryl/src");
     let out_dir = project_root.join("benches/verilator");
 
     // Wrapper modules are shared with the Celox Rust benchmarks
@@ -124,8 +119,8 @@ fn main() {
     // --- LinearSec (P=6: 57-bit data, 63-bit codeword) ---
     let linear_sec_code = format!(
         "{}\n{}\n{}",
-        read_veryl(&veryl_std, &["coding", "linear_sec_encoder.veryl"]),
-        read_veryl(&veryl_std, &["coding", "linear_sec_decoder.veryl"]),
+        read_veryl(&["coding", "linear_sec_encoder.veryl"]),
+        read_veryl(&["coding", "linear_sec_decoder.veryl"]),
         include_str!("../../../benches/veryl/linear_sec_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&linear_sec_code));
@@ -135,7 +130,7 @@ fn main() {
     // --- Countones (W=64): combinational popcount tree ---
     let countones_code = format!(
         "{}\n{}",
-        read_veryl(&veryl_std, &["countones", "countones.veryl"]),
+        read_veryl(&["countones", "countones.veryl"]),
         include_str!("../../../benches/veryl/countones_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&countones_code));
@@ -145,7 +140,7 @@ fn main() {
     // --- std::counter (WIDTH=32) ---
     let std_counter_code = format!(
         "{}\n{}",
-        read_veryl(&veryl_std, &["counter", "counter.veryl"]),
+        read_veryl(&["counter", "counter.veryl"]),
         include_str!("../../../benches/veryl/std_counter_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&std_counter_code));
@@ -155,9 +150,9 @@ fn main() {
     // --- std::gray_counter (WIDTH=32) ---
     let gray_counter_code = format!(
         "{}\n{}\n{}\n{}",
-        read_veryl(&veryl_std, &["counter", "counter.veryl"]),
-        read_veryl(&veryl_std, &["gray", "gray_encoder.veryl"]),
-        read_veryl(&veryl_std, &["gray", "gray_counter.veryl"]),
+        read_veryl(&["counter", "counter.veryl"]),
+        read_veryl(&["gray", "gray_encoder.veryl"]),
+        read_veryl(&["gray", "gray_counter.veryl"]),
         include_str!("../../../benches/veryl/gray_counter_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&gray_counter_code));
@@ -167,9 +162,9 @@ fn main() {
     // --- std::fifo (WIDTH=8, DEPTH=16) ---
     let fifo_code = format!(
         "{}\n{}\n{}\n{}",
-        read_veryl(&veryl_std, &["ram", "ram.veryl"]),
-        read_veryl(&veryl_std, &["fifo", "fifo_controller.veryl"]),
-        read_veryl(&veryl_std, &["fifo", "fifo.veryl"]),
+        read_veryl(&["ram", "ram.veryl"]),
+        read_veryl(&["fifo", "fifo_controller.veryl"]),
+        read_veryl(&["fifo", "fifo.veryl"]),
         include_str!("../../../benches/veryl/fifo_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&fifo_code));
@@ -179,8 +174,8 @@ fn main() {
     // --- std::gray_encoder + gray_decoder (WIDTH=32) ---
     let gray_codec_code = format!(
         "{}\n{}\n{}",
-        read_veryl(&veryl_std, &["gray", "gray_encoder.veryl"]),
-        read_veryl(&veryl_std, &["gray", "gray_decoder.veryl"]),
+        read_veryl(&["gray", "gray_encoder.veryl"]),
+        read_veryl(&["gray", "gray_decoder.veryl"]),
         include_str!("../../../benches/veryl/gray_codec_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&gray_codec_code));
@@ -190,7 +185,7 @@ fn main() {
     // --- std::edge_detector (WIDTH=32) ---
     let edge_detector_code = format!(
         "{}\n{}",
-        read_veryl(&veryl_std, &["edge_detector", "edge_detector.veryl"]),
+        read_veryl(&["edge_detector", "edge_detector.veryl"]),
         include_str!("../../../benches/veryl/edge_detector_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&edge_detector_code));
@@ -200,7 +195,7 @@ fn main() {
     // --- std::onehot (W=64) ---
     let onehot_code = format!(
         "{}\n{}",
-        read_veryl(&veryl_std, &["countones", "onehot.veryl"]),
+        read_veryl(&["countones", "onehot.veryl"]),
         include_str!("../../../benches/veryl/onehot_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&onehot_code));
@@ -210,7 +205,7 @@ fn main() {
     // --- std::lfsr_galois (SIZE=32) ---
     let lfsr_code = format!(
         "{}\n{}",
-        read_veryl(&veryl_std, &["lfsr", "lfsr_galois.veryl"]),
+        read_veryl(&["lfsr", "lfsr_galois.veryl"]),
         include_str!("../../../benches/veryl/lfsr_top.veryl"),
     );
     let sv = strip_sourcemap(&emit_sv(&lfsr_code));

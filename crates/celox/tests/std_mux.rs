@@ -4,12 +4,6 @@ use celox::Simulator;
 #[macro_use]
 mod test_utils;
 
-const SELECTOR_PKG_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/selector/selector_pkg.veryl");
-const MUX_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/selector/mux.veryl");
-const DEMUX_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/selector/demux.veryl");
-
 all_backends! {
 
     // Build-only smoke test: mux with selector_pkg requires `calc_select_width`
@@ -43,7 +37,11 @@ o_data,
 );
 }
 "#;
-let code = format!("{SELECTOR_PKG_SRC}\n{MUX_SRC}\n{top}"); }
+let code = format!(
+    "{}\n{}\n{top}",
+    test_utils::veryl_std::source(&["selector", "selector_pkg.veryl"]),
+    test_utils::veryl_std::source(&["selector", "mux.veryl"]),
+); }
         @build Simulator::builder(&code, "Top");
 
     }
@@ -79,7 +77,11 @@ o_data3 = data_arr[3];
 }
 }
 "#;
-let code = format!("{SELECTOR_PKG_SRC}\n{DEMUX_SRC}\n{top}"); }
+let code = format!(
+    "{}\n{}\n{top}",
+    test_utils::veryl_std::source(&["selector", "selector_pkg.veryl"]),
+    test_utils::veryl_std::source(&["selector", "demux.veryl"]),
+); }
         @build Simulator::builder(&code, "Top");
 
     }
