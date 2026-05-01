@@ -432,28 +432,38 @@ module Top (
 }
 
 #[test]
-fn test_ff_statement_system_functions_are_reported_as_unsupported() {
+fn test_ff_statement_runtime_event_system_functions_are_supported() {
+    let code = r#"
+module Top (clk: input clock, d: input logic) {
+    always_ff (clk) {
+        $display("display d=%0d", d);
+        $write("write d=%0d", d);
+        $assert(d, "assert d=%0d", d);
+    }
+}
+"#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+
+    sim.modify(|io| io.set(d, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "display d=1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "write d=1".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn test_unsupported_ff_statement_system_functions_are_reported() {
     let cases = [
-        (
-            "display",
-            r#"
-module Top (clk: input clock, d: input logic) {
-    always_ff (clk) {
-        $display("d=%0d", d);
-    }
-}
-"#,
-        ),
-        (
-            "write",
-            r#"
-module Top (clk: input clock, d: input logic) {
-    always_ff (clk) {
-        $write("d=%0d", d);
-    }
-}
-"#,
-        ),
         (
             "readmemh",
             r#"
@@ -461,16 +471,6 @@ module Top (clk: input clock) {
     var mem: logic<8>[4];
     always_ff (clk) {
         $readmemh("mem.hex", mem);
-    }
-}
-"#,
-        ),
-        (
-            "assert",
-            r#"
-module Top (clk: input clock, d: input logic) {
-    always_ff (clk) {
-        $assert(d);
     }
 }
 "#,

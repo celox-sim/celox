@@ -318,39 +318,51 @@ fn collect_runtime_events(
         }
 
         let site_id = read_payload_u64(slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET) as usize;
-        if let Some(site) = sites.get(site_id) {
-            let site_layout = layout.runtime_event_site_layouts.get(site_id);
-            let arg_count =
-                read_payload_u64(slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET) as usize;
-            let arg_count = arg_count.min(site.arg_widths.len());
-            let mut args = Vec::with_capacity(arg_count);
-            if let Some(site_layout) = site_layout {
-                for idx in 0..arg_count {
-                    let Some(arg_layout) = site_layout.args.get(idx) else {
-                        break;
-                    };
-                    let mut values = Vec::with_capacity(arg_layout.word_count);
-                    let mut masks = Vec::with_capacity(arg_layout.word_count);
-                    for word_idx in 0..arg_layout.word_count {
-                        values.push(read_payload_u64(
-                            slot_base
-                                + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
-                                + (arg_layout.value_word_offset + word_idx) * 8,
-                        ));
-                        masks.push(read_payload_u64(
-                            slot_base
-                                + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
-                                + (arg_layout.mask_word_offset + word_idx) * 8,
-                        ));
-                    }
-                    args.push(RuntimeEventArgValue {
-                        values,
-                        masks,
-                        width: site.arg_widths.get(idx).copied().unwrap_or(64),
-                        signed: site.arg_signed.get(idx).copied().unwrap_or(false),
-                    });
+        let site = sites.get(site_id);
+        let site_layout = layout.runtime_event_site_layouts.get(site_id);
+        let arg_count = read_payload_u64(slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET) as usize;
+        let arg_count = site
+            .map(|site| arg_count.min(site.arg_widths.len()))
+            .unwrap_or(0);
+        let mut args = Vec::with_capacity(arg_count);
+        if let Some(site_layout) = site_layout {
+            for idx in 0..arg_count {
+                let Some(arg_layout) = site_layout.args.get(idx) else {
+                    break;
+                };
+                let mut values = Vec::with_capacity(arg_layout.word_count);
+                let mut masks = Vec::with_capacity(arg_layout.word_count);
+                for word_idx in 0..arg_layout.word_count {
+                    values.push(read_payload_u64(
+                        slot_base
+                            + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                            + (arg_layout.value_word_offset + word_idx) * 8,
+                    ));
+                    masks.push(read_payload_u64(
+                        slot_base
+                            + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                            + (arg_layout.mask_word_offset + word_idx) * 8,
+                    ));
                 }
+                args.push(RuntimeEventArgValue {
+                    values,
+                    masks,
+                    width: site
+                        .and_then(|site| site.arg_widths.get(idx).copied())
+                        .unwrap_or(64),
+                    signed: site
+                        .and_then(|site| site.arg_signed.get(idx).copied())
+                        .unwrap_or(false),
+                });
             }
+        }
+
+        let published_after = read_seq_u64(slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET);
+        if published_after == RUNTIME_EVENT_WRITING || published_after != seq {
+            break;
+        }
+
+        if let Some(site) = site {
             let message = render_runtime_event_message(site, &args);
             events.push(match site.kind {
                 RuntimeEventKind::Display => RuntimeEvent::Display { message },
