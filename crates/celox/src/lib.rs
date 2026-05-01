@@ -91,13 +91,15 @@ pub use simulation::Simulation;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::DeadStorePolicy;
 #[cfg(not(target_arch = "wasm32"))]
+pub use simulator::RuntimeEvent;
+#[cfg(not(target_arch = "wasm32"))]
+pub use simulator::RuntimeEventDrain;
+#[cfg(not(target_arch = "wasm32"))]
 pub use simulator::Simulator;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::SimulatorBuilder;
 pub use simulator::SimulatorError;
 pub use simulator::SimulatorErrorKind;
-#[cfg(not(target_arch = "wasm32"))]
-pub use simulator::RuntimeEvent;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::SimulatorOptions;
 pub use simulator::render_diagnostic;

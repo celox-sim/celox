@@ -1,13 +1,15 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::backend::RuntimeEventBuffer;
 #[cfg(target_arch = "x86_64")]
 use crate::backend::native::{NativeBackend, SharedNativeCode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{
+    IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     ir::{InstancePath, Program, RuntimeEventKind, RuntimeEventSite, SignalRef, VariableInfo},
-    IOContext, RuntimeErrorCode,
 };
 use num_bigint::BigUint;
 
@@ -72,6 +74,26 @@ pub enum RuntimeEvent {
     AssertContinue { message: String },
     AssertFatal { message: String },
     Missed { count: u64 },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub struct RuntimeEventDrain {
+    buffer: Arc<RuntimeEventBuffer>,
+    layout: MemoryLayout,
+    sites: Vec<RuntimeEventSite>,
+    read_seq: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RuntimeEventDrain {
+    pub fn drain(&mut self) -> Vec<RuntimeEvent> {
+        drain_runtime_events_from_buffer(
+            &self.buffer,
+            &self.layout,
+            &self.sites,
+            &mut self.read_seq,
+        )
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -256,6 +278,111 @@ fn render_runtime_event_message(site: &RuntimeEventSite, args: &[RuntimeEventArg
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_runtime_events(
+    layout: &MemoryLayout,
+    sites: &[RuntimeEventSite],
+    read_seq: &mut u64,
+    buffer_size: usize,
+    mut read_payload_u64: impl FnMut(usize) -> u64,
+    mut read_seq_u64: impl FnMut(usize) -> u64,
+) -> Vec<RuntimeEvent> {
+    use crate::backend::memory_layout::{
+        RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+        RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+        RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+    };
+
+    if RUNTIME_EVENT_HEADER_SIZE > buffer_size || layout.runtime_event_capacity == 0 {
+        return Vec::new();
+    }
+
+    let write_seq = read_seq_u64(0);
+    let mut events = Vec::new();
+    let capacity = layout.runtime_event_capacity as u64;
+    if *read_seq + capacity < write_seq {
+        let new_read = write_seq - capacity;
+        events.push(RuntimeEvent::Missed {
+            count: new_read - *read_seq,
+        });
+        *read_seq = new_read;
+    }
+
+    while *read_seq < write_seq {
+        let seq = *read_seq;
+        let slot = (seq as usize) & (layout.runtime_event_capacity - 1);
+        let slot_base = RUNTIME_EVENT_HEADER_SIZE + slot * layout.runtime_event_slot_size;
+        let published = read_seq_u64(slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET);
+        if published == RUNTIME_EVENT_WRITING || published != seq {
+            break;
+        }
+
+        let site_id = read_payload_u64(slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET) as usize;
+        if let Some(site) = sites.get(site_id) {
+            let site_layout = layout.runtime_event_site_layouts.get(site_id);
+            let arg_count =
+                read_payload_u64(slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET) as usize;
+            let arg_count = arg_count.min(site.arg_widths.len());
+            let mut args = Vec::with_capacity(arg_count);
+            if let Some(site_layout) = site_layout {
+                for idx in 0..arg_count {
+                    let Some(arg_layout) = site_layout.args.get(idx) else {
+                        break;
+                    };
+                    let mut values = Vec::with_capacity(arg_layout.word_count);
+                    let mut masks = Vec::with_capacity(arg_layout.word_count);
+                    for word_idx in 0..arg_layout.word_count {
+                        values.push(read_payload_u64(
+                            slot_base
+                                + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                                + (arg_layout.value_word_offset + word_idx) * 8,
+                        ));
+                        masks.push(read_payload_u64(
+                            slot_base
+                                + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                                + (arg_layout.mask_word_offset + word_idx) * 8,
+                        ));
+                    }
+                    args.push(RuntimeEventArgValue {
+                        values,
+                        masks,
+                        width: site.arg_widths.get(idx).copied().unwrap_or(64),
+                        signed: site.arg_signed.get(idx).copied().unwrap_or(false),
+                    });
+                }
+            }
+            let message = render_runtime_event_message(site, &args);
+            events.push(match site.kind {
+                RuntimeEventKind::Display => RuntimeEvent::Display { message },
+                RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
+                RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
+            });
+        }
+        *read_seq += 1;
+    }
+
+    events
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drain_runtime_events_from_buffer(
+    buffer: &RuntimeEventBuffer,
+    layout: &MemoryLayout,
+    sites: &[RuntimeEventSite],
+    read_seq: &mut u64,
+) -> Vec<RuntimeEvent> {
+    use std::sync::atomic::Ordering;
+
+    collect_runtime_events(
+        layout,
+        sites,
+        read_seq,
+        buffer.byte_size(),
+        |offset| buffer.read_u64(offset),
+        |offset| buffer.load_atomic_u64(offset, Ordering::Acquire),
+    )
+}
+
 // ── Generic methods available for any backend ────────────────────────
 #[cfg(not(target_arch = "wasm32"))]
 impl<B: SimBackend> Simulator<B> {
@@ -299,81 +426,37 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
-        use crate::backend::memory_layout::{
-            RUNTIME_EVENT_CAPACITY, RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
-            RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
-            RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
-        };
-
         let layout = self.backend.layout();
-        let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
-        if RUNTIME_EVENT_HEADER_SIZE > size {
-            return Vec::new();
+        if let Some(buffer) = self.backend.runtime_event_buffer() {
+            return drain_runtime_events_from_buffer(
+                &buffer,
+                layout,
+                &self.program.runtime_event_sites,
+                &mut self.runtime_event_read_seq,
+            );
         }
+
+        let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
         let read_u64 = |offset: usize| -> u64 {
             unsafe { std::ptr::read_volatile(ptr.add(offset) as *const u64) }
         };
-        let write_seq = read_u64(0);
-        let mut events = Vec::new();
-        let capacity = RUNTIME_EVENT_CAPACITY as u64;
-        if self.runtime_event_read_seq + capacity < write_seq {
-            let new_read = write_seq - capacity;
-            events.push(RuntimeEvent::Missed {
-                count: new_read - self.runtime_event_read_seq,
-            });
-            self.runtime_event_read_seq = new_read;
-        }
-        while self.runtime_event_read_seq < write_seq {
-            let seq = self.runtime_event_read_seq;
-            let slot = (seq as usize) & (layout.runtime_event_capacity - 1);
-            let slot_base = RUNTIME_EVENT_HEADER_SIZE + slot * layout.runtime_event_slot_size;
-            let published = read_u64(slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET);
-            if published == RUNTIME_EVENT_WRITING || published != seq {
-                break;
-            }
-            let site_id = read_u64(slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET) as usize;
-            if let Some(site) = self.program.runtime_event_sites.get(site_id) {
-                let site_layout = layout.runtime_event_site_layouts.get(site_id);
-                let arg_count = read_u64(slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET) as usize;
-                let arg_count = arg_count.min(site.arg_widths.len());
-                let mut args = Vec::with_capacity(arg_count);
-                if let Some(site_layout) = site_layout {
-                    for idx in 0..arg_count {
-                        let Some(arg_layout) = site_layout.args.get(idx) else {
-                            break;
-                        };
-                        let mut values = Vec::with_capacity(arg_layout.word_count);
-                        let mut masks = Vec::with_capacity(arg_layout.word_count);
-                        for word_idx in 0..arg_layout.word_count {
-                            values.push(read_u64(
-                                slot_base
-                                    + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
-                                    + (arg_layout.value_word_offset + word_idx) * 8,
-                            ));
-                            masks.push(read_u64(
-                                slot_base
-                                    + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
-                                    + (arg_layout.mask_word_offset + word_idx) * 8,
-                            ));
-                        }
-                        args.push(RuntimeEventArgValue {
-                            values,
-                            masks,
-                            width: site.arg_widths.get(idx).copied().unwrap_or(64),
-                            signed: site.arg_signed.get(idx).copied().unwrap_or(false),
-                        });
-                    }
-                }
-                let message = render_runtime_event_message(site, &args);
-                events.push(match site.kind {
-                    RuntimeEventKind::Display => RuntimeEvent::Display { message },
-                    RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
-                    RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
-                });
-            }
-            self.runtime_event_read_seq += 1;
-        }
-        events
+        collect_runtime_events(
+            layout,
+            &self.program.runtime_event_sites,
+            &mut self.runtime_event_read_seq,
+            size,
+            read_u64,
+            read_u64,
+        )
+    }
+
+    pub fn runtime_event_drain(&self) -> Option<RuntimeEventDrain> {
+        Some(RuntimeEventDrain {
+            buffer: self.backend.runtime_event_buffer()?,
+            layout: self.backend.layout().clone(),
+            sites: self.program.runtime_event_sites.clone(),
+            read_seq: 0,
+        })
     }
 
     /// Returns a reference to the compiled SIR program.

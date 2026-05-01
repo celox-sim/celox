@@ -597,6 +597,12 @@ fn emit_inst(
             offset,
             src,
             size,
+        }
+        | MInst::AtomicStorePtr {
+            ptr,
+            offset,
+            src,
+            size,
         } => {
             let ptr = preg_to_reg64(resolve(assignment, *ptr));
             let s_preg = resolve(assignment, *src);
@@ -671,6 +677,13 @@ fn emit_inst(
         }
 
         MInst::StorePtrIndexed {
+            ptr,
+            offset,
+            index,
+            src,
+            size,
+        }
+        | MInst::AtomicStorePtrIndexed {
             ptr,
             offset,
             index,

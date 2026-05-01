@@ -1,8 +1,12 @@
 use num_bigint::BigUint;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 use crate::ir::{AbsoluteAddr, SignalRef};
 
 use super::MemoryLayout;
+#[cfg(not(target_arch = "wasm32"))]
+use super::RuntimeEventBuffer;
 
 // SimulatorErrorCode: on native it's defined in runtime.rs; on wasm32 we define it here.
 #[cfg(not(target_arch = "wasm32"))]
@@ -133,6 +137,10 @@ pub trait SimBackend {
     fn memory_as_ptr(&self) -> (*const u8, usize);
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize);
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize);
+    #[cfg(not(target_arch = "wasm32"))]
+    fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
+        None
+    }
     fn stable_region_size(&self) -> usize;
     fn layout(&self) -> &MemoryLayout;
 

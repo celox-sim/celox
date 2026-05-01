@@ -182,6 +182,61 @@ fn test_ff_runtime_events_support_wide_four_state_args(sim) {
     );
 }
 
+fn test_ff_runtime_event_drain_handle_can_run_during_simulation(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<16>) {
+            always_ff (clk) {
+                $display("a=%0d", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drained = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let drain_thread = {
+        let done = std::sync::Arc::clone(&done);
+        let drained = std::sync::Arc::clone(&drained);
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                let events = drain.drain();
+                if !events.is_empty() {
+                    drained.lock().unwrap().extend(events);
+                }
+                std::thread::yield_now();
+            }
+            drained.lock().unwrap().extend(drain.drain());
+        })
+    };
+
+    for value in 0..128u16 {
+        sim.modify(|io| io.set(a, value)).unwrap();
+        sim.tick(clk).unwrap();
+    }
+    done.store(true, std::sync::atomic::Ordering::Release);
+    drain_thread.join().unwrap();
+
+    let events = std::sync::Arc::try_unwrap(drained)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    let messages = events
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            other => panic!("unexpected runtime event: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let expected = (0..128u16)
+        .map(|value| format!("a={value}"))
+        .collect::<Vec<_>>();
+    assert_eq!(messages, expected);
+}
+
 fn test_ff_runtime_fatal_assert_records_event(sim) {
     @omit_veryl;
     @ignore_on(wasm);

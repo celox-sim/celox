@@ -5,6 +5,8 @@ pub(crate) mod memory_layout;
 pub(crate) mod native;
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod runtime_event_buffer;
 pub mod traits;
 #[cfg(not(target_arch = "wasm32"))]
 mod translator;
@@ -22,6 +24,8 @@ pub use memory_layout::{MemoryLayout, get_byte_size};
 pub use runtime::SharedJitCode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{EventRef, JitBackend};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use runtime_event_buffer::RuntimeEventBuffer;
 #[cfg(target_arch = "wasm32")]
 pub use traits::EventHandle;
 pub use traits::SimulatorErrorCode;

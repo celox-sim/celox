@@ -420,11 +420,16 @@ impl SIRTranslator {
             .builder
             .ins()
             .iconst(types::I64, RUNTIME_EVENT_WRITING as i64);
-        state.builder.ins().store(
+        let slot_seq_addr = state
+            .builder
+            .ins()
+            .iadd_imm(slot_addr, RUNTIME_EVENT_SLOT_SEQ_OFFSET as i64);
+        state.builder.ins().atomic_rmw(
+            types::I64,
             MemFlags::new(),
+            cranelift::codegen::ir::AtomicRmwOp::Xchg,
+            slot_seq_addr,
             writing,
-            slot_addr,
-            RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
         );
         let site = state.builder.ins().iconst(types::I64, site_id as i64);
         state.builder.ins().store(
@@ -477,17 +482,25 @@ impl SIRTranslator {
                 );
             }
         }
-        state.builder.ins().store(
-            MemFlags::new(),
-            seq,
-            slot_addr,
-            RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
-        );
-        let next = state.builder.ins().iadd_imm(seq, 1);
-        state
+        let slot_seq_addr = state
             .builder
             .ins()
-            .store(MemFlags::new(), next, write_seq_addr, 0);
+            .iadd_imm(slot_addr, RUNTIME_EVENT_SLOT_SEQ_OFFSET as i64);
+        state.builder.ins().atomic_rmw(
+            types::I64,
+            MemFlags::new(),
+            cranelift::codegen::ir::AtomicRmwOp::Xchg,
+            slot_seq_addr,
+            seq,
+        );
+        let next = state.builder.ins().iadd_imm(seq, 1);
+        state.builder.ins().atomic_rmw(
+            types::I64,
+            MemFlags::new(),
+            cranelift::codegen::ir::AtomicRmwOp::Xchg,
+            write_seq_addr,
+            next,
+        );
     }
 
     /// Slice: extract bits [bit_offset, bit_offset+width) from src register.

@@ -383,6 +383,13 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
+    /// atomic store [ptr + offset] = src
+    AtomicStorePtr {
+        ptr: VReg,
+        offset: i32,
+        src: VReg,
+        size: OpSize,
+    },
     /// dst = load [base + offset + index]  (register-indexed memory access)
     LoadIndexed {
         dst: VReg,
@@ -409,6 +416,14 @@ pub enum MInst {
     },
     /// store [ptr + offset + index] = src
     StorePtrIndexed {
+        ptr: VReg,
+        offset: i32,
+        index: VReg,
+        src: VReg,
+        size: OpSize,
+    },
+    /// atomic store [ptr + offset + index] = src
+    AtomicStorePtrIndexed {
         ptr: VReg,
         offset: i32,
         index: VReg,
@@ -541,6 +556,12 @@ impl fmt::Display for MInst {
                 src,
                 size,
             } => write!(f, "store.{size} [{ptr} + {offset}], {src}"),
+            MInst::AtomicStorePtr {
+                ptr,
+                offset,
+                src,
+                size,
+            } => write!(f, "atomic_store.{size} [{ptr} + {offset}], {src}"),
             MInst::LoadIndexed {
                 dst,
                 base,
@@ -569,6 +590,13 @@ impl fmt::Display for MInst {
                 src,
                 size,
             } => write!(f, "store.{size} [{ptr} + {offset} + {index}], {src}"),
+            MInst::AtomicStorePtrIndexed {
+                ptr,
+                offset,
+                index,
+                src,
+                size,
+            } => write!(f, "atomic_store.{size} [{ptr} + {offset} + {index}], {src}"),
             MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
             MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
             MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
@@ -701,8 +729,10 @@ impl MInst {
 
             MInst::Store { .. }
             | MInst::StorePtr { .. }
+            | MInst::AtomicStorePtr { .. }
             | MInst::StoreIndexed { .. }
             | MInst::StorePtrIndexed { .. }
+            | MInst::AtomicStorePtrIndexed { .. }
             | MInst::Branch { .. }
             | MInst::Jump { .. }
             | MInst::Return
@@ -719,10 +749,14 @@ impl MInst {
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
+            MInst::AtomicStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::LoadIndexed { index, .. } => Uses::one(*index),
             MInst::StoreIndexed { index, src, .. } => Uses::two(*index, *src),
             MInst::LoadPtrIndexed { ptr, index, .. } => Uses::two(*ptr, *index),
             MInst::StorePtrIndexed {
+                ptr, index, src, ..
+            } => Uses::three(*ptr, *index, *src),
+            MInst::AtomicStorePtrIndexed {
                 ptr, index, src, ..
             } => Uses::three(*ptr, *index, *src),
             MInst::Add { lhs, rhs, .. }
@@ -787,6 +821,14 @@ impl MInst {
                     *src = new;
                 }
             }
+            MInst::AtomicStorePtr { ptr, src, .. } => {
+                if *ptr == old {
+                    *ptr = new;
+                }
+                if *src == old {
+                    *src = new;
+                }
+            }
             MInst::LoadIndexed { index, .. } => {
                 if *index == old {
                     *index = new;
@@ -809,6 +851,19 @@ impl MInst {
                 }
             }
             MInst::StorePtrIndexed {
+                ptr, index, src, ..
+            } => {
+                if *ptr == old {
+                    *ptr = new;
+                }
+                if *index == old {
+                    *index = new;
+                }
+                if *src == old {
+                    *src = new;
+                }
+            }
+            MInst::AtomicStorePtrIndexed {
                 ptr, index, src, ..
             } => {
                 if *ptr == old {

@@ -747,7 +747,7 @@ fn lower_instruction(
                 value: RUNTIME_EVENT_WRITING,
             });
             let slot_base = RUNTIME_EVENT_HEADER_SIZE as i32;
-            block.push(MInst::StorePtrIndexed {
+            block.push(MInst::AtomicStorePtrIndexed {
                 ptr: event_ptr,
                 offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
                 index: slot_off,
@@ -837,7 +837,7 @@ fn lower_instruction(
                     });
                 }
             }
-            block.push(MInst::StorePtrIndexed {
+            block.push(MInst::AtomicStorePtrIndexed {
                 ptr: event_ptr,
                 offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
                 index: slot_off,
@@ -850,7 +850,7 @@ fn lower_instruction(
                 src: seq_v,
                 imm: 1,
             });
-            block.push(MInst::StorePtr {
+            block.push(MInst::AtomicStorePtr {
                 ptr: event_ptr,
                 offset: 0,
                 src: next_seq,

@@ -7,6 +7,7 @@ use crate::{
     ir::{AbsoluteAddr, SignalRef},
 };
 
+use super::RuntimeEventBuffer;
 use super::{JitEngine, MemoryLayout, get_byte_size};
 pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 
@@ -153,7 +154,7 @@ impl SharedJitCode {
 pub struct JitBackend {
     shared: Arc<SharedJitCode>,
     memory: Vec<u64>,
-    runtime_event_buffer: Vec<u64>,
+    runtime_event_buffer: Arc<RuntimeEventBuffer>,
     /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
     comb_func: SimFunc,
 }
@@ -522,8 +523,9 @@ impl JitBackend {
     pub fn from_shared(shared: Arc<SharedJitCode>) -> Self {
         let num_u64 = shared.layout.merged_total_size.div_ceil(8);
         let mut memory = vec![0u64; num_u64];
-        let event_words = shared.layout.runtime_event_buffer_size.div_ceil(8);
-        let runtime_event_buffer = vec![0u64; event_words];
+        let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
+            shared.layout.runtime_event_buffer_size,
+        ));
 
         // Initialize 4-state regions to X (v=1, m=1)
         for &(offset, allocated_size) in &shared.four_state_inits {
@@ -825,9 +827,13 @@ impl JitBackend {
 
     pub fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
         (
-            self.runtime_event_buffer.as_ptr() as *const u8,
-            self.shared.layout.runtime_event_buffer_size,
+            self.runtime_event_buffer.as_ptr(),
+            self.runtime_event_buffer.byte_size(),
         )
+    }
+
+    pub fn runtime_event_buffer(&self) -> Arc<RuntimeEventBuffer> {
+        Arc::clone(&self.runtime_event_buffer)
     }
 
     /// Returns the stable region size in bytes.
@@ -987,6 +993,10 @@ impl super::SimBackend for JitBackend {
 
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
         self.runtime_event_buffer_as_ptr()
+    }
+
+    fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
+        Some(self.runtime_event_buffer())
     }
 
     fn stable_region_size(&self) -> usize {

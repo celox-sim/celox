@@ -478,8 +478,10 @@ fn is_memory_clobber(inst: &MInst) -> bool {
         inst,
         MInst::Store { .. }
             | MInst::StorePtr { .. }
+            | MInst::AtomicStorePtr { .. }
             | MInst::StoreIndexed { .. }
             | MInst::StorePtrIndexed { .. }
+            | MInst::AtomicStorePtrIndexed { .. }
     )
 }
 
@@ -633,8 +635,10 @@ fn global_gvn(func: &mut MFunction) {
                     MInst::Store {
                         base, offset, size, ..
                     } => (Some(*base), *offset, size.bytes() as i32),
-                    MInst::StoreIndexed { .. } | MInst::StorePtrIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
-                    MInst::StorePtr { .. } => (None, 0, 0),
+                    MInst::StoreIndexed { .. }
+                    | MInst::StorePtrIndexed { .. }
+                    | MInst::AtomicStorePtrIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
+                    MInst::StorePtr { .. } | MInst::AtomicStorePtr { .. } => (None, 0, 0),
                     _ => (None, 0, 0),
                 };
                 let load_keys: Vec<GvnKey> = value_table
@@ -1022,8 +1026,10 @@ fn if_convert(func: &mut MFunction) {
                     inst,
                     MInst::Store { .. }
                         | MInst::StorePtr { .. }
+                        | MInst::AtomicStorePtr { .. }
                         | MInst::StoreIndexed { .. }
                         | MInst::StorePtrIndexed { .. }
+                        | MInst::AtomicStorePtrIndexed { .. }
                         | MInst::Load { .. }
                         | MInst::LoadPtr { .. }
                         | MInst::LoadImm { .. }
@@ -1369,17 +1375,17 @@ fn split_live_ranges(func: &mut MFunction) {
                     ..
                 } => {
                     // Check no Store between def and use (conservative)
-                    let has_store = block.insts[def_ii + 1..use_pos]
-                        .iter()
-                        .any(|i| {
-                            matches!(
-                                i,
-                                MInst::Store { .. }
-                                    | MInst::StorePtr { .. }
-                                    | MInst::StoreIndexed { .. }
-                                    | MInst::StorePtrIndexed { .. }
-                            )
-                        });
+                    let has_store = block.insts[def_ii + 1..use_pos].iter().any(|i| {
+                        matches!(
+                            i,
+                            MInst::Store { .. }
+                                | MInst::StorePtr { .. }
+                                | MInst::AtomicStorePtr { .. }
+                                | MInst::StoreIndexed { .. }
+                                | MInst::StorePtrIndexed { .. }
+                                | MInst::AtomicStorePtrIndexed { .. }
+                        )
+                    });
                     if !has_store {
                         Some(RematKind::SimLoad(*offset, *size))
                     } else {
@@ -2091,7 +2097,8 @@ fn forward_local_store_loads(func: &mut MFunction) {
                 MInst::LoadIndexed { .. }
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::StoreIndexed { .. }
-                | MInst::StorePtrIndexed { .. } => {
+                | MInst::StorePtrIndexed { .. }
+                | MInst::AtomicStorePtrIndexed { .. } => {
                     available.clear();
                     rewritten.push(inst);
                 }
@@ -2205,7 +2212,8 @@ fn eliminate_redundant_local_stores(func: &mut MFunction) {
                 MInst::LoadIndexed { .. }
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::StoreIndexed { .. }
-                | MInst::StorePtrIndexed { .. } => {
+                | MInst::StorePtrIndexed { .. }
+                | MInst::AtomicStorePtrIndexed { .. } => {
                     available.clear();
                     rewritten.push(inst);
                 }
@@ -2333,8 +2341,10 @@ fn dead_code_eliminate(func: &mut MFunction) {
                             inst,
                             MInst::Store { .. }
                                 | MInst::StorePtr { .. }
+                                | MInst::AtomicStorePtr { .. }
                                 | MInst::StoreIndexed { .. }
                                 | MInst::StorePtrIndexed { .. }
+                                | MInst::AtomicStorePtrIndexed { .. }
                                 | MInst::Branch { .. }
                                 | MInst::Jump { .. }
                                 | MInst::Return
