@@ -369,6 +369,27 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
+    /// dst = load [ptr + offset]
+    LoadPtr {
+        dst: VReg,
+        ptr: VReg,
+        offset: i32,
+        size: OpSize,
+    },
+    /// store [ptr + offset] = src
+    StorePtr {
+        ptr: VReg,
+        offset: i32,
+        src: VReg,
+        size: OpSize,
+    },
+    /// atomic store [ptr + offset] = src
+    AtomicStorePtr {
+        ptr: VReg,
+        offset: i32,
+        src: VReg,
+        size: OpSize,
+    },
     /// dst = load [base + offset + index]  (register-indexed memory access)
     LoadIndexed {
         dst: VReg,
@@ -380,6 +401,30 @@ pub enum MInst {
     /// store [base + offset + index] = src  (register-indexed memory access)
     StoreIndexed {
         base: BaseReg,
+        offset: i32,
+        index: VReg,
+        src: VReg,
+        size: OpSize,
+    },
+    /// dst = load [ptr + offset + index]
+    LoadPtrIndexed {
+        dst: VReg,
+        ptr: VReg,
+        offset: i32,
+        index: VReg,
+        size: OpSize,
+    },
+    /// store [ptr + offset + index] = src
+    StorePtrIndexed {
+        ptr: VReg,
+        offset: i32,
+        index: VReg,
+        src: VReg,
+        size: OpSize,
+    },
+    /// atomic store [ptr + offset + index] = src
+    AtomicStorePtrIndexed {
+        ptr: VReg,
         offset: i32,
         index: VReg,
         src: VReg,
@@ -499,6 +544,24 @@ impl fmt::Display for MInst {
                 src,
                 size,
             } => write!(f, "store.{size} [{base} + {offset}], {src}"),
+            MInst::LoadPtr {
+                dst,
+                ptr,
+                offset,
+                size,
+            } => write!(f, "{dst} = load.{size} [{ptr} + {offset}]"),
+            MInst::StorePtr {
+                ptr,
+                offset,
+                src,
+                size,
+            } => write!(f, "store.{size} [{ptr} + {offset}], {src}"),
+            MInst::AtomicStorePtr {
+                ptr,
+                offset,
+                src,
+                size,
+            } => write!(f, "atomic_store.{size} [{ptr} + {offset}], {src}"),
             MInst::LoadIndexed {
                 dst,
                 base,
@@ -513,6 +576,27 @@ impl fmt::Display for MInst {
                 src,
                 size,
             } => write!(f, "store.{size} [{base} + {offset} + {index}], {src}"),
+            MInst::LoadPtrIndexed {
+                dst,
+                ptr,
+                offset,
+                index,
+                size,
+            } => write!(f, "{dst} = load.{size} [{ptr} + {offset} + {index}]"),
+            MInst::StorePtrIndexed {
+                ptr,
+                offset,
+                index,
+                src,
+                size,
+            } => write!(f, "store.{size} [{ptr} + {offset} + {index}], {src}"),
+            MInst::AtomicStorePtrIndexed {
+                ptr,
+                offset,
+                index,
+                src,
+                size,
+            } => write!(f, "atomic_store.{size} [{ptr} + {offset} + {index}], {src}"),
             MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
             MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
             MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
@@ -613,7 +697,9 @@ impl MInst {
             MInst::Mov { dst, .. }
             | MInst::LoadImm { dst, .. }
             | MInst::Load { dst, .. }
+            | MInst::LoadPtr { dst, .. }
             | MInst::LoadIndexed { dst, .. }
+            | MInst::LoadPtrIndexed { dst, .. }
             | MInst::Add { dst, .. }
             | MInst::Sub { dst, .. }
             | MInst::Mul { dst, .. }
@@ -642,7 +728,11 @@ impl MInst {
             | MInst::Select { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
+            | MInst::StorePtr { .. }
+            | MInst::AtomicStorePtr { .. }
             | MInst::StoreIndexed { .. }
+            | MInst::StorePtrIndexed { .. }
+            | MInst::AtomicStorePtrIndexed { .. }
             | MInst::Branch { .. }
             | MInst::Jump { .. }
             | MInst::Return
@@ -657,8 +747,18 @@ impl MInst {
             MInst::Mov { src, .. } => Uses::one(*src),
             MInst::LoadImm { .. } | MInst::Load { .. } => Uses::none(),
             MInst::Store { src, .. } => Uses::one(*src),
+            MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
+            MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
+            MInst::AtomicStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::LoadIndexed { index, .. } => Uses::one(*index),
             MInst::StoreIndexed { index, src, .. } => Uses::two(*index, *src),
+            MInst::LoadPtrIndexed { ptr, index, .. } => Uses::two(*ptr, *index),
+            MInst::StorePtrIndexed {
+                ptr, index, src, ..
+            } => Uses::three(*ptr, *index, *src),
+            MInst::AtomicStorePtrIndexed {
+                ptr, index, src, ..
+            } => Uses::three(*ptr, *index, *src),
             MInst::Add { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
             | MInst::Mul { lhs, rhs, .. }
@@ -708,12 +808,67 @@ impl MInst {
                     *src = new;
                 }
             }
+            MInst::LoadPtr { ptr, .. } => {
+                if *ptr == old {
+                    *ptr = new;
+                }
+            }
+            MInst::StorePtr { ptr, src, .. } => {
+                if *ptr == old {
+                    *ptr = new;
+                }
+                if *src == old {
+                    *src = new;
+                }
+            }
+            MInst::AtomicStorePtr { ptr, src, .. } => {
+                if *ptr == old {
+                    *ptr = new;
+                }
+                if *src == old {
+                    *src = new;
+                }
+            }
             MInst::LoadIndexed { index, .. } => {
                 if *index == old {
                     *index = new;
                 }
             }
             MInst::StoreIndexed { index, src, .. } => {
+                if *index == old {
+                    *index = new;
+                }
+                if *src == old {
+                    *src = new;
+                }
+            }
+            MInst::LoadPtrIndexed { ptr, index, .. } => {
+                if *ptr == old {
+                    *ptr = new;
+                }
+                if *index == old {
+                    *index = new;
+                }
+            }
+            MInst::StorePtrIndexed {
+                ptr, index, src, ..
+            } => {
+                if *ptr == old {
+                    *ptr = new;
+                }
+                if *index == old {
+                    *index = new;
+                }
+                if *src == old {
+                    *src = new;
+                }
+            }
+            MInst::AtomicStorePtrIndexed {
+                ptr, index, src, ..
+            } => {
+                if *ptr == old {
+                    *ptr = new;
+                }
                 if *index == old {
                     *index = new;
                 }

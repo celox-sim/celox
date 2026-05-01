@@ -196,6 +196,7 @@ pub fn estimate_clif_cost(
         }
         SIRInstruction::Concat(_, args) => 3 * args.len() * state_mul,
         SIRInstruction::Slice(_, _, _, _) => 3 * state_mul,
+        SIRInstruction::RuntimeEvent { args, .. } => 12 + args.len() * 2,
     }
 }
 

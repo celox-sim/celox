@@ -6,20 +6,20 @@ expression: output
 === MIR (eval_comb) ===
 Execution Unit 0 (before regalloc):
 bb0:
-  v0 = load.i32 [sim + 0]
-  v1 = load.i32 [sim + 8]
+  v0 = load.i32 [sim + 8]
+  v1 = load.i32 [sim + 16]
   v3 = add v0, v1
   v2 = and v3, 0xffffffff
-  store.i32 [sim + 4], v2
+  store.i32 [sim + 12], v2
   ret
 
 Execution Unit 0 (after regalloc):
 bb0:
-  v0 = load.i32 [sim + 0]
-  v1 = load.i32 [sim + 8]
+  v0 = load.i32 [sim + 8]
+  v1 = load.i32 [sim + 16]
   v3 = add v0, v1
   v2 = and v3, 0xffffffff
-  store.i32 [sim + 4], v2
+  store.i32 [sim + 12], v2
   ret
   Register assignment:
     v0 -> rax
@@ -30,13 +30,13 @@ bb0:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
-  0x00000009  mov eax,[r15]
-  0x0000000c  mov edx,[r15+8]
-  0x00000010  add rax,rdx
-  0x00000013  and eax,0FFFFFFFFh
-  0x00000018  mov [r15+4],eax
-  0x0000001c  xor eax,eax
-  0x0000001e  jmp short 0000000000000020h
-  0x00000020  add rsp,8
-  0x00000024  pop r15
-  0x00000026  ret
+  0x00000009  mov eax,[r15+8]
+  0x0000000d  mov edx,[r15+10h]
+  0x00000011  add rax,rdx
+  0x00000014  and eax,0FFFFFFFFh
+  0x00000019  mov [r15+0Ch],eax
+  0x0000001d  xor eax,eax
+  0x0000001f  jmp short 0000000000000021h
+  0x00000021  add rsp,8
+  0x00000025  pop r15
+  0x00000027  ret

@@ -166,7 +166,9 @@ pub fn lower_execution_unit(
                 | SIRInstruction::Concat(d, _)
                 | SIRInstruction::Slice(d, _, _, _)
                 | SIRInstruction::Mux(d, _, _, _) => Some(*d),
-                SIRInstruction::Store(..) | SIRInstruction::Commit(..) => None,
+                SIRInstruction::Store(..)
+                | SIRInstruction::Commit(..)
+                | SIRInstruction::RuntimeEvent { .. } => None,
             };
             if let Some(dr) = dst_reg {
                 let w = ctx.sir_width(&dr);
@@ -691,6 +693,170 @@ fn lower_instruction(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
 ) {
     match inst {
+        SIRInstruction::RuntimeEvent { site_id, args } => {
+            use crate::backend::memory_layout::{
+                RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+                RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+                RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+                STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+            };
+
+            let event_ptr = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Load {
+                dst: event_ptr,
+                base: BaseReg::SimState,
+                offset: STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                size: OpSize::S64,
+            });
+            let seq_v = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::LoadPtr {
+                dst: seq_v,
+                ptr: event_ptr,
+                offset: 0,
+                size: OpSize::S64,
+            });
+            let mask_v = ctx.alloc_vreg(SpillDesc::remat(
+                (ctx.layout.runtime_event_capacity as u64) - 1,
+            ));
+            block.push(MInst::LoadImm {
+                dst: mask_v,
+                value: (ctx.layout.runtime_event_capacity as u64) - 1,
+            });
+            let slot_idx = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And {
+                dst: slot_idx,
+                lhs: seq_v,
+                rhs: mask_v,
+            });
+            let slot_size_v =
+                ctx.alloc_vreg(SpillDesc::remat(ctx.layout.runtime_event_slot_size as u64));
+            block.push(MInst::LoadImm {
+                dst: slot_size_v,
+                value: ctx.layout.runtime_event_slot_size as u64,
+            });
+            let slot_off = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Mul {
+                dst: slot_off,
+                lhs: slot_idx,
+                rhs: slot_size_v,
+            });
+
+            let writing = ctx.alloc_vreg(SpillDesc::remat(RUNTIME_EVENT_WRITING));
+            block.push(MInst::LoadImm {
+                dst: writing,
+                value: RUNTIME_EVENT_WRITING,
+            });
+            let slot_base = RUNTIME_EVENT_HEADER_SIZE as i32;
+            block.push(MInst::AtomicStorePtrIndexed {
+                ptr: event_ptr,
+                offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
+                index: slot_off,
+                src: writing,
+                size: OpSize::S64,
+            });
+            let site_v = ctx.alloc_vreg(SpillDesc::remat(*site_id as u64));
+            block.push(MInst::LoadImm {
+                dst: site_v,
+                value: *site_id as u64,
+            });
+            block.push(MInst::StorePtrIndexed {
+                ptr: event_ptr,
+                offset: slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET as i32,
+                index: slot_off,
+                src: site_v,
+                size: OpSize::S64,
+            });
+            let site_layout = &ctx.layout.runtime_event_site_layouts[*site_id as usize];
+            let arg_count = args.len() as u64;
+            let arg_count_v = ctx.alloc_vreg(SpillDesc::remat(arg_count));
+            block.push(MInst::LoadImm {
+                dst: arg_count_v,
+                value: arg_count,
+            });
+            block.push(MInst::StorePtrIndexed {
+                ptr: event_ptr,
+                offset: slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET as i32,
+                index: slot_off,
+                src: arg_count_v,
+                size: OpSize::S64,
+            });
+            for (idx, arg) in args.iter().enumerate() {
+                let Some(arg_layout) = site_layout.args.get(idx) else {
+                    continue;
+                };
+                let value_chunks = if ctx.wide_regs.contains_key(arg) {
+                    ctx.get_wide_chunks(arg, block)
+                } else {
+                    vec![(ctx.reg_map.get(*arg), ctx.sir_width(arg).min(64))]
+                };
+                let mask_chunks = if ctx.wide_regs.contains_key(arg) {
+                    get_wide_mask_chunks(ctx, block, arg, arg_layout.word_count)
+                } else {
+                    vec![ctx.get_mask(*arg, block)]
+                };
+                for word_idx in 0..arg_layout.word_count {
+                    let value_vreg = value_chunks
+                        .get(word_idx)
+                        .map(|chunk| chunk.0)
+                        .unwrap_or_else(|| {
+                            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                            block.push(MInst::LoadImm {
+                                dst: zero,
+                                value: 0,
+                            });
+                            zero
+                        });
+                    block.push(MInst::StorePtrIndexed {
+                        ptr: event_ptr,
+                        offset: slot_base
+                            + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                                + (arg_layout.value_word_offset + word_idx) * 8)
+                                as i32,
+                        index: slot_off,
+                        src: value_vreg,
+                        size: OpSize::S64,
+                    });
+
+                    let mask_vreg = mask_chunks.get(word_idx).copied().unwrap_or_else(|| {
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm {
+                            dst: zero,
+                            value: 0,
+                        });
+                        zero
+                    });
+                    block.push(MInst::StorePtrIndexed {
+                        ptr: event_ptr,
+                        offset: slot_base
+                            + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                                + (arg_layout.mask_word_offset + word_idx) * 8)
+                                as i32,
+                        index: slot_off,
+                        src: mask_vreg,
+                        size: OpSize::S64,
+                    });
+                }
+            }
+            block.push(MInst::AtomicStorePtrIndexed {
+                ptr: event_ptr,
+                offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
+                index: slot_off,
+                src: seq_v,
+                size: OpSize::S64,
+            });
+            let next_seq = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::AddImm {
+                dst: next_seq,
+                src: seq_v,
+                imm: 1,
+            });
+            block.push(MInst::AtomicStorePtr {
+                ptr: event_ptr,
+                offset: 0,
+                src: next_seq,
+                size: OpSize::S64,
+            });
+        }
         SIRInstruction::Mux(dst, cond, then_val, else_val) => {
             // Expand Mux into Binary/Unary sequence and process through standard ISel.
             // This ensures width masking, constant tracking, and 4-state mask handling

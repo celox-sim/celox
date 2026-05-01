@@ -43,6 +43,249 @@ fn test_ff_nonblocking(sim) {
     assert_eq!(sim.get(q), 0x11111111u32.into());
 }
 
+fn test_ff_runtime_display_and_assert_continue(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<8>, q: output logic<8>) {
+            always_ff (clk) {
+                q = a;
+                $display("a=%0d", a);
+                $assert_continue(a != 8'd3, "bad a=%0d", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| io.set(a, 3u8)).unwrap();
+    sim.tick(clk).unwrap();
+    let events = sim.drain_runtime_events();
+    assert_eq!(
+        events,
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "a=3".to_string(),
+            },
+            celox::RuntimeEvent::AssertContinue {
+                message: "bad a=3".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_ff_runtime_events_format_verilog_radices(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<8>) {
+            always_ff (clk) {
+                $display("bin=%b hex=%h HEX=%H", a, a, a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| io.set(a, 0x2au8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "bin=00101010 hex=2a HEX=2A".to_string(),
+        }],
+    );
+}
+
+fn test_ff_runtime_events_preserve_four_state_args(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<4>) {
+            always_ff (clk) {
+                $display("a=%b hex=%x dec=%0d", a, a, a);
+                $assert_continue(1'b0, "bad=%b", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| {
+        io.set_four_state(a, BigUint::from(0b1010u32), BigUint::from(0b0100u32))
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    let events = sim.drain_runtime_events();
+    assert_eq!(
+        events,
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "a=1x10 hex=x dec=x".to_string(),
+            },
+            celox::RuntimeEvent::AssertContinue {
+                message: "bad=1x10".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_ff_runtime_events_support_design_sized_arg_count(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            b: input logic<8>,
+            c: input logic<8>,
+            d: input logic<8>,
+            e: input logic<8>
+        ) {
+            always_ff (clk) {
+                $display("%0d %0d %0d %0d %0d", a, b, c, d, e);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let e = sim.signal("e");
+
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 2u8);
+        io.set(c, 3u8);
+        io.set(d, 4u8);
+        io.set(e, 5u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "1 2 3 4 5".to_string(),
+        }],
+    );
+}
+
+fn test_ff_runtime_events_support_wide_four_state_args(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<80>) {
+            always_ff (clk) {
+                $display("a=%x dec=%0d", a, a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| {
+        io.set_four_state(
+            a,
+            BigUint::parse_bytes(b"123456789abcdef01234", 16).unwrap(),
+            BigUint::from(0x0fu32),
+        )
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=123456789abcdef0123x dec=x".to_string(),
+        }],
+    );
+}
+
+fn test_ff_runtime_event_drain_handle_can_run_during_simulation(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<16>) {
+            always_ff (clk) {
+                $display("a=%0d", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drained = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let drain_thread = {
+        let done = std::sync::Arc::clone(&done);
+        let drained = std::sync::Arc::clone(&drained);
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                let events = drain.drain();
+                if !events.is_empty() {
+                    drained.lock().unwrap().extend(events);
+                }
+                std::thread::yield_now();
+            }
+            drained.lock().unwrap().extend(drain.drain());
+        })
+    };
+
+    for value in 0..128u16 {
+        sim.modify(|io| io.set(a, value)).unwrap();
+        sim.tick(clk).unwrap();
+    }
+    done.store(true, std::sync::atomic::Ordering::Release);
+    drain_thread.join().unwrap();
+
+    let events = std::sync::Arc::try_unwrap(drained)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    let messages = events
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            other => panic!("unexpected runtime event: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let expected = (0..128u16)
+        .map(|value| format!("a={value}"))
+        .collect::<Vec<_>>();
+    assert_eq!(messages, expected);
+}
+
+fn test_ff_runtime_fatal_assert_records_event(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<8>) {
+            always_ff (clk) {
+                $assert(a != 8'd7, "fatal a=%0d", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| io.set(a, 7u8)).unwrap();
+    assert!(sim.tick(clk).is_err());
+    let events = sim.drain_runtime_events();
+    assert_eq!(
+        events,
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "fatal a=7".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_for_bounds(sim) {
     @setup { let code = r#"
         module Top (

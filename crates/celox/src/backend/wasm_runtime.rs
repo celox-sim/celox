@@ -97,6 +97,9 @@ impl super::traits::SimBackend for WasmBackend {
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         WasmBackend::memory_as_mut_ptr(self)
     }
+    fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
+        WasmBackend::runtime_event_buffer_as_ptr(self)
+    }
     fn stable_region_size(&self) -> usize {
         WasmBackend::stable_region_size(self)
     }
@@ -279,7 +282,9 @@ impl WasmBackend {
 
         // Create store and shared memory
         let mut store = Store::new(&engine, ());
-        let mem_pages = layout.merged_total_size.div_ceil(65536) as u64;
+        let runtime_event_base = layout.merged_total_size;
+        let mem_pages =
+            (layout.merged_total_size + layout.runtime_event_buffer_size).div_ceil(65536) as u64;
         let mem_pages = mem_pages.max(1);
         let memory = Memory::new(
             &mut store,
@@ -290,6 +295,7 @@ impl WasmBackend {
         // Initialize 4-state regions to X
         {
             let mem_data = memory.data_mut(&mut store);
+            mem_data[0..8].copy_from_slice(&(runtime_event_base as u64).to_le_bytes());
             for &(offset, allocated_size) in &four_state_inits {
                 // value bytes = 0xFF, mask bytes = 0xFF
                 for i in 0..allocated_size {
@@ -547,6 +553,15 @@ impl WasmBackend {
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         let data = self.memory.data_mut(&mut self.store);
         (data.as_mut_ptr(), self.layout.merged_total_size)
+    }
+
+    pub fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
+        let data = self.memory.data(&self.store);
+        let event_base = self.layout.merged_total_size;
+        (
+            unsafe { data.as_ptr().add(event_base) },
+            self.layout.runtime_event_buffer_size,
+        )
     }
 
     pub fn stable_region_size(&self) -> usize {

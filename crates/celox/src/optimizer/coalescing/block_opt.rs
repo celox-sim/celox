@@ -37,11 +37,15 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.push(*then_val);
             out.push(*else_val);
         }
+        SIRInstruction::RuntimeEvent { args, .. } => out.extend(args.iter().copied()),
     }
 }
 
 fn is_memory_barrier<A>(inst: &SIRInstruction<A>) -> bool {
-    matches!(inst, SIRInstruction::Commit(_, _, _, _, _))
+    matches!(
+        inst,
+        SIRInstruction::Commit(_, _, _, _, _) | SIRInstruction::RuntimeEvent { .. }
+    )
 }
 
 fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, usize, bool)> {

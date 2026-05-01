@@ -268,6 +268,14 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 dst.0, cond.0, then_val.0, else_val.0
             )
         }
+        SIRInstruction::RuntimeEvent { site_id, args } => {
+            let args = args
+                .iter()
+                .map(|r| format!("r{}", r.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("RuntimeEvent(site={}, args=[{}])", site_id, args)
+        }
     }
 }
 

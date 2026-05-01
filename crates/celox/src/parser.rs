@@ -621,6 +621,7 @@ pub(crate) fn flatten(
         apply_ffs,
         mut comb_blocks,
         mut runtime_errors,
+        runtime_event_sites,
         next_runtime_error_code,
     ) = timed_sub!(
         "relocate_units",
@@ -726,6 +727,7 @@ pub(crate) fn flatten(
             apply_ffs: HashMap::default(),
             eval_comb: Vec::new(),
             runtime_errors: HashMap::default(),
+            runtime_event_sites: Vec::new(),
             eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
@@ -833,6 +835,7 @@ pub(crate) fn flatten(
         apply_ffs,
         eval_comb: schduled,
         runtime_errors,
+        runtime_event_sites,
         eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
@@ -1359,6 +1362,7 @@ fn relocate_executation_unit_with_errors<A, B>(
     eu: &ExecutionUnit<A>,
     f: &impl Fn(&A) -> B,
     runtime_error_codes: &HashMap<i64, i64>,
+    runtime_event_sites: &HashMap<u32, u32>,
 ) -> ExecutionUnit<B> {
     ExecutionUnit {
         entry_block_id: eu.entry_block_id,
@@ -1373,7 +1377,18 @@ fn relocate_executation_unit_with_errors<A, B>(
                         instructions: block
                             .instructions
                             .iter()
-                            .map(|inst| inst.map_addr(f))
+                            .map(|inst| match inst {
+                                crate::ir::SIRInstruction::RuntimeEvent { site_id, args } => {
+                                    crate::ir::SIRInstruction::RuntimeEvent {
+                                        site_id: runtime_event_sites
+                                            .get(site_id)
+                                            .copied()
+                                            .unwrap_or(*site_id),
+                                        args: args.clone(),
+                                    }
+                                }
+                                _ => inst.map_addr(f),
+                            })
                             .collect(),
                         params: block.params.clone(),
                         terminator: match block.terminator {
@@ -1530,6 +1545,7 @@ fn relocate_units(
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
     HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+    Vec<crate::ir::RuntimeEventSite>,
     i64,
 ) {
     let mut global_arena = SLTNodeArena::<AbsoluteAddr>::new();
@@ -1545,6 +1561,7 @@ fn relocate_units(
         HashMap::default();
     let mut comb_blocks = Vec::new();
     let mut runtime_errors = HashMap::default();
+    let mut runtime_event_sites = Vec::new();
     let mut next_runtime_error_code = 2000;
 
     for (path, id) in expanded {
@@ -1570,6 +1587,12 @@ fn relocate_units(
                         .collect(),
                 },
             );
+        }
+        let mut runtime_event_site_map = HashMap::default();
+        for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
+            let global_site = runtime_event_sites.len() as u32;
+            runtime_event_site_map.insert(local_site as u32, global_site);
+            runtime_event_sites.push(site.clone());
         }
 
         let relocated_module = flatting::flatting(
@@ -1603,6 +1626,7 @@ fn relocate_units(
                         var_id: addr.var_id,
                     },
                     &runtime_error_codes,
+                    &runtime_event_site_map,
                 ),
             );
 
@@ -1624,6 +1648,7 @@ fn relocate_units(
                             var_id: addr.var_id,
                         },
                         &runtime_error_codes,
+                        &runtime_event_site_map,
                     ),
                 );
             }
@@ -1647,6 +1672,7 @@ fn relocate_units(
                         var_id: addr.var_id,
                     },
                     &runtime_error_codes,
+                    &runtime_event_site_map,
                 ),
             );
 
@@ -1668,6 +1694,7 @@ fn relocate_units(
                             var_id: addr.var_id,
                         },
                         &runtime_error_codes,
+                        &runtime_event_site_map,
                     ),
                 );
             }
@@ -1691,6 +1718,7 @@ fn relocate_units(
                         var_id: addr.var_id,
                     },
                     &runtime_error_codes,
+                    &runtime_event_site_map,
                 ),
             );
 
@@ -1712,6 +1740,7 @@ fn relocate_units(
                             var_id: addr.var_id,
                         },
                         &runtime_error_codes,
+                        &runtime_event_site_map,
                     ),
                 );
             }
@@ -1724,6 +1753,7 @@ fn relocate_units(
         apply_ffs,
         comb_blocks,
         runtime_errors,
+        runtime_event_sites,
         next_runtime_error_code,
     )
 }

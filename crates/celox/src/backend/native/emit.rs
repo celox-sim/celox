@@ -120,6 +120,18 @@ fn mem_operand_indexed(base: BaseReg, offset: i32, index: AsmRegister64) -> AsmM
     base_reg + index + offset
 }
 
+fn mem_operand_ptr(ptr: AsmRegister64, offset: i32) -> AsmMemoryOperand {
+    ptr + offset
+}
+
+fn mem_operand_ptr_indexed(
+    ptr: AsmRegister64,
+    offset: i32,
+    index: AsmRegister64,
+) -> AsmMemoryOperand {
+    ptr + index + offset
+}
+
 // ────────────────────────────────────────────────────────────────
 // Callee-saved register tracking
 // ────────────────────────────────────────────────────────────────
@@ -555,6 +567,62 @@ fn emit_inst(
             }
         }
 
+        MInst::LoadPtr {
+            dst,
+            ptr,
+            offset,
+            size,
+        } => {
+            let d_preg = resolve(assignment, *dst);
+            let ptr = preg_to_reg64(resolve(assignment, *ptr));
+            let mem = mem_operand_ptr(ptr, *offset);
+            match size {
+                OpSize::S8 => {
+                    asm.movzx(preg_to_reg32(d_preg), byte_ptr(mem))?;
+                }
+                OpSize::S16 => {
+                    asm.movzx(preg_to_reg32(d_preg), word_ptr(mem))?;
+                }
+                OpSize::S32 => {
+                    asm.mov(preg_to_reg32(d_preg), dword_ptr(mem))?;
+                }
+                OpSize::S64 => {
+                    asm.mov(preg_to_reg64(d_preg), qword_ptr(mem))?;
+                }
+            }
+        }
+
+        MInst::StorePtr {
+            ptr,
+            offset,
+            src,
+            size,
+        }
+        | MInst::AtomicStorePtr {
+            ptr,
+            offset,
+            src,
+            size,
+        } => {
+            let ptr = preg_to_reg64(resolve(assignment, *ptr));
+            let s_preg = resolve(assignment, *src);
+            let mem = mem_operand_ptr(ptr, *offset);
+            match size {
+                OpSize::S8 => {
+                    asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
+                }
+                OpSize::S16 => {
+                    asm.mov(word_ptr(mem), preg_to_reg16(s_preg))?;
+                }
+                OpSize::S32 => {
+                    asm.mov(dword_ptr(mem), preg_to_reg32(s_preg))?;
+                }
+                OpSize::S64 => {
+                    asm.mov(qword_ptr(mem), preg_to_reg64(s_preg))?;
+                }
+            }
+        }
+
         MInst::LoadIndexed {
             dst,
             base,
@@ -577,6 +645,67 @@ fn emit_inst(
                 }
                 OpSize::S64 => {
                     asm.mov(preg_to_reg64(d_preg), qword_ptr(mem))?;
+                }
+            }
+        }
+
+        MInst::LoadPtrIndexed {
+            dst,
+            ptr,
+            offset,
+            index,
+            size,
+        } => {
+            let d_preg = resolve(assignment, *dst);
+            let ptr = preg_to_reg64(resolve(assignment, *ptr));
+            let idx = preg_to_reg64(resolve(assignment, *index));
+            let mem = mem_operand_ptr_indexed(ptr, *offset, idx);
+            match size {
+                OpSize::S8 => {
+                    asm.movzx(preg_to_reg32(d_preg), byte_ptr(mem))?;
+                }
+                OpSize::S16 => {
+                    asm.movzx(preg_to_reg32(d_preg), word_ptr(mem))?;
+                }
+                OpSize::S32 => {
+                    asm.mov(preg_to_reg32(d_preg), dword_ptr(mem))?;
+                }
+                OpSize::S64 => {
+                    asm.mov(preg_to_reg64(d_preg), qword_ptr(mem))?;
+                }
+            }
+        }
+
+        MInst::StorePtrIndexed {
+            ptr,
+            offset,
+            index,
+            src,
+            size,
+        }
+        | MInst::AtomicStorePtrIndexed {
+            ptr,
+            offset,
+            index,
+            src,
+            size,
+        } => {
+            let ptr = preg_to_reg64(resolve(assignment, *ptr));
+            let idx = preg_to_reg64(resolve(assignment, *index));
+            let s_preg = resolve(assignment, *src);
+            let mem = mem_operand_ptr_indexed(ptr, *offset, idx);
+            match size {
+                OpSize::S8 => {
+                    asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
+                }
+                OpSize::S16 => {
+                    asm.mov(word_ptr(mem), preg_to_reg16(s_preg))?;
+                }
+                OpSize::S32 => {
+                    asm.mov(dword_ptr(mem), preg_to_reg32(s_preg))?;
+                }
+                OpSize::S64 => {
+                    asm.mov(qword_ptr(mem), preg_to_reg64(s_preg))?;
                 }
             }
         }

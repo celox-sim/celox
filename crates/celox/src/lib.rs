@@ -1,6 +1,8 @@
 mod backend;
 mod context_width;
 mod debug;
+#[cfg(not(target_arch = "wasm32"))]
+mod display_format;
 mod flatting;
 mod ir;
 mod logic_tree;
@@ -90,6 +92,10 @@ pub use parser::SchedulerError;
 pub use simulation::Simulation;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::DeadStorePolicy;
+#[cfg(not(target_arch = "wasm32"))]
+pub use simulator::RuntimeEvent;
+#[cfg(not(target_arch = "wasm32"))]
+pub use simulator::RuntimeEventDrain;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::Simulator;
 #[cfg(not(target_arch = "wasm32"))]

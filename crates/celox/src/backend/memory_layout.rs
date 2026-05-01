@@ -1,6 +1,34 @@
 use crate::HashMap;
 use crate::ir::{AbsoluteAddr, Program, SIRInstruction};
 
+pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
+pub const STATE_HEADER_SIZE: usize = 8;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
+pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub const RUNTIME_EVENT_SLOT_SITE_OFFSET: usize = 8;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub const RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET: usize = 16;
+pub const RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET: usize = 24;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeEventArgLayout {
+    pub value_word_offset: usize,
+    pub mask_word_offset: usize,
+    pub word_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeEventSiteLayout {
+    pub args: Vec<RuntimeEventArgLayout>,
+    pub payload_words: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {
     /// Stable region (region = 0) offsets. Includes all declared variables.
@@ -26,6 +54,13 @@ pub struct MemoryLayout {
     /// Located after triggered bits. Zero if no spilling needed.
     pub scratch_base_offset: usize,
     pub scratch_size: usize,
+
+    /// Runtime event ring geometry. The ring storage itself is backend-owned;
+    /// generated code finds it through the state header.
+    pub runtime_event_capacity: usize,
+    pub runtime_event_slot_size: usize,
+    pub runtime_event_buffer_size: usize,
+    pub runtime_event_site_layouts: Vec<RuntimeEventSiteLayout>,
 }
 
 impl MemoryLayout {
@@ -52,7 +87,16 @@ impl MemoryLayout {
         let mut offsets = HashMap::default();
         let mut widths = HashMap::default();
         let mut is_4states = HashMap::default();
-        let mut current_offset = 0;
+        let runtime_event_site_layouts = build_runtime_event_site_layouts(program);
+        let runtime_event_slot_size = RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+            + runtime_event_site_layouts
+                .iter()
+                .map(|site| site.payload_words)
+                .max()
+                .unwrap_or(0)
+                * 8;
+
+        let mut current_offset = STATE_HEADER_SIZE;
 
         // 3. Execute packing
         for (addr, width, is_4state) in stable_vars_to_layout {
@@ -108,6 +152,8 @@ impl MemoryLayout {
         let triggered_bits_total_size = num_potential_triggers.div_ceil(8);
 
         let scratch_base_offset = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
+        let runtime_event_buffer_size =
+            RUNTIME_EVENT_HEADER_SIZE + RUNTIME_EVENT_CAPACITY * runtime_event_slot_size;
         let merged_total_size = (scratch_base_offset + scratch_bytes + 7) & !7;
 
         // Apply address aliases: aliased variables share the canonical's offset.
@@ -150,8 +196,42 @@ impl MemoryLayout {
             triggered_bits_total_size,
             scratch_base_offset,
             scratch_size: scratch_bytes,
+            runtime_event_capacity: RUNTIME_EVENT_CAPACITY,
+            runtime_event_slot_size,
+            runtime_event_buffer_size,
+            runtime_event_site_layouts,
         }
     }
+}
+
+fn build_runtime_event_site_layouts(program: &Program) -> Vec<RuntimeEventSiteLayout> {
+    program
+        .runtime_event_sites
+        .iter()
+        .map(|site| {
+            let mut payload_words = 0;
+            let args = site
+                .arg_widths
+                .iter()
+                .map(|width| {
+                    let word_count = (*width).div_ceil(64).max(1);
+                    let value_word_offset = payload_words;
+                    payload_words += word_count;
+                    let mask_word_offset = payload_words;
+                    payload_words += word_count;
+                    RuntimeEventArgLayout {
+                        value_word_offset,
+                        mask_word_offset,
+                        word_count,
+                    }
+                })
+                .collect();
+            RuntimeEventSiteLayout {
+                args,
+                payload_words,
+            }
+        })
+        .collect()
 }
 
 /// Collect all absolute addresses referenced in FF execution units.

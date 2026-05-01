@@ -168,7 +168,24 @@ fn optimize_bit_extracts(
             SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
                 *use_count.entry(*off).or_default() += 1;
             }
+            SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
+                *use_count.entry(*off).or_default() += 1;
+            }
+            SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
             SIRInstruction::Concat(_, args) => {
+                for arg in args {
+                    *use_count.entry(*arg).or_default() += 1;
+                }
+            }
+            SIRInstruction::Slice(_, src, _, _) => {
+                *use_count.entry(*src).or_default() += 1;
+            }
+            SIRInstruction::Mux(_, cond, then_val, else_val) => {
+                *use_count.entry(*cond).or_default() += 1;
+                *use_count.entry(*then_val).or_default() += 1;
+                *use_count.entry(*else_val).or_default() += 1;
+            }
+            SIRInstruction::RuntimeEvent { args, .. } => {
                 for arg in args {
                     *use_count.entry(*arg).or_default() += 1;
                 }
@@ -249,4 +266,55 @@ fn optimize_bit_extracts(
     }
 
     *instructions = out;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{InstanceId, STABLE_REGION};
+    use veryl_analyzer::ir::VarId;
+
+    fn test_addr() -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region: STABLE_REGION,
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        }
+    }
+
+    #[test]
+    fn keeps_shift_result_used_by_runtime_event() {
+        let addr = test_addr();
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), addr, SIROffset::Static(0), 8),
+            SIRInstruction::Imm(RegisterId(1), SIRValue::new(2u64)),
+            SIRInstruction::Binary(RegisterId(2), RegisterId(0), BinaryOp::Shr, RegisterId(1)),
+            SIRInstruction::Imm(RegisterId(3), SIRValue::new(3u64)),
+            SIRInstruction::Binary(RegisterId(4), RegisterId(2), BinaryOp::And, RegisterId(3)),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![RegisterId(2)],
+            },
+        ];
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(4), RegisterType::Logic { width: 8 });
+
+        optimize_bit_extracts(&mut instructions, &mut register_map);
+
+        assert!(instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::Binary(RegisterId(2), RegisterId(0), BinaryOp::Shr, RegisterId(1))
+        )));
+        assert!(instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::Load(RegisterId(4), _, SIROffset::Static(2), 2)
+        )));
+        assert!(instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::RuntimeEvent {
+                args,
+                ..
+            } if args == &vec![RegisterId(2)]
+        )));
+    }
 }

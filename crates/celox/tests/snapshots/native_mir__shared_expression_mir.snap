@@ -1,34 +1,35 @@
 ---
 source: crates/celox/tests/native_mir.rs
+assertion_line: 103
 expression: output
 ---
 === MIR (eval_comb) ===
 Execution Unit 0 (before regalloc):
 bb0:
-  v0 = load.i32 [sim + 0]
-  v4 = load.i32 [sim + 8]
+  v0 = load.i32 [sim + 8]
+  v4 = load.i32 [sim + 16]
   v7 = add v0, v4
   v2 = and v7, 0xffffffff
   v6 = imm 0x1
   v3 = and v2, v6
-  store.i32 [sim + 4], v3
+  store.i32 [sim + 12], v3
   v1 = imm 0x2
   v5 = or v2, v1
-  store.i32 [sim + 12], v5
+  store.i32 [sim + 20], v5
   ret
 
 Execution Unit 0 (after regalloc):
 bb0:
-  v0 = load.i32 [sim + 0]
-  v4 = load.i32 [sim + 8]
+  v0 = load.i32 [sim + 8]
+  v4 = load.i32 [sim + 16]
   v7 = add v0, v4
   v2 = and v7, 0xffffffff
   v6 = imm 0x1
   v3 = and v2, v6
-  store.i32 [sim + 4], v3
+  store.i32 [sim + 12], v3
   v1 = imm 0x2
   v5 = or v2, v1
-  store.i32 [sim + 12], v5
+  store.i32 [sim + 20], v5
   ret
   Register assignment:
     v0 -> rax
@@ -43,18 +44,18 @@ bb0:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
-  0x00000009  mov eax,[r15]
-  0x0000000c  mov edx,[r15+8]
-  0x00000010  add rax,rdx
-  0x00000013  and eax,0FFFFFFFFh
-  0x00000018  mov edx,1
-  0x0000001d  and edx,eax
-  0x0000001f  mov [r15+4],edx
-  0x00000023  mov edx,2
-  0x00000028  or eax,edx
-  0x0000002a  mov [r15+0Ch],eax
-  0x0000002e  xor eax,eax
-  0x00000030  jmp short 0000000000000032h
-  0x00000032  add rsp,8
-  0x00000036  pop r15
-  0x00000038  ret
+  0x00000009  mov eax,[r15+8]
+  0x0000000d  mov edx,[r15+10h]
+  0x00000011  add rax,rdx
+  0x00000014  and eax,0FFFFFFFFh
+  0x00000019  mov edx,1
+  0x0000001e  and edx,eax
+  0x00000020  mov [r15+0Ch],edx
+  0x00000024  mov edx,2
+  0x00000029  or eax,edx
+  0x0000002b  mov [r15+14h],eax
+  0x0000002f  xor eax,eax
+  0x00000031  jmp short 0000000000000033h
+  0x00000033  add rsp,8
+  0x00000037  pop r15
+  0x00000039  ret
