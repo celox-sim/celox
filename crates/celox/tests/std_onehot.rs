@@ -4,9 +4,6 @@ use celox::Simulator;
 #[macro_use]
 mod test_utils;
 
-const ONEHOT_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/countones/onehot.veryl");
-
 all_backends! {
 
     // Exhaustive 8-bit onehot detection
@@ -24,7 +21,7 @@ o_zero,
 );
 }
 "#;
-let code = format!("{ONEHOT_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["countones", "onehot.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let i_data = sim.signal("i_data");
     let o_onehot = sim.signal("o_onehot");

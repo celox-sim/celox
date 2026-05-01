@@ -81,8 +81,8 @@ fn test_constant_break_in_synth_comb_loop(sim) {
 #[ignore]
 fn test_constant_signed_bounds_in_unrolled_synth_loops(sim) {
     // Constant signed reverse bounds are currently broken in the upstream
-    // Veryl analyzer unroller, so this regression is parked until deps/veryl
-    // is fixed.
+    // Veryl analyzer unroller, so this regression is parked until upstream
+    // Veryl is fixed.
     @setup { let code = r#"
         module Top (
             sum_fwd: output logic<32>,

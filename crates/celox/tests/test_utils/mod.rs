@@ -1,5 +1,9 @@
 pub mod veryl_sim;
 
+#[path = "../fixtures/veryl_std.rs"]
+#[allow(dead_code)]
+pub mod veryl_std;
+
 /// Generates four `#[test]` functions (native, cranelift, wasm, veryl) per test.
 ///
 /// ```rust

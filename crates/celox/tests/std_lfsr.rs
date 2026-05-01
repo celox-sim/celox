@@ -5,9 +5,6 @@ use std::collections::HashSet;
 #[macro_use]
 mod test_utils;
 
-const LFSR_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/lfsr/lfsr_galois.veryl");
-
 /// LFSR Galois has no reset port -- uses i_set for initialization.
 /// The Top module wraps it with a clock but no reset connection.
 const TOP: &str = r#"
@@ -39,7 +36,7 @@ all_backends! {
     // cycle length incorrect (9 instead of 255 for SIZE=8). These tests verify
     // the simulation mechanics (seed, shift, hold) but not LFSR correctness.
     fn test_lfsr_basic_shift(sim) {
-        @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
+        @setup { let code = format!("{}\n{TOP}", test_utils::veryl_std::source(&["lfsr", "lfsr_galois.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -91,7 +88,7 @@ all_backends! {
 
     // Cycle detection: LFSR should produce a deterministic repeating cycle
     fn test_lfsr_deterministic_cycle(sim) {
-        @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
+        @setup { let code = format!("{}\n{TOP}", test_utils::veryl_std::source(&["lfsr", "lfsr_galois.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -169,7 +166,7 @@ all_backends! {
 
     // LFSR disabled (i_en=0) should hold its value
     fn test_lfsr_enable_hold(sim) {
-        @setup { let code = format!("{LFSR_SRC}\n{TOP}"); }
+        @setup { let code = format!("{}\n{TOP}", test_utils::veryl_std::source(&["lfsr", "lfsr_galois.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");

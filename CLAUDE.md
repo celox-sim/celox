@@ -32,12 +32,12 @@ cargo insta accept       # Accept snapshot changes
 | `packages/celox` | TypeScript runtime package |
 | `packages/vite-plugin` | Vite plugin |
 
-## Veryl Submodule
+## Veryl Dependencies
 
-The `deps/veryl/` directory contains a fork of Veryl (`tignear/veryl`). The workspace depends on `veryl-analyzer`, `veryl-emitter`, `veryl-parser`, `veryl-metadata`, and `veryl-path` from this submodule.
+The workspace depends on released Veryl crates: `veryl-analyzer`, `veryl-emitter`, `veryl-parser`, `veryl-metadata`, `veryl-path`, and `veryl-simulator`.
 
 - `default-features = false` is set on `veryl-parser` to suppress parser regeneration during builds.
-- After updating the submodule, run `cargo test` to verify compatibility.
+- After updating Veryl crate versions, run `cargo test` to verify compatibility.
 
 ### Analyzer API
 

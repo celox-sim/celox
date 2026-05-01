@@ -3,10 +3,15 @@
 
 use celox::Simulator;
 
-const LINEAR_SEC_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_encoder.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_decoder.veryl"),
-    r#"
+#[path = "../tests/fixtures/veryl_std.rs"]
+mod veryl_std;
+
+fn linear_sec_source() -> String {
+    format!(
+        "{}\n{}\n{}",
+        veryl_std::source(&["coding", "linear_sec_encoder.veryl"]),
+        veryl_std::source(&["coding", "linear_sec_decoder.veryl"]),
+        r#"
 module Top #(
     param P: u32 = 6,
     const K: u32 = (1 << P) - 1,
@@ -32,10 +37,11 @@ module Top #(
     );
 }
 "#
-);
+    )
+}
 
 fn main() {
-    let trace_result = Simulator::builder(LINEAR_SEC_SRC, "Top")
+    let trace_result = Simulator::builder(&linear_sec_source(), "Top")
         .trace_post_optimized_sir()
         .trace_pre_optimized_clif()
         .trace_post_optimized_clif()

@@ -7,10 +7,10 @@ mod test_utils;
 all_backends! {
 
     fn test_fifo_issue5_subtract_overflow(sim) {
-        @setup { let ram = include_str!("../../../deps/veryl/crates/std/veryl/src/ram/ram.veryl");
+        @setup { let ram = test_utils::veryl_std::source(&["ram", "ram.veryl"]);
 let fifo_ctrl =
-include_str!("../../../deps/veryl/crates/std/veryl/src/fifo/fifo_controller.veryl");
-let fifo = include_str!("../../../deps/veryl/crates/std/veryl/src/fifo/fifo.veryl");
+test_utils::veryl_std::source(&["fifo", "fifo_controller.veryl"]);
+let fifo = test_utils::veryl_std::source(&["fifo", "fifo.veryl"]);
 let top = r#"
 module Top (
 i_clk: input clock,

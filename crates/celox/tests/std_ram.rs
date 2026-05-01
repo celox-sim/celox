@@ -4,8 +4,6 @@ use celox::Simulator;
 #[macro_use]
 mod test_utils;
 
-const RAM_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/ram/ram.veryl");
-
 all_backends! {
 
     // Dual-port RAM: write via port A, read via port B (BUFFER_OUT=false, combinational read)
@@ -40,7 +38,7 @@ o_qb,
 );
 }
 "#;
-let code = format!("{RAM_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["ram", "ram.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -137,7 +135,7 @@ o_qb,
 );
 }
 "#;
-let code = format!("{RAM_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["ram", "ram.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -217,7 +215,7 @@ o_qb,
 );
 }
 "#;
-let code = format!("{RAM_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["ram", "ram.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");

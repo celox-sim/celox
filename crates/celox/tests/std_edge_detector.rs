@@ -4,9 +4,6 @@ use celox::Simulator;
 #[macro_use]
 mod test_utils;
 
-const EDGE_DETECTOR_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/edge_detector/edge_detector.veryl");
-
 const TOP_W1: &str = r#"
 module Top (
     clk      : input  clock,
@@ -38,7 +35,7 @@ all_backends! {
     // Flow: set i_data -> tick (FF captures i_data into `data`) -> change i_data
     //       -> eval_comb -> read outputs (edge between old data and new i_data)
     fn test_edge_detector_basic(sim) {
-        @setup { let code = format!("{EDGE_DETECTOR_SRC}\n{TOP_W1}"); }
+        @setup { let code = format!("{}\n{TOP_W1}", test_utils::veryl_std::source(&["edge_detector", "edge_detector.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -98,7 +95,7 @@ all_backends! {
     //   o_posedge = i_data & ~data & ~i_clear     -- AND, fully masked by clear
     //   o_negedge = ~i_data & data & ~i_clear     -- AND, fully masked by clear
     fn test_edge_detector_clear(sim) {
-        @setup { let code = format!("{EDGE_DETECTOR_SRC}\n{TOP_W1}"); }
+        @setup { let code = format!("{}\n{TOP_W1}", test_utils::veryl_std::source(&["edge_detector", "edge_detector.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -166,7 +163,7 @@ o_negedge,
 );
 }
 "#;
-let code = format!("{EDGE_DETECTOR_SRC}\n{top}"); }
+let code = format!("{}\n{top}", test_utils::veryl_std::source(&["edge_detector", "edge_detector.veryl"])); }
         @build Simulator::builder(&code, "Top");
     let clk = sim.event("clk");
     let rst = sim.signal("rst");

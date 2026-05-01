@@ -5,11 +5,6 @@ use celox::{SimBackend, Simulator};
 #[allow(unused_macros)]
 mod test_utils;
 
-const RAM_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/ram/ram.veryl");
-const FIFO_CTRL_SRC: &str =
-    include_str!("../../../deps/veryl/crates/std/veryl/src/fifo/fifo_controller.veryl");
-const FIFO_SRC: &str = include_str!("../../../deps/veryl/crates/std/veryl/src/fifo/fifo.veryl");
-
 const TOP: &str = r#"
 module Top (
     clk        : input  clock,
@@ -43,6 +38,15 @@ module Top (
 }
 "#;
 
+fn fifo_source() -> String {
+    format!(
+        "{}\n{}\n{}\n{TOP}",
+        test_utils::veryl_std::source(&["ram", "ram.veryl"]),
+        test_utils::veryl_std::source(&["fifo", "fifo_controller.veryl"]),
+        test_utils::veryl_std::source(&["fifo", "fifo.veryl"]),
+    )
+}
+
 fn reset<B: SimBackend>(sim: &mut Simulator<B>) {
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
@@ -67,7 +71,7 @@ all_backends! {
 // After reset, FIFO should be empty
 fn test_fifo_initial_empty(sim) {
     @omit_veryl;
-    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
@@ -87,7 +91,7 @@ fn test_fifo_initial_empty(sim) {
 // Push one item, verify not empty, pop it back
 fn test_fifo_push_pop_single(sim) {
     @omit_veryl;
-    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
@@ -132,7 +136,7 @@ fn test_fifo_push_pop_single(sim) {
 // Push until full (DEPTH=4), verify full flag
 fn test_fifo_full(sim) {
     @omit_veryl;
-    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
@@ -161,7 +165,7 @@ fn test_fifo_full(sim) {
 // Push 4 items then pop all, verify FIFO ordering
 fn test_fifo_ordering(sim) {
     @omit_veryl;
-    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 
@@ -200,7 +204,7 @@ fn test_fifo_ordering(sim) {
 // Clear resets the FIFO to empty
 fn test_fifo_clear(sim) {
     @omit_veryl;
-    @setup { let code = format!("{RAM_SRC}\n{FIFO_CTRL_SRC}\n{FIFO_SRC}\n{TOP}"); }
+    @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
 

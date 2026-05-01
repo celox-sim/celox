@@ -2,18 +2,28 @@
 
 use celox::{DeadStorePolicy, Simulator};
 
-const LINEAR_SEC_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_encoder.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_decoder.veryl"),
-    include_str!("../../../benches/veryl/linear_sec_top.veryl"),
-);
+#[path = "test_utils/mod.rs"]
+#[macro_use]
+#[allow(unused_macros)]
+mod test_utils;
+
+fn linear_sec_source() -> String {
+    format!(
+        "{}\n{}\n{}",
+        test_utils::veryl_std::source(&["coding", "linear_sec_encoder.veryl"]),
+        test_utils::veryl_std::source(&["coding", "linear_sec_decoder.veryl"]),
+        include_str!("../../../benches/veryl/linear_sec_top.veryl"),
+    )
+}
 
 fn build_sim() -> Simulator {
-    Simulator::builder(LINEAR_SEC_SRC, "Top").build().unwrap()
+    Simulator::builder(&linear_sec_source(), "Top")
+        .build()
+        .unwrap()
 }
 
 fn build_sim_dse() -> Simulator {
-    Simulator::builder(LINEAR_SEC_SRC, "Top")
+    Simulator::builder(&linear_sec_source(), "Top")
         .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
         .build()
         .unwrap()

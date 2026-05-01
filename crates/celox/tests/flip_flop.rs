@@ -130,8 +130,8 @@ fn test_ff_runtime_for_break(sim) {
 #[ignore]
 fn test_ff_constant_signed_bounds_in_unrolled_loops(sim) {
     // Constant signed reverse bounds are currently broken in the upstream
-    // Veryl analyzer unroller, so this regression is parked until deps/veryl
-    // is fixed.
+    // Veryl analyzer unroller, so this regression is parked until upstream
+    // Veryl is fixed.
     @setup { let code = r#"
         module Top (
             clk: input clock,

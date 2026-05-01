@@ -1,5 +1,9 @@
 use celox::{DeadStorePolicy, Simulator, TestResult};
 use criterion::{Criterion, criterion_group, criterion_main};
+use std::sync::LazyLock;
+
+#[path = "../tests/fixtures/veryl_std.rs"]
+mod veryl_std;
 
 // Wrapper modules are shared with celox-bench-sv (Verilator SV generation)
 // via benches/veryl/*.veryl to guarantee identical circuits.
@@ -11,71 +15,101 @@ const NATIVE_TB_COUNTER_N1000: &str = concat!(
     include_str!("../../../benches/veryl/top_n1000.veryl"),
     include_str!("../../../benches/veryl/native_tb_counter_n1000.veryl"),
 );
-const NATIVE_TB_STD_COUNTER: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
-    include_str!("../../../benches/veryl/std_counter_top.veryl"),
-    include_str!("../../../benches/veryl/native_tb_std_counter.veryl"),
-);
+static NATIVE_TB_STD_COUNTER: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}\n{}",
+        veryl_std::source(&["counter", "counter.veryl"]),
+        include_str!("../../../benches/veryl/std_counter_top.veryl"),
+        include_str!("../../../benches/veryl/native_tb_std_counter.veryl"),
+    )
+});
 
 // P=6: K=63-bit codeword, N=57-bit data
-const LINEAR_SEC_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_encoder.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/coding/linear_sec_decoder.veryl"),
-    include_str!("../../../benches/veryl/linear_sec_top.veryl"),
-);
+static LINEAR_SEC_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}\n{}",
+        veryl_std::source(&["coding", "linear_sec_encoder.veryl"]),
+        veryl_std::source(&["coding", "linear_sec_decoder.veryl"]),
+        include_str!("../../../benches/veryl/linear_sec_top.veryl"),
+    )
+});
 
 // std::countones W=64: recursive combinational popcount tree
-const COUNTONES_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/countones/countones.veryl"),
-    include_str!("../../../benches/veryl/countones_top.veryl"),
-);
+static COUNTONES_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        veryl_std::source(&["countones", "countones.veryl"]),
+        include_str!("../../../benches/veryl/countones_top.veryl"),
+    )
+});
 
 // std::counter WIDTH=32
-const STD_COUNTER_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
-    include_str!("../../../benches/veryl/std_counter_top.veryl"),
-);
+static STD_COUNTER_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        veryl_std::source(&["counter", "counter.veryl"]),
+        include_str!("../../../benches/veryl/std_counter_top.veryl"),
+    )
+});
 
 // std::fifo WIDTH=8 DEPTH=16
-const FIFO_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/ram/ram.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/fifo/fifo_controller.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/fifo/fifo.veryl"),
-    include_str!("../../../benches/veryl/fifo_top.veryl"),
-);
+static FIFO_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}\n{}\n{}",
+        veryl_std::source(&["ram", "ram.veryl"]),
+        veryl_std::source(&["fifo", "fifo_controller.veryl"]),
+        veryl_std::source(&["fifo", "fifo.veryl"]),
+        include_str!("../../../benches/veryl/fifo_top.veryl"),
+    )
+});
 
 // std::gray_encoder + gray_decoder WIDTH=32 (combinational roundtrip)
-const GRAY_CODEC_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_encoder.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_decoder.veryl"),
-    include_str!("../../../benches/veryl/gray_codec_top.veryl"),
-);
+static GRAY_CODEC_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}\n{}",
+        veryl_std::source(&["gray", "gray_encoder.veryl"]),
+        veryl_std::source(&["gray", "gray_decoder.veryl"]),
+        include_str!("../../../benches/veryl/gray_codec_top.veryl"),
+    )
+});
 
 // std::edge_detector WIDTH=32
-const EDGE_DETECTOR_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/edge_detector/edge_detector.veryl"),
-    include_str!("../../../benches/veryl/edge_detector_top.veryl"),
-);
+static EDGE_DETECTOR_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        veryl_std::source(&["edge_detector", "edge_detector.veryl"]),
+        include_str!("../../../benches/veryl/edge_detector_top.veryl"),
+    )
+});
 
 // std::onehot W=64
-const ONEHOT_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/countones/onehot.veryl"),
-    include_str!("../../../benches/veryl/onehot_top.veryl"),
-);
+static ONEHOT_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        veryl_std::source(&["countones", "onehot.veryl"]),
+        include_str!("../../../benches/veryl/onehot_top.veryl"),
+    )
+});
 
 // std::lfsr_galois SIZE=32
-const LFSR_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/lfsr/lfsr_galois.veryl"),
-    include_str!("../../../benches/veryl/lfsr_top.veryl"),
-);
+static LFSR_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        veryl_std::source(&["lfsr", "lfsr_galois.veryl"]),
+        include_str!("../../../benches/veryl/lfsr_top.veryl"),
+    )
+});
 
 // std::gray_counter WIDTH=32
-const GRAY_COUNTER_SRC: &str = concat!(
-    include_str!("../../../deps/veryl/crates/std/veryl/src/counter/counter.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_encoder.veryl"),
-    include_str!("../../../deps/veryl/crates/std/veryl/src/gray/gray_counter.veryl"),
-    include_str!("../../../benches/veryl/gray_counter_top.veryl"),
-);
+static GRAY_COUNTER_SRC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}\n{}\n{}",
+        veryl_std::source(&["counter", "counter.veryl"]),
+        veryl_std::source(&["gray", "gray_encoder.veryl"]),
+        veryl_std::source(&["gray", "gray_counter.veryl"]),
+        include_str!("../../../benches/veryl/gray_counter_top.veryl"),
+    )
+});
 
 fn benchmark_counter(c: &mut Criterion) {
     c.bench_function("simulation_build_top_n1000", |b| {
@@ -129,11 +163,11 @@ fn benchmark_counter(c: &mut Criterion) {
 fn benchmark_linear_sec(c: &mut Criterion) {
     c.bench_function("simulation_build_linear_sec_p6", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(LINEAR_SEC_SRC, "Top").build().unwrap();
+            let _sim = Simulator::builder(&LINEAR_SEC_SRC, "Top").build().unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(LINEAR_SEC_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&LINEAR_SEC_SRC, "Top").build().unwrap();
     let i_word = sim.signal("i_word");
     let o_word = sim.signal("o_word");
     let o_corrected = sim.signal("o_corrected");
@@ -172,7 +206,7 @@ fn benchmark_linear_sec(c: &mut Criterion) {
 }
 
 fn benchmark_linear_sec_isolation(c: &mut Criterion) {
-    let mut sim = Simulator::builder(LINEAR_SEC_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&LINEAR_SEC_SRC, "Top").build().unwrap();
     let i_word = sim.signal("i_word");
     let o_word = sim.signal("o_word");
 
@@ -282,11 +316,11 @@ fn benchmark_linear_sec_isolation(c: &mut Criterion) {
 fn benchmark_countones(c: &mut Criterion) {
     c.bench_function("simulation_build_countones_w64", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(COUNTONES_SRC, "Top").build().unwrap();
+            let _sim = Simulator::builder(&COUNTONES_SRC, "Top").build().unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(COUNTONES_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&COUNTONES_SRC, "Top").build().unwrap();
     let i_data = sim.signal("i_data");
     let o_ones = sim.signal("o_ones");
 
@@ -314,14 +348,14 @@ fn benchmark_countones(c: &mut Criterion) {
 fn benchmark_countones_dse(c: &mut Criterion) {
     c.bench_function("dse_build_countones_w64", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(COUNTONES_SRC, "Top")
+            let _sim = Simulator::builder(&COUNTONES_SRC, "Top")
                 .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
                 .build()
                 .unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(COUNTONES_SRC, "Top")
+    let mut sim = Simulator::builder(&COUNTONES_SRC, "Top")
         .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
         .build()
         .unwrap();
@@ -352,14 +386,14 @@ fn benchmark_countones_dse(c: &mut Criterion) {
 fn benchmark_linear_sec_dse(c: &mut Criterion) {
     c.bench_function("dse_build_linear_sec_p6", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(LINEAR_SEC_SRC, "Top")
+            let _sim = Simulator::builder(&LINEAR_SEC_SRC, "Top")
                 .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
                 .build()
                 .unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(LINEAR_SEC_SRC, "Top")
+    let mut sim = Simulator::builder(&LINEAR_SEC_SRC, "Top")
         .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
         .build()
         .unwrap();
@@ -399,11 +433,11 @@ fn benchmark_linear_sec_dse(c: &mut Criterion) {
 fn benchmark_std_counter(c: &mut Criterion) {
     c.bench_function("simulation_build_std_counter_w32", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(STD_COUNTER_SRC, "Top").build().unwrap();
+            let _sim = Simulator::builder(&STD_COUNTER_SRC, "Top").build().unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(STD_COUNTER_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&STD_COUNTER_SRC, "Top").build().unwrap();
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_up = sim.signal("i_up");
@@ -450,11 +484,15 @@ fn benchmark_std_counter(c: &mut Criterion) {
 fn benchmark_gray_counter(c: &mut Criterion) {
     c.bench_function("simulation_build_gray_counter_w32", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(GRAY_COUNTER_SRC, "Top").build().unwrap();
+            let _sim = Simulator::builder(&GRAY_COUNTER_SRC, "Top")
+                .build()
+                .unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(GRAY_COUNTER_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&GRAY_COUNTER_SRC, "Top")
+        .build()
+        .unwrap();
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_up = sim.signal("i_up");
@@ -501,11 +539,11 @@ fn benchmark_gray_counter(c: &mut Criterion) {
 fn benchmark_fifo(c: &mut Criterion) {
     c.bench_function("simulation_build_fifo_w8_d16", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(FIFO_SRC, "Top").build().unwrap();
+            let _sim = Simulator::builder(&FIFO_SRC, "Top").build().unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(FIFO_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&FIFO_SRC, "Top").build().unwrap();
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_push = sim.signal("i_push");
@@ -566,11 +604,11 @@ fn benchmark_fifo(c: &mut Criterion) {
 fn benchmark_gray_codec(c: &mut Criterion) {
     c.bench_function("simulation_build_gray_codec_w32", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(GRAY_CODEC_SRC, "Top").build().unwrap();
+            let _sim = Simulator::builder(&GRAY_CODEC_SRC, "Top").build().unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(GRAY_CODEC_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&GRAY_CODEC_SRC, "Top").build().unwrap();
     let i_bin = sim.signal("i_bin");
     let o_bin = sim.signal("o_bin");
 
@@ -598,13 +636,13 @@ fn benchmark_gray_codec(c: &mut Criterion) {
 fn benchmark_edge_detector(c: &mut Criterion) {
     c.bench_function("simulation_build_edge_detector_w32", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(EDGE_DETECTOR_SRC, "Top")
+            let _sim = Simulator::builder(&EDGE_DETECTOR_SRC, "Top")
                 .build()
                 .unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(EDGE_DETECTOR_SRC, "Top")
+    let mut sim = Simulator::builder(&EDGE_DETECTOR_SRC, "Top")
         .build()
         .unwrap();
     let clk = sim.event("clk");
@@ -645,11 +683,11 @@ fn benchmark_edge_detector(c: &mut Criterion) {
 fn benchmark_onehot(c: &mut Criterion) {
     c.bench_function("simulation_build_onehot_w64", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(ONEHOT_SRC, "Top").build().unwrap();
+            let _sim = Simulator::builder(&ONEHOT_SRC, "Top").build().unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(ONEHOT_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&ONEHOT_SRC, "Top").build().unwrap();
     let i_data = sim.signal("i_data");
     let o_onehot = sim.signal("o_onehot");
 
@@ -677,7 +715,7 @@ fn benchmark_onehot(c: &mut Criterion) {
 fn benchmark_onehot_dse(c: &mut Criterion) {
     c.bench_function("dse_build_onehot_w64", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(ONEHOT_SRC, "Top")
+            let _sim = Simulator::builder(&ONEHOT_SRC, "Top")
                 .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
                 .live_signal(vec![], vec!["o_onehot".to_string()])
                 .build()
@@ -685,7 +723,7 @@ fn benchmark_onehot_dse(c: &mut Criterion) {
         })
     });
 
-    let mut sim = Simulator::builder(ONEHOT_SRC, "Top")
+    let mut sim = Simulator::builder(&ONEHOT_SRC, "Top")
         .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
         .live_signal(vec![], vec!["o_onehot".to_string()])
         .build()
@@ -717,11 +755,11 @@ fn benchmark_onehot_dse(c: &mut Criterion) {
 fn benchmark_lfsr(c: &mut Criterion) {
     c.bench_function("simulation_build_lfsr_w32", |b| {
         b.iter(|| {
-            let _sim = Simulator::builder(LFSR_SRC, "Top").build().unwrap();
+            let _sim = Simulator::builder(&LFSR_SRC, "Top").build().unwrap();
         })
     });
 
-    let mut sim = Simulator::builder(LFSR_SRC, "Top").build().unwrap();
+    let mut sim = Simulator::builder(&LFSR_SRC, "Top").build().unwrap();
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let i_en = sim.signal("i_en");
@@ -817,14 +855,14 @@ fn benchmark_native_tb_counter(c: &mut Criterion) {
 fn benchmark_native_tb_std_counter(c: &mut Criterion) {
     c.bench_function("native_tb_run_std_counter_w32_x1000000", |b| {
         b.iter(|| {
-            let result = Simulator::builder(NATIVE_TB_STD_COUNTER, "bench_std_counter")
+            let result = Simulator::builder(&NATIVE_TB_STD_COUNTER, "bench_std_counter")
                 .run_test()
                 .unwrap();
             assert_eq!(result, TestResult::Pass);
         })
     });
 
-    let mut sim = Simulator::builder(NATIVE_TB_STD_COUNTER, "bench_std_counter")
+    let mut sim = Simulator::builder(&NATIVE_TB_STD_COUNTER, "bench_std_counter")
         .build()
         .unwrap();
     let tb = celox::testbench::compile_initial_testbench(&sim).unwrap();
