@@ -9,6 +9,7 @@ use crate::backend::native::{NativeBackend, SharedNativeCode};
 use crate::{
     IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
+    display_format::{DisplayFormatArg, format_display_arg},
     ir::{InstancePath, Program, RuntimeEventKind, RuntimeEventSite, SignalRef, VariableInfo},
 };
 use num_bigint::BigUint;
@@ -110,22 +111,6 @@ struct RuntimeEventArgValue {
     signed: bool,
 }
 
-fn runtime_event_bit(words: &[u64], bit: usize) -> bool {
-    words
-        .get(bit / 64)
-        .map(|word| ((word >> (bit % 64)) & 1) != 0)
-        .unwrap_or(false)
-}
-
-fn runtime_event_has_mask(arg: &RuntimeEventArgValue) -> bool {
-    for bit in 0..arg.width {
-        if runtime_event_bit(&arg.masks, bit) {
-            return true;
-        }
-    }
-    false
-}
-
 fn runtime_event_words_to_biguint(words: &[u64], width: usize) -> BigUint {
     let mut value = BigUint::from(0u8);
     for (idx, word) in words.iter().enumerate() {
@@ -138,101 +123,26 @@ fn runtime_event_words_to_biguint(words: &[u64], width: usize) -> BigUint {
     }
 }
 
-fn format_runtime_arg_decimal(arg: &RuntimeEventArgValue) -> String {
-    if runtime_event_has_mask(arg) {
-        return "x".to_string();
-    }
+fn runtime_event_format_arg(arg: &RuntimeEventArgValue, spec: Option<char>) -> String {
     let value = runtime_event_words_to_biguint(&arg.values, arg.width);
-    if arg.signed && arg.width > 0 && runtime_event_bit(&arg.values, arg.width - 1) {
-        let modulus = BigUint::from(1u8) << arg.width;
-        format!("-{}", modulus - value)
-    } else {
-        value.to_string()
-    }
-}
-
-fn format_runtime_arg_binary(arg: &RuntimeEventArgValue) -> String {
-    if !runtime_event_has_mask(arg) {
-        return runtime_event_words_to_biguint(&arg.values, arg.width).to_str_radix(2);
-    }
-    let digits = arg.width.max(1);
-    let mut out = String::with_capacity(digits);
-    for bit in (0..digits).rev() {
-        if runtime_event_bit(&arg.masks, bit) {
-            out.push('x');
-        } else if runtime_event_bit(&arg.values, bit) {
-            out.push('1');
-        } else {
-            out.push('0');
-        }
-    }
-    out
-}
-
-fn format_runtime_arg_radix_with_mask(arg: &RuntimeEventArgValue, bits_per_digit: usize) -> String {
-    let digits = arg.width.div_ceil(bits_per_digit).max(1);
-    let mut out = String::with_capacity(digits);
-    for digit_idx in (0..digits).rev() {
-        let start = digit_idx * bits_per_digit;
-        let end = (start + bits_per_digit).min(arg.width);
-        if (start..end).any(|bit| runtime_event_bit(&arg.masks, bit)) {
-            out.push('x');
-            continue;
-        }
-        let mut digit = 0u32;
-        for bit in start..end {
-            if runtime_event_bit(&arg.values, bit) {
-                digit |= 1 << (bit - start);
-            }
-        }
-        out.push(char::from_digit(digit, 1 << bits_per_digit).unwrap());
-    }
-    out
-}
-
-fn format_runtime_arg_hex(arg: &RuntimeEventArgValue, upper: bool) -> String {
-    let mut out = if runtime_event_has_mask(arg) {
-        format_runtime_arg_radix_with_mask(arg, 4)
-    } else {
-        runtime_event_words_to_biguint(&arg.values, arg.width).to_str_radix(16)
-    };
-    if upper {
-        out.make_ascii_uppercase();
-    }
-    out
-}
-
-fn format_runtime_arg_octal(arg: &RuntimeEventArgValue) -> String {
-    if runtime_event_has_mask(arg) {
-        format_runtime_arg_radix_with_mask(arg, 3)
-    } else {
-        runtime_event_words_to_biguint(&arg.values, arg.width).to_str_radix(8)
-    }
-}
-
-fn format_runtime_arg_char(arg: &RuntimeEventArgValue) -> String {
-    if runtime_event_has_mask(arg) {
-        "x".to_string()
-    } else {
-        let value = arg.values.first().copied().unwrap_or(0);
-        let value = if arg.width >= 64 {
-            value
-        } else if arg.width == 0 {
-            0
-        } else {
-            value & ((1u64 << arg.width) - 1)
-        };
-        char::from_u32(value as u32)
-            .unwrap_or('\u{fffd}')
-            .to_string()
-    }
+    let mask = runtime_event_words_to_biguint(&arg.masks, arg.width);
+    format_display_arg(
+        &DisplayFormatArg {
+            value: &value,
+            mask: Some(&mask),
+            width: arg.width,
+            signed: arg.signed,
+            is_string: false,
+        },
+        spec,
+    )
 }
 
 fn render_runtime_event_message(site: &RuntimeEventSite, args: &[RuntimeEventArgValue]) -> String {
     let Some(template) = site.template.as_deref() else {
         return args
             .iter()
-            .map(format_runtime_arg_decimal)
+            .map(|arg| runtime_event_format_arg(arg, Some('d')))
             .collect::<Vec<_>>()
             .join(" ");
     };
@@ -267,12 +177,10 @@ fn render_runtime_event_message(site: &RuntimeEventSite, args: &[RuntimeEventArg
         };
         arg_idx += 1;
         match spec {
-            'x' => out.push_str(&format_runtime_arg_hex(arg, false)),
-            'X' => out.push_str(&format_runtime_arg_hex(arg, true)),
-            'b' | 'B' => out.push_str(&format_runtime_arg_binary(arg)),
-            'o' | 'O' => out.push_str(&format_runtime_arg_octal(arg)),
-            'c' => out.push_str(&format_runtime_arg_char(arg)),
-            _ => out.push_str(&format_runtime_arg_decimal(arg)),
+            'x' | 'h' | 'X' | 'H' | 'b' | 'B' | 'o' | 'O' | 'c' | 'C' | 's' | 'S' => {
+                out.push_str(&runtime_event_format_arg(arg, Some(spec)));
+            }
+            _ => out.push_str(&runtime_event_format_arg(arg, Some('d'))),
         }
     }
     out

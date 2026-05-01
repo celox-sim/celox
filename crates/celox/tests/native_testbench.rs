@@ -1244,6 +1244,26 @@ fn test_assert_format_args_render_uppercase_aliases_like_lowercase() {
 }
 
 #[test]
+fn test_assert_format_args_preserve_binary_width_and_hex_alias() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0, "bin=%b hex=%h", 8'd1, 8'h2a);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("bin=00000001 hex=2a")
+    );
+}
+
+#[test]
 fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
     let code = r#"
         #[test(t)]

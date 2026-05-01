@@ -75,6 +75,30 @@ fn test_ff_runtime_display_and_assert_continue(sim) {
     );
 }
 
+fn test_ff_runtime_events_format_verilog_radices(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<8>) {
+            always_ff (clk) {
+                $display("bin=%b hex=%h HEX=%H", a, a, a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| io.set(a, 0x2au8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "bin=00101010 hex=2a HEX=2A".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_events_preserve_four_state_args(sim) {
     @omit_veryl;
     @ignore_on(wasm);

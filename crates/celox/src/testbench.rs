@@ -7,6 +7,7 @@
 
 use crate::backend::get_byte_size;
 use crate::backend::traits::SimBackend;
+use crate::display_format::{DisplayFormatArg, format_display_arg};
 use crate::ir::{AbsoluteAddr, SignalRef};
 use crate::simulator::Simulator;
 use num_bigint::{BigInt, BigUint, Sign};
@@ -435,72 +436,19 @@ fn compile_assert_message<B: SimBackend>(
     }
 }
 
-fn tb_value_to_utf8(value: &TbValue, width: usize) -> Option<String> {
-    if !width.is_multiple_of(8) {
-        return None;
-    }
-    let num_bytes = width / 8;
-    let mut bytes = vec![0u8; num_bytes];
-    match value {
-        TbValue::U64(v) => {
-            let mut payload = *v;
-            for i in (0..num_bytes).rev() {
-                bytes[i] = (payload & 0xff) as u8;
-                payload >>= 8;
-            }
-        }
-        TbValue::Wide(v) => {
-            let mut payload = v.clone();
-            let mask = BigUint::from(0xffu64);
-            for i in (0..num_bytes).rev() {
-                bytes[i] = (&payload & &mask).to_u64().unwrap_or(0) as u8;
-                payload >>= 8;
-            }
-        }
-    }
-    String::from_utf8(bytes).ok()
-}
-
-fn tb_value_to_signed_bigint(value: &TbValue, width: usize) -> BigInt {
-    if width == 0 {
-        return BigInt::from(0);
-    }
-    let unsigned = value.to_biguint();
-    let sign_bit = BigUint::from(1u8) << (width - 1);
-    if (&unsigned & &sign_bit) != BigUint::ZERO {
-        BigInt::from_biguint(Sign::Plus, unsigned) - (BigInt::from(1u8) << width)
-    } else {
-        BigInt::from_biguint(Sign::Plus, unsigned)
-    }
-}
-
 fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char>) -> String {
     let value = arg.expr.eval_value(memory);
-    if arg.is_string {
-        return tb_value_to_utf8(&value, arg.width).unwrap_or_else(|| format!("{:?}", value));
-    }
-    match spec.unwrap_or('d') {
-        'b' | 'B' => format!("{:b}", value.to_biguint()),
-        'o' | 'O' => format!("{:o}", value.to_biguint()),
-        'x' | 'h' => format!("{:x}", value.to_biguint()),
-        'X' | 'H' => format!("{:X}", value.to_biguint()),
-        'd' | 'D' | 'i' | 'I' => {
-            if arg.signed {
-                tb_value_to_signed_bigint(&value, arg.width).to_string()
-            } else {
-                value.to_biguint().to_string()
-            }
-        }
-        'c' | 'C' => char::from((value.to_u64() & 0xff) as u8).to_string(),
-        's' | 'S' => tb_value_to_utf8(&value, arg.width).unwrap_or_else(|| format!("{:?}", value)),
-        _ => {
-            if arg.signed {
-                tb_value_to_signed_bigint(&value, arg.width).to_string()
-            } else {
-                value.to_biguint().to_string()
-            }
-        }
-    }
+    let value = value.to_biguint();
+    format_display_arg(
+        &DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: arg.width,
+            signed: arg.signed,
+            is_string: arg.is_string,
+        },
+        spec,
+    )
 }
 
 fn render_assert_message(

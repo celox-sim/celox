@@ -1,6 +1,7 @@
 mod backend;
 mod context_width;
 mod debug;
+mod display_format;
 mod flatting;
 mod ir;
 mod logic_tree;
