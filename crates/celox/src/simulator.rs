@@ -12,6 +12,7 @@ use crate::{
     display_format::{DisplayFormatArg, format_display_arg},
     ir::{InstancePath, Program, RuntimeEventKind, RuntimeEventSite, SignalRef, VariableInfo},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use num_bigint::BigUint;
 
 mod builder;
@@ -69,6 +70,7 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     runtime_event_read_seq: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
     Display { message: String },
@@ -104,6 +106,7 @@ impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct RuntimeEventArgValue {
     values: Vec<u64>,
     masks: Vec<u64>,
@@ -111,6 +114,7 @@ struct RuntimeEventArgValue {
     signed: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn runtime_event_words_to_biguint(words: &[u64], width: usize) -> BigUint {
     let mut value = BigUint::from(0u8);
     for (idx, word) in words.iter().enumerate() {
@@ -123,6 +127,7 @@ fn runtime_event_words_to_biguint(words: &[u64], width: usize) -> BigUint {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn runtime_event_format_arg(arg: &RuntimeEventArgValue, spec: Option<char>) -> String {
     let value = runtime_event_words_to_biguint(&arg.values, arg.width);
     let mask = runtime_event_words_to_biguint(&arg.masks, arg.width);
@@ -138,6 +143,7 @@ fn runtime_event_format_arg(arg: &RuntimeEventArgValue, spec: Option<char>) -> S
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn render_runtime_event_message(site: &RuntimeEventSite, args: &[RuntimeEventArgValue]) -> String {
     let Some(template) = site.template.as_deref() else {
         return args

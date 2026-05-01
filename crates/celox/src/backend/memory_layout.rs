@@ -2,12 +2,17 @@ use crate::ir::{AbsoluteAddr, Program, SIRInstruction};
 use crate::HashMap;
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
 pub const STATE_HEADER_SIZE: usize = 8;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
 pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_SLOT_SITE_OFFSET: usize = 8;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET: usize = 16;
 pub const RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET: usize = 24;
 

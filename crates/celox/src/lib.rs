@@ -1,6 +1,7 @@
 mod backend;
 mod context_width;
 mod debug;
+#[cfg(not(target_arch = "wasm32"))]
 mod display_format;
 mod flatting;
 mod ir;
