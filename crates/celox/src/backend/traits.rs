@@ -132,6 +132,7 @@ pub trait SimBackend {
     // ── memory / layout ─────────────────────────────────────────
     fn memory_as_ptr(&self) -> (*const u8, usize);
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize);
+    fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize);
     fn stable_region_size(&self) -> usize;
     fn layout(&self) -> &MemoryLayout;
 

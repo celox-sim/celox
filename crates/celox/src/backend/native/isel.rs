@@ -698,14 +698,21 @@ fn lower_instruction(
                 RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
                 RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
                 RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+                STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
             };
 
-            let base = ctx.layout.runtime_event_base_offset as i32;
-            let seq_v = ctx.alloc_vreg(SpillDesc::transient());
+            let event_ptr = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::Load {
-                dst: seq_v,
+                dst: event_ptr,
                 base: BaseReg::SimState,
-                offset: base,
+                offset: STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                size: OpSize::S64,
+            });
+            let seq_v = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::LoadPtr {
+                dst: seq_v,
+                ptr: event_ptr,
+                offset: 0,
                 size: OpSize::S64,
             });
             let mask_v = ctx.alloc_vreg(SpillDesc::remat(
@@ -739,9 +746,9 @@ fn lower_instruction(
                 dst: writing,
                 value: RUNTIME_EVENT_WRITING,
             });
-            let slot_base = base + RUNTIME_EVENT_HEADER_SIZE as i32;
-            block.push(MInst::StoreIndexed {
-                base: BaseReg::SimState,
+            let slot_base = RUNTIME_EVENT_HEADER_SIZE as i32;
+            block.push(MInst::StorePtrIndexed {
+                ptr: event_ptr,
                 offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
                 index: slot_off,
                 src: writing,
@@ -752,8 +759,8 @@ fn lower_instruction(
                 dst: site_v,
                 value: *site_id as u64,
             });
-            block.push(MInst::StoreIndexed {
-                base: BaseReg::SimState,
+            block.push(MInst::StorePtrIndexed {
+                ptr: event_ptr,
                 offset: slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET as i32,
                 index: slot_off,
                 src: site_v,
@@ -766,8 +773,8 @@ fn lower_instruction(
                 dst: arg_count_v,
                 value: arg_count,
             });
-            block.push(MInst::StoreIndexed {
-                base: BaseReg::SimState,
+            block.push(MInst::StorePtrIndexed {
+                ptr: event_ptr,
                 offset: slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET as i32,
                 index: slot_off,
                 src: arg_count_v,
@@ -799,8 +806,8 @@ fn lower_instruction(
                             });
                             zero
                         });
-                    block.push(MInst::StoreIndexed {
-                        base: BaseReg::SimState,
+                    block.push(MInst::StorePtrIndexed {
+                        ptr: event_ptr,
                         offset: slot_base
                             + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
                                 + (arg_layout.value_word_offset + word_idx) * 8)
@@ -818,8 +825,8 @@ fn lower_instruction(
                         });
                         zero
                     });
-                    block.push(MInst::StoreIndexed {
-                        base: BaseReg::SimState,
+                    block.push(MInst::StorePtrIndexed {
+                        ptr: event_ptr,
                         offset: slot_base
                             + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
                                 + (arg_layout.mask_word_offset + word_idx) * 8)
@@ -830,8 +837,8 @@ fn lower_instruction(
                     });
                 }
             }
-            block.push(MInst::StoreIndexed {
-                base: BaseReg::SimState,
+            block.push(MInst::StorePtrIndexed {
+                ptr: event_ptr,
                 offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
                 index: slot_off,
                 src: seq_v,
@@ -843,9 +850,9 @@ fn lower_instruction(
                 src: seq_v,
                 imm: 1,
             });
-            block.push(MInst::Store {
-                base: BaseReg::SimState,
-                offset: base,
+            block.push(MInst::StorePtr {
+                ptr: event_ptr,
+                offset: 0,
                 src: next_seq,
                 size: OpSize::S64,
             });

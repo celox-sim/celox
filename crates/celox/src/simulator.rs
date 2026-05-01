@@ -306,15 +306,14 @@ impl<B: SimBackend> Simulator<B> {
         };
 
         let layout = self.backend.layout();
-        let (ptr, size) = self.backend.memory_as_ptr();
-        let base = layout.runtime_event_base_offset;
-        if base + RUNTIME_EVENT_HEADER_SIZE > size {
+        let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
+        if RUNTIME_EVENT_HEADER_SIZE > size {
             return Vec::new();
         }
         let read_u64 = |offset: usize| -> u64 {
             unsafe { std::ptr::read_volatile(ptr.add(offset) as *const u64) }
         };
-        let write_seq = read_u64(base);
+        let write_seq = read_u64(0);
         let mut events = Vec::new();
         let capacity = RUNTIME_EVENT_CAPACITY as u64;
         if self.runtime_event_read_seq + capacity < write_seq {
@@ -327,8 +326,7 @@ impl<B: SimBackend> Simulator<B> {
         while self.runtime_event_read_seq < write_seq {
             let seq = self.runtime_event_read_seq;
             let slot = (seq as usize) & (layout.runtime_event_capacity - 1);
-            let slot_base =
-                base + RUNTIME_EVENT_HEADER_SIZE + slot * layout.runtime_event_slot_size;
+            let slot_base = RUNTIME_EVENT_HEADER_SIZE + slot * layout.runtime_event_slot_size;
             let published = read_u64(slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET);
             if published == RUNTIME_EVENT_WRITING || published != seq {
                 break;

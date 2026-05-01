@@ -153,6 +153,7 @@ impl SharedJitCode {
 pub struct JitBackend {
     shared: Arc<SharedJitCode>,
     memory: Vec<u64>,
+    runtime_event_buffer: Vec<u64>,
     /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
     comb_func: SimFunc,
 }
@@ -462,10 +463,7 @@ impl JitBackend {
         );
         debug_assert_eq!(
             engine.translator.layout.merged_total_size,
-            (engine.translator.layout.runtime_event_base_offset
-                + crate::backend::memory_layout::RUNTIME_EVENT_HEADER_SIZE
-                + engine.translator.layout.runtime_event_capacity
-                    * engine.translator.layout.runtime_event_slot_size
+            (engine.translator.layout.scratch_base_offset + engine.translator.layout.scratch_size
                 + 7)
                 & !7
         );
@@ -524,6 +522,8 @@ impl JitBackend {
     pub fn from_shared(shared: Arc<SharedJitCode>) -> Self {
         let num_u64 = shared.layout.merged_total_size.div_ceil(8);
         let mut memory = vec![0u64; num_u64];
+        let event_words = shared.layout.runtime_event_buffer_size.div_ceil(8);
+        let runtime_event_buffer = vec![0u64; event_words];
 
         // Initialize 4-state regions to X (v=1, m=1)
         for &(offset, allocated_size) in &shared.four_state_inits {
@@ -536,10 +536,26 @@ impl JitBackend {
         }
 
         let comb_func = shared.comb_func;
-        Self {
+        let mut backend = Self {
             shared,
             memory,
+            runtime_event_buffer,
             comb_func,
+        };
+        backend.install_runtime_event_buffer();
+        backend
+    }
+
+    fn install_runtime_event_buffer(&mut self) {
+        use crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
+
+        let addr = self.runtime_event_buffer.as_mut_ptr() as u64;
+        let ptr = unsafe {
+            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET)
+                as *mut u64
+        };
+        unsafe {
+            std::ptr::write_unaligned(ptr, addr);
         }
     }
 
@@ -807,6 +823,13 @@ impl JitBackend {
         (self.memory.as_mut_ptr() as *mut u8, size)
     }
 
+    pub fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
+        (
+            self.runtime_event_buffer.as_ptr() as *const u8,
+            self.shared.layout.runtime_event_buffer_size,
+        )
+    }
+
     /// Returns the stable region size in bytes.
     pub fn stable_region_size(&self) -> usize {
         self.shared.layout.total_size
@@ -960,6 +983,10 @@ impl super::SimBackend for JitBackend {
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         self.memory_as_mut_ptr()
+    }
+
+    fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
+        self.runtime_event_buffer_as_ptr()
     }
 
     fn stable_region_size(&self) -> usize {

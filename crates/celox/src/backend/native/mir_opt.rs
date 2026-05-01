@@ -474,7 +474,13 @@ fn gvn_bin_rr(op: u8, lhs: VReg, rhs: VReg) -> GvnKey {
 
 /// Returns true if the instruction could modify memory that Load reads.
 fn is_memory_clobber(inst: &MInst) -> bool {
-    matches!(inst, MInst::Store { .. } | MInst::StoreIndexed { .. })
+    matches!(
+        inst,
+        MInst::Store { .. }
+            | MInst::StorePtr { .. }
+            | MInst::StoreIndexed { .. }
+            | MInst::StorePtrIndexed { .. }
+    )
 }
 
 /// Global GVN: dominator-tree-scoped value numbering.
@@ -627,7 +633,8 @@ fn global_gvn(func: &mut MFunction) {
                     MInst::Store {
                         base, offset, size, ..
                     } => (Some(*base), *offset, size.bytes() as i32),
-                    MInst::StoreIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
+                    MInst::StoreIndexed { .. } | MInst::StorePtrIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
+                    MInst::StorePtr { .. } => (None, 0, 0),
                     _ => (None, 0, 0),
                 };
                 let load_keys: Vec<GvnKey> = value_table
@@ -1014,8 +1021,11 @@ fn if_convert(func: &mut MFunction) {
                 matches!(
                     inst,
                     MInst::Store { .. }
+                        | MInst::StorePtr { .. }
                         | MInst::StoreIndexed { .. }
+                        | MInst::StorePtrIndexed { .. }
                         | MInst::Load { .. }
+                        | MInst::LoadPtr { .. }
                         | MInst::LoadImm { .. }
                         | MInst::Mov { .. }
                         | MInst::Add { .. }
@@ -1361,7 +1371,15 @@ fn split_live_ranges(func: &mut MFunction) {
                     // Check no Store between def and use (conservative)
                     let has_store = block.insts[def_ii + 1..use_pos]
                         .iter()
-                        .any(|i| matches!(i, MInst::Store { .. } | MInst::StoreIndexed { .. }));
+                        .any(|i| {
+                            matches!(
+                                i,
+                                MInst::Store { .. }
+                                    | MInst::StorePtr { .. }
+                                    | MInst::StoreIndexed { .. }
+                                    | MInst::StorePtrIndexed { .. }
+                            )
+                        });
                     if !has_store {
                         Some(RematKind::SimLoad(*offset, *size))
                     } else {
@@ -2070,7 +2088,10 @@ fn forward_local_store_loads(func: &mut MFunction) {
                         size,
                     });
                 }
-                MInst::LoadIndexed { .. } | MInst::StoreIndexed { .. } => {
+                MInst::LoadIndexed { .. }
+                | MInst::LoadPtrIndexed { .. }
+                | MInst::StoreIndexed { .. }
+                | MInst::StorePtrIndexed { .. } => {
                     available.clear();
                     rewritten.push(inst);
                 }
@@ -2181,7 +2202,10 @@ fn eliminate_redundant_local_stores(func: &mut MFunction) {
                         });
                     }
                 }
-                MInst::LoadIndexed { .. } | MInst::StoreIndexed { .. } => {
+                MInst::LoadIndexed { .. }
+                | MInst::LoadPtrIndexed { .. }
+                | MInst::StoreIndexed { .. }
+                | MInst::StorePtrIndexed { .. } => {
                     available.clear();
                     rewritten.push(inst);
                 }
@@ -2308,7 +2332,9 @@ fn dead_code_eliminate(func: &mut MFunction) {
                         return matches!(
                             inst,
                             MInst::Store { .. }
+                                | MInst::StorePtr { .. }
                                 | MInst::StoreIndexed { .. }
+                                | MInst::StorePtrIndexed { .. }
                                 | MInst::Branch { .. }
                                 | MInst::Jump { .. }
                                 | MInst::Return

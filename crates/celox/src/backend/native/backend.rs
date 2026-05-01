@@ -241,6 +241,7 @@ fn compile_program(
 pub struct NativeBackend {
     compiled: Arc<SharedNativeCode>,
     memory: Vec<u64>,
+    runtime_event_buffer: Vec<u64>,
 }
 
 impl NativeBackend {
@@ -255,6 +256,8 @@ impl NativeBackend {
         let mem_size_words =
             (shared.layout.merged_total_size + shared.layout.triggered_bits_total_size).div_ceil(8);
         let mut memory = vec![0u64; mem_size_words + 1]; // +1 for safety
+        let event_words = shared.layout.runtime_event_buffer_size.div_ceil(8);
+        let runtime_event_buffer = vec![0u64; event_words];
 
         // Initialize 4-state regions to X (v=1, m=1)
         for &(offset, allocated_size) in &shared.four_state_inits {
@@ -266,9 +269,25 @@ impl NativeBackend {
             }
         }
 
-        Self {
+        let mut backend = Self {
             compiled: shared,
             memory,
+            runtime_event_buffer,
+        };
+        backend.install_runtime_event_buffer();
+        backend
+    }
+
+    fn install_runtime_event_buffer(&mut self) {
+        use crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
+
+        let addr = self.runtime_event_buffer.as_mut_ptr() as u64;
+        let ptr = unsafe {
+            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET)
+                as *mut u64
+        };
+        unsafe {
+            std::ptr::write_unaligned(ptr, addr);
         }
     }
 
@@ -477,6 +496,13 @@ impl super::super::SimBackend for NativeBackend {
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         (self.mem_mut_ptr(), self.memory.len() * 8)
+    }
+
+    fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
+        (
+            self.runtime_event_buffer.as_ptr() as *const u8,
+            self.compiled.layout.runtime_event_buffer_size,
+        )
     }
 
     fn stable_region_size(&self) -> usize {

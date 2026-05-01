@@ -3,6 +3,8 @@ use crate::HashMap;
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
+pub const STATE_HEADER_SIZE: usize = 8;
+pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
 pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
 pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
 pub const RUNTIME_EVENT_SLOT_SITE_OFFSET: usize = 8;
@@ -48,11 +50,11 @@ pub struct MemoryLayout {
     pub scratch_base_offset: usize,
     pub scratch_size: usize,
 
-    /// Single-producer runtime event ring. The layout is intentionally
-    /// producer-ring shaped so it can grow to multiple producers later.
-    pub runtime_event_base_offset: usize,
+    /// Runtime event ring geometry. The ring storage itself is backend-owned;
+    /// generated code finds it through the state header.
     pub runtime_event_capacity: usize,
     pub runtime_event_slot_size: usize,
+    pub runtime_event_buffer_size: usize,
     pub runtime_event_site_layouts: Vec<RuntimeEventSiteLayout>,
 }
 
@@ -89,7 +91,7 @@ impl MemoryLayout {
                 .unwrap_or(0)
                 * 8;
 
-        let mut current_offset = 0;
+        let mut current_offset = STATE_HEADER_SIZE;
 
         // 3. Execute packing
         for (addr, width, is_4state) in stable_vars_to_layout {
@@ -145,10 +147,9 @@ impl MemoryLayout {
         let triggered_bits_total_size = num_potential_triggers.div_ceil(8);
 
         let scratch_base_offset = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
-        let runtime_event_base_offset = (scratch_base_offset + scratch_bytes + 7) & !7;
-        let runtime_event_bytes =
+        let runtime_event_buffer_size =
             RUNTIME_EVENT_HEADER_SIZE + RUNTIME_EVENT_CAPACITY * runtime_event_slot_size;
-        let merged_total_size = (runtime_event_base_offset + runtime_event_bytes + 7) & !7;
+        let merged_total_size = (scratch_base_offset + scratch_bytes + 7) & !7;
 
         // Apply address aliases: aliased variables share the canonical's offset.
         // Only alias when:
@@ -190,9 +191,9 @@ impl MemoryLayout {
             triggered_bits_total_size,
             scratch_base_offset,
             scratch_size: scratch_bytes,
-            runtime_event_base_offset,
             runtime_event_capacity: RUNTIME_EVENT_CAPACITY,
             runtime_event_slot_size,
+            runtime_event_buffer_size,
             runtime_event_site_layouts,
         }
     }

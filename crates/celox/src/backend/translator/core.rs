@@ -386,10 +386,16 @@ impl SIRTranslator {
             RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
             RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
             RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         };
 
-        let base = self.layout.runtime_event_base_offset as i64;
-        let write_seq_addr = state.builder.ins().iadd_imm(state.mem_ptr, base);
+        let event_ptr = state.builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            state.mem_ptr,
+            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+        );
+        let write_seq_addr = event_ptr;
         let seq = state
             .builder
             .ins()
@@ -407,8 +413,8 @@ impl SIRTranslator {
         let slot_base_off = state
             .builder
             .ins()
-            .iadd_imm(slot_off, base + RUNTIME_EVENT_HEADER_SIZE as i64);
-        let slot_addr = state.builder.ins().iadd(state.mem_ptr, slot_base_off);
+            .iadd_imm(slot_off, RUNTIME_EVENT_HEADER_SIZE as i64);
+        let slot_addr = state.builder.ins().iadd(event_ptr, slot_base_off);
 
         let writing = state
             .builder
