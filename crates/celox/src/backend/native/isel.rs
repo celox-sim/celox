@@ -695,11 +695,9 @@ fn lower_instruction(
     match inst {
         SIRInstruction::RuntimeEvent { site_id, args } => {
             use crate::backend::memory_layout::{
-                RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_MAX_ARGS,
-                RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET, RUNTIME_EVENT_SLOT_ARGS_OFFSET,
-                RUNTIME_EVENT_SLOT_MASKS_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
-                RUNTIME_EVENT_SLOT_SITE_OFFSET,
-                RUNTIME_EVENT_WRITING,
+                RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+                RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+                RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
             };
 
             let base = ctx.layout.runtime_event_base_offset as i32;
@@ -761,7 +759,8 @@ fn lower_instruction(
                 src: site_v,
                 size: OpSize::S64,
             });
-            let arg_count = args.len().min(RUNTIME_EVENT_MAX_ARGS) as u64;
+            let site_layout = &ctx.layout.runtime_event_site_layouts[*site_id as usize];
+            let arg_count = args.len() as u64;
             let arg_count_v = ctx.alloc_vreg(SpillDesc::remat(arg_count));
             block.push(MInst::LoadImm {
                 dst: arg_count_v,
@@ -774,38 +773,62 @@ fn lower_instruction(
                 src: arg_count_v,
                 size: OpSize::S64,
             });
-            for (idx, arg) in args.iter().take(RUNTIME_EVENT_MAX_ARGS).enumerate() {
-                let vreg = if ctx.wide_regs.contains_key(arg) {
-                    ctx.get_wide_chunks(arg, block)[0].0
-                } else {
-                    ctx.reg_map.get(*arg)
+            for (idx, arg) in args.iter().enumerate() {
+                let Some(arg_layout) = site_layout.args.get(idx) else {
+                    continue;
                 };
-                block.push(MInst::StoreIndexed {
-                    base: BaseReg::SimState,
-                    offset: slot_base + (RUNTIME_EVENT_SLOT_ARGS_OFFSET + idx * 8) as i32,
-                    index: slot_off,
-                    src: vreg,
-                    size: OpSize::S64,
-                });
-                let mask_vreg = if ctx.wide_regs.contains_key(arg) {
-                    get_wide_mask_chunks(ctx, block, arg, 1)[0]
-                } else if let Some(mask) = ctx.mask_map.map.get(arg.0).copied().flatten() {
-                    mask
+                let value_chunks = if ctx.wide_regs.contains_key(arg) {
+                    ctx.get_wide_chunks(arg, block)
                 } else {
-                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm {
-                        dst: zero,
-                        value: 0,
+                    vec![(ctx.reg_map.get(*arg), ctx.sir_width(arg).min(64))]
+                };
+                let mask_chunks = if ctx.wide_regs.contains_key(arg) {
+                    get_wide_mask_chunks(ctx, block, arg, arg_layout.word_count)
+                } else {
+                    vec![ctx.get_mask(*arg, block)]
+                };
+                for word_idx in 0..arg_layout.word_count {
+                    let value_vreg = value_chunks
+                        .get(word_idx)
+                        .map(|chunk| chunk.0)
+                        .unwrap_or_else(|| {
+                            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                            block.push(MInst::LoadImm {
+                                dst: zero,
+                                value: 0,
+                            });
+                            zero
+                        });
+                    block.push(MInst::StoreIndexed {
+                        base: BaseReg::SimState,
+                        offset: slot_base
+                            + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                                + (arg_layout.value_word_offset + word_idx) * 8)
+                                as i32,
+                        index: slot_off,
+                        src: value_vreg,
+                        size: OpSize::S64,
                     });
-                    zero
-                };
-                block.push(MInst::StoreIndexed {
-                    base: BaseReg::SimState,
-                    offset: slot_base + (RUNTIME_EVENT_SLOT_MASKS_OFFSET + idx * 8) as i32,
-                    index: slot_off,
-                    src: mask_vreg,
-                    size: OpSize::S64,
-                });
+
+                    let mask_vreg = mask_chunks.get(word_idx).copied().unwrap_or_else(|| {
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm {
+                            dst: zero,
+                            value: 0,
+                        });
+                        zero
+                    });
+                    block.push(MInst::StoreIndexed {
+                        base: BaseReg::SimState,
+                        offset: slot_base
+                            + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                                + (arg_layout.mask_word_offset + word_idx) * 8)
+                                as i32,
+                        index: slot_off,
+                        src: mask_vreg,
+                        size: OpSize::S64,
+                    });
+                }
             }
             block.push(MInst::StoreIndexed {
                 base: BaseReg::SimState,
@@ -2948,7 +2971,11 @@ fn lower_instruction(
                 for chunk_i in 0..n_dst_chunks {
                     let chunk_width = if chunk_i == n_dst_chunks - 1 {
                         let rem = total_width % 64;
-                        if rem == 0 { 64 } else { rem }
+                        if rem == 0 {
+                            64
+                        } else {
+                            rem
+                        }
                     } else {
                         64
                     };
@@ -3034,7 +3061,11 @@ fn lower_instruction(
                             for (i, mv) in mc.into_iter().enumerate() {
                                 let cw = if i == ISelContext::num_chunks(arg_width) - 1 {
                                     let r = arg_width % 64;
-                                    if r == 0 { 64 } else { r }
+                                    if r == 0 {
+                                        64
+                                    } else {
+                                        r
+                                    }
                                 } else {
                                     64
                                 };
@@ -3053,7 +3084,11 @@ fn lower_instruction(
                     for chunk_i in 0..n_dst_chunks {
                         let chunk_width = if chunk_i == n_dst_chunks - 1 {
                             let rem = total_width % 64;
-                            if rem == 0 { 64 } else { rem }
+                            if rem == 0 {
+                                64
+                            } else {
+                                rem
+                            }
                         } else {
                             64
                         };
@@ -4368,7 +4403,11 @@ fn lower_wide_runtime_shift(
                 let carry_i = match dir {
                     ShiftDir::Left => {
                         // carry comes from chunk below: i-1
-                        if i == 0 { usize::MAX } else { i - 1 }
+                        if i == 0 {
+                            usize::MAX
+                        } else {
+                            i - 1
+                        }
                     }
                     ShiftDir::Right | ShiftDir::ArithRight => {
                         // carry comes from chunk above: i+1
@@ -4920,8 +4959,8 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
             let cond_vreg = ctx.reg_map.get(*cond);
             block.push(MInst::Branch {
                 cond: cond_vreg,
-                true_bb: BlockId(true_block.0.0 as u32),
-                false_bb: BlockId(false_block.0.0 as u32),
+                true_bb: BlockId(true_block.0 .0 as u32),
+                false_bb: BlockId(false_block.0 .0 as u32),
             });
         }
         SIRTerminator::Return => {
@@ -5686,7 +5725,11 @@ fn lower_wide_binary_mask(
                 let rv = ctx.wide_chunk_or_zero(&rv_chunks, i, block);
                 let chunk_w = if i == n_dst - 1 {
                     let r = d_width % 64;
-                    if r == 0 { 64 } else { r }
+                    if r == 0 {
+                        64
+                    } else {
+                        r
+                    }
                 } else {
                     64
                 };
@@ -5914,7 +5957,11 @@ fn lower_wide_binary_mask(
                 for (i, (m, w)) in dst_m_chunks.into_iter().enumerate() {
                     let chunk_w = if i == n_dst - 1 {
                         let r = d_width % 64;
-                        if r == 0 { 64 } else { r }
+                        if r == 0 {
+                            64
+                        } else {
+                            r
+                        }
                     } else {
                         64
                     };
@@ -5985,7 +6032,11 @@ fn lower_wide_binary_mask(
                 for i in 0..n_dst {
                     let chunk_w = if i == n_dst - 1 {
                         let r = d_width % 64;
-                        if r == 0 { 64 } else { r }
+                        if r == 0 {
+                            64
+                        } else {
+                            r
+                        }
                     } else {
                         64
                     };
@@ -6060,7 +6111,11 @@ fn lower_wide_binary_mask(
                     let chunk_m = ctx.alloc_vreg(SpillDesc::transient());
                     let chunk_w = if i == n_dst - 1 {
                         let r = d_width % 64;
-                        if r == 0 { 64 } else { r }
+                        if r == 0 {
+                            64
+                        } else {
+                            r
+                        }
                     } else {
                         64
                     };
@@ -6157,7 +6212,11 @@ fn lower_wide_unary_mask(
                     let chunk_m = ctx.alloc_vreg(SpillDesc::transient());
                     let chunk_w = if i == n_dst - 1 {
                         let r = d_width % 64;
-                        if r == 0 { 64 } else { r }
+                        if r == 0 {
+                            64
+                        } else {
+                            r
+                        }
                     } else {
                         64
                     };

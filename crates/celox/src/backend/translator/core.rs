@@ -3,13 +3,13 @@ use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
 
 use crate::{
-    HashMap, SimulatorOptions,
     ir::{
         AbsoluteAddr, BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType,
         SIRInstruction, STABLE_REGION,
     },
-    optimizer::coalescing::TailCallChunk,
     optimizer::coalescing::pass_tail_call_split::{SpillSlot, SpilledChunk},
+    optimizer::coalescing::TailCallChunk,
+    HashMap, SimulatorOptions,
 };
 
 use super::MemoryLayout;
@@ -383,9 +383,8 @@ impl SIRTranslator {
         args: &[RegisterId],
     ) {
         use crate::backend::memory_layout::{
-            RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_MAX_ARGS, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
-            RUNTIME_EVENT_SLOT_ARGS_OFFSET, RUNTIME_EVENT_SLOT_MASKS_OFFSET,
-            RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+            RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+            RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
             RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
         };
 
@@ -405,10 +404,10 @@ impl SIRTranslator {
             .ins()
             .iconst(types::I64, self.layout.runtime_event_slot_size as i64);
         let slot_off = state.builder.ins().imul(slot_idx, slot_size);
-        let slot_base_off = state.builder.ins().iadd_imm(
-            slot_off,
-            base + RUNTIME_EVENT_HEADER_SIZE as i64,
-        );
+        let slot_base_off = state
+            .builder
+            .ins()
+            .iadd_imm(slot_off, base + RUNTIME_EVENT_HEADER_SIZE as i64);
         let slot_addr = state.builder.ins().iadd(state.mem_ptr, slot_base_off);
 
         let writing = state
@@ -428,7 +427,8 @@ impl SIRTranslator {
             slot_addr,
             RUNTIME_EVENT_SLOT_SITE_OFFSET as i32,
         );
-        let arg_count = args.len().min(RUNTIME_EVENT_MAX_ARGS);
+        let site_layout = &self.layout.runtime_event_site_layouts[site_id as usize];
+        let arg_count = args.len();
         let arg_count_v = state.builder.ins().iconst(types::I64, arg_count as i64);
         state.builder.ins().store(
             MemFlags::new(),
@@ -436,26 +436,40 @@ impl SIRTranslator {
             slot_addr,
             RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET as i32,
         );
-        for (idx, arg) in args.iter().take(RUNTIME_EVENT_MAX_ARGS).enumerate() {
+        for (idx, arg) in args.iter().enumerate() {
+            let Some(arg_layout) = site_layout.args.get(idx) else {
+                continue;
+            };
             let reg = &state.regs[arg];
-            let value = reg.first_value(state.builder);
-            let value = cast_type(state.builder, value, types::I64);
-            state.builder.ins().store(
-                MemFlags::new(),
-                value,
-                slot_addr,
-                (RUNTIME_EVENT_SLOT_ARGS_OFFSET + idx * 8) as i32,
-            );
-            let mask = reg
-                .first_mask(state.builder)
-                .map(|mask| cast_type(state.builder, mask, types::I64))
-                .unwrap_or_else(|| state.builder.ins().iconst(types::I64, 0));
-            state.builder.ins().store(
-                MemFlags::new(),
-                mask,
-                slot_addr,
-                (RUNTIME_EVENT_SLOT_MASKS_OFFSET + idx * 8) as i32,
-            );
+            let values = reg.load_value_chunks(state.builder);
+            let masks = reg.load_mask_chunks(state.builder);
+            for word_idx in 0..arg_layout.word_count {
+                let value = values
+                    .get(word_idx)
+                    .copied()
+                    .map(|value| cast_type(state.builder, value, types::I64))
+                    .unwrap_or_else(|| state.builder.ins().iconst(types::I64, 0));
+                state.builder.ins().store(
+                    MemFlags::new(),
+                    value,
+                    slot_addr,
+                    (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                        + (arg_layout.value_word_offset + word_idx) * 8) as i32,
+                );
+
+                let mask = masks
+                    .as_ref()
+                    .and_then(|masks| masks.get(word_idx).copied())
+                    .map(|mask| cast_type(state.builder, mask, types::I64))
+                    .unwrap_or_else(|| state.builder.ins().iconst(types::I64, 0));
+                state.builder.ins().store(
+                    MemFlags::new(),
+                    mask,
+                    slot_addr,
+                    (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                        + (arg_layout.mask_word_offset + word_idx) * 8) as i32,
+                );
+            }
         }
         state.builder.ins().store(
             MemFlags::new(),
@@ -464,7 +478,10 @@ impl SIRTranslator {
             RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
         );
         let next = state.builder.ins().iadd_imm(seq, 1);
-        state.builder.ins().store(MemFlags::new(), next, write_seq_addr, 0);
+        state
+            .builder
+            .ins()
+            .store(MemFlags::new(), next, write_seq_addr, 0);
     }
 
     /// Slice: extract bits [bit_offset, bit_offset+width) from src register.

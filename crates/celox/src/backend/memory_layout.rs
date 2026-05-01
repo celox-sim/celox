@@ -1,17 +1,26 @@
-use crate::HashMap;
 use crate::ir::{AbsoluteAddr, Program, SIRInstruction};
+use crate::HashMap;
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
-pub const RUNTIME_EVENT_MAX_ARGS: usize = 4;
 pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
 pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
-pub const RUNTIME_EVENT_SLOT_SIZE: usize = 8 * (3 + RUNTIME_EVENT_MAX_ARGS * 2);
 pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
 pub const RUNTIME_EVENT_SLOT_SITE_OFFSET: usize = 8;
 pub const RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET: usize = 16;
-pub const RUNTIME_EVENT_SLOT_ARGS_OFFSET: usize = 24;
-pub const RUNTIME_EVENT_SLOT_MASKS_OFFSET: usize =
-    RUNTIME_EVENT_SLOT_ARGS_OFFSET + RUNTIME_EVENT_MAX_ARGS * 8;
+pub const RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET: usize = 24;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeEventArgLayout {
+    pub value_word_offset: usize,
+    pub mask_word_offset: usize,
+    pub word_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeEventSiteLayout {
+    pub args: Vec<RuntimeEventArgLayout>,
+    pub payload_words: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {
@@ -44,6 +53,7 @@ pub struct MemoryLayout {
     pub runtime_event_base_offset: usize,
     pub runtime_event_capacity: usize,
     pub runtime_event_slot_size: usize,
+    pub runtime_event_site_layouts: Vec<RuntimeEventSiteLayout>,
 }
 
 impl MemoryLayout {
@@ -70,6 +80,15 @@ impl MemoryLayout {
         let mut offsets = HashMap::default();
         let mut widths = HashMap::default();
         let mut is_4states = HashMap::default();
+        let runtime_event_site_layouts = build_runtime_event_site_layouts(program);
+        let runtime_event_slot_size = RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+            + runtime_event_site_layouts
+                .iter()
+                .map(|site| site.payload_words)
+                .max()
+                .unwrap_or(0)
+                * 8;
+
         let mut current_offset = 0;
 
         // 3. Execute packing
@@ -128,7 +147,7 @@ impl MemoryLayout {
         let scratch_base_offset = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
         let runtime_event_base_offset = (scratch_base_offset + scratch_bytes + 7) & !7;
         let runtime_event_bytes =
-            RUNTIME_EVENT_HEADER_SIZE + RUNTIME_EVENT_CAPACITY * RUNTIME_EVENT_SLOT_SIZE;
+            RUNTIME_EVENT_HEADER_SIZE + RUNTIME_EVENT_CAPACITY * runtime_event_slot_size;
         let merged_total_size = (runtime_event_base_offset + runtime_event_bytes + 7) & !7;
 
         // Apply address aliases: aliased variables share the canonical's offset.
@@ -173,9 +192,40 @@ impl MemoryLayout {
             scratch_size: scratch_bytes,
             runtime_event_base_offset,
             runtime_event_capacity: RUNTIME_EVENT_CAPACITY,
-            runtime_event_slot_size: RUNTIME_EVENT_SLOT_SIZE,
+            runtime_event_slot_size,
+            runtime_event_site_layouts,
         }
     }
+}
+
+fn build_runtime_event_site_layouts(program: &Program) -> Vec<RuntimeEventSiteLayout> {
+    program
+        .runtime_event_sites
+        .iter()
+        .map(|site| {
+            let mut payload_words = 0;
+            let args = site
+                .arg_widths
+                .iter()
+                .map(|width| {
+                    let word_count = (*width).div_ceil(64).max(1);
+                    let value_word_offset = payload_words;
+                    payload_words += word_count;
+                    let mask_word_offset = payload_words;
+                    payload_words += word_count;
+                    RuntimeEventArgLayout {
+                        value_word_offset,
+                        mask_word_offset,
+                        word_count,
+                    }
+                })
+                .collect();
+            RuntimeEventSiteLayout {
+                args,
+                payload_words,
+            }
+        })
+        .collect()
 }
 
 /// Collect all absolute addresses referenced in FF execution units.

@@ -109,6 +109,79 @@ fn test_ff_runtime_events_preserve_four_state_args(sim) {
     );
 }
 
+fn test_ff_runtime_events_support_design_sized_arg_count(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            b: input logic<8>,
+            c: input logic<8>,
+            d: input logic<8>,
+            e: input logic<8>
+        ) {
+            always_ff (clk) {
+                $display("%0d %0d %0d %0d %0d", a, b, c, d, e);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let e = sim.signal("e");
+
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 2u8);
+        io.set(c, 3u8);
+        io.set(d, 4u8);
+        io.set(e, 5u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "1 2 3 4 5".to_string(),
+        }],
+    );
+}
+
+fn test_ff_runtime_events_support_wide_four_state_args(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<80>) {
+            always_ff (clk) {
+                $display("a=%x dec=%0d", a, a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| {
+        io.set_four_state(
+            a,
+            BigUint::parse_bytes(b"123456789abcdef01234", 16).unwrap(),
+            BigUint::from(0x0fu32),
+        )
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=123456789abcdef0123x dec=x".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_fatal_assert_records_event(sim) {
     @omit_veryl;
     @ignore_on(wasm);
