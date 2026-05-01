@@ -697,7 +697,8 @@ fn lower_instruction(
             use crate::backend::memory_layout::{
                 RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_MAX_ARGS,
                 RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET, RUNTIME_EVENT_SLOT_ARGS_OFFSET,
-                RUNTIME_EVENT_SLOT_SEQ_OFFSET, RUNTIME_EVENT_SLOT_SITE_OFFSET,
+                RUNTIME_EVENT_SLOT_MASKS_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+                RUNTIME_EVENT_SLOT_SITE_OFFSET,
                 RUNTIME_EVENT_WRITING,
             };
 
@@ -784,6 +785,25 @@ fn lower_instruction(
                     offset: slot_base + (RUNTIME_EVENT_SLOT_ARGS_OFFSET + idx * 8) as i32,
                     index: slot_off,
                     src: vreg,
+                    size: OpSize::S64,
+                });
+                let mask_vreg = if ctx.wide_regs.contains_key(arg) {
+                    get_wide_mask_chunks(ctx, block, arg, 1)[0]
+                } else if let Some(mask) = ctx.mask_map.map.get(arg.0).copied().flatten() {
+                    mask
+                } else {
+                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                    block.push(MInst::LoadImm {
+                        dst: zero,
+                        value: 0,
+                    });
+                    zero
+                };
+                block.push(MInst::StoreIndexed {
+                    base: BaseReg::SimState,
+                    offset: slot_base + (RUNTIME_EVENT_SLOT_MASKS_OFFSET + idx * 8) as i32,
+                    index: slot_off,
+                    src: mask_vreg,
                     size: OpSize::S64,
                 });
             }

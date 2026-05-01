@@ -75,6 +75,40 @@ fn test_ff_runtime_display_and_assert_continue(sim) {
     );
 }
 
+fn test_ff_runtime_events_preserve_four_state_args(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<4>) {
+            always_ff (clk) {
+                $display("a=%b hex=%x dec=%0d", a, a, a);
+                $assert_continue(1'b0, "bad=%b", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+
+    sim.modify(|io| {
+        io.set_four_state(a, BigUint::from(0b1010u32), BigUint::from(0b0100u32))
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    let events = sim.drain_runtime_events();
+    assert_eq!(
+        events,
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "a=1x10 hex=x dec=x".to_string(),
+            },
+            celox::RuntimeEvent::AssertContinue {
+                message: "bad=1x10".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_ff_runtime_fatal_assert_records_event(sim) {
     @omit_veryl;
     @ignore_on(wasm);

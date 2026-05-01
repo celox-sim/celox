@@ -384,7 +384,8 @@ impl SIRTranslator {
     ) {
         use crate::backend::memory_layout::{
             RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_MAX_ARGS, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
-            RUNTIME_EVENT_SLOT_ARGS_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+            RUNTIME_EVENT_SLOT_ARGS_OFFSET, RUNTIME_EVENT_SLOT_MASKS_OFFSET,
+            RUNTIME_EVENT_SLOT_SEQ_OFFSET,
             RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
         };
 
@@ -436,13 +437,24 @@ impl SIRTranslator {
             RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET as i32,
         );
         for (idx, arg) in args.iter().take(RUNTIME_EVENT_MAX_ARGS).enumerate() {
-            let value = state.regs[arg].first_value(state.builder);
+            let reg = &state.regs[arg];
+            let value = reg.first_value(state.builder);
             let value = cast_type(state.builder, value, types::I64);
             state.builder.ins().store(
                 MemFlags::new(),
                 value,
                 slot_addr,
                 (RUNTIME_EVENT_SLOT_ARGS_OFFSET + idx * 8) as i32,
+            );
+            let mask = reg
+                .first_mask(state.builder)
+                .map(|mask| cast_type(state.builder, mask, types::I64))
+                .unwrap_or_else(|| state.builder.ins().iconst(types::I64, 0));
+            state.builder.ins().store(
+                MemFlags::new(),
+                mask,
+                slot_addr,
+                (RUNTIME_EVENT_SLOT_MASKS_OFFSET + idx * 8) as i32,
             );
         }
         state.builder.ins().store(

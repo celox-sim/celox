@@ -7,7 +7,7 @@ use crate::backend::native::{NativeBackend, SharedNativeCode};
 use crate::{
     IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
-    ir::{InstancePath, Program, RuntimeEventKind, SignalRef, VariableInfo},
+    ir::{InstancePath, Program, RuntimeEventKind, RuntimeEventSite, SignalRef, VariableInfo},
 };
 #[cfg(not(target_arch = "wasm32"))]
 use num_bigint::BigUint;
@@ -82,11 +82,125 @@ impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
     }
 }
 
-fn render_runtime_event_message(template: Option<&str>, args: &[u64]) -> String {
-    let Some(template) = template else {
+fn relevant_mask(mask: u64, width: usize) -> u64 {
+    if width == 0 {
+        0
+    } else if width >= 64 {
+        mask
+    } else {
+        mask & ((1u64 << width) - 1)
+    }
+}
+
+fn relevant_value(value: u64, width: usize) -> u64 {
+    if width == 0 {
+        0
+    } else if width >= 64 {
+        value
+    } else {
+        value & ((1u64 << width) - 1)
+    }
+}
+
+fn format_runtime_arg_decimal(value: u64, mask: u64, width: usize, signed: bool) -> String {
+    if relevant_mask(mask, width) != 0 {
+        return "x".to_string();
+    }
+    let value = relevant_value(value, width);
+    if signed && width > 0 {
+        if width >= 64 {
+            (value as i64).to_string()
+        } else {
+            let shift = 64 - width;
+            (((value << shift) as i64) >> shift).to_string()
+        }
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_runtime_arg_binary(value: u64, mask: u64, width: usize) -> String {
+    let mask = relevant_mask(mask, width);
+    let value = relevant_value(value, width);
+    if mask == 0 {
+        return format!("{value:b}");
+    }
+    let digits = width.clamp(1, 64);
+    let mut out = String::with_capacity(digits);
+    for bit in (0..digits).rev() {
+        if ((mask >> bit) & 1) != 0 {
+            out.push('x');
+        } else if ((value >> bit) & 1) != 0 {
+            out.push('1');
+        } else {
+            out.push('0');
+        }
+    }
+    out
+}
+
+fn format_runtime_arg_hex(value: u64, mask: u64, width: usize, upper: bool) -> String {
+    let mask = relevant_mask(mask, width);
+    let value = relevant_value(value, width);
+    if mask == 0 {
+        return if upper {
+            format!("{value:X}")
+        } else {
+            format!("{value:x}")
+        };
+    }
+    let digits = width.div_ceil(4).clamp(1, 16);
+    let mut out = String::with_capacity(digits);
+    for nibble in (0..digits).rev() {
+        let shift = nibble * 4;
+        let nibble_mask = (mask >> shift) & 0xf;
+        if nibble_mask != 0 {
+            out.push(if upper { 'X' } else { 'x' });
+        } else {
+            let digit = ((value >> shift) & 0xf) as u8;
+            out.push(char::from_digit(digit as u32, 16).unwrap());
+        }
+    }
+    if upper {
+        out.make_ascii_uppercase();
+    }
+    out
+}
+
+fn format_runtime_arg_octal(value: u64, mask: u64, width: usize) -> String {
+    let mask = relevant_mask(mask, width);
+    let value = relevant_value(value, width);
+    if mask == 0 {
+        return format!("{value:o}");
+    }
+    let digits = width.div_ceil(3).clamp(1, 22);
+    let mut out = String::with_capacity(digits);
+    for octal in (0..digits).rev() {
+        let shift = octal * 3;
+        let octal_mask = (mask >> shift) & 0x7;
+        if octal_mask != 0 {
+            out.push('x');
+        } else {
+            let digit = ((value >> shift) & 0x7) as u8;
+            out.push(char::from_digit(digit as u32, 8).unwrap());
+        }
+    }
+    out
+}
+
+fn render_runtime_event_message(site: &RuntimeEventSite, args: &[u64], masks: &[u64]) -> String {
+    let Some(template) = site.template.as_deref() else {
         return args
             .iter()
-            .map(|arg| format!("{arg}"))
+            .enumerate()
+            .map(|(idx, arg)| {
+                format_runtime_arg_decimal(
+                    *arg,
+                    masks.get(idx).copied().unwrap_or(0),
+                    site.arg_widths.get(idx).copied().unwrap_or(64),
+                    site.arg_signed.get(idx).copied().unwrap_or(false),
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
     };
@@ -108,14 +222,20 @@ fn render_runtime_event_message(template: Option<&str>, args: &[u64]) -> String 
         }
         let spec = chars.next().unwrap_or('d');
         let value = args.get(arg_idx).copied().unwrap_or(0);
+        let mask = masks.get(arg_idx).copied().unwrap_or(0);
+        let width = site.arg_widths.get(arg_idx).copied().unwrap_or(64);
+        let signed = site.arg_signed.get(arg_idx).copied().unwrap_or(false);
         arg_idx += 1;
         match spec {
-            'x' => out.push_str(&format!("{value:x}")),
-            'X' => out.push_str(&format!("{value:X}")),
-            'b' | 'B' => out.push_str(&format!("{value:b}")),
-            'o' | 'O' => out.push_str(&format!("{value:o}")),
-            'c' => out.push(char::from_u32(value as u32).unwrap_or('\u{fffd}')),
-            _ => out.push_str(&format!("{value}")),
+            'x' => out.push_str(&format_runtime_arg_hex(value, mask, width, false)),
+            'X' => out.push_str(&format_runtime_arg_hex(value, mask, width, true)),
+            'b' | 'B' => out.push_str(&format_runtime_arg_binary(value, mask, width)),
+            'o' | 'O' => out.push_str(&format_runtime_arg_octal(value, mask, width)),
+            'c' if relevant_mask(mask, width) == 0 => {
+                out.push(char::from_u32(relevant_value(value, width) as u32).unwrap_or('\u{fffd}'))
+            }
+            'c' => out.push('x'),
+            _ => out.push_str(&format_runtime_arg_decimal(value, mask, width, signed)),
         }
     }
     out
@@ -167,7 +287,8 @@ impl<B: SimBackend> Simulator<B> {
         use crate::backend::memory_layout::{
             RUNTIME_EVENT_CAPACITY, RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_MAX_ARGS,
             RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET, RUNTIME_EVENT_SLOT_ARGS_OFFSET,
-            RUNTIME_EVENT_SLOT_SEQ_OFFSET, RUNTIME_EVENT_SLOT_SITE_OFFSET,
+            RUNTIME_EVENT_SLOT_MASKS_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+            RUNTIME_EVENT_SLOT_SITE_OFFSET,
             RUNTIME_EVENT_WRITING,
         };
 
@@ -206,8 +327,14 @@ impl<B: SimBackend> Simulator<B> {
             for idx in 0..arg_count {
                 args.push(read_u64(slot_base + RUNTIME_EVENT_SLOT_ARGS_OFFSET + idx * 8));
             }
+            let mut masks = Vec::with_capacity(arg_count);
+            for idx in 0..arg_count {
+                masks.push(read_u64(
+                    slot_base + RUNTIME_EVENT_SLOT_MASKS_OFFSET + idx * 8,
+                ));
+            }
             if let Some(site) = self.program.runtime_event_sites.get(site_id) {
-                let message = render_runtime_event_message(site.template.as_deref(), &args);
+                let message = render_runtime_event_message(site, &args, &masks);
                 events.push(match site.kind {
                     RuntimeEventKind::Display => RuntimeEvent::Display { message },
                     RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
