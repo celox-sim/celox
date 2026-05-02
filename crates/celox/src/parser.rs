@@ -742,6 +742,7 @@ pub(crate) fn flatten(
             reset_clock_map: HashMap::default(),
             address_aliases: HashMap::default(),
             layout: None,
+            initial_memory_values: Vec::new(),
             initial_statements: None,
             tb_functions: fxhash::FxHashMap::default(),
         };
@@ -829,6 +830,23 @@ pub(crate) fn flatten(
 
     let num_events = topological_clocks.len();
     let (mod_vars, mod_path_idx) = module_variables(module_ir, config)?;
+    let initial_memory_values = instance_modules
+        .iter()
+        .flat_map(|(&instance_id, module_id)| {
+            modules[module_id]
+                .initial_memory_values
+                .iter()
+                .map(move |init| crate::ir::InitialMemoryValue {
+                    addr: AbsoluteAddr {
+                        instance_id,
+                        var_id: init.var_id,
+                    },
+                    value: init.value.clone(),
+                    mask: init.mask.clone(),
+                    written_mask: init.written_mask.clone(),
+                })
+        })
+        .collect();
     let program = Program {
         eval_apply_ffs,
         eval_only_ffs,
@@ -850,6 +868,7 @@ pub(crate) fn flatten(
         reset_clock_map,
         address_aliases: HashMap::default(),
         layout: None,
+        initial_memory_values,
         initial_statements,
         tb_functions: module_ir
             .get(root_id)

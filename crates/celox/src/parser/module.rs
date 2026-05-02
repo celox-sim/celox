@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    BitAccess, BlockId, ExecutionUnit, GlueAddr, GlueBlock, ModuleId, SIRBuilder, SIRTerminator,
-    SimModule, TriggerSet, VarAtomBase,
+    BitAccess, BlockId, ExecutionUnit, GlueAddr, GlueBlock, ModuleId, ModuleInitialMemoryValue,
+    SIRBuilder, SIRTerminator, SimModule, TriggerSet, VarAtomBase,
 };
 
 use crate::logic_tree::{
@@ -14,7 +14,13 @@ use crate::parser::{
     ff::FfParser, registry::get_port_type, resolve_total_width,
 };
 use crate::{HashMap, HashSet};
-use veryl_analyzer::ir::{Component, Declaration, InstDeclaration, Module, VarId};
+use num_bigint::BigUint;
+use veryl_analyzer::ir::{
+    AssignDestination, Component, Declaration, Expression, InstDeclaration, Module, Statement,
+    SystemFunctionInput, SystemFunctionKind, VarId,
+};
+use veryl_analyzer::value::Value;
+use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::StrId;
 
 pub struct ModuleParser<'a> {
@@ -26,6 +32,7 @@ pub struct ModuleParser<'a> {
     comb_blocks: Vec<LogicPath<VarId>>,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
     glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
+    initial_memory_values: Vec<ModuleInitialMemoryValue>,
     ff_parser: FfParser<'a>,
     arena: SLTNodeArena<VarId>,
     reset_clock_map: HashMap<VarId, VarId>,
@@ -55,6 +62,7 @@ impl<'a> ModuleParser<'a> {
             comb_blocks: Vec::new(),
             comb_boundaries: HashMap::default(),
             glue_blocks: HashMap::default(),
+            initial_memory_values: Vec::new(),
             ff_parser: FfParser::new(module, *config),
             arena: SLTNodeArena::new(),
             reset_clock_map: HashMap::default(),
@@ -234,6 +242,242 @@ impl<'a> ModuleParser<'a> {
         Ok(())
     }
 
+    fn static_string_expr(expr: &Expression) -> Option<String> {
+        if !expr.comptime().r#type.is_string() {
+            return None;
+        }
+        let value = expr.comptime().get_value().ok()?;
+        byte_value_to_string(value)
+    }
+
+    fn parse_initial_declaration(
+        &mut self,
+        decl: &veryl_analyzer::ir::InitialDeclaration,
+    ) -> Result<(), ParserError> {
+        let mut context = veryl_analyzer::Context::default();
+        context.variables = self.module.variables.clone();
+        for stmt in &decl.statements {
+            self.parse_initial_statement(stmt, &mut context)?;
+        }
+        Ok(())
+    }
+
+    fn parse_initial_statement(
+        &mut self,
+        stmt: &Statement,
+        context: &mut veryl_analyzer::Context,
+    ) -> Result<(), ParserError> {
+        match stmt {
+            Statement::SystemFunctionCall(call) => {
+                if let SystemFunctionKind::Readmemh(filename, output) = &call.kind {
+                    let value =
+                        self.parse_readmem_file(filename, output.0.as_slice(), 16, context)?;
+                    self.initial_memory_values.push(value);
+                }
+                Ok(())
+            }
+            Statement::If(if_stmt) => {
+                let cond = if_stmt
+                    .cond
+                    .clone()
+                    .eval_value(context)
+                    .and_then(|value| value.to_usize());
+                let Some(cond) = cond else {
+                    return Ok(());
+                };
+                let branch = if cond != 0 {
+                    &if_stmt.true_side
+                } else {
+                    &if_stmt.false_side
+                };
+                for stmt in branch {
+                    self.parse_initial_statement(stmt, context)?;
+                }
+                Ok(())
+            }
+            Statement::For(for_stmt) => {
+                let Some(iter) = for_stmt.range.eval_iter(context) else {
+                    return Ok(());
+                };
+                for i in iter {
+                    if let Some(var) = context.variables.get_mut(&for_stmt.var_id)
+                        && let Some(total_width) = for_stmt.var_type.total_width()
+                    {
+                        let val = Value::new(i as u64, total_width, for_stmt.var_type.signed);
+                        var.set_value(&[], val, None);
+                    }
+                    for stmt in &for_stmt.body {
+                        self.parse_initial_statement(stmt, context)?;
+                    }
+                }
+                Ok(())
+            }
+            Statement::Null => Ok(()),
+            Statement::Unsupported(token) => Err(ParserError::unsupported(
+                111,
+                LoweringPhase::SimulatorParser,
+                "initial statement",
+                "unsupported initial statement; only direct $readmemh calls are currently lowered",
+                Some(token),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn parse_readmem_file(
+        &self,
+        filename_arg: &SystemFunctionInput,
+        output: &[AssignDestination],
+        radix: u32,
+        context: &mut veryl_analyzer::Context,
+    ) -> Result<ModuleInitialMemoryValue, ParserError> {
+        let Some(filename) = Self::static_string_expr(&filename_arg.0) else {
+            return Err(ParserError::unsupported(
+                111,
+                LoweringPhase::SimulatorParser,
+                "$readmemh filename expression",
+                "filename must be a compile-time string",
+                Some(&filename_arg.0.comptime().token),
+            ));
+        };
+        let dst = match output {
+            [dst] if dst.select.is_empty() && dst.select.1.is_none() => dst,
+            [dst] => {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh destination",
+                    "destination must be a whole unpacked array variable",
+                    Some(&dst.token),
+                ));
+            }
+            _ => {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh destination",
+                    "concatenated destinations are not supported",
+                    None,
+                ));
+            }
+        };
+
+        let var = &self.module.variables[&dst.id];
+        let depth = var.r#type.total_array().ok_or_else(|| {
+            ParserError::unresolved_width(self.module, var, var.r#type.to_string())
+        })?;
+        let start_addr = if dst.index.0.is_empty() {
+            0
+        } else {
+            let Some(indices) = dst.index.eval_value(context) else {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh destination index",
+                    "destination index must be compile-time constant",
+                    Some(&dst.token),
+                ));
+            };
+            let Some(index) = var.r#type.array.calc_index(&indices) else {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh destination index",
+                    format!("destination index {indices:?} is out of range"),
+                    Some(&dst.token),
+                ));
+            };
+            index
+        };
+        if depth <= 1 {
+            return Err(ParserError::unsupported(
+                111,
+                LoweringPhase::SimulatorParser,
+                "$readmemh destination",
+                "destination must be an unpacked array",
+                Some(&dst.token),
+            ));
+        }
+
+        let total_width = resolve_total_width(self.module, var)?;
+        let element_width = total_width / depth;
+        if element_width == 0 || element_width * depth != total_width {
+            return Err(ParserError::unresolved_width(
+                self.module,
+                var,
+                var.r#type.to_string(),
+            ));
+        }
+
+        let path = self.resolve_readmem_path(&filename, &filename_arg.0.comptime().token);
+        let content = std::fs::read_to_string(&path).map_err(|err| {
+            ParserError::unsupported(
+                111,
+                LoweringPhase::SimulatorParser,
+                "$readmemh file",
+                format!("failed to read {}: {err}", path.display()),
+                Some(&filename_arg.0.comptime().token),
+            )
+        })?;
+        let words = parse_memory_content(&content, radix, element_width)?;
+        let mut value = BigUint::default();
+        let mut mask = BigUint::default();
+        let mut written_mask = BigUint::default();
+        let element_bits = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
+
+        for (addr, word_value, word_mask) in words {
+            let Some(addr) = start_addr.checked_add(addr) else {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh address",
+                    "address exceeds destination depth",
+                    Some(&dst.token),
+                ));
+            };
+            if addr >= depth {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh address",
+                    format!("address {addr} exceeds destination depth {depth}"),
+                    Some(&dst.token),
+                ));
+            }
+            let shift = addr * element_width;
+            value |= word_value << shift;
+            mask |= word_mask << shift;
+            written_mask |= &element_bits << shift;
+        }
+
+        Ok(ModuleInitialMemoryValue {
+            var_id: dst.id,
+            value,
+            mask,
+            written_mask,
+        })
+    }
+
+    fn resolve_readmem_path(
+        &self,
+        filename: &str,
+        token: &veryl_parser::token_range::TokenRange,
+    ) -> std::path::PathBuf {
+        let path = std::path::PathBuf::from(filename);
+        if path.is_absolute() {
+            return path;
+        }
+
+        let source_path = token.beg.source.to_string();
+        if source_path.is_empty() {
+            return path;
+        }
+        std::path::Path::new(&source_path)
+            .parent()
+            .map(|parent| parent.join(&path))
+            .unwrap_or(path)
+    }
+
     fn parse_inner(mut self) -> Result<SimModule, ParserError> {
         let mut ff_groups: HashMap<TriggerSet<VarId>, Vec<&veryl_analyzer::ir::FfDeclaration>> =
             HashMap::default();
@@ -256,6 +500,9 @@ impl<'a> ModuleParser<'a> {
                     let mid = self.inst_ids[self.inst_idx];
                     self.inst_idx += 1;
                     self.parse_inst_declaration(inst_decl, mid)?;
+                }
+                Declaration::Initial(init_decl) => {
+                    self.parse_initial_declaration(init_decl)?;
                 }
                 _ => {}
             }
@@ -392,6 +639,7 @@ impl<'a> ModuleParser<'a> {
             comb_blocks: self.comb_blocks,
             runtime_errors: self.ff_parser.runtime_errors().clone(),
             runtime_event_sites: self.ff_parser.runtime_event_sites().clone(),
+            initial_memory_values: self.initial_memory_values,
             comb_boundaries,
             arena: self.arena,
             store: self.store,
@@ -491,4 +739,118 @@ fn collect_glue_sources_with_window(
         }
         SLTNode::Constant(_, _, _, _) => {}
     }
+}
+
+fn parse_memory_content(
+    content: &str,
+    radix: u32,
+    width: usize,
+) -> Result<Vec<(usize, BigUint, BigUint)>, ParserError> {
+    let mut result = Vec::new();
+    let mut addr = 0usize;
+    for token in memory_tokens(content) {
+        if let Some(address) = token.strip_prefix('@') {
+            addr = usize::from_str_radix(address, 16).map_err(|err| {
+                ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh address",
+                    format!("invalid address directive {token}: {err}"),
+                    None,
+                )
+            })?;
+            continue;
+        }
+        let (value, mask) = parse_memory_word(&token, radix, width)?;
+        result.push((addr, value, mask));
+        addr += 1;
+    }
+    Ok(result)
+}
+
+fn memory_tokens(content: &str) -> Vec<String> {
+    let mut out = String::with_capacity(content.len());
+    let bytes = content.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'/' => {
+                    i += 2;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    out.push(' ');
+                    continue;
+                }
+                b'*' => {
+                    i += 2;
+                    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(bytes.len());
+                    out.push(' ');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out.split_whitespace()
+        .map(|token| token.replace('_', ""))
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn parse_memory_word(
+    token: &str,
+    radix: u32,
+    width: usize,
+) -> Result<(BigUint, BigUint), ParserError> {
+    let bits_per_digit = match radix {
+        2 => 1,
+        16 => 4,
+        _ => unreachable!(),
+    };
+    let mut value = BigUint::default();
+    let mut mask = BigUint::default();
+    for ch in token.chars() {
+        value <<= bits_per_digit;
+        mask <<= bits_per_digit;
+        match ch {
+            '0'..='9' | 'a'..='f' | 'A'..='F' => {
+                let Some(digit) = ch.to_digit(radix) else {
+                    return Err(invalid_memory_word(token));
+                };
+                value |= BigUint::from(digit);
+            }
+            'x' | 'X' | '?' => {
+                mask |= (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
+            }
+            'z' | 'Z' => {
+                let unknown = (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
+                value |= &unknown;
+                mask |= unknown;
+            }
+            _ => return Err(invalid_memory_word(token)),
+        }
+    }
+
+    if width == 0 {
+        return Ok((BigUint::default(), BigUint::default()));
+    }
+    let keep = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+    Ok((value & &keep, mask & keep))
+}
+
+fn invalid_memory_word(token: &str) -> ParserError {
+    ParserError::unsupported(
+        111,
+        LoweringPhase::SimulatorParser,
+        "$readmemh data",
+        format!("invalid data token {token}"),
+        None,
+    )
 }

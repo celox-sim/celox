@@ -60,6 +60,22 @@ pub struct VariableInfo {
     pub array_dims: Vec<usize>,
 }
 
+#[derive(Clone, Debug)]
+pub struct InitialMemoryValue {
+    pub addr: AbsoluteAddr,
+    pub value: BigUint,
+    pub mask: BigUint,
+    pub written_mask: BigUint,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModuleInitialMemoryValue {
+    pub var_id: VarId,
+    pub value: BigUint,
+    pub mask: BigUint,
+    pub written_mask: BigUint,
+}
+
 impl fmt::Debug for VariableInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VariableInfo")
@@ -139,6 +155,8 @@ pub struct Program {
     pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
     /// Pre-computed memory layout. Built after optimization, before backend codegen.
     pub layout: Option<crate::backend::MemoryLayout>,
+    /// Initial memory contents loaded from synthesizable initial blocks.
+    pub initial_memory_values: Vec<InitialMemoryValue>,
     /// Initial block statements from the top-level module (for native testbenches).
     pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
     /// Functions defined in the top-level module (for testbench function calls).
@@ -597,6 +615,7 @@ pub struct SimModule {
     pub comb_blocks: Vec<LogicPath<VarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    pub initial_memory_values: Vec<ModuleInitialMemoryValue>,
     pub comb_boundaries: HashMap<VarId, std::collections::BTreeSet<usize>>,
     pub arena: SLTNodeArena<VarId>,
     pub store: SymbolicStore<VarId>,

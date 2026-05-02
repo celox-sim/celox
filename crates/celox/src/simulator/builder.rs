@@ -576,6 +576,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
             sim.vcd_writer = Some(vcd_writer);
         }
+        sim.apply_initial_values();
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
         Ok(sim)
     }
@@ -594,6 +595,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
             sim.vcd_writer = Some(vcd_writer);
         }
+        sim.apply_initial_values();
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
         Ok(sim)
     }
@@ -611,6 +613,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
             sim.vcd_writer = Some(vcd_writer);
         }
+        sim.apply_initial_values();
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
         Ok(sim)
     }
@@ -718,6 +721,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             let backend = JitBackend::new(&program, &self.options, None)?;
 
             let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+            sim.apply_initial_values();
             sim.modify(|_| {}).map_err(SimulatorError::from)?;
             Ok(sim)
         });
@@ -807,6 +811,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
             sim.vcd_writer = Some(vcd_writer);
         }
+        sim.apply_initial_values();
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
         Ok(crate::Simulation::new(sim))
     }
