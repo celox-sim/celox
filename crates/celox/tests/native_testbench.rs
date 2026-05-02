@@ -1655,3 +1655,23 @@ fn test_arithmetic_in_assert() {
         TestResult::Pass,
     );
 }
+
+#[test]
+fn test_runtime_if_in_initial_is_left_for_testbench_runner() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var done: logic;
+            initial {
+                done = 1;
+                if done {
+                    $finish();
+                }
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}

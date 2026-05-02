@@ -283,13 +283,7 @@ impl<'a> ModuleParser<'a> {
                     .eval_value(context)
                     .and_then(|value| value.to_usize());
                 let Some(cond) = cond else {
-                    return Err(ParserError::unsupported(
-                        111,
-                        LoweringPhase::SimulatorParser,
-                        "initial if condition",
-                        "condition must be compile-time constant",
-                        Some(&if_stmt.token),
-                    ));
+                    return Ok(());
                 };
                 let branch = if cond != 0 {
                     &if_stmt.true_side
@@ -303,13 +297,7 @@ impl<'a> ModuleParser<'a> {
             }
             Statement::For(for_stmt) => {
                 let Some(iter) = for_stmt.range.eval_iter(context) else {
-                    return Err(ParserError::unsupported(
-                        111,
-                        LoweringPhase::SimulatorParser,
-                        "initial for range",
-                        "range bounds and step must be compile-time constant",
-                        Some(&for_stmt.token),
-                    ));
+                    return Ok(());
                 };
                 for i in iter {
                     if let Some(var) = context.variables.get_mut(&for_stmt.var_id)

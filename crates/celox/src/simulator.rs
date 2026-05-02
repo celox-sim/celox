@@ -421,7 +421,9 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn apply_initial_values(&mut self) {
+        let mut applied = false;
         for init in &self.program.initial_memory_values {
+            applied = true;
             let signal = self.backend.resolve_signal(&init.addr);
             let width_mask = if signal.width == 0 {
                 BigUint::default()
@@ -437,6 +439,9 @@ impl<B: SimBackend> Simulator<B> {
             } else {
                 self.backend.set_wide(signal, value);
             }
+        }
+        if applied {
+            self.dirty = true;
         }
     }
 
@@ -952,7 +957,9 @@ impl Simulator<NativeBackend> {
     /// Create a simulator from pre-compiled shared native code.
     pub fn from_shared(shared: Arc<SharedNativeCode>, program: crate::ir::Program) -> Self {
         let backend = NativeBackend::from_shared(shared);
-        Self::with_backend_and_program(backend, program, vec![])
+        let mut sim = Self::with_backend_and_program(backend, program, vec![]);
+        sim.apply_initial_values();
+        sim
     }
 
     /// Consume the simulator and return the inner native backend.

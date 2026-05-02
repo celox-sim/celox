@@ -220,3 +220,44 @@ fn test_initial_readmemb_reports_unsupported() {
         other => panic!("expected unsupported initial statement error, got {other:?}"),
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn test_initial_readmemh_applies_to_shared_native_simulator() {
+    let mem_path = temp_mem_file("readmemh_shared_native", "ca\nfe\n");
+    let code = format!(
+        r#"
+            module Top (out0: output logic<8>, out1: output logic<8>) {{
+                var mem: logic<8>[2];
+                initial {{
+                    $readmemh("{}", mem);
+                }}
+                assign out0 = mem[0];
+                assign out1 = mem[1];
+            }}
+        "#,
+        mem_path
+    );
+
+    let sim = Simulator::builder(&code, "Top").build_native().unwrap();
+    let shared = sim.shared_code();
+    let (program, _) = celox::compile_to_sir(
+        &[(&code, std::path::Path::new(""))],
+        "Top",
+        &[],
+        &[],
+        false,
+        &celox::TraceOptions::default(),
+        None,
+        None,
+        None,
+        None,
+        &[],
+        &celox::OptimizeOptions::default(),
+    )
+    .unwrap();
+    let mut sim = Simulator::from_shared(shared, program);
+
+    assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0xcau32));
+    assert_eq!(sim.get(sim.signal("out1")), BigUint::from(0xfeu32));
+}
