@@ -33,7 +33,7 @@ importers:
         version: 4.5.1
       emnapi:
         specifier: ^1.9.1
-        version: 1.9.1
+        version: 1.10.0
       lefthook:
         specifier: ^2.1.2
         version: 2.1.6
@@ -1744,14 +1744,6 @@ packages:
 
   emnapi@1.10.0:
     resolution: {integrity: sha512-swoyZjupDvLoe/KC3HZ4SY1JUN+tviT6eOZ3Px28TZAYdBHtRIiMWWrIUUH+2/9CYY4fNTID1YhYZ+kdFHszHg==}
-    peerDependencies:
-      node-addon-api: '>= 6.1.0'
-    peerDependenciesMeta:
-      node-addon-api:
-        optional: true
-
-  emnapi@1.9.1:
-    resolution: {integrity: sha512-s4RbfzgbYg9cWBZXJT6LazImJQ5p+F+LyTsCWQJXbGVdPmtCtdlwqd0Oiv3O51KyYV/Hq58xszaQ/l153tK6Uw==}
     peerDependencies:
       node-addon-api: '>= 6.1.0'
     peerDependenciesMeta:
@@ -3775,8 +3767,6 @@ snapshots:
       '@types/trusted-types': 2.0.7
 
   emnapi@1.10.0: {}
-
-  emnapi@1.9.1: {}
 
   emoji-regex-xs@1.0.0: {}
 
