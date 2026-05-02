@@ -611,10 +611,14 @@ fn render_assert_message(
                     }
                     Some(spec) => {
                         chars.next();
-                        while matches!(chars.peek(), Some('0'..='9')) {
-                            chars.next();
-                        }
-                        let spec = chars.next().unwrap_or(spec);
+                        let spec = if spec.is_ascii_digit() {
+                            while matches!(chars.peek(), Some('0'..='9')) {
+                                chars.next();
+                            }
+                            chars.next().unwrap_or(spec)
+                        } else {
+                            spec
+                        };
                         match spec {
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
                             | 'B' | 'c' | 'C' | 's' | 'S' => {
@@ -2266,6 +2270,11 @@ fn store_u64_release(base: *mut u8, byte_offset: usize, value: u64) {
     }
 }
 
+struct DrainedAssertionEvents {
+    last_message: Option<String>,
+    fatal_message: Option<String>,
+}
+
 fn publish_tb_assert_event<B: SimBackend>(
     sim: &mut Simulator<B>,
     site_id: u32,
@@ -2348,16 +2357,28 @@ fn drain_runtime_assertions<B: SimBackend>(
     sim: &mut Simulator<B>,
     ctx: &mut DetailedExecContext,
     location: Option<&SourceLocation>,
-) -> Option<String> {
+) -> DrainedAssertionEvents {
     let mut last_message = None;
+    let mut fatal_message = None;
     let format_ctx = RuntimeFormatContext {
         tb_time: Some(ctx.current_time),
         scope: None,
     };
     for event in sim.drain_runtime_events_with_context(format_ctx) {
         match event {
-            RuntimeEvent::AssertContinue { message } | RuntimeEvent::AssertFatal { message } => {
+            RuntimeEvent::AssertContinue { message } => {
                 last_message = Some(message.clone());
+                ctx.assertions.push(AssertionResult {
+                    passed: false,
+                    message: Some(message),
+                    location: location.cloned(),
+                });
+            }
+            RuntimeEvent::AssertFatal { message } => {
+                last_message = Some(message.clone());
+                if fatal_message.is_none() {
+                    fatal_message = Some(message.clone());
+                }
                 ctx.assertions.push(AssertionResult {
                     passed: false,
                     message: Some(message),
@@ -2376,7 +2397,10 @@ fn drain_runtime_assertions<B: SimBackend>(
             RuntimeEvent::Display { .. } => {}
         }
     }
-    last_message
+    DrainedAssertionEvents {
+        last_message,
+        fatal_message,
+    }
 }
 
 /// Like [`exec`] but collects assertion results into `ctx` instead of
@@ -2412,11 +2436,21 @@ fn exec_one_detailed<B: SimBackend>(
                     for _ in 0..n {
                         if let Err(e) = sim.tick(*clock_event) {
                             ctx.current_time = ctx.current_time.saturating_add(1);
-                            drain_runtime_assertions(sim, ctx, None);
+                            let drained = drain_runtime_assertions(sim, ctx, None);
+                            if ctx.stop_on_fatal_assert {
+                                if let Some(message) = drained.fatal_message {
+                                    return ExecResult::Fail(message);
+                                }
+                            }
                             return ExecResult::Fail(format!("{e}"));
                         }
                         ctx.current_time = ctx.current_time.saturating_add(1);
-                        drain_runtime_assertions(sim, ctx, None);
+                        let drained = drain_runtime_assertions(sim, ctx, None);
+                        if ctx.stop_on_fatal_assert {
+                            if let Some(message) = drained.fatal_message {
+                                return ExecResult::Fail(message);
+                            }
+                        }
                     }
                     ExecResult::Continue
                 }
@@ -2434,11 +2468,21 @@ fn exec_one_detailed<B: SimBackend>(
             for _ in 0..*duration {
                 if let Err(e) = sim.tick(*clock_event) {
                     ctx.current_time = ctx.current_time.saturating_add(1);
-                    drain_runtime_assertions(sim, ctx, None);
+                    let drained = drain_runtime_assertions(sim, ctx, None);
+                    if ctx.stop_on_fatal_assert {
+                        if let Some(message) = drained.fatal_message {
+                            return ExecResult::Fail(message);
+                        }
+                    }
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
                 ctx.current_time = ctx.current_time.saturating_add(1);
-                drain_runtime_assertions(sim, ctx, None);
+                let drained = drain_runtime_assertions(sim, ctx, None);
+                if ctx.stop_on_fatal_assert {
+                    if let Some(message) = drained.fatal_message {
+                        return ExecResult::Fail(message);
+                    }
+                }
             }
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
@@ -2466,6 +2510,7 @@ fn exec_one_detailed<B: SimBackend>(
             } else {
                 publish_tb_assert_event(sim, *site_id, message, ptr);
                 let rendered_message = drain_runtime_assertions(sim, ctx, location.as_ref())
+                    .last_message
                     .or_else(|| render_assert_message(message, ptr, ctx.current_time));
                 if !continue_on_fail && ctx.stop_on_fatal_assert {
                     ExecResult::Fail(

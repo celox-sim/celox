@@ -1151,6 +1151,27 @@ fn test_passing_assert_uses_runtime_event_formatting() {
 }
 
 #[test]
+fn test_passing_assert_preserves_single_character_format_specifiers() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b1, "a=%d b=%d", 8'd3, 8'd7);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert!(detailed.assertions[0].passed);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("a=3 b=7"),
+    );
+}
+
+#[test]
 fn test_assert_format_args_render_percent_m_and_t_without_args() {
     let code = r#"
         #[test(t)]
@@ -1362,6 +1383,30 @@ fn test_run_test_detailed_collects_ff_assert_runtime_events() {
     assert_eq!(detailed.assertions.len(), 1);
     assert!(!detailed.assertions[0].passed);
     assert_eq!(detailed.assertions[0].message.as_deref(), Some("ff a=0"));
+}
+
+#[test]
+fn test_run_test_stops_on_ff_fatal_runtime_event() {
+    let code = r#"
+        module Top (clk: input clock) {
+            always_ff (clk) {
+                $assert(1'b0, "ff fatal");
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst dut: Top (clk);
+            initial {
+                clk.next(2);
+                $assert_continue(1'b0, "after fatal");
+                $finish();
+            }
+        }
+    "#;
+    let result = Simulator::builder(code, "t").run_test().unwrap();
+    assert_eq!(result, TestResult::Fail("ff fatal".to_string()));
 }
 
 // ── Array and bit select ───────────────────────────────────────────────
