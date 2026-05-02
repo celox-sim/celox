@@ -747,7 +747,9 @@ fn lower_instruction(
                 value: RUNTIME_EVENT_WRITING,
             });
             let slot_base = RUNTIME_EVENT_HEADER_SIZE as i32;
-            block.push(MInst::AtomicStorePtrIndexed {
+            // Mark the slot as being written before updating its payload. Readers
+            // acquire-load sequence words; payload/site/arg fields are plain data.
+            block.push(MInst::ReleaseStorePtrIndexed {
                 ptr: event_ptr,
                 offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
                 index: slot_off,
@@ -837,7 +839,9 @@ fn lower_instruction(
                     });
                 }
             }
-            block.push(MInst::AtomicStorePtrIndexed {
+            // Publish this slot after all payload writes. This is the release side
+            // of the ring-buffer protocol; payload words themselves are not atomic.
+            block.push(MInst::ReleaseStorePtrIndexed {
                 ptr: event_ptr,
                 offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
                 index: slot_off,
@@ -850,7 +854,8 @@ fn lower_instruction(
                 src: seq_v,
                 imm: 1,
             });
-            block.push(MInst::AtomicStorePtr {
+            // Advance the global write sequence after the slot sequence is visible.
+            block.push(MInst::ReleaseStorePtr {
                 ptr: event_ptr,
                 offset: 0,
                 src: next_seq,

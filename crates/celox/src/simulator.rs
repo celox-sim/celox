@@ -211,6 +211,11 @@ fn collect_runtime_events(
         return Vec::new();
     }
 
+    // Ring-buffer synchronization protocol:
+    // - writers store event payload/site/arg fields normally;
+    // - writers publish slot/global sequence words with release semantics;
+    // - readers acquire-load sequence words, then read payload normally;
+    // - readers re-check the slot sequence after reading payload to reject races.
     let write_seq = read_seq_u64(0);
     let mut events = Vec::new();
     let capacity = layout.runtime_event_capacity as u64;

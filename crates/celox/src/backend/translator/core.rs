@@ -424,6 +424,8 @@ impl SIRTranslator {
             .builder
             .ins()
             .iadd_imm(slot_addr, RUNTIME_EVENT_SLOT_SEQ_OFFSET as i64);
+        // Mark the slot as being written. Runtime-event readers acquire-load
+        // sequence words and read payload words only while the sequence is stable.
         state.builder.ins().atomic_rmw(
             types::I64,
             MemFlags::new(),
@@ -486,6 +488,8 @@ impl SIRTranslator {
             .builder
             .ins()
             .iadd_imm(slot_addr, RUNTIME_EVENT_SLOT_SEQ_OFFSET as i64);
+        // Publish the slot after all payload stores. Only the sequence words
+        // participate in the acquire/release protocol; payload stores are plain.
         state.builder.ins().atomic_rmw(
             types::I64,
             MemFlags::new(),
@@ -494,6 +498,7 @@ impl SIRTranslator {
             seq,
         );
         let next = state.builder.ins().iadd_imm(seq, 1);
+        // Advance the global write sequence after the slot sequence is visible.
         state.builder.ins().atomic_rmw(
             types::I64,
             MemFlags::new(),
