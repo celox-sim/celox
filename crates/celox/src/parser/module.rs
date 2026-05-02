@@ -19,6 +19,7 @@ use veryl_analyzer::ir::{
     AssignDestination, Component, Declaration, Expression, InstDeclaration, Module, Statement,
     SystemFunctionInput, SystemFunctionKind, VarId,
 };
+use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::StrId;
 
@@ -253,18 +254,72 @@ impl<'a> ModuleParser<'a> {
         &mut self,
         decl: &veryl_analyzer::ir::InitialDeclaration,
     ) -> Result<(), ParserError> {
+        let mut context = veryl_analyzer::Context::default();
+        context.variables = self.module.variables.clone();
         for stmt in &decl.statements {
-            self.parse_initial_statement(stmt)?;
+            self.parse_initial_statement(stmt, &mut context)?;
         }
         Ok(())
     }
 
-    fn parse_initial_statement(&mut self, stmt: &Statement) -> Result<(), ParserError> {
+    fn parse_initial_statement(
+        &mut self,
+        stmt: &Statement,
+        context: &mut veryl_analyzer::Context,
+    ) -> Result<(), ParserError> {
         match stmt {
             Statement::SystemFunctionCall(call) => {
                 if let SystemFunctionKind::Readmemh(filename, output) = &call.kind {
                     let value = self.parse_readmem_file(filename, output.0.as_slice(), 16)?;
                     self.initial_memory_values.push(value);
+                }
+                Ok(())
+            }
+            Statement::If(if_stmt) => {
+                let cond = if_stmt
+                    .cond
+                    .clone()
+                    .eval_value(context)
+                    .and_then(|value| value.to_usize());
+                let Some(cond) = cond else {
+                    return Err(ParserError::unsupported(
+                        111,
+                        LoweringPhase::SimulatorParser,
+                        "initial if condition",
+                        "condition must be compile-time constant",
+                        Some(&if_stmt.token),
+                    ));
+                };
+                let branch = if cond != 0 {
+                    &if_stmt.true_side
+                } else {
+                    &if_stmt.false_side
+                };
+                for stmt in branch {
+                    self.parse_initial_statement(stmt, context)?;
+                }
+                Ok(())
+            }
+            Statement::For(for_stmt) => {
+                let Some(iter) = for_stmt.range.eval_iter(context) else {
+                    return Err(ParserError::unsupported(
+                        111,
+                        LoweringPhase::SimulatorParser,
+                        "initial for range",
+                        "range bounds and step must be compile-time constant",
+                        Some(&for_stmt.token),
+                    ));
+                };
+                for i in iter {
+                    if let Some(var) = context.variables.get_mut(&for_stmt.var_id)
+                        && let Some(total_width) = for_stmt.var_type.total_width()
+                    {
+                        let val = Value::new(i as u64, total_width, for_stmt.var_type.signed);
+                        var.set_value(&[], val, None);
+                    }
+                    for stmt in &for_stmt.body {
+                        self.parse_initial_statement(stmt, context)?;
+                    }
                 }
                 Ok(())
             }

@@ -74,6 +74,55 @@ fn test_initial_readmemh_supports_comments_address_and_xz(sim) {
     assert_eq!(sim.get_four_state(sim.signal("out3")), (BigUint::from(0xf0u32), BigUint::from(0xf0u32)));
 }
 
+fn test_initial_readmemh_supports_const_if(sim) {
+    @omit_veryl;
+    @setup {
+        let hex_path = temp_mem_file("readmemh_if", "21\n43\n65\n87\n");
+        let other_path = temp_mem_file("readmemh_if_dead", "00\n00\n00\n00\n");
+        let code = format!(r#"
+            module Top (out0: output logic<8>, out3: output logic<8>) {{
+                var mem: logic<8>[4];
+                initial {{
+                    if 1'd1 {{
+                        $readmemh("{}", mem);
+                    }} else {{
+                        $readmemh("{}", mem);
+                    }}
+                }}
+                assign out0 = mem[0];
+                assign out3 = mem[3];
+            }}
+        "#, hex_path, other_path);
+    }
+    @build Simulator::builder(&code, "Top");
+    assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0x21u32));
+    assert_eq!(sim.get(sim.signal("out3")), BigUint::from(0x87u32));
+}
+
+fn test_initial_readmemh_supports_const_for(sim) {
+    @omit_veryl;
+    @setup {
+        let mem_path = temp_mem_file("readmemh_for", "11\n22\n33\n44\n");
+        let code = format!(r#"
+            module Top (out0: output logic<8>, out2: output logic<8>) {{
+                var mem: logic<8>[4];
+                initial {{
+                    for i in 0..2 {{
+                        if i == 1 {{
+                            $readmemh("{}", mem);
+                        }}
+                    }}
+                }}
+                assign out0 = mem[0];
+                assign out2 = mem[2];
+            }}
+        "#, mem_path);
+    }
+    @build Simulator::builder(&code, "Top");
+    assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0x11u32));
+    assert_eq!(sim.get(sim.signal("out2")), BigUint::from(0x33u32));
+}
+
 }
 
 #[test]
