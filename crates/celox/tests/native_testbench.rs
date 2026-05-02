@@ -1130,6 +1130,27 @@ fn test_assert_format_args_follow_veryl_single_char_specifiers() {
 }
 
 #[test]
+fn test_passing_assert_uses_runtime_event_formatting() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b1, "cnt=%0d hex=%08x", 8'd3, 8'h0f);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert!(detailed.assertions[0].passed);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("cnt=3 hex=f"),
+    );
+}
+
+#[test]
 fn test_assert_format_args_render_percent_m_and_t_without_args() {
     let code = r#"
         #[test(t)]
@@ -1146,6 +1167,38 @@ fn test_assert_format_args_render_percent_m_and_t_without_args() {
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
         Some("loc=<hierarchy> time=0"),
+    );
+}
+
+#[test]
+fn test_ff_runtime_events_drain_with_per_tick_time() {
+    let code = r#"
+        module Top (clk: input clock) {
+            always_ff (clk) {
+                $assert_continue(1'b0, "ff time=%t");
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst dut: Top (clk);
+            initial {
+                clk.next(3);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 3);
+    assert_eq!(
+        detailed
+            .assertions
+            .iter()
+            .map(|a| a.message.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("ff time=1"), Some("ff time=2"), Some("ff time=3")],
     );
 }
 

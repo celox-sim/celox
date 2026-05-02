@@ -611,10 +611,10 @@ fn render_assert_message(
                     }
                     Some(spec) => {
                         chars.next();
-                        // Keep native testbench formatting aligned with upstream Veryl's
-                        // `format_display_string()`: only single-character specifiers are
-                        // recognized today, so width/flag modifiers such as `%0d` and `%08x`
-                        // remain literal text rather than being parsed here independently.
+                        while matches!(chars.peek(), Some('0'..='9')) {
+                            chars.next();
+                        }
+                        let spec = chars.next().unwrap_or(spec);
                         match spec {
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
                             | 'B' | 'c' | 'C' | 's' | 'S' => {
@@ -2411,12 +2411,13 @@ fn exec_one_detailed<B: SimBackend>(
                 Ok(n) => {
                     for _ in 0..n {
                         if let Err(e) = sim.tick(*clock_event) {
+                            ctx.current_time = ctx.current_time.saturating_add(1);
                             drain_runtime_assertions(sim, ctx, None);
                             return ExecResult::Fail(format!("{e}"));
                         }
+                        ctx.current_time = ctx.current_time.saturating_add(1);
                         drain_runtime_assertions(sim, ctx, None);
                     }
-                    ctx.current_time = ctx.current_time.saturating_add(n);
                     ExecResult::Continue
                 }
                 Err(e) => ExecResult::Fail(e),
@@ -2432,12 +2433,13 @@ fn exec_one_detailed<B: SimBackend>(
             sim_set_u64(sim, *reset_signal, (*assert_value).into());
             for _ in 0..*duration {
                 if let Err(e) = sim.tick(*clock_event) {
+                    ctx.current_time = ctx.current_time.saturating_add(1);
                     drain_runtime_assertions(sim, ctx, None);
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
+                ctx.current_time = ctx.current_time.saturating_add(1);
                 drain_runtime_assertions(sim, ctx, None);
             }
-            ctx.current_time = ctx.current_time.saturating_add(*duration);
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
         }
