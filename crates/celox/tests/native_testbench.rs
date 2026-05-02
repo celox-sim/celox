@@ -1284,6 +1284,33 @@ fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
     assert_eq!(detailed.assertions[1].message.as_deref(), Some("second"));
 }
 
+#[test]
+fn test_run_test_detailed_collects_ff_assert_runtime_events() {
+    let code = r#"
+        module Top (clk: input clock, a: input logic<8>) {
+            always_ff (clk) {
+                $assert_continue(a != 8'd0, "ff a=%0d", a);
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var a: logic<8>;
+            inst dut: Top (clk, a);
+            initial {
+                clk.next(1);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert!(!detailed.assertions[0].passed);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("ff a=0"));
+}
+
 // ── Array and bit select ───────────────────────────────────────────────
 
 #[test]

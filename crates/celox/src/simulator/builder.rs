@@ -522,6 +522,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.options.optimize_options,
         )?;
 
+        // Register testbench runtime-event sites before layout fixes the ring geometry.
+        crate::testbench::register_runtime_event_sites(&mut program);
+
         // Build memory layout (consumes address_aliases for offset sharing)
         program.build_layout(self.options.four_state);
 
