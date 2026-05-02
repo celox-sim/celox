@@ -31,6 +31,16 @@
   "packageRules": [
     {
       "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "napi",
+        "napi-derive"
+      ],
+      "groupName": "napi-rs crates"
+    },
+    {
+      "matchManagers": [
         "cargo",
         "npm"
       ],
