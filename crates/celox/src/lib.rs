@@ -97,6 +97,8 @@ pub use simulator::RuntimeEvent;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::RuntimeEventDrain;
 #[cfg(not(target_arch = "wasm32"))]
+pub use simulator::RuntimeFormatContext;
+#[cfg(not(target_arch = "wasm32"))]
 pub use simulator::Simulator;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::SimulatorBuilder;

@@ -6,15 +6,21 @@
 //! heap allocation; wider signals fall back to `BigUint`.
 
 use crate::backend::get_byte_size;
+use crate::backend::memory_layout::{
+    RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+    RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+    RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+};
 use crate::backend::traits::SimBackend;
 use crate::display_format::{DisplayFormatArg, format_display_arg};
-use crate::ir::{AbsoluteAddr, SignalRef};
-use crate::simulator::Simulator;
+use crate::ir::{AbsoluteAddr, Program, RuntimeEventKind, RuntimeEventSite, SignalRef};
+use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use veryl_analyzer::ir::{
-    AssertKind, Expression, Factor, ForBound, ForRange, Op, Statement, SystemFunctionInput,
-    SystemFunctionKind, TbMethod, TbMethodCall, VarId,
+    AssertKind, Expression, Factor, ForBound, ForRange, Function, Op, Statement,
+    SystemFunctionInput, SystemFunctionKind, TbMethod, TbMethodCall, VarId,
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
@@ -43,7 +49,8 @@ pub struct AssertionResult {
     pub location: Option<SourceLocation>,
 }
 
-/// Detailed test result collecting all assertion outcomes.
+/// Detailed test result with assertion outcomes observed before the test
+/// finishes or stops on a fatal failure.
 #[derive(Debug, Clone)]
 pub struct TestResultDetailed {
     pub passed: bool,
@@ -94,6 +101,7 @@ pub(crate) enum TestbenchStatement<B: SimBackend> {
     },
     Assert {
         expr: CompiledExpr,
+        site_id: u32,
         continue_on_fail: bool,
         message: Option<AssertMessage>,
         location: Option<SourceLocation>,
@@ -413,6 +421,130 @@ fn compile_assert_arg<B: SimBackend>(
     }
 }
 
+fn assert_arg_width(input: &SystemFunctionInput) -> usize {
+    let expr = &input.0;
+    let ctx_width = expr.comptime().expr_context.width;
+    if ctx_width > 0 {
+        ctx_width
+    } else if let Some(type_width) = expr.comptime().r#type.total_width() {
+        type_width
+    } else if let Ok(value) = expr.comptime().get_value() {
+        value.width()
+    } else {
+        0
+    }
+}
+
+fn runtime_event_site_for_assert(
+    kind: &AssertKind,
+    args: &[SystemFunctionInput],
+) -> RuntimeEventSite {
+    let (template, value_args) = if args
+        .first()
+        .and_then(|arg| static_string_expr(&arg.0))
+        .is_some()
+    {
+        (
+            args.first().and_then(|arg| static_string_expr(&arg.0)),
+            &args[1..],
+        )
+    } else {
+        (None, args)
+    };
+    RuntimeEventSite {
+        kind: match kind {
+            AssertKind::Fatal => RuntimeEventKind::AssertFatal,
+            AssertKind::Continue => RuntimeEventKind::AssertContinue,
+        },
+        template,
+        arg_widths: value_args.iter().map(assert_arg_width).collect(),
+        arg_signed: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().expr_context.signed)
+            .collect(),
+        arg_is_string: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().r#type.is_string())
+            .collect(),
+    }
+}
+
+fn function_body(
+    funcs: &fxhash::FxHashMap<VarId, Function>,
+    fc: &veryl_analyzer::ir::FunctionCall,
+) -> Option<veryl_analyzer::ir::FunctionBody> {
+    let func = funcs.get(&fc.id)?;
+    if let Some(idx) = &fc.index {
+        func.get_function(idx)
+    } else {
+        func.get_function(&[])
+    }
+}
+
+fn collect_runtime_event_sites(
+    stmts: &[Statement],
+    funcs: &fxhash::FxHashMap<VarId, Function>,
+    out: &mut Vec<RuntimeEventSite>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Statement::SystemFunctionCall(sf) => {
+                if let SystemFunctionKind::Assert { kind, args, .. } = &sf.kind {
+                    out.push(runtime_event_site_for_assert(kind, args));
+                }
+            }
+            Statement::If(s) => {
+                collect_runtime_event_sites(&s.true_side, funcs, out);
+                collect_runtime_event_sites(&s.false_side, funcs, out);
+            }
+            Statement::For(s) => collect_runtime_event_sites(&s.body, funcs, out),
+            Statement::FunctionCall(fc) => {
+                if let Some(body) = function_body(funcs, fc) {
+                    collect_runtime_event_sites(&body.statements, funcs, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn count_assert_statements(
+    stmts: &[Statement],
+    funcs: &fxhash::FxHashMap<VarId, Function>,
+) -> usize {
+    let mut count = 0;
+    for stmt in stmts {
+        match stmt {
+            Statement::SystemFunctionCall(sf) => {
+                if matches!(&sf.kind, SystemFunctionKind::Assert { .. }) {
+                    count += 1;
+                }
+            }
+            Statement::If(s) => {
+                count += count_assert_statements(&s.true_side, funcs);
+                count += count_assert_statements(&s.false_side, funcs);
+            }
+            Statement::For(s) => count += count_assert_statements(&s.body, funcs),
+            Statement::FunctionCall(fc) => {
+                if let Some(body) = function_body(funcs, fc) {
+                    count += count_assert_statements(&body.statements, funcs);
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+pub(crate) fn register_runtime_event_sites(program: &mut Program) {
+    let Some(stmts) = program.initial_statements.as_ref() else {
+        return;
+    };
+    let mut sites = Vec::new();
+    collect_runtime_event_sites(stmts, &program.tb_functions, &mut sites);
+    program.runtime_event_sites.extend(sites);
+}
+
 fn compile_assert_message<B: SimBackend>(
     args: &[SystemFunctionInput],
     ec: &ExprCompiler<'_, B>,
@@ -480,10 +612,14 @@ fn render_assert_message(
                     }
                     Some(spec) => {
                         chars.next();
-                        // Keep native testbench formatting aligned with upstream Veryl's
-                        // `format_display_string()`: only single-character specifiers are
-                        // recognized today, so width/flag modifiers such as `%0d` and `%08x`
-                        // remain literal text rather than being parsed here independently.
+                        let spec = if spec.is_ascii_digit() {
+                            while matches!(chars.peek(), Some('0'..='9')) {
+                                chars.next();
+                            }
+                            chars.next().unwrap_or(spec)
+                        } else {
+                            spec
+                        };
                         match spec {
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
                             | 'B' | 'c' | 'C' | 's' | 'S' => {
@@ -1230,7 +1366,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         }
     }
 
-    pub(crate) fn convert(&self, stmts: &[Statement]) -> Vec<TestbenchStatement<B>> {
+    pub(crate) fn convert(&mut self, stmts: &[Statement]) -> Vec<TestbenchStatement<B>> {
         let p = self.sim.program();
         let root_instance_id = *p
             .instance_ids
@@ -1242,9 +1378,14 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             root_instance_id,
             root_module_id,
         };
+        let site_count = count_assert_statements(stmts, &p.tb_functions) as u32;
+        let mut next_assert_site_id = p
+            .runtime_event_sites
+            .len()
+            .saturating_sub(site_count as usize) as u32;
         stmts
             .iter()
-            .filter_map(|s| self.convert_stmt(s, &ec))
+            .filter_map(|s| self.convert_stmt(s, &ec, &mut next_assert_site_id))
             .collect()
     }
 
@@ -1252,6 +1393,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         &self,
         stmt: &Statement,
         ec: &ExprCompiler<'_, B>,
+        next_assert_site_id: &mut u32,
     ) -> Option<TestbenchStatement<B>> {
         fn convert_for_bound<B: SimBackend>(
             bound: &ForBound,
@@ -1271,8 +1413,11 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             Statement::TbMethodCall(tb) => self.convert_tb_method(tb, ec),
             Statement::SystemFunctionCall(sf) => match &sf.kind {
                 SystemFunctionKind::Assert { kind, cond, args } => {
+                    let site_id = *next_assert_site_id;
+                    *next_assert_site_id = next_assert_site_id.saturating_add(1);
                     Some(TestbenchStatement::Assert {
                         expr: ec.compile(&cond.0),
+                        site_id,
                         continue_on_fail: matches!(kind, AssertKind::Continue),
                         message: compile_assert_message(args, ec),
                         location: extract_source_location(&sf.comptime.token),
@@ -1286,19 +1431,19 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                 then_block: s
                     .true_side
                     .iter()
-                    .filter_map(|s| self.convert_stmt(s, ec))
+                    .filter_map(|s| self.convert_stmt(s, ec, next_assert_site_id))
                     .collect(),
                 else_block: s
                     .false_side
                     .iter()
-                    .filter_map(|s| self.convert_stmt(s, ec))
+                    .filter_map(|s| self.convert_stmt(s, ec, next_assert_site_id))
                     .collect(),
             }),
             Statement::For(s) => {
                 let body: Vec<_> = s
                     .body
                     .iter()
-                    .filter_map(|s| self.convert_stmt(s, ec))
+                    .filter_map(|s| self.convert_stmt(s, ec, next_assert_site_id))
                     .collect();
                 let lv = self
                     .resolve_loop_var(&s.var_id)
@@ -1363,7 +1508,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     })
             }
             Statement::Break => Some(TestbenchStatement::Break),
-            Statement::FunctionCall(fc) => self.convert_function_call(fc, ec),
+            Statement::FunctionCall(fc) => self.convert_function_call(fc, ec, next_assert_site_id),
             _ => None,
         }
     }
@@ -1374,6 +1519,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         &self,
         fc: &veryl_analyzer::ir::FunctionCall,
         ec: &ExprCompiler<'_, B>,
+        next_assert_site_id: &mut u32,
     ) -> Option<TestbenchStatement<B>> {
         let program = self.sim.program();
         let func = program.tb_functions.get(&fc.id)?;
@@ -1401,7 +1547,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
 
         // Inline body statements
         for stmt in &func_body.statements {
-            if let Some(ts) = self.convert_stmt(stmt, ec) {
+            if let Some(ts) = self.convert_stmt(stmt, ec, next_assert_site_id) {
                 stmts.push(ts);
             }
         }
@@ -2017,7 +2163,6 @@ pub(crate) fn run_testbench<B: SimBackend>(
 ) -> TestResult {
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
-        stop_on_fatal_assert: true,
         current_time: 0,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
@@ -2074,15 +2219,14 @@ pub fn run_compiled_testbench<B: SimBackend>(
     run_testbench(sim, &tb.stmts)
 }
 
-/// Run the testbench collecting **all** assertion results instead of stopping
-/// at the first failure.
+/// Run the testbench and return assertion results observed before the test
+/// finishes or stops on a fatal failure.
 pub(crate) fn run_testbench_detailed<B: SimBackend>(
     sim: &mut Simulator<B>,
     stmts: &[TestbenchStatement<B>],
 ) -> TestResultDetailed {
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
-        stop_on_fatal_assert: false,
         current_time: 0,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
@@ -2095,8 +2239,165 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
 
 struct DetailedExecContext {
     assertions: Vec<AssertionResult>,
-    stop_on_fatal_assert: bool,
     current_time: u64,
+}
+
+fn assert_event_args(message: &Option<AssertMessage>) -> &[CompiledAssertArg] {
+    match message {
+        Some(AssertMessage::Formatted { args, .. }) | Some(AssertMessage::DynamicArgs(args)) => {
+            args
+        }
+        None => &[],
+    }
+}
+
+fn write_u64_volatile(base: *mut u8, byte_offset: usize, value: u64) {
+    unsafe {
+        std::ptr::write_volatile(base.add(byte_offset) as *mut u64, value);
+    }
+}
+
+fn load_u64_acquire(base: *const u8, byte_offset: usize) -> u64 {
+    unsafe { (*(base.add(byte_offset) as *const AtomicU64)).load(Ordering::Acquire) }
+}
+
+fn store_u64_release(base: *mut u8, byte_offset: usize, value: u64) {
+    unsafe {
+        (*(base.add(byte_offset) as *const AtomicU64)).store(value, Ordering::Release);
+    }
+}
+
+struct DrainedAssertionEvents {
+    last_message: Option<String>,
+    fatal_message: Option<String>,
+}
+
+fn publish_tb_assert_event<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    site_id: u32,
+    message: &Option<AssertMessage>,
+    memory: *mut u8,
+) {
+    let args = assert_event_args(message)
+        .iter()
+        .map(|arg| arg.expr.eval_value(memory).to_biguint())
+        .collect::<Vec<_>>();
+    let layout = sim.layout();
+    let Some(site_layout) = layout
+        .runtime_event_site_layouts
+        .get(site_id as usize)
+        .cloned()
+    else {
+        return;
+    };
+    let capacity = layout.runtime_event_capacity;
+    if capacity == 0 {
+        return;
+    }
+    let slot_size = layout.runtime_event_slot_size;
+    let (event_ptr_const, buffer_size) = sim.backend_ref().runtime_event_buffer_as_ptr();
+    if RUNTIME_EVENT_HEADER_SIZE > buffer_size {
+        return;
+    }
+    let event_ptr = event_ptr_const as *mut u8;
+    let seq = load_u64_acquire(event_ptr_const, 0);
+    let slot = (seq as usize) & (capacity - 1);
+    let slot_base = RUNTIME_EVENT_HEADER_SIZE + slot * slot_size;
+    if slot_base + slot_size > buffer_size {
+        return;
+    }
+
+    store_u64_release(
+        event_ptr,
+        slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+        RUNTIME_EVENT_WRITING,
+    );
+    write_u64_volatile(
+        event_ptr,
+        slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET,
+        site_id as u64,
+    );
+    let arg_count = args.len().min(site_layout.args.len());
+    write_u64_volatile(
+        event_ptr,
+        slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+        arg_count as u64,
+    );
+
+    for (idx, value) in args.iter().take(arg_count).enumerate() {
+        let arg_layout = &site_layout.args[idx];
+        let words = value.to_u64_digits();
+        for word_idx in 0..arg_layout.word_count {
+            let value_word = words.get(word_idx).copied().unwrap_or(0);
+            write_u64_volatile(
+                event_ptr,
+                slot_base
+                    + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                    + (arg_layout.value_word_offset + word_idx) * 8,
+                value_word,
+            );
+            write_u64_volatile(
+                event_ptr,
+                slot_base
+                    + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                    + (arg_layout.mask_word_offset + word_idx) * 8,
+                0,
+            );
+        }
+    }
+
+    store_u64_release(event_ptr, slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET, seq);
+    store_u64_release(event_ptr, 0, seq.wrapping_add(1));
+}
+
+fn drain_runtime_assertions<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    ctx: &mut DetailedExecContext,
+    location: Option<&SourceLocation>,
+) -> DrainedAssertionEvents {
+    let mut last_message = None;
+    let mut fatal_message = None;
+    let format_ctx = RuntimeFormatContext {
+        tb_time: Some(ctx.current_time),
+        scope: None,
+    };
+    for event in sim.drain_runtime_events_with_context(format_ctx) {
+        match event {
+            RuntimeEvent::AssertContinue { message } => {
+                last_message = Some(message.clone());
+                ctx.assertions.push(AssertionResult {
+                    passed: false,
+                    message: Some(message),
+                    location: location.cloned(),
+                });
+            }
+            RuntimeEvent::AssertFatal { message } => {
+                last_message = Some(message.clone());
+                if fatal_message.is_none() {
+                    fatal_message = Some(message.clone());
+                }
+                ctx.assertions.push(AssertionResult {
+                    passed: false,
+                    message: Some(message),
+                    location: location.cloned(),
+                });
+            }
+            RuntimeEvent::Missed { count } => {
+                let message = format!("missed {count} runtime events");
+                last_message = Some(message.clone());
+                ctx.assertions.push(AssertionResult {
+                    passed: false,
+                    message: Some(message),
+                    location: None,
+                });
+            }
+            RuntimeEvent::Display { .. } => {}
+        }
+    }
+    DrainedAssertionEvents {
+        last_message,
+        fatal_message,
+    }
 }
 
 /// Like [`exec`] but collects assertion results into `ctx` instead of
@@ -2130,9 +2431,17 @@ fn exec_one_detailed<B: SimBackend>(
             match eval_clock_count(sim, count) {
                 Ok(n) => {
                     for _ in 0..n {
-                        sim.tick(*clock_event).unwrap();
+                        if let Err(e) = sim.tick(*clock_event) {
+                            ctx.current_time = ctx.current_time.saturating_add(1);
+                            let drained = drain_runtime_assertions(sim, ctx, None);
+                            if let Some(message) = drained.fatal_message {
+                                return ExecResult::Fail(message);
+                            }
+                            return ExecResult::Fail(format!("{e}"));
+                        }
+                        ctx.current_time = ctx.current_time.saturating_add(1);
+                        drain_runtime_assertions(sim, ctx, None);
                     }
-                    ctx.current_time = ctx.current_time.saturating_add(n);
                     ExecResult::Continue
                 }
                 Err(e) => ExecResult::Fail(e),
@@ -2148,15 +2457,22 @@ fn exec_one_detailed<B: SimBackend>(
             sim_set_u64(sim, *reset_signal, (*assert_value).into());
             for _ in 0..*duration {
                 if let Err(e) = sim.tick(*clock_event) {
+                    ctx.current_time = ctx.current_time.saturating_add(1);
+                    let drained = drain_runtime_assertions(sim, ctx, None);
+                    if let Some(message) = drained.fatal_message {
+                        return ExecResult::Fail(message);
+                    }
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
+                ctx.current_time = ctx.current_time.saturating_add(1);
+                drain_runtime_assertions(sim, ctx, None);
             }
-            ctx.current_time = ctx.current_time.saturating_add(*duration);
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
         }
         TestbenchStatement::Assert {
             expr,
+            site_id,
             continue_on_fail,
             message,
             location,
@@ -2166,16 +2482,26 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let (ptr, _) = sim.memory_as_mut_ptr();
             let passed = expr.eval_bool(ptr);
-            let rendered_message = render_assert_message(message, ptr, ctx.current_time);
-            ctx.assertions.push(AssertionResult {
-                passed,
-                message: rendered_message.clone(),
-                location: location.clone(),
-            });
-            if !passed && !continue_on_fail && ctx.stop_on_fatal_assert {
-                ExecResult::Fail(rendered_message.unwrap_or_else(|| "assertion failed".to_string()))
-            } else {
+            if passed {
+                let rendered_message = render_assert_message(message, ptr, ctx.current_time);
+                ctx.assertions.push(AssertionResult {
+                    passed,
+                    message: rendered_message.clone(),
+                    location: location.clone(),
+                });
                 ExecResult::Continue
+            } else {
+                publish_tb_assert_event(sim, *site_id, message, ptr);
+                let rendered_message = drain_runtime_assertions(sim, ctx, location.as_ref())
+                    .last_message
+                    .or_else(|| render_assert_message(message, ptr, ctx.current_time));
+                if !continue_on_fail {
+                    ExecResult::Fail(
+                        rendered_message.unwrap_or_else(|| "assertion failed".to_string()),
+                    )
+                } else {
+                    ExecResult::Continue
+                }
             }
         }
         TestbenchStatement::If {
@@ -2227,5 +2553,31 @@ fn exec_one_detailed<B: SimBackend>(
         }
         TestbenchStatement::Break => ExecResult::Break,
         TestbenchStatement::Finish => ExecResult::Finished,
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::{Simulator, TestResult};
+
+    #[test]
+    fn traced_build_registers_compiled_testbench_runtime_event_sites() {
+        let code = r#"
+            #[test(t)]
+            module t {
+                initial {
+                    $assert_continue(1'b0, "continue failure");
+                    $finish();
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(code, "t").build_with_trace().unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+
+        assert_eq!(
+            run_compiled_testbench(&mut sim, &tb),
+            TestResult::Fail("continue failure".to_string()),
+        );
     }
 }

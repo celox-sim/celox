@@ -522,6 +522,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.options.optimize_options,
         )?;
 
+        // Register testbench runtime-event sites before layout fixes the ring geometry.
+        crate::testbench::register_runtime_event_sites(&mut program);
+
         // Build memory layout (consumes address_aliases for offset sharing)
         program.build_layout(self.options.four_state);
 
@@ -626,7 +629,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         Ok(crate::testbench::run_testbench(&mut sim, &tb_stmts))
     }
 
-    /// Compiles and runs a native testbench, collecting all assertion results.
+    /// Compiles and runs a native testbench, returning assertion results
+    /// observed before the test finishes or stops on a fatal failure.
     pub fn run_test_detailed(self) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
         let mut sim = self.build()?;
         let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
@@ -662,6 +666,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         );
 
         let sim_res = program_res.and_then(|(mut program, warnings)| {
+            // Register testbench runtime-event sites before layout fixes the ring geometry.
+            crate::testbench::register_runtime_event_sites(&mut program);
+
             program.build_layout(self.options.four_state);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {

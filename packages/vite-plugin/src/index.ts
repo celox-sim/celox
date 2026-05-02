@@ -222,7 +222,8 @@ function generateEsmExport(
  * Generate vitest test code for native testbench modules.
  *
  * Each `#[test]` module becomes a single `test()` case that runs the
- * testbench via NAPI and reports all assertion results.
+ * testbench via NAPI and reports the assertion results observed before that
+ * test finishes or stops on a fatal failure.
  */
 function generateTestCode(
 	testModuleNames: string[],

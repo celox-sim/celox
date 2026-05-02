@@ -163,6 +163,10 @@ impl<'a> FfParser<'a> {
                 .iter()
                 .map(|arg| arg.0.comptime().expr_context.signed)
                 .collect(),
+            arg_is_string: value_args
+                .iter()
+                .map(|arg| arg.0.comptime().r#type.is_string())
+                .collect(),
         };
         let id = self.runtime_event_sites.len() as u32;
         self.runtime_event_sites.push(site);

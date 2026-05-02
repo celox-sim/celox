@@ -478,10 +478,10 @@ fn is_memory_clobber(inst: &MInst) -> bool {
         inst,
         MInst::Store { .. }
             | MInst::StorePtr { .. }
-            | MInst::AtomicStorePtr { .. }
+            | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
             | MInst::StorePtrIndexed { .. }
-            | MInst::AtomicStorePtrIndexed { .. }
+            | MInst::ReleaseStorePtrIndexed { .. }
     )
 }
 
@@ -637,8 +637,8 @@ fn global_gvn(func: &mut MFunction) {
                     } => (Some(*base), *offset, size.bytes() as i32),
                     MInst::StoreIndexed { .. }
                     | MInst::StorePtrIndexed { .. }
-                    | MInst::AtomicStorePtrIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
-                    MInst::StorePtr { .. } | MInst::AtomicStorePtr { .. } => (None, 0, 0),
+                    | MInst::ReleaseStorePtrIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
+                    MInst::StorePtr { .. } | MInst::ReleaseStorePtr { .. } => (None, 0, 0),
                     _ => (None, 0, 0),
                 };
                 let load_keys: Vec<GvnKey> = value_table
@@ -1026,10 +1026,10 @@ fn if_convert(func: &mut MFunction) {
                     inst,
                     MInst::Store { .. }
                         | MInst::StorePtr { .. }
-                        | MInst::AtomicStorePtr { .. }
+                        | MInst::ReleaseStorePtr { .. }
                         | MInst::StoreIndexed { .. }
                         | MInst::StorePtrIndexed { .. }
-                        | MInst::AtomicStorePtrIndexed { .. }
+                        | MInst::ReleaseStorePtrIndexed { .. }
                         | MInst::Load { .. }
                         | MInst::LoadPtr { .. }
                         | MInst::LoadImm { .. }
@@ -1380,10 +1380,10 @@ fn split_live_ranges(func: &mut MFunction) {
                             i,
                             MInst::Store { .. }
                                 | MInst::StorePtr { .. }
-                                | MInst::AtomicStorePtr { .. }
+                                | MInst::ReleaseStorePtr { .. }
                                 | MInst::StoreIndexed { .. }
                                 | MInst::StorePtrIndexed { .. }
-                                | MInst::AtomicStorePtrIndexed { .. }
+                                | MInst::ReleaseStorePtrIndexed { .. }
                         )
                     });
                     if !has_store {
@@ -2098,7 +2098,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::StoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
-                | MInst::AtomicStorePtrIndexed { .. } => {
+                | MInst::ReleaseStorePtrIndexed { .. } => {
                     available.clear();
                     rewritten.push(inst);
                 }
@@ -2213,7 +2213,7 @@ fn eliminate_redundant_local_stores(func: &mut MFunction) {
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::StoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
-                | MInst::AtomicStorePtrIndexed { .. } => {
+                | MInst::ReleaseStorePtrIndexed { .. } => {
                     available.clear();
                     rewritten.push(inst);
                 }
@@ -2341,10 +2341,10 @@ fn dead_code_eliminate(func: &mut MFunction) {
                             inst,
                             MInst::Store { .. }
                                 | MInst::StorePtr { .. }
-                                | MInst::AtomicStorePtr { .. }
+                                | MInst::ReleaseStorePtr { .. }
                                 | MInst::StoreIndexed { .. }
                                 | MInst::StorePtrIndexed { .. }
-                                | MInst::AtomicStorePtrIndexed { .. }
+                                | MInst::ReleaseStorePtrIndexed { .. }
                                 | MInst::Branch { .. }
                                 | MInst::Jump { .. }
                                 | MInst::Return

@@ -598,7 +598,7 @@ fn emit_inst(
             src,
             size,
         }
-        | MInst::AtomicStorePtr {
+        | MInst::ReleaseStorePtr {
             ptr,
             offset,
             src,
@@ -607,6 +607,8 @@ fn emit_inst(
             let ptr = preg_to_reg64(resolve(assignment, *ptr));
             let s_preg = resolve(assignment, *src);
             let mem = mem_operand_ptr(ptr, *offset);
+            // x86-64 TSO gives plain aligned stores release-store ordering:
+            // earlier payload stores cannot become visible after this publish store.
             match size {
                 OpSize::S8 => {
                     asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
@@ -683,7 +685,7 @@ fn emit_inst(
             src,
             size,
         }
-        | MInst::AtomicStorePtrIndexed {
+        | MInst::ReleaseStorePtrIndexed {
             ptr,
             offset,
             index,
@@ -694,6 +696,8 @@ fn emit_inst(
             let idx = preg_to_reg64(resolve(assignment, *index));
             let s_preg = resolve(assignment, *src);
             let mem = mem_operand_ptr_indexed(ptr, *offset, idx);
+            // x86-64 TSO gives plain aligned stores release-store ordering:
+            // earlier payload stores cannot become visible after this publish store.
             match size {
                 OpSize::S8 => {
                     asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;

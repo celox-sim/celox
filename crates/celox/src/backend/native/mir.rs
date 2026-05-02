@@ -383,8 +383,12 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
-    /// atomic store [ptr + offset] = src
-    AtomicStorePtr {
+    /// release-store [ptr + offset] = src.
+    ///
+    /// This is used as a publish point for lock-free runtime-event buffers:
+    /// payload words are stored normally, then the sequence word is release-stored.
+    /// It is not a read-modify-write atomic operation.
+    ReleaseStorePtr {
         ptr: VReg,
         offset: i32,
         src: VReg,
@@ -422,8 +426,12 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
-    /// atomic store [ptr + offset + index] = src
-    AtomicStorePtrIndexed {
+    /// release-store [ptr + offset + index] = src.
+    ///
+    /// This is used as a publish point for lock-free runtime-event buffers:
+    /// payload words are stored normally, then the sequence word is release-stored.
+    /// It is not a read-modify-write atomic operation.
+    ReleaseStorePtrIndexed {
         ptr: VReg,
         offset: i32,
         index: VReg,
@@ -556,12 +564,12 @@ impl fmt::Display for MInst {
                 src,
                 size,
             } => write!(f, "store.{size} [{ptr} + {offset}], {src}"),
-            MInst::AtomicStorePtr {
+            MInst::ReleaseStorePtr {
                 ptr,
                 offset,
                 src,
                 size,
-            } => write!(f, "atomic_store.{size} [{ptr} + {offset}], {src}"),
+            } => write!(f, "release_store.{size} [{ptr} + {offset}], {src}"),
             MInst::LoadIndexed {
                 dst,
                 base,
@@ -590,13 +598,16 @@ impl fmt::Display for MInst {
                 src,
                 size,
             } => write!(f, "store.{size} [{ptr} + {offset} + {index}], {src}"),
-            MInst::AtomicStorePtrIndexed {
+            MInst::ReleaseStorePtrIndexed {
                 ptr,
                 offset,
                 index,
                 src,
                 size,
-            } => write!(f, "atomic_store.{size} [{ptr} + {offset} + {index}], {src}"),
+            } => write!(
+                f,
+                "release_store.{size} [{ptr} + {offset} + {index}], {src}"
+            ),
             MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
             MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
             MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
@@ -729,10 +740,10 @@ impl MInst {
 
             MInst::Store { .. }
             | MInst::StorePtr { .. }
-            | MInst::AtomicStorePtr { .. }
+            | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
             | MInst::StorePtrIndexed { .. }
-            | MInst::AtomicStorePtrIndexed { .. }
+            | MInst::ReleaseStorePtrIndexed { .. }
             | MInst::Branch { .. }
             | MInst::Jump { .. }
             | MInst::Return
@@ -749,14 +760,14 @@ impl MInst {
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
-            MInst::AtomicStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
+            MInst::ReleaseStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::LoadIndexed { index, .. } => Uses::one(*index),
             MInst::StoreIndexed { index, src, .. } => Uses::two(*index, *src),
             MInst::LoadPtrIndexed { ptr, index, .. } => Uses::two(*ptr, *index),
             MInst::StorePtrIndexed {
                 ptr, index, src, ..
             } => Uses::three(*ptr, *index, *src),
-            MInst::AtomicStorePtrIndexed {
+            MInst::ReleaseStorePtrIndexed {
                 ptr, index, src, ..
             } => Uses::three(*ptr, *index, *src),
             MInst::Add { lhs, rhs, .. }
@@ -821,7 +832,7 @@ impl MInst {
                     *src = new;
                 }
             }
-            MInst::AtomicStorePtr { ptr, src, .. } => {
+            MInst::ReleaseStorePtr { ptr, src, .. } => {
                 if *ptr == old {
                     *ptr = new;
                 }
@@ -863,7 +874,7 @@ impl MInst {
                     *src = new;
                 }
             }
-            MInst::AtomicStorePtrIndexed {
+            MInst::ReleaseStorePtrIndexed {
                 ptr, index, src, ..
             } => {
                 if *ptr == old {

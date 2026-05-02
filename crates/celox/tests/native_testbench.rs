@@ -1125,7 +1125,89 @@ fn test_assert_format_args_follow_veryl_single_char_specifiers() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("cnt=%0d hex=%08x"),
+        Some("cnt=3 hex=f"),
+    );
+}
+
+#[test]
+fn test_passing_assert_uses_runtime_event_formatting() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b1, "cnt=%0d hex=%08x", 8'd3, 8'h0f);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert!(detailed.assertions[0].passed);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("cnt=3 hex=f"),
+    );
+}
+
+#[test]
+fn test_passing_assert_preserves_single_character_format_specifiers() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b1, "a=%d b=%d", 8'd3, 8'd7);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert!(detailed.assertions[0].passed);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("a=3 b=7"),);
+}
+
+#[test]
+fn test_message_less_testbench_assert_uses_default_message() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert(1'b0);
+                $finish();
+            }
+        }
+    "#;
+    let result = Simulator::builder(code, "t").run_test().unwrap();
+    assert_eq!(result, TestResult::Fail("assertion failed".to_string()));
+
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("assertion failed"),
+    );
+}
+
+#[test]
+fn test_message_less_testbench_assert_continue_uses_default_message() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("assertion failed"),
     );
 }
 
@@ -1146,6 +1228,38 @@ fn test_assert_format_args_render_percent_m_and_t_without_args() {
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
         Some("loc=<hierarchy> time=0"),
+    );
+}
+
+#[test]
+fn test_ff_runtime_events_drain_with_per_tick_time() {
+    let code = r#"
+        module Top (clk: input clock) {
+            always_ff (clk) {
+                $assert_continue(1'b0, "ff time=%t");
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst dut: Top (clk);
+            initial {
+                clk.next(3);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 3);
+    assert_eq!(
+        detailed
+            .assertions
+            .iter()
+            .map(|a| a.message.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("ff time=1"), Some("ff time=2"), Some("ff time=3")],
     );
 }
 
@@ -1264,7 +1378,7 @@ fn test_assert_format_args_preserve_binary_width_and_hex_alias() {
 }
 
 #[test]
-fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
+fn test_run_test_detailed_stops_on_plain_assert_failure() {
     let code = r#"
         #[test(t)]
         module t {
@@ -1277,11 +1391,60 @@ fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
     "#;
     let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
     assert!(!detailed.passed);
-    assert_eq!(detailed.assertions.len(), 2);
+    assert_eq!(detailed.assertions.len(), 1);
     assert!(!detailed.assertions[0].passed);
     assert_eq!(detailed.assertions[0].message.as_deref(), Some("first"));
-    assert!(!detailed.assertions[1].passed);
-    assert_eq!(detailed.assertions[1].message.as_deref(), Some("second"));
+}
+
+#[test]
+fn test_run_test_detailed_collects_ff_assert_runtime_events() {
+    let code = r#"
+        module Top (clk: input clock, a: input logic<8>) {
+            always_ff (clk) {
+                $assert_continue(a != 8'd0, "ff a=%0d", a);
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var a: logic<8>;
+            inst dut: Top (clk, a);
+            initial {
+                clk.next(1);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert!(!detailed.assertions[0].passed);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("ff a=0"));
+}
+
+#[test]
+fn test_run_test_stops_on_ff_fatal_runtime_event() {
+    let code = r#"
+        module Top (clk: input clock) {
+            always_ff (clk) {
+                $assert(1'b0, "ff fatal");
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst dut: Top (clk);
+            initial {
+                clk.next(2);
+                $assert_continue(1'b0, "after fatal");
+                $finish();
+            }
+        }
+    "#;
+    let result = Simulator::builder(code, "t").run_test().unwrap();
+    assert_eq!(result, TestResult::Fail("ff fatal".to_string()));
 }
 
 // ── Array and bit select ───────────────────────────────────────────────

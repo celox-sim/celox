@@ -80,6 +80,13 @@ pub enum RuntimeEvent {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RuntimeFormatContext<'a> {
+    pub tb_time: Option<u64>,
+    pub scope: Option<&'a str>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub struct RuntimeEventDrain {
     buffer: Arc<RuntimeEventBuffer>,
     layout: MemoryLayout,
@@ -90,11 +97,16 @@ pub struct RuntimeEventDrain {
 #[cfg(not(target_arch = "wasm32"))]
 impl RuntimeEventDrain {
     pub fn drain(&mut self) -> Vec<RuntimeEvent> {
+        self.drain_with_context(RuntimeFormatContext::default())
+    }
+
+    pub fn drain_with_context(&mut self, ctx: RuntimeFormatContext<'_>) -> Vec<RuntimeEvent> {
         drain_runtime_events_from_buffer(
             &self.buffer,
             &self.layout,
             &self.sites,
             &mut self.read_seq,
+            ctx,
         )
     }
 }
@@ -112,6 +124,18 @@ struct RuntimeEventArgValue {
     masks: Vec<u64>,
     width: usize,
     signed: bool,
+    is_string: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum RawRuntimeEvent {
+    Event {
+        site_id: usize,
+        args: Vec<RuntimeEventArgValue>,
+    },
+    Missed {
+        count: u64,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -137,18 +161,31 @@ fn runtime_event_format_arg(arg: &RuntimeEventArgValue, spec: Option<char>) -> S
             mask: Some(&mask),
             width: arg.width,
             signed: arg.signed,
-            is_string: false,
+            is_string: arg.is_string,
         },
         spec,
     )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn render_runtime_event_message(site: &RuntimeEventSite, args: &[RuntimeEventArgValue]) -> String {
+fn render_runtime_event_message(
+    site: &RuntimeEventSite,
+    args: &[RuntimeEventArgValue],
+    ctx: RuntimeFormatContext<'_>,
+) -> String {
     let Some(template) = site.template.as_deref() else {
+        let default_spec = match site.kind {
+            RuntimeEventKind::Display => 'd',
+            RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
+                if args.is_empty() {
+                    return "assertion failed".to_string();
+                }
+                'x'
+            }
+        };
         return args
             .iter()
-            .map(|arg| runtime_event_format_arg(arg, Some('d')))
+            .map(|arg| runtime_event_format_arg(arg, Some(default_spec)))
             .collect::<Vec<_>>()
             .join(" ");
     };
@@ -169,27 +206,52 @@ fn render_runtime_event_message(site: &RuntimeEventSite, args: &[RuntimeEventArg
             chars.next();
         }
         let spec = chars.next().unwrap_or('d');
-        let fallback;
-        let arg = if let Some(arg) = args.get(arg_idx) {
-            arg
-        } else {
-            fallback = RuntimeEventArgValue {
-                values: vec![0],
-                masks: vec![0],
-                width: 64,
-                signed: false,
-            };
-            &fallback
-        };
-        arg_idx += 1;
         match spec {
             'x' | 'h' | 'X' | 'H' | 'b' | 'B' | 'o' | 'O' | 'c' | 'C' | 's' | 'S' => {
+                let Some(arg) = args.get(arg_idx) else {
+                    arg_idx += 1;
+                    continue;
+                };
                 out.push_str(&runtime_event_format_arg(arg, Some(spec)));
+                arg_idx += 1;
             }
-            _ => out.push_str(&runtime_event_format_arg(arg, Some('d'))),
+            'd' | 'D' | 'i' | 'I' => {
+                let Some(arg) = args.get(arg_idx) else {
+                    arg_idx += 1;
+                    continue;
+                };
+                out.push_str(&runtime_event_format_arg(arg, Some(spec)));
+                arg_idx += 1;
+            }
+            't' | 'T' => out.push_str(&ctx.tb_time.unwrap_or(0).to_string()),
+            'm' | 'M' => out.push_str(ctx.scope.unwrap_or("<hierarchy>")),
+            other => {
+                out.push('%');
+                out.push(other);
+            }
         }
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn render_raw_runtime_event(
+    raw: RawRuntimeEvent,
+    sites: &[RuntimeEventSite],
+    ctx: RuntimeFormatContext<'_>,
+) -> Option<RuntimeEvent> {
+    match raw {
+        RawRuntimeEvent::Missed { count } => Some(RuntimeEvent::Missed { count }),
+        RawRuntimeEvent::Event { site_id, args } => {
+            let site = sites.get(site_id)?;
+            let message = render_runtime_event_message(site, &args, ctx);
+            Some(match site.kind {
+                RuntimeEventKind::Display => RuntimeEvent::Display { message },
+                RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
+                RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
+            })
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -200,7 +262,7 @@ fn collect_runtime_events(
     buffer_size: usize,
     mut read_payload_u64: impl FnMut(usize) -> u64,
     mut read_seq_u64: impl FnMut(usize) -> u64,
-) -> Vec<RuntimeEvent> {
+) -> Vec<RawRuntimeEvent> {
     use crate::backend::memory_layout::{
         RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
         RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
@@ -211,12 +273,17 @@ fn collect_runtime_events(
         return Vec::new();
     }
 
+    // Ring-buffer synchronization protocol:
+    // - writers store event payload/site/arg fields normally;
+    // - writers publish slot/global sequence words with release semantics;
+    // - readers acquire-load sequence words, then read payload normally;
+    // - readers re-check the slot sequence after reading payload to reject races.
     let write_seq = read_seq_u64(0);
     let mut events = Vec::new();
     let capacity = layout.runtime_event_capacity as u64;
     if *read_seq + capacity < write_seq {
         let new_read = write_seq - capacity;
-        events.push(RuntimeEvent::Missed {
+        events.push(RawRuntimeEvent::Missed {
             count: new_read - *read_seq,
         });
         *read_seq = new_read;
@@ -267,6 +334,9 @@ fn collect_runtime_events(
                     signed: site
                         .and_then(|site| site.arg_signed.get(idx).copied())
                         .unwrap_or(false),
+                    is_string: site
+                        .and_then(|site| site.arg_is_string.get(idx).copied())
+                        .unwrap_or(false),
                 });
             }
         }
@@ -276,13 +346,8 @@ fn collect_runtime_events(
             break;
         }
 
-        if let Some(site) = site {
-            let message = render_runtime_event_message(site, &args);
-            events.push(match site.kind {
-                RuntimeEventKind::Display => RuntimeEvent::Display { message },
-                RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
-                RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
-            });
+        if site.is_some() {
+            events.push(RawRuntimeEvent::Event { site_id, args });
         }
         *read_seq += 1;
     }
@@ -296,6 +361,7 @@ fn drain_runtime_events_from_buffer(
     layout: &MemoryLayout,
     sites: &[RuntimeEventSite],
     read_seq: &mut u64,
+    ctx: RuntimeFormatContext<'_>,
 ) -> Vec<RuntimeEvent> {
     use std::sync::atomic::Ordering;
 
@@ -307,6 +373,9 @@ fn drain_runtime_events_from_buffer(
         |offset| buffer.read_u64(offset),
         |offset| buffer.load_atomic_u64(offset, Ordering::Acquire),
     )
+    .into_iter()
+    .filter_map(|raw| render_raw_runtime_event(raw, sites, ctx))
+    .collect()
 }
 
 // ── Generic methods available for any backend ────────────────────────
@@ -352,6 +421,13 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+        self.drain_runtime_events_with_context(RuntimeFormatContext::default())
+    }
+
+    pub fn drain_runtime_events_with_context(
+        &mut self,
+        ctx: RuntimeFormatContext<'_>,
+    ) -> Vec<RuntimeEvent> {
         let layout = self.backend.layout();
         if let Some(buffer) = self.backend.runtime_event_buffer() {
             return drain_runtime_events_from_buffer(
@@ -359,6 +435,7 @@ impl<B: SimBackend> Simulator<B> {
                 layout,
                 &self.program.runtime_event_sites,
                 &mut self.runtime_event_read_seq,
+                ctx,
             );
         }
 
@@ -374,6 +451,9 @@ impl<B: SimBackend> Simulator<B> {
             read_u64,
             read_u64,
         )
+        .into_iter()
+        .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
+        .collect()
     }
 
     pub fn runtime_event_drain(&self) -> Option<RuntimeEventDrain> {

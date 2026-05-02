@@ -106,6 +106,7 @@ pub struct RuntimeEventSite {
     pub template: Option<String>,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
+    pub arg_is_string: Vec<bool>,
 }
 
 #[derive(Clone)]

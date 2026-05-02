@@ -2757,6 +2757,38 @@ module CounterTbFail {
 }
 `;
 
+const TB_MULTIPLE_TESTS_SOURCE = `
+${TB_COUNTER_SOURCE}
+#[test(t)]
+module CounterTbFailFirst {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen(clk);
+    var cnt: logic<32>;
+    inst dut: Counter_tb (clk, rst, cnt);
+    initial {
+        rst.assert(clk);
+        clk.next  (5);
+        $assert   (cnt == 32'd99, "fail first");
+        $assert   (cnt == 32'd5, "should not run");
+        $finish   ();
+    }
+}
+
+#[test(t)]
+module CounterTbPassSecond {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen(clk);
+    var cnt: logic<32>;
+    inst dut: Counter_tb (clk, rst, cnt);
+    initial {
+        rst.assert(clk);
+        clk.next  (5);
+        $assert   (cnt == 32'd5, "pass second");
+        $finish   ();
+    }
+}
+`;
+
 describe("E2E: native testbench (runTest)", () => {
 	const addon = loadNativeAddon();
 
@@ -2770,16 +2802,33 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(result.assertions[0]!.passed).toBe(true);
 	});
 
-	test("failing testbench returns passed=false and collects all assertions", () => {
+	test("failing testbench returns passed=false and stops on plain assert", () => {
 		const result: NapiTestResult = addon.runTest(
 			[{ content: TB_FAIL_SOURCE, path: "test.veryl" }],
 			"CounterTbFail",
 		);
 		expect(result.passed).toBe(false);
-		// Both assertions are collected (not stopped at first failure)
-		expect(result.assertions.length).toBe(2);
+		expect(result.assertions.length).toBe(1);
 		expect(result.assertions[0]!.passed).toBe(false);
-		expect(result.assertions[1]!.passed).toBe(true);
+	});
+
+	test("multiple test modules run independently after one fails", () => {
+		const sources = [{ content: TB_MULTIPLE_TESTS_SOURCE, path: "test.veryl" }];
+
+		const first: NapiTestResult = addon.runTest(sources, "CounterTbFailFirst");
+		expect(first.passed).toBe(false);
+		expect(first.assertions.length).toBe(1);
+		expect(first.assertions[0]!.passed).toBe(false);
+		expect(first.assertions[0]!.message).toBe("fail first");
+
+		const second: NapiTestResult = addon.runTest(
+			sources,
+			"CounterTbPassSecond",
+		);
+		expect(second.passed).toBe(true);
+		expect(second.assertions.length).toBe(1);
+		expect(second.assertions[0]!.passed).toBe(true);
+		expect(second.assertions[0]!.message).toBe("pass second");
 	});
 
 	test("assertion results include source location", () => {
