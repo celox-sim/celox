@@ -14,7 +14,7 @@ use crate::backend::memory_layout::{
 use crate::backend::traits::SimBackend;
 use crate::display_format::{DisplayFormatArg, format_display_arg};
 use crate::ir::{AbsoluteAddr, Program, RuntimeEventKind, RuntimeEventSite, SignalRef};
-use crate::simulator::{RuntimeEvent, Simulator};
+use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -460,6 +460,10 @@ fn runtime_event_site_for_assert(
         arg_signed: value_args
             .iter()
             .map(|arg| arg.0.comptime().expr_context.signed)
+            .collect(),
+        arg_is_string: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().r#type.is_string())
             .collect(),
     }
 }
@@ -2346,7 +2350,11 @@ fn drain_runtime_assertions<B: SimBackend>(
     location: Option<&SourceLocation>,
 ) -> Option<String> {
     let mut last_message = None;
-    for event in sim.drain_runtime_events() {
+    let format_ctx = RuntimeFormatContext {
+        tb_time: Some(ctx.current_time),
+        scope: None,
+    };
+    for event in sim.drain_runtime_events_with_context(format_ctx) {
         match event {
             RuntimeEvent::AssertContinue { message } | RuntimeEvent::AssertFatal { message } => {
                 last_message = Some(message.clone());
@@ -2445,29 +2453,25 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let (ptr, _) = sim.memory_as_mut_ptr();
             let passed = expr.eval_bool(ptr);
-            let rendered_message = render_assert_message(message, ptr, ctx.current_time);
             if passed {
+                let rendered_message = render_assert_message(message, ptr, ctx.current_time);
                 ctx.assertions.push(AssertionResult {
                     passed,
                     message: rendered_message.clone(),
                     location: location.clone(),
                 });
+                ExecResult::Continue
             } else {
                 publish_tb_assert_event(sim, *site_id, message, ptr);
-                // TB has extra formatting context (%t/%m and width handling) that
-                // runtime events do not carry yet. Publish to the shared ring for
-                // ordering/producer semantics, then keep the established TB message.
-                sim.drain_runtime_events();
-                ctx.assertions.push(AssertionResult {
-                    passed,
-                    message: rendered_message.clone(),
-                    location: location.clone(),
-                });
-            }
-            if !passed && !continue_on_fail && ctx.stop_on_fatal_assert {
-                ExecResult::Fail(rendered_message.unwrap_or_else(|| "assertion failed".to_string()))
-            } else {
-                ExecResult::Continue
+                let rendered_message = drain_runtime_assertions(sim, ctx, location.as_ref())
+                    .or_else(|| render_assert_message(message, ptr, ctx.current_time));
+                if !continue_on_fail && ctx.stop_on_fatal_assert {
+                    ExecResult::Fail(
+                        rendered_message.unwrap_or_else(|| "assertion failed".to_string()),
+                    )
+                } else {
+                    ExecResult::Continue
+                }
             }
         }
         TestbenchStatement::If {

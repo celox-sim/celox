@@ -1125,7 +1125,7 @@ fn test_assert_format_args_follow_veryl_single_char_specifiers() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("cnt=%0d hex=%08x"),
+        Some("cnt=3 hex=f"),
     );
 }
 
