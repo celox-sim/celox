@@ -123,6 +123,66 @@ fn test_initial_readmemh_supports_const_for(sim) {
     assert_eq!(sim.get(sim.signal("out2")), BigUint::from(0x33u32));
 }
 
+fn test_initial_readmemh_supports_indexed_destination(sim) {
+    @omit_veryl;
+    @setup {
+        let mem_path = temp_mem_file("readmemh_indexed", "aa\nbb\n");
+        let code = format!(r#"
+            module Top (
+                out0: output logic<8>,
+                out1: output logic<8>,
+                out2: output logic<8>,
+                out3: output logic<8>,
+            ) {{
+                var mem: logic<8>[4];
+                initial {{
+                    $readmemh("{}", mem[1]);
+                }}
+                assign out0 = mem[0];
+                assign out1 = mem[1];
+                assign out2 = mem[2];
+                assign out3 = mem[3];
+            }}
+        "#, mem_path);
+    }
+    @build Simulator::builder(&code, "Top").four_state(true);
+    assert_eq!(sim.get_four_state(sim.signal("out0")).1, BigUint::from(0xffu32));
+    assert_eq!(sim.get_four_state(sim.signal("out1")), (BigUint::from(0xaau32), BigUint::from(0u32)));
+    assert_eq!(sim.get_four_state(sim.signal("out2")), (BigUint::from(0xbbu32), BigUint::from(0u32)));
+    assert_eq!(sim.get_four_state(sim.signal("out3")).1, BigUint::from(0xffu32));
+}
+
+fn test_initial_readmemh_multiple_files_merge_in_order(sim) {
+    @omit_veryl;
+    @setup {
+        let first_path = temp_mem_file("readmemh_multi_first", "11\n22\n33\n44\n");
+        let second_path = temp_mem_file("readmemh_multi_second", "aa\nbb\n");
+        let code = format!(r#"
+            module Top (
+                out0: output logic<8>,
+                out1: output logic<8>,
+                out2: output logic<8>,
+                out3: output logic<8>,
+            ) {{
+                var mem: logic<8>[4];
+                initial {{
+                    $readmemh("{}", mem);
+                    $readmemh("{}", mem[1]);
+                }}
+                assign out0 = mem[0];
+                assign out1 = mem[1];
+                assign out2 = mem[2];
+                assign out3 = mem[3];
+            }}
+        "#, first_path, second_path);
+    }
+    @build Simulator::builder(&code, "Top");
+    assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0x11u32));
+    assert_eq!(sim.get(sim.signal("out1")), BigUint::from(0xaau32));
+    assert_eq!(sim.get(sim.signal("out2")), BigUint::from(0xbbu32));
+    assert_eq!(sim.get(sim.signal("out3")), BigUint::from(0x44u32));
+}
+
 }
 
 #[test]

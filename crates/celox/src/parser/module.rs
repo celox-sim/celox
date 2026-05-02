@@ -270,7 +270,8 @@ impl<'a> ModuleParser<'a> {
         match stmt {
             Statement::SystemFunctionCall(call) => {
                 if let SystemFunctionKind::Readmemh(filename, output) = &call.kind {
-                    let value = self.parse_readmem_file(filename, output.0.as_slice(), 16)?;
+                    let value =
+                        self.parse_readmem_file(filename, output.0.as_slice(), 16, context)?;
                     self.initial_memory_values.push(value);
                 }
                 Ok(())
@@ -340,6 +341,7 @@ impl<'a> ModuleParser<'a> {
         filename_arg: &SystemFunctionInput,
         output: &[AssignDestination],
         radix: u32,
+        context: &mut veryl_analyzer::Context,
     ) -> Result<ModuleInitialMemoryValue, ParserError> {
         let Some(filename) = Self::static_string_expr(&filename_arg.0) else {
             return Err(ParserError::unsupported(
@@ -351,9 +353,7 @@ impl<'a> ModuleParser<'a> {
             ));
         };
         let dst = match output {
-            [dst] if dst.index.0.is_empty() && dst.select.is_empty() && dst.select.1.is_none() => {
-                dst
-            }
+            [dst] if dst.select.is_empty() && dst.select.1.is_none() => dst,
             [dst] => {
                 return Err(ParserError::unsupported(
                     111,
@@ -378,6 +378,29 @@ impl<'a> ModuleParser<'a> {
         let depth = var.r#type.total_array().ok_or_else(|| {
             ParserError::unresolved_width(self.module, var, var.r#type.to_string())
         })?;
+        let start_addr = if dst.index.0.is_empty() {
+            0
+        } else {
+            let Some(indices) = dst.index.eval_value(context) else {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh destination index",
+                    "destination index must be compile-time constant",
+                    Some(&dst.token),
+                ));
+            };
+            let Some(index) = var.r#type.array.calc_index(&indices) else {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh destination index",
+                    format!("destination index {indices:?} is out of range"),
+                    Some(&dst.token),
+                ));
+            };
+            index
+        };
         if depth <= 1 {
             return Err(ParserError::unsupported(
                 111,
@@ -415,6 +438,15 @@ impl<'a> ModuleParser<'a> {
         let element_bits = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
 
         for (addr, word_value, word_mask) in words {
+            let Some(addr) = start_addr.checked_add(addr) else {
+                return Err(ParserError::unsupported(
+                    111,
+                    LoweringPhase::SimulatorParser,
+                    "$readmemh address",
+                    "address exceeds destination depth",
+                    Some(&dst.token),
+                ));
+            };
             if addr >= depth {
                 return Err(ParserError::unsupported(
                     111,
