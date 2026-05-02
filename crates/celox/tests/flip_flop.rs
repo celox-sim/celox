@@ -286,6 +286,30 @@ fn test_ff_runtime_fatal_assert_records_event(sim) {
     );
 }
 
+fn test_ff_message_less_runtime_fatal_assert_uses_default_message(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock) {
+            always_ff (clk) {
+                $assert(1'b0);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+
+    let err = sim.tick(clk).unwrap_err();
+    assert_eq!(err.to_string(), "assertion failed");
+    let events = sim.drain_runtime_events();
+    assert_eq!(
+        events,
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "assertion failed".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_for_bounds(sim) {
     @setup { let code = r#"
         module Top (

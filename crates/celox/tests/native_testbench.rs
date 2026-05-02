@@ -1165,9 +1165,49 @@ fn test_passing_assert_preserves_single_character_format_specifiers() {
     assert!(detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
     assert!(detailed.assertions[0].passed);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("a=3 b=7"),);
+}
+
+#[test]
+fn test_message_less_testbench_assert_uses_default_message() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert(1'b0);
+                $finish();
+            }
+        }
+    "#;
+    let result = Simulator::builder(code, "t").run_test().unwrap();
+    assert_eq!(result, TestResult::Fail("assertion failed".to_string()));
+
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("a=3 b=7"),
+        Some("assertion failed"),
+    );
+}
+
+#[test]
+fn test_message_less_testbench_assert_continue_uses_default_message() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert_continue(1'b0);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some("assertion failed"),
     );
 }
 
@@ -1338,7 +1378,7 @@ fn test_assert_format_args_preserve_binary_width_and_hex_alias() {
 }
 
 #[test]
-fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
+fn test_run_test_detailed_stops_on_plain_assert_failure() {
     let code = r#"
         #[test(t)]
         module t {
@@ -1351,11 +1391,9 @@ fn test_run_test_detailed_collects_multiple_plain_assert_failures() {
     "#;
     let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
     assert!(!detailed.passed);
-    assert_eq!(detailed.assertions.len(), 2);
+    assert_eq!(detailed.assertions.len(), 1);
     assert!(!detailed.assertions[0].passed);
     assert_eq!(detailed.assertions[0].message.as_deref(), Some("first"));
-    assert!(!detailed.assertions[1].passed);
-    assert_eq!(detailed.assertions[1].message.as_deref(), Some("second"));
 }
 
 #[test]

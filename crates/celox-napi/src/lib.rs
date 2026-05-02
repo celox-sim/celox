@@ -1908,7 +1908,8 @@ fn convert_test_result(r: celox::TestResultDetailed) -> NapiTestResult {
 /// Run a native testbench from Veryl source code.
 ///
 /// Compiles the given sources and runs the `#[test]` module specified by `top`,
-/// collecting all assertion results.
+/// returning assertion results observed before that test finishes or stops on a
+/// fatal failure.
 #[cfg(not(target_arch = "wasm32"))]
 #[napi]
 pub fn run_test(

@@ -49,7 +49,8 @@ pub struct AssertionResult {
     pub location: Option<SourceLocation>,
 }
 
-/// Detailed test result collecting all assertion outcomes.
+/// Detailed test result with assertion outcomes observed before the test
+/// finishes or stops on a fatal failure.
 #[derive(Debug, Clone)]
 pub struct TestResultDetailed {
     pub passed: bool,
@@ -468,8 +469,8 @@ fn runtime_event_site_for_assert(
     }
 }
 
-fn function_body<'a>(
-    funcs: &'a fxhash::FxHashMap<VarId, Function>,
+fn function_body(
+    funcs: &fxhash::FxHashMap<VarId, Function>,
     fc: &veryl_analyzer::ir::FunctionCall,
 ) -> Option<veryl_analyzer::ir::FunctionBody> {
     let func = funcs.get(&fc.id)?;
@@ -1381,8 +1382,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         let mut next_assert_site_id = p
             .runtime_event_sites
             .len()
-            .checked_sub(site_count as usize)
-            .unwrap_or(0) as u32;
+            .saturating_sub(site_count as usize) as u32;
         stmts
             .iter()
             .filter_map(|s| self.convert_stmt(s, &ec, &mut next_assert_site_id))
@@ -2163,7 +2163,6 @@ pub(crate) fn run_testbench<B: SimBackend>(
 ) -> TestResult {
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
-        stop_on_fatal_assert: true,
         current_time: 0,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
@@ -2220,15 +2219,14 @@ pub fn run_compiled_testbench<B: SimBackend>(
     run_testbench(sim, &tb.stmts)
 }
 
-/// Run the testbench collecting **all** assertion results instead of stopping
-/// at the first failure.
+/// Run the testbench and return assertion results observed before the test
+/// finishes or stops on a fatal failure.
 pub(crate) fn run_testbench_detailed<B: SimBackend>(
     sim: &mut Simulator<B>,
     stmts: &[TestbenchStatement<B>],
 ) -> TestResultDetailed {
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
-        stop_on_fatal_assert: false,
         current_time: 0,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
@@ -2241,7 +2239,6 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
 
 struct DetailedExecContext {
     assertions: Vec<AssertionResult>,
-    stop_on_fatal_assert: bool,
     current_time: u64,
 }
 
@@ -2437,20 +2434,13 @@ fn exec_one_detailed<B: SimBackend>(
                         if let Err(e) = sim.tick(*clock_event) {
                             ctx.current_time = ctx.current_time.saturating_add(1);
                             let drained = drain_runtime_assertions(sim, ctx, None);
-                            if ctx.stop_on_fatal_assert {
-                                if let Some(message) = drained.fatal_message {
-                                    return ExecResult::Fail(message);
-                                }
+                            if let Some(message) = drained.fatal_message {
+                                return ExecResult::Fail(message);
                             }
                             return ExecResult::Fail(format!("{e}"));
                         }
                         ctx.current_time = ctx.current_time.saturating_add(1);
-                        let drained = drain_runtime_assertions(sim, ctx, None);
-                        if ctx.stop_on_fatal_assert {
-                            if let Some(message) = drained.fatal_message {
-                                return ExecResult::Fail(message);
-                            }
-                        }
+                        drain_runtime_assertions(sim, ctx, None);
                     }
                     ExecResult::Continue
                 }
@@ -2469,20 +2459,13 @@ fn exec_one_detailed<B: SimBackend>(
                 if let Err(e) = sim.tick(*clock_event) {
                     ctx.current_time = ctx.current_time.saturating_add(1);
                     let drained = drain_runtime_assertions(sim, ctx, None);
-                    if ctx.stop_on_fatal_assert {
-                        if let Some(message) = drained.fatal_message {
-                            return ExecResult::Fail(message);
-                        }
+                    if let Some(message) = drained.fatal_message {
+                        return ExecResult::Fail(message);
                     }
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
                 ctx.current_time = ctx.current_time.saturating_add(1);
-                let drained = drain_runtime_assertions(sim, ctx, None);
-                if ctx.stop_on_fatal_assert {
-                    if let Some(message) = drained.fatal_message {
-                        return ExecResult::Fail(message);
-                    }
-                }
+                drain_runtime_assertions(sim, ctx, None);
             }
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
@@ -2512,7 +2495,7 @@ fn exec_one_detailed<B: SimBackend>(
                 let rendered_message = drain_runtime_assertions(sim, ctx, location.as_ref())
                     .last_message
                     .or_else(|| render_assert_message(message, ptr, ctx.current_time));
-                if !continue_on_fail && ctx.stop_on_fatal_assert {
+                if !continue_on_fail {
                     ExecResult::Fail(
                         rendered_message.unwrap_or_else(|| "assertion failed".to_string()),
                     )
@@ -2570,5 +2553,31 @@ fn exec_one_detailed<B: SimBackend>(
         }
         TestbenchStatement::Break => ExecResult::Break,
         TestbenchStatement::Finish => ExecResult::Finished,
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::{Simulator, TestResult};
+
+    #[test]
+    fn traced_build_registers_compiled_testbench_runtime_event_sites() {
+        let code = r#"
+            #[test(t)]
+            module t {
+                initial {
+                    $assert_continue(1'b0, "continue failure");
+                    $finish();
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(code, "t").build_with_trace().unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+
+        assert_eq!(
+            run_compiled_testbench(&mut sim, &tb),
+            TestResult::Fail("continue failure".to_string()),
+        );
     }
 }

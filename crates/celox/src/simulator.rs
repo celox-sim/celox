@@ -176,7 +176,12 @@ fn render_runtime_event_message(
     let Some(template) = site.template.as_deref() else {
         let default_spec = match site.kind {
             RuntimeEventKind::Display => 'd',
-            RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => 'x',
+            RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
+                if args.is_empty() {
+                    return "assertion failed".to_string();
+                }
+                'x'
+            }
         };
         return args
             .iter()
