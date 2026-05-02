@@ -1,4 +1,4 @@
-use celox::{BigUint, Simulator};
+use celox::{BigUint, LoweringPhase, ParserError, Simulator, SimulatorErrorKind};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -74,4 +74,40 @@ fn test_initial_readmemh_supports_comments_address_and_xz(sim) {
     assert_eq!(sim.get_four_state(sim.signal("out3")), (BigUint::from(0xf0u32), BigUint::from(0xf0u32)));
 }
 
+}
+
+#[test]
+fn test_initial_readmemb_reports_unsupported() {
+    let mem_path = temp_mem_file("readmemb", "00010010\n00110100\n01010110\n01111000\n");
+    let code = format!(
+        r#"
+            module Top (out0: output logic<8>) {{
+                var mem: logic<8>[4];
+                initial {{
+                    $readmemb("{}", mem);
+                }}
+                assign out0 = mem[0];
+            }}
+        "#,
+        mem_path
+    );
+
+    let err = Simulator::builder(&code, "Top")
+        .build()
+        .expect_err("$readmemb should not be silently ignored");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported {
+            issue,
+            phase,
+            feature,
+            detail,
+            ..
+        }) => {
+            assert_eq!(*issue, 111);
+            assert_eq!(*phase, LoweringPhase::SimulatorParser);
+            assert_eq!(*feature, "initial statement");
+            assert!(detail.contains("only direct $readmemh"));
+        }
+        other => panic!("expected unsupported initial statement error, got {other:?}"),
+    }
 }

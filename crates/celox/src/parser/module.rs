@@ -269,6 +269,13 @@ impl<'a> ModuleParser<'a> {
                 Ok(())
             }
             Statement::Null => Ok(()),
+            Statement::Unsupported(token) => Err(ParserError::unsupported(
+                111,
+                LoweringPhase::SimulatorParser,
+                "initial statement",
+                "unsupported initial statement; only direct $readmemh calls are currently lowered",
+                Some(token),
+            )),
             _ => Ok(()),
         }
     }
