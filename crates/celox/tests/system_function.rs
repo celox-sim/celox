@@ -98,6 +98,101 @@ module Top (
         assert_eq!(sim.get_as::<u32>(q), 4);
     }
 
+    #[ignore = "direct $clog2 in always_comb is folded from X payload by Veryl analyzer before Celox comb lowering"]
+    fn test_direct_comb_clog2_system_function(sim) {
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<32>,
+) {
+    always_comb {
+        q = $clog2(d);
+    }
+}
+"#, "Top");
+
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        for value in 0u16..256 {
+            let value = value as u8;
+            sim.modify(|io| io.set(d, value)).unwrap();
+            let expected = if value == 0 {
+                0
+            } else {
+                u32::BITS - (u32::from(value) - 1).leading_zeros()
+            };
+            assert_eq!(sim.get_as::<u32>(q), expected, "value={value}");
+        }
+    }
+
+    fn test_comb_function_body_clog2_system_function(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<32>,
+) {
+    function clog2_value (
+        x: input logic<8>,
+    ) -> logic<32> {
+        return $clog2(x);
+    }
+
+    always_comb {
+        q = clog2_value(d);
+    }
+}
+"#, "Top");
+
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        for value in 0u16..256 {
+            let value = value as u8;
+            sim.modify(|io| io.set(d, value)).unwrap();
+            let expected = if value == 0 {
+                0
+            } else {
+                u32::BITS - (u32::from(value) - 1).leading_zeros()
+            };
+            assert_eq!(sim.get_as::<u32>(q), expected, "value={value}");
+        }
+    }
+
+    fn test_comb_function_body_bits_size_system_functions(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>[4],
+    bits_q: output logic<32>,
+    size_q: output logic<32>,
+) {
+    function bits_value (
+        x: input logic<8>[4],
+    ) -> logic<32> {
+        return $bits(x);
+    }
+
+    function size_value (
+        x: input logic<8>[4],
+    ) -> logic<32> {
+        return $size(x);
+    }
+
+    always_comb {
+        bits_q = bits_value(d);
+        size_q = size_value(d);
+    }
+}
+"#, "Top");
+
+        let bits_q = sim.signal("bits_q");
+        let size_q = sim.signal("size_q");
+        assert_eq!(sim.get_as::<u32>(bits_q), 32);
+        assert_eq!(sim.get_as::<u32>(size_q), 4);
+    }
+
     fn test_direct_comb_bits_type_system_function(sim) {
         @build Simulator::builder(r#"
 module Top (

@@ -2625,7 +2625,10 @@ fn eval_function_body_return(
         call: &SystemFunctionCall,
     ) -> Result<(), ParserError> {
         match &call.kind {
-            SystemFunctionKind::Onehot(input) => {
+            SystemFunctionKind::Bits(input)
+            | SystemFunctionKind::Size(input)
+            | SystemFunctionKind::Clog2(input)
+            | SystemFunctionKind::Onehot(input) => {
                 validate_function_body_expression(module, &input.0)
             }
             _ => Err(ParserError::unsupported(
@@ -4729,6 +4732,37 @@ fn eval_system_function_call(
                 false,
             ));
             Ok(((result, HashSet::default()), HashMap::default()))
+        }
+        SystemFunctionKind::Clog2(input) => {
+            let ((arg, sources), bounds) = eval_expression(module, store, &input.0, arena, None)?;
+            let width = get_width(arg, arena);
+            let mut result = arena.alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                32,
+                false,
+            ));
+            for k in 1..=width {
+                let threshold = arena.alloc(SLTNode::Constant(
+                    BigUint::from(1u8) << (k - 1),
+                    BigUint::from(0u8),
+                    width,
+                    false,
+                ));
+                let cond = arena.alloc(SLTNode::Binary(arg, BinaryOp::GtU, threshold));
+                let value = arena.alloc(SLTNode::Constant(
+                    BigUint::from(k),
+                    BigUint::from(0u8),
+                    32,
+                    false,
+                ));
+                result = arena.alloc(SLTNode::Mux {
+                    cond,
+                    then_expr: value,
+                    else_expr: result,
+                });
+            }
+            Ok(((result, sources), bounds))
         }
         SystemFunctionKind::Onehot(input) => {
             let ((arg, sources), bounds) = eval_expression(module, store, &input.0, arena, None)?;
