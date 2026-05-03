@@ -3849,9 +3849,7 @@ fn eval_function_call_expression(
     };
 
     let Some(ret_id) = function_body.ret else {
-        return Err(ParserError::unsupported(
-            63,
-            LoweringPhase::CombLowering,
+        return Err(ParserError::illegal_context(
             "void function call in comb expression",
             format!("{call}"),
             Some(&call.comptime.token),

@@ -872,6 +872,50 @@ fn test_ff_function_call_rejects_mismatched_unpacked_array_shape() {
 }
 
 #[test]
+fn test_comb_void_function_call_in_expression_is_illegal_context() {
+    let code = r#"
+        module Top (q: output logic) {
+            function f () {
+            }
+            always_comb {
+                q = f();
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        match e.kind() {
+            SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+                assert_eq!(*feature, "void function call in comb expression");
+            }
+            k => panic!("expected IllegalContext for void comb function expression, got {k:?}"),
+        }
+    });
+}
+
+#[test]
+fn test_ff_void_function_call_in_expression_is_illegal_context() {
+    let code = r#"
+        module Top (clk: input clock, q: output logic) {
+            function f () {
+            }
+            always_ff (clk) {
+                q = f();
+            }
+        }
+    "#;
+
+    assert_analyzer_or_sir(Simulator::builder(code, "Top").build(), |e| {
+        match e.kind() {
+            SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+                assert_eq!(*feature, "void function call in expression");
+            }
+            k => panic!("expected IllegalContext for void FF function expression, got {k:?}"),
+        }
+    });
+}
+
+#[test]
 fn test_ff_array_literal_multiple_default_is_illegal_context() {
     let code = r#"
         module Top (

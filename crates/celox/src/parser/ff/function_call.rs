@@ -690,9 +690,7 @@ impl<'a> FfParser<'a> {
         }
 
         let Some(ret_id) = function_body.ret else {
-            return Err(ParserError::unsupported(
-                63,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::illegal_context(
                 "void function call in expression",
                 format!("{call}"),
                 Some(&call.comptime.token),
