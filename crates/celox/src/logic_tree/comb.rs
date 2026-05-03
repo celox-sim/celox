@@ -17,7 +17,7 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
-    ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionKind,
+    ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionKind, Type,
     ValueVariant, VarId, VarSelectOp,
 };
 use veryl_analyzer::value::Value;
@@ -4710,6 +4710,26 @@ fn eval_system_function_call(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     match &call.kind {
+        SystemFunctionKind::Bits(input) => {
+            let width = system_function_input_bits_width(module, store, &input.0, arena);
+            let result = arena.alloc(SLTNode::Constant(
+                BigUint::from(width),
+                BigUint::from(0u8),
+                32,
+                false,
+            ));
+            Ok(((result, HashSet::default()), HashMap::default()))
+        }
+        SystemFunctionKind::Size(input) => {
+            let size = system_function_input_size(module, store, &input.0, arena);
+            let result = arena.alloc(SLTNode::Constant(
+                BigUint::from(size),
+                BigUint::from(0u8),
+                32,
+                false,
+            ));
+            Ok(((result, HashSet::default()), HashMap::default()))
+        }
         SystemFunctionKind::Onehot(input) => {
             let ((arg, sources), bounds) = eval_expression(module, store, &input.0, arena, None)?;
             let width = get_width(arg, arena);
@@ -4739,6 +4759,57 @@ fn eval_system_function_call(
             format!("module `{}`: {call}", module.name),
             Some(&call.comptime.token),
         )),
+    }
+}
+
+fn system_function_type_bits_width(ty: &Type) -> Option<usize> {
+    ty.total_width()
+        .map(|width| width * ty.total_array().unwrap_or(1))
+}
+
+fn system_function_type_size(ty: &Type) -> Option<usize> {
+    if let Some(size) = ty.array.first() {
+        *size
+    } else if let Some(size) = ty.width_expr().first().and_then(|expr| expr.numeric()) {
+        Some(size)
+    } else if let Some(size) = ty.width().first() {
+        *size
+    } else {
+        ty.total_width()
+    }
+}
+
+fn system_function_input_bits_width(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+) -> usize {
+    let comptime = expr.comptime();
+    match &comptime.value {
+        ValueVariant::Type(ty) => system_function_type_bits_width(ty).unwrap_or(0),
+        _ => system_function_type_bits_width(&comptime.r#type).unwrap_or_else(|| {
+            eval_expression(module, store, expr, arena, None)
+                .map(|((node, _), _)| get_width(node, arena))
+                .unwrap_or(0)
+        }),
+    }
+}
+
+fn system_function_input_size(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+) -> usize {
+    let comptime = expr.comptime();
+    match &comptime.value {
+        ValueVariant::Type(ty) => system_function_type_size(ty).unwrap_or(0),
+        _ => system_function_type_size(&comptime.r#type).unwrap_or_else(|| {
+            eval_expression(module, store, expr, arena, None)
+                .map(|((node, _), _)| get_width(node, arena))
+                .unwrap_or(0)
+        }),
     }
 }
 
