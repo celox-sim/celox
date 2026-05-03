@@ -21,7 +21,7 @@
     "vite": "^6.0.0",
     "vite-plugin-monaco-editor": "^1.1.0",
     "vite-plugin-monaco-editor-nls": "^3.0.1",
-    "vitest": "^3.0.0"
+    "vitest": "^4.0.0"
   },
   "dependencies": {
     "@vitest/expect": "^4.1.1",
