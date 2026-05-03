@@ -29,12 +29,6 @@ module Top (
 all_backends! {
 
     // Basic LFSR: seed then shift, verify output changes
-    //
-    // NOTE: Veryl analyzer has a bug where generate-if `TAPVEC[K]` bit-index
-    // conditions are always evaluated as true, so all bit positions get XOR taps
-    // instead of only the ones specified by the tap vector. This makes the LFSR
-    // cycle length incorrect (9 instead of 255 for SIZE=8). These tests verify
-    // the simulation mechanics (seed, shift, hold) but not LFSR correctness.
     fn test_lfsr_basic_shift(sim) {
         @setup { let code = format!("{}\n{TOP}", test_utils::veryl_std::source(&["lfsr", "lfsr_galois.veryl"])); }
         @build Simulator::builder(&code, "Top");
@@ -144,7 +138,10 @@ all_backends! {
         assert_ne!(v, 0, "LFSR output should never be 0 (tick {i})");
     }
 
-    assert!(cycle_len > 1, "cycle length should be > 1, got {cycle_len}");
+    assert_eq!(
+        cycle_len, 255,
+        "8-bit maximal LFSR should visit all non-zero states"
+    );
 
     // Verify the cycle actually repeats for one more full period.
     for (i, expected) in values
