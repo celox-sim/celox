@@ -35,7 +35,7 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets --no-deps
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v6
         with:
@@ -63,7 +63,7 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v6
         with:
@@ -97,7 +97,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v6
         with:
@@ -133,7 +133,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v6
         with:
@@ -165,7 +165,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v6
         with:
@@ -187,7 +187,7 @@ jobs:
       - name: Prepare template for local package validation
         working-directory: examples/template
         run: |
-          node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.devDependencies['@celox-sim/celox']='link:../../packages/celox'; pkg.devDependencies['@celox-sim/vite-plugin']='link:../../packages/vite-plugin'; pkg.pnpm={...(pkg.pnpm||{}), onlyBuiltDependencies:['esbuild']}; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+          node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.devDependencies['@celox-sim/celox']='link:../../packages/celox'; pkg.devDependencies['@celox-sim/vite-plugin']='link:../../packages/vite-plugin'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
           pnpm install --ignore-workspace --no-frozen-lockfile
 
       - name: Run template tests
@@ -206,7 +206,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v6
         with:
