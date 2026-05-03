@@ -45,7 +45,7 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
-      - uses: veryl-lang/setup-verilator@v1
+      - uses: veryl-lang/setup-verilator@v2
 
       - name: Install Google Benchmark
         run: sudo apt-get install -y libbenchmark-dev
