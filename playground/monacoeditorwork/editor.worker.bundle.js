@@ -3867,8 +3867,6 @@
               case 125:
                 chClass = hasOpenCurlyBracket ? 0 : 1;
                 break;
-              // The following three rules make it that ' or " or ` are allowed inside links
-              // only if the link is wrapped by some other quote character
               case 39:
               case 34:
               case 96:
