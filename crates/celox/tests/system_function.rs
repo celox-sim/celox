@@ -193,6 +193,111 @@ module Top (
         assert_eq!(sim.get_as::<u32>(size_q), 4);
     }
 
+    fn test_direct_comb_signed_system_function_sign_extends_to_context(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<16>,
+) {
+    always_comb {
+        q = $signed(d);
+    }
+}
+"#, "Top");
+
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        sim.modify(|io| io.set(d, 0x80u8)).unwrap();
+        assert_eq!(sim.get_as::<u16>(q), 0xff80);
+    }
+
+    fn test_direct_comb_unsigned_system_function_zero_extends_to_context(sim) {
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<16>,
+) {
+    always_comb {
+        q = $unsigned(d);
+    }
+}
+"#, "Top");
+
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        sim.modify(|io| io.set(d, 0x80u8)).unwrap();
+        assert_eq!(sim.get_as::<u16>(q), 0x0080);
+    }
+
+    fn test_direct_comb_signed_unsigned_system_functions_affect_comparison(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    z: input logic<8>,
+    signed_lt: output logic,
+    unsigned_lt: output logic,
+) {
+    always_comb {
+        signed_lt = $signed(d) <: (z as i8);
+        unsigned_lt = $unsigned(d) <: (z as i8);
+    }
+}
+"#, "Top");
+
+        let d = sim.signal("d");
+        let z = sim.signal("z");
+        let signed_lt = sim.signal("signed_lt");
+        let unsigned_lt = sim.signal("unsigned_lt");
+
+        sim.modify(|io| {
+            io.set(d, 0xffu8);
+            io.set(z, 0x01u8);
+        })
+        .unwrap();
+        assert_eq!(sim.get_as::<u8>(signed_lt), 1);
+        assert_eq!(sim.get_as::<u8>(unsigned_lt), 0);
+    }
+
+    fn test_comb_function_body_signed_unsigned_system_functions(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    signed_q: output logic<16>,
+    unsigned_q: output logic<16>,
+) {
+    function signed_value (
+        x: input logic<8>,
+    ) -> logic<16> {
+        return $signed(x);
+    }
+
+    function unsigned_value (
+        x: input logic<8>,
+    ) -> logic<16> {
+        return $unsigned(x);
+    }
+
+    always_comb {
+        signed_q = signed_value(d);
+        unsigned_q = unsigned_value(d);
+    }
+}
+"#, "Top");
+
+        let d = sim.signal("d");
+        let signed_q = sim.signal("signed_q");
+        let unsigned_q = sim.signal("unsigned_q");
+
+        sim.modify(|io| io.set(d, 0x80u8)).unwrap();
+        assert_eq!(sim.get_as::<u16>(signed_q), 0xff80);
+        assert_eq!(sim.get_as::<u16>(unsigned_q), 0x0080);
+    }
+
     fn test_direct_comb_bits_type_system_function(sim) {
         @build Simulator::builder(r#"
 module Top (

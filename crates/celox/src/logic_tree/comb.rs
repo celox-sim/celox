@@ -2628,7 +2628,9 @@ fn eval_function_body_return(
             SystemFunctionKind::Bits(input)
             | SystemFunctionKind::Size(input)
             | SystemFunctionKind::Clog2(input)
-            | SystemFunctionKind::Onehot(input) => {
+            | SystemFunctionKind::Onehot(input)
+            | SystemFunctionKind::Signed(input)
+            | SystemFunctionKind::Unsigned(input) => {
                 validate_function_body_expression(module, &input.0)
             }
             _ => Err(ParserError::unsupported(
@@ -4100,10 +4102,10 @@ pub fn eval_expression(
                     arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))
                 }
                 Op::Sub => {
-                    let lhs_signed =
-                        cast_target_signed(lhs).unwrap_or_else(|| is_signed(module, l_expr, arena));
-                    let rhs_signed =
-                        cast_target_signed(rhs).unwrap_or_else(|| is_signed(module, r_expr, arena));
+                    let lhs_signed = expression_signed_override(lhs)
+                        .unwrap_or_else(|| is_signed(module, l_expr, arena));
+                    let rhs_signed = expression_signed_override(rhs)
+                        .unwrap_or_else(|| is_signed(module, r_expr, arena));
                     let signed = lhs_signed && rhs_signed;
                     let bin_op = convert_binary_op(op, signed);
                     let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr));
@@ -4118,10 +4120,10 @@ pub fn eval_expression(
                     })
                 }
                 _ => {
-                    let lhs_signed =
-                        cast_target_signed(lhs).unwrap_or_else(|| is_signed(module, l_expr, arena));
-                    let rhs_signed =
-                        cast_target_signed(rhs).unwrap_or_else(|| is_signed(module, r_expr, arena));
+                    let lhs_signed = expression_signed_override(lhs)
+                        .unwrap_or_else(|| is_signed(module, l_expr, arena));
+                    let rhs_signed = expression_signed_override(rhs)
+                        .unwrap_or_else(|| is_signed(module, r_expr, arena));
                     let signed = lhs_signed && rhs_signed;
                     let bin_op = if matches!(op, Op::ArithShiftR) {
                         if lhs_signed {
@@ -4647,7 +4649,9 @@ fn eval_factor(
                 BoundaryMap::default(),
             ))
         }
-        Factor::SystemFunctionCall(call) => eval_system_function_call(module, store, call, arena),
+        Factor::SystemFunctionCall(call) => {
+            eval_system_function_call(module, store, call, arena, context_width)
+        }
         Factor::FunctionCall(call) => eval_function_call_expression(module, store, call, arena),
         Factor::Anonymous(_) | Factor::Unknown(_) => Err(ParserError::unsupported(
             67,
@@ -4706,11 +4710,57 @@ fn merge_boundaries(mut base: BoundaryMap<VarId>, other: BoundaryMap<VarId>) -> 
     base
 }
 
+fn apply_context_width(
+    arena: &mut SLTNodeArena<VarId>,
+    expr: NodeId,
+    target_width: Option<usize>,
+    sign_extend: bool,
+) -> NodeId {
+    let Some(target_width) = target_width else {
+        return expr;
+    };
+    let expr_width = get_width(expr, arena);
+    if expr_width < target_width {
+        let pad_width = target_width - expr_width;
+        let pad = if sign_extend {
+            let msb_slice = arena.alloc(SLTNode::Slice {
+                expr,
+                access: BitAccess::new(expr_width - 1, expr_width - 1),
+            });
+            let pad = if pad_width == 1 {
+                msb_slice
+            } else {
+                arena.alloc(SLTNode::Concat(
+                    std::iter::repeat_n((msb_slice, 1), pad_width).collect(),
+                ))
+            };
+            (pad, pad_width)
+        } else {
+            let zero = arena.alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u32),
+                pad_width,
+                false,
+            ));
+            (zero, pad_width)
+        };
+        arena.alloc(SLTNode::Concat(vec![pad, (expr, expr_width)]))
+    } else if expr_width > target_width {
+        arena.alloc(SLTNode::Slice {
+            expr,
+            access: BitAccess::new(0, target_width - 1),
+        })
+    } else {
+        expr
+    }
+}
+
 fn eval_system_function_call(
     module: &Module,
     store: &SymbolicStore<VarId>,
     call: &SystemFunctionCall,
     arena: &mut SLTNodeArena<VarId>,
+    context_width: Option<usize>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     match &call.kind {
         SystemFunctionKind::Bits(input) => {
@@ -4785,6 +4835,17 @@ fn eval_system_function_call(
             let no_overlap = arena.alloc(SLTNode::Binary(overlap, BinaryOp::Eq, zero));
             let result = arena.alloc(SLTNode::Binary(non_zero, BinaryOp::LogicAnd, no_overlap));
             Ok(((result, sources), bounds))
+        }
+        SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
+            let ((arg, sources), bounds) = eval_expression(module, store, &input.0, arena, None)?;
+            let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
+            Ok((
+                (
+                    apply_context_width(arena, arg, context_width, signed),
+                    sources,
+                ),
+                bounds,
+            ))
         }
         _ => Err(ParserError::unsupported(
             59,
@@ -4861,23 +4922,31 @@ fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarId>) -> bool
     }
 }
 
-fn cast_target_signed(expr: &Expression) -> Option<bool> {
-    let Expression::Binary(_, op, rhs, _) = expr else {
-        return None;
-    };
-    if !matches!(op, Op::As) {
-        return None;
-    }
-
-    let Expression::Term(factor) = rhs.as_ref() else {
-        return None;
-    };
-    let Factor::Value(comptime) = factor.as_ref() else {
-        return None;
-    };
-    match &comptime.value {
-        ValueVariant::Type(ty) => Some(ty.signed),
-        ValueVariant::Numeric(_) => Some(false),
+fn expression_signed_override(expr: &Expression) -> Option<bool> {
+    match expr {
+        Expression::Binary(_, Op::As, rhs, _) => {
+            let Expression::Term(factor) = rhs.as_ref() else {
+                return None;
+            };
+            let Factor::Value(comptime) = factor.as_ref() else {
+                return None;
+            };
+            match &comptime.value {
+                ValueVariant::Type(ty) => Some(ty.signed),
+                ValueVariant::Numeric(_) => Some(false),
+                _ => None,
+            }
+        }
+        Expression::Term(factor) => {
+            let Factor::SystemFunctionCall(call) = factor.as_ref() else {
+                return None;
+            };
+            match call.kind {
+                SystemFunctionKind::Signed(_) => Some(true),
+                SystemFunctionKind::Unsigned(_) => Some(false),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
