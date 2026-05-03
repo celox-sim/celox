@@ -47,7 +47,7 @@ jobs:
         with:
           node-version: 24
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust
@@ -115,7 +115,7 @@ jobs:
         with:
           node-version: 24
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - name: Download binding artifact
         uses: actions/download-artifact@v8
@@ -149,7 +149,7 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -242,7 +242,7 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v4
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
