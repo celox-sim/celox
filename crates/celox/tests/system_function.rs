@@ -65,6 +65,54 @@ module Top (
         }
     }
 
+    fn test_direct_comb_bits_system_function(sim) {
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<32>,
+) {
+    always_comb {
+        q = $bits(d);
+    }
+}
+"#, "Top");
+
+        let q = sim.signal("q");
+        assert_eq!(sim.get_as::<u32>(q), 8);
+    }
+
+    fn test_direct_comb_size_system_function(sim) {
+        @ignore_on(veryl);
+        @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>[4],
+    q: output logic<32>,
+) {
+    always_comb {
+        q = $size(d);
+    }
+}
+"#, "Top");
+
+        let q = sim.signal("q");
+        assert_eq!(sim.get_as::<u32>(q), 4);
+    }
+
+    fn test_direct_comb_bits_type_system_function(sim) {
+        @build Simulator::builder(r#"
+module Top (
+    q: output logic<32>,
+) {
+    always_comb {
+        q = $bits(logic<8>);
+    }
+}
+"#, "Top");
+
+        let q = sim.signal("q");
+        assert_eq!(sim.get_as::<u32>(q), 8);
+    }
+
     fn test_direct_ff_bits_system_function(sim) {
         @build Simulator::builder(r#"
 module Top (
