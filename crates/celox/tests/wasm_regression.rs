@@ -1196,8 +1196,8 @@ fn wasm_reg_vcd_output() {
     // Build VCD descriptors using the JIT simulator's helper
     let descs = sim.build_vcd_descs(false);
 
-    let vcd_path = "/tmp/wasm_vcd_test.vcd";
-    let mut vcd_writer = VcdWriter::new(vcd_path, &descs).unwrap();
+    let vcd_path = std::env::temp_dir().join(format!("wasm_vcd_test_{}.vcd", std::process::id()));
+    let mut vcd_writer = VcdWriter::new(&vcd_path, &descs).unwrap();
 
     // Helper to dump VCD from WASM memory
     let dump_vcd = |wasm: &WasmBackend, writer: &mut VcdWriter, ts: u64| {
@@ -1225,7 +1225,7 @@ fn wasm_reg_vcd_output() {
     }
 
     // Verify VCD file was written
-    let content = std::fs::read_to_string(vcd_path).unwrap();
+    let content = std::fs::read_to_string(&vcd_path).unwrap();
     assert!(
         content.contains("$var wire"),
         "VCD should contain signal declarations"
@@ -1237,5 +1237,5 @@ fn wasm_reg_vcd_output() {
     assert_eq!(wasm.get(w_cnt), BigUint::from(5u32), "counter should be 5");
 
     // Clean up
-    std::fs::remove_file(vcd_path).unwrap();
+    std::fs::remove_file(&vcd_path).unwrap();
 }
