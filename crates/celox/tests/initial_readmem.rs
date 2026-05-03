@@ -1,4 +1,5 @@
 use celox::{BigUint, LoweringPhase, ParserError, Simulator, SimulatorErrorKind};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -6,7 +7,9 @@ use celox::{BigUint, LoweringPhase, ParserError, Simulator, SimulatorErrorKind};
 mod test_utils;
 
 fn temp_mem_file(name: &str, content: &str) -> String {
-    let path = std::env::temp_dir().join(format!("celox_{name}_{}.mem", std::process::id()));
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("celox_{name}_{}_{id}.mem", std::process::id()));
     std::fs::write(&path, content).unwrap();
     path.to_string_lossy().replace('\\', "\\\\")
 }
