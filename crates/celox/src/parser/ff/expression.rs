@@ -1276,10 +1276,12 @@ impl<'a> FfParser<'a> {
                 self.stack.push_back(casted);
                 Ok(())
             }
-            _ => Err(ParserError::unsupported(
-                66,
-                LoweringPhase::FfLowering,
-                "system function call",
+            SystemFunctionKind::Readmemh(_, _)
+            | SystemFunctionKind::Display(_)
+            | SystemFunctionKind::Write(_)
+            | SystemFunctionKind::Assert { .. }
+            | SystemFunctionKind::Finish => Err(ParserError::illegal_context(
+                "system task in FF expression",
                 format!("{call}"),
                 Some(&call.comptime.token),
             )),
