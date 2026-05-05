@@ -9,6 +9,68 @@ fn build_wasm(code: &str, top: &str) -> (WasmBackend, celox::Simulator) {
 }
 
 #[test]
+fn test_wasm_comb_constant_display_runtime_event() {
+    let code = r#"
+        module Top {
+            always_comb {
+                $display("hi");
+            }
+        }
+    "#;
+    let mut sim = celox::Simulator::builder(code, "Top")
+        .build_wasm()
+        .expect("build_wasm failed");
+
+    sim.eval_comb().expect("eval_comb failed");
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "hi".to_string(),
+        }],
+    );
+
+    sim.eval_comb().expect("second eval_comb failed");
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+}
+
+#[test]
+fn test_wasm_comb_store_enables_downstream_display() {
+    let code = r#"
+        module Top (
+            a: input logic<8>,
+        ) {
+            var x: logic<8>;
+
+            always_comb {
+                x = a;
+            }
+
+            always_comb {
+                $display("x=%0d", x);
+            }
+        }
+    "#;
+    let mut sim = celox::Simulator::builder(code, "Top")
+        .build_wasm()
+        .expect("build_wasm failed");
+    let a = sim.signal("a");
+
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(a, 7u8)).expect("modify failed");
+    sim.eval_comb().expect("eval_comb failed");
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "x=7".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(a, 7u8)).expect("same modify failed");
+    sim.eval_comb().expect("same eval_comb failed");
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+}
+
+#[test]
 fn test_wasm_adder_combinational() {
     let code = r#"
         module Top (

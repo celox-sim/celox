@@ -146,6 +146,9 @@ pub trait SimBackend {
     fn comb_capture_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
         None
     }
+    fn comb_capture_event_buffer_as_ptr(&self) -> Option<(*const u8, usize)> {
+        None
+    }
     fn set_comb_capture_event_enabled(&mut self, _active_sites: &[bool]) {}
     fn stable_region_size(&self) -> usize;
     fn layout(&self) -> &MemoryLayout;

@@ -671,18 +671,32 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     fn collect_comb_capture_events(&mut self) -> Vec<RawRuntimeEvent> {
-        let Some(buffer) = self.backend.comb_capture_event_buffer() else {
+        let mut out = Vec::new();
+        let raw_events = if let Some(buffer) = self.backend.comb_capture_event_buffer() {
+            collect_runtime_events(
+                self.backend.layout(),
+                &self.program.runtime_event_sites,
+                &mut self.comb_capture_event_read_seq,
+                buffer.byte_size(),
+                |offset| buffer.read_u64(offset),
+                |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
+            )
+        } else if let Some((ptr, size)) = self.backend.comb_capture_event_buffer_as_ptr() {
+            let read_u64 = |offset: usize| -> u64 {
+                unsafe { std::ptr::read_volatile(ptr.add(offset) as *const u64) }
+            };
+            collect_runtime_events(
+                self.backend.layout(),
+                &self.program.runtime_event_sites,
+                &mut self.comb_capture_event_read_seq,
+                size,
+                read_u64,
+                read_u64,
+            )
+        } else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        for raw in collect_runtime_events(
-            self.backend.layout(),
-            &self.program.runtime_event_sites,
-            &mut self.comb_capture_event_read_seq,
-            buffer.byte_size(),
-            |offset| buffer.read_u64(offset),
-            |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
-        ) {
+        for raw in raw_events {
             match raw {
                 RawRuntimeEvent::Event { site_id, args } => {
                     out.push(RawRuntimeEvent::Event { site_id, args });
