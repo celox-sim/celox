@@ -398,16 +398,6 @@ fn drain_runtime_events_from_buffer(
     .collect()
 }
 
-fn collapse_repeated_capture_sequence(events: &mut Vec<RuntimeEvent>) {
-    while events.len() > 1 && events.len().is_multiple_of(2) {
-        let mid = events.len() / 2;
-        if events[..mid] != events[mid..] {
-            break;
-        }
-        events.truncate(mid);
-    }
-}
-
 // ── Generic methods available for any backend ────────────────────────
 #[cfg(not(target_arch = "wasm32"))]
 impl<B: SimBackend> Simulator<B> {
@@ -675,7 +665,7 @@ impl<B: SimBackend> Simulator<B> {
             }
             let site_id = self.program.comb_observers[idx].site_id;
             if let Some(raw_events) = captures.remove(&site_id) {
-                let mut events: Vec<_> = raw_events
+                let events: Vec<_> = raw_events
                     .into_iter()
                     .filter_map(|raw| {
                         render_raw_runtime_event(
@@ -685,7 +675,6 @@ impl<B: SimBackend> Simulator<B> {
                         )
                     })
                     .collect();
-                collapse_repeated_capture_sequence(&mut events);
                 self.pending_runtime_events.extend(events);
                 continue;
             }

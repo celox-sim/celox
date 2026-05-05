@@ -1203,6 +1203,97 @@ module Top (
     );
 }
 
+fn test_comb_display_inside_dynamic_for_preserves_repeated_identical_events(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    count: input logic<4>,
+    out: output logic<8>,
+) {
+    always_comb {
+        for i in 0..count {
+            $display("same");
+        }
+        out = count;
+    }
+}
+"#, "Top");
+
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(count, 2u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 2);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "same".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "same".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_inside_dynamic_for_with_multiple_updates_emits_once_per_iteration(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    count: input logic<4>,
+    base: input logic<8>,
+    out_a: output logic<8>,
+    out_b: output logic<8>,
+) {
+    var a: logic<8>;
+    var b: logic<8>;
+
+    always_comb {
+        a = base;
+        b = base + 8'd10;
+        for i in 0..count {
+            a = a + i;
+            b = b + i;
+            $display("i=%0d", i);
+        }
+        out_a = a;
+        out_b = b;
+    }
+}
+"#, "Top");
+
+    let count = sim.signal("count");
+    let base = sim.signal("base");
+    let out_a = sim.signal("out_a");
+    let out_b = sim.signal("out_b");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(count, 2u8);
+        io.set(base, 5u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out_a), 6);
+    assert_eq!(sim.get_as::<u8>(out_b), 16);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "i=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=1".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_comb_display_preserves_order_around_dynamic_for(sim) {
     @omit_veryl;
     @ignore_on(wasm);

@@ -999,6 +999,7 @@ pub enum LogicPathTarget<A: Hash + Eq + Clone> {
         guard: Option<NodeId>,
         emit_on_true: bool,
         args: Vec<NodeId>,
+        loop_runner: Option<NodeId>,
     },
 }
 
@@ -1064,6 +1065,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                     guard,
                     emit_on_true,
                     args,
+                    loop_runner,
                 } => LogicPathTarget::CombCaptureEvent {
                     site_id: *site_id,
                     guard: guard.map(|node| {
@@ -1080,6 +1082,11 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                                 .map_addr(*node, arena, target_arena, cache, f)
                         })
                         .collect(),
+                    loop_runner: loop_runner.map(|node| {
+                        arena
+                            .get(node)
+                            .map_addr(node, arena, target_arena, cache, f)
+                    }),
                 },
             },
             sources: self
@@ -1343,6 +1350,7 @@ fn collect_system_function_effect(
         site_id,
         guard,
         args: observer_args,
+        loop_runner: None,
         sensitivity: Vec::new(),
         local_inputs: store
             .iter()
@@ -2025,40 +2033,46 @@ fn collect_comb_effects_for(
         ..
     } = &for_stmt.range
     else {
-        let loop_effects = collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
-        return eval_for_with_effects(
+        let (loop_effects, observer_start) =
+            collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        let (store, _, runner) = eval_for_with_effects(
             module,
             store,
             BoundaryMap::default(),
             for_stmt,
             arena,
             &loop_effects,
-        )
-        .map(|(s, _)| s);
+        )?;
+        attach_loop_runner_to_first_observer(collector, observer_start, runner);
+        return Ok(store);
     };
     let Some(start) = const_for_bound_i64(start) else {
-        let loop_effects = collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
-        return eval_for_with_effects(
+        let (loop_effects, observer_start) =
+            collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        let (store, _, runner) = eval_for_with_effects(
             module,
             store,
             BoundaryMap::default(),
             for_stmt,
             arena,
             &loop_effects,
-        )
-        .map(|(s, _)| s);
+        )?;
+        attach_loop_runner_to_first_observer(collector, observer_start, runner);
+        return Ok(store);
     };
     let Some(end) = const_for_bound_i64(end) else {
-        let loop_effects = collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
-        return eval_for_with_effects(
+        let (loop_effects, observer_start) =
+            collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        let (store, _, runner) = eval_for_with_effects(
             module,
             store,
             BoundaryMap::default(),
             for_stmt,
             arena,
             &loop_effects,
-        )
-        .map(|(s, _)| s);
+        )?;
+        attach_loop_runner_to_first_observer(collector, observer_start, runner);
+        return Ok(store);
     };
     let final_end = if *inclusive { end + 1 } else { end };
     for i in start..final_end {
@@ -2093,9 +2107,9 @@ fn collect_dynamic_for_effects(
     for_stmt: &ForStatement,
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
-) -> Result<Vec<SLTForEffect>, ParserError> {
+) -> Result<(Vec<SLTForEffect>, usize), ParserError> {
     let Some(loop_width) = for_stmt.var_type.total_width() else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), collector.observers.len()));
     };
     let mut iter_store = store.clone();
     let mut written_accesses = HashMap::default();
@@ -2132,41 +2146,28 @@ fn collect_dynamic_for_effects(
         iter_store.insert(id, loop_store);
     }
     iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+    let observer_start = collector.observers.len();
     let saved = collector.loop_effects.take();
     collector.loop_effects = Some(Vec::new());
     let _ = collect_comb_effects_statements(module, iter_store, &for_stmt.body, arena, collector)?;
     let effects = collector.loop_effects.take().unwrap_or_default();
     collector.loop_effects = saved;
-    attach_effects_to_existing_for_folds(arena, for_stmt.var_id, &effects);
-    Ok(effects)
+    Ok((effects, observer_start))
 }
 
-fn attach_effects_to_existing_for_folds(
-    arena: &mut SLTNodeArena<VarId>,
-    loop_var: VarId,
-    effects: &[SLTForEffect],
+fn attach_loop_runner_to_first_observer(
+    collector: &mut CombEffectCollector,
+    observer_start: usize,
+    runner: Option<NodeId>,
 ) {
-    if effects.is_empty() {
+    let Some(runner) = runner else {
         return;
-    }
-    let mut changed = false;
-    for node in &mut arena.nodes {
-        let SLTNode::ForFold {
-            loop_var: node_loop_var,
-            effects: node_effects,
-            ..
-        } = node
-        else {
-            continue;
-        };
-        if *node_loop_var == loop_var && node_effects.is_empty() {
-            *node_effects = effects.to_vec();
-            changed = true;
-            break;
-        }
-    }
-    if changed {
-        arena.cache.clear();
+    };
+    if let Some(observer) = collector.observers[observer_start..]
+        .iter_mut()
+        .find(|observer| observer.captured_in_loop)
+    {
+        observer.loop_runner = Some(runner);
     }
 }
 
@@ -2727,6 +2728,7 @@ fn eval_for(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     eval_for_with_effects(module, store, boundaries, for_stmt, arena, &[])
+        .map(|(store, boundaries, _)| (store, boundaries))
 }
 
 fn eval_for_with_effects(
@@ -2736,7 +2738,14 @@ fn eval_for_with_effects(
     for_stmt: &ForStatement,
     arena: &mut SLTNodeArena<VarId>,
     effects: &[SLTForEffect],
-) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
+) -> Result<
+    (
+        SymbolicStore<VarId>,
+        HashMap<VarId, BTreeSet<usize>>,
+        Option<NodeId>,
+    ),
+    ParserError,
+> {
     let Some(loop_width) = for_stmt.var_type.total_width() else {
         return Err(ParserError::unsupported(
             65,
@@ -2917,34 +2926,79 @@ fn eval_for_with_effects(
     merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
 
     let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena);
-    if updates.is_empty() {
+    if updates.is_empty() && effects.is_empty() {
         let mut store = store;
         store.remove(&for_stmt.var_id);
-        return Ok((store, merged_boundaries));
+        return Ok((store, merged_boundaries, None));
     }
 
-    let folded_updates: Vec<_> = updates
-        .iter()
-        .map(|(target, expr, _)| SLTForUpdate {
-            target: *target,
-            expr: *expr,
-        })
-        .collect();
+    let folded_updates: Vec<_> = if updates.is_empty() {
+        let one = bool_node(arena, true);
+        vec![SLTForUpdate {
+            target: VarAtomBase::new(for_stmt.var_id, 0, loop_width - 1),
+            expr: one,
+        }]
+    } else {
+        updates
+            .iter()
+            .map(|(target, expr, _)| SLTForUpdate {
+                target: *target,
+                expr: *expr,
+            })
+            .collect()
+    };
     let loop_updated_vars: HashSet<_> = folded_updates
         .iter()
         .map(|update| update.target.id)
         .collect();
-    let initial_updates: Vec<_> = updates
-        .iter()
-        .map(|(target, _, _)| {
-            let parts = store[&target.id].get_parts(target.access);
-            let (expr, _) = combine_parts_with_default(target.id, target.access.lsb, parts, arena);
-            SLTForUpdate {
-                target: *target,
-                expr,
-            }
-        })
-        .collect();
+    let initial_updates: Vec<_> = if updates.is_empty() {
+        let one = bool_node(arena, true);
+        vec![SLTForUpdate {
+            target: VarAtomBase::new(for_stmt.var_id, 0, loop_width - 1),
+            expr: one,
+        }]
+    } else {
+        updates
+            .iter()
+            .map(|(target, _, _)| {
+                let parts = store[&target.id].get_parts(target.access);
+                let (expr, _) =
+                    combine_parts_with_default(target.id, target.access.lsb, parts, arena);
+                SLTForUpdate {
+                    target: *target,
+                    expr,
+                }
+            })
+            .collect()
+    };
+
+    let loop_runner = if effects.is_empty() {
+        None
+    } else {
+        let result = folded_updates[0].target;
+        Some(arena.alloc(SLTNode::ForFold {
+            loop_var: for_stmt.var_id,
+            loop_width,
+            loop_signed: for_stmt.var_type.signed,
+            start: start.clone(),
+            end: end.clone(),
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            result,
+            initials: initial_updates.clone(),
+            updates: folded_updates.clone(),
+            effects: effects.to_vec(),
+            continue_cond: loop_state.continue_expr,
+        }))
+    };
+
+    if updates.is_empty() {
+        let mut store = store;
+        store.remove(&for_stmt.var_id);
+        return Ok((store, merged_boundaries, loop_runner));
+    }
 
     let mut result_store = store;
     for (target, _expr, sources) in updates {
@@ -2976,7 +3030,7 @@ fn eval_for_with_effects(
             result: target,
             initials: initial_updates.clone(),
             updates: folded_updates.clone(),
-            effects: effects.to_vec(),
+            effects: Vec::new(),
             continue_cond: loop_state.continue_expr,
         });
 
@@ -2990,7 +3044,7 @@ fn eval_for_with_effects(
     }
 
     result_store.remove(&for_stmt.var_id);
-    Ok((result_store, merged_boundaries))
+    Ok((result_store, merged_boundaries, loop_runner))
 }
 
 fn eval_assign(

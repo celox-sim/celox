@@ -358,7 +358,12 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
             guard,
             emit_on_true,
             args,
+            loop_runner,
         } => {
+            if let Some(loop_runner) = loop_runner {
+                lower_logic_path_node(lowerer, builder, path, *loop_runner, arena, lower_cache);
+                return;
+            }
             let emit = |builder: &mut SIRBuilder<Addr>,
                         lower_cache: &mut HashMap<NodeId, RegisterId>| {
                 let regs = args

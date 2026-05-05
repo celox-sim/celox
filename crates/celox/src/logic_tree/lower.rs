@@ -1124,13 +1124,13 @@ impl SLTToSIRLowerer {
             self.cast_reg_width_ext(builder, loop_value, loop_width, loop_signed);
 
         let mut env_inputs = crate::HashMap::default();
+        for (update, state_reg) in updates.iter().zip(body_states.iter().copied()) {
+            env_inputs.insert(update.target.clone(), state_reg);
+        }
         env_inputs.insert(
             VarAtomBase::new(loop_var.clone(), 0, loop_width - 1),
             loop_value_trunc,
         );
-        for (update, state_reg) in updates.iter().zip(body_states.iter().copied()) {
-            env_inputs.insert(update.target.clone(), state_reg);
-        }
         let env = LowerEnv { inputs: env_inputs };
         let mut local_cache = crate::HashMap::default();
         self.lower_for_effects(builder, arena, &mut local_cache, &env, effects);

@@ -133,6 +133,7 @@ pub struct CombObserver<A = AbsoluteAddr> {
     pub site_id: u32,
     pub guard: Option<crate::logic_tree::NodeId>,
     pub args: Vec<crate::logic_tree::NodeId>,
+    pub loop_runner: Option<crate::logic_tree::NodeId>,
     pub sensitivity: Vec<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, crate::logic_tree::NodeId)>,
     pub observed_inputs: Vec<VarAtomBase<A>>,

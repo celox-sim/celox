@@ -1827,6 +1827,29 @@ fn build_comb_observer_capture_paths(
 
     for observer in observers {
         if observer.captured_in_loop {
+            let Some(loop_runner) = observer.loop_runner else {
+                continue;
+            };
+            let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
+            let sources = observer
+                .sensitivity
+                .iter()
+                .copied()
+                .filter(|atom| !written_inputs.contains(&atom.id))
+                .collect();
+            comb_blocks.push(LogicPath {
+                target: LogicPathTarget::CombCaptureEvent {
+                    site_id: observer.site_id,
+                    guard: None,
+                    emit_on_true: true,
+                    args: Vec::new(),
+                    loop_runner: Some(loop_runner),
+                },
+                sources,
+                local_inputs: observer.local_inputs.clone(),
+                order_before: HashSet::default(),
+                expr: loop_runner,
+            });
             continue;
         }
         let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
@@ -1873,6 +1896,7 @@ fn build_comb_observer_capture_paths(
                 guard: observer.guard,
                 emit_on_true,
                 args: observer.args.clone(),
+                loop_runner: None,
             },
             sources,
             local_inputs: observer.local_inputs.clone(),
