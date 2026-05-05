@@ -230,7 +230,7 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 bits
             )
         }
-        SIRInstruction::Store(addr, offset, bits, src, _) => {
+        SIRInstruction::Store(addr, offset, bits, src, _, _) => {
             format!(
                 "Store(addr={}, offset={}, bits={}, src_reg = {})",
                 format_regioned_addr(addr, program),

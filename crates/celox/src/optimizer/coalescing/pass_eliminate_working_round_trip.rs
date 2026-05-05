@@ -98,7 +98,9 @@ pub(crate) fn eliminate_working_round_trip(
                     }
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
-                SIRInstruction::Store(addr, offset, _, _, _) if addr.region == WORKING_REGION => {
+                SIRInstruction::Store(addr, offset, _, _, _, _)
+                    if addr.region == WORKING_REGION =>
+                {
                     let abs = addr.absolute_addr();
                     if matches!(offset, SIROffset::Dynamic(_)) {
                         vars.entry(abs).and_modify(|v| v.has_dynamic = true);
@@ -174,7 +176,7 @@ pub(crate) fn eliminate_working_round_trip(
                     true
                 }
                 // Redirect Store from WORKING to STABLE
-                SIRInstruction::Store(addr, _, _, _, _) if addr.region == WORKING_REGION => {
+                SIRInstruction::Store(addr, _, _, _, _, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
                     if let Some(stable) = stable_addrs.get(&abs) {
                         *addr = *stable;

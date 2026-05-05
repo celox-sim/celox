@@ -916,7 +916,7 @@ pub(crate) fn flatten(
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
                     match inst {
-                        crate::ir::SIRInstruction::Store(addr, .., triggers) => {
+                        crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                             let abs = addr.absolute_addr();
                             let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
@@ -941,7 +941,7 @@ pub(crate) fn flatten(
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
                     match inst {
-                        crate::ir::SIRInstruction::Store(addr, .., triggers) => {
+                        crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                             let abs = addr.absolute_addr();
                             let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
@@ -970,7 +970,9 @@ pub(crate) fn flatten(
                             let abs = addr.absolute_addr();
                             let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
-                                if let crate::ir::SIRInstruction::Store(.., triggers) = inst {
+                                if let crate::ir::SIRInstruction::Store(_, _, _, _, triggers, _) =
+                                    inst
+                                {
                                     *triggers = ts.clone();
                                 }
                             }
@@ -994,7 +996,7 @@ pub(crate) fn flatten(
         for bb in eu.blocks.values_mut() {
             for inst in &mut bb.instructions {
                 match inst {
-                    crate::ir::SIRInstruction::Store(addr, .., triggers) => {
+                    crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                         let abs = addr.absolute_addr();
                         let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
                         if let Some(ts) = trigger_map.get(&canonical) {
@@ -1825,6 +1827,9 @@ fn build_comb_observer_capture_paths(
         return;
     }
 
+    annotate_comb_capture_enable_sites(comb_blocks, observers);
+
+    let mut previous_capture_path: Option<LogicPathId> = None;
     for observer in observers {
         if observer.captured_in_loop {
             let Some(loop_runner) = observer.loop_runner else {
@@ -1837,6 +1842,10 @@ fn build_comb_observer_capture_paths(
                 .copied()
                 .filter(|atom| !written_inputs.contains(&atom.id))
                 .collect();
+            let path_id = LogicPathId(comb_blocks.len());
+            if let Some(prev) = previous_capture_path {
+                comb_blocks[prev.0].order_before.insert(path_id);
+            }
             comb_blocks.push(LogicPath {
                 target: LogicPathTarget::CombCaptureEvent {
                     site_id: observer.site_id,
@@ -1848,8 +1857,10 @@ fn build_comb_observer_capture_paths(
                 sources,
                 local_inputs: observer.local_inputs.clone(),
                 order_before: HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
                 expr: loop_runner,
             });
+            previous_capture_path = Some(path_id);
             continue;
         }
         let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
@@ -1872,6 +1883,9 @@ fn build_comb_observer_capture_paths(
         let order_after = observer_order_after(comb_blocks, observer);
 
         let path_id = LogicPathId(comb_blocks.len());
+        if let Some(prev) = previous_capture_path {
+            comb_blocks[prev.0].order_before.insert(path_id);
+        }
         for idx in &order_after {
             comb_blocks[idx.0].order_before.insert(path_id);
         }
@@ -1901,8 +1915,31 @@ fn build_comb_observer_capture_paths(
             sources,
             local_inputs: observer.local_inputs.clone(),
             order_before,
+            comb_capture_enable_sites: Vec::new(),
             expr,
         });
+        previous_capture_path = Some(path_id);
+    }
+}
+
+fn annotate_comb_capture_enable_sites(
+    comb_blocks: &mut [LogicPath<AbsoluteAddr>],
+    observers: &[crate::ir::CombObserver<AbsoluteAddr>],
+) {
+    for observer in observers {
+        for atom in &observer.sensitivity {
+            for path in comb_blocks.iter_mut() {
+                let Some(target) = path.target.var() else {
+                    continue;
+                };
+                if target.id == atom.id
+                    && target.access.overlaps(&atom.access)
+                    && !path.comb_capture_enable_sites.contains(&observer.site_id)
+                {
+                    path.comb_capture_enable_sites.push(observer.site_id);
+                }
+            }
+        }
     }
 }
 
@@ -1933,7 +1970,8 @@ fn observer_order_before(
         .iter()
         .map(|atom| atom.id)
         .collect();
-    if position_ids.is_empty() {
+    let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
+    if position_ids.is_empty() || written_inputs.is_empty() {
         return HashSet::default();
     }
     let written_before = observer.written_before.iter().collect::<Vec<_>>();
@@ -1942,7 +1980,7 @@ fn observer_order_before(
         let Some(target) = path.target.var() else {
             continue;
         };
-        if !position_ids.contains(&target.id) {
+        if !position_ids.contains(&target.id) || !written_inputs.contains(&target.id) {
             continue;
         }
         let already_written = written_before

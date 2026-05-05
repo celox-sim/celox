@@ -160,6 +160,120 @@ module Top (
     assert_eq!(sim.drain_runtime_events(), vec![]);
 }
 
+fn test_comb_display_tracks_downstream_comb_settle_sensitivity(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    var x: logic<8>;
+
+    always_comb {
+        x = a;
+    }
+
+    always_comb {
+        out = x;
+        $display("x=%0d", x);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 9u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 9);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "x=9".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_after_ff_runtime_event_preserves_drain_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<8>,
+    out: output logic<8>,
+) {
+    var q: logic<8>;
+
+    always_ff {
+        q = d;
+        $display("ff=%0d", d);
+    }
+
+    always_comb {
+        out = q;
+        $display("comb=%0d", out);
+    }
+}
+"#, "Top");
+
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(d, 3u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 3);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "ff=3".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "comb=3".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_capture_defers_context_formatting_until_drain(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    always_comb {
+        out = a;
+        $display("loc=%m time=%t a=%0d", a);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 5);
+    assert_eq!(
+        sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
+            tb_time: Some(42),
+            scope: Some("tb.top"),
+        }),
+        vec![celox::RuntimeEvent::Display {
+            message: "loc=tb.top time=42 a=5".to_string(),
+        }],
+    );
+}
+
 fn test_comb_inactive_display_and_assert_do_not_leak_or_duplicate(sim) {
     @omit_veryl;
     @ignore_on(wasm);

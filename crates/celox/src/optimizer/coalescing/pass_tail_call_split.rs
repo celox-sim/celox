@@ -483,11 +483,11 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.push(*off);
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
             out.push(*off);
             out.push(*src);
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
             out.push(*src);
         }
         SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
@@ -1368,6 +1368,7 @@ mod tests {
                 32,
                 result_reg,
                 Vec::new(),
+                Vec::new(),
             ));
         }
 
@@ -1488,6 +1489,7 @@ mod tests {
                     32,
                     param_reg,
                     Vec::new(),
+                    Vec::new(),
                 ));
             }
 
@@ -1545,6 +1547,7 @@ mod tests {
                     SIROffset::Static(0),
                     32,
                     result_reg,
+                    Vec::new(),
                     Vec::new(),
                 ));
             }

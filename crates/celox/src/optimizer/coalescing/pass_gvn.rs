@@ -291,7 +291,7 @@ fn apply_aliases(
             }
         }
         SIRInstruction::Load(_, _, _, _) => {}
-        SIRInstruction::Store(_, _, _, src, _) => {
+        SIRInstruction::Store(_, _, _, src, _, _) => {
             if let Some(&a) = aliases.get(src) {
                 *src = a;
             }

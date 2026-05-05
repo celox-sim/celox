@@ -767,6 +767,45 @@ fn load_comb_capture_event_ptr_and_enabled(
     (event_ptr, enabled)
 }
 
+fn emit_enable_comb_capture_sites(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    changed: VReg,
+    site_ids: &[u32],
+) {
+    let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Load {
+        dst: enabled_ptr,
+        base: BaseReg::SimState,
+        offset: crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+        size: OpSize::S64,
+    });
+    let one = ctx.alloc_vreg(SpillDesc::remat(1));
+    block.push(MInst::LoadImm { dst: one, value: 1 });
+    for &site_id in site_ids {
+        let old = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadPtr {
+            dst: old,
+            ptr: enabled_ptr,
+            offset: site_id as i32,
+            size: OpSize::S8,
+        });
+        let next = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Select {
+            dst: next,
+            cond: changed,
+            true_val: one,
+            false_val: old,
+        });
+        block.push(MInst::StorePtr {
+            ptr: enabled_ptr,
+            offset: site_id as i32,
+            src: next,
+            size: OpSize::S8,
+        });
+    }
+}
+
 fn lower_runtime_event_write(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -1542,7 +1581,7 @@ fn lower_instruction(
             }
         }
 
-        SIRInstruction::Store(addr, offset, width_bits, src_reg, triggers) => {
+        SIRInstruction::Store(addr, offset, width_bits, src_reg, triggers, comb_capture_sites) => {
             // width=0: identity Store optimized away; only emit triggers.
             if *width_bits == 0 {
                 if !triggers.is_empty() {
@@ -1616,6 +1655,51 @@ fn lower_instruction(
                 }
                 // Skip value store entirely
             } else {
+                let old_comb_probe = if comb_capture_sites.is_empty() || *width_bits > 64 {
+                    None
+                } else {
+                    match offset {
+                        SIROffset::Static(bit_off) => {
+                            let intra = bit_off % 8;
+                            let containing_byte_off =
+                                ctx.byte_offset(addr, 0) + (bit_off / 8) as i32;
+                            let size = ISelContext::op_size_for_width(*width_bits + intra);
+                            let old = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Load {
+                                dst: old,
+                                base: BaseReg::SimState,
+                                offset: containing_byte_off,
+                                size,
+                            });
+                            Some((old, containing_byte_off, size))
+                        }
+                        SIROffset::Dynamic(_) => None,
+                    }
+                };
+                let old_comb_mask_probe = if comb_capture_sites.is_empty()
+                    || *width_bits > 64
+                    || !ctx.is_4state_var(addr)
+                {
+                    None
+                } else {
+                    match offset {
+                        SIROffset::Static(bit_off) => {
+                            let intra = bit_off % 8;
+                            let containing_byte_off =
+                                ctx.mask_byte_offset(addr, 0) + (bit_off / 8) as i32;
+                            let size = ISelContext::op_size_for_width(*width_bits + intra);
+                            let old = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Load {
+                                dst: old,
+                                base: BaseReg::SimState,
+                                offset: containing_byte_off,
+                                size,
+                            });
+                            Some((old, containing_byte_off, size))
+                        }
+                        SIROffset::Dynamic(_) => None,
+                    }
+                };
                 match offset {
                     SIROffset::Static(bit_off) => {
                         // Check for wide value from Concat
@@ -1838,6 +1922,16 @@ fn lower_instruction(
                             src: result,
                             size: rw_size,
                         });
+                        if !comb_capture_sites.is_empty() {
+                            let changed = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Cmp {
+                                dst: changed,
+                                lhs: old_word,
+                                rhs: result,
+                                kind: CmpKind::Ne,
+                            });
+                            emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
+                        }
                     }
                 }
 
@@ -1994,6 +2088,21 @@ fn lower_instruction(
                                 src: m_result,
                                 size: rw_size,
                             });
+                            if !comb_capture_sites.is_empty() {
+                                let changed = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Cmp {
+                                    dst: changed,
+                                    lhs: old_mask_word,
+                                    rhs: m_result,
+                                    kind: CmpKind::Ne,
+                                });
+                                emit_enable_comb_capture_sites(
+                                    ctx,
+                                    block,
+                                    changed,
+                                    comb_capture_sites,
+                                );
+                            }
                         }
                     }
                 } else if ctx.four_state {
@@ -2006,6 +2115,41 @@ fn lower_instruction(
                         value: 0,
                     });
                     ctx.set_mask(*src_reg, zero);
+                }
+
+                if let Some((old_comb_probe, byte_off, size)) = old_comb_probe {
+                    let new_comb_probe = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Load {
+                        dst: new_comb_probe,
+                        base: BaseReg::SimState,
+                        offset: byte_off,
+                        size,
+                    });
+                    let changed = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp {
+                        dst: changed,
+                        lhs: old_comb_probe,
+                        rhs: new_comb_probe,
+                        kind: CmpKind::Ne,
+                    });
+                    emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
+                }
+                if let Some((old_comb_mask_probe, byte_off, size)) = old_comb_mask_probe {
+                    let new_comb_mask_probe = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Load {
+                        dst: new_comb_mask_probe,
+                        base: BaseReg::SimState,
+                        offset: byte_off,
+                        size,
+                    });
+                    let changed = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp {
+                        dst: changed,
+                        lhs: old_comb_mask_probe,
+                        rhs: new_comb_mask_probe,
+                        kind: CmpKind::Ne,
+                    });
+                    emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
                 }
 
                 // Trigger detection: compare old vs new value, set triggered_bits

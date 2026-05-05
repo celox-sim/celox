@@ -224,7 +224,7 @@ impl Program {
                 for eu in &mut self.eval_comb {
                     for block in eu.blocks.values_mut() {
                         for inst in &mut block.instructions {
-                            if let SIRInstruction::Store(addr, _, width, _, triggers) = inst {
+                            if let SIRInstruction::Store(addr, _, width, _, triggers, _) = inst {
                                 if aliased.contains(&addr.absolute_addr()) {
                                     if triggers.is_empty() {
                                         // Mark for removal
@@ -240,7 +240,8 @@ impl Program {
                         block.instructions.retain(|inst| {
                             !matches!(
                                 inst,
-                                SIRInstruction::Store(_, _, 0, _, triggers) if triggers.is_empty()
+                                SIRInstruction::Store(_, _, 0, _, triggers, _)
+                                    if triggers.is_empty()
                             )
                         });
                     }
@@ -354,7 +355,7 @@ impl Program {
                         for block in eu.blocks.values() {
                             for inst in &block.instructions {
                                 match inst {
-                                    SIRInstruction::Store(addr, _, _, _, _)
+                                    SIRInstruction::Store(addr, _, _, _, _, _)
                                         if addr.region == WORKING_REGION =>
                                     {
                                         addrs.insert(addr.absolute_addr());
@@ -817,8 +818,15 @@ fn renumber_sir_inst<A: Clone>(
         SIRInstruction::Load(dst, addr, offset, width) => {
             SIRInstruction::Load(r(*dst), addr.clone(), off(offset), *width)
         }
-        SIRInstruction::Store(addr, offset, width, src, triggers) => {
-            SIRInstruction::Store(addr.clone(), off(offset), *width, r(*src), triggers.clone())
+        SIRInstruction::Store(addr, offset, width, src, triggers, comb_capture_sites) => {
+            SIRInstruction::Store(
+                addr.clone(),
+                off(offset),
+                *width,
+                r(*src),
+                triggers.clone(),
+                comb_capture_sites.clone(),
+            )
         }
         SIRInstruction::Commit(src, dst, offset, width, triggers) => SIRInstruction::Commit(
             src.clone(),
@@ -1135,7 +1143,14 @@ pub enum SIRInstruction<Addr> {
     Binary(RegisterId, RegisterId, BinaryOp, RegisterId),
     Unary(RegisterId, UnaryOp, RegisterId),
     Load(RegisterId, Addr, SIROffset, usize),
-    Store(Addr, SIROffset, usize, RegisterId, Vec<TriggerIdWithKind>),
+    Store(
+        Addr,
+        SIROffset,
+        usize,
+        RegisterId,
+        Vec<TriggerIdWithKind>,
+        Vec<u32>,
+    ),
     /// Commits a value from `src` region to `dst` region with the same offset/width.
     Commit(Addr, Addr, SIROffset, usize, Vec<TriggerIdWithKind>),
     /// Concatenates multiple registers into a single register.
@@ -1177,11 +1192,18 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     rd.0, addr, offset, bits
                 )
             }
-            SIRInstruction::Store(addr, offset, op_width, src_reg, triggers) => {
+            SIRInstruction::Store(
+                addr,
+                offset,
+                op_width,
+                src_reg,
+                triggers,
+                comb_capture_sites,
+            ) => {
                 write!(
                     f,
-                    "Store(addr={}, offset={}, src_reg = {}, bits={}, triggers={:?})",
-                    addr, offset, src_reg.0, op_width, triggers
+                    "Store(addr={}, offset={}, src_reg = {}, bits={}, triggers={:?}, comb_capture_sites={:?})",
+                    addr, offset, src_reg.0, op_width, triggers, comb_capture_sites
                 )
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
@@ -1247,8 +1269,8 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Load(rd, addr, offset, bits) => {
                 SIRInstruction::Load(rd, f(addr), offset, bits)
             }
-            SIRInstruction::Store(addr, offset, bits, rs, triggers) => {
-                SIRInstruction::Store(f(addr), offset, bits, rs, triggers)
+            SIRInstruction::Store(addr, offset, bits, rs, triggers, comb_capture_sites) => {
+                SIRInstruction::Store(f(addr), offset, bits, rs, triggers, comb_capture_sites)
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
                 SIRInstruction::Commit(f(src), f(dst), offset, bits, triggers)
@@ -1280,8 +1302,15 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Load(rd, addr, offset, bits) => {
                 SIRInstruction::Load(*rd, f(addr), offset.clone(), *bits)
             }
-            SIRInstruction::Store(addr, offset, bits, rs, triggers) => {
-                SIRInstruction::Store(f(addr), offset.clone(), *bits, *rs, triggers.clone())
+            SIRInstruction::Store(addr, offset, bits, rs, triggers, comb_capture_sites) => {
+                SIRInstruction::Store(
+                    f(addr),
+                    offset.clone(),
+                    *bits,
+                    *rs,
+                    triggers.clone(),
+                    comb_capture_sites.clone(),
+                )
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
                 SIRInstruction::Commit(f(src), f(dst), offset.clone(), *bits, triggers.clone())

@@ -35,7 +35,7 @@ fn preload_trigger_old_values<'a>(
     for block in blocks {
         for inst in &block.instructions {
             match inst {
-                SIRInstruction::Store(addr, _, _, _, triggers) if !triggers.is_empty() => {
+                SIRInstruction::Store(addr, _, _, _, triggers, _) if !triggers.is_empty() => {
                     trigger_addrs.insert((addr.absolute_addr(), addr.region));
                 }
                 SIRInstruction::Commit(_, dst, _, _, triggers) if !triggers.is_empty() => {
@@ -358,8 +358,23 @@ impl SIRTranslator {
             SIRInstruction::Load(dst, addr, offset, op_width) => {
                 self.translate_load_inst(state, dst, addr, offset, op_width);
             }
-            SIRInstruction::Store(addr, offset, op_width, src_reg, triggers) => {
-                self.translate_store_inst(state, addr, offset, op_width, src_reg, triggers);
+            SIRInstruction::Store(
+                addr,
+                offset,
+                op_width,
+                src_reg,
+                triggers,
+                comb_capture_sites,
+            ) => {
+                self.translate_store_inst(
+                    state,
+                    addr,
+                    offset,
+                    op_width,
+                    src_reg,
+                    triggers,
+                    comb_capture_sites,
+                );
             }
             SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
                 self.translate_commit_inst(state, src_addr, dst_addr, offset, op_width, triggers);

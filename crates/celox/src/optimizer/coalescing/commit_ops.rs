@@ -40,7 +40,7 @@ fn resolve_forward_src_from_pred(
 
     for (idx, inst) in pred_block.instructions.iter().enumerate().rev() {
         let (store_addr, store_off, store_bits, store_src) = match inst {
-            SIRInstruction::Store(addr, SIROffset::Static(off), bits, src, _) => {
+            SIRInstruction::Store(addr, SIROffset::Static(off), bits, src, _, _) => {
                 (*addr, *off, *bits, *src)
             }
             _ => continue,
@@ -107,14 +107,20 @@ pub(crate) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAd
             for si in (0..ci).rev() {
                 let sinst = &block.instructions[si];
                 match sinst {
-                    SIRInstruction::Store(addr, SIROffset::Static(store_off), store_bits, _, _)
-                        if *addr == src_addr
-                            && *store_off >= off
-                            && store_off + store_bits <= off + bits =>
+                    SIRInstruction::Store(
+                        addr,
+                        SIROffset::Static(store_off),
+                        store_bits,
+                        _,
+                        _,
+                        _,
+                    ) if *addr == src_addr
+                        && *store_off >= off
+                        && store_off + store_bits <= off + bits =>
                     {
                         found_stores.push((si, *store_off, *store_bits));
                     }
-                    SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _)
+                    SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _, _)
                         if *addr == src_addr =>
                     {
                         safe = false;
@@ -169,7 +175,7 @@ pub(crate) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAd
         for (ci, store_updates) in &commit_replacements {
             remove_indices.push(*ci);
             for (si, new_dst) in store_updates {
-                if let SIRInstruction::Store(addr, _, _, _, _) = &mut block.instructions[*si] {
+                if let SIRInstruction::Store(addr, _, _, _, _, _) = &mut block.instructions[*si] {
                     *addr = *new_dst;
                 }
             }
@@ -238,8 +244,14 @@ pub(super) fn split_wide_commits(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             };
             let mut sub_ranges: Vec<(usize, usize)> = Vec::new();
             for pred_inst in &first_block.instructions {
-                if let SIRInstruction::Store(addr, SIROffset::Static(store_off), store_bits, _, _) =
-                    pred_inst
+                if let SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(store_off),
+                    store_bits,
+                    _,
+                    _,
+                    _,
+                ) = pred_inst
                     && *addr == src_addr
                     && *store_off >= off
                     && store_off + store_bits <= off + bits
@@ -277,7 +289,7 @@ pub(super) fn split_wide_commits(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                     let has_match = pred_block.instructions.iter().any(|pi| {
                         matches!(
                             pi,
-                            SIRInstruction::Store(addr, SIROffset::Static(so), sb, _, _)
+                            SIRInstruction::Store(addr, SIROffset::Static(so), sb, _, _, _)
                             if *addr == src_addr && *so == *sub_off && *sb == *sub_bits
                         )
                     });
@@ -405,6 +417,7 @@ pub(crate) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
                         *bits,
                         *src_reg,
                         Default::default(),
+                        Vec::new(),
                     ));
                 }
             }

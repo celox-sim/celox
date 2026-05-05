@@ -158,11 +158,11 @@ fn optimize_bit_extracts(
             SIRInstruction::Unary(_, _, src) => {
                 *use_count.entry(*src).or_default() += 1;
             }
-            SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+            SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
                 *use_count.entry(*off).or_default() += 1;
                 *use_count.entry(*src).or_default() += 1;
             }
-            SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+            SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
                 *use_count.entry(*src).or_default() += 1;
             }
             SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {

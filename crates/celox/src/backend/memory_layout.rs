@@ -252,7 +252,7 @@ fn collect_ff_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
             for inst in &block.instructions {
                 match inst {
                     SIRInstruction::Load(_, addr, _, _)
-                    | SIRInstruction::Store(addr, _, _, _, _) => {
+                    | SIRInstruction::Store(addr, _, _, _, _, _) => {
                         addrs.insert(addr.absolute_addr());
                     }
                     SIRInstruction::Commit(src, dst, _, _, _) => {

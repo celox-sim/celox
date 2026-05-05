@@ -27,6 +27,7 @@ struct StoreCandidate {
     offset: usize,
     width: usize,
     src_reg: RegisterId,
+    comb_capture_sites: Vec<u32>,
 }
 
 fn coalesce_block(
@@ -43,7 +44,7 @@ fn coalesce_block(
 
     for (i, inst) in block.instructions.iter().enumerate() {
         match inst {
-            SIRInstruction::Store(addr, SIROffset::Static(off), width, src, triggers)
+            SIRInstruction::Store(addr, SIROffset::Static(off), width, src, triggers, sites)
                 if triggers.is_empty() =>
             {
                 groups.entry(*addr).or_default().push(StoreCandidate {
@@ -51,6 +52,7 @@ fn coalesce_block(
                     offset: *off,
                     width: *width,
                     src_reg: *src,
+                    comb_capture_sites: sites.clone(),
                 });
             }
             SIRInstruction::Load(_, addr, _, _) => {
@@ -61,7 +63,7 @@ fn coalesce_block(
                 seal_group(&mut groups, src, &mut sealed_groups);
             }
             // A Store with Dynamic offset could alias any static offset
-            SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _) => {
+            SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _, _) => {
                 seal_group(&mut groups, addr, &mut sealed_groups);
             }
             _ => {}
@@ -125,9 +127,18 @@ fn coalesce_block(
                 // Concat order: MSB first, so reverse the LSB-sorted order
                 let concat_args: Vec<RegisterId> =
                     sub_run.iter().rev().map(|c| c.src_reg).collect();
+                let mut comb_capture_sites = Vec::new();
+                for site_id in sub_run
+                    .iter()
+                    .flat_map(|c| c.comb_capture_sites.iter().copied())
+                {
+                    if !comb_capture_sites.contains(&site_id) {
+                        comb_capture_sites.push(site_id);
+                    }
+                }
 
                 // Get the addr from the first candidate (all share the same addr)
-                let addr = if let SIRInstruction::Store(addr, _, _, _, _) =
+                let addr = if let SIRInstruction::Store(addr, _, _, _, _, _) =
                     &block.instructions[sub_run[0].inst_index]
                 {
                     *addr
@@ -143,6 +154,7 @@ fn coalesce_block(
                         total_width,
                         concat_reg,
                         Vec::new(),
+                        comb_capture_sites,
                     ),
                 ];
 
@@ -262,9 +274,30 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
-            SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), Vec::new()),
-            SIRInstruction::Store(addr, SIROffset::Static(2), 1, RegisterId(2), Vec::new()),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                1,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(1),
+                1,
+                RegisterId(1),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(2),
+                1,
+                RegisterId(2),
+                Vec::new(),
+                Vec::new(),
+            ),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -288,7 +321,7 @@ mod tests {
             other => panic!("Expected Concat, got {:?}", other),
         }
         match &block.instructions[1] {
-            SIRInstruction::Store(_, SIROffset::Static(0), 3, _, triggers) => {
+            SIRInstruction::Store(_, SIROffset::Static(0), 3, _, triggers, _) => {
                 assert!(triggers.is_empty());
             }
             other => panic!("Expected wide Store, got {:?}", other),
@@ -312,10 +345,38 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(addr0, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
-            SIRInstruction::Store(addr1, SIROffset::Static(0), 1, RegisterId(2), Vec::new()),
-            SIRInstruction::Store(addr0, SIROffset::Static(1), 1, RegisterId(1), Vec::new()),
-            SIRInstruction::Store(addr1, SIROffset::Static(1), 1, RegisterId(3), Vec::new()),
+            SIRInstruction::Store(
+                addr0,
+                SIROffset::Static(0),
+                1,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr1,
+                SIROffset::Static(0),
+                1,
+                RegisterId(2),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr0,
+                SIROffset::Static(1),
+                1,
+                RegisterId(1),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr1,
+                SIROffset::Static(1),
+                1,
+                RegisterId(3),
+                Vec::new(),
+                Vec::new(),
+            ),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -343,9 +404,23 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                1,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
             SIRInstruction::Load(RegisterId(2), addr, SIROffset::Static(0), 1),
-            SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), Vec::new()),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(1),
+                1,
+                RegisterId(1),
+                Vec::new(),
+                Vec::new(),
+            ),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -373,8 +448,22 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
-            SIRInstruction::Store(addr, SIROffset::Static(2), 1, RegisterId(1), Vec::new()),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                1,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(2),
+                1,
+                RegisterId(1),
+                Vec::new(),
+                Vec::new(),
+            ),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -405,8 +494,22 @@ mod tests {
         };
 
         let instructions = vec![
-            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), vec![trigger]),
-            SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), vec![trigger]),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                1,
+                RegisterId(0),
+                vec![trigger],
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(1),
+                1,
+                RegisterId(1),
+                vec![trigger],
+                Vec::new(),
+            ),
         ];
 
         let mut eu = make_eu(instructions, register_map);
@@ -434,10 +537,38 @@ mod tests {
         }
 
         let instructions = vec![
-            SIRInstruction::Store(addr, SIROffset::Static(0), 1, RegisterId(0), Vec::new()),
-            SIRInstruction::Store(addr, SIROffset::Static(1), 1, RegisterId(1), Vec::new()),
-            SIRInstruction::Store(addr, SIROffset::Static(2), 1, RegisterId(2), Vec::new()),
-            SIRInstruction::Store(addr, SIROffset::Static(5), 1, RegisterId(3), Vec::new()),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                1,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(1),
+                1,
+                RegisterId(1),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(2),
+                1,
+                RegisterId(2),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(5),
+                1,
+                RegisterId(3),
+                Vec::new(),
+                Vec::new(),
+            ),
         ];
 
         let mut eu = make_eu(instructions, register_map);

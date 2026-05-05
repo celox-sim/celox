@@ -685,6 +685,7 @@ impl<'a> FfParser<'a> {
             target_width,
             src_reg,
             Vec::new(),
+            Vec::new(),
         ));
 
         // Use conservative range from eval_var_select for tracking (covers all possible bits).

@@ -46,7 +46,7 @@ fn forward_and_simplify(instructions: &mut [SIRInstruction<RegionedAbsoluteAddr>
 
     for inst in instructions.iter_mut() {
         match inst {
-            SIRInstruction::Store(addr, SIROffset::Static(off), width, src, _triggers) => {
+            SIRInstruction::Store(addr, SIROffset::Static(off), width, src, _triggers, _) => {
                 let key = StoreKey {
                     addr: *addr,
                     bit_offset: *off,
@@ -68,7 +68,7 @@ fn forward_and_simplify(instructions: &mut [SIRInstruction<RegionedAbsoluteAddr>
                     },
                 );
             }
-            SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _) => {
+            SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _, _) => {
                 // Conservatively invalidate all entries for this addr
                 known_stores.retain(|k, _| k.addr != *addr);
             }
@@ -175,7 +175,7 @@ fn apply_aliases_to_inst(
             }
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
             if let Some(&to) = aliases.get(off) {
                 *off = to;
             }
@@ -183,7 +183,7 @@ fn apply_aliases_to_inst(
                 *src = to;
             }
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
             if let Some(&to) = aliases.get(src) {
                 *src = to;
             }

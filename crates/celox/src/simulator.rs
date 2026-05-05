@@ -69,7 +69,7 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
     runtime_event_read_seq: u64,
     comb_capture_event_read_seq: u64,
-    pending_runtime_events: Vec<RuntimeEvent>,
+    pending_runtime_events: Vec<RawRuntimeEvent>,
     comb_observer_snapshots: Vec<Vec<BigUint>>,
 }
 
@@ -478,15 +478,15 @@ impl<B: SimBackend> Simulator<B> {
         &mut self,
         ctx: RuntimeFormatContext<'_>,
     ) -> Vec<RuntimeEvent> {
-        let mut events = std::mem::take(&mut self.pending_runtime_events);
         let layout = self.backend.layout();
-        let mut drained = if let Some(buffer) = self.backend.runtime_event_buffer() {
-            drain_runtime_events_from_buffer(
-                &buffer,
+        let mut raw_events = if let Some(buffer) = self.backend.runtime_event_buffer() {
+            collect_runtime_events(
                 layout,
                 &self.program.runtime_event_sites,
                 &mut self.runtime_event_read_seq,
-                ctx,
+                buffer.byte_size(),
+                |offset| buffer.read_u64(offset),
+                |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
             )
         } else {
             let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
@@ -501,12 +501,12 @@ impl<B: SimBackend> Simulator<B> {
                 read_u64,
                 read_u64,
             )
+        };
+        raw_events.append(&mut std::mem::take(&mut self.pending_runtime_events));
+        raw_events
             .into_iter()
             .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
             .collect()
-        };
-        events.append(&mut drained);
-        events
     }
 
     pub fn runtime_event_drain(&self) -> Option<RuntimeEventDrain> {
@@ -579,7 +579,7 @@ impl<B: SimBackend> Simulator<B> {
 
     pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
         let before = self.snapshot_all_comb_observers();
-        let active: Vec<bool> = before
+        let active_before: Vec<bool> = before
             .iter()
             .zip(&self.comb_observer_snapshots)
             .map(|(now, prev)| now != prev)
@@ -589,7 +589,7 @@ impl<B: SimBackend> Simulator<B> {
             .program
             .comb_observers
             .iter()
-            .zip(active.iter().copied())
+            .zip(active_before.iter().copied())
         {
             if is_active {
                 active_sites[observer.site_id as usize] = true;
@@ -603,9 +603,12 @@ impl<B: SimBackend> Simulator<B> {
         self.backend
             .eval_comb()
             .map_err(|e| self.decorate_runtime_error(e))?;
+        let after = self.snapshot_all_comb_observers();
         let captures = self.collect_comb_capture_events();
-        self.run_active_comb_observers(&active, captures)?;
-        self.comb_observer_snapshots = before;
+        self.backend
+            .set_comb_capture_event_enabled(&vec![false; self.program.runtime_event_sites.len()]);
+        self.pending_runtime_events.extend(captures);
+        self.comb_observer_snapshots = after;
         Ok(())
     }
 
@@ -627,11 +630,11 @@ impl<B: SimBackend> Simulator<B> {
             .collect()
     }
 
-    fn collect_comb_capture_events(&mut self) -> crate::HashMap<u32, Vec<RawRuntimeEvent>> {
+    fn collect_comb_capture_events(&mut self) -> Vec<RawRuntimeEvent> {
         let Some(buffer) = self.backend.comb_capture_event_buffer() else {
-            return crate::HashMap::default();
+            return Vec::new();
         };
-        let mut out: crate::HashMap<u32, Vec<RawRuntimeEvent>> = crate::HashMap::default();
+        let mut out = Vec::new();
         for raw in collect_runtime_events(
             self.backend.layout(),
             &self.program.runtime_event_sites,
@@ -642,44 +645,14 @@ impl<B: SimBackend> Simulator<B> {
         ) {
             match raw {
                 RawRuntimeEvent::Event { site_id, args } => {
-                    out.entry(site_id as u32)
-                        .or_default()
-                        .push(RawRuntimeEvent::Event { site_id, args });
+                    out.push(RawRuntimeEvent::Event { site_id, args });
                 }
                 RawRuntimeEvent::Missed { count } => self
                     .pending_runtime_events
-                    .push(RuntimeEvent::Missed { count }),
+                    .push(RawRuntimeEvent::Missed { count }),
             }
         }
         out
-    }
-
-    fn run_active_comb_observers(
-        &mut self,
-        active: &[bool],
-        mut captures: crate::HashMap<u32, Vec<RawRuntimeEvent>>,
-    ) -> Result<(), RuntimeErrorCode> {
-        for (idx, is_active) in active.iter().copied().enumerate() {
-            if !is_active {
-                continue;
-            }
-            let site_id = self.program.comb_observers[idx].site_id;
-            if let Some(raw_events) = captures.remove(&site_id) {
-                let events: Vec<_> = raw_events
-                    .into_iter()
-                    .filter_map(|raw| {
-                        render_raw_runtime_event(
-                            raw,
-                            &self.program.runtime_event_sites,
-                            RuntimeFormatContext::default(),
-                        )
-                    })
-                    .collect();
-                self.pending_runtime_events.extend(events);
-                continue;
-            }
-        }
-        Ok(())
     }
 
     pub(crate) fn eval_apply_ff_at_checked(

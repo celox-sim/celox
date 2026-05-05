@@ -23,7 +23,7 @@ pub(super) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Concat(dst, _)
         | SIRInstruction::Slice(dst, _, _, _)
         | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-        SIRInstruction::Store(_, _, _, _, _)
+        SIRInstruction::Store(_, _, _, _, _, _)
         | SIRInstruction::Commit(_, _, _, _, _)
         | SIRInstruction::RuntimeEvent { .. }
         | SIRInstruction::CombCaptureEvent { .. } => None,
@@ -93,11 +93,11 @@ fn collect_used_regs_into(
             out.insert(*off);
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
             out.insert(*off);
             out.insert(*src);
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
             out.insert(*src);
         }
         SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
@@ -370,7 +370,7 @@ pub(super) fn batch_replace_in_inst(
             }
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
             if let Some(&to) = map.get(off) {
                 *off = to;
             }
@@ -378,7 +378,7 @@ pub(super) fn batch_replace_in_inst(
                 *src = to;
             }
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
             if let Some(&to) = map.get(src) {
                 *src = to;
             }

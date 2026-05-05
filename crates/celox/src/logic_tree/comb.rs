@@ -1033,6 +1033,7 @@ pub struct LogicPath<A: Hash + Eq + Clone> {
     pub sources: HashSet<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, NodeId)>,
     pub order_before: HashSet<LogicPathId>,
+    pub comb_capture_enable_sites: Vec<u32>,
     pub expr: NodeId,
 }
 
@@ -1107,6 +1108,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                 })
                 .collect(),
             order_before: self.order_before.clone(),
+            comb_capture_enable_sites: self.comb_capture_enable_sites.clone(),
             expr: arena
                 .get(self.expr)
                 .map_addr(self.expr, arena, target_arena, cache, f),
@@ -1181,6 +1183,7 @@ pub fn parse_comb(
                     sources: sources.clone(),
                     local_inputs: Vec::new(),
                     order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
                     expr: final_expr,
                 });
             }
@@ -1201,6 +1204,7 @@ pub fn parse_comb(
         observer.written_inputs = observer
             .observed_inputs
             .iter()
+            .chain(observer.position_inputs.iter())
             .filter_map(|atom| written_ids.contains(&atom.id).then_some(atom.id))
             .collect();
     }

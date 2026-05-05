@@ -65,7 +65,7 @@ pub(crate) fn eliminate_dead_stores(
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {
                 match inst {
-                    SIRInstruction::Store(addr, SIROffset::Static(_), _, _, triggers)
+                    SIRInstruction::Store(addr, SIROffset::Static(_), _, _, triggers, _)
                         if triggers.is_empty() =>
                     {
                         let abs = addr.absolute_addr();

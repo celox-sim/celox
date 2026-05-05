@@ -439,7 +439,7 @@ fn compile_instruction(
                 dst, addr, offset, *op_width, layout, four_state, locals, instrs,
             );
         }
-        SIRInstruction::Store(addr, offset, op_width, src, triggers) => {
+        SIRInstruction::Store(addr, offset, op_width, src, triggers, _) => {
             compile_store(
                 addr,
                 offset,
@@ -4160,7 +4160,7 @@ fn collect_trigger_addrs(
         for block in unit.blocks.values() {
             for inst in &block.instructions {
                 match inst {
-                    SIRInstruction::Store(addr, _, _, _, triggers) if !triggers.is_empty() => {
+                    SIRInstruction::Store(addr, _, _, _, triggers, _) if !triggers.is_empty() => {
                         addrs.insert((addr.absolute_addr(), addr.region));
                     }
                     SIRInstruction::Commit(_, dst, _, _, triggers) if !triggers.is_empty() => {

@@ -551,7 +551,7 @@ fn find_stores_to_var(
     for unit in &program.eval_comb {
         for block in unit.blocks.values() {
             for inst in &block.instructions {
-                if let crate::ir::SIRInstruction::Store(addr, _, bits, _, _) = inst {
+                if let crate::ir::SIRInstruction::Store(addr, _, bits, _, _, _) = inst {
                     if addr.instance_id == instance_id && addr.var_id == var_id {
                         stores.push(StoreInfo { bits: *bits });
                     }

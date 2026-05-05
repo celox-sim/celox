@@ -179,6 +179,7 @@ fn atomize_logic_paths(
                     sources: filtered_sources,
                     local_inputs: path.local_inputs.clone(),
                     order_before: path.order_before.clone(),
+                    comb_capture_enable_sites: path.comb_capture_enable_sites.clone(),
                     expr: merged_expr,
                 });
             }

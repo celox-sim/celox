@@ -49,11 +49,11 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         let mut plans: Vec<SplitPlan> = Vec::new();
 
         for (si, inst) in block.instructions.iter().enumerate() {
-            let (addr, offset, width, src_reg) = match inst {
-                SIRInstruction::Store(addr, SIROffset::Static(off), width, src, _)
+            let (addr, offset, width, src_reg, comb_capture_sites) = match inst {
+                SIRInstruction::Store(addr, SIROffset::Static(off), width, src, _, sites)
                     if *width > 64 =>
                 {
-                    (*addr, *off, *width, *src)
+                    (*addr, *off, *width, *src, sites.clone())
                 }
                 _ => continue,
             };
@@ -123,6 +123,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                     chunk_width,
                     store_src,
                     vec![],
+                    comb_capture_sites.clone(),
                 ));
 
                 insertions.push((insert_after, insts_to_insert));

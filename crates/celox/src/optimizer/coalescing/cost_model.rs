@@ -158,7 +158,7 @@ pub fn estimate_clif_cost(
             };
             base * state_mul
         }
-        SIRInstruction::Store(_, offset, op_width, _, _) => {
+        SIRInstruction::Store(_, offset, op_width, _, _, _) => {
             let nc = num_chunks(*op_width);
             let base = if *op_width <= 64 {
                 6

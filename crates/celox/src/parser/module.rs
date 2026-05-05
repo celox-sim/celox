@@ -80,8 +80,7 @@ impl<'a> ModuleParser<'a> {
     ) -> Result<(), ParserError> {
         let (paths, store, boundaries, mut observers, sites) =
             parse_comb(self.module, decl, &mut self.arena)?;
-        let site_offset =
-            self.ff_parser.runtime_event_sites().len() + self.comb_runtime_event_sites.len();
+        let site_offset = self.comb_runtime_event_sites.len();
         for observer in &mut observers {
             observer.site_id += site_offset as u32;
         }
@@ -180,6 +179,7 @@ impl<'a> ModuleParser<'a> {
                 sources: collect_glue_sources(sliced, &glue_arena),
                 local_inputs: Vec::new(),
                 order_before: HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
             };
 
             let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
@@ -247,6 +247,7 @@ impl<'a> ModuleParser<'a> {
                     sources,
                     local_inputs: Vec::new(),
                     order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
                     expr: rhs_part,
                 };
                 output_ports.push((vec![dst.id], path));
@@ -653,6 +654,10 @@ impl<'a> ModuleParser<'a> {
         let mut comb_boundaries = self.slicer.boundaries().clone();
         for (id, bounds) in self.comb_boundaries {
             comb_boundaries.entry(id).or_default().extend(bounds);
+        }
+        let ff_site_count = self.ff_parser.runtime_event_sites().len() as u32;
+        for observer in &mut self.comb_observers {
+            observer.site_id += ff_site_count;
         }
         let mut runtime_event_sites = self.ff_parser.runtime_event_sites().clone();
         runtime_event_sites.extend(self.comb_runtime_event_sites);
