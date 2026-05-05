@@ -8,7 +8,9 @@ use crate::logic_tree::range_store::RangeStore;
 use crate::parser::{LoweringPhase, resolve_total_width};
 use crate::{
     HashMap, HashSet,
-    ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
+    ir::{
+        BinaryOp, BitAccess, CombObserver, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase,
+    },
     parser::bitaccess::{
         celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
     },
@@ -17,10 +19,10 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
-    ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionKind, Type,
-    ValueVariant, VarId, VarSelectOp,
+    ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionInput,
+    SystemFunctionKind, Type, ValueVariant, VarId, VarSelectOp,
 };
-use veryl_analyzer::value::Value;
+use veryl_analyzer::value::{Value, byte_value_to_string};
 
 // SymbolicStore: Maps variable IDs to their current symbolic representation.
 // Each variable is managed by a RangeStore, which tracks bit-ranges and their associated SLT nodes.
@@ -988,6 +990,8 @@ pub fn parse_comb(
         Vec<LogicPath<VarId>>,
         SymbolicStore<VarId>,
         BoundaryMap<VarId>,
+        Vec<CombObserver<VarId>>,
+        Vec<RuntimeEventSite>,
     ),
     ParserError,
 > {
@@ -1000,12 +1004,21 @@ pub fn parse_comb(
     }
 
     // 2. Symbolic Execution: Evaluate statements sequentially to update the symbolic state.
+    let effect_initial_store = current_store.clone();
     let (final_store, boundaries) = decl
         .statements
         .iter()
         .try_fold((current_store, BoundaryMap::default()), |(s, b), stmt| {
             eval_statement(module, s, b, stmt, arena)
         })?;
+    let mut effects = CombEffectCollector::default();
+    collect_comb_effects_statements(
+        module,
+        effect_initial_store,
+        &decl.statements,
+        arena,
+        &mut effects,
+    )?;
 
     // 3. Path Extraction: Convert the final symbolic store into a list of LogicPaths.
     // Each LogicPath represents a modified bit-range and the logic required to compute it.
@@ -1038,7 +1051,276 @@ pub fn parse_comb(
             }
         }
     }
-    Ok((paths, final_store, boundaries))
+    let mut process_sensitivity = effects.sensitivity;
+    let written_ids: HashSet<_> = paths.iter().map(|path| path.target.id).collect();
+    for path in &paths {
+        process_sensitivity.extend(path.sources.iter().copied());
+    }
+    process_sensitivity.retain(|atom| !written_ids.contains(&atom.id));
+    let process_sensitivity: Vec<_> = process_sensitivity.into_iter().collect();
+    for observer in &mut effects.observers {
+        observer.sensitivity = process_sensitivity.clone();
+        observer.written_inputs = observer
+            .observed_inputs
+            .iter()
+            .filter_map(|atom| written_ids.contains(&atom.id).then_some(atom.id))
+            .collect();
+    }
+    Ok((
+        paths,
+        final_store,
+        boundaries,
+        effects.observers,
+        effects.sites,
+    ))
+}
+
+#[derive(Default)]
+struct CombEffectCollector {
+    observers: Vec<CombObserver<VarId>>,
+    sites: Vec<RuntimeEventSite>,
+    sensitivity: HashSet<VarAtomBase<VarId>>,
+}
+
+fn static_string_expr(expr: &Expression) -> Option<String> {
+    if !expr.comptime().r#type.is_string() {
+        return None;
+    }
+    let value = expr.comptime().get_value().ok()?;
+    byte_value_to_string(value)
+}
+
+fn register_comb_runtime_event_site<'a>(
+    collector: &mut CombEffectCollector,
+    kind: RuntimeEventKind,
+    args: &'a [SystemFunctionInput],
+) -> (u32, &'a [SystemFunctionInput]) {
+    let (template, value_args) = if args
+        .first()
+        .and_then(|arg| static_string_expr(&arg.0))
+        .is_some()
+    {
+        (
+            args.first().and_then(|arg| static_string_expr(&arg.0)),
+            &args[1..],
+        )
+    } else {
+        (None, args)
+    };
+    let site = RuntimeEventSite {
+        kind,
+        template,
+        arg_widths: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().r#type.total_width().unwrap_or(1))
+            .collect(),
+        arg_signed: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().expr_context.signed)
+            .collect(),
+        arg_is_string: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().r#type.is_string())
+            .collect(),
+    };
+    let id = collector.sites.len() as u32;
+    collector.sites.push(site);
+    (id, value_args)
+}
+
+fn collect_system_function_effect(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    call: &SystemFunctionCall,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    let (kind, cond, args) = match &call.kind {
+        SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+            (RuntimeEventKind::Display, None, args.as_slice())
+        }
+        SystemFunctionKind::Assert { kind, cond, args } => {
+            let event_kind = match kind {
+                veryl_analyzer::ir::AssertKind::Fatal => RuntimeEventKind::AssertFatal,
+                veryl_analyzer::ir::AssertKind::Continue => RuntimeEventKind::AssertContinue,
+            };
+            (event_kind, Some(&cond.0), args.as_slice())
+        }
+        _ => {
+            return Err(ParserError::unsupported(
+                66,
+                LoweringPhase::CombLowering,
+                "system function call",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            ));
+        }
+    };
+    let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
+    let mut observer_args = Vec::new();
+    let mut observed_inputs = HashSet::default();
+    for arg in value_args {
+        let ((node, sources), _) = eval_expression(module, store, &arg.0, arena, None)?;
+        observed_inputs.extend(sources.iter().copied());
+        collector.sensitivity.extend(sources);
+        observer_args.push(node);
+    }
+    let guard = if let Some(cond) = cond {
+        let ((cond_node, cond_sources), _) = eval_expression(module, store, cond, arena, None)?;
+        observed_inputs.extend(cond_sources.iter().copied());
+        collector.sensitivity.extend(cond_sources);
+        Some(cond_node)
+    } else {
+        None
+    };
+    let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
+    collector.observers.push(CombObserver {
+        site_id,
+        guard,
+        args: observer_args,
+        sensitivity: Vec::new(),
+        local_inputs: store
+            .iter()
+            .filter_map(|(id, range_store)| {
+                if !observed_ids.contains(id) {
+                    return None;
+                }
+                let width = module
+                    .variables
+                    .get(id)
+                    .and_then(|var| resolve_total_width(module, var).ok())?;
+                if width == 0 {
+                    return None;
+                }
+                let parts = range_store.get_parts(BitAccess::new(0, width - 1));
+                let modified = parts.iter().any(|(value, _)| value.is_some());
+                if !modified {
+                    return None;
+                }
+                let (node, _) = combine_parts_with_default(*id, 0, parts, arena);
+                Some((*id, node))
+            })
+            .collect(),
+        observed_inputs: observed_inputs.into_iter().collect(),
+        written_inputs: Vec::new(),
+    });
+    Ok(())
+}
+
+fn collect_comb_effects_statements(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    statements: &[Statement],
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<SymbolicStore<VarId>, ParserError> {
+    for stmt in statements {
+        match stmt {
+            Statement::Assign(assign) => {
+                let (next_store, _) =
+                    eval_assign(module, store, BoundaryMap::default(), assign, arena)?;
+                store = next_store;
+            }
+            Statement::SystemFunctionCall(call) => {
+                collect_system_function_effect(module, &store, call, arena, collector)?;
+            }
+            Statement::For(for_stmt) => {
+                store = collect_comb_effects_for(module, store, for_stmt, arena, collector)?;
+            }
+            Statement::If(if_stmt) => {
+                let ((_, sources), _) =
+                    eval_expression(module, &store, &if_stmt.cond, arena, None)?;
+                collector.sensitivity.extend(sources);
+                let side_store = collect_comb_effects_statements(
+                    module,
+                    store.clone(),
+                    &if_stmt.true_side,
+                    arena,
+                    collector,
+                )?;
+                let else_store = collect_comb_effects_statements(
+                    module,
+                    store,
+                    &if_stmt.false_side,
+                    arena,
+                    collector,
+                )?;
+                store = merge_symbolic_stores(
+                    module,
+                    &side_store,
+                    &else_store,
+                    bool_node(arena, true),
+                    &HashSet::default(),
+                    arena,
+                )?;
+            }
+            Statement::FunctionCall(_)
+            | Statement::IfReset(_)
+            | Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => {}
+        }
+    }
+    Ok(store)
+}
+
+fn collect_comb_effects_for(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    for_stmt: &ForStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<SymbolicStore<VarId>, ParserError> {
+    let loop_width = for_stmt.var_type.total_width().unwrap_or(32);
+    let original_store = store.clone();
+    let ForRange::Forward {
+        start,
+        end,
+        inclusive,
+        ..
+    } = &for_stmt.range
+    else {
+        return eval_for(module, store, BoundaryMap::default(), for_stmt, arena).map(|(s, _)| s);
+    };
+    let Some(start) = const_for_bound_i64(start) else {
+        return eval_for(module, store, BoundaryMap::default(), for_stmt, arena).map(|(s, _)| s);
+    };
+    let Some(end) = const_for_bound_i64(end) else {
+        return eval_for(module, store, BoundaryMap::default(), for_stmt, arena).map(|(s, _)| s);
+    };
+    let final_end = if *inclusive { end + 1 } else { end };
+    for i in start..final_end {
+        let mut iter_store = store.clone();
+        let node = arena.alloc(SLTNode::Constant(
+            BigUint::from(i as u64),
+            BigUint::from(0u8),
+            loop_width,
+            for_stmt.var_type.signed,
+        ));
+        iter_store.insert(
+            for_stmt.var_id,
+            RangeStore::new(Some((node, HashSet::default())), loop_width),
+        );
+        store =
+            collect_comb_effects_statements(module, iter_store, &for_stmt.body, arena, collector)?;
+        store.remove(&for_stmt.var_id);
+    }
+    eval_for(
+        module,
+        original_store,
+        BoundaryMap::default(),
+        for_stmt,
+        arena,
+    )
+    .map(|(s, _)| s)
+}
+
+fn const_for_bound_i64(bound: &ForBound) -> Option<i64> {
+    match bound {
+        ForBound::Const(v) => (*v).try_into().ok(),
+        ForBound::Expression(expr) => eval_constexpr(expr)?.to_i64(),
+    }
 }
 
 fn eval_statement(
@@ -1057,11 +1339,7 @@ fn eval_statement(
             "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(fc) => Err(ParserError::illegal_context(
-            "statement in always_comb",
-            "system function call".to_string(),
-            Some(&fc.comptime.token),
-        )),
+        Statement::SystemFunctionCall(_) => Ok((store, boundaries)),
         Statement::FunctionCall(fc) => eval_statement_form_function_call(
             module,
             store,
@@ -1295,11 +1573,7 @@ fn eval_loop_statement(
             "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(fc) => Err(ParserError::illegal_context(
-            "statement in always_comb",
-            "system function call".to_string(),
-            Some(&fc.comptime.token),
-        )),
+        Statement::SystemFunctionCall(_) => Ok(state),
         Statement::FunctionCall(fc) => {
             let guard_state = state.clone();
             let (next_store, next_boundaries) = eval_statement_form_function_call(
@@ -5146,7 +5420,8 @@ mod tests {
             })
             .expect("No always_comb found in Top");
         let mut arena = SLTNodeArena::new();
-        let (paths, _, boundaries) = super::parse_comb(&top_module, comb_decl, &mut arena).unwrap();
+        let (paths, _, boundaries, _, _) =
+            super::parse_comb(&top_module, comb_decl, &mut arena).unwrap();
         (top_module, CombResult { paths, boundaries })
     }
     pub fn var_id_of(module: &Module, var_path: &[&str]) -> VarId {

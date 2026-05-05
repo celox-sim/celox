@@ -68,6 +68,7 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(crate) dirty: bool,
     pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
     runtime_event_read_seq: u64,
+    comb_observer_snapshots: Vec<Vec<BigUint>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -149,6 +150,23 @@ fn runtime_event_words_to_biguint(words: &[u64], width: usize) -> BigUint {
     } else {
         BigUint::from(0u8)
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn mask_width(value: BigUint, width: usize) -> BigUint {
+    if width == 0 {
+        BigUint::from(0u8)
+    } else {
+        value & ((BigUint::from(1u8) << width) - BigUint::from(1u8))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn slice_biguint(value: &BigUint, lsb: usize, msb: usize) -> BigUint {
+    if msb < lsb {
+        return BigUint::from(0u8);
+    }
+    mask_width(value >> lsb, msb - lsb + 1)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -410,14 +428,17 @@ impl<B: SimBackend> Simulator<B> {
         program: Program,
         warnings: Vec<veryl_analyzer::AnalyzerError>,
     ) -> Self {
-        Self {
+        let mut sim = Self {
             backend,
             program,
             vcd_writer: None,
             dirty: false,
             warnings,
             runtime_event_read_seq: 0,
-        }
+            comb_observer_snapshots: Vec::new(),
+        };
+        sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
+        sim
     }
 
     pub(crate) fn apply_initial_values(&mut self) {
@@ -455,30 +476,30 @@ impl<B: SimBackend> Simulator<B> {
     ) -> Vec<RuntimeEvent> {
         let layout = self.backend.layout();
         if let Some(buffer) = self.backend.runtime_event_buffer() {
-            return drain_runtime_events_from_buffer(
+            drain_runtime_events_from_buffer(
                 &buffer,
                 layout,
                 &self.program.runtime_event_sites,
                 &mut self.runtime_event_read_seq,
                 ctx,
-            );
+            )
+        } else {
+            let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
+            let read_u64 = |offset: usize| -> u64 {
+                unsafe { std::ptr::read_volatile(ptr.add(offset) as *const u64) }
+            };
+            collect_runtime_events(
+                layout,
+                &self.program.runtime_event_sites,
+                &mut self.runtime_event_read_seq,
+                size,
+                read_u64,
+                read_u64,
+            )
+            .into_iter()
+            .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
+            .collect()
         }
-
-        let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
-        let read_u64 = |offset: usize| -> u64 {
-            unsafe { std::ptr::read_volatile(ptr.add(offset) as *const u64) }
-        };
-        collect_runtime_events(
-            layout,
-            &self.program.runtime_event_sites,
-            &mut self.runtime_event_read_seq,
-            size,
-            read_u64,
-            read_u64,
-        )
-        .into_iter()
-        .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
-        .collect()
     }
 
     pub fn runtime_event_drain(&self) -> Option<RuntimeEventDrain> {
@@ -508,7 +529,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
         if self.dirty {
-            self.backend.eval_comb().unwrap();
+            self.eval_comb_checked().unwrap();
             self.dirty = false;
         }
         if let Some(ref mut writer) = self.vcd_writer {
@@ -550,9 +571,48 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
+        let before = self.snapshot_all_comb_observers();
+        let active: Vec<bool> = before
+            .iter()
+            .zip(&self.comb_observer_snapshots)
+            .map(|(now, prev)| now != prev)
+            .collect();
+        self.run_active_comb_observers(&active)?;
         self.backend
             .eval_comb()
-            .map_err(|e| self.decorate_runtime_error(e))
+            .map_err(|e| self.decorate_runtime_error(e))?;
+        self.comb_observer_snapshots = before;
+        Ok(())
+    }
+
+    fn snapshot_all_comb_observers(&self) -> Vec<Vec<BigUint>> {
+        self.program
+            .comb_observers
+            .iter()
+            .map(|observer| {
+                observer
+                    .sensitivity
+                    .iter()
+                    .map(|atom| {
+                        let signal = self.backend.resolve_signal(&atom.id);
+                        let value = self.backend.get(signal);
+                        slice_biguint(&value, atom.access.lsb, atom.access.msb)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn run_active_comb_observers(&mut self, active: &[bool]) -> Result<(), RuntimeErrorCode> {
+        for (idx, is_active) in active.iter().copied().enumerate() {
+            if !is_active {
+                continue;
+            }
+            self.backend
+                .eval_comb_observer(idx)
+                .map_err(|e| self.decorate_runtime_error(e))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn eval_apply_ff_at_checked(
@@ -622,7 +682,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Lazily evaluates combinational logic if the state is dirty.
     pub fn get_as<T: Default + Copy>(&mut self, signal: SignalRef) -> T {
         if self.dirty {
-            self.backend.eval_comb().unwrap();
+            self.eval_comb_checked().unwrap();
             self.dirty = false;
         }
         self.backend.get_as(signal)
@@ -632,7 +692,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Lazily evaluates combinational logic if the state is dirty.
     pub fn get(&mut self, signal: SignalRef) -> BigUint {
         if self.dirty {
-            self.backend.eval_comb().unwrap();
+            self.eval_comb_checked().unwrap();
             self.dirty = false;
         }
         self.backend.get(signal)
@@ -642,7 +702,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Lazily evaluates combinational logic if the state is dirty.
     pub fn get_four_state(&mut self, signal: SignalRef) -> (BigUint, BigUint) {
         if self.dirty {
-            self.backend.eval_comb().unwrap();
+            self.eval_comb_checked().unwrap();
             self.dirty = false;
         }
         self.backend.get_four_state(signal)

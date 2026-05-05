@@ -91,6 +91,18 @@ impl SLTToSIRLowerer {
         self.lower_inner(builder, node, arena, cache, None, true)
     }
 
+    pub fn lower_with_inputs<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        inputs: crate::HashMap<VarAtomBase<A>, RegisterId>,
+    ) -> RegisterId {
+        let env = LowerEnv { inputs };
+        self.lower_inner(builder, node, arena, cache, Some(&env), false)
+    }
+
     fn lower_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,

@@ -620,6 +620,7 @@ pub(crate) fn flatten(
         eval_only_ffs,
         apply_ffs,
         mut comb_blocks,
+        comb_observers,
         mut runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
@@ -726,8 +727,10 @@ pub(crate) fn flatten(
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             eval_comb: Vec::new(),
+            eval_comb_observers: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
+            comb_observers: Vec::new(),
             eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
@@ -797,6 +800,15 @@ pub(crate) fn flatten(
             register_map: eu.register_map,
         })
         .collect();
+    let (eval_comb_observers, observer_runtime_errors, _next_runtime_error_code) =
+        build_comb_observer_units(
+            &comb_observers,
+            &runtime_event_sites,
+            &global_arena,
+            four_state,
+            next_runtime_error_code,
+        );
+    runtime_errors.extend(observer_runtime_errors);
 
     if let Some(t) = trace
         && trace_opts.scheduled_units
@@ -852,8 +864,10 @@ pub(crate) fn flatten(
         eval_only_ffs,
         apply_ffs,
         eval_comb: schduled,
+        eval_comb_observers,
         runtime_errors,
         runtime_event_sites,
+        comb_observers,
         eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
@@ -1563,6 +1577,7 @@ fn relocate_units(
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
+    Vec<crate::ir::CombObserver<AbsoluteAddr>>,
     HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     Vec<crate::ir::RuntimeEventSite>,
     i64,
@@ -1579,6 +1594,7 @@ fn relocate_units(
     let mut apply_ffs: HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>> =
         HashMap::default();
     let mut comb_blocks = Vec::new();
+    let mut comb_observers = Vec::new();
     let mut runtime_errors = HashMap::default();
     let mut runtime_event_sites = Vec::new();
     let mut next_runtime_error_code = 2000;
@@ -1614,7 +1630,7 @@ fn relocate_units(
             runtime_event_sites.push(site.clone());
         }
 
-        let relocated_module = flatting::flatting(
+        let mut relocated_module = flatting::flatting(
             sim_module,
             path,
             expanded,
@@ -1623,7 +1639,11 @@ fn relocate_units(
             trace_opts,
             trace.as_deref_mut(),
         );
+        for observer in &mut relocated_module.comb_observers {
+            observer.site_id = runtime_event_site_map[&observer.site_id];
+        }
         comb_blocks.extend(relocated_module.comb_blocks);
+        comb_observers.extend(relocated_module.comb_observers);
 
         // Relocate sequential blocks for this instance
         for (trigger_set, eu) in &sim_module.eval_apply_ff_blocks {
@@ -1771,10 +1791,158 @@ fn relocate_units(
         eval_only_ffs,
         apply_ffs,
         comb_blocks,
+        comb_observers,
         runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
     )
+}
+
+fn build_comb_observer_units(
+    observers: &[crate::ir::CombObserver<AbsoluteAddr>],
+    sites: &[crate::ir::RuntimeEventSite],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    four_state: bool,
+    mut next_runtime_error_code: i64,
+) -> (
+    Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>,
+    HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+    i64,
+) {
+    let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state);
+    let mut units = Vec::new();
+    let mut runtime_errors = HashMap::default();
+
+    for observer in observers {
+        let mut builder = crate::ir::SIRBuilder::new();
+        let mut cache = HashMap::default();
+        let mut env_inputs = HashMap::default();
+        for (addr, node) in &observer.local_inputs {
+            let reg = lowerer.lower(&mut builder, *node, arena, &mut cache);
+            let width = crate::logic_tree::get_width(*node, arena);
+            if width > 0 {
+                env_inputs.insert(crate::ir::VarAtomBase::new(*addr, 0, width - 1), reg);
+            }
+        }
+
+        let site = &sites[observer.site_id as usize];
+        match site.kind {
+            crate::ir::RuntimeEventKind::Display => {
+                let regs = lower_observer_args(
+                    &lowerer,
+                    &mut builder,
+                    arena,
+                    &mut cache,
+                    &observer.args,
+                    &env_inputs,
+                );
+                builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
+                    site_id: observer.site_id,
+                    args: regs,
+                });
+                builder.seal_block(crate::ir::SIRTerminator::Return);
+            }
+            crate::ir::RuntimeEventKind::AssertContinue
+            | crate::ir::RuntimeEventKind::AssertFatal => {
+                let guard = observer
+                    .guard
+                    .expect("comb assert observer must have a guard");
+                let cond = lowerer.lower_with_inputs(
+                    &mut builder,
+                    guard,
+                    arena,
+                    &mut cache,
+                    env_inputs.clone(),
+                );
+                let pass_bb = builder.new_block();
+                let fail_bb = builder.new_block();
+                builder.seal_block(crate::ir::SIRTerminator::Branch {
+                    cond,
+                    true_block: (pass_bb, vec![]),
+                    false_block: (fail_bb, vec![]),
+                });
+                builder.switch_to_block(fail_bb);
+                let regs = lower_observer_args(
+                    &lowerer,
+                    &mut builder,
+                    arena,
+                    &mut cache,
+                    &observer.args,
+                    &env_inputs,
+                );
+                builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
+                    site_id: observer.site_id,
+                    args: regs,
+                });
+                if matches!(site.kind, crate::ir::RuntimeEventKind::AssertFatal) {
+                    let code = next_runtime_error_code;
+                    next_runtime_error_code += 1;
+                    runtime_errors.insert(
+                        code,
+                        RuntimeErrorInfo {
+                            message: site
+                                .template
+                                .clone()
+                                .unwrap_or_else(|| "assertion failed".to_string()),
+                            signals: Vec::new(),
+                        },
+                    );
+                    builder.seal_block(crate::ir::SIRTerminator::Error(code));
+                } else {
+                    builder.seal_block(crate::ir::SIRTerminator::Jump(pass_bb, vec![]));
+                }
+                builder.switch_to_block(pass_bb);
+                builder.seal_block(crate::ir::SIRTerminator::Return);
+            }
+        }
+
+        let (blocks, register_map, _) = builder.drain();
+        let eu = crate::ir::ExecutionUnit {
+            entry_block_id: crate::ir::BlockId(0),
+            blocks: blocks
+                .into_iter()
+                .map(|(id, bb)| {
+                    (
+                        id,
+                        crate::ir::BasicBlock {
+                            id: bb.id,
+                            params: bb.params,
+                            instructions: bb
+                                .instructions
+                                .into_iter()
+                                .map(|inst| {
+                                    inst.into_map_addr(|addr| RegionedAbsoluteAddr {
+                                        region: STABLE_REGION,
+                                        instance_id: addr.instance_id,
+                                        var_id: addr.var_id,
+                                    })
+                                })
+                                .collect(),
+                            terminator: bb.terminator,
+                        },
+                    )
+                })
+                .collect(),
+            register_map,
+        };
+        units.push(eu);
+    }
+
+    (units, runtime_errors, next_runtime_error_code)
+}
+
+fn lower_observer_args(
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut crate::ir::SIRBuilder<AbsoluteAddr>,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    cache: &mut HashMap<crate::logic_tree::NodeId, crate::ir::RegisterId>,
+    args: &[crate::logic_tree::NodeId],
+    env_inputs: &HashMap<crate::ir::VarAtomBase<AbsoluteAddr>, crate::ir::RegisterId>,
+) -> Vec<crate::ir::RegisterId> {
+    args.iter()
+        .copied()
+        .map(|node| lowerer.lower_with_inputs(builder, node, arena, cache, env_inputs.clone()))
+        .collect()
 }
 
 fn analyze_clock_dependencies(

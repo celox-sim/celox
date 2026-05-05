@@ -60,6 +60,7 @@ impl super::super::EventHandle for NativeEventRef {
 /// that share the same compiled machine code.
 pub struct SharedNativeCode {
     comb_func: NativeSimFunc,
+    comb_observer_funcs: Vec<NativeSimFunc>,
     /// Keep JitCode alive so the mmap regions remain valid.
     _jit_codes: Vec<jit_mem::JitCode>,
 
@@ -132,6 +133,13 @@ fn compile_program(
     let comb_jit = compile_units(&sir.eval_comb, layout, options.four_state)?;
     let comb_func = comb_jit.fn_ptr;
     all_jit_codes.push(comb_jit);
+
+    let mut comb_observer_funcs = Vec::new();
+    for unit in &sir.eval_comb_observers {
+        let code = compile_units(std::slice::from_ref(unit), layout, options.four_state)?;
+        comb_observer_funcs.push(code.fn_ptr);
+        all_jit_codes.push(code);
+    }
 
     // Compile FF units
     let mut next_id = 0usize;
@@ -223,6 +231,7 @@ fn compile_program(
 
     Ok(SharedNativeCode {
         comb_func,
+        comb_observer_funcs,
         _jit_codes: all_jit_codes,
         event_map,
         eval_only_event_map,
@@ -334,6 +343,13 @@ impl super::super::SimBackend for NativeBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         Self::call_func(&mut self.memory, self.compiled.comb_func)
+    }
+
+    fn eval_comb_observer(&mut self, idx: usize) -> Result<(), SimulatorErrorCode> {
+        let Some(func) = self.compiled.comb_observer_funcs.get(idx).copied() else {
+            return Ok(());
+        };
+        Self::call_func(&mut self.memory, func)
     }
 
     fn eval_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {

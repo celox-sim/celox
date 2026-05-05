@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    BitAccess, BlockId, ExecutionUnit, GlueAddr, GlueBlock, ModuleId, ModuleInitialMemoryValue,
-    SIRBuilder, SIRTerminator, SimModule, TriggerSet, VarAtomBase,
+    BitAccess, BlockId, CombObserver, ExecutionUnit, GlueAddr, GlueBlock, ModuleId,
+    ModuleInitialMemoryValue, RuntimeEventSite, SIRBuilder, SIRTerminator, SimModule, TriggerSet,
+    VarAtomBase,
 };
 
 use crate::logic_tree::{
@@ -30,6 +31,8 @@ pub struct ModuleParser<'a> {
     slicer: BitSlicer,
     store: SymbolicStore<VarId>,
     comb_blocks: Vec<LogicPath<VarId>>,
+    comb_observers: Vec<CombObserver<VarId>>,
+    comb_runtime_event_sites: Vec<RuntimeEventSite>,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
     glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     initial_memory_values: Vec<ModuleInitialMemoryValue>,
@@ -60,6 +63,8 @@ impl<'a> ModuleParser<'a> {
             slicer: BitSlicer::new(module)?,
             store: SymbolicStore::default(),
             comb_blocks: Vec::new(),
+            comb_observers: Vec::new(),
+            comb_runtime_event_sites: Vec::new(),
             comb_boundaries: HashMap::default(),
             glue_blocks: HashMap::default(),
             initial_memory_values: Vec::new(),
@@ -73,9 +78,17 @@ impl<'a> ModuleParser<'a> {
         &mut self,
         decl: &veryl_analyzer::ir::CombDeclaration,
     ) -> Result<(), ParserError> {
-        let (paths, store, boundaries) = parse_comb(self.module, decl, &mut self.arena)?;
+        let (paths, store, boundaries, mut observers, sites) =
+            parse_comb(self.module, decl, &mut self.arena)?;
+        let site_offset =
+            self.ff_parser.runtime_event_sites().len() + self.comb_runtime_event_sites.len();
+        for observer in &mut observers {
+            observer.site_id += site_offset as u32;
+        }
         self.store.extend(store);
         self.comb_blocks.extend(paths);
+        self.comb_observers.extend(observers);
+        self.comb_runtime_event_sites.extend(sites);
         for (id, bounds) in boundaries {
             self.comb_boundaries.entry(id).or_default().extend(bounds);
         }
@@ -629,6 +642,8 @@ impl<'a> ModuleParser<'a> {
         for (id, bounds) in self.comb_boundaries {
             comb_boundaries.entry(id).or_default().extend(bounds);
         }
+        let mut runtime_event_sites = self.ff_parser.runtime_event_sites().clone();
+        runtime_event_sites.extend(self.comb_runtime_event_sites);
         Ok(SimModule {
             variables: self.module.variables.clone(),
             name: self.module.name,
@@ -637,8 +652,9 @@ impl<'a> ModuleParser<'a> {
             apply_ff_blocks,
             eval_apply_ff_blocks,
             comb_blocks: self.comb_blocks,
+            comb_observers: self.comb_observers,
             runtime_errors: self.ff_parser.runtime_errors().clone(),
-            runtime_event_sites: self.ff_parser.runtime_event_sites().clone(),
+            runtime_event_sites,
             initial_memory_values: self.initial_memory_values,
             comb_boundaries,
             arena: self.arena,

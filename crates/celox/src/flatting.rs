@@ -5,8 +5,8 @@ use veryl_analyzer::ir::VarId;
 
 use crate::HashMap;
 use crate::ir::{
-    AbsoluteAddr, BitAccess, GlueAddr, GlueBlock, InstanceId, InstancePath, RelocationModule,
-    SimModule, VarAtomBase,
+    AbsoluteAddr, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
+    RelocationModule, SimModule, VarAtomBase,
 };
 use crate::logic_tree::{LogicPath, NodeId, SLTNode, SLTNodeArena, get_width};
 
@@ -30,6 +30,14 @@ pub fn flatting(
         .comb_blocks
         .iter()
         .map(|e| convert_logic_path(e, &module.arena, arena, &mut comb_cache, &cv))
+        .collect();
+    let mut observer_cache = HashMap::default();
+    let comb_observers: Vec<_> = module
+        .comb_observers
+        .iter()
+        .map(|observer| {
+            convert_comb_observer(observer, &module.arena, arena, &mut observer_cache, &cv)
+        })
         .collect();
     for (child_instance_name, gbs) in &module.glue_blocks {
         for (idx, gb) in gbs.iter().enumerate() {
@@ -77,6 +85,7 @@ pub fn flatting(
         eval_only_ff_blocks: HashMap::default(),
         apply_ff_blocks: HashMap::default(),
         comb_blocks: atomized_comb_blocks,
+        comb_observers,
     }
 }
 
@@ -337,6 +346,52 @@ fn convert_logic_path<
 ) -> LogicPath<B> {
     lp.map_addr(arena, target_arena, cache, f)
 }
+
+fn convert_comb_observer<
+    A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
+    B: Hash + Eq + Clone,
+>(
+    observer: &CombObserver<A>,
+    arena: &SLTNodeArena<A>,
+    target_arena: &mut SLTNodeArena<B>,
+    cache: &mut HashMap<NodeId, NodeId>,
+    f: &impl Fn(&A) -> B,
+) -> CombObserver<B> {
+    let mut map_node = |node| {
+        arena
+            .get(node)
+            .map_addr(node, arena, target_arena, cache, f)
+    };
+    CombObserver {
+        site_id: observer.site_id,
+        guard: observer.guard.map(&mut map_node),
+        args: observer.args.iter().copied().map(&mut map_node).collect(),
+        sensitivity: observer
+            .sensitivity
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        local_inputs: observer
+            .local_inputs
+            .iter()
+            .map(|(id, node)| {
+                (
+                    f(id),
+                    arena
+                        .get(*node)
+                        .map_addr(*node, arena, target_arena, cache, f),
+                )
+            })
+            .collect(),
+        observed_inputs: observer
+            .observed_inputs
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        written_inputs: observer.written_inputs.iter().map(f).collect(),
+    }
+}
+
 fn convert_glue_block(
     gb: &GlueBlock,
     parent_id: InstanceId,

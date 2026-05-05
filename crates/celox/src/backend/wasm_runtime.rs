@@ -49,6 +49,9 @@ impl super::traits::SimBackend for WasmBackend {
     fn eval_comb(&mut self) -> Result<(), super::SimulatorErrorCode> {
         WasmBackend::eval_comb(self)
     }
+    fn eval_comb_observer(&mut self, idx: usize) -> Result<(), super::SimulatorErrorCode> {
+        WasmBackend::eval_comb_observer(self, idx)
+    }
     fn eval_apply_ff_at(&mut self, event: WasmEventRef) -> Result<(), super::SimulatorErrorCode> {
         WasmBackend::eval_apply_ff_at(self, &event)
     }
@@ -131,6 +134,7 @@ pub struct WasmBackend {
     store: Store<()>,
     memory: Memory,
     comb_func: TypedFunc<(), i64>,
+    comb_observer_funcs: Vec<TypedFunc<(), i64>>,
     event_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
     eval_only_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
     apply_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
@@ -162,6 +166,21 @@ impl WasmBackend {
         let comb_module = Module::new(&engine, &comb_wasm.bytes).map_err(|e| {
             crate::SimulatorError::from(format!("WASM compilation failed (eval_comb): {e:?}"))
         })?;
+        let mut comb_observer_modules = Vec::new();
+        for unit in &sir.eval_comb_observers {
+            let wasm = wasm_codegen::compile_units(
+                std::slice::from_ref(unit),
+                &layout,
+                options.four_state,
+                options.emit_triggers,
+            );
+            let module = Module::new(&engine, &wasm.bytes).map_err(|e| {
+                crate::SimulatorError::from(format!(
+                    "WASM compilation failed (comb observer): {e:?}"
+                ))
+            })?;
+            comb_observer_modules.push(module);
+        }
 
         // Compile event functions
         let mut event_modules = Vec::new();
@@ -330,6 +349,10 @@ impl WasmBackend {
         }
 
         let comb_func = instantiate_module(&engine, &mut store, &comb_module, &memory)?;
+        let mut comb_observer_funcs = Vec::new();
+        for module in &comb_observer_modules {
+            comb_observer_funcs.push(instantiate_module(&engine, &mut store, module, &memory)?);
+        }
 
         let mut event_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>> = HashMap::default();
         for (addr, module) in &event_modules {
@@ -355,6 +378,7 @@ impl WasmBackend {
             store,
             memory,
             comb_func,
+            comb_observer_funcs,
             event_funcs,
             eval_only_funcs,
             apply_funcs,
@@ -380,6 +404,13 @@ impl WasmBackend {
 
     pub fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         let func = self.comb_func.clone();
+        self.run_func(&func)
+    }
+
+    pub fn eval_comb_observer(&mut self, idx: usize) -> Result<(), SimulatorErrorCode> {
+        let Some(func) = self.comb_observer_funcs.get(idx).cloned() else {
+            return Ok(());
+        };
         self.run_func(&func)
     }
 

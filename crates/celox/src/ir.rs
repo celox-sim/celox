@@ -125,14 +125,27 @@ pub struct RuntimeEventSite {
     pub arg_is_string: Vec<bool>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CombObserver<A = AbsoluteAddr> {
+    pub site_id: u32,
+    pub guard: Option<crate::logic_tree::NodeId>,
+    pub args: Vec<crate::logic_tree::NodeId>,
+    pub sensitivity: Vec<VarAtomBase<A>>,
+    pub local_inputs: Vec<(A, crate::logic_tree::NodeId)>,
+    pub observed_inputs: Vec<VarAtomBase<A>>,
+    pub written_inputs: Vec<A>,
+}
+
 #[derive(Clone)]
 pub struct Program {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub eval_comb_observers: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
     /// Tail-call chain compilation plan, populated by the optimizer when the
     /// estimated CLIF instruction count exceeds Cranelift's limit.
     pub eval_comb_plan: Option<EvalCombPlan>,
@@ -175,6 +188,15 @@ impl Program {
     /// Build and store the memory layout. Also removes identity Stores for
     /// validated aliases and runs DCE to clean up dead instruction chains.
     pub fn build_layout(&mut self, four_state: bool) {
+        if !self.comb_observers.is_empty() && !self.address_aliases.is_empty() {
+            let observed_written: crate::HashSet<AbsoluteAddr> = self
+                .comb_observers
+                .iter()
+                .flat_map(|observer| observer.written_inputs.iter().copied())
+                .collect();
+            self.address_aliases
+                .retain(|alias_addr, _| !observed_written.contains(alias_addr));
+        }
         let layout = crate::backend::MemoryLayout::build(self, four_state);
 
         // Remove identity Stores for aliases validated by the layout
@@ -553,6 +575,7 @@ pub struct RelocationModule {
     pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
     pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
     pub comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
+    pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
 }
 
 impl fmt::Debug for RelocationModule {
@@ -564,6 +587,7 @@ impl fmt::Debug for RelocationModule {
             .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("comb_blocks", &self.comb_blocks)
+            .field("comb_observers", &self.comb_observers)
             .finish()
     }
 }
@@ -613,6 +637,7 @@ pub struct SimModule {
     pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
+    pub comb_observers: Vec<CombObserver<VarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     pub initial_memory_values: Vec<ModuleInitialMemoryValue>,
