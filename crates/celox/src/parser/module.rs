@@ -313,11 +313,9 @@ impl<'a> ModuleParser<'a> {
                 Ok(())
             }
             Statement::Null => Ok(()),
-            Statement::Unsupported(token) => Err(ParserError::unsupported(
-                111,
-                LoweringPhase::SimulatorParser,
+            Statement::Unsupported(token) => Err(ParserError::illegal_context(
                 "initial statement",
-                "unsupported initial statement; only direct $readmemh calls are currently lowered",
+                "only direct $readmemh calls are valid in simulator-lowered initial blocks",
                 Some(token),
             )),
             _ => Ok(()),

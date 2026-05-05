@@ -1,4 +1,4 @@
-use celox::{BigUint, LoweringPhase, ParserError, Simulator, SimulatorErrorKind};
+use celox::{BigUint, ParserError, Simulator, SimulatorErrorKind};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "test_utils/mod.rs"]
@@ -189,7 +189,7 @@ fn test_initial_readmemh_multiple_files_merge_in_order(sim) {
 }
 
 #[test]
-fn test_initial_readmemb_reports_unsupported() {
+fn test_initial_readmemb_reports_illegal_context() {
     let mem_path = temp_mem_file("readmemb", "00010010\n00110100\n01010110\n01111000\n");
     let code = format!(
         r#"
@@ -208,19 +208,13 @@ fn test_initial_readmemb_reports_unsupported() {
         .build()
         .expect_err("$readmemb should not be silently ignored");
     match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported {
-            issue,
-            phase,
-            feature,
-            detail,
-            ..
+        SimulatorErrorKind::SIRParser(ParserError::IllegalContext {
+            feature, detail, ..
         }) => {
-            assert_eq!(*issue, 111);
-            assert_eq!(*phase, LoweringPhase::SimulatorParser);
             assert_eq!(*feature, "initial statement");
             assert!(detail.contains("only direct $readmemh"));
         }
-        other => panic!("expected unsupported initial statement error, got {other:?}"),
+        other => panic!("expected illegal initial statement context error, got {other:?}"),
     }
 }
 
