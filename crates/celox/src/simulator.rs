@@ -70,7 +70,7 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     runtime_event_read_seq: u64,
     comb_capture_event_read_seq: u64,
     pending_runtime_events: Vec<RawRuntimeEvent>,
-    comb_observer_snapshots: Vec<Vec<BigUint>>,
+    comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -612,7 +612,7 @@ impl<B: SimBackend> Simulator<B> {
         Ok(())
     }
 
-    fn snapshot_all_comb_observers(&self) -> Vec<Vec<BigUint>> {
+    fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
         self.program
             .comb_observers
             .iter()
@@ -622,8 +622,15 @@ impl<B: SimBackend> Simulator<B> {
                     .iter()
                     .map(|atom| {
                         let signal = self.backend.resolve_signal(&atom.id);
-                        let value = self.backend.get(signal);
-                        slice_biguint(&value, atom.access.lsb, atom.access.msb)
+                        let (value, mask) = if signal.is_4state {
+                            self.backend.get_four_state(signal)
+                        } else {
+                            (self.backend.get(signal), BigUint::default())
+                        };
+                        (
+                            slice_biguint(&value, atom.access.lsb, atom.access.msb),
+                            slice_biguint(&mask, atom.access.lsb, atom.access.msb),
+                        )
                     })
                     .collect()
             })

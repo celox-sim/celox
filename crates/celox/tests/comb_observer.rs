@@ -1702,6 +1702,162 @@ module Top (
     assert_eq!(sim.drain_runtime_events(), vec![]);
 }
 
+fn test_comb_display_four_state_mask_only_input_change_triggers(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    always_comb {
+        out = a;
+        $display("a=%b", a);
+    }
+}
+"#, "Top").four_state(true);
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set_four_state(
+            a,
+            num_bigint::BigUint::from(0xA0u8),
+            num_bigint::BigUint::from(0u8),
+        )
+    })
+    .unwrap();
+    assert_eq!(sim.get_four_state(out).0, num_bigint::BigUint::from(0xA0u8));
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=10100000".to_string(),
+        }],
+    );
+
+    sim.modify(|io| {
+        io.set_four_state(
+            a,
+            num_bigint::BigUint::from(0xA0u8),
+            num_bigint::BigUint::from(0x0Fu8),
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(out).1,
+        num_bigint::BigUint::from(0x0Fu8)
+    );
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=1010xxxx".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_unaligned_wide_store_enables_downstream_observer(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<127>,
+    out: output logic<8>,
+) {
+    var tmp: logic<128>;
+
+    always_comb {
+        tmp = 128'd0;
+        tmp[127:1] = a;
+    }
+
+    always_comb {
+        out = tmp[8:1];
+        $display("slice=%0d", tmp[8:1]);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set_wide(a, num_bigint::BigUint::from(0x5Au8)))
+        .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0x5A);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "slice=90".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_wide_four_state_mask_store_enables_downstream_observer(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<80>,
+    out: output logic<8>,
+) {
+    var tmp: logic<80>;
+
+    always_comb {
+        tmp = a;
+    }
+
+    always_comb {
+        out = tmp[7:0];
+        $display("lo=%b", tmp[7:0]);
+    }
+}
+"#, "Top").four_state(true);
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set_four_state(
+            a,
+            num_bigint::BigUint::from(0x10u8),
+            num_bigint::BigUint::from(0u8),
+        )
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0x10);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "lo=00010000".to_string(),
+        }],
+    );
+
+    sim.modify(|io| {
+        io.set_four_state(
+            a,
+            num_bigint::BigUint::from(0x10u8),
+            num_bigint::BigUint::from(0x0Fu8),
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(out).1,
+        num_bigint::BigUint::from(0x0Fu8)
+    );
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "lo=0001xxxx".to_string(),
+        }],
+    );
+}
+
 }
 
 #[test]
