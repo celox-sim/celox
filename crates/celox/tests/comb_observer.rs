@@ -313,7 +313,7 @@ module Top (
     );
 }
 
-fn test_comb_display_retriggers_when_downstream_comb_changes_second_dependency(sim) {
+fn test_comb_display_coalesces_sensitive_changes_before_observer_executes(sim) {
     @omit_veryl;
     @ignore_on(wasm);
     @build Simulator::builder(r#"
@@ -350,14 +350,443 @@ module Top (
     sim.modify(|io| io.set(src, 5u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out_a), 5);
     assert_eq!(sim.get_as::<u8>(out_b), 5);
+
+    // IEEE 1800-2023 9.2.2.2.1 makes this observer sensitive to both a and b,
+    // while 4.7 leaves Active event ordering nondeterministic. Celox is allowed
+    // to coalesce multiple sensitivity changes into one pending process
+    // execution and emit the side effect once at the settled observation point.
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=5 b=5".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_inside_writer_reactivates_after_assign_chain(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    o: output logic,
+) {
+    var x: logic<2>;
+    var y: logic;
+
+    always_comb {
+        x[0] = a;
+        $display("x1=%0d", x[1]);
+        o = x[1];
+    }
+
+    assign y = x[0];
+    assign x[1] = y;
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let o = sim.signal("o");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(o), 1);
     assert_eq!(
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "a=5 b=0".to_string(),
+                message: "x1=0".to_string(),
             },
             celox::RuntimeEvent::Display {
-                message: "a=5 b=5".to_string(),
+                message: "x1=1".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_inside_writer_reactivates_after_multi_stage_assign_chain(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    o: output logic,
+) {
+    var x: logic<4>;
+
+    always_comb {
+        x[0] = a;
+        $display("x3=%0d", x[3]);
+        o = x[3];
+    }
+
+    assign x[1] = x[0];
+    assign x[2] = x[1];
+    assign x[3] = x[2];
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let o = sim.signal("o");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(o), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "x3=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "x3=1".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_inside_writer_preserves_ordered_downstream_reactivations(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    out: output logic<2>,
+) {
+    var x: logic<3>;
+
+    always_comb {
+        x[0] = a;
+        $display("x1=%0d x2=%0d", x[1], x[2]);
+        out = {x[2], x[1]};
+    }
+
+    assign x[1] = x[0];
+    assign x[2] = x[1];
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 3);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "x1=0 x2=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "x1=1 x2=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "x1=1 x2=1".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_inside_writer_reactivates_through_dynamic_index_read(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    i: input logic<2>,
+    j: input logic<2>,
+    o: output logic,
+) {
+    var w: logic<4>;
+    var x: logic<2>;
+
+    always_comb {
+        w = 4'd0;
+        w[i] = a;
+        $display("xj=%0d", x[j]);
+        o = x[j];
+    }
+
+    assign x[0] = w[0];
+    assign x[1] = x[0];
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let i = sim.signal("i");
+    let j = sim.signal("j");
+    let o = sim.signal("o");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(i, 0u8);
+        io.set(j, 1u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(o), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "xj=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "xj=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "xj=1".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_guard_reactivates_after_assign_chain_changes_guard(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    o: output logic,
+) {
+    var x: logic<2>;
+
+    always_comb {
+        x[0] = a;
+        if x[1] {
+            $display("hit x1=%0d", x[1]);
+        }
+        o = x[1];
+    }
+
+    assign x[1] = x[0];
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let o = sim.signal("o");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(o), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "hit x1=1".to_string(),
+        }],
+    );
+}
+
+fn test_comb_assert_fatal_reactivates_after_assign_chain_changes_assert_input(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    o: output logic,
+) {
+    var x: logic<2>;
+
+    always_comb {
+        x[0] = a;
+        $assert(x[1] == 1'd0, "x1 became %0d", x[1]);
+        o = x[1];
+    }
+
+    assign x[1] = x[0];
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    let err = sim.eval_comb().unwrap_err();
+    assert_eq!(
+        err,
+        celox::RuntimeErrorCode::Runtime {
+            message: "x1 became 1".to_string(),
+            signals: Vec::new(),
+        },
+    );
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "x1 became 1".to_string(),
+        }],
+    );
+}
+
+fn test_comb_multiple_observers_inside_writer_reactivate_in_statement_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    b: input logic,
+    out: output logic<2>,
+) {
+    var p: logic;
+    var q: logic;
+    var r: logic;
+    var s: logic;
+
+    always_comb {
+        p = a;
+        $display("first=%0d", q);
+        r = b;
+        $display("second=%0d", s);
+        out = {s, q};
+    }
+
+    assign q = p;
+    assign s = r;
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 3);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "first=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "second=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "first=1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "second=1".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_inside_dynamic_for_reactivates_after_assign_chain(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    count: input logic<3>,
+    o: output logic,
+) {
+    var seed: logic;
+    var x0: logic;
+    var x1: logic;
+
+    always_comb {
+        seed = a;
+        for i in 0..count {
+            $display("i=%0d x1=%0d", i, x1);
+        }
+        o = x1;
+    }
+
+    assign x0 = seed;
+    assign x1 = x0;
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let count = sim.signal("count");
+    let o = sim.signal("o");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(count, 2u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(o), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "i=0 x1=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=1 x1=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=0 x1=1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=1 x1=1".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_inside_writer_reactivates_through_instance_port_chain(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Passthrough (
+    i: input logic,
+    o: output logic,
+) {
+    assign o = i;
+}
+
+module Top (
+    a: input logic,
+    o: output logic,
+) {
+    var x: logic<2>;
+    var mid: logic;
+
+    inst u: Passthrough (
+        i: x[0],
+        o: mid,
+    );
+
+    always_comb {
+        x[0] = a;
+        $display("x1=%0d", x[1]);
+        o = x[1];
+    }
+
+    assign x[1] = mid;
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let o = sim.signal("o");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(o), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "x1=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "x1=1".to_string(),
             },
         ],
     );
@@ -2093,13 +2522,9 @@ module Top (
     let capture = sir
         .find("CombCaptureEvent(")
         .unwrap_or_else(|| panic!("missing comb capture event in SIR:\n{sir}"));
-    let store_high = sir
-        .find("Store(addr=tmp (region=0), offset=7, bits=1")
-        .unwrap_or_else(|| panic!("missing high-bit store in SIR:\n{sir}"));
-
     assert!(
-        store_low < capture && capture < store_high,
-        "observer capture should be ordered after the prior low-bit write and before the unrelated later high-bit write:\n{sir}"
+        store_low < capture,
+        "observer capture should be ordered after the prior low-bit write; unrelated later writes may move before capture if the statement-position value is snapshotted:\n{sir}"
     );
 }
 
@@ -2200,16 +2625,10 @@ module Top (
     let second_capture = sir
         .find("CombCaptureEvent(site=1")
         .unwrap_or_else(|| panic!("missing second capture event in SIR:\n{sir}"));
-    let store_bit7 = sir
-        .find("Store(addr=tmp (region=0), offset=7, bits=1")
-        .unwrap_or_else(|| panic!("missing bit 7 store in SIR:\n{sir}"));
 
     assert!(
-        store_bit0 < first_capture
-            && first_capture < store_bit1
-            && store_bit1 < second_capture
-            && second_capture < store_bit7,
-        "each observer capture should be placeable at its own statement position on the same variable:\n{sir}"
+        store_bit0 < first_capture && store_bit1 < second_capture && first_capture < second_capture,
+        "each observer capture should preserve prior-write and side-effect order; unrelated later writes may move before capture if statement-position values are snapshotted:\n{sir}"
     );
 }
 

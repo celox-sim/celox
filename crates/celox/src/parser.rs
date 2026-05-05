@@ -72,7 +72,7 @@ mod scheduler;
 use crate::ir::{
     AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, LogicPathId,
     ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule,
-    VariableInfo,
+    VarAtomBase, VariableInfo,
 };
 use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena};
 pub use scheduler::SchedulerError;
@@ -1882,22 +1882,35 @@ fn build_comb_observer_capture_paths(
 
     annotate_comb_capture_enable_sites(comb_blocks, observers);
 
-    let mut previous_capture_path: Option<LogicPathId> = None;
+    let mut previous_primary_capture_path: Option<LogicPathId> = None;
+    let mut previous_trigger_capture_path: Option<LogicPathId> = None;
     for observer in observers {
+        let has_statement_position_dependency =
+            observer_has_statement_position_dependency(comb_blocks, observer);
+        let order_before = observer_order_before(comb_blocks, observer);
+        let order_after = observer_order_after(comb_blocks, observer);
+        let trigger_paths = if has_statement_position_dependency {
+            observer_trigger_paths(comb_blocks, observer)
+        } else {
+            Vec::new()
+        };
         if observer.captured_in_loop {
             let Some(loop_runner) = observer.loop_runner else {
                 continue;
             };
-            let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
-            let sources = observer
+            let sources: HashSet<_> = observer
                 .sensitivity
                 .iter()
                 .copied()
-                .filter(|atom| !written_inputs.contains(&atom.id))
+                .filter(|atom| !observer_written_input_overlaps(observer, atom))
+                .filter(|atom| !observer_statement_position_overlaps(comb_blocks, observer, atom))
                 .collect();
             let path_id = LogicPathId(comb_blocks.len());
-            if let Some(prev) = previous_capture_path {
+            if let Some(prev) = previous_primary_capture_path {
                 comb_blocks[prev.0].order_before.insert(path_id);
+            }
+            for idx in &order_after {
+                comb_blocks[idx.0].order_before.insert(path_id);
             }
             comb_blocks.push(LogicPath {
                 target: LogicPathTarget::CombCaptureEvent {
@@ -1911,20 +1924,54 @@ fn build_comb_observer_capture_paths(
                 },
                 sources,
                 local_inputs: observer.local_inputs.clone(),
-                order_before: HashSet::default(),
+                order_before: order_before.clone(),
                 comb_capture_enable_sites: Vec::new(),
                 pre_lower_nodes: Vec::new(),
                 expr: loop_runner,
             });
-            previous_capture_path = Some(path_id);
+            previous_primary_capture_path = Some(path_id);
+            for trigger_idx in trigger_paths {
+                let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
+                    continue;
+                };
+                let path_id = LogicPathId(comb_blocks.len());
+                if let Some(prev) = previous_trigger_capture_path {
+                    comb_blocks[prev.0].order_before.insert(path_id);
+                }
+                comb_blocks[trigger_idx.0].order_before.insert(path_id);
+                comb_blocks.push(LogicPath {
+                    target: LogicPathTarget::CombCaptureEvent {
+                        site_id: observer.site_id,
+                        guard: None,
+                        emit_on_true: true,
+                        args: Vec::new(),
+                        loop_runner: Some(loop_runner),
+                        fatal_error_code: None,
+                        consume_enabled: true,
+                    },
+                    sources: std::iter::once(trigger_target).collect(),
+                    local_inputs: observer.local_inputs.clone(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
+                    expr: loop_runner,
+                });
+                previous_trigger_capture_path = Some(path_id);
+            }
             continue;
         }
-        let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
+        let local_input_ids: HashSet<_> = observer
+            .local_inputs
+            .iter()
+            .map(|(addr, _)| *addr)
+            .collect();
         let mut sources: HashSet<_> = observer
             .observed_inputs
             .iter()
             .copied()
-            .filter(|atom| !written_inputs.contains(&atom.id))
+            .filter(|atom| !observer_written_input_overlaps(observer, atom))
+            .filter(|atom| !local_input_ids.contains(&atom.id))
+            .filter(|atom| !observer_statement_position_overlaps(comb_blocks, observer, atom))
             .collect();
         for (_, node) in &observer.local_inputs {
             let mut local_sources = HashSet::default();
@@ -1932,12 +1979,13 @@ fn build_comb_observer_capture_paths(
             sources.extend(
                 local_sources
                     .into_iter()
-                    .filter(|atom| !written_inputs.contains(&atom.id)),
+                    .filter(|atom| !observer_written_input_overlaps(observer, atom))
+                    .filter(|atom| !local_input_ids.contains(&atom.id))
+                    .filter(|atom| {
+                        !observer_statement_position_overlaps(comb_blocks, observer, atom)
+                    }),
             );
         }
-        let order_before = observer_order_before(comb_blocks, observer);
-        let order_after = observer_order_after(comb_blocks, observer);
-
         let expr = observer
             .guard
             .or_else(|| observer.args.first().copied())
@@ -1958,15 +2006,46 @@ fn build_comb_observer_capture_paths(
             crate::ir::RuntimeEventKind::AssertFatal
         )
         .then_some(observer.site_id as i64);
-        let trigger_paths = observer_trigger_paths(comb_blocks, observer);
-        if trigger_paths.is_empty() {
+        let pre_lower_nodes = observer_pre_lower_nodes(observer);
+        for idx in &order_after {
+            comb_blocks[idx.0]
+                .pre_lower_nodes
+                .extend(pre_lower_nodes.iter().copied());
+        }
+        let path_id = LogicPathId(comb_blocks.len());
+        if let Some(prev) = previous_primary_capture_path {
+            comb_blocks[prev.0].order_before.insert(path_id);
+        }
+        for idx in &order_after {
+            comb_blocks[idx.0].order_before.insert(path_id);
+        }
+        comb_blocks.push(LogicPath {
+            target: LogicPathTarget::CombCaptureEvent {
+                site_id: observer.site_id,
+                guard: observer.guard,
+                emit_on_true,
+                args: observer.args.clone(),
+                loop_runner: None,
+                fatal_error_code,
+                consume_enabled: !trigger_paths.is_empty(),
+            },
+            sources,
+            local_inputs: observer.local_inputs.clone(),
+            order_before,
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr,
+        });
+        previous_primary_capture_path = Some(path_id);
+        for trigger_idx in trigger_paths {
+            let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
+                continue;
+            };
             let path_id = LogicPathId(comb_blocks.len());
-            if let Some(prev) = previous_capture_path {
+            if let Some(prev) = previous_trigger_capture_path {
                 comb_blocks[prev.0].order_before.insert(path_id);
             }
-            for idx in &order_after {
-                comb_blocks[idx.0].order_before.insert(path_id);
-            }
+            comb_blocks[trigger_idx.0].order_before.insert(path_id);
             comb_blocks.push(LogicPath {
                 target: LogicPathTarget::CombCaptureEvent {
                     site_id: observer.site_id,
@@ -1975,93 +2054,74 @@ fn build_comb_observer_capture_paths(
                     args: observer.args.clone(),
                     loop_runner: None,
                     fatal_error_code,
-                    consume_enabled: false,
+                    consume_enabled: true,
                 },
-                sources,
+                sources: std::iter::once(trigger_target).collect(),
                 local_inputs: observer.local_inputs.clone(),
-                order_before,
+                order_before: HashSet::default(),
                 comb_capture_enable_sites: Vec::new(),
                 pre_lower_nodes: Vec::new(),
                 expr,
             });
-            previous_capture_path = Some(path_id);
-        } else {
-            for trigger_idx in trigger_paths {
-                let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
-                    continue;
-                };
-                let path_id = LogicPathId(comb_blocks.len());
-                if let Some(prev) = previous_capture_path {
-                    comb_blocks[prev.0].order_before.insert(path_id);
-                }
-                comb_blocks[trigger_idx.0].order_before.insert(path_id);
-                let mut order_before = HashSet::default();
-                for (idx, path) in comb_blocks.iter().enumerate() {
-                    if idx == trigger_idx.0 {
-                        continue;
-                    }
-                    let Some(target) = path.target.var() else {
-                        continue;
-                    };
-                    if observer
-                        .sensitivity
-                        .iter()
-                        .any(|atom| target.id == atom.id && target.access.overlaps(&atom.access))
-                        && path.sources.iter().any(|source| {
-                            source.id == trigger_target.id
-                                && source.access.overlaps(&trigger_target.access)
-                        })
-                    {
-                        order_before.insert(LogicPathId(idx));
-                    }
-                }
-                let pre_lower_nodes = observer_pre_lower_nodes(observer);
-                comb_blocks[trigger_idx.0]
-                    .pre_lower_nodes
-                    .extend(pre_lower_nodes.iter().copied());
-                comb_blocks.push(LogicPath {
-                    target: LogicPathTarget::CombCaptureEvent {
-                        site_id: observer.site_id,
-                        guard: observer.guard,
-                        emit_on_true,
-                        args: observer.args.clone(),
-                        loop_runner: None,
-                        fatal_error_code,
-                        consume_enabled: true,
-                    },
-                    sources: std::iter::once(trigger_target).collect(),
-                    local_inputs: observer.local_inputs.clone(),
-                    order_before,
-                    comb_capture_enable_sites: Vec::new(),
-                    pre_lower_nodes: Vec::new(),
-                    expr,
-                });
-                previous_capture_path = Some(path_id);
-            }
+            previous_trigger_capture_path = Some(path_id);
         }
     }
+}
+
+fn observer_written_input_overlaps(
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+    atom: &VarAtomBase<AbsoluteAddr>,
+) -> bool {
+    observer
+        .written_input_atoms
+        .iter()
+        .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
+}
+
+fn observer_statement_position_overlaps(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+    atom: &VarAtomBase<AbsoluteAddr>,
+) -> bool {
+    atom_overlaps_any(atom, observer_affected_by_preceding_writes(paths, observer))
+}
+
+fn observer_has_statement_position_dependency(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> bool {
+    if observer.preceding_writes.is_empty() {
+        return false;
+    }
+    let affected = observer_affected_by_preceding_writes(paths, observer);
+    observer
+        .position_inputs
+        .iter()
+        .chain(observer.observed_inputs.iter())
+        .any(|input| atom_overlaps_any(input, &affected))
 }
 
 fn observer_trigger_paths(
     paths: &[LogicPath<AbsoluteAddr>],
     observer: &crate::ir::CombObserver<AbsoluteAddr>,
 ) -> Vec<LogicPathId> {
-    let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
     let mut seen_targets = HashSet::default();
     paths
         .iter()
         .enumerate()
         .filter_map(|(idx, path)| {
             let target = path.target.var()?;
-            if !seen_targets.insert(target.id) {
+            if observer_written_input_overlaps(observer, target) {
                 return None;
             }
             let matches = observer
                 .sensitivity
                 .iter()
-                .filter(|atom| !written_inputs.contains(&atom.id))
                 .any(|atom| target.id == atom.id && target.access.overlaps(&atom.access));
-            matches.then_some(LogicPathId(idx))
+            if !matches || !seen_targets.insert((target.id, target.access.lsb, target.access.msb)) {
+                return None;
+            }
+            Some(LogicPathId(idx))
         })
         .collect()
 }
@@ -2104,7 +2164,10 @@ fn observer_order_after(
     observer: &crate::ir::CombObserver<AbsoluteAddr>,
 ) -> HashSet<LogicPathId> {
     let mut result = HashSet::default();
-    for written in &observer.written_before {
+    if !observer_has_statement_position_dependency(paths, observer) {
+        return result;
+    }
+    for written in &observer.preceding_writes {
         for (idx, path) in paths.iter().enumerate() {
             let Some(target) = path.target.var() else {
                 continue;
@@ -2121,25 +2184,20 @@ fn observer_order_before(
     paths: &[LogicPath<AbsoluteAddr>],
     observer: &crate::ir::CombObserver<AbsoluteAddr>,
 ) -> HashSet<LogicPathId> {
-    let position_ids: HashSet<_> = observer
-        .position_inputs
-        .iter()
-        .map(|atom| atom.id)
-        .collect();
-    let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
-    if position_ids.is_empty() || written_inputs.is_empty() {
+    if !observer_has_statement_position_dependency(paths, observer) {
         return HashSet::default();
     }
-    let written_before = observer.written_before.iter().collect::<Vec<_>>();
+    let preceding_writes = observer.preceding_writes.iter().collect::<Vec<_>>();
+    let affected_by_preceding_writes = observer_affected_by_preceding_writes(paths, observer);
     let mut result = HashSet::default();
     for (idx, path) in paths.iter().enumerate() {
         let Some(target) = path.target.var() else {
             continue;
         };
-        if !position_ids.contains(&target.id) || !written_inputs.contains(&target.id) {
+        if !atom_overlaps_any(target, &affected_by_preceding_writes) {
             continue;
         }
-        let already_written = written_before
+        let already_written = preceding_writes
             .iter()
             .any(|written| target.id == written.id && target.access.overlaps(&written.access));
         if !already_written {
@@ -2147,6 +2205,44 @@ fn observer_order_before(
         }
     }
     result
+}
+
+fn observer_affected_by_preceding_writes(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> HashSet<VarAtomBase<AbsoluteAddr>> {
+    let mut affected: HashSet<VarAtomBase<AbsoluteAddr>> =
+        observer.preceding_writes.iter().copied().collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for path in paths {
+            let Some(target) = path.target.var() else {
+                continue;
+            };
+            if !path
+                .sources
+                .iter()
+                .any(|source| atom_overlaps_any(source, &affected))
+            {
+                continue;
+            }
+            if affected.insert(*target) {
+                changed = true;
+            }
+        }
+    }
+    affected
+}
+
+fn atom_overlaps_any<A: Eq + std::hash::Hash + Copy>(
+    atom: &VarAtomBase<A>,
+    atoms: impl IntoIterator<Item = impl std::borrow::Borrow<VarAtomBase<A>>>,
+) -> bool {
+    atoms.into_iter().any(|other| {
+        let other = other.borrow();
+        atom.id == other.id && atom.access.overlaps(&other.access)
+    })
 }
 
 fn analyze_clock_dependencies(

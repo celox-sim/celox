@@ -256,6 +256,22 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
     memo.insert(node, deps.clone());
     deps
 }
+
+fn collect_logic_path_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
+    path: &LogicPath<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+) {
+    collect_node_input_deps(path.expr, arena, memo, inverse_memo);
+    for (_, node) in &path.local_inputs {
+        collect_node_input_deps(*node, arena, memo, inverse_memo);
+    }
+    for node in &path.pre_lower_nodes {
+        collect_node_input_deps(*node, arena, memo, inverse_memo);
+    }
+}
+
 struct TarjanContext {
     index: usize,
     stack: Vec<usize>,
@@ -577,9 +593,8 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 let mut regs: Vec<(RegisterId, usize)> = Vec::with_capacity(sorted_by_lsb.len());
                 for &idx in &sorted_by_lsb {
                     let path = &input[idx];
-                    collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
+                    collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
                     for node in &path.pre_lower_nodes {
-                        collect_node_input_deps(*node, arena, dep_memo, inverse_dep_memo);
                         pre_lower_logic_path_node(
                             lowerer,
                             builder,
@@ -629,10 +644,7 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     // Fallback: emit in original topological order (don't sort pending).
     for &idx in pending.iter() {
         let path = &input[idx];
-        collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
-        for node in &path.pre_lower_nodes {
-            collect_node_input_deps(*node, arena, dep_memo, inverse_dep_memo);
-        }
+        collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
         emit_logic_path_store(lowerer, builder, path, arena, lower_cache);
         invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
     }
@@ -832,7 +844,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                      inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>| {
         let path = &input[idx];
 
-        collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
+        collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
         emit_logic_path_store(&lowerer, builder, path, arena, lower_cache);
         invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
     };
@@ -1018,7 +1030,12 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                         SIROffset::Static(target.access.lsb),
                         width,
                     ));
-                    collect_node_input_deps(path.expr, arena, &mut dep_memo, &mut inverse_dep_memo);
+                    collect_logic_path_input_deps(
+                        path,
+                        arena,
+                        &mut dep_memo,
+                        &mut inverse_dep_memo,
+                    );
                     // b. Compute the new value
                     let new_val_reg = lower_logic_path_expr(
                         &lowerer,

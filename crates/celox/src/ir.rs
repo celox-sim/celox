@@ -138,7 +138,9 @@ pub struct CombObserver<A = AbsoluteAddr> {
     pub local_inputs: Vec<(A, crate::logic_tree::NodeId)>,
     pub observed_inputs: Vec<VarAtomBase<A>>,
     pub position_inputs: Vec<VarAtomBase<A>>,
+    pub preceding_writes: Vec<VarAtomBase<A>>,
     pub written_before: Vec<VarAtomBase<A>>,
+    pub written_input_atoms: Vec<VarAtomBase<A>>,
     pub written_inputs: Vec<A>,
     pub captured_in_loop: bool,
 }

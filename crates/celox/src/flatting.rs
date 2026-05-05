@@ -411,8 +411,18 @@ fn convert_comb_observer<
             .iter()
             .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
             .collect(),
+        preceding_writes: observer
+            .preceding_writes
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
         written_before: observer
             .written_before
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        written_input_atoms: observer
+            .written_input_atoms
             .iter()
             .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
             .collect(),

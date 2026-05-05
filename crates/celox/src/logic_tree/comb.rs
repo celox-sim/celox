@@ -1209,23 +1209,37 @@ pub fn parse_comb(
         }
     }
     let mut process_sensitivity = effects.sensitivity;
-    let written_ids: HashSet<_> = paths
+    let written_atoms: Vec<_> = paths
         .iter()
-        .filter_map(|path| path.target.var().map(|target| target.id))
+        .filter_map(|path| path.target.var().copied())
         .collect();
     for path in &paths {
         process_sensitivity.extend(path.sources.iter().copied());
     }
-    process_sensitivity.retain(|atom| !written_ids.contains(&atom.id));
+    process_sensitivity.retain(|atom| {
+        !written_atoms
+            .iter()
+            .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
+    });
     let process_sensitivity: Vec<_> = process_sensitivity.into_iter().collect();
     for observer in &mut effects.observers {
         observer.sensitivity = process_sensitivity.clone();
-        observer.written_inputs = observer
+        observer.written_input_atoms = observer
             .observed_inputs
             .iter()
             .chain(observer.position_inputs.iter())
-            .filter_map(|atom| written_ids.contains(&atom.id).then_some(atom.id))
+            .copied()
+            .filter(|atom| {
+                written_atoms
+                    .iter()
+                    .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
+            })
             .collect();
+        let mut written_inputs = HashSet::default();
+        for atom in &observer.written_input_atoms {
+            written_inputs.insert(atom.id);
+        }
+        observer.written_inputs = written_inputs.into_iter().collect();
     }
     Ok((
         paths,
@@ -1370,6 +1384,19 @@ fn collect_system_function_effect(
     });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
+    let preceding_writes: Vec<_> = store
+        .iter()
+        .flat_map(|(id, range_store)| {
+            range_store
+                .ranges
+                .iter()
+                .filter_map(move |(&lsb, (value, width, _))| {
+                    value
+                        .is_some()
+                        .then_some(VarAtomBase::new(*id, lsb, lsb + width - 1))
+                })
+        })
+        .collect();
     collector.observers.push(CombObserver {
         site_id,
         guard,
@@ -1400,6 +1427,7 @@ fn collect_system_function_effect(
             .collect(),
         observed_inputs: observed_inputs.into_iter().collect(),
         position_inputs: position_inputs.into_iter().collect(),
+        preceding_writes: preceding_writes.clone(),
         written_before: store
             .iter()
             .filter(|(id, _)| position_ids.contains(id))
@@ -1414,6 +1442,7 @@ fn collect_system_function_effect(
                     })
             })
             .collect(),
+        written_input_atoms: Vec::new(),
         written_inputs: Vec::new(),
         captured_in_loop: loop_effect.is_some(),
     });
