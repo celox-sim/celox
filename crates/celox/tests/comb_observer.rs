@@ -351,6 +351,51 @@ module Top (
     );
 }
 
+fn test_comb_display_snapshots_repeated_full_var_writes(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    always_comb {
+        tmp = a;
+        $display("first=%0d", tmp);
+        tmp = a + 8'd1;
+        $display("second=%0d", tmp);
+        tmp = a + 8'd2;
+        $display("third=%0d", tmp);
+        out = tmp;
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 3u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 5);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "first=3".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "second=4".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "third=5".to_string(),
+            },
+        ],
+    );
+}
+
 }
 
 #[test]

@@ -1929,7 +1929,6 @@ fn build_comb_observer_storage_paths(
     }
 
     let mut storages = Vec::new();
-
     for observer in observers {
         let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
         let mut sources: HashSet<_> = observer
