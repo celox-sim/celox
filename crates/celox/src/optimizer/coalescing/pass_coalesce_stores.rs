@@ -45,7 +45,7 @@ fn coalesce_block(
     for (i, inst) in block.instructions.iter().enumerate() {
         match inst {
             SIRInstruction::Store(addr, SIROffset::Static(off), width, src, triggers, sites)
-                if triggers.is_empty() =>
+                if triggers.is_empty() && sites.is_empty() =>
             {
                 groups.entry(*addr).or_default().push(StoreCandidate {
                     inst_index: i,

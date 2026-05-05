@@ -536,8 +536,13 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                     .var()
                     .is_some_and(|target| path.sources.iter().any(|s| s.id == target.id))
             });
+            let same_comb_capture_enable_sites = sorted_by_lsb.first().is_none_or(|first| {
+                sorted_by_lsb.iter().all(|idx| {
+                    input[*idx].comb_capture_enable_sites == input[*first].comb_capture_enable_sites
+                })
+            });
 
-            if contiguous && within_var_width && !has_self_ref {
+            if contiguous && within_var_width && !has_self_ref && same_comb_capture_enable_sites {
                 // Coalesce: lower each path expression, then concat + single wide store.
                 // SIR Concat order is [MSB, ..., LSB], so reverse after lsb sort.
                 let mut regs: Vec<(RegisterId, usize)> = Vec::with_capacity(sorted_by_lsb.len());

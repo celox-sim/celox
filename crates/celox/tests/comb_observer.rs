@@ -1466,6 +1466,242 @@ module Top (
     );
 }
 
+fn test_comb_display_downstream_wide_store_enables_observer(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<128>,
+    unrelated: input logic<8>,
+    out: output logic<8>,
+) {
+    var tmp: logic<128>;
+
+    always_comb {
+        tmp = a;
+    }
+
+    always_comb {
+        out = tmp[7:0];
+        $display("lo=%0d hi=%0d", tmp[7:0], tmp[71:64]);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let unrelated = sim.signal("unrelated");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    let value: num_bigint::BigUint = (num_bigint::BigUint::from(0x12u8) << 64)
+        | num_bigint::BigUint::from(0x34u8);
+    sim.modify(|io| io.set_wide(a, value.clone())).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0x34);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "lo=52 hi=18".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set_wide(a, value)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+
+    sim.modify(|io| io.set(unrelated, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0x34);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
+fn test_comb_display_downstream_dynamic_write_crossing_word_boundary(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    idx: input logic<7>,
+    val: input logic<8>,
+    out: output logic<8>,
+) {
+    var tmp: logic<128>;
+
+    always_comb {
+        tmp = 128'd0;
+        tmp[idx +: 8] = val;
+    }
+
+    always_comb {
+        out = tmp[67:60];
+        $display("slice=%0d", tmp[67:60]);
+    }
+}
+"#, "Top");
+
+    let idx = sim.signal("idx");
+    let val = sim.signal("val");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(idx, 60u8);
+        io.set(val, 0xABu8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0xAB);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "slice=171".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(val, 0xABu8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
+fn test_comb_display_store_coalesce_does_not_enable_unrelated_chunk(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    lo: input logic<8>,
+    hi: input logic<8>,
+    out: output logic<8>,
+) {
+    var tmp: logic<16>;
+
+    always_comb {
+        tmp[7:0] = lo;
+        tmp[15:8] = hi;
+    }
+
+    always_comb {
+        out = tmp[7:0];
+        $display("lo=%0d", tmp[7:0]);
+    }
+}
+"#, "Top");
+
+    let lo = sim.signal("lo");
+    let hi = sim.signal("hi");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(lo, 5u8);
+        io.set(hi, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 5);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "lo=5".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(hi, 2u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 5);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
+fn test_comb_display_ff_to_downstream_comb_store_enables_observer(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<8>,
+    out: output logic<8>,
+) {
+    var q: logic<8>;
+    var x: logic<8>;
+
+    always_ff {
+        q = d;
+    }
+
+    always_comb {
+        x = q;
+    }
+
+    always_comb {
+        out = x;
+        $display("x=%0d", x);
+    }
+}
+"#, "Top");
+
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(d, 11u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 11);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "x=11".to_string(),
+        }],
+    );
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
+fn test_comb_display_port_alias_write_enables_downstream_observer(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Child (
+    a: input logic<8>,
+    y: output logic<8>,
+) {
+    always_comb {
+        y = a;
+    }
+}
+
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    var internal: logic<8>;
+
+    inst child: Child (
+        a: a,
+        y: internal,
+    );
+
+    always_comb {
+        out = internal;
+        $display("internal=%0d", internal);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 21u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 21);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "internal=21".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(a, 21u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
 }
 
 #[test]

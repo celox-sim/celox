@@ -1676,6 +1676,34 @@ fn lower_instruction(
                         SIROffset::Dynamic(_) => None,
                     }
                 };
+                let old_comb_wide_probe = if comb_capture_sites.is_empty() || *width_bits <= 64 {
+                    Vec::new()
+                } else if let SIROffset::Static(bit_off) = offset {
+                    if bit_off % 8 == 0 {
+                        let mut probes = Vec::new();
+                        let mut bit_pos = 0usize;
+                        while bit_pos < *width_bits {
+                            let chunk_bits = (*width_bits - bit_pos).min(64);
+                            let chunk_off = ctx.byte_offset(addr, *bit_off + bit_pos);
+                            let size = OpSize::from_bits(chunk_bits)
+                                .unwrap_or_else(|| ISelContext::op_size_for_width(chunk_bits));
+                            let old = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Load {
+                                dst: old,
+                                base: BaseReg::SimState,
+                                offset: chunk_off,
+                                size,
+                            });
+                            probes.push((old, chunk_off, size));
+                            bit_pos += chunk_bits;
+                        }
+                        probes
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
                 let old_comb_mask_probe = if comb_capture_sites.is_empty()
                     || *width_bits > 64
                     || !ctx.is_4state_var(addr)
@@ -2132,6 +2160,38 @@ fn lower_instruction(
                         rhs: new_comb_probe,
                         kind: CmpKind::Ne,
                     });
+                    emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
+                }
+                if !old_comb_wide_probe.is_empty() {
+                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                    block.push(MInst::LoadImm {
+                        dst: zero,
+                        value: 0,
+                    });
+                    let mut changed = zero;
+                    for (old, byte_off, size) in old_comb_wide_probe {
+                        let new = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Load {
+                            dst: new,
+                            base: BaseReg::SimState,
+                            offset: byte_off,
+                            size,
+                        });
+                        let chunk_changed = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Cmp {
+                            dst: chunk_changed,
+                            lhs: old,
+                            rhs: new,
+                            kind: CmpKind::Ne,
+                        });
+                        let next_changed = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or {
+                            dst: next_changed,
+                            lhs: changed,
+                            rhs: chunk_changed,
+                        });
+                        changed = next_changed;
+                    }
                     emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
                 }
                 if let Some((old_comb_mask_probe, byte_off, size)) = old_comb_mask_probe {
