@@ -1140,6 +1140,8 @@ struct CombEffectCollector {
     observers: Vec<CombObserver<VarId>>,
     sites: Vec<RuntimeEventSite>,
     sensitivity: HashSet<VarAtomBase<VarId>>,
+    active_guard: Option<NodeId>,
+    active_guard_sources: HashSet<VarAtomBase<VarId>>,
 }
 
 fn static_string_expr(expr: &Expression) -> Option<String> {
@@ -1227,7 +1229,7 @@ fn collect_system_function_effect(
         collect_expression_position_inputs(module, &arg.0, &mut position_inputs)?;
         observer_args.push(node);
     }
-    let guard = if let Some(cond) = cond {
+    let explicit_guard = if let Some(cond) = cond {
         let ((cond_node, cond_sources), _) = eval_expression(module, store, cond, arena, None)?;
         observed_inputs.extend(cond_sources.iter().copied());
         collector.sensitivity.extend(cond_sources);
@@ -1235,6 +1237,25 @@ fn collect_system_function_effect(
         Some(cond_node)
     } else {
         None
+    };
+    observed_inputs.extend(collector.active_guard_sources.iter().copied());
+    let guard = match (kind, collector.active_guard, explicit_guard) {
+        (RuntimeEventKind::Display, active, None) => active,
+        (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, None, explicit) => {
+            explicit
+        }
+        (
+            RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal,
+            Some(active),
+            Some(explicit),
+        ) => {
+            let inactive = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, active));
+            Some(arena.alloc(SLTNode::Binary(inactive, BinaryOp::LogicOr, explicit)))
+        }
+        (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, Some(active), None) => {
+            Some(active)
+        }
+        (RuntimeEventKind::Display, _, Some(_)) => unreachable!("display has no explicit guard"),
     };
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
@@ -1386,13 +1407,35 @@ fn collect_comb_effects_statements(
             Statement::SystemFunctionCall(call) => {
                 collect_system_function_effect(module, &store, call, arena, collector)?;
             }
+            Statement::FunctionCall(call) => {
+                let (next_store, _) = eval_statement_form_function_call(
+                    module,
+                    store,
+                    BoundaryMap::default(),
+                    call,
+                    arena,
+                    LoweringPhase::CombLowering,
+                )?;
+                store = next_store;
+            }
             Statement::For(for_stmt) => {
                 store = collect_comb_effects_for(module, store, for_stmt, arena, collector)?;
             }
             Statement::If(if_stmt) => {
-                let ((_, sources), _) =
+                let ((cond_node, sources), _) =
                     eval_expression(module, &store, &if_stmt.cond, arena, None)?;
-                collector.sensitivity.extend(sources);
+                collector.sensitivity.extend(sources.iter().copied());
+                let saved_guard = collector.active_guard;
+                let saved_guard_sources = collector.active_guard_sources.clone();
+                let true_guard = if let Some(active) = saved_guard {
+                    arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, cond_node))
+                } else {
+                    cond_node
+                };
+                let mut true_sources = saved_guard_sources.clone();
+                true_sources.extend(sources.iter().copied());
+                collector.active_guard = Some(true_guard);
+                collector.active_guard_sources = true_sources;
                 let side_store = collect_comb_effects_statements(
                     module,
                     store.clone(),
@@ -1400,6 +1443,16 @@ fn collect_comb_effects_statements(
                     arena,
                     collector,
                 )?;
+                let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+                let false_guard = if let Some(active) = saved_guard {
+                    arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, false_cond))
+                } else {
+                    false_cond
+                };
+                let mut false_sources = saved_guard_sources.clone();
+                false_sources.extend(sources.iter().copied());
+                collector.active_guard = Some(false_guard);
+                collector.active_guard_sources = false_sources;
                 let else_store = collect_comb_effects_statements(
                     module,
                     store,
@@ -1407,6 +1460,8 @@ fn collect_comb_effects_statements(
                     arena,
                     collector,
                 )?;
+                collector.active_guard = saved_guard;
+                collector.active_guard_sources = saved_guard_sources;
                 store = merge_symbolic_stores(
                     module,
                     &side_store,
@@ -1416,8 +1471,7 @@ fn collect_comb_effects_statements(
                     arena,
                 )?;
             }
-            Statement::FunctionCall(_)
-            | Statement::IfReset(_)
+            Statement::IfReset(_)
             | Statement::TbMethodCall(_)
             | Statement::Break
             | Statement::Unsupported(_)

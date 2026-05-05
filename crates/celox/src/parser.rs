@@ -1830,12 +1830,37 @@ fn build_comb_observer_units(
         let site = &sites[observer.site_id as usize];
         match site.kind {
             crate::ir::RuntimeEventKind::Display => {
-                let regs = load_observer_args(&mut builder, observer, site);
-                builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
-                    site_id: observer.site_id,
-                    args: regs,
-                });
-                builder.seal_block(crate::ir::SIRTerminator::Return);
+                if let Some(guard_storage) = observer.guard_storage {
+                    let cond = builder.alloc_bit(1, false);
+                    builder.emit(crate::ir::SIRInstruction::LoadObserver(
+                        cond,
+                        guard_storage,
+                        1,
+                    ));
+                    let event_bb = builder.new_block();
+                    let done_bb = builder.new_block();
+                    builder.seal_block(crate::ir::SIRTerminator::Branch {
+                        cond,
+                        true_block: (event_bb, vec![]),
+                        false_block: (done_bb, vec![]),
+                    });
+                    builder.switch_to_block(event_bb);
+                    let regs = load_observer_args(&mut builder, observer, site);
+                    builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
+                        site_id: observer.site_id,
+                        args: regs,
+                    });
+                    builder.seal_block(crate::ir::SIRTerminator::Jump(done_bb, vec![]));
+                    builder.switch_to_block(done_bb);
+                    builder.seal_block(crate::ir::SIRTerminator::Return);
+                } else {
+                    let regs = load_observer_args(&mut builder, observer, site);
+                    builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
+                        site_id: observer.site_id,
+                        args: regs,
+                    });
+                    builder.seal_block(crate::ir::SIRTerminator::Return);
+                }
             }
             crate::ir::RuntimeEventKind::AssertContinue
             | crate::ir::RuntimeEventKind::AssertFatal => {
