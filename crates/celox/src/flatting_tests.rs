@@ -113,7 +113,7 @@ fn setup_to_flatting(
 
             for (_, logic_path) in &glue.input_ports {
                 // logic_path.target is GlueAddr::Child
-                let target_glue_addr = logic_path.target.id;
+                let target_glue_addr = logic_path.target.var().unwrap().id;
                 let target_addr = if let crate::ir::GlueAddr::Child(v) = target_glue_addr {
                     AbsoluteAddr {
                         instance_id: child_id,
@@ -138,7 +138,8 @@ fn setup_to_flatting(
                                 .range((Excluded(source.access.lsb), Included(source.access.msb)))
                             {
                                 let offset = bound - source.access.lsb;
-                                let target_bound = logic_path.target.access.lsb + offset;
+                                let target_bound =
+                                    logic_path.target.var().unwrap().access.lsb + offset;
 
                                 new_child_boundaries
                                     .entry(target_addr)
@@ -207,7 +208,7 @@ fn test_split_by_boundaries() {
     let x_targets: Vec<_> = relocation_module
         .comb_blocks
         .iter()
-        .filter(|path| path.target.id.var_id == x_id)
+        .filter(|path| path.target.var().unwrap().id.var_id == x_id)
         .collect();
 
     // Should be 2 paths: 2 real assignments. Identity assignments are no longer generated.
@@ -220,7 +221,12 @@ fn test_split_by_boundaries() {
     // Verify ranges
     let ranges: Vec<_> = x_targets
         .iter()
-        .map(|p| (p.target.access.lsb, p.target.access.msb))
+        .map(|p| {
+            (
+                p.target.var().unwrap().access.lsb,
+                p.target.var().unwrap().access.msb,
+            )
+        })
         .collect();
     // Use contains to avoid ordering issues, or sort
     assert!(ranges.contains(&(0, 15)), "Missing range 0..15");
@@ -255,7 +261,7 @@ fn test_dynamic_index_no_split() {
     let x_targets: Vec<_> = relocation_module
         .comb_blocks
         .iter()
-        .filter(|path| path.target.id.var_id == x_id)
+        .filter(|path| path.target.var().unwrap().id.var_id == x_id)
         .collect();
 
     // 2 assignments (x=a, x[i]=1) -> 2 paths. No limit boundaries -> No splitting.
@@ -266,7 +272,9 @@ fn test_dynamic_index_no_split() {
         "Dynamic indexing should not induce splitting (2 original paths preserved)"
     );
     assert_eq!(
-        x_targets[0].target.access.msb - x_targets[0].target.access.lsb + 1,
+        x_targets[0].target.var().unwrap().access.msb
+            - x_targets[0].target.var().unwrap().access.lsb
+            + 1,
         32
     );
 }
@@ -300,7 +308,7 @@ fn test_mixed_boundaries() {
     let x_targets: Vec<_> = relocation_module
         .comb_blocks
         .iter()
-        .filter(|path| path.target.id.var_id == x_id)
+        .filter(|path| path.target.var().unwrap().id.var_id == x_id)
         .collect();
 
     // Boundaries: {0, 15, 16, 32} -> 3 atoms [0..14], [15..15], [16..31]
@@ -313,7 +321,12 @@ fn test_mixed_boundaries() {
 
     let ranges: Vec<_> = x_targets
         .iter()
-        .map(|p| (p.target.access.lsb, p.target.access.msb))
+        .map(|p| {
+            (
+                p.target.var().unwrap().access.lsb,
+                p.target.var().unwrap().access.msb,
+            )
+        })
         .collect();
     assert!(ranges.contains(&(0, 14)));
     assert!(ranges.contains(&(15, 15)));
@@ -502,14 +515,14 @@ fn test_boundary_propagation() {
     let b_targets: Vec<_> = relocation_module
         .comb_blocks
         .iter()
-        .filter(|path| path.target.id.var_id == b_id)
+        .filter(|path| path.target.var().unwrap().id.var_id == b_id)
         .collect();
 
     // Check stores to c1.b (Input port, driven by Parent)
     // We expect stores of size 16 (0..15) and 16 (16..31) because boundaries propagated from v.
     let sizes: Vec<_> = b_targets
         .iter()
-        .map(|p| p.target.access.msb - p.target.access.lsb + 1)
+        .map(|p| p.target.var().unwrap().access.msb - p.target.var().unwrap().access.lsb + 1)
         .collect();
 
     // c1.b should be split because boundary propagated from v

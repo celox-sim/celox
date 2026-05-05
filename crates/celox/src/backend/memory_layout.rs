@@ -1,5 +1,5 @@
 use crate::HashMap;
-use crate::ir::{AbsoluteAddr, Program, SIRInstruction};
+use crate::ir::{AbsoluteAddr, ObserverStorageId, Program, SIRInstruction};
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -54,6 +54,13 @@ pub struct MemoryLayout {
     /// Located after triggered bits. Zero if no spilling needed.
     pub scratch_base_offset: usize,
     pub scratch_size: usize,
+
+    /// Observer expression snapshot storage. This is deliberately separate
+    /// from variable addresses; layout may alias it later when proven safe.
+    pub observer_offsets: HashMap<ObserverStorageId, usize>,
+    pub observer_widths: HashMap<ObserverStorageId, usize>,
+    pub observer_storage_base_offset: usize,
+    pub observer_storage_size: usize,
 
     /// Runtime event ring geometry. The ring storage itself is backend-owned;
     /// generated code finds it through the state header.
@@ -152,9 +159,31 @@ impl MemoryLayout {
         let triggered_bits_total_size = num_potential_triggers.div_ceil(8);
 
         let scratch_base_offset = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
+        let observer_storage_base_offset = (scratch_base_offset + scratch_bytes + 7) & !7;
+        let mut observer_offsets = HashMap::default();
+        let mut observer_widths = HashMap::default();
+        let mut observer_current_offset = 0;
+        let mut observer_storages: Vec<_> = program
+            .comb_observer_storages
+            .iter()
+            .map(|storage| (storage.id, storage.width))
+            .collect();
+        observer_storages.sort_by_key(|&(_, width)| std::cmp::Reverse(get_alignment(width)));
+        for (id, width) in observer_storages {
+            let align = get_alignment(width);
+            let size = get_byte_size(width);
+            observer_current_offset = (observer_current_offset + align - 1) & !(align - 1);
+            observer_offsets.insert(id, observer_current_offset);
+            observer_widths.insert(id, width);
+            observer_current_offset += size;
+            if four_state {
+                observer_current_offset += size;
+            }
+        }
+        let observer_storage_size = observer_current_offset;
         let runtime_event_buffer_size =
             RUNTIME_EVENT_HEADER_SIZE + RUNTIME_EVENT_CAPACITY * runtime_event_slot_size;
-        let merged_total_size = (scratch_base_offset + scratch_bytes + 7) & !7;
+        let merged_total_size = (observer_storage_base_offset + observer_storage_size + 7) & !7;
 
         // Apply address aliases: aliased variables share the canonical's offset.
         // Only alias when:
@@ -196,6 +225,10 @@ impl MemoryLayout {
             triggered_bits_total_size,
             scratch_base_offset,
             scratch_size: scratch_bytes,
+            observer_offsets,
+            observer_widths,
+            observer_storage_base_offset,
+            observer_storage_size,
             runtime_event_capacity: RUNTIME_EVENT_CAPACITY,
             runtime_event_slot_size,
             runtime_event_buffer_size,

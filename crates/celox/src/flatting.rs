@@ -8,7 +8,7 @@ use crate::ir::{
     AbsoluteAddr, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
     RelocationModule, SimModule, VarAtomBase,
 };
-use crate::logic_tree::{LogicPath, NodeId, SLTNode, SLTNodeArena, get_width};
+use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, get_width};
 
 pub fn flatting(
     module: &SimModule,
@@ -98,9 +98,13 @@ fn atomize_logic_paths(
     let mut atomized_paths = Vec::new();
 
     for path in paths {
-        if let Some(bounds) = boundaries.get(&path.target.id) {
+        let Some(target_var) = path.target.var() else {
+            atomized_paths.push(path.clone());
+            continue;
+        };
+        if let Some(bounds) = boundaries.get(&target_var.id) {
             // This variable has defined boundaries, so we need to split it.
-            let atoms = path.target.access.calculate_atoms(bounds);
+            let atoms = target_var.access.calculate_atoms(bounds);
 
             // Extract the set of variable IDs that were originally declared as sources.
             // This acts as a "source mask" to filter out unintended dependencies.
@@ -113,8 +117,8 @@ fn atomize_logic_paths(
                 Vec::new();
             for atom_access in &atoms {
                 let relative_atom_access = crate::ir::BitAccess::new(
-                    atom_access.lsb - path.target.access.lsb,
-                    atom_access.msb - path.target.access.lsb,
+                    atom_access.lsb - target_var.access.lsb,
+                    atom_access.msb - target_var.access.lsb,
                 );
                 let new_expr = arena.alloc(SLTNode::Slice {
                     expr: path.expr,
@@ -145,11 +149,11 @@ fn atomize_logic_paths(
 
                 // Build the merged path expression.
                 let relative_access = crate::ir::BitAccess::new(
-                    merged_lsb - path.target.access.lsb,
-                    merged_msb - path.target.access.lsb,
+                    merged_lsb - target_var.access.lsb,
+                    merged_msb - target_var.access.lsb,
                 );
                 let merged_width = merged_msb - merged_lsb + 1;
-                let original_width = path.target.access.msb - path.target.access.lsb + 1;
+                let original_width = target_var.access.msb - target_var.access.lsb + 1;
 
                 let merged_expr = if merged_width == original_width {
                     // Covers the full original range — use the expression directly.
@@ -169,10 +173,12 @@ fn atomize_logic_paths(
                     .filter(|input_atom| original_source_ids.contains(&input_atom.id))
                     .collect();
 
-                let target = VarAtomBase::new(path.target.id, merged_lsb, merged_msb);
+                let target = VarAtomBase::new(target_var.id, merged_lsb, merged_msb);
                 atomized_paths.push(LogicPath {
-                    target,
+                    target: LogicPathTarget::Var(target),
                     sources: filtered_sources,
+                    local_inputs: path.local_inputs.clone(),
+                    schedule_before: path.schedule_before.clone(),
                     expr: merged_expr,
                 });
             }
@@ -366,6 +372,8 @@ fn convert_comb_observer<
         site_id: observer.site_id,
         guard: observer.guard.map(&mut map_node),
         args: observer.args.iter().copied().map(&mut map_node).collect(),
+        guard_storage: observer.guard_storage,
+        arg_storages: observer.arg_storages.clone(),
         sensitivity: observer
             .sensitivity
             .iter()
@@ -612,7 +620,7 @@ mod tests {
         let path1 = paths
             .iter()
             .find(|p| {
-                p.target.id
+                p.target.var().unwrap().id
                     == (AbsoluteAddr {
                         instance_id: InstanceId(0),
                         var_id: top_ic_id,
@@ -633,7 +641,7 @@ mod tests {
         let path2 = paths
             .iter()
             .find(|p| {
-                p.target.id
+                p.target.var().unwrap().id
                     == (AbsoluteAddr {
                         instance_id: InstanceId(0),
                         var_id: top_o_id,
@@ -654,7 +662,7 @@ mod tests {
         let path3 = paths
             .iter()
             .find(|p| {
-                p.target.id
+                p.target.var().unwrap().id
                     == (AbsoluteAddr {
                         instance_id: InstanceId(1),
                         var_id: child_i_id,
@@ -675,7 +683,7 @@ mod tests {
         let path4 = paths
             .iter()
             .find(|p| {
-                p.target.id
+                p.target.var().unwrap().id
                     == (AbsoluteAddr {
                         instance_id: InstanceId(0),
                         var_id: top_oc_id,

@@ -216,9 +216,10 @@ fn gvn_block(
             }
             // Load: depends on memory state, cannot be value-numbered
             // (Store-Load forwarding handles Load redundancy separately)
-            SIRInstruction::Load(..) => None,
+            SIRInstruction::Load(..) | SIRInstruction::LoadObserver(..) => None,
             // Store/Commit: side-effecting. Invalidate all Load-derived values.
             SIRInstruction::Store(..)
+            | SIRInstruction::StoreObserver(..)
             | SIRInstruction::Commit(..)
             | SIRInstruction::RuntimeEvent { .. } => {
                 // Conservative: don't invalidate value table for pure
@@ -289,8 +290,13 @@ fn apply_aliases(
                 *src = a;
             }
         }
-        SIRInstruction::Load(_, _, _, _) => {}
+        SIRInstruction::Load(_, _, _, _) | SIRInstruction::LoadObserver(_, _, _) => {}
         SIRInstruction::Store(_, _, _, src, _) => {
+            if let Some(&a) = aliases.get(src) {
+                *src = a;
+            }
+        }
+        SIRInstruction::StoreObserver(_, _, src) => {
             if let Some(&a) = aliases.get(src) {
                 *src = a;
             }

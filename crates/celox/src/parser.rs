@@ -41,7 +41,7 @@ use crate::ir::{
     AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, ModuleId, Program,
     RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule, VariableInfo,
 };
-use crate::logic_tree::{LogicPath, SLTNodeArena};
+use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNodeArena};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
 use veryl_analyzer::ir::Declaration;
@@ -552,7 +552,7 @@ fn scheduler_source_locations(
     blocks
         .iter()
         .filter_map(|block| {
-            let addr = block.target.id;
+            let addr = block.target.var()?.id;
             if !seen.insert(addr) {
                 return None;
             }
@@ -620,7 +620,7 @@ pub(crate) fn flatten(
         eval_only_ffs,
         apply_ffs,
         mut comb_blocks,
-        comb_observers,
+        mut comb_observers,
         mut runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
@@ -710,6 +710,10 @@ pub(crate) fn flatten(
         })
         .collect();
 
+    let (comb_observer_storages, observer_capture_paths) =
+        build_comb_observer_storage_paths(&mut comb_observers, &global_arena);
+    comb_blocks.extend(observer_capture_paths);
+
     let sched_start = flatten_timing.then(crate::timing::now);
     let schedule = scheduler::sort(
         comb_blocks,
@@ -731,6 +735,7 @@ pub(crate) fn flatten(
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             comb_observers: Vec::new(),
+            comb_observer_storages: Vec::new(),
             eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
@@ -804,11 +809,11 @@ pub(crate) fn flatten(
         build_comb_observer_units(
             &comb_observers,
             &runtime_event_sites,
-            &global_arena,
             four_state,
             next_runtime_error_code,
         );
     runtime_errors.extend(observer_runtime_errors);
+    let eval_comb = schduled.clone();
 
     if let Some(t) = trace
         && trace_opts.scheduled_units
@@ -863,11 +868,12 @@ pub(crate) fn flatten(
         eval_apply_ffs,
         eval_only_ffs,
         apply_ffs,
-        eval_comb: schduled,
+        eval_comb,
         eval_comb_observers,
         runtime_errors,
         runtime_event_sites,
         comb_observers,
+        comb_observer_storages,
         eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
@@ -1189,7 +1195,9 @@ fn propagate_boundaries(
 
                     // Propagate from Parent to Child (Input Ports)
                     for (parent_vars, child_addr) in &glue_block.input_ports {
-                        if let GlueAddr::Child(child_var_id) = child_addr.target.id {
+                        if let Some(target) = child_addr.target.var()
+                            && let GlueAddr::Child(child_var_id) = target.id
+                        {
                             let child_abs = AbsoluteAddr {
                                 instance_id: child_id,
                                 var_id: child_var_id,
@@ -1462,9 +1470,12 @@ fn unify_clock_domains(
                         | crate::logic_tree::SLTNode::Slice { .. }
                 );
                 if is_alias {
+                    let Some(target) = logic_path.target.var() else {
+                        continue;
+                    };
                     let target_abs = AbsoluteAddr {
                         instance_id: *id,
-                        var_id: logic_path.target.id,
+                        var_id: target.id,
                     };
                     let source_abs = AbsoluteAddr {
                         instance_id: *id,
@@ -1482,7 +1493,9 @@ fn unify_clock_domains(
 
                 // Inputs: Parent -> Child (Parent drives Child)
                 for (parent_vars, logic_path) in &glue_block.input_ports {
-                    if let GlueAddr::Child(child_var_id) = logic_path.target.id {
+                    if let Some(target) = logic_path.target.var()
+                        && let GlueAddr::Child(child_var_id) = target.id
+                    {
                         let child_abs = AbsoluteAddr {
                             instance_id: child_id,
                             var_id: child_var_id,
@@ -1801,41 +1814,23 @@ fn relocate_units(
 fn build_comb_observer_units(
     observers: &[crate::ir::CombObserver<AbsoluteAddr>],
     sites: &[crate::ir::RuntimeEventSite],
-    arena: &SLTNodeArena<AbsoluteAddr>,
-    four_state: bool,
+    _four_state: bool,
     mut next_runtime_error_code: i64,
 ) -> (
     Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>,
     HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     i64,
 ) {
-    let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state);
     let mut units = Vec::new();
     let mut runtime_errors = HashMap::default();
 
     for observer in observers {
         let mut builder = crate::ir::SIRBuilder::new();
-        let mut cache = HashMap::default();
-        let mut env_inputs = HashMap::default();
-        for (addr, node) in &observer.local_inputs {
-            let reg = lowerer.lower(&mut builder, *node, arena, &mut cache);
-            let width = crate::logic_tree::get_width(*node, arena);
-            if width > 0 {
-                env_inputs.insert(crate::ir::VarAtomBase::new(*addr, 0, width - 1), reg);
-            }
-        }
 
         let site = &sites[observer.site_id as usize];
         match site.kind {
             crate::ir::RuntimeEventKind::Display => {
-                let regs = lower_observer_args(
-                    &lowerer,
-                    &mut builder,
-                    arena,
-                    &mut cache,
-                    &observer.args,
-                    &env_inputs,
-                );
+                let regs = load_observer_args(&mut builder, observer, site);
                 builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
                     site_id: observer.site_id,
                     args: regs,
@@ -1844,16 +1839,16 @@ fn build_comb_observer_units(
             }
             crate::ir::RuntimeEventKind::AssertContinue
             | crate::ir::RuntimeEventKind::AssertFatal => {
-                let guard = observer
-                    .guard
-                    .expect("comb assert observer must have a guard");
-                let cond = lowerer.lower_with_inputs(
-                    &mut builder,
-                    guard,
-                    arena,
-                    &mut cache,
-                    env_inputs.clone(),
-                );
+                let guard_storage = observer
+                    .guard_storage
+                    .expect("comb assert observer must have a guard storage");
+                let cond_width = 1;
+                let cond = builder.alloc_bit(cond_width, false);
+                builder.emit(crate::ir::SIRInstruction::LoadObserver(
+                    cond,
+                    guard_storage,
+                    cond_width,
+                ));
                 let pass_bb = builder.new_block();
                 let fail_bb = builder.new_block();
                 builder.seal_block(crate::ir::SIRTerminator::Branch {
@@ -1862,14 +1857,7 @@ fn build_comb_observer_units(
                     false_block: (fail_bb, vec![]),
                 });
                 builder.switch_to_block(fail_bb);
-                let regs = lower_observer_args(
-                    &lowerer,
-                    &mut builder,
-                    arena,
-                    &mut cache,
-                    &observer.args,
-                    &env_inputs,
-                );
+                let regs = load_observer_args(&mut builder, observer, site);
                 builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
                     site_id: observer.site_id,
                     args: regs,
@@ -1931,17 +1919,86 @@ fn build_comb_observer_units(
     (units, runtime_errors, next_runtime_error_code)
 }
 
-fn lower_observer_args(
-    lowerer: &crate::logic_tree::SLTToSIRLowerer,
-    builder: &mut crate::ir::SIRBuilder<AbsoluteAddr>,
+fn build_comb_observer_storage_paths(
+    observers: &mut [crate::ir::CombObserver<AbsoluteAddr>],
     arena: &SLTNodeArena<AbsoluteAddr>,
-    cache: &mut HashMap<crate::logic_tree::NodeId, crate::ir::RegisterId>,
-    args: &[crate::logic_tree::NodeId],
-    env_inputs: &HashMap<crate::ir::VarAtomBase<AbsoluteAddr>, crate::ir::RegisterId>,
+) -> (
+    Vec<crate::ir::ObserverStorage>,
+    Vec<LogicPath<AbsoluteAddr>>,
+) {
+    if observers.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut storages = Vec::new();
+    let mut paths = Vec::new();
+
+    for observer in observers {
+        let schedule_before: HashSet<_> = observer.written_inputs.iter().copied().collect();
+        let mut sources: HashSet<_> = observer
+            .observed_inputs
+            .iter()
+            .copied()
+            .filter(|atom| !schedule_before.contains(&atom.id))
+            .collect();
+        for (_, node) in &observer.local_inputs {
+            let mut local_sources = HashSet::default();
+            crate::flatting::collect_inputs(*node, arena, &mut local_sources);
+            sources.extend(
+                local_sources
+                    .into_iter()
+                    .filter(|atom| !schedule_before.contains(&atom.id)),
+            );
+        }
+
+        if let Some(guard) = observer.guard {
+            let width = crate::logic_tree::get_width(guard, arena).max(1);
+            let storage = crate::ir::ObserverStorageId(storages.len());
+            storages.push(crate::ir::ObserverStorage { id: storage, width });
+            observer.guard_storage = Some(storage);
+            paths.push(LogicPath {
+                target: LogicPathTarget::ObserverStorage { storage, width },
+                sources: sources.clone(),
+                local_inputs: observer.local_inputs.clone(),
+                schedule_before: schedule_before.clone(),
+                expr: guard,
+            });
+        }
+
+        observer.arg_storages.clear();
+        for arg in &observer.args {
+            let width = crate::logic_tree::get_width(*arg, arena).max(1);
+            let storage = crate::ir::ObserverStorageId(storages.len());
+            storages.push(crate::ir::ObserverStorage { id: storage, width });
+            observer.arg_storages.push(storage);
+            paths.push(LogicPath {
+                target: LogicPathTarget::ObserverStorage { storage, width },
+                sources: sources.clone(),
+                local_inputs: observer.local_inputs.clone(),
+                schedule_before: schedule_before.clone(),
+                expr: *arg,
+            });
+        }
+    }
+
+    (storages, paths)
+}
+
+fn load_observer_args(
+    builder: &mut crate::ir::SIRBuilder<AbsoluteAddr>,
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+    site: &crate::ir::RuntimeEventSite,
 ) -> Vec<crate::ir::RegisterId> {
-    args.iter()
+    observer
+        .arg_storages
+        .iter()
         .copied()
-        .map(|node| lowerer.lower_with_inputs(builder, node, arena, cache, env_inputs.clone()))
+        .zip(site.arg_widths.iter().copied())
+        .map(|(storage, width)| {
+            let reg = builder.alloc_bit(width, false);
+            builder.emit(crate::ir::SIRInstruction::LoadObserver(reg, storage, width));
+            reg
+        })
         .collect()
 }
 
@@ -1991,7 +2048,10 @@ fn analyze_clock_dependencies(
     let acd_start = acd_timing.then(crate::timing::now);
     let mut comb_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     for path in comb_blocks {
-        let target_abs = path.target.id;
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        let target_abs = target.id;
         let mut sources = crate::HashSet::default();
         crate::flatting::collect_inputs(path.expr, arena, &mut sources);
         for source in sources {

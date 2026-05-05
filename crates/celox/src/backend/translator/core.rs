@@ -358,8 +358,14 @@ impl SIRTranslator {
             SIRInstruction::Load(dst, addr, offset, op_width) => {
                 self.translate_load_inst(state, dst, addr, offset, op_width);
             }
+            SIRInstruction::LoadObserver(dst, storage, op_width) => {
+                self.translate_load_observer_inst(state, dst, storage, *op_width);
+            }
             SIRInstruction::Store(addr, offset, op_width, src_reg, triggers) => {
                 self.translate_store_inst(state, addr, offset, op_width, src_reg, triggers);
+            }
+            SIRInstruction::StoreObserver(storage, op_width, src_reg) => {
+                self.translate_store_observer_inst(state, storage, *op_width, src_reg);
             }
             SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
                 self.translate_commit_inst(state, src_addr, dst_addr, offset, op_width, triggers);

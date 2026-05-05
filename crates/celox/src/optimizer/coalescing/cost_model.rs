@@ -158,6 +158,9 @@ pub fn estimate_clif_cost(
             };
             base * state_mul
         }
+        SIRInstruction::LoadObserver(_, _, op_width) => {
+            num_chunks(*op_width).max(1) * 3 * state_mul
+        }
         SIRInstruction::Store(_, offset, op_width, _, _) => {
             let nc = num_chunks(*op_width);
             let base = if *op_width <= 64 {
@@ -173,6 +176,9 @@ pub fn estimate_clif_cost(
                 22 * nc
             };
             base * state_mul
+        }
+        SIRInstruction::StoreObserver(_, op_width, _) => {
+            num_chunks(*op_width).max(1) * 6 * state_mul
         }
         SIRInstruction::Commit(_, _, offset, op_width, _) => {
             let nc = num_chunks(*op_width);

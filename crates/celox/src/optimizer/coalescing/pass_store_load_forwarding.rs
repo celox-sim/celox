@@ -175,6 +175,7 @@ fn apply_aliases_to_inst(
             }
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
+        SIRInstruction::LoadObserver(_, _, _) => {}
         SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
             if let Some(&to) = aliases.get(off) {
                 *off = to;
@@ -184,6 +185,11 @@ fn apply_aliases_to_inst(
             }
         }
         SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+            if let Some(&to) = aliases.get(src) {
+                *src = to;
+            }
+        }
+        SIRInstruction::StoreObserver(_, _, src) => {
             if let Some(&to) = aliases.get(src) {
                 *src = to;
             }

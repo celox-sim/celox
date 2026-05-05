@@ -7,8 +7,8 @@ use crate::ir::{
 };
 
 use crate::logic_tree::{
-    LogicPath, SLTNode, SLTNodeArena, SymbolicStore, eval_expression, get_width, parse_comb,
-    range_store::RangeStore,
+    LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SymbolicStore, eval_expression, get_width,
+    parse_comb, range_store::RangeStore,
 };
 use crate::parser::{
     BuildConfig, LoweringPhase, ParserError, bitaccess::eval_var_select, bitslicer::BitSlicer,
@@ -171,9 +171,15 @@ impl<'a> ModuleParser<'a> {
             };
 
             let path = LogicPath {
-                target: VarAtomBase::new(GlueAddr::Child(child_port_id), 0, width - 1),
+                target: LogicPathTarget::Var(VarAtomBase::new(
+                    GlueAddr::Child(child_port_id),
+                    0,
+                    width - 1,
+                )),
                 expr: sliced,
                 sources: collect_glue_sources(sliced, &glue_arena),
+                local_inputs: Vec::new(),
+                schedule_before: HashSet::default(),
             };
 
             let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
@@ -233,8 +239,14 @@ impl<'a> ModuleParser<'a> {
                 ));
 
                 let path = LogicPath {
-                    target: VarAtomBase::new(GlueAddr::Parent(dst.id), access.lsb, access.msb),
+                    target: LogicPathTarget::Var(VarAtomBase::new(
+                        GlueAddr::Parent(dst.id),
+                        access.lsb,
+                        access.msb,
+                    )),
                     sources,
+                    local_inputs: Vec::new(),
+                    schedule_before: HashSet::default(),
                     expr: rhs_part,
                 };
                 output_ports.push((vec![dst.id], path));

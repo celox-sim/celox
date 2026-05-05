@@ -17,11 +17,15 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.push(*off);
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
+        SIRInstruction::LoadObserver(_, _, _) => {}
         SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
             out.push(*off);
             out.push(*src);
         }
         SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+            out.push(*src);
+        }
+        SIRInstruction::StoreObserver(_, _, src) => {
             out.push(*src);
         }
         SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
@@ -44,7 +48,9 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
 fn is_memory_barrier<A>(inst: &SIRInstruction<A>) -> bool {
     matches!(
         inst,
-        SIRInstruction::Commit(_, _, _, _, _) | SIRInstruction::RuntimeEvent { .. }
+        SIRInstruction::Commit(_, _, _, _, _)
+            | SIRInstruction::StoreObserver(..)
+            | SIRInstruction::RuntimeEvent { .. }
     )
 }
 

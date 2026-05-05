@@ -129,7 +129,10 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     let mut non_const: HashSet<A> = HashSet::default();
 
     for path in paths.iter() {
-        let var = &path.target.id;
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        let var = &target.id;
         if non_const.contains(var) {
             continue;
         }
@@ -137,7 +140,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
             const_candidates
                 .entry(var.clone())
                 .or_default()
-                .push((path.target.access, path.expr));
+                .push((target.access, path.expr));
         } else {
             non_const.insert(var.clone());
             const_candidates.remove(var);

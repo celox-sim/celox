@@ -577,10 +577,10 @@ impl<B: SimBackend> Simulator<B> {
             .zip(&self.comb_observer_snapshots)
             .map(|(now, prev)| now != prev)
             .collect();
-        self.run_active_comb_observers(&active)?;
         self.backend
             .eval_comb()
             .map_err(|e| self.decorate_runtime_error(e))?;
+        self.run_active_comb_observers(&active)?;
         self.comb_observer_snapshots = before;
         Ok(())
     }

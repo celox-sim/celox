@@ -459,10 +459,12 @@ fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Binary(dst, _, _, _)
         | SIRInstruction::Unary(dst, _, _)
         | SIRInstruction::Load(dst, _, _, _)
+        | SIRInstruction::LoadObserver(dst, _, _)
         | SIRInstruction::Concat(dst, _)
         | SIRInstruction::Slice(dst, _, _, _)
         | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
         SIRInstruction::Store(..)
+        | SIRInstruction::StoreObserver(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. } => None,
     }
@@ -482,6 +484,7 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.push(*off);
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
+        SIRInstruction::LoadObserver(_, _, _) => {}
         SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
             out.push(*off);
             out.push(*src);
@@ -489,6 +492,7 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
         SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
             out.push(*src);
         }
+        SIRInstruction::StoreObserver(_, _, src) => out.push(*src),
         SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
             out.push(*off);
         }

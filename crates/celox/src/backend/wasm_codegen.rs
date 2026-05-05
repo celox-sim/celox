@@ -439,6 +439,9 @@ fn compile_instruction(
                 dst, addr, offset, *op_width, layout, four_state, locals, instrs,
             );
         }
+        SIRInstruction::LoadObserver(dst, storage, op_width) => {
+            compile_load_observer(dst, *storage, *op_width, layout, four_state, locals, instrs);
+        }
         SIRInstruction::Store(addr, offset, op_width, src, triggers) => {
             compile_store(
                 addr,
@@ -452,6 +455,9 @@ fn compile_instruction(
                 locals,
                 instrs,
             );
+        }
+        SIRInstruction::StoreObserver(storage, op_width, src) => {
+            compile_store_observer(*storage, *op_width, src, layout, four_state, locals, instrs);
         }
         SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
             compile_commit(
@@ -2813,6 +2819,31 @@ fn compile_load(
     }
 }
 
+fn compile_load_observer(
+    dst: &RegisterId,
+    storage: crate::ir::ObserverStorageId,
+    op_width: usize,
+    layout: &MemoryLayout,
+    four_state: bool,
+    locals: &LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let d = &locals.reg_map[dst];
+    let byte_offset = layout.observer_storage_base_offset + layout.observer_offsets[&storage];
+    compile_load_at_offset(d, byte_offset, 0, op_width, instrs);
+    if four_state {
+        if let Some(mask_idx) = d.mask_idx {
+            let mask_local = RegLocal {
+                value_idx: mask_idx,
+                num_chunks: d.num_chunks,
+                mask_idx: None,
+            };
+            let mask_offset = byte_offset + get_byte_size(layout.observer_widths[&storage]);
+            compile_load_at_offset(&mask_local, mask_offset, 0, op_width, instrs);
+        }
+    }
+}
+
 fn compile_load_at_offset(
     dst: &RegLocal,
     byte_offset: usize,
@@ -3107,6 +3138,33 @@ fn compile_store(
     // Trigger detection
     if emit_triggers && !triggers.is_empty() {
         emit_trigger_detection(addr, triggers, layout, locals, instrs);
+    }
+}
+
+fn compile_store_observer(
+    storage: crate::ir::ObserverStorageId,
+    op_width: usize,
+    src: &RegisterId,
+    layout: &MemoryLayout,
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let s = locals.reg_map[src].clone();
+    let byte_offset = layout.observer_storage_base_offset + layout.observer_offsets[&storage];
+    compile_store_at_offset(&s, byte_offset, 0, op_width, locals, instrs);
+    if four_state {
+        let mask_offset = byte_offset + get_byte_size(layout.observer_widths[&storage]);
+        if let Some(mask_idx) = s.mask_idx {
+            let mask_local = RegLocal {
+                value_idx: mask_idx,
+                num_chunks: s.num_chunks,
+                mask_idx: None,
+            };
+            compile_store_at_offset(&mask_local, mask_offset, 0, op_width, locals, instrs);
+        } else {
+            compile_store_zero(mask_offset, op_width, instrs);
+        }
     }
 }
 

@@ -9,7 +9,8 @@ use crate::parser::{LoweringPhase, resolve_total_width};
 use crate::{
     HashMap, HashSet,
     ir::{
-        BinaryOp, BitAccess, CombObserver, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase,
+        BinaryOp, BitAccess, CombObserver, ObserverStorageId, RuntimeEventKind, RuntimeEventSite,
+        UnaryOp, VarAtomBase,
     },
     parser::bitaccess::{
         celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
@@ -940,9 +941,42 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
     serialize = "A: Serialize + std::hash::Hash + Eq",
     deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
 ))]
+pub enum LogicPathTarget<A: Hash + Eq + Clone> {
+    Var(VarAtomBase<A>),
+    ObserverStorage {
+        storage: ObserverStorageId,
+        width: usize,
+    },
+}
+
+impl<A: Hash + Eq + Clone> LogicPathTarget<A> {
+    pub fn var(&self) -> Option<&VarAtomBase<A>> {
+        match self {
+            LogicPathTarget::Var(var) => Some(var),
+            LogicPathTarget::ObserverStorage { .. } => None,
+        }
+    }
+}
+
+impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for LogicPathTarget<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicPathTarget::Var(var) => write!(f, "{var}"),
+            LogicPathTarget::ObserverStorage { storage, .. } => write!(f, "{storage}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + std::hash::Hash + Eq",
+    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
 pub struct LogicPath<A: Hash + Eq + Clone> {
-    pub target: VarAtomBase<A>,
+    pub target: LogicPathTarget<A>,
     pub sources: HashSet<VarAtomBase<A>>,
+    pub local_inputs: Vec<(A, NodeId)>,
+    pub schedule_before: HashSet<A>,
     pub expr: NodeId,
 }
 
@@ -964,16 +998,37 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
         F: Fn(&A) -> B,
     {
         LogicPath {
-            target: VarAtomBase::new(
-                f(&self.target.id),
-                self.target.access.lsb,
-                self.target.access.msb,
-            ),
+            target: match &self.target {
+                LogicPathTarget::Var(var) => LogicPathTarget::Var(VarAtomBase::new(
+                    f(&var.id),
+                    var.access.lsb,
+                    var.access.msb,
+                )),
+                LogicPathTarget::ObserverStorage { storage, width } => {
+                    LogicPathTarget::ObserverStorage {
+                        storage: *storage,
+                        width: *width,
+                    }
+                }
+            },
             sources: self
                 .sources
                 .iter()
                 .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
                 .collect(),
+            local_inputs: self
+                .local_inputs
+                .iter()
+                .map(|(id, node)| {
+                    (
+                        f(id),
+                        arena
+                            .get(*node)
+                            .map_addr(*node, arena, target_arena, cache, f),
+                    )
+                })
+                .collect(),
+            schedule_before: self.schedule_before.iter().map(f).collect(),
             expr: arena
                 .get(self.expr)
                 .map_addr(self.expr, arena, target_arena, cache, f),
@@ -1044,15 +1099,20 @@ pub fn parse_comb(
                 };
 
                 paths.push(LogicPath::<VarId> {
-                    target: VarAtomBase::new(*id, lsb, msb),
+                    target: LogicPathTarget::Var(VarAtomBase::new(*id, lsb, msb)),
                     sources: sources.clone(),
+                    local_inputs: Vec::new(),
+                    schedule_before: HashSet::default(),
                     expr: final_expr,
                 });
             }
         }
     }
     let mut process_sensitivity = effects.sensitivity;
-    let written_ids: HashSet<_> = paths.iter().map(|path| path.target.id).collect();
+    let written_ids: HashSet<_> = paths
+        .iter()
+        .filter_map(|path| path.target.var().map(|target| target.id))
+        .collect();
     for path in &paths {
         process_sensitivity.extend(path.sources.iter().copied());
     }
@@ -1178,6 +1238,8 @@ fn collect_system_function_effect(
         site_id,
         guard,
         args: observer_args,
+        guard_storage: None,
+        arg_storages: Vec::new(),
         sensitivity: Vec::new(),
         local_inputs: store
             .iter()
@@ -5461,7 +5523,11 @@ mod tests {
         let path = result
             .paths
             .iter()
-            .find(|p| p.target.id == b_id && p.target.access.lsb == 4 && p.target.access.msb == 7)
+            .find(|p| {
+                p.target.var().unwrap().id == b_id
+                    && p.target.var().unwrap().access.lsb == 4
+                    && p.target.var().unwrap().access.msb == 7
+            })
             .unwrap();
         let a_id = var_id_of(&module, &["a"]);
 
@@ -5563,7 +5629,7 @@ mod tests {
         let path_a0 = res
             .paths
             .iter()
-            .find(|p| p.target.id == id_a && p.target.access.lsb == 0)
+            .find(|p| p.target.var().unwrap().id == id_a && p.target.var().unwrap().access.lsb == 0)
             .expect("Path for a[0] not found");
 
         // a[0] depends on c
@@ -5581,7 +5647,7 @@ mod tests {
         let path_a_upper = res
             .paths
             .iter()
-            .find(|p| p.target.id == id_a && p.target.access.lsb == 1)
+            .find(|p| p.target.var().unwrap().id == id_a && p.target.var().unwrap().access.lsb == 1)
             .expect("Path for a[7:1] not found");
         assert!(
             path_a_upper.sources.iter().any(|s| s.id == id_b),
@@ -5601,7 +5667,11 @@ mod tests {
         let id_b = var_id_of(&module, &["b"]);
         let id_c = var_id_of(&module, &["c"]);
 
-        let path_oa = res.paths.iter().find(|p| p.target.id == id_oa).unwrap();
+        let path_oa = res
+            .paths
+            .iter()
+            .find(|p| p.target.var().unwrap().id == id_oa)
+            .unwrap();
 
         // o_a depends on b and c
         assert!(path_oa.sources.iter().any(|s| s.id == id_b));
@@ -5628,7 +5698,7 @@ mod tests {
         let path_a0 = res
             .paths
             .iter()
-            .find(|p| p.target.id == id_a && p.target.access.lsb == 0)
+            .find(|p| p.target.var().unwrap().id == id_a && p.target.var().unwrap().access.lsb == 0)
             .unwrap();
 
         assert!(
@@ -5658,7 +5728,10 @@ mod tests {
 
         // d is updated dynamically, so we expect a path covering d[0..31]
         let id_d = var_id_of(&module, &["d"]);
-        let path = result.paths.iter().find(|p| p.target.id == id_d);
+        let path = result
+            .paths
+            .iter()
+            .find(|p| p.target.var().unwrap().id == id_d);
 
         // Dynamic assignment essentially combines all bits, so we should find a path for d.
         // It might be split or single, but since we updated full range in eval_dynamic_assign, it should be single if initialized so.
@@ -5666,8 +5739,8 @@ mod tests {
         // So `d` starts as [0:31]. Dynamic update updates [0:31]. So it should stay [0:31].
 
         let path = path.expect("Path for d not found");
-        assert_eq!(path.target.access.lsb, 0);
-        assert_eq!(path.target.access.msb, 31);
+        assert_eq!(path.target.var().unwrap().access.lsb, 0);
+        assert_eq!(path.target.var().unwrap().access.msb, 31);
 
         let id_a = var_id_of(&module, &["a"]);
         let id_idx = var_id_of(&module, &["idx"]);
