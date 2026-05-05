@@ -625,6 +625,53 @@ impl SIRTranslator {
         }
     }
 
+    pub(super) fn translate_comb_capture_enable_if_changed(
+        &self,
+        state: &mut TranslationState,
+        old: &RegisterId,
+        new: &RegisterId,
+        sites: &[u32],
+    ) {
+        if sites.is_empty() {
+            return;
+        }
+
+        let old_value_chunks = state.regs[old].load_value_chunks(state.builder);
+        let new_value_chunks = state.regs[new].load_value_chunks(state.builder);
+        let mut changed =
+            self.translate_chunks_changed(state, &old_value_chunks, &new_value_chunks);
+
+        if self.options.four_state {
+            let old_mask_chunks = state.regs[old]
+                .load_mask_chunks(state.builder)
+                .unwrap_or_else(|| {
+                    old_value_chunks
+                        .iter()
+                        .map(|chunk| {
+                            let ty = state.builder.func.dfg.value_type(*chunk);
+                            state.builder.ins().iconst(ty, 0)
+                        })
+                        .collect()
+                });
+            let new_mask_chunks = state.regs[new]
+                .load_mask_chunks(state.builder)
+                .unwrap_or_else(|| {
+                    new_value_chunks
+                        .iter()
+                        .map(|chunk| {
+                            let ty = state.builder.func.dfg.value_type(*chunk);
+                            state.builder.ins().iconst(ty, 0)
+                        })
+                        .collect()
+                });
+            let mask_changed =
+                self.translate_chunks_changed(state, &old_mask_chunks, &new_mask_chunks);
+            changed = state.builder.ins().bor(changed, mask_changed);
+        }
+
+        self.translate_enable_comb_capture_sites(state, changed, sites);
+    }
+
     pub(super) fn translate_commit_inst(
         &self,
         state: &mut TranslationState,

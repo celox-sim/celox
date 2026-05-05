@@ -206,7 +206,8 @@ pub fn lower_execution_unit(
                 SIRInstruction::Store(..)
                 | SIRInstruction::Commit(..)
                 | SIRInstruction::RuntimeEvent { .. }
-                | SIRInstruction::CombCaptureEvent { .. } => None,
+                | SIRInstruction::CombCaptureEvent { .. }
+                | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
             };
             if let Some(dr) = dst_reg {
                 let w = ctx.sir_width(&dr);
@@ -815,6 +816,100 @@ fn emit_enable_comb_capture_sites(
     }
 }
 
+fn emit_enable_comb_capture_sites_if_regs_changed(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    old: RegisterId,
+    new: RegisterId,
+    site_ids: &[u32],
+) {
+    if site_ids.is_empty() {
+        return;
+    }
+
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
+    });
+    let mut changed = zero;
+
+    if ctx.sir_width(&old) > 64 || ctx.sir_width(&new) > 64 {
+        let old_chunks = ctx.get_wide_chunks(&old, block);
+        let new_chunks = ctx.get_wide_chunks(&new, block);
+        let chunk_count = old_chunks.len().max(new_chunks.len());
+        for idx in 0..chunk_count {
+            let old_chunk = ctx.wide_chunk_or_zero(&old_chunks, idx, block);
+            let new_chunk = ctx.wide_chunk_or_zero(&new_chunks, idx, block);
+            let chunk_changed = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp {
+                dst: chunk_changed,
+                lhs: old_chunk,
+                rhs: new_chunk,
+                kind: CmpKind::Ne,
+            });
+            let next = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or {
+                dst: next,
+                lhs: changed,
+                rhs: chunk_changed,
+            });
+            changed = next;
+        }
+
+        if ctx.four_state {
+            let old_masks = get_wide_mask_chunks(ctx, block, &old, chunk_count);
+            let new_masks = get_wide_mask_chunks(ctx, block, &new, chunk_count);
+            for (old_mask, new_mask) in old_masks.into_iter().zip(new_masks) {
+                let mask_changed = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp {
+                    dst: mask_changed,
+                    lhs: old_mask,
+                    rhs: new_mask,
+                    kind: CmpKind::Ne,
+                });
+                let next = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or {
+                    dst: next,
+                    lhs: changed,
+                    rhs: mask_changed,
+                });
+                changed = next;
+            }
+        }
+    } else {
+        let value_changed = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Cmp {
+            dst: value_changed,
+            lhs: ctx.reg_map.get(old),
+            rhs: ctx.reg_map.get(new),
+            kind: CmpKind::Ne,
+        });
+        changed = value_changed;
+
+        if ctx.four_state {
+            let old_mask = ctx.get_mask(old, block);
+            let new_mask = ctx.get_mask(new, block);
+            let mask_changed = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp {
+                dst: mask_changed,
+                lhs: old_mask,
+                rhs: new_mask,
+                kind: CmpKind::Ne,
+            });
+            let next = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or {
+                dst: next,
+                lhs: changed,
+                rhs: mask_changed,
+            });
+            changed = next;
+        }
+    }
+
+    emit_enable_comb_capture_sites(ctx, block, changed, site_ids);
+}
+
 fn collect_static_comb_store_byte_probes(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -1075,6 +1170,9 @@ fn lower_instruction(
         }
         SIRInstruction::CombCaptureEvent { .. } => {
             unreachable!("comb capture events are CFG-lowered by lower_execution_unit")
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+            emit_enable_comb_capture_sites_if_regs_changed(ctx, block, *old, *new, sites);
         }
         SIRInstruction::Mux(dst, cond, then_val, else_val) => {
             // Expand Mux into Binary/Unary sequence and process through standard ISel.

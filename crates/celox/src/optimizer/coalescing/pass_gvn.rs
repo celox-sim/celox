@@ -221,7 +221,8 @@ fn gvn_block(
             SIRInstruction::Store(..)
             | SIRInstruction::Commit(..)
             | SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. } => {
+            | SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
                 // Conservative: don't invalidate value table for pure
                 // computations (Binary/Unary/Concat/Slice/Imm are
                 // memory-independent). Only Loads would be affected by
@@ -326,6 +327,14 @@ fn apply_aliases(
                 if let Some(&a) = aliases.get(arg) {
                     *arg = a;
                 }
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            if let Some(&a) = aliases.get(old) {
+                *old = a;
+            }
+            if let Some(&a) = aliases.get(new) {
+                *new = a;
             }
         }
     }

@@ -191,6 +191,10 @@ fn optimize_bit_extracts(
                     *use_count.entry(*arg).or_default() += 1;
                 }
             }
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+                *use_count.entry(*old).or_default() += 1;
+                *use_count.entry(*new).or_default() += 1;
+            }
             _ => {}
         }
     }

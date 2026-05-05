@@ -26,7 +26,8 @@ pub(super) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         SIRInstruction::Store(_, _, _, _, _, _)
         | SIRInstruction::Commit(_, _, _, _, _)
         | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. } => None,
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
     }
 }
 
@@ -118,6 +119,10 @@ fn collect_used_regs_into(
         SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => {
             out.extend(args.iter().copied());
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            out.insert(*old);
+            out.insert(*new);
         }
     }
 }
@@ -418,6 +423,14 @@ pub(super) fn batch_replace_in_inst(
                 if let Some(&to) = map.get(arg) {
                     *arg = to;
                 }
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            if let Some(&to) = map.get(old) {
+                *old = to;
+            }
+            if let Some(&to) = map.get(new) {
+                *new = to;
             }
         }
     }

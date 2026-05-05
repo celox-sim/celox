@@ -225,6 +225,14 @@ fn apply_aliases_to_inst(
                 }
             }
         }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            if let Some(&to) = aliases.get(old) {
+                *old = to;
+            }
+            if let Some(&to) = aliases.get(new) {
+                *new = to;
+            }
+        }
     }
 }
 

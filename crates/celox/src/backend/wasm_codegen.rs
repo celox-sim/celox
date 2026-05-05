@@ -478,7 +478,9 @@ fn compile_instruction(
                 dst, cond, then_val, else_val, unit, four_state, locals, instrs,
             );
         }
-        SIRInstruction::RuntimeEvent { .. } | SIRInstruction::CombCaptureEvent { .. } => {
+        SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
             // Runtime event ring emission is implemented for CPU backends first.
             // WASM keeps the instruction as a no-op until the shared-memory
             // atomic path is wired through the JS bridge.

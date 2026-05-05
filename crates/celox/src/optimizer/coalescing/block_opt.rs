@@ -49,6 +49,10 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
         }
         SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => out.extend(args.iter().copied()),
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            out.push(*old);
+            out.push(*new);
+        }
     }
 }
 
@@ -58,6 +62,7 @@ fn is_memory_barrier<A>(inst: &SIRInstruction<A>) -> bool {
         SIRInstruction::Commit(_, _, _, _, _)
             | SIRInstruction::RuntimeEvent { .. }
             | SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. }
     )
 }
 

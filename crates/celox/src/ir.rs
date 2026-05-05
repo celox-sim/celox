@@ -861,6 +861,13 @@ fn renumber_sir_inst<A: Clone>(
             args: args.iter().map(|a| r(*a)).collect(),
             fatal_error_code: *fatal_error_code,
         },
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+            SIRInstruction::CombCaptureEnableIfChanged {
+                old: r(*old),
+                new: r(*new),
+                sites: sites.clone(),
+            }
+        }
     }
 }
 
@@ -1177,6 +1184,11 @@ pub enum SIRInstruction<Addr> {
         args: Vec<RegisterId>,
         fatal_error_code: Option<i64>,
     },
+    CombCaptureEnableIfChanged {
+        old: RegisterId,
+        new: RegisterId,
+        sites: Vec<u32>,
+    },
 }
 
 impl<A: Display> fmt::Display for SIRInstruction<A> {
@@ -1271,6 +1283,13 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     write!(f, "])")
                 }
             }
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+                write!(
+                    f,
+                    "CombCaptureEnableIfChanged(old=r{}, new=r{}, sites={:?})",
+                    old.0, new.0, sites
+                )
+            }
         }
     }
 }
@@ -1308,6 +1327,9 @@ impl<A> SIRInstruction<A> {
                 args,
                 fatal_error_code,
             },
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+                SIRInstruction::CombCaptureEnableIfChanged { old, new, sites }
+            }
         }
     }
     pub fn map_addr<B>(&self, mut f: impl FnMut(&A) -> B) -> SIRInstruction<B> {
@@ -1355,6 +1377,13 @@ impl<A> SIRInstruction<A> {
                 args: args.clone(),
                 fatal_error_code: *fatal_error_code,
             },
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+                SIRInstruction::CombCaptureEnableIfChanged {
+                    old: *old,
+                    new: *new,
+                    sites: sites.clone(),
+                }
+            }
         }
     }
 }

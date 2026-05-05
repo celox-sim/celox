@@ -465,7 +465,8 @@ fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. } => None,
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
     }
 }
 
@@ -505,6 +506,10 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
         }
         SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => out.extend(args.iter().copied()),
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            out.push(*old);
+            out.push(*new);
+        }
     }
 }
 

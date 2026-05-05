@@ -429,6 +429,9 @@ impl SIRTranslator {
                     *fatal_error_code,
                 );
             }
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+                self.translate_comb_capture_enable_if_changed(state, old, new, sites);
+            }
         }
     }
 

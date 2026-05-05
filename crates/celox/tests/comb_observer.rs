@@ -2054,6 +2054,59 @@ module Top (
 }
 
 #[test]
+fn test_comb_observer_store_activation_lowers_as_separate_instruction() {
+    let result = Simulator::builder(
+        r#"
+module Top (
+    a: input logic,
+    out: output logic,
+) {
+    var tmp: logic;
+
+    always_comb {
+        tmp = a;
+    }
+
+    always_comb {
+        out = tmp;
+        $display("tmp=%0d", tmp);
+    }
+}
+"#,
+        "Top",
+    )
+    .optimize(false)
+    .trace_post_optimized_sir()
+    .build_with_trace();
+    let sir = result
+        .trace
+        .format_post_optimized_sir()
+        .expect("post-optimized SIR should be traced");
+
+    let old_load = sir
+        .find("Load(addr=tmp (region=0), offset=0, bits=1)")
+        .unwrap_or_else(|| panic!("missing old-value load for comb observer activation:\n{sir}"));
+    let store = sir
+        .find("Store(addr=tmp (region=0), offset=0, bits=1")
+        .unwrap_or_else(|| panic!("missing tmp store in SIR:\n{sir}"));
+    let enable = sir
+        .find("CombCaptureEnableIfChanged(")
+        .unwrap_or_else(|| panic!("missing separated comb observer enable instruction:\n{sir}"));
+    let capture = sir
+        .find("CombCaptureEvent(")
+        .unwrap_or_else(|| panic!("missing comb capture event in SIR:\n{sir}"));
+
+    assert!(
+        old_load < store && store < enable && enable < capture,
+        "observer activation should be a separate instruction ordered around the observed store:\n{sir}"
+    );
+    assert!(
+        !sir.contains("comb_capture_sites=[0]"),
+        "observer activation sites should not be attached to Store:\n{sir}"
+    );
+}
+
+#[test]
 fn test_comb_observer_snapshot_order_can_place_multiple_observers_on_same_var() {
     let result = Simulator::builder(
         r#"

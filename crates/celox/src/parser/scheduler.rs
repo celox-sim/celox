@@ -15,14 +15,6 @@ use std::fmt::Display;
 use std::hash::Hash;
 use thiserror::Error;
 
-fn extend_unique_u32(dst: &mut Vec<u32>, src: &[u32]) {
-    for &site_id in src {
-        if !dst.contains(&site_id) {
-            dst.push(site_id);
-        }
-    }
-}
-
 fn greedy_fas_sort(scc: &[usize], global_adj: &[Vec<usize>]) -> Vec<usize> {
     let scc_set: HashSet<usize> = scc.iter().cloned().collect();
     let mut local_adj: HashMap<usize, Vec<usize>> = HashMap::default();
@@ -354,14 +346,33 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
         LogicPathTarget::Var(target) => {
             let result_reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
             let width = 1 + target.access.msb - target.access.lsb;
+            let old_reg = if path.comb_capture_enable_sites.is_empty() {
+                None
+            } else {
+                let old_reg = builder.alloc_bit(width, false);
+                builder.emit(SIRInstruction::Load(
+                    old_reg,
+                    target.id,
+                    SIROffset::Static(target.access.lsb),
+                    width,
+                ));
+                Some(old_reg)
+            };
             builder.emit(SIRInstruction::Store(
                 target.id,
                 SIROffset::Static(target.access.lsb),
                 width,
                 result_reg,
                 Vec::new(),
-                path.comb_capture_enable_sites.clone(),
+                Vec::new(),
             ));
+            if let Some(old) = old_reg {
+                builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
+                    old,
+                    new: result_reg,
+                    sites: path.comb_capture_enable_sites.clone(),
+                });
+            }
         }
         LogicPathTarget::CombCaptureEvent {
             site_id,
@@ -538,23 +549,16 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                     .var()
                     .is_some_and(|target| path.sources.iter().any(|s| s.id == target.id))
             });
-            let same_comb_capture_enable_sites = sorted_by_lsb.first().is_none_or(|first| {
-                sorted_by_lsb.iter().all(|idx| {
-                    input[*idx].comb_capture_enable_sites == input[*first].comb_capture_enable_sites
-                })
-            });
+            let no_comb_capture_enable_sites = sorted_by_lsb
+                .iter()
+                .all(|idx| input[*idx].comb_capture_enable_sites.is_empty());
 
-            if contiguous && within_var_width && !has_self_ref && same_comb_capture_enable_sites {
+            if contiguous && within_var_width && !has_self_ref && no_comb_capture_enable_sites {
                 // Coalesce: lower each path expression, then concat + single wide store.
                 // SIR Concat order is [MSB, ..., LSB], so reverse after lsb sort.
                 let mut regs: Vec<(RegisterId, usize)> = Vec::with_capacity(sorted_by_lsb.len());
-                let mut comb_capture_enable_sites = Vec::new();
                 for &idx in &sorted_by_lsb {
                     let path = &input[idx];
-                    extend_unique_u32(
-                        &mut comb_capture_enable_sites,
-                        &path.comb_capture_enable_sites,
-                    );
                     collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
                     let reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
                     let target = path.target.var().unwrap();
@@ -577,7 +581,7 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                     merged_width,
                     concat_reg,
                     Vec::new(),
-                    comb_capture_enable_sites,
+                    Vec::new(),
                 ));
 
                 // Invalidate cache for the target variable.
@@ -1018,8 +1022,15 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                         width,
                         new_val_reg,
                         Vec::new(),
-                        path.comb_capture_enable_sites.clone(),
+                        Vec::new(),
                     ));
+                    if !path.comb_capture_enable_sites.is_empty() {
+                        builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
+                            old: old_val_reg,
+                            new: new_val_reg,
+                            sites: path.comb_capture_enable_sites.clone(),
+                        });
+                    }
                     if let Some(to_remove) = inverse_dep_memo.get(&addr) {
                         for node in to_remove {
                             lower_cache.remove(node);

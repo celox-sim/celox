@@ -188,6 +188,7 @@ fn inst_def(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. } => None,
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
     }
 }

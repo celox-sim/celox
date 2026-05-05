@@ -295,6 +295,12 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 format!("CombCaptureEvent(site={}, args=[{}])", site_id, args)
             }
         }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+            format!(
+                "CombCaptureEnableIfChanged(old=r{}, new=r{}, sites={:?})",
+                old.0, new.0, sites
+            )
+        }
     }
 }
 
