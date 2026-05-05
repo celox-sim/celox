@@ -9,8 +9,8 @@ use crate::parser::{LoweringPhase, resolve_total_width};
 use crate::{
     HashMap, HashSet,
     ir::{
-        BinaryOp, BitAccess, CombObserver, LogicPathId, ObserverStorageId, RuntimeEventKind,
-        RuntimeEventSite, UnaryOp, VarAtomBase,
+        BinaryOp, BitAccess, CombObserver, LogicPathId, RuntimeEventKind, RuntimeEventSite,
+        UnaryOp, VarAtomBase,
     },
     parser::bitaccess::{
         celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
@@ -339,6 +339,14 @@ pub struct SLTForUpdate<A: Hash + Eq + Clone> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SLTForEffect {
+    pub site_id: u32,
+    pub guard: Option<NodeId>,
+    pub emit_on_true: bool,
+    pub args: Vec<NodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(
     into = "SLTNodeSerde<A>",
     from = "SLTNodeSerde<A>",
@@ -375,6 +383,7 @@ pub enum SLTNode<A: Hash + Eq + Clone> {
         result: VarAtomBase<A>,
         initials: Vec<SLTForUpdate<A>>,
         updates: Vec<SLTForUpdate<A>>,
+        effects: Vec<SLTForEffect>,
         continue_cond: NodeId,
     },
     // Concat/Slice are primarily used for RHS expression evaluation.
@@ -422,6 +431,7 @@ enum SLTNodeSerde<A: Hash + Eq + Clone> {
         result: VarAtomBase<A>,
         initials: Vec<SLTForUpdate<A>>,
         updates: Vec<SLTForUpdate<A>>,
+        effects: Vec<SLTForEffect>,
         continue_cond: NodeId,
     },
     Concat(Vec<(NodeId, usize)>),
@@ -475,6 +485,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => SLTNodeSerde::ForFold {
                 loop_var,
@@ -489,6 +500,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             },
             SLTNode::Concat(parts) => SLTNodeSerde::Concat(parts),
@@ -546,6 +558,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => SLTNode::ForFold {
                 loop_var,
@@ -560,6 +573,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             },
             SLTNodeSerde::Concat(parts) => SLTNode::Concat(parts),
@@ -668,6 +682,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => {
                 let map_bound =
@@ -718,6 +733,27 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                         ),
                     })
                     .collect();
+                let mapped_effects = effects
+                    .iter()
+                    .map(|effect| SLTForEffect {
+                        site_id: effect.site_id,
+                        guard: effect.guard.map(|guard| {
+                            arena
+                                .get(guard)
+                                .map_addr(guard, arena, target_arena, cache, f)
+                        }),
+                        emit_on_true: effect.emit_on_true,
+                        args: effect
+                            .args
+                            .iter()
+                            .map(|arg| {
+                                arena
+                                    .get(*arg)
+                                    .map_addr(*arg, arena, target_arena, cache, f)
+                            })
+                            .collect(),
+                    })
+                    .collect();
                 SLTNode::ForFold {
                     loop_var: f(loop_var),
                     loop_width: *loop_width,
@@ -731,6 +767,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     result: VarAtomBase::new(f(&result.id), result.access.lsb, result.access.msb),
                     initials: mapped_initials,
                     updates: mapped_updates,
+                    effects: mapped_effects,
                     continue_cond: arena.get(*continue_cond).map_addr(
                         *continue_cond,
                         arena,
@@ -884,6 +921,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => {
                 writeln!(
@@ -910,6 +948,19 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     writeln!(f, "{}update {}:", child_indent, update.target)?;
                     arena.get(update.expr).fmt_recursive(f, depth + 2, arena)?;
                     writeln!(f)?;
+                }
+                for effect in effects {
+                    writeln!(f, "{}effect site={}:", child_indent, effect.site_id)?;
+                    if let Some(guard) = effect.guard {
+                        writeln!(f, "{}guard:", child_indent)?;
+                        arena.get(guard).fmt_recursive(f, depth + 2, arena)?;
+                        writeln!(f)?;
+                    }
+                    for arg in &effect.args {
+                        writeln!(f, "{}arg:", child_indent)?;
+                        arena.get(*arg).fmt_recursive(f, depth + 2, arena)?;
+                        writeln!(f)?;
+                    }
                 }
                 writeln!(f, "{}continue:", child_indent)?;
                 arena
@@ -943,9 +994,11 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
 ))]
 pub enum LogicPathTarget<A: Hash + Eq + Clone> {
     Var(VarAtomBase<A>),
-    ObserverStorage {
-        storage: ObserverStorageId,
-        width: usize,
+    CombCaptureEvent {
+        site_id: u32,
+        guard: Option<NodeId>,
+        emit_on_true: bool,
+        args: Vec<NodeId>,
     },
 }
 
@@ -953,7 +1006,7 @@ impl<A: Hash + Eq + Clone> LogicPathTarget<A> {
     pub fn var(&self) -> Option<&VarAtomBase<A>> {
         match self {
             LogicPathTarget::Var(var) => Some(var),
-            LogicPathTarget::ObserverStorage { .. } => None,
+            LogicPathTarget::CombCaptureEvent { .. } => None,
         }
     }
 }
@@ -962,7 +1015,9 @@ impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for LogicPathTarget<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LogicPathTarget::Var(var) => write!(f, "{var}"),
-            LogicPathTarget::ObserverStorage { storage, .. } => write!(f, "{storage}"),
+            LogicPathTarget::CombCaptureEvent { site_id, .. } => {
+                write!(f, "capture_event({site_id})")
+            }
         }
     }
 }
@@ -1004,12 +1059,28 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                     var.access.lsb,
                     var.access.msb,
                 )),
-                LogicPathTarget::ObserverStorage { storage, width } => {
-                    LogicPathTarget::ObserverStorage {
-                        storage: *storage,
-                        width: *width,
-                    }
-                }
+                LogicPathTarget::CombCaptureEvent {
+                    site_id,
+                    guard,
+                    emit_on_true,
+                    args,
+                } => LogicPathTarget::CombCaptureEvent {
+                    site_id: *site_id,
+                    guard: guard.map(|node| {
+                        arena
+                            .get(node)
+                            .map_addr(node, arena, target_arena, cache, f)
+                    }),
+                    emit_on_true: *emit_on_true,
+                    args: args
+                        .iter()
+                        .map(|node| {
+                            arena
+                                .get(*node)
+                                .map_addr(*node, arena, target_arena, cache, f)
+                        })
+                        .collect(),
+                },
             },
             sources: self
                 .sources
@@ -1142,6 +1213,7 @@ struct CombEffectCollector {
     sensitivity: HashSet<VarAtomBase<VarId>>,
     active_guard: Option<NodeId>,
     active_guard_sources: HashSet<VarAtomBase<VarId>>,
+    loop_effects: Option<Vec<SLTForEffect>>,
 }
 
 fn static_string_expr(expr: &Expression) -> Option<String> {
@@ -1257,14 +1329,18 @@ fn collect_system_function_effect(
         }
         (RuntimeEventKind::Display, _, Some(_)) => unreachable!("display has no explicit guard"),
     };
+    let loop_effect = collector.loop_effects.as_ref().map(|_| SLTForEffect {
+        site_id,
+        guard,
+        emit_on_true: matches!(kind, RuntimeEventKind::Display),
+        args: observer_args.clone(),
+    });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
     collector.observers.push(CombObserver {
         site_id,
         guard,
         args: observer_args,
-        guard_storage: None,
-        arg_storages: Vec::new(),
         sensitivity: Vec::new(),
         local_inputs: store
             .iter()
@@ -1305,7 +1381,11 @@ fn collect_system_function_effect(
             })
             .collect(),
         written_inputs: Vec::new(),
+        captured_in_loop: loop_effect.is_some(),
     });
+    if let (Some(loop_effects), Some(loop_effect)) = (&mut collector.loop_effects, loop_effect) {
+        loop_effects.push(loop_effect);
+    }
     Ok(())
 }
 
@@ -1497,13 +1577,40 @@ fn collect_comb_effects_for(
         ..
     } = &for_stmt.range
     else {
-        return eval_for(module, store, BoundaryMap::default(), for_stmt, arena).map(|(s, _)| s);
+        let loop_effects = collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        return eval_for_with_effects(
+            module,
+            store,
+            BoundaryMap::default(),
+            for_stmt,
+            arena,
+            &loop_effects,
+        )
+        .map(|(s, _)| s);
     };
     let Some(start) = const_for_bound_i64(start) else {
-        return eval_for(module, store, BoundaryMap::default(), for_stmt, arena).map(|(s, _)| s);
+        let loop_effects = collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        return eval_for_with_effects(
+            module,
+            store,
+            BoundaryMap::default(),
+            for_stmt,
+            arena,
+            &loop_effects,
+        )
+        .map(|(s, _)| s);
     };
     let Some(end) = const_for_bound_i64(end) else {
-        return eval_for(module, store, BoundaryMap::default(), for_stmt, arena).map(|(s, _)| s);
+        let loop_effects = collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        return eval_for_with_effects(
+            module,
+            store,
+            BoundaryMap::default(),
+            for_stmt,
+            arena,
+            &loop_effects,
+        )
+        .map(|(s, _)| s);
     };
     let final_end = if *inclusive { end + 1 } else { end };
     for i in start..final_end {
@@ -1530,6 +1637,89 @@ fn collect_comb_effects_for(
         arena,
     )
     .map(|(s, _)| s)
+}
+
+fn collect_dynamic_for_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    for_stmt: &ForStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<Vec<SLTForEffect>, ParserError> {
+    let Some(loop_width) = for_stmt.var_type.total_width() else {
+        return Ok(Vec::new());
+    };
+    let mut iter_store = store.clone();
+    let mut written_accesses = HashMap::default();
+    collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
+    for (id, accesses) in written_accesses {
+        let width = resolve_total_width(module, &module.variables[&id])?;
+        let mut loop_store = RangeStore::new(None, width);
+        let mut covered = vec![false; width];
+        for access in accesses {
+            for slot in covered.iter_mut().take(access.msb + 1).skip(access.lsb) {
+                *slot = true;
+            }
+        }
+        let original = store
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| RangeStore::new(None, width));
+        let mut bit = 0usize;
+        while bit < width {
+            if covered[bit] {
+                bit += 1;
+                continue;
+            }
+            let start = bit;
+            while bit < width && !covered[bit] {
+                bit += 1;
+            }
+            let end = bit - 1;
+            let access = BitAccess::new(start, end);
+            let parts = original.get_parts(access);
+            let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena);
+            loop_store.update(access, Some((expr, sources)));
+        }
+        iter_store.insert(id, loop_store);
+    }
+    iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+    let saved = collector.loop_effects.take();
+    collector.loop_effects = Some(Vec::new());
+    let _ = collect_comb_effects_statements(module, iter_store, &for_stmt.body, arena, collector)?;
+    let effects = collector.loop_effects.take().unwrap_or_default();
+    collector.loop_effects = saved;
+    attach_effects_to_existing_for_folds(arena, for_stmt.var_id, &effects);
+    Ok(effects)
+}
+
+fn attach_effects_to_existing_for_folds(
+    arena: &mut SLTNodeArena<VarId>,
+    loop_var: VarId,
+    effects: &[SLTForEffect],
+) {
+    if effects.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for node in &mut arena.nodes {
+        let SLTNode::ForFold {
+            loop_var: node_loop_var,
+            effects: node_effects,
+            ..
+        } = node
+        else {
+            continue;
+        };
+        if *node_loop_var == loop_var && node_effects.is_empty() {
+            *node_effects = effects.to_vec();
+            changed = true;
+            break;
+        }
+    }
+    if changed {
+        arena.cache.clear();
+    }
 }
 
 fn const_for_bound_i64(bound: &ForBound) -> Option<i64> {
@@ -2080,6 +2270,17 @@ fn eval_for(
     for_stmt: &ForStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
+    eval_for_with_effects(module, store, boundaries, for_stmt, arena, &[])
+}
+
+fn eval_for_with_effects(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: HashMap<VarId, BTreeSet<usize>>,
+    for_stmt: &ForStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    effects: &[SLTForEffect],
+) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     let Some(loop_width) = for_stmt.var_type.total_width() else {
         return Err(ParserError::unsupported(
             65,
@@ -2319,6 +2520,7 @@ fn eval_for(
             result: target,
             initials: initial_updates.clone(),
             updates: folded_updates.clone(),
+            effects: effects.to_vec(),
             continue_cond: loop_state.continue_expr,
         });
 
@@ -3830,6 +4032,7 @@ fn eval_function_body_return(
                 result: *target,
                 initials: initial_updates.clone(),
                 updates: folded_updates.clone(),
+                effects: Vec::new(),
                 continue_cond: loop_effective_continue,
             });
 
@@ -3875,6 +4078,7 @@ fn eval_function_body_return(
                 result: control_target,
                 initials: control_initials,
                 updates: control_updates,
+                effects: Vec::new(),
                 continue_cond: iter_state.continue_expr,
             })
         } else {

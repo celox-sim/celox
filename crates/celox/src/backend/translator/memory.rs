@@ -2,79 +2,9 @@ use cranelift::prelude::*;
 
 use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type};
 use super::{SIRTranslator, TranslationState, get_byte_size};
-use crate::ir::{
-    ObserverStorageId, RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION,
-    TriggerIdWithKind,
-};
+use crate::ir::{RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION, TriggerIdWithKind};
 
 impl SIRTranslator {
-    pub(super) fn translate_load_observer_inst(
-        &self,
-        state: &mut TranslationState,
-        dst: &RegisterId,
-        storage: &ObserverStorageId,
-        op_width: usize,
-    ) {
-        let d_phys_width = state.register_map[dst].width();
-        let byte_offset =
-            self.layout.observer_storage_base_offset + self.layout.observer_offsets[storage];
-        let addr = state
-            .builder
-            .ins()
-            .iadd_imm(state.mem_ptr, byte_offset as i64);
-        let zero_shift = state.builder.ins().iconst(types::I64, 0);
-        let value = self.translate_load_native(state, addr, zero_shift, op_width, d_phys_width);
-        if self.options.four_state {
-            let mask_offset = byte_offset + get_byte_size(self.layout.observer_widths[storage]);
-            let mask_addr = state
-                .builder
-                .ins()
-                .iadd_imm(state.mem_ptr, mask_offset as i64);
-            let zero_shift = state.builder.ins().iconst(types::I64, 0);
-            let mask =
-                self.translate_load_native(state, mask_addr, zero_shift, op_width, d_phys_width);
-            state.regs.insert(
-                *dst,
-                TransValue::FourState {
-                    values: vec![value],
-                    masks: vec![mask],
-                },
-            );
-        } else {
-            state.regs.insert(*dst, TransValue::TwoState(vec![value]));
-        }
-    }
-
-    pub(super) fn translate_store_observer_inst(
-        &self,
-        state: &mut TranslationState,
-        storage: &ObserverStorageId,
-        op_width: usize,
-        src_reg: &RegisterId,
-    ) {
-        let byte_offset =
-            self.layout.observer_storage_base_offset + self.layout.observer_offsets[storage];
-        let addr = state
-            .builder
-            .ins()
-            .iadd_imm(state.mem_ptr, byte_offset as i64);
-        let value = state.regs[src_reg].first_value(state.builder);
-        let zero_shift = state.builder.ins().iconst(types::I64, 0);
-        self.translate_store_native(state, addr, zero_shift, op_width, value);
-        if self.options.four_state {
-            let mask_offset = byte_offset + get_byte_size(self.layout.observer_widths[storage]);
-            let mask_addr = state
-                .builder
-                .ins()
-                .iadd_imm(state.mem_ptr, mask_offset as i64);
-            let mask = state.regs[src_reg]
-                .first_mask(state.builder)
-                .unwrap_or_else(|| state.builder.ins().iconst(types::I64, 0));
-            let zero_shift = state.builder.ins().iconst(types::I64, 0);
-            self.translate_store_native(state, mask_addr, zero_shift, op_width, mask);
-        }
-    }
-
     pub(super) fn translate_load_inst(
         &self,
         state: &mut TranslationState,

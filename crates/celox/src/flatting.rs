@@ -319,6 +319,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             end,
             initials,
             updates,
+            effects,
             continue_cond,
             ..
         } => {
@@ -333,6 +334,14 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             }
             for update in updates {
                 collect_inputs_with_window(update.expr, None, arena, set, visited);
+            }
+            for effect in effects {
+                if let Some(guard) = effect.guard {
+                    collect_inputs_with_window(guard, None, arena, set, visited);
+                }
+                for arg in &effect.args {
+                    collect_inputs_with_window(*arg, None, arena, set, visited);
+                }
             }
             collect_inputs_with_window(*continue_cond, None, arena, set, visited);
             set.retain(|atom| atom.id != *loop_var);
@@ -372,8 +381,6 @@ fn convert_comb_observer<
         site_id: observer.site_id,
         guard: observer.guard.map(&mut map_node),
         args: observer.args.iter().copied().map(&mut map_node).collect(),
-        guard_storage: observer.guard_storage,
-        arg_storages: observer.arg_storages.clone(),
         sensitivity: observer
             .sensitivity
             .iter()
@@ -407,6 +414,7 @@ fn convert_comb_observer<
             .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
             .collect(),
         written_inputs: observer.written_inputs.iter().map(f).collect(),
+        captured_in_loop: observer.captured_in_loop,
     }
 }
 

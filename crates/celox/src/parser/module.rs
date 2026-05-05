@@ -747,6 +747,7 @@ fn collect_glue_sources_with_window(
             end,
             initials,
             updates,
+            effects,
             continue_cond,
             ..
         } => {
@@ -761,6 +762,14 @@ fn collect_glue_sources_with_window(
             }
             for update in updates {
                 collect_glue_sources_with_window(update.expr, None, arena, set);
+            }
+            for effect in effects {
+                if let Some(guard) = effect.guard {
+                    collect_glue_sources_with_window(guard, None, arena, set);
+                }
+                for arg in &effect.args {
+                    collect_glue_sources_with_window(*arg, None, arena, set);
+                }
             }
             collect_glue_sources_with_window(*continue_cond, None, arena, set);
             set.retain(|atom| atom.id != *loop_var);

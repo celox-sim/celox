@@ -230,9 +230,6 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 bits
             )
         }
-        SIRInstruction::LoadObserver(rd, storage, bits) => {
-            format!("r{} = LoadObserver({}, bits={})", rd.0, storage, bits)
-        }
         SIRInstruction::Store(addr, offset, bits, src, _) => {
             format!(
                 "Store(addr={}, offset={}, bits={}, src_reg = {})",
@@ -240,12 +237,6 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 offset,
                 bits,
                 src.0
-            )
-        }
-        SIRInstruction::StoreObserver(storage, bits, src) => {
-            format!(
-                "StoreObserver({}, bits={}, src_reg = {})",
-                storage, bits, src.0
             )
         }
         SIRInstruction::Commit(src, dst, offset, bits, _) => {
@@ -284,6 +275,14 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("RuntimeEvent(site={}, args=[{}])", site_id, args)
+        }
+        SIRInstruction::CombCaptureEvent { site_id, args } => {
+            let args = args
+                .iter()
+                .map(|r| format!("r{}", r.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("CombCaptureEvent(site={}, args=[{}])", site_id, args)
         }
     }
 }

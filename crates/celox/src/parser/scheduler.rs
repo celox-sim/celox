@@ -195,6 +195,7 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             end,
             initials,
             updates,
+            effects,
             continue_cond,
             ..
         } => {
@@ -226,8 +227,16 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                     memo,
                     inverse_memo,
                 ));
-                set.remove(loop_var);
             }
+            for effect in effects {
+                if let Some(guard) = effect.guard {
+                    set.extend(collect_node_input_deps(guard, arena, memo, inverse_memo));
+                }
+                for arg in &effect.args {
+                    set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
+                }
+            }
+            set.remove(loop_var);
             set.extend(collect_node_input_deps(
                 *continue_cond,
                 arena,
@@ -306,6 +315,25 @@ fn lower_logic_path_expr<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     lowerer.lower_with_inputs(builder, path.expr, arena, lower_cache, env_inputs)
 }
 
+fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    path: &LogicPath<Addr>,
+    node: NodeId,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+) -> RegisterId {
+    let mut env_inputs = HashMap::default();
+    for (addr, local_node) in &path.local_inputs {
+        let reg = lowerer.lower(builder, *local_node, arena, lower_cache);
+        let width = crate::logic_tree::get_width(*local_node, arena);
+        if width > 0 {
+            env_inputs.insert(crate::ir::VarAtomBase::new(*addr, 0, width - 1), reg);
+        }
+    }
+    lowerer.lower_with_inputs(builder, node, arena, lower_cache, env_inputs)
+}
+
 fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     lowerer: &crate::logic_tree::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
@@ -313,9 +341,9 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
 ) {
-    let result_reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
     match &path.target {
         LogicPathTarget::Var(target) => {
+            let result_reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
             let width = 1 + target.access.msb - target.access.lsb;
             builder.emit(SIRInstruction::Store(
                 target.id,
@@ -325,8 +353,53 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
                 Vec::new(),
             ));
         }
-        LogicPathTarget::ObserverStorage { storage, width } => {
-            builder.emit(SIRInstruction::StoreObserver(*storage, *width, result_reg));
+        LogicPathTarget::CombCaptureEvent {
+            site_id,
+            guard,
+            emit_on_true,
+            args,
+        } => {
+            let emit = |builder: &mut SIRBuilder<Addr>,
+                        lower_cache: &mut HashMap<NodeId, RegisterId>| {
+                let regs = args
+                    .iter()
+                    .map(|arg| {
+                        lower_logic_path_node(lowerer, builder, path, *arg, arena, lower_cache)
+                    })
+                    .collect();
+                builder.emit(SIRInstruction::CombCaptureEvent {
+                    site_id: *site_id,
+                    args: regs,
+                });
+            };
+            if let Some(guard) = guard {
+                let cond =
+                    lower_logic_path_node(lowerer, builder, path, *guard, arena, lower_cache);
+                let branch_cond = if *emit_on_true {
+                    cond
+                } else {
+                    let inverted = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Unary(
+                        inverted,
+                        crate::ir::UnaryOp::LogicNot,
+                        cond,
+                    ));
+                    inverted
+                };
+                let event_block = builder.new_block();
+                let done_block = builder.new_block();
+                builder.seal_block(SIRTerminator::Branch {
+                    cond: branch_cond,
+                    true_block: (event_block, vec![]),
+                    false_block: (done_block, vec![]),
+                });
+                builder.switch_to_block(event_block);
+                emit(builder, lower_cache);
+                builder.seal_block(SIRTerminator::Jump(done_block, vec![]));
+                builder.switch_to_block(done_block);
+            } else {
+                emit(builder, lower_cache);
+            }
         }
     }
 }
@@ -532,12 +605,12 @@ fn reorder_dag_runs<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 (
                     layer[na],
                     input[na].target.var().map(|target| target.id),
-                    matches!(input[na].target, LogicPathTarget::ObserverStorage { .. }),
+                    matches!(input[na].target, LogicPathTarget::CombCaptureEvent { .. }),
                 )
                     .cmp(&(
                         layer[nb],
                         input[nb].target.var().map(|target| target.id),
-                        matches!(input[nb].target, LogicPathTarget::ObserverStorage { .. }),
+                        matches!(input[nb].target, LogicPathTarget::CombCaptureEvent { .. }),
                     ))
             });
             for i in indices {

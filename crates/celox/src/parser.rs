@@ -711,8 +711,12 @@ pub(crate) fn flatten(
         })
         .collect();
 
-    let comb_observer_storages =
-        build_comb_observer_storage_paths(&mut comb_blocks, &mut comb_observers, &global_arena);
+    build_comb_observer_capture_paths(
+        &mut comb_blocks,
+        &mut comb_observers,
+        &runtime_event_sites,
+        &mut global_arena,
+    );
 
     let sched_start = flatten_timing.then(crate::timing::now);
     let schedule = scheduler::sort(
@@ -735,7 +739,6 @@ pub(crate) fn flatten(
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             comb_observers: Vec::new(),
-            comb_observer_storages: Vec::new(),
             eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
@@ -805,14 +808,7 @@ pub(crate) fn flatten(
             register_map: eu.register_map,
         })
         .collect();
-    let (eval_comb_observers, observer_runtime_errors, _next_runtime_error_code) =
-        build_comb_observer_units(
-            &comb_observers,
-            &runtime_event_sites,
-            four_state,
-            next_runtime_error_code,
-        );
-    runtime_errors.extend(observer_runtime_errors);
+    let eval_comb_observers = Vec::new();
     let eval_comb = schduled.clone();
 
     if let Some(t) = trace
@@ -873,7 +869,6 @@ pub(crate) fn flatten(
         runtime_errors,
         runtime_event_sites,
         comb_observers,
-        comb_observer_storages,
         eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
@@ -1428,6 +1423,15 @@ fn relocate_executation_unit_with_errors<A, B>(
                                         args: args.clone(),
                                     }
                                 }
+                                crate::ir::SIRInstruction::CombCaptureEvent { site_id, args } => {
+                                    crate::ir::SIRInstruction::CombCaptureEvent {
+                                        site_id: runtime_event_sites
+                                            .get(site_id)
+                                            .copied()
+                                            .unwrap_or(*site_id),
+                                        args: args.clone(),
+                                    }
+                                }
                                 _ => inst.map_addr(f),
                             })
                             .collect(),
@@ -1811,150 +1815,20 @@ fn relocate_units(
     )
 }
 
-fn build_comb_observer_units(
-    observers: &[crate::ir::CombObserver<AbsoluteAddr>],
-    sites: &[crate::ir::RuntimeEventSite],
-    _four_state: bool,
-    mut next_runtime_error_code: i64,
-) -> (
-    Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>,
-    HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
-    i64,
-) {
-    let mut units = Vec::new();
-    let mut runtime_errors = HashMap::default();
-
-    for observer in observers {
-        let mut builder = crate::ir::SIRBuilder::new();
-
-        let site = &sites[observer.site_id as usize];
-        match site.kind {
-            crate::ir::RuntimeEventKind::Display => {
-                if let Some(guard_storage) = observer.guard_storage {
-                    let cond = builder.alloc_bit(1, false);
-                    builder.emit(crate::ir::SIRInstruction::LoadObserver(
-                        cond,
-                        guard_storage,
-                        1,
-                    ));
-                    let event_bb = builder.new_block();
-                    let done_bb = builder.new_block();
-                    builder.seal_block(crate::ir::SIRTerminator::Branch {
-                        cond,
-                        true_block: (event_bb, vec![]),
-                        false_block: (done_bb, vec![]),
-                    });
-                    builder.switch_to_block(event_bb);
-                    let regs = load_observer_args(&mut builder, observer, site);
-                    builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
-                        site_id: observer.site_id,
-                        args: regs,
-                    });
-                    builder.seal_block(crate::ir::SIRTerminator::Jump(done_bb, vec![]));
-                    builder.switch_to_block(done_bb);
-                    builder.seal_block(crate::ir::SIRTerminator::Return);
-                } else {
-                    let regs = load_observer_args(&mut builder, observer, site);
-                    builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
-                        site_id: observer.site_id,
-                        args: regs,
-                    });
-                    builder.seal_block(crate::ir::SIRTerminator::Return);
-                }
-            }
-            crate::ir::RuntimeEventKind::AssertContinue
-            | crate::ir::RuntimeEventKind::AssertFatal => {
-                let guard_storage = observer
-                    .guard_storage
-                    .expect("comb assert observer must have a guard storage");
-                let cond_width = 1;
-                let cond = builder.alloc_bit(cond_width, false);
-                builder.emit(crate::ir::SIRInstruction::LoadObserver(
-                    cond,
-                    guard_storage,
-                    cond_width,
-                ));
-                let pass_bb = builder.new_block();
-                let fail_bb = builder.new_block();
-                builder.seal_block(crate::ir::SIRTerminator::Branch {
-                    cond,
-                    true_block: (pass_bb, vec![]),
-                    false_block: (fail_bb, vec![]),
-                });
-                builder.switch_to_block(fail_bb);
-                let regs = load_observer_args(&mut builder, observer, site);
-                builder.emit(crate::ir::SIRInstruction::RuntimeEvent {
-                    site_id: observer.site_id,
-                    args: regs,
-                });
-                if matches!(site.kind, crate::ir::RuntimeEventKind::AssertFatal) {
-                    let code = next_runtime_error_code;
-                    next_runtime_error_code += 1;
-                    runtime_errors.insert(
-                        code,
-                        RuntimeErrorInfo {
-                            message: site
-                                .template
-                                .clone()
-                                .unwrap_or_else(|| "assertion failed".to_string()),
-                            signals: Vec::new(),
-                        },
-                    );
-                    builder.seal_block(crate::ir::SIRTerminator::Error(code));
-                } else {
-                    builder.seal_block(crate::ir::SIRTerminator::Jump(pass_bb, vec![]));
-                }
-                builder.switch_to_block(pass_bb);
-                builder.seal_block(crate::ir::SIRTerminator::Return);
-            }
-        }
-
-        let (blocks, register_map, _) = builder.drain();
-        let eu = crate::ir::ExecutionUnit {
-            entry_block_id: crate::ir::BlockId(0),
-            blocks: blocks
-                .into_iter()
-                .map(|(id, bb)| {
-                    (
-                        id,
-                        crate::ir::BasicBlock {
-                            id: bb.id,
-                            params: bb.params,
-                            instructions: bb
-                                .instructions
-                                .into_iter()
-                                .map(|inst| {
-                                    inst.into_map_addr(|addr| RegionedAbsoluteAddr {
-                                        region: STABLE_REGION,
-                                        instance_id: addr.instance_id,
-                                        var_id: addr.var_id,
-                                    })
-                                })
-                                .collect(),
-                            terminator: bb.terminator,
-                        },
-                    )
-                })
-                .collect(),
-            register_map,
-        };
-        units.push(eu);
-    }
-
-    (units, runtime_errors, next_runtime_error_code)
-}
-
-fn build_comb_observer_storage_paths(
+fn build_comb_observer_capture_paths(
     comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
     observers: &mut [crate::ir::CombObserver<AbsoluteAddr>],
-    arena: &SLTNodeArena<AbsoluteAddr>,
-) -> Vec<crate::ir::ObserverStorage> {
+    sites: &[crate::ir::RuntimeEventSite],
+    arena: &mut SLTNodeArena<AbsoluteAddr>,
+) {
     if observers.is_empty() {
-        return Vec::new();
+        return;
     }
 
-    let mut storages = Vec::new();
     for observer in observers {
+        if observer.captured_in_loop {
+            continue;
+        }
         let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
         let mut sources: HashSet<_> = observer
             .observed_inputs
@@ -1974,45 +1848,38 @@ fn build_comb_observer_storage_paths(
         let order_before = observer_order_before(comb_blocks, observer);
         let order_after = observer_order_after(comb_blocks, observer);
 
-        if let Some(guard) = observer.guard {
-            let width = crate::logic_tree::get_width(guard, arena).max(1);
-            let storage = crate::ir::ObserverStorageId(storages.len());
-            storages.push(crate::ir::ObserverStorage { id: storage, width });
-            observer.guard_storage = Some(storage);
-            let path_id = LogicPathId(comb_blocks.len());
-            for idx in &order_after {
-                comb_blocks[idx.0].order_before.insert(path_id);
-            }
-            comb_blocks.push(LogicPath {
-                target: LogicPathTarget::ObserverStorage { storage, width },
-                sources: sources.clone(),
-                local_inputs: observer.local_inputs.clone(),
-                order_before: order_before.clone(),
-                expr: guard,
-            });
+        let path_id = LogicPathId(comb_blocks.len());
+        for idx in &order_after {
+            comb_blocks[idx.0].order_before.insert(path_id);
         }
-
-        observer.arg_storages.clear();
-        for arg in &observer.args {
-            let width = crate::logic_tree::get_width(*arg, arena).max(1);
-            let storage = crate::ir::ObserverStorageId(storages.len());
-            storages.push(crate::ir::ObserverStorage { id: storage, width });
-            observer.arg_storages.push(storage);
-            let path_id = LogicPathId(comb_blocks.len());
-            for idx in &order_after {
-                comb_blocks[idx.0].order_before.insert(path_id);
-            }
-            comb_blocks.push(LogicPath {
-                target: LogicPathTarget::ObserverStorage { storage, width },
-                sources: sources.clone(),
-                local_inputs: observer.local_inputs.clone(),
-                order_before: order_before.clone(),
-                expr: *arg,
+        let expr = observer
+            .guard
+            .or_else(|| observer.args.first().copied())
+            .unwrap_or_else(|| {
+                arena.alloc(crate::logic_tree::SLTNode::Constant(
+                    num_bigint::BigUint::from(1u8),
+                    num_bigint::BigUint::from(0u8),
+                    1,
+                    false,
+                ))
             });
-        }
+        let emit_on_true = matches!(
+            sites[observer.site_id as usize].kind,
+            crate::ir::RuntimeEventKind::Display
+        );
+        comb_blocks.push(LogicPath {
+            target: LogicPathTarget::CombCaptureEvent {
+                site_id: observer.site_id,
+                guard: observer.guard,
+                emit_on_true,
+                args: observer.args.clone(),
+            },
+            sources,
+            local_inputs: observer.local_inputs.clone(),
+            order_before,
+            expr,
+        });
     }
-
-    storages
 }
 
 fn observer_order_after(
@@ -2062,24 +1929,6 @@ fn observer_order_before(
         }
     }
     result
-}
-
-fn load_observer_args(
-    builder: &mut crate::ir::SIRBuilder<AbsoluteAddr>,
-    observer: &crate::ir::CombObserver<AbsoluteAddr>,
-    site: &crate::ir::RuntimeEventSite,
-) -> Vec<crate::ir::RegisterId> {
-    observer
-        .arg_storages
-        .iter()
-        .copied()
-        .zip(site.arg_widths.iter().copied())
-        .map(|(storage, width)| {
-            let reg = builder.alloc_bit(width, false);
-            builder.emit(crate::ir::SIRInstruction::LoadObserver(reg, storage, width));
-            reg
-        })
-        .collect()
 }
 
 fn analyze_clock_dependencies(

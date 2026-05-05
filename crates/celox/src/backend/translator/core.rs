@@ -358,14 +358,8 @@ impl SIRTranslator {
             SIRInstruction::Load(dst, addr, offset, op_width) => {
                 self.translate_load_inst(state, dst, addr, offset, op_width);
             }
-            SIRInstruction::LoadObserver(dst, storage, op_width) => {
-                self.translate_load_observer_inst(state, dst, storage, *op_width);
-            }
             SIRInstruction::Store(addr, offset, op_width, src_reg, triggers) => {
                 self.translate_store_inst(state, addr, offset, op_width, src_reg, triggers);
-            }
-            SIRInstruction::StoreObserver(storage, op_width, src_reg) => {
-                self.translate_store_observer_inst(state, storage, *op_width, src_reg);
             }
             SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
                 self.translate_commit_inst(state, src_addr, dst_addr, offset, op_width, triggers);
@@ -377,7 +371,20 @@ impl SIRTranslator {
                 self.translate_mux_inst(state, dst, cond, then_val, else_val);
             }
             SIRInstruction::RuntimeEvent { site_id, args } => {
-                self.translate_runtime_event_inst(state, *site_id, args);
+                self.translate_runtime_event_inst(
+                    state,
+                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+                    *site_id,
+                    args,
+                );
+            }
+            SIRInstruction::CombCaptureEvent { site_id, args } => {
+                self.translate_runtime_event_inst(
+                    state,
+                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET,
+                    *site_id,
+                    args,
+                );
             }
         }
     }
@@ -385,6 +392,7 @@ impl SIRTranslator {
     fn translate_runtime_event_inst(
         &self,
         state: &mut TranslationState,
+        event_ptr_offset: usize,
         site_id: u32,
         args: &[RegisterId],
     ) {
@@ -392,14 +400,13 @@ impl SIRTranslator {
             RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
             RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
             RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
-            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         };
 
         let event_ptr = state.builder.ins().load(
             types::I64,
             MemFlags::new(),
             state.mem_ptr,
-            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+            event_ptr_offset as i32,
         );
         let write_seq_addr = event_ptr;
         let seq = state

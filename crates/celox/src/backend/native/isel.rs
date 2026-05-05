@@ -163,14 +163,13 @@ pub fn lower_execution_unit(
                 | SIRInstruction::Binary(d, _, _, _)
                 | SIRInstruction::Unary(d, _, _)
                 | SIRInstruction::Load(d, _, _, _)
-                | SIRInstruction::LoadObserver(d, _, _)
                 | SIRInstruction::Concat(d, _)
                 | SIRInstruction::Slice(d, _, _, _)
                 | SIRInstruction::Mux(d, _, _, _) => Some(*d),
                 SIRInstruction::Store(..)
-                | SIRInstruction::StoreObserver(..)
                 | SIRInstruction::Commit(..)
-                | SIRInstruction::RuntimeEvent { .. } => None,
+                | SIRInstruction::RuntimeEvent { .. }
+                | SIRInstruction::CombCaptureEvent { .. } => None,
             };
             if let Some(dr) = dst_reg {
                 let w = ctx.sir_width(&dr);
@@ -490,27 +489,6 @@ impl<'a> ISelContext<'a> {
         (base + bit_offset / 8) as i32
     }
 
-    fn observer_byte_offset(
-        &self,
-        storage: crate::ir::ObserverStorageId,
-        bit_offset: usize,
-    ) -> i32 {
-        (self.layout.observer_storage_base_offset
-            + self.layout.observer_offsets[&storage]
-            + bit_offset / 8) as i32
-    }
-
-    fn observer_mask_byte_offset(
-        &self,
-        storage: crate::ir::ObserverStorageId,
-        bit_offset: usize,
-    ) -> i32 {
-        (self.layout.observer_storage_base_offset
-            + self.layout.observer_offsets[&storage]
-            + crate::backend::get_byte_size(self.layout.observer_widths[&storage])
-            + bit_offset / 8) as i32
-    }
-
     /// Choose OpSize for a given bit width, clamping to the smallest
     /// native size that fits.
     fn op_size_for_width(width_bits: usize) -> OpSize {
@@ -716,19 +694,28 @@ fn lower_instruction(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
 ) {
     match inst {
-        SIRInstruction::RuntimeEvent { site_id, args } => {
+        SIRInstruction::RuntimeEvent { site_id, args }
+        | SIRInstruction::CombCaptureEvent { site_id, args } => {
             use crate::backend::memory_layout::{
                 RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
                 RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
                 RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
-                STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
             };
 
+            let event_ptr_offset = match inst {
+                SIRInstruction::RuntimeEvent { .. } => {
+                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET
+                }
+                SIRInstruction::CombCaptureEvent { .. } => {
+                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET
+                }
+                _ => unreachable!(),
+            };
             let event_ptr = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::Load {
                 dst: event_ptr,
                 base: BaseReg::SimState,
-                offset: STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                offset: event_ptr_offset as i32,
                 size: OpSize::S64,
             });
             let seq_v = ctx.alloc_vreg(SpillDesc::transient());
@@ -1485,53 +1472,6 @@ fn lower_instruction(
             }
         }
 
-        SIRInstruction::LoadObserver(dst, storage, width_bits) => {
-            let vreg = ctx.reg_map.get(*dst);
-            if *width_bits > 64 {
-                let n_chunks = ISelContext::num_chunks(*width_bits);
-                let mut chunks = Vec::with_capacity(n_chunks);
-                let mut remaining = *width_bits;
-                let mut bit_pos = 0usize;
-                for _ in 0..n_chunks {
-                    let chunk_bits = remaining.min(64);
-                    let chunk_vreg = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Load {
-                        dst: chunk_vreg,
-                        base: BaseReg::SimState,
-                        offset: ctx.observer_byte_offset(*storage, bit_pos),
-                        size: ISelContext::op_size_for_width(chunk_bits),
-                    });
-                    chunks.push((chunk_vreg, chunk_bits));
-                    bit_pos += chunk_bits;
-                    remaining -= chunk_bits;
-                }
-                ctx.set_wide_chunks(*dst, chunks);
-            } else {
-                let raw = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Load {
-                    dst: raw,
-                    base: BaseReg::SimState,
-                    offset: ctx.observer_byte_offset(*storage, 0),
-                    size: ISelContext::op_size_for_width(*width_bits),
-                });
-                if *width_bits < 64 {
-                    ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
-                } else {
-                    ctx.emit_mov(block, vreg, raw);
-                }
-            }
-            if ctx.four_state {
-                let mvreg = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Load {
-                    dst: mvreg,
-                    base: BaseReg::SimState,
-                    offset: ctx.observer_mask_byte_offset(*storage, 0),
-                    size: ISelContext::op_size_for_width((*width_bits).min(64)),
-                });
-                ctx.set_mask(*dst, mvreg);
-            }
-        }
-
         SIRInstruction::Store(addr, offset, width_bits, src_reg, triggers) => {
             // width=0: identity Store optimized away; only emit triggers.
             if *width_bits == 0 {
@@ -2077,39 +2017,6 @@ fn lower_instruction(
                 }
             } // else (width != 0)
         } // Store
-
-        SIRInstruction::StoreObserver(storage, width_bits, src_reg) => {
-            if *width_bits > 64 {
-                let chunks = ctx.get_wide_chunks(src_reg, block);
-                let mut bit_pos = 0usize;
-                for (chunk_vreg, chunk_width) in &chunks {
-                    block.push(MInst::Store {
-                        base: BaseReg::SimState,
-                        offset: ctx.observer_byte_offset(*storage, bit_pos),
-                        src: *chunk_vreg,
-                        size: ISelContext::op_size_for_width(*chunk_width),
-                    });
-                    bit_pos += chunk_width;
-                }
-            } else {
-                let src_vreg = ctx.reg_map.get(*src_reg);
-                block.push(MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: ctx.observer_byte_offset(*storage, 0),
-                    src: src_vreg,
-                    size: ISelContext::op_size_for_width(*width_bits),
-                });
-            }
-            if ctx.four_state {
-                let mask_vreg = ctx.get_mask(*src_reg, block);
-                block.push(MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: ctx.observer_mask_byte_offset(*storage, 0),
-                    src: mask_vreg,
-                    size: ISelContext::op_size_for_width((*width_bits).min(64)),
-                });
-            }
-        }
 
         SIRInstruction::Commit(src_addr, dst_addr, offset, width_bits, _triggers) => {
             // Commit = load from src region, store to dst region (same offset/width)

@@ -156,6 +156,7 @@ pub struct JitBackend {
     shared: Arc<SharedJitCode>,
     memory: Vec<u64>,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
+    comb_capture_event_buffer: Arc<RuntimeEventBuffer>,
     /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
     comb_func: SimFunc,
     comb_observer_funcs: Vec<SimFunc>,
@@ -473,8 +474,8 @@ impl JitBackend {
         );
         debug_assert_eq!(
             engine.translator.layout.merged_total_size,
-            (engine.translator.layout.observer_storage_base_offset
-                + engine.translator.layout.observer_storage_size
+            (engine.translator.layout.scratch_base_offset
+                + engine.translator.layout.scratch_size
                 + 7)
                 & !7
         );
@@ -537,6 +538,9 @@ impl JitBackend {
         let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
             shared.layout.runtime_event_buffer_size,
         ));
+        let comb_capture_event_buffer = Arc::new(RuntimeEventBuffer::new(
+            shared.layout.runtime_event_buffer_size,
+        ));
 
         // Initialize 4-state regions to X (v=1, m=1)
         for &(offset, allocated_size) in &shared.four_state_inits {
@@ -554,19 +558,30 @@ impl JitBackend {
             shared,
             memory,
             runtime_event_buffer,
+            comb_capture_event_buffer,
             comb_func,
             comb_observer_funcs,
         };
-        backend.install_runtime_event_buffer();
+        backend.install_event_buffers();
         backend
     }
 
-    fn install_runtime_event_buffer(&mut self) {
-        use crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
+    fn install_event_buffers(&mut self) {
+        use crate::backend::memory_layout::{
+            STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+        };
 
         let addr = self.runtime_event_buffer.as_mut_ptr() as u64;
         let ptr = unsafe {
             (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET)
+                as *mut u64
+        };
+        unsafe {
+            std::ptr::write_unaligned(ptr, addr);
+        }
+        let addr = self.comb_capture_event_buffer.as_mut_ptr() as u64;
+        let ptr = unsafe {
+            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET)
                 as *mut u64
         };
         unsafe {
@@ -856,6 +871,10 @@ impl JitBackend {
         Arc::clone(&self.runtime_event_buffer)
     }
 
+    pub fn comb_capture_event_buffer(&self) -> Arc<RuntimeEventBuffer> {
+        Arc::clone(&self.comb_capture_event_buffer)
+    }
+
     /// Returns the stable region size in bytes.
     pub fn stable_region_size(&self) -> usize {
         self.shared.layout.total_size
@@ -1021,6 +1040,10 @@ impl super::SimBackend for JitBackend {
 
     fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
         Some(self.runtime_event_buffer())
+    }
+
+    fn comb_capture_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
+        Some(self.comb_capture_event_buffer())
     }
 
     fn stable_region_size(&self) -> usize {

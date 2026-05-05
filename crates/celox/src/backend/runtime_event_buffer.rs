@@ -47,4 +47,12 @@ impl RuntimeEventBuffer {
         let word = byte_offset / 8;
         unsafe { std::ptr::read_volatile(self.words[word].get()) }
     }
+
+    pub fn reset(&self) {
+        for word in &self.words {
+            unsafe {
+                std::ptr::write_volatile(word.get(), 0);
+            }
+        }
+    }
 }

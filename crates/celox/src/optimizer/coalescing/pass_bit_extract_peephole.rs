@@ -185,7 +185,8 @@ fn optimize_bit_extracts(
                 *use_count.entry(*then_val).or_default() += 1;
                 *use_count.entry(*else_val).or_default() += 1;
             }
-            SIRInstruction::RuntimeEvent { args, .. } => {
+            SIRInstruction::RuntimeEvent { args, .. }
+            | SIRInstruction::CombCaptureEvent { args, .. } => {
                 for arg in args {
                     *use_count.entry(*arg).or_default() += 1;
                 }

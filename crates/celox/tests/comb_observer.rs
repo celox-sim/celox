@@ -588,6 +588,159 @@ module Top (
     );
 }
 
+fn test_comb_display_snapshots_after_dynamic_for(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    count: input logic<4>,
+    base: input logic<8>,
+    out: output logic<8>,
+) {
+    var sum: logic<8>;
+
+    always_comb {
+        sum = base;
+        for i in 0..count {
+            sum = sum + i;
+        }
+        $display("sum=%0d", sum);
+        out = sum;
+    }
+}
+"#, "Top");
+
+    let count = sim.signal("count");
+    let base = sim.signal("base");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(count, 4u8);
+        io.set(base, 10u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 16);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "sum=16".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_inside_dynamic_for_runs_each_iteration(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    count: input logic<4>,
+    base: input logic<8>,
+    out: output logic<8>,
+) {
+    var sum: logic<8>;
+
+    always_comb {
+        sum = base;
+        for i in 0..count {
+            sum = sum + i;
+            $display("i=%0d sum=%0d", i, sum);
+        }
+        out = sum;
+    }
+}
+"#, "Top");
+
+    let count = sim.signal("count");
+    let base = sim.signal("base");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(count, 4u8);
+        io.set(base, 10u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 16);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "i=0 sum=10".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=1 sum=11".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=2 sum=13".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=3 sum=16".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_display_preserves_order_around_dynamic_for(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    count: input logic<4>,
+    base: input logic<8>,
+    out: output logic<8>,
+) {
+    var sum: logic<8>;
+
+    always_comb {
+        sum = base;
+        $display("before=%0d", sum);
+        for i in 0..count {
+            sum = sum + i;
+            $display("inside i=%0d sum=%0d", i, sum);
+        }
+        $display("after=%0d", sum);
+        out = sum;
+    }
+}
+"#, "Top");
+
+    let count = sim.signal("count");
+    let base = sim.signal("base");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(count, 3u8);
+        io.set(base, 10u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 13);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "before=10".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inside i=0 sum=10".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inside i=1 sum=11".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inside i=2 sum=13".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "after=13".to_string(),
+            },
+        ],
+    );
+}
+
 }
 
 #[test]
@@ -653,16 +806,16 @@ module Top (
     let store_low = sir
         .find("Store(addr=tmp (region=0), offset=0, bits=1")
         .unwrap_or_else(|| panic!("missing low-bit store in SIR:\n{sir}"));
-    let store_observer = sir
-        .find("StoreObserver(")
-        .unwrap_or_else(|| panic!("missing observer store in SIR:\n{sir}"));
+    let capture = sir
+        .find("CombCaptureEvent(")
+        .unwrap_or_else(|| panic!("missing comb capture event in SIR:\n{sir}"));
     let store_high = sir
         .find("Store(addr=tmp (region=0), offset=7, bits=1")
         .unwrap_or_else(|| panic!("missing high-bit store in SIR:\n{sir}"));
 
     assert!(
-        store_low < store_observer && store_observer < store_high,
-        "observer snapshot should be ordered after the prior low-bit write and before the unrelated later high-bit write:\n{sir}"
+        store_low < capture && capture < store_high,
+        "observer capture should be ordered after the prior low-bit write and before the unrelated later high-bit write:\n{sir}"
     );
 }
 
@@ -701,24 +854,61 @@ module Top (
     let store_bit0 = sir
         .find("Store(addr=tmp (region=0), offset=0, bits=1")
         .unwrap_or_else(|| panic!("missing bit 0 store in SIR:\n{sir}"));
-    let first_observer = sir
-        .find("StoreObserver(obs0")
-        .unwrap_or_else(|| panic!("missing first observer store in SIR:\n{sir}"));
+    let first_capture = sir
+        .find("CombCaptureEvent(site=0")
+        .unwrap_or_else(|| panic!("missing first capture event in SIR:\n{sir}"));
     let store_bit1 = sir
         .find("Store(addr=tmp (region=0), offset=1, bits=1")
         .unwrap_or_else(|| panic!("missing bit 1 store in SIR:\n{sir}"));
-    let second_observer = sir
-        .find("StoreObserver(obs1")
-        .unwrap_or_else(|| panic!("missing second observer store in SIR:\n{sir}"));
+    let second_capture = sir
+        .find("CombCaptureEvent(site=1")
+        .unwrap_or_else(|| panic!("missing second capture event in SIR:\n{sir}"));
     let store_bit7 = sir
         .find("Store(addr=tmp (region=0), offset=7, bits=1")
         .unwrap_or_else(|| panic!("missing bit 7 store in SIR:\n{sir}"));
 
     assert!(
-        store_bit0 < first_observer
-            && first_observer < store_bit1
-            && store_bit1 < second_observer
-            && second_observer < store_bit7,
-        "each observer snapshot should be placeable at its own statement position on the same variable:\n{sir}"
+        store_bit0 < first_capture
+            && first_capture < store_bit1
+            && store_bit1 < second_capture
+            && second_capture < store_bit7,
+        "each observer capture should be placeable at its own statement position on the same variable:\n{sir}"
+    );
+}
+
+#[test]
+fn test_comb_observer_dynamic_for_lowers_capture_event() {
+    let result = Simulator::builder(
+        r#"
+module Top (
+    count: input logic<4>,
+    base: input logic<8>,
+    out: output logic<8>,
+) {
+    var sum: logic<8>;
+
+    always_comb {
+        sum = base;
+        for i in 0..count {
+            sum = sum + i;
+            $display("i=%0d sum=%0d", i, sum);
+        }
+        out = sum;
+    }
+}
+"#,
+        "Top",
+    )
+    .optimize(false)
+    .trace_post_optimized_sir()
+    .build_with_trace();
+    let sir = result
+        .trace
+        .format_post_optimized_sir()
+        .expect("post-optimized SIR should be traced");
+
+    assert!(
+        sir.contains("CombCaptureEvent("),
+        "dynamic for observer should lower to a comb capture event:\n{sir}"
     );
 }

@@ -126,36 +126,20 @@ pub struct RuntimeEventSite {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ObserverStorageId(pub usize);
-
-impl fmt::Display for ObserverStorageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "obs{}", self.0)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LogicPathId(pub usize);
-
-#[derive(Clone, Debug)]
-pub struct ObserverStorage {
-    pub id: ObserverStorageId,
-    pub width: usize,
-}
 
 #[derive(Clone, Debug)]
 pub struct CombObserver<A = AbsoluteAddr> {
     pub site_id: u32,
     pub guard: Option<crate::logic_tree::NodeId>,
     pub args: Vec<crate::logic_tree::NodeId>,
-    pub guard_storage: Option<ObserverStorageId>,
-    pub arg_storages: Vec<ObserverStorageId>,
     pub sensitivity: Vec<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, crate::logic_tree::NodeId)>,
     pub observed_inputs: Vec<VarAtomBase<A>>,
     pub position_inputs: Vec<VarAtomBase<A>>,
     pub written_before: Vec<VarAtomBase<A>>,
     pub written_inputs: Vec<A>,
+    pub captured_in_loop: bool,
 }
 
 #[derive(Clone)]
@@ -168,7 +152,6 @@ pub struct Program {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
-    pub comb_observer_storages: Vec<ObserverStorage>,
     /// Tail-call chain compilation plan, populated by the optimizer when the
     /// estimated CLIF instruction count exceeds Cranelift's limit.
     pub eval_comb_plan: Option<EvalCombPlan>,
@@ -833,14 +816,8 @@ fn renumber_sir_inst<A: Clone>(
         SIRInstruction::Load(dst, addr, offset, width) => {
             SIRInstruction::Load(r(*dst), addr.clone(), off(offset), *width)
         }
-        SIRInstruction::LoadObserver(dst, storage, width) => {
-            SIRInstruction::LoadObserver(r(*dst), *storage, *width)
-        }
         SIRInstruction::Store(addr, offset, width, src, triggers) => {
             SIRInstruction::Store(addr.clone(), off(offset), *width, r(*src), triggers.clone())
-        }
-        SIRInstruction::StoreObserver(storage, width, src) => {
-            SIRInstruction::StoreObserver(*storage, *width, r(*src))
         }
         SIRInstruction::Commit(src, dst, offset, width, triggers) => SIRInstruction::Commit(
             src.clone(),
@@ -863,6 +840,10 @@ fn renumber_sir_inst<A: Clone>(
             SIRInstruction::Mux(r(*dst), r(*cond), r(*then_val), r(*else_val))
         }
         SIRInstruction::RuntimeEvent { site_id, args } => SIRInstruction::RuntimeEvent {
+            site_id: *site_id,
+            args: args.iter().map(|a| r(*a)).collect(),
+        },
+        SIRInstruction::CombCaptureEvent { site_id, args } => SIRInstruction::CombCaptureEvent {
             site_id: *site_id,
             args: args.iter().map(|a| r(*a)).collect(),
         },
@@ -1153,9 +1134,7 @@ pub enum SIRInstruction<Addr> {
     Binary(RegisterId, RegisterId, BinaryOp, RegisterId),
     Unary(RegisterId, UnaryOp, RegisterId),
     Load(RegisterId, Addr, SIROffset, usize),
-    LoadObserver(RegisterId, ObserverStorageId, usize),
     Store(Addr, SIROffset, usize, RegisterId, Vec<TriggerIdWithKind>),
-    StoreObserver(ObserverStorageId, usize, RegisterId),
     /// Commits a value from `src` region to `dst` region with the same offset/width.
     Commit(Addr, Addr, SIROffset, usize, Vec<TriggerIdWithKind>),
     /// Concatenates multiple registers into a single register.
@@ -1169,6 +1148,10 @@ pub enum SIRInstruction<Addr> {
     /// When cond has X/Z bits, result is all-X.
     Mux(RegisterId, RegisterId, RegisterId, RegisterId), // dst, cond, then_val, else_val
     RuntimeEvent {
+        site_id: u32,
+        args: Vec<RegisterId>,
+    },
+    CombCaptureEvent {
         site_id: u32,
         args: Vec<RegisterId>,
     },
@@ -1193,21 +1176,11 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     rd.0, addr, offset, bits
                 )
             }
-            SIRInstruction::LoadObserver(rd, storage, bits) => {
-                write!(f, "r{} = LoadObserver({}, bits={})", rd.0, storage, bits)
-            }
             SIRInstruction::Store(addr, offset, op_width, src_reg, triggers) => {
                 write!(
                     f,
                     "Store(addr={}, offset={}, src_reg = {}, bits={}, triggers={:?})",
                     addr, offset, src_reg.0, op_width, triggers
-                )
-            }
-            SIRInstruction::StoreObserver(storage, op_width, src_reg) => {
-                write!(
-                    f,
-                    "StoreObserver({}, src_reg = {}, bits={})",
-                    storage, src_reg.0, op_width
                 )
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
@@ -1251,6 +1224,16 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                 }
                 write!(f, "])")
             }
+            SIRInstruction::CombCaptureEvent { site_id, args } => {
+                write!(f, "CombCaptureEvent(site={}, args=[", site_id)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "r{}", arg.0)?;
+                }
+                write!(f, "])")
+            }
         }
     }
 }
@@ -1263,14 +1246,8 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Load(rd, addr, offset, bits) => {
                 SIRInstruction::Load(rd, f(addr), offset, bits)
             }
-            SIRInstruction::LoadObserver(rd, storage, bits) => {
-                SIRInstruction::LoadObserver(rd, storage, bits)
-            }
             SIRInstruction::Store(addr, offset, bits, rs, triggers) => {
                 SIRInstruction::Store(f(addr), offset, bits, rs, triggers)
-            }
-            SIRInstruction::StoreObserver(storage, bits, rs) => {
-                SIRInstruction::StoreObserver(storage, bits, rs)
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
                 SIRInstruction::Commit(f(src), f(dst), offset, bits, triggers)
@@ -1284,6 +1261,9 @@ impl<A> SIRInstruction<A> {
             }
             SIRInstruction::RuntimeEvent { site_id, args } => {
                 SIRInstruction::RuntimeEvent { site_id, args }
+            }
+            SIRInstruction::CombCaptureEvent { site_id, args } => {
+                SIRInstruction::CombCaptureEvent { site_id, args }
             }
         }
     }
@@ -1299,14 +1279,8 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Load(rd, addr, offset, bits) => {
                 SIRInstruction::Load(*rd, f(addr), offset.clone(), *bits)
             }
-            SIRInstruction::LoadObserver(rd, storage, bits) => {
-                SIRInstruction::LoadObserver(*rd, *storage, *bits)
-            }
             SIRInstruction::Store(addr, offset, bits, rs, triggers) => {
                 SIRInstruction::Store(f(addr), offset.clone(), *bits, *rs, triggers.clone())
-            }
-            SIRInstruction::StoreObserver(storage, bits, rs) => {
-                SIRInstruction::StoreObserver(*storage, *bits, *rs)
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
                 SIRInstruction::Commit(f(src), f(dst), offset.clone(), *bits, triggers.clone())
@@ -1322,6 +1296,12 @@ impl<A> SIRInstruction<A> {
                 site_id: *site_id,
                 args: args.clone(),
             },
+            SIRInstruction::CombCaptureEvent { site_id, args } => {
+                SIRInstruction::CombCaptureEvent {
+                    site_id: *site_id,
+                    args: args.clone(),
+                }
+            }
         }
     }
 }
