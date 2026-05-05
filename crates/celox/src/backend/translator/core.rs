@@ -371,17 +371,40 @@ impl SIRTranslator {
                 self.translate_mux_inst(state, dst, cond, then_val, else_val);
             }
             SIRInstruction::RuntimeEvent { site_id, args } => {
-                self.translate_runtime_event_inst(
-                    state,
-                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
-                    *site_id,
-                    args,
+                let event_ptr = state.builder.ins().load(
+                    types::I64,
+                    MemFlags::new(),
+                    state.mem_ptr,
+                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
                 );
+                self.translate_runtime_event_inst(state, event_ptr, None, *site_id, args);
             }
             SIRInstruction::CombCaptureEvent { site_id, args } => {
+                let capture_ptr = state.builder.ins().load(
+                    types::I64,
+                    MemFlags::new(),
+                    state.mem_ptr,
+                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET
+                        as i32,
+                );
+                let enabled_ptr = state.builder.ins().load(
+                    types::I64,
+                    MemFlags::new(),
+                    state.mem_ptr,
+                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+                        as i32,
+                );
+                let enabled = state.builder.ins().load(
+                    types::I8,
+                    MemFlags::new(),
+                    enabled_ptr,
+                    *site_id as i32,
+                );
+                let enabled = state.builder.ins().icmp_imm(IntCC::NotEqual, enabled, 0);
                 self.translate_runtime_event_inst(
                     state,
-                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET,
+                    capture_ptr,
+                    Some(enabled),
                     *site_id,
                     args,
                 );
@@ -392,7 +415,8 @@ impl SIRTranslator {
     fn translate_runtime_event_inst(
         &self,
         state: &mut TranslationState,
-        event_ptr_offset: usize,
+        event_ptr: Value,
+        enabled: Option<Value>,
         site_id: u32,
         args: &[RegisterId],
     ) {
@@ -402,12 +426,6 @@ impl SIRTranslator {
             RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
         };
 
-        let event_ptr = state.builder.ins().load(
-            types::I64,
-            MemFlags::new(),
-            state.mem_ptr,
-            event_ptr_offset as i32,
-        );
         let write_seq_addr = event_ptr;
         let seq = state
             .builder
@@ -510,7 +528,10 @@ impl SIRTranslator {
             slot_seq_addr,
             seq,
         );
-        let next = state.builder.ins().iadd_imm(seq, 1);
+        let incremented = state.builder.ins().iadd_imm(seq, 1);
+        let next = enabled
+            .map(|enabled| state.builder.ins().select(enabled, incremented, seq))
+            .unwrap_or(incremented);
         // Advance the global write sequence after the slot sequence is visible.
         state.builder.ins().atomic_rmw(
             types::I64,

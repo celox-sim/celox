@@ -702,22 +702,54 @@ fn lower_instruction(
                 RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
             };
 
-            let event_ptr_offset = match inst {
+            let event_ptr = ctx.alloc_vreg(SpillDesc::transient());
+            let mut capture_enabled = None;
+            match inst {
                 SIRInstruction::RuntimeEvent { .. } => {
-                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET
+                    block.push(MInst::Load {
+                        dst: event_ptr,
+                        base: BaseReg::SimState,
+                        offset:
+                            crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET
+                                as i32,
+                        size: OpSize::S64,
+                    });
                 }
                 SIRInstruction::CombCaptureEvent { .. } => {
-                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET
+                    block.push(MInst::Load {
+                        dst: event_ptr,
+                        base: BaseReg::SimState,
+                        offset:
+                            crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET
+                                as i32,
+                        size: OpSize::S64,
+                    });
+                    let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Load {
+                        dst: enabled_ptr,
+                        base: BaseReg::SimState,
+                        offset: crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+                            as i32,
+                        size: OpSize::S64,
+                    });
+                    let enabled_byte = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::LoadPtr {
+                        dst: enabled_byte,
+                        ptr: enabled_ptr,
+                        offset: *site_id as i32,
+                        size: OpSize::S8,
+                    });
+                    let enabled = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::CmpImm {
+                        dst: enabled,
+                        lhs: enabled_byte,
+                        imm: 0,
+                        kind: CmpKind::Ne,
+                    });
+                    capture_enabled = Some(enabled);
                 }
                 _ => unreachable!(),
-            };
-            let event_ptr = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Load {
-                dst: event_ptr,
-                base: BaseReg::SimState,
-                offset: event_ptr_offset as i32,
-                size: OpSize::S64,
-            });
+            }
             let seq_v = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::LoadPtr {
                 dst: seq_v,
@@ -864,11 +896,23 @@ fn lower_instruction(
                 src: seq_v,
                 imm: 1,
             });
+            let published_seq = if let Some(enabled) = capture_enabled {
+                let selected = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select {
+                    dst: selected,
+                    cond: enabled,
+                    true_val: next_seq,
+                    false_val: seq_v,
+                });
+                selected
+            } else {
+                next_seq
+            };
             // Advance the global write sequence after the slot sequence is visible.
             block.push(MInst::ReleaseStorePtr {
                 ptr: event_ptr,
                 offset: 0,
-                src: next_seq,
+                src: published_seq,
                 size: OpSize::S64,
             });
         }

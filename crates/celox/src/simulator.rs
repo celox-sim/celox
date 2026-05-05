@@ -594,6 +594,18 @@ impl<B: SimBackend> Simulator<B> {
             .zip(&self.comb_observer_snapshots)
             .map(|(now, prev)| now != prev)
             .collect();
+        let mut active_sites = vec![false; self.program.runtime_event_sites.len()];
+        for (observer, is_active) in self
+            .program
+            .comb_observers
+            .iter()
+            .zip(active.iter().copied())
+        {
+            if is_active {
+                active_sites[observer.site_id as usize] = true;
+            }
+        }
+        self.backend.set_comb_capture_event_enabled(&active_sites);
         if let Some(buffer) = self.backend.comb_capture_event_buffer() {
             buffer.reset();
             self.comb_capture_event_read_seq = 0;

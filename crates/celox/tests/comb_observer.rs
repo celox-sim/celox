@@ -109,6 +109,57 @@ module Top (
     assert_eq!(sim.drain_runtime_events(), vec![]);
 }
 
+fn test_comb_display_ff_triggered_comb_only_captures_active_sites(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<8>,
+    a: input logic<8>,
+    y: output logic<8>,
+    z: output logic<8>,
+) {
+    var q: logic<8>;
+
+    always_ff {
+        q = d;
+    }
+
+    always_comb {
+        y = q;
+        $display("q=%0d", q);
+    }
+
+    always_comb {
+        z = a;
+        for i in 0..1100 {
+            $display("inactive=%0d", a);
+        }
+    }
+}
+"#, "Top");
+
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let y = sim.signal("y");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(d, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get_as::<u8>(y), 7);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "q=7".to_string(),
+        }],
+    );
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
 fn test_comb_display_keeps_static_unrolled_execution_count(sim) {
     @omit_veryl;
     @ignore_on(wasm);
