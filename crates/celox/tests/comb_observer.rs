@@ -313,6 +313,56 @@ module Top (
     );
 }
 
+fn test_comb_display_retriggers_when_downstream_comb_changes_second_dependency(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    src: input logic<8>,
+    out_a: output logic<8>,
+    out_b: output logic<8>,
+) {
+    var a: logic<8>;
+    var b: logic<8>;
+
+    always_comb {
+        a = src;
+    }
+
+    always_comb {
+        b = a;
+    }
+
+    always_comb {
+        out_a = a;
+        out_b = b;
+        $display("a=%0d b=%0d", a, b);
+    }
+}
+"#, "Top");
+
+    let src = sim.signal("src");
+    let out_a = sim.signal("out_a");
+    let out_b = sim.signal("out_b");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(src, 5u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out_a), 5);
+    assert_eq!(sim.get_as::<u8>(out_b), 5);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "a=5 b=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "a=5 b=5".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_comb_display_after_ff_runtime_event_preserves_drain_order(sim) {
     @omit_veryl;
     @ignore_on(wasm);

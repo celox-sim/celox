@@ -203,6 +203,13 @@ impl Program {
                 .collect();
             self.address_aliases
                 .retain(|alias_addr, _| !observed_written.contains(alias_addr));
+            self.address_aliases.retain(|alias_addr, canonical_addr| {
+                !comb_capture_enable_needs_unaliased_old_value(
+                    &self.eval_comb,
+                    *alias_addr,
+                    *canonical_addr,
+                )
+            });
         }
         let layout = crate::backend::MemoryLayout::build(self, four_state);
 
@@ -383,6 +390,46 @@ impl Program {
         addrs
     }
 }
+
+fn comb_capture_enable_needs_unaliased_old_value(
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    alias_addr: AbsoluteAddr,
+    canonical_addr: AbsoluteAddr,
+) -> bool {
+    for eu in units {
+        for block in eu.blocks.values() {
+            let mut canonical_written = false;
+            let mut last_store = None;
+            for inst in &block.instructions {
+                match inst {
+                    SIRInstruction::Store(addr, _, _, _, _, comb_capture_sites) => {
+                        let abs = addr.absolute_addr();
+                        if abs == canonical_addr {
+                            canonical_written = true;
+                        }
+                        if abs == alias_addr && !comb_capture_sites.is_empty() && !canonical_written
+                        {
+                            return true;
+                        }
+                        last_store = Some(abs);
+                    }
+                    SIRInstruction::CombCaptureEnableIfChanged { sites, .. } => {
+                        if !sites.is_empty() && last_store == Some(alias_addr) && !canonical_written
+                        {
+                            return true;
+                        }
+                        last_store = None;
+                    }
+                    _ => {
+                        last_store = None;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
 pub struct BitAccess {
     pub lsb: usize,
@@ -856,10 +903,12 @@ fn renumber_sir_inst<A: Clone>(
             site_id,
             args,
             fatal_error_code,
+            consume_enabled,
         } => SIRInstruction::CombCaptureEvent {
             site_id: *site_id,
             args: args.iter().map(|a| r(*a)).collect(),
             fatal_error_code: *fatal_error_code,
+            consume_enabled: *consume_enabled,
         },
         SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
             SIRInstruction::CombCaptureEnableIfChanged {
@@ -1183,6 +1232,7 @@ pub enum SIRInstruction<Addr> {
         site_id: u32,
         args: Vec<RegisterId>,
         fatal_error_code: Option<i64>,
+        consume_enabled: bool,
     },
     CombCaptureEnableIfChanged {
         old: RegisterId,
@@ -1269,6 +1319,7 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                 site_id,
                 args,
                 fatal_error_code,
+                consume_enabled,
             } => {
                 write!(f, "CombCaptureEvent(site={}, args=[", site_id)?;
                 for (i, arg) in args.iter().enumerate() {
@@ -1279,6 +1330,8 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                 }
                 if let Some(code) = fatal_error_code {
                     write!(f, "], fatal_error={code})")
+                } else if *consume_enabled {
+                    write!(f, "], consume_enabled=true)")
                 } else {
                     write!(f, "])")
                 }
@@ -1322,10 +1375,12 @@ impl<A> SIRInstruction<A> {
                 site_id,
                 args,
                 fatal_error_code,
+                consume_enabled,
             } => SIRInstruction::CombCaptureEvent {
                 site_id,
                 args,
                 fatal_error_code,
+                consume_enabled,
             },
             SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
                 SIRInstruction::CombCaptureEnableIfChanged { old, new, sites }
@@ -1372,10 +1427,12 @@ impl<A> SIRInstruction<A> {
                 site_id,
                 args,
                 fatal_error_code,
+                consume_enabled,
             } => SIRInstruction::CombCaptureEvent {
                 site_id: *site_id,
                 args: args.clone(),
                 fatal_error_code: *fatal_error_code,
+                consume_enabled: *consume_enabled,
             },
             SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
                 SIRInstruction::CombCaptureEnableIfChanged {

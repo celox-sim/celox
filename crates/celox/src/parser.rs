@@ -74,7 +74,7 @@ use crate::ir::{
     ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule,
     VariableInfo,
 };
-use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNodeArena};
+use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
 use veryl_analyzer::ir::Declaration;
@@ -1475,6 +1475,7 @@ fn relocate_executation_unit_with_errors<A, B>(
                                     site_id,
                                     args,
                                     fatal_error_code,
+                                    consume_enabled,
                                 } => crate::ir::SIRInstruction::CombCaptureEvent {
                                     site_id: runtime_event_sites
                                         .get(site_id)
@@ -1482,6 +1483,7 @@ fn relocate_executation_unit_with_errors<A, B>(
                                         .unwrap_or(*site_id),
                                     args: args.clone(),
                                     fatal_error_code: *fatal_error_code,
+                                    consume_enabled: *consume_enabled,
                                 },
                                 _ => inst.map_addr(f),
                             })
@@ -1905,11 +1907,13 @@ fn build_comb_observer_capture_paths(
                     args: Vec::new(),
                     loop_runner: Some(loop_runner),
                     fatal_error_code: None,
+                    consume_enabled: true,
                 },
                 sources,
                 local_inputs: observer.local_inputs.clone(),
                 order_before: HashSet::default(),
                 comb_capture_enable_sites: Vec::new(),
+                pre_lower_nodes: Vec::new(),
                 expr: loop_runner,
             });
             previous_capture_path = Some(path_id);
@@ -1934,13 +1938,6 @@ fn build_comb_observer_capture_paths(
         let order_before = observer_order_before(comb_blocks, observer);
         let order_after = observer_order_after(comb_blocks, observer);
 
-        let path_id = LogicPathId(comb_blocks.len());
-        if let Some(prev) = previous_capture_path {
-            comb_blocks[prev.0].order_before.insert(path_id);
-        }
-        for idx in &order_after {
-            comb_blocks[idx.0].order_before.insert(path_id);
-        }
         let expr = observer
             .guard
             .or_else(|| observer.args.first().copied())
@@ -1961,23 +1958,124 @@ fn build_comb_observer_capture_paths(
             crate::ir::RuntimeEventKind::AssertFatal
         )
         .then_some(observer.site_id as i64);
-        comb_blocks.push(LogicPath {
-            target: LogicPathTarget::CombCaptureEvent {
-                site_id: observer.site_id,
-                guard: observer.guard,
-                emit_on_true,
-                args: observer.args.clone(),
-                loop_runner: None,
-                fatal_error_code,
-            },
-            sources,
-            local_inputs: observer.local_inputs.clone(),
-            order_before,
-            comb_capture_enable_sites: Vec::new(),
-            expr,
-        });
-        previous_capture_path = Some(path_id);
+        let trigger_paths = observer_trigger_paths(comb_blocks, observer);
+        if trigger_paths.is_empty() {
+            let path_id = LogicPathId(comb_blocks.len());
+            if let Some(prev) = previous_capture_path {
+                comb_blocks[prev.0].order_before.insert(path_id);
+            }
+            for idx in &order_after {
+                comb_blocks[idx.0].order_before.insert(path_id);
+            }
+            comb_blocks.push(LogicPath {
+                target: LogicPathTarget::CombCaptureEvent {
+                    site_id: observer.site_id,
+                    guard: observer.guard,
+                    emit_on_true,
+                    args: observer.args.clone(),
+                    loop_runner: None,
+                    fatal_error_code,
+                    consume_enabled: false,
+                },
+                sources,
+                local_inputs: observer.local_inputs.clone(),
+                order_before,
+                comb_capture_enable_sites: Vec::new(),
+                pre_lower_nodes: Vec::new(),
+                expr,
+            });
+            previous_capture_path = Some(path_id);
+        } else {
+            for trigger_idx in trigger_paths {
+                let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
+                    continue;
+                };
+                let path_id = LogicPathId(comb_blocks.len());
+                if let Some(prev) = previous_capture_path {
+                    comb_blocks[prev.0].order_before.insert(path_id);
+                }
+                comb_blocks[trigger_idx.0].order_before.insert(path_id);
+                let mut order_before = HashSet::default();
+                for (idx, path) in comb_blocks.iter().enumerate() {
+                    if idx == trigger_idx.0 {
+                        continue;
+                    }
+                    let Some(target) = path.target.var() else {
+                        continue;
+                    };
+                    if observer
+                        .sensitivity
+                        .iter()
+                        .any(|atom| target.id == atom.id && target.access.overlaps(&atom.access))
+                        && path.sources.iter().any(|source| {
+                            source.id == trigger_target.id
+                                && source.access.overlaps(&trigger_target.access)
+                        })
+                    {
+                        order_before.insert(LogicPathId(idx));
+                    }
+                }
+                let pre_lower_nodes = observer_pre_lower_nodes(observer);
+                comb_blocks[trigger_idx.0]
+                    .pre_lower_nodes
+                    .extend(pre_lower_nodes.iter().copied());
+                comb_blocks.push(LogicPath {
+                    target: LogicPathTarget::CombCaptureEvent {
+                        site_id: observer.site_id,
+                        guard: observer.guard,
+                        emit_on_true,
+                        args: observer.args.clone(),
+                        loop_runner: None,
+                        fatal_error_code,
+                        consume_enabled: true,
+                    },
+                    sources: std::iter::once(trigger_target).collect(),
+                    local_inputs: observer.local_inputs.clone(),
+                    order_before,
+                    comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
+                    expr,
+                });
+                previous_capture_path = Some(path_id);
+            }
+        }
     }
+}
+
+fn observer_trigger_paths(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> Vec<LogicPathId> {
+    let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
+    let mut seen_targets = HashSet::default();
+    paths
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, path)| {
+            let target = path.target.var()?;
+            if !seen_targets.insert(target.id) {
+                return None;
+            }
+            let matches = observer
+                .sensitivity
+                .iter()
+                .filter(|atom| !written_inputs.contains(&atom.id))
+                .any(|atom| target.id == atom.id && target.access.overlaps(&atom.access));
+            matches.then_some(LogicPathId(idx))
+        })
+        .collect()
+}
+
+fn observer_pre_lower_nodes(observer: &crate::ir::CombObserver<AbsoluteAddr>) -> Vec<NodeId> {
+    if !observer.local_inputs.is_empty() {
+        return Vec::new();
+    }
+    let mut nodes = Vec::with_capacity(observer.args.len() + usize::from(observer.guard.is_some()));
+    if let Some(guard) = observer.guard {
+        nodes.push(guard);
+    }
+    nodes.extend(observer.args.iter().copied());
+    nodes
 }
 
 fn annotate_comb_capture_enable_sites(

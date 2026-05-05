@@ -162,6 +162,7 @@ pub fn lower_execution_unit(
                 site_id,
                 args,
                 fatal_error_code,
+                consume_enabled,
             } = inst
             {
                 let (event_ptr, enabled) =
@@ -180,6 +181,28 @@ pub fn lower_execution_unit(
 
                 let mut write_block = MBlock::new(write_block_id);
                 lower_runtime_event_write(&mut ctx, &mut write_block, event_ptr, *site_id, args);
+                if *consume_enabled {
+                    let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());
+                    write_block.push(MInst::Load {
+                        dst: enabled_ptr,
+                        base: BaseReg::SimState,
+                        offset:
+                            crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+                                as i32,
+                        size: OpSize::S64,
+                    });
+                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                    write_block.push(MInst::LoadImm {
+                        dst: zero,
+                        value: 0,
+                    });
+                    write_block.push(MInst::StorePtr {
+                        ptr: enabled_ptr,
+                        offset: *site_id as i32,
+                        src: zero,
+                        size: OpSize::S8,
+                    });
+                }
                 if let Some(code) = fatal_error_code {
                     write_block.push(MInst::ReturnError { code: *code });
                 } else {
@@ -838,14 +861,26 @@ fn emit_enable_comb_capture_sites_if_regs_changed(
         let old_chunks = ctx.get_wide_chunks(&old, block);
         let new_chunks = ctx.get_wide_chunks(&new, block);
         let chunk_count = old_chunks.len().max(new_chunks.len());
+        let compare_width = ctx.sir_width(&old).max(ctx.sir_width(&new));
         for idx in 0..chunk_count {
             let old_chunk = ctx.wide_chunk_or_zero(&old_chunks, idx, block);
             let new_chunk = ctx.wide_chunk_or_zero(&new_chunks, idx, block);
+            let chunk_width = compare_width.saturating_sub(idx * 64).min(64);
+            let (old_cmp, new_cmp) = if chunk_width < 64 {
+                let masked_old = ctx.alloc_vreg(SpillDesc::transient());
+                let masked_new = ctx.alloc_vreg(SpillDesc::transient());
+                let mask = mask_for_width(chunk_width);
+                ctx.emit_and_imm(block, masked_old, old_chunk, mask);
+                ctx.emit_and_imm(block, masked_new, new_chunk, mask);
+                (masked_old, masked_new)
+            } else {
+                (old_chunk, new_chunk)
+            };
             let chunk_changed = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::Cmp {
                 dst: chunk_changed,
-                lhs: old_chunk,
-                rhs: new_chunk,
+                lhs: old_cmp,
+                rhs: new_cmp,
                 kind: CmpKind::Ne,
             });
             let next = ctx.alloc_vreg(SpillDesc::transient());
@@ -860,12 +895,23 @@ fn emit_enable_comb_capture_sites_if_regs_changed(
         if ctx.four_state {
             let old_masks = get_wide_mask_chunks(ctx, block, &old, chunk_count);
             let new_masks = get_wide_mask_chunks(ctx, block, &new, chunk_count);
-            for (old_mask, new_mask) in old_masks.into_iter().zip(new_masks) {
+            for (idx, (old_mask, new_mask)) in old_masks.into_iter().zip(new_masks).enumerate() {
+                let chunk_width = compare_width.saturating_sub(idx * 64).min(64);
+                let (old_cmp, new_cmp) = if chunk_width < 64 {
+                    let masked_old = ctx.alloc_vreg(SpillDesc::transient());
+                    let masked_new = ctx.alloc_vreg(SpillDesc::transient());
+                    let mask = mask_for_width(chunk_width);
+                    ctx.emit_and_imm(block, masked_old, old_mask, mask);
+                    ctx.emit_and_imm(block, masked_new, new_mask, mask);
+                    (masked_old, masked_new)
+                } else {
+                    (old_mask, new_mask)
+                };
                 let mask_changed = ctx.alloc_vreg(SpillDesc::transient());
                 block.push(MInst::Cmp {
                     dst: mask_changed,
-                    lhs: old_mask,
-                    rhs: new_mask,
+                    lhs: old_cmp,
+                    rhs: new_cmp,
                     kind: CmpKind::Ne,
                 });
                 let next = ctx.alloc_vreg(SpillDesc::transient());

@@ -180,6 +180,7 @@ impl<'a> ModuleParser<'a> {
                 local_inputs: Vec::new(),
                 order_before: HashSet::default(),
                 comb_capture_enable_sites: Vec::new(),
+                pre_lower_nodes: Vec::new(),
             };
 
             let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
@@ -248,6 +249,7 @@ impl<'a> ModuleParser<'a> {
                     local_inputs: Vec::new(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
                     expr: rhs_part,
                 };
                 output_ports.push((vec![dst.id], path));

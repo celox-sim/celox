@@ -280,6 +280,7 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
             site_id,
             args,
             fatal_error_code,
+            consume_enabled,
         } => {
             let args = args
                 .iter()
@@ -290,6 +291,11 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 format!(
                     "CombCaptureEvent(site={}, args=[{}], fatal_error={})",
                     site_id, args, code
+                )
+            } else if *consume_enabled {
+                format!(
+                    "CombCaptureEvent(site={}, args=[{}], consume_enabled=true)",
+                    site_id, args
                 )
             } else {
                 format!("CombCaptureEvent(site={}, args=[{}])", site_id, args)

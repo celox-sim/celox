@@ -1003,6 +1003,7 @@ pub enum LogicPathTarget<A: Hash + Eq + Clone> {
         args: Vec<NodeId>,
         loop_runner: Option<NodeId>,
         fatal_error_code: Option<i64>,
+        consume_enabled: bool,
     },
 }
 
@@ -1037,6 +1038,7 @@ pub struct LogicPath<A: Hash + Eq + Clone> {
     pub local_inputs: Vec<(A, NodeId)>,
     pub order_before: HashSet<LogicPathId>,
     pub comb_capture_enable_sites: Vec<u32>,
+    pub pre_lower_nodes: Vec<NodeId>,
     pub expr: NodeId,
 }
 
@@ -1071,6 +1073,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                     args,
                     loop_runner,
                     fatal_error_code,
+                    consume_enabled,
                 } => LogicPathTarget::CombCaptureEvent {
                     site_id: *site_id,
                     guard: guard.map(|node| {
@@ -1093,6 +1096,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                             .map_addr(node, arena, target_arena, cache, f)
                     }),
                     fatal_error_code: *fatal_error_code,
+                    consume_enabled: *consume_enabled,
                 },
             },
             sources: self
@@ -1114,6 +1118,15 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                 .collect(),
             order_before: self.order_before.clone(),
             comb_capture_enable_sites: self.comb_capture_enable_sites.clone(),
+            pre_lower_nodes: self
+                .pre_lower_nodes
+                .iter()
+                .map(|node| {
+                    arena
+                        .get(*node)
+                        .map_addr(*node, arena, target_arena, cache, f)
+                })
+                .collect(),
             expr: arena
                 .get(self.expr)
                 .map_addr(self.expr, arena, target_arena, cache, f),
@@ -1189,6 +1202,7 @@ pub fn parse_comb(
                     local_inputs: Vec::new(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
                     expr: final_expr,
                 });
             }

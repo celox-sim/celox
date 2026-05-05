@@ -392,12 +392,15 @@ impl SIRTranslator {
                     state.mem_ptr,
                     crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
                 );
-                self.translate_runtime_event_inst(state, event_ptr, None, *site_id, args, None);
+                self.translate_runtime_event_inst(
+                    state, event_ptr, None, *site_id, args, None, None,
+                );
             }
             SIRInstruction::CombCaptureEvent {
                 site_id,
                 args,
                 fatal_error_code,
+                consume_enabled,
             } => {
                 let capture_ptr = state.builder.ins().load(
                     types::I64,
@@ -427,6 +430,7 @@ impl SIRTranslator {
                     *site_id,
                     args,
                     *fatal_error_code,
+                    (*consume_enabled).then_some((enabled_ptr, *site_id)),
                 );
             }
             SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
@@ -443,6 +447,7 @@ impl SIRTranslator {
         site_id: u32,
         args: &[RegisterId],
         fatal_error_code: Option<i64>,
+        consume_enabled: Option<(Value, u32)>,
     ) {
         use crate::backend::memory_layout::{
             RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
@@ -572,6 +577,13 @@ impl SIRTranslator {
             write_seq_addr,
             incremented,
         );
+        if let Some((enabled_ptr, site_id)) = consume_enabled {
+            let zero = state.builder.ins().iconst(types::I8, 0);
+            state
+                .builder
+                .ins()
+                .store(MemFlags::new(), zero, enabled_ptr, site_id as i32);
+        }
         if let Some((write_block, done_block)) = guarded_blocks {
             if let Some(code) = fatal_error_code {
                 let error = state.builder.ins().iconst(types::I64, code);

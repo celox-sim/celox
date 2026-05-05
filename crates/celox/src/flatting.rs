@@ -180,6 +180,7 @@ fn atomize_logic_paths(
                     local_inputs: path.local_inputs.clone(),
                     order_before: path.order_before.clone(),
                     comb_capture_enable_sites: path.comb_capture_enable_sites.clone(),
+                    pre_lower_nodes: path.pre_lower_nodes.clone(),
                     expr: merged_expr,
                 });
             }

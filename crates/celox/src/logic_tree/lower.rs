@@ -1353,6 +1353,7 @@ impl SLTToSIRLowerer {
                     site_id: effect.site_id,
                     args,
                     fatal_error_code: effect.fatal_error_code,
+                    consume_enabled: false,
                 });
             };
             if let Some(guard) = effect.guard {

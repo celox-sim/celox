@@ -335,6 +335,19 @@ fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     lowerer.lower_with_inputs(builder, node, arena, lower_cache, env_inputs)
 }
 
+fn pre_lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    path: &LogicPath<Addr>,
+    node: NodeId,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+) {
+    if path.local_inputs.is_empty() {
+        lowerer.lower(builder, node, arena, lower_cache);
+    }
+}
+
 fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     lowerer: &crate::logic_tree::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
@@ -344,6 +357,9 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
 ) {
     match &path.target {
         LogicPathTarget::Var(target) => {
+            for node in &path.pre_lower_nodes {
+                pre_lower_logic_path_node(lowerer, builder, path, *node, arena, lower_cache);
+            }
             let result_reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
             let width = 1 + target.access.msb - target.access.lsb;
             let old_reg = if path.comb_capture_enable_sites.is_empty() {
@@ -381,6 +397,7 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
             args,
             loop_runner,
             fatal_error_code,
+            consume_enabled,
         } => {
             if let Some(loop_runner) = loop_runner {
                 lower_logic_path_node(lowerer, builder, path, *loop_runner, arena, lower_cache);
@@ -398,6 +415,7 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
                     site_id: *site_id,
                     args: regs,
                     fatal_error_code: *fatal_error_code,
+                    consume_enabled: *consume_enabled,
                 });
             };
             if let Some(guard) = guard {
@@ -560,6 +578,17 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 for &idx in &sorted_by_lsb {
                     let path = &input[idx];
                     collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
+                    for node in &path.pre_lower_nodes {
+                        collect_node_input_deps(*node, arena, dep_memo, inverse_dep_memo);
+                        pre_lower_logic_path_node(
+                            lowerer,
+                            builder,
+                            path,
+                            *node,
+                            arena,
+                            lower_cache,
+                        );
+                    }
                     let reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
                     let target = path.target.var().unwrap();
                     let w = 1 + target.access.msb - target.access.lsb;
@@ -601,6 +630,9 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     for &idx in pending.iter() {
         let path = &input[idx];
         collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
+        for node in &path.pre_lower_nodes {
+            collect_node_input_deps(*node, arena, dep_memo, inverse_dep_memo);
+        }
         emit_logic_path_store(lowerer, builder, path, arena, lower_cache);
         invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
     }
