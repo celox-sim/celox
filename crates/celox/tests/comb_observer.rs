@@ -633,21 +633,18 @@ module Top (
     b: input logic,
     out: output logic<2>,
 ) {
-    var p: logic;
-    var q: logic;
-    var r: logic;
-    var s: logic;
+    var x: logic<4>;
 
     always_comb {
-        p = a;
-        $display("first=%0d", q);
-        r = b;
-        $display("second=%0d", s);
-        out = {s, q};
+        x[0] = a;
+        $display("first=%0d", x[1]);
+        x[2] = b;
+        $display("second=%0d", x[3]);
+        out = {x[3], x[1]};
     }
 
-    assign q = p;
-    assign s = r;
+    assign x[1] = x[0];
+    assign x[3] = x[2];
 }
 "#, "Top");
 

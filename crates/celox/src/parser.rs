@@ -2106,6 +2106,7 @@ fn observer_trigger_paths(
     observer: &crate::ir::CombObserver<AbsoluteAddr>,
 ) -> Vec<LogicPathId> {
     let mut seen_targets = HashSet::default();
+    let affected = observer_affected_by_preceding_writes(paths, observer);
     paths
         .iter()
         .enumerate()
@@ -2114,11 +2115,15 @@ fn observer_trigger_paths(
             if observer_written_input_overlaps(observer, target) {
                 return None;
             }
-            let matches = observer
-                .sensitivity
+            let matches_observer_operand = observer
+                .position_inputs
                 .iter()
+                .chain(observer.observed_inputs.iter())
                 .any(|atom| target.id == atom.id && target.access.overlaps(&atom.access));
-            if !matches || !seen_targets.insert((target.id, target.access.lsb, target.access.msb)) {
+            if !matches_observer_operand
+                || !atom_overlaps_any(target, &affected)
+                || !seen_targets.insert((target.id, target.access.lsb, target.access.msb))
+            {
                 return None;
             }
             Some(LogicPathId(idx))

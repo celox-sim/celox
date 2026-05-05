@@ -1409,6 +1409,23 @@ fn collect_system_function_effect(
                 if !observed_ids.contains(id) {
                     return None;
                 }
+                if guard.is_none() {
+                    let overlaps_observed_input =
+                        range_store.ranges.iter().any(|(&lsb, (value, width, _))| {
+                            value.is_some()
+                                && observed_inputs.iter().chain(position_inputs.iter()).any(
+                                    |atom| {
+                                        atom.id == *id
+                                            && atom
+                                                .access
+                                                .overlaps(&BitAccess::new(lsb, lsb + width - 1))
+                                    },
+                                )
+                        });
+                    if !overlaps_observed_input {
+                        return None;
+                    }
+                }
                 let width = module
                     .variables
                     .get(id)
