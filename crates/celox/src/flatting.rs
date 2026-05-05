@@ -178,7 +178,7 @@ fn atomize_logic_paths(
                     target: LogicPathTarget::Var(target),
                     sources: filtered_sources,
                     local_inputs: path.local_inputs.clone(),
-                    schedule_before: path.schedule_before.clone(),
+                    order_before: path.order_before.clone(),
                     expr: merged_expr,
                 });
             }
@@ -393,6 +393,16 @@ fn convert_comb_observer<
             .collect(),
         observed_inputs: observer
             .observed_inputs
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        position_inputs: observer
+            .position_inputs
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        written_before: observer
+            .written_before
             .iter()
             .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
             .collect(),

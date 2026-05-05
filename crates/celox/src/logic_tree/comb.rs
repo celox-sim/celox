@@ -9,8 +9,8 @@ use crate::parser::{LoweringPhase, resolve_total_width};
 use crate::{
     HashMap, HashSet,
     ir::{
-        BinaryOp, BitAccess, CombObserver, ObserverStorageId, RuntimeEventKind, RuntimeEventSite,
-        UnaryOp, VarAtomBase,
+        BinaryOp, BitAccess, CombObserver, LogicPathId, ObserverStorageId, RuntimeEventKind,
+        RuntimeEventSite, UnaryOp, VarAtomBase,
     },
     parser::bitaccess::{
         celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
@@ -976,7 +976,7 @@ pub struct LogicPath<A: Hash + Eq + Clone> {
     pub target: LogicPathTarget<A>,
     pub sources: HashSet<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, NodeId)>,
-    pub schedule_before: HashSet<A>,
+    pub order_before: HashSet<LogicPathId>,
     pub expr: NodeId,
 }
 
@@ -1028,7 +1028,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                     )
                 })
                 .collect(),
-            schedule_before: self.schedule_before.iter().map(f).collect(),
+            order_before: self.order_before.clone(),
             expr: arena
                 .get(self.expr)
                 .map_addr(self.expr, arena, target_arena, cache, f),
@@ -1102,7 +1102,7 @@ pub fn parse_comb(
                     target: LogicPathTarget::Var(VarAtomBase::new(*id, lsb, msb)),
                     sources: sources.clone(),
                     local_inputs: Vec::new(),
-                    schedule_before: HashSet::default(),
+                    order_before: HashSet::default(),
                     expr: final_expr,
                 });
             }
@@ -1219,21 +1219,25 @@ fn collect_system_function_effect(
     let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
     let mut observer_args = Vec::new();
     let mut observed_inputs = HashSet::default();
+    let mut position_inputs = HashSet::default();
     for arg in value_args {
         let ((node, sources), _) = eval_expression(module, store, &arg.0, arena, None)?;
         observed_inputs.extend(sources.iter().copied());
         collector.sensitivity.extend(sources);
+        collect_expression_position_inputs(module, &arg.0, &mut position_inputs)?;
         observer_args.push(node);
     }
     let guard = if let Some(cond) = cond {
         let ((cond_node, cond_sources), _) = eval_expression(module, store, cond, arena, None)?;
         observed_inputs.extend(cond_sources.iter().copied());
         collector.sensitivity.extend(cond_sources);
+        collect_expression_position_inputs(module, cond, &mut position_inputs)?;
         Some(cond_node)
     } else {
         None
     };
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
+    let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
     collector.observers.push(CombObserver {
         site_id,
         guard,
@@ -1264,9 +1268,105 @@ fn collect_system_function_effect(
             })
             .collect(),
         observed_inputs: observed_inputs.into_iter().collect(),
+        position_inputs: position_inputs.into_iter().collect(),
+        written_before: store
+            .iter()
+            .filter(|(id, _)| position_ids.contains(id))
+            .flat_map(|(id, range_store)| {
+                range_store
+                    .ranges
+                    .iter()
+                    .filter_map(move |(&lsb, (value, width, _))| {
+                        value
+                            .is_some()
+                            .then_some(VarAtomBase::new(*id, lsb, lsb + width - 1))
+                    })
+            })
+            .collect(),
         written_inputs: Vec::new(),
     });
     Ok(())
+}
+
+fn collect_expression_position_inputs(
+    module: &Module,
+    expr: &Expression,
+    out: &mut HashSet<VarAtomBase<VarId>>,
+) -> Result<(), ParserError> {
+    match expr {
+        Expression::Term(factor) => collect_factor_position_inputs(module, factor, out),
+        Expression::Binary(lhs, _, rhs, _) => {
+            collect_expression_position_inputs(module, lhs, out)?;
+            collect_expression_position_inputs(module, rhs, out)
+        }
+        Expression::Unary(_, inner, _) => collect_expression_position_inputs(module, inner, out),
+        Expression::Ternary(cond, then_expr, else_expr, _) => {
+            collect_expression_position_inputs(module, cond, out)?;
+            collect_expression_position_inputs(module, then_expr, out)?;
+            collect_expression_position_inputs(module, else_expr, out)
+        }
+        Expression::Concatenation(parts, _) => {
+            for (part, repeat) in parts {
+                collect_expression_position_inputs(module, part, out)?;
+                if let Some(repeat) = repeat {
+                    collect_expression_position_inputs(module, repeat, out)?;
+                }
+            }
+            Ok(())
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(expr, repeat) => {
+                        collect_expression_position_inputs(module, expr, out)?;
+                        if let Some(repeat) = repeat {
+                            collect_expression_position_inputs(module, repeat, out)?;
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(expr) => {
+                        collect_expression_position_inputs(module, expr, out)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, field_expr) in fields {
+                collect_expression_position_inputs(module, field_expr, out)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn collect_factor_position_inputs(
+    module: &Module,
+    factor: &Factor,
+    out: &mut HashSet<VarAtomBase<VarId>>,
+) -> Result<(), ParserError> {
+    match factor {
+        Factor::Variable(var_id, index, select, comptime) => {
+            if !comptime.is_const {
+                let access = eval_var_select(module, *var_id, index, select)?;
+                out.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
+            }
+            for expr in index.0.iter().chain(select.0.iter()) {
+                collect_expression_position_inputs(module, expr, out)?;
+            }
+            if let Some((_, expr)) = &select.1 {
+                collect_expression_position_inputs(module, expr, out)?;
+            }
+            Ok(())
+        }
+        Factor::Value(_) => Ok(()),
+        Factor::FunctionCall(call) => {
+            for arg in call.inputs.values() {
+                collect_expression_position_inputs(module, arg, out)?;
+            }
+            Ok(())
+        }
+        Factor::SystemFunctionCall(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+    }
 }
 
 fn collect_comb_effects_statements(

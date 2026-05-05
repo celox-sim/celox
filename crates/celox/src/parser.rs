@@ -38,8 +38,9 @@ pub mod module;
 pub mod registry;
 mod scheduler;
 use crate::ir::{
-    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, ModuleId, Program,
-    RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule, VariableInfo,
+    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, LogicPathId,
+    ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule,
+    VariableInfo,
 };
 use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNodeArena};
 pub use scheduler::SchedulerError;
@@ -710,9 +711,8 @@ pub(crate) fn flatten(
         })
         .collect();
 
-    let (comb_observer_storages, observer_capture_paths) =
-        build_comb_observer_storage_paths(&mut comb_observers, &global_arena);
-    comb_blocks.extend(observer_capture_paths);
+    let comb_observer_storages =
+        build_comb_observer_storage_paths(&mut comb_blocks, &mut comb_observers, &global_arena);
 
     let sched_start = flatten_timing.then(crate::timing::now);
     let schedule = scheduler::sort(
@@ -1920,26 +1920,23 @@ fn build_comb_observer_units(
 }
 
 fn build_comb_observer_storage_paths(
+    comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
     observers: &mut [crate::ir::CombObserver<AbsoluteAddr>],
     arena: &SLTNodeArena<AbsoluteAddr>,
-) -> (
-    Vec<crate::ir::ObserverStorage>,
-    Vec<LogicPath<AbsoluteAddr>>,
-) {
+) -> Vec<crate::ir::ObserverStorage> {
     if observers.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     }
 
     let mut storages = Vec::new();
-    let mut paths = Vec::new();
 
     for observer in observers {
-        let schedule_before: HashSet<_> = observer.written_inputs.iter().copied().collect();
+        let written_inputs: HashSet<_> = observer.written_inputs.iter().copied().collect();
         let mut sources: HashSet<_> = observer
             .observed_inputs
             .iter()
             .copied()
-            .filter(|atom| !schedule_before.contains(&atom.id))
+            .filter(|atom| !written_inputs.contains(&atom.id))
             .collect();
         for (_, node) in &observer.local_inputs {
             let mut local_sources = HashSet::default();
@@ -1947,20 +1944,26 @@ fn build_comb_observer_storage_paths(
             sources.extend(
                 local_sources
                     .into_iter()
-                    .filter(|atom| !schedule_before.contains(&atom.id)),
+                    .filter(|atom| !written_inputs.contains(&atom.id)),
             );
         }
+        let order_before = observer_order_before(comb_blocks, observer);
+        let order_after = observer_order_after(comb_blocks, observer);
 
         if let Some(guard) = observer.guard {
             let width = crate::logic_tree::get_width(guard, arena).max(1);
             let storage = crate::ir::ObserverStorageId(storages.len());
             storages.push(crate::ir::ObserverStorage { id: storage, width });
             observer.guard_storage = Some(storage);
-            paths.push(LogicPath {
+            let path_id = LogicPathId(comb_blocks.len());
+            for idx in &order_after {
+                comb_blocks[idx.0].order_before.insert(path_id);
+            }
+            comb_blocks.push(LogicPath {
                 target: LogicPathTarget::ObserverStorage { storage, width },
                 sources: sources.clone(),
                 local_inputs: observer.local_inputs.clone(),
-                schedule_before: schedule_before.clone(),
+                order_before: order_before.clone(),
                 expr: guard,
             });
         }
@@ -1971,17 +1974,70 @@ fn build_comb_observer_storage_paths(
             let storage = crate::ir::ObserverStorageId(storages.len());
             storages.push(crate::ir::ObserverStorage { id: storage, width });
             observer.arg_storages.push(storage);
-            paths.push(LogicPath {
+            let path_id = LogicPathId(comb_blocks.len());
+            for idx in &order_after {
+                comb_blocks[idx.0].order_before.insert(path_id);
+            }
+            comb_blocks.push(LogicPath {
                 target: LogicPathTarget::ObserverStorage { storage, width },
                 sources: sources.clone(),
                 local_inputs: observer.local_inputs.clone(),
-                schedule_before: schedule_before.clone(),
+                order_before: order_before.clone(),
                 expr: *arg,
             });
         }
     }
 
-    (storages, paths)
+    storages
+}
+
+fn observer_order_after(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> HashSet<LogicPathId> {
+    let mut result = HashSet::default();
+    for written in &observer.written_before {
+        for (idx, path) in paths.iter().enumerate() {
+            let Some(target) = path.target.var() else {
+                continue;
+            };
+            if target.id == written.id && target.access.overlaps(&written.access) {
+                result.insert(LogicPathId(idx));
+            }
+        }
+    }
+    result
+}
+
+fn observer_order_before(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> HashSet<LogicPathId> {
+    let position_ids: HashSet<_> = observer
+        .position_inputs
+        .iter()
+        .map(|atom| atom.id)
+        .collect();
+    if position_ids.is_empty() {
+        return HashSet::default();
+    }
+    let written_before = observer.written_before.iter().collect::<Vec<_>>();
+    let mut result = HashSet::default();
+    for (idx, path) in paths.iter().enumerate() {
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        if !position_ids.contains(&target.id) {
+            continue;
+        }
+        let already_written = written_before
+            .iter()
+            .any(|written| target.id == written.id && target.access.overlaps(&written.access));
+        if !already_written {
+            result.insert(LogicPathId(idx));
+        }
+    }
+    result
 }
 
 fn load_observer_args(

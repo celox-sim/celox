@@ -134,6 +134,9 @@ impl fmt::Display for ObserverStorageId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LogicPathId(pub usize);
+
 #[derive(Clone, Debug)]
 pub struct ObserverStorage {
     pub id: ObserverStorageId,
@@ -150,6 +153,8 @@ pub struct CombObserver<A = AbsoluteAddr> {
     pub sensitivity: Vec<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, crate::logic_tree::NodeId)>,
     pub observed_inputs: Vec<VarAtomBase<A>>,
+    pub position_inputs: Vec<VarAtomBase<A>>,
+    pub written_before: Vec<VarAtomBase<A>>,
     pub written_inputs: Vec<A>,
 }
 

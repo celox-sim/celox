@@ -614,11 +614,9 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 }
             }
         }
-        for target_id in &path.schedule_before {
-            if let Some(candidates) = atoms_map.get(target_id) {
-                for (_, v) in candidates {
-                    adj[u].push(*v);
-                }
+        for target in &path.order_before {
+            if target.0 < n {
+                adj[u].push(target.0);
             }
         }
     }

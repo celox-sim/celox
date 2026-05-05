@@ -179,7 +179,7 @@ impl<'a> ModuleParser<'a> {
                 expr: sliced,
                 sources: collect_glue_sources(sliced, &glue_arena),
                 local_inputs: Vec::new(),
-                schedule_before: HashSet::default(),
+                order_before: HashSet::default(),
             };
 
             let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
@@ -246,7 +246,7 @@ impl<'a> ModuleParser<'a> {
                     )),
                     sources,
                     local_inputs: Vec::new(),
-                    schedule_before: HashSet::default(),
+                    order_before: HashSet::default(),
                     expr: rhs_part,
                 };
                 output_ports.push((vec![dst.id], path));
