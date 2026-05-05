@@ -426,6 +426,17 @@ impl SIRTranslator {
             RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
         };
 
+        let guarded_blocks = enabled.map(|enabled| {
+            let write_block = state.builder.create_block();
+            let done_block = state.builder.create_block();
+            state
+                .builder
+                .ins()
+                .brif(enabled, write_block, &[], done_block, &[]);
+            state.builder.switch_to_block(write_block);
+            (write_block, done_block)
+        });
+
         let write_seq_addr = event_ptr;
         let seq = state
             .builder
@@ -529,17 +540,20 @@ impl SIRTranslator {
             seq,
         );
         let incremented = state.builder.ins().iadd_imm(seq, 1);
-        let next = enabled
-            .map(|enabled| state.builder.ins().select(enabled, incremented, seq))
-            .unwrap_or(incremented);
         // Advance the global write sequence after the slot sequence is visible.
         state.builder.ins().atomic_rmw(
             types::I64,
             MemFlags::new(),
             cranelift::codegen::ir::AtomicRmwOp::Xchg,
             write_seq_addr,
-            next,
+            incremented,
         );
+        if let Some((write_block, done_block)) = guarded_blocks {
+            state.builder.ins().jump(done_block, &[]);
+            state.builder.switch_to_block(done_block);
+            state.builder.seal_block(write_block);
+            state.builder.seal_block(done_block);
+        }
     }
 
     /// Slice: extract bits [bit_offset, bit_offset+width) from src register.

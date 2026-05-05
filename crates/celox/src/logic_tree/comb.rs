@@ -1295,6 +1295,7 @@ fn collect_system_function_effect(
     let mut observed_inputs = HashSet::default();
     let mut position_inputs = HashSet::default();
     for arg in value_args {
+        collect_expression_effects(module, store, &arg.0, arena, collector)?;
         let ((node, sources), _) = eval_expression(module, store, &arg.0, arena, None)?;
         observed_inputs.extend(sources.iter().copied());
         collector.sensitivity.extend(sources);
@@ -1302,6 +1303,7 @@ fn collect_system_function_effect(
         observer_args.push(node);
     }
     let explicit_guard = if let Some(cond) = cond {
+        collect_expression_effects(module, store, cond, arena, collector)?;
         let ((cond_node, cond_sources), _) = eval_expression(module, store, cond, arena, None)?;
         observed_inputs.extend(cond_sources.iter().copied());
         collector.sensitivity.extend(cond_sources);
@@ -1386,6 +1388,449 @@ fn collect_system_function_effect(
     if let (Some(loop_effects), Some(loop_effect)) = (&mut collector.loop_effects, loop_effect) {
         loop_effects.push(loop_effect);
     }
+    Ok(())
+}
+
+fn with_collector_guard<T, F>(
+    collector: &mut CombEffectCollector,
+    arena: &mut SLTNodeArena<VarId>,
+    guard: NodeId,
+    guard_sources: HashSet<VarAtomBase<VarId>>,
+    f: F,
+) -> Result<T, ParserError>
+where
+    F: FnOnce(&mut CombEffectCollector, &mut SLTNodeArena<VarId>) -> Result<T, ParserError>,
+{
+    let saved_guard = collector.active_guard;
+    let saved_guard_sources = collector.active_guard_sources.clone();
+    let active_guard = if let Some(active) = saved_guard {
+        arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, guard))
+    } else {
+        guard
+    };
+    let mut active_guard_sources = saved_guard_sources.clone();
+    active_guard_sources.extend(guard_sources);
+    collector.active_guard = Some(active_guard);
+    collector.active_guard_sources = active_guard_sources;
+    let result = f(collector, arena);
+    collector.active_guard = saved_guard;
+    collector.active_guard_sources = saved_guard_sources;
+    result
+}
+
+fn collect_function_call_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    call: &veryl_analyzer::ir::FunctionCall,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    let Some(function) = module.functions.get(&call.id) else {
+        return Err(ParserError::unsupported(
+            62,
+            LoweringPhase::CombLowering,
+            "function call",
+            format!("unknown function id: {:?}", call.id),
+            Some(&call.comptime.token),
+        ));
+    };
+
+    let Some(function_body) = (if let Some(index) = &call.index {
+        function.get_function(index)
+    } else {
+        function.get_function(&[])
+    }) else {
+        return Err(ParserError::unsupported(
+            62,
+            LoweringPhase::CombLowering,
+            "function call specialization",
+            format!("{call}"),
+            Some(&call.comptime.token),
+        ));
+    };
+
+    let mut local_store = store.clone();
+    for (arg_path, arg_id) in &function_body.arg_map {
+        let Some(arg_expr) = call.inputs.get(arg_path) else {
+            continue;
+        };
+        collect_expression_effects(module, store, arg_expr, arena, collector)?;
+
+        let formal = &module.variables[arg_id];
+        let arg_width = resolve_total_width(module, formal)?;
+        let ((arg_node, arg_sources), _) =
+            eval_expression(module, store, arg_expr, arena, Some(arg_width))?;
+        local_store.insert(
+            *arg_id,
+            RangeStore::new(Some((arg_node, arg_sources)), arg_width),
+        );
+    }
+
+    if !statements_contain_runtime_effect(module, &function_body.statements) {
+        return Ok(());
+    }
+
+    if let Some(ret_id) = function_body.ret {
+        collect_function_body_effects(
+            module,
+            local_store,
+            &function_body.statements,
+            ret_id,
+            arena,
+            collector,
+        )?;
+    } else {
+        let _ = collect_comb_effects_statements(
+            module,
+            local_store,
+            &function_body.statements,
+            arena,
+            collector,
+        )?;
+    }
+    Ok(())
+}
+
+fn statements_contain_runtime_effect(module: &Module, statements: &[Statement]) -> bool {
+    statements
+        .iter()
+        .any(|stmt| statement_contains_runtime_effect(module, stmt))
+}
+
+fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool {
+    match stmt {
+        Statement::SystemFunctionCall(call) => matches!(
+            call.kind,
+            SystemFunctionKind::Display(_)
+                | SystemFunctionKind::Write(_)
+                | SystemFunctionKind::Assert { .. }
+        ),
+        Statement::If(if_stmt) => {
+            statements_contain_runtime_effect(module, &if_stmt.true_side)
+                || statements_contain_runtime_effect(module, &if_stmt.false_side)
+        }
+        Statement::For(for_stmt) => statements_contain_runtime_effect(module, &for_stmt.body),
+        Statement::FunctionCall(call) => module
+            .functions
+            .get(&call.id)
+            .and_then(|function| {
+                if let Some(index) = &call.index {
+                    function.get_function(index)
+                } else {
+                    function.get_function(&[])
+                }
+            })
+            .is_some_and(|body| statements_contain_runtime_effect(module, &body.statements)),
+        Statement::Assign(_)
+        | Statement::IfReset(_)
+        | Statement::TbMethodCall(_)
+        | Statement::Break
+        | Statement::Unsupported(_)
+        | Statement::Null => false,
+    }
+}
+
+fn collect_expression_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    match expr {
+        Expression::Term(factor) => collect_factor_effects(module, store, factor, arena, collector),
+        Expression::Unary(_, inner, _) => {
+            collect_expression_effects(module, store, inner, arena, collector)
+        }
+        Expression::Binary(lhs, _, rhs, _) => {
+            collect_expression_effects(module, store, lhs, arena, collector)?;
+            collect_expression_effects(module, store, rhs, arena, collector)
+        }
+        Expression::Ternary(cond, then_expr, else_expr, _) => {
+            collect_expression_effects(module, store, cond, arena, collector)?;
+            collect_expression_effects(module, store, then_expr, arena, collector)?;
+            collect_expression_effects(module, store, else_expr, arena, collector)
+        }
+        Expression::Concatenation(items, _) => {
+            for (item_expr, repeat_expr) in items {
+                collect_expression_effects(module, store, item_expr, arena, collector)?;
+                if let Some(repeat_expr) = repeat_expr {
+                    collect_expression_effects(module, store, repeat_expr, arena, collector)?;
+                }
+            }
+            Ok(())
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(item_expr, repeat_expr) => {
+                        collect_expression_effects(module, store, item_expr, arena, collector)?;
+                        if let Some(repeat_expr) = repeat_expr {
+                            collect_expression_effects(
+                                module,
+                                store,
+                                repeat_expr,
+                                arena,
+                                collector,
+                            )?;
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(default_expr) => {
+                        collect_expression_effects(module, store, default_expr, arena, collector)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, field_expr) in fields {
+                collect_expression_effects(module, store, field_expr, arena, collector)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn collect_factor_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    factor: &Factor,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    match factor {
+        Factor::Variable(_, index, select, _) => {
+            for expr in index.0.iter().chain(select.0.iter()) {
+                collect_expression_effects(module, store, expr, arena, collector)?;
+            }
+            if let Some((_, expr)) = &select.1 {
+                collect_expression_effects(module, store, expr, arena, collector)?;
+            }
+            Ok(())
+        }
+        Factor::FunctionCall(call) => {
+            collect_function_call_effects(module, store, call, arena, collector)
+        }
+        Factor::SystemFunctionCall(call) => match &call.kind {
+            SystemFunctionKind::Bits(input)
+            | SystemFunctionKind::Size(input)
+            | SystemFunctionKind::Clog2(input)
+            | SystemFunctionKind::Onehot(input)
+            | SystemFunctionKind::Signed(input)
+            | SystemFunctionKind::Unsigned(input) => {
+                collect_expression_effects(module, store, &input.0, arena, collector)
+            }
+            _ => Ok(()),
+        },
+        Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+    }
+}
+
+fn collect_function_body_effects(
+    module: &Module,
+    local_store: SymbolicStore<VarId>,
+    statements: &[Statement],
+    ret_id: VarId,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    fn collect_statements(
+        module: &Module,
+        mut state: FunctionControlState,
+        statements: &[Statement],
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+        collector: &mut CombEffectCollector,
+    ) -> Result<FunctionControlState, ParserError> {
+        for stmt in statements {
+            if matches!(constant_bool(arena, state.live_expr), Some(false)) {
+                break;
+            }
+            state = collect_statement(module, state, stmt, ret_id, arena, collector)?;
+        }
+        Ok(state)
+    }
+
+    fn collect_statement(
+        module: &Module,
+        state: FunctionControlState,
+        stmt: &Statement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+        collector: &mut CombEffectCollector,
+    ) -> Result<FunctionControlState, ParserError> {
+        if matches!(constant_bool(arena, state.live_expr), Some(false)) {
+            return Ok(state);
+        }
+        match stmt {
+            Statement::Assign(assign) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_expression_effects(module, &store, &assign.expr, arena, collector)
+                })?;
+                let (store, boundaries) =
+                    eval_assign(module, state.store, state.boundaries, assign, arena)?;
+                let live_expr = if function_assigns_whole_var(assign, ret_id) {
+                    bool_node(arena, false)
+                } else {
+                    bool_node(arena, true)
+                };
+                Ok(FunctionControlState {
+                    store,
+                    boundaries,
+                    live_expr,
+                    live_sources: HashSet::default(),
+                })
+            }
+            Statement::SystemFunctionCall(call) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_system_function_effect(module, &store, call, arena, collector)
+                })?;
+                Ok(state)
+            }
+            Statement::FunctionCall(call) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_function_call_effects(module, &store, call, arena, collector)
+                })?;
+                let (store, boundaries) = eval_statement_form_function_call(
+                    module,
+                    state.store,
+                    state.boundaries,
+                    call,
+                    arena,
+                    LoweringPhase::CombLowering,
+                )?;
+                Ok(FunctionControlState {
+                    store,
+                    boundaries,
+                    live_expr: bool_node(arena, true),
+                    live_sources: HashSet::default(),
+                })
+            }
+            Statement::If(if_stmt) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)
+                })?;
+
+                let ((cond_node, cond_sources), _) =
+                    eval_expression(module, &state.store, &if_stmt.cond, arena, None)?;
+                let true_guard = arena.alloc(SLTNode::Binary(
+                    state.live_expr,
+                    BinaryOp::LogicAnd,
+                    cond_node,
+                ));
+                let mut true_sources = state.live_sources.clone();
+                true_sources.extend(cond_sources.iter().copied());
+                with_collector_guard(
+                    collector,
+                    arena,
+                    true_guard,
+                    true_sources,
+                    |collector, arena| {
+                        let _ = collect_statements(
+                            module,
+                            state.clone(),
+                            &if_stmt.true_side,
+                            ret_id,
+                            arena,
+                            collector,
+                        )?;
+                        Ok(())
+                    },
+                )?;
+
+                let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+                let false_guard = arena.alloc(SLTNode::Binary(
+                    state.live_expr,
+                    BinaryOp::LogicAnd,
+                    false_cond,
+                ));
+                let mut false_sources = state.live_sources.clone();
+                false_sources.extend(cond_sources.iter().copied());
+                with_collector_guard(
+                    collector,
+                    arena,
+                    false_guard,
+                    false_sources,
+                    |collector, arena| {
+                        let _ = collect_statements(
+                            module,
+                            state.clone(),
+                            &if_stmt.false_side,
+                            ret_id,
+                            arena,
+                            collector,
+                        )?;
+                        Ok(())
+                    },
+                )?;
+
+                let (store, boundaries) =
+                    eval_if(module, state.store, state.boundaries, if_stmt, arena)?;
+                Ok(FunctionControlState {
+                    store,
+                    boundaries,
+                    live_expr: bool_node(arena, true),
+                    live_sources: HashSet::default(),
+                })
+            }
+            Statement::For(for_stmt) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    let _ = collect_comb_effects_for(module, store, for_stmt, arena, collector)?;
+                    Ok(())
+                })?;
+                let (store, boundaries) =
+                    eval_for(module, state.store, state.boundaries, for_stmt, arena)?;
+                Ok(FunctionControlState {
+                    store,
+                    boundaries,
+                    live_expr: bool_node(arena, true),
+                    live_sources: HashSet::default(),
+                })
+            }
+            Statement::Null => Ok(state),
+            Statement::IfReset(ir) => Err(ParserError::illegal_context(
+                "statement in comb function body",
+                format!("{stmt}"),
+                Some(&ir.token),
+            )),
+            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
+                Err(ParserError::illegal_context(
+                    "statement in comb function body",
+                    format!("{stmt}"),
+                    None,
+                ))
+            }
+        }
+    }
+
+    let _ = collect_statements(
+        module,
+        FunctionControlState {
+            store: local_store,
+            boundaries: BoundaryMap::default(),
+            live_expr: bool_node(arena, true),
+            live_sources: HashSet::default(),
+        },
+        statements,
+        ret_id,
+        arena,
+        collector,
+    )?;
     Ok(())
 }
 
@@ -1480,6 +1925,7 @@ fn collect_comb_effects_statements(
     for stmt in statements {
         match stmt {
             Statement::Assign(assign) => {
+                collect_expression_effects(module, &store, &assign.expr, arena, collector)?;
                 let (next_store, _) =
                     eval_assign(module, store, BoundaryMap::default(), assign, arena)?;
                 store = next_store;
@@ -1488,6 +1934,7 @@ fn collect_comb_effects_statements(
                 collect_system_function_effect(module, &store, call, arena, collector)?;
             }
             Statement::FunctionCall(call) => {
+                collect_function_call_effects(module, &store, call, arena, collector)?;
                 let (next_store, _) = eval_statement_form_function_call(
                     module,
                     store,
@@ -1502,6 +1949,7 @@ fn collect_comb_effects_statements(
                 store = collect_comb_effects_for(module, store, for_stmt, arena, collector)?;
             }
             Statement::If(if_stmt) => {
+                collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)?;
                 let ((cond_node, sources), _) =
                     eval_expression(module, &store, &if_stmt.cond, arena, None)?;
                 collector.sensitivity.extend(sources.iter().copied());
@@ -1784,6 +2232,14 @@ fn bool_node(arena: &mut SLTNodeArena<VarId>, value: bool) -> NodeId {
         1,
         false,
     ))
+}
+
+fn function_assigns_whole_var(assign: &AssignStatement, var_id: VarId) -> bool {
+    assign.dst.len() == 1
+        && assign.dst[0].id == var_id
+        && assign.dst[0].index.0.is_empty()
+        && assign.dst[0].select.0.is_empty()
+        && assign.dst[0].select.1.is_none()
 }
 
 fn constant_bool(arena: &SLTNodeArena<VarId>, node: NodeId) -> Option<bool> {
@@ -3325,6 +3781,19 @@ fn eval_function_body_return(
             | SystemFunctionKind::Unsigned(input) => {
                 validate_function_body_expression(module, &input.0)
             }
+            SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                for arg in args {
+                    validate_function_body_expression(module, &arg.0)?;
+                }
+                Ok(())
+            }
+            SystemFunctionKind::Assert { cond, args, .. } => {
+                validate_function_body_expression(module, &cond.0)?;
+                for arg in args {
+                    validate_function_body_expression(module, &arg.0)?;
+                }
+                Ok(())
+            }
             _ => Err(ParserError::unsupported(
                 59,
                 LoweringPhase::CombLowering,
@@ -3400,13 +3869,7 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                59,
-                LoweringPhase::CombLowering,
-                "system function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
+            Statement::SystemFunctionCall(fc) => validate_function_body_system_function(module, fc),
             Statement::FunctionCall(call) => {
                 for expr in call.inputs.values() {
                     validate_function_body_expression(module, expr)?;
@@ -3763,13 +4226,7 @@ fn eval_function_body_return(
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
-                Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                    59,
-                    LoweringPhase::CombLowering,
-                    "system function call in comb function body",
-                    format!("{stmt}"),
-                    Some(&fc.comptime.token),
-                )),
+                Statement::SystemFunctionCall(_) => Ok(state),
                 Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                     Err(ParserError::illegal_context(
                         "statement in comb function body",
@@ -4299,13 +4756,7 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                59,
-                LoweringPhase::CombLowering,
-                "system function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
+            Statement::SystemFunctionCall(_) => Ok(state),
             Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                 Err(ParserError::illegal_context(
                     "statement in comb function body",
@@ -4430,13 +4881,7 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                59,
-                LoweringPhase::CombLowering,
-                "system function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
+            Statement::SystemFunctionCall(_) => Ok(state),
             Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                 Err(ParserError::illegal_context(
                     "statement in comb function body",

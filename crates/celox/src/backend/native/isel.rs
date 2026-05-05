@@ -69,6 +69,9 @@ pub fn lower_execution_unit(
             block_ids.push(bid);
         }
     }
+    let mut next_extra_block_id = block_ids.iter().map(|bid| bid.0).max().unwrap_or(0) + 1;
+    let mut sir_exit_mir_blocks: std::collections::HashMap<crate::ir::BlockId, BlockId> =
+        std::collections::HashMap::new();
 
     let mut mask_map = RegMap::new(max_sir_regs);
     // Pre-allocate mask VRegs for 4-state
@@ -155,7 +158,32 @@ pub fn lower_execution_unit(
 
         // Lower instructions
         for inst in &sir_block.instructions {
-            lower_instruction(&mut ctx, &mut mblock, inst);
+            if let SIRInstruction::CombCaptureEvent { site_id, args } = inst {
+                let (event_ptr, enabled) =
+                    load_comb_capture_event_ptr_and_enabled(&mut ctx, &mut mblock, *site_id);
+                let write_block_id = BlockId(next_extra_block_id as u32);
+                next_extra_block_id += 1;
+                let cont_block_id = BlockId(next_extra_block_id as u32);
+                next_extra_block_id += 1;
+
+                mblock.push(MInst::Branch {
+                    cond: enabled,
+                    true_bb: write_block_id,
+                    false_bb: cont_block_id,
+                });
+                func.blocks.push(mblock);
+
+                let mut write_block = MBlock::new(write_block_id);
+                lower_runtime_event_write(&mut ctx, &mut write_block, event_ptr, *site_id, args);
+                write_block.push(MInst::Jump {
+                    target: cont_block_id,
+                });
+                func.blocks.push(write_block);
+
+                mblock = MBlock::new(cont_block_id);
+            } else {
+                lower_instruction(&mut ctx, &mut mblock, inst);
+            }
 
             // Track known bit width for redundant mask elimination.
             let dst_reg = match inst {
@@ -182,10 +210,11 @@ pub fn lower_execution_unit(
 
         // Lower terminator
         lower_terminator(&mut ctx, &mut mblock, &sir_block.terminator);
+        let pred_mir_id = mblock.id;
+        sir_exit_mir_blocks.insert(sir_block_id, pred_mir_id);
 
         // Capture mask phi sources from this block's terminator (before mask_map changes)
         if four_state {
-            let pred_mir_id = BlockId(sir_block_id.0 as u32);
             let edges: Vec<(crate::ir::BlockId, &[RegisterId])> = match &sir_block.terminator {
                 SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
                 SIRTerminator::Branch {
@@ -244,7 +273,10 @@ pub fn lower_execution_unit(
         let mut phi_sources: HashMap<BlockId, Vec<(BlockId, usize, usize, VReg)>> = HashMap::new();
         for &sir_block_id in &block_ids {
             let sir_block = &eu.blocks[&sir_block_id];
-            let pred_mir_id = BlockId(sir_block_id.0 as u32);
+            let pred_mir_id = sir_exit_mir_blocks
+                .get(&sir_block_id)
+                .copied()
+                .unwrap_or(BlockId(sir_block_id.0 as u32));
             let edges: Vec<(crate::ir::BlockId, &[RegisterId])> = match &sir_block.terminator {
                 SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
                 SIRTerminator::Branch {
@@ -688,233 +720,227 @@ impl<'a> ISelContext<'a> {
     }
 }
 
+fn load_runtime_event_ptr(ctx: &mut ISelContext, block: &mut MBlock) -> VReg {
+    let event_ptr = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Load {
+        dst: event_ptr,
+        base: BaseReg::SimState,
+        offset: crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+        size: OpSize::S64,
+    });
+    event_ptr
+}
+
+fn load_comb_capture_event_ptr_and_enabled(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    site_id: u32,
+) -> (VReg, VReg) {
+    let event_ptr = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Load {
+        dst: event_ptr,
+        base: BaseReg::SimState,
+        offset: crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET as i32,
+        size: OpSize::S64,
+    });
+    let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Load {
+        dst: enabled_ptr,
+        base: BaseReg::SimState,
+        offset: crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+        size: OpSize::S64,
+    });
+    let enabled_byte = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::LoadPtr {
+        dst: enabled_byte,
+        ptr: enabled_ptr,
+        offset: site_id as i32,
+        size: OpSize::S8,
+    });
+    let enabled = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::CmpImm {
+        dst: enabled,
+        lhs: enabled_byte,
+        imm: 0,
+        kind: CmpKind::Ne,
+    });
+    (event_ptr, enabled)
+}
+
+fn lower_runtime_event_write(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    event_ptr: VReg,
+    site_id: u32,
+    args: &[RegisterId],
+) {
+    use crate::backend::memory_layout::{
+        RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+        RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+        RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+    };
+
+    let seq_v = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::LoadPtr {
+        dst: seq_v,
+        ptr: event_ptr,
+        offset: 0,
+        size: OpSize::S64,
+    });
+    let mask_v = ctx.alloc_vreg(SpillDesc::remat(
+        (ctx.layout.runtime_event_capacity as u64) - 1,
+    ));
+    block.push(MInst::LoadImm {
+        dst: mask_v,
+        value: (ctx.layout.runtime_event_capacity as u64) - 1,
+    });
+    let slot_idx = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::And {
+        dst: slot_idx,
+        lhs: seq_v,
+        rhs: mask_v,
+    });
+    let slot_size_v = ctx.alloc_vreg(SpillDesc::remat(ctx.layout.runtime_event_slot_size as u64));
+    block.push(MInst::LoadImm {
+        dst: slot_size_v,
+        value: ctx.layout.runtime_event_slot_size as u64,
+    });
+    let slot_off = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Mul {
+        dst: slot_off,
+        lhs: slot_idx,
+        rhs: slot_size_v,
+    });
+
+    let writing = ctx.alloc_vreg(SpillDesc::remat(RUNTIME_EVENT_WRITING));
+    block.push(MInst::LoadImm {
+        dst: writing,
+        value: RUNTIME_EVENT_WRITING,
+    });
+    let slot_base = RUNTIME_EVENT_HEADER_SIZE as i32;
+    block.push(MInst::ReleaseStorePtrIndexed {
+        ptr: event_ptr,
+        offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
+        index: slot_off,
+        src: writing,
+        size: OpSize::S64,
+    });
+    let site_v = ctx.alloc_vreg(SpillDesc::remat(site_id as u64));
+    block.push(MInst::LoadImm {
+        dst: site_v,
+        value: site_id as u64,
+    });
+    block.push(MInst::StorePtrIndexed {
+        ptr: event_ptr,
+        offset: slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET as i32,
+        index: slot_off,
+        src: site_v,
+        size: OpSize::S64,
+    });
+    let site_layout = &ctx.layout.runtime_event_site_layouts[site_id as usize];
+    let arg_count = args.len() as u64;
+    let arg_count_v = ctx.alloc_vreg(SpillDesc::remat(arg_count));
+    block.push(MInst::LoadImm {
+        dst: arg_count_v,
+        value: arg_count,
+    });
+    block.push(MInst::StorePtrIndexed {
+        ptr: event_ptr,
+        offset: slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET as i32,
+        index: slot_off,
+        src: arg_count_v,
+        size: OpSize::S64,
+    });
+    for (idx, arg) in args.iter().enumerate() {
+        let Some(arg_layout) = site_layout.args.get(idx) else {
+            continue;
+        };
+        let value_chunks = if ctx.wide_regs.contains_key(arg) {
+            ctx.get_wide_chunks(arg, block)
+        } else {
+            vec![(ctx.reg_map.get(*arg), ctx.sir_width(arg).min(64))]
+        };
+        let mask_chunks = if ctx.wide_regs.contains_key(arg) {
+            get_wide_mask_chunks(ctx, block, arg, arg_layout.word_count)
+        } else {
+            vec![ctx.get_mask(*arg, block)]
+        };
+        for word_idx in 0..arg_layout.word_count {
+            let value_vreg = value_chunks
+                .get(word_idx)
+                .map(|chunk| chunk.0)
+                .unwrap_or_else(|| {
+                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                    block.push(MInst::LoadImm {
+                        dst: zero,
+                        value: 0,
+                    });
+                    zero
+                });
+            block.push(MInst::StorePtrIndexed {
+                ptr: event_ptr,
+                offset: slot_base
+                    + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                        + (arg_layout.value_word_offset + word_idx) * 8)
+                        as i32,
+                index: slot_off,
+                src: value_vreg,
+                size: OpSize::S64,
+            });
+
+            let mask_vreg = mask_chunks.get(word_idx).copied().unwrap_or_else(|| {
+                let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm {
+                    dst: zero,
+                    value: 0,
+                });
+                zero
+            });
+            block.push(MInst::StorePtrIndexed {
+                ptr: event_ptr,
+                offset: slot_base
+                    + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                        + (arg_layout.mask_word_offset + word_idx) * 8)
+                        as i32,
+                index: slot_off,
+                src: mask_vreg,
+                size: OpSize::S64,
+            });
+        }
+    }
+    block.push(MInst::ReleaseStorePtrIndexed {
+        ptr: event_ptr,
+        offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
+        index: slot_off,
+        src: seq_v,
+        size: OpSize::S64,
+    });
+    let next_seq = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::AddImm {
+        dst: next_seq,
+        src: seq_v,
+        imm: 1,
+    });
+    block.push(MInst::ReleaseStorePtr {
+        ptr: event_ptr,
+        offset: 0,
+        src: next_seq,
+        size: OpSize::S64,
+    });
+}
+
 fn lower_instruction(
     ctx: &mut ISelContext,
     block: &mut MBlock,
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
 ) {
     match inst {
-        SIRInstruction::RuntimeEvent { site_id, args }
-        | SIRInstruction::CombCaptureEvent { site_id, args } => {
-            use crate::backend::memory_layout::{
-                RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
-                RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
-                RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
-            };
-
-            let event_ptr = ctx.alloc_vreg(SpillDesc::transient());
-            let mut capture_enabled = None;
-            match inst {
-                SIRInstruction::RuntimeEvent { .. } => {
-                    block.push(MInst::Load {
-                        dst: event_ptr,
-                        base: BaseReg::SimState,
-                        offset:
-                            crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET
-                                as i32,
-                        size: OpSize::S64,
-                    });
-                }
-                SIRInstruction::CombCaptureEvent { .. } => {
-                    block.push(MInst::Load {
-                        dst: event_ptr,
-                        base: BaseReg::SimState,
-                        offset:
-                            crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET
-                                as i32,
-                        size: OpSize::S64,
-                    });
-                    let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Load {
-                        dst: enabled_ptr,
-                        base: BaseReg::SimState,
-                        offset: crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
-                            as i32,
-                        size: OpSize::S64,
-                    });
-                    let enabled_byte = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::LoadPtr {
-                        dst: enabled_byte,
-                        ptr: enabled_ptr,
-                        offset: *site_id as i32,
-                        size: OpSize::S8,
-                    });
-                    let enabled = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::CmpImm {
-                        dst: enabled,
-                        lhs: enabled_byte,
-                        imm: 0,
-                        kind: CmpKind::Ne,
-                    });
-                    capture_enabled = Some(enabled);
-                }
-                _ => unreachable!(),
-            }
-            let seq_v = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::LoadPtr {
-                dst: seq_v,
-                ptr: event_ptr,
-                offset: 0,
-                size: OpSize::S64,
-            });
-            let mask_v = ctx.alloc_vreg(SpillDesc::remat(
-                (ctx.layout.runtime_event_capacity as u64) - 1,
-            ));
-            block.push(MInst::LoadImm {
-                dst: mask_v,
-                value: (ctx.layout.runtime_event_capacity as u64) - 1,
-            });
-            let slot_idx = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::And {
-                dst: slot_idx,
-                lhs: seq_v,
-                rhs: mask_v,
-            });
-            let slot_size_v =
-                ctx.alloc_vreg(SpillDesc::remat(ctx.layout.runtime_event_slot_size as u64));
-            block.push(MInst::LoadImm {
-                dst: slot_size_v,
-                value: ctx.layout.runtime_event_slot_size as u64,
-            });
-            let slot_off = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Mul {
-                dst: slot_off,
-                lhs: slot_idx,
-                rhs: slot_size_v,
-            });
-
-            let writing = ctx.alloc_vreg(SpillDesc::remat(RUNTIME_EVENT_WRITING));
-            block.push(MInst::LoadImm {
-                dst: writing,
-                value: RUNTIME_EVENT_WRITING,
-            });
-            let slot_base = RUNTIME_EVENT_HEADER_SIZE as i32;
-            // Mark the slot as being written before updating its payload. Readers
-            // acquire-load sequence words; payload/site/arg fields are plain data.
-            block.push(MInst::ReleaseStorePtrIndexed {
-                ptr: event_ptr,
-                offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
-                index: slot_off,
-                src: writing,
-                size: OpSize::S64,
-            });
-            let site_v = ctx.alloc_vreg(SpillDesc::remat(*site_id as u64));
-            block.push(MInst::LoadImm {
-                dst: site_v,
-                value: *site_id as u64,
-            });
-            block.push(MInst::StorePtrIndexed {
-                ptr: event_ptr,
-                offset: slot_base + RUNTIME_EVENT_SLOT_SITE_OFFSET as i32,
-                index: slot_off,
-                src: site_v,
-                size: OpSize::S64,
-            });
-            let site_layout = &ctx.layout.runtime_event_site_layouts[*site_id as usize];
-            let arg_count = args.len() as u64;
-            let arg_count_v = ctx.alloc_vreg(SpillDesc::remat(arg_count));
-            block.push(MInst::LoadImm {
-                dst: arg_count_v,
-                value: arg_count,
-            });
-            block.push(MInst::StorePtrIndexed {
-                ptr: event_ptr,
-                offset: slot_base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET as i32,
-                index: slot_off,
-                src: arg_count_v,
-                size: OpSize::S64,
-            });
-            for (idx, arg) in args.iter().enumerate() {
-                let Some(arg_layout) = site_layout.args.get(idx) else {
-                    continue;
-                };
-                let value_chunks = if ctx.wide_regs.contains_key(arg) {
-                    ctx.get_wide_chunks(arg, block)
-                } else {
-                    vec![(ctx.reg_map.get(*arg), ctx.sir_width(arg).min(64))]
-                };
-                let mask_chunks = if ctx.wide_regs.contains_key(arg) {
-                    get_wide_mask_chunks(ctx, block, arg, arg_layout.word_count)
-                } else {
-                    vec![ctx.get_mask(*arg, block)]
-                };
-                for word_idx in 0..arg_layout.word_count {
-                    let value_vreg = value_chunks
-                        .get(word_idx)
-                        .map(|chunk| chunk.0)
-                        .unwrap_or_else(|| {
-                            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                            block.push(MInst::LoadImm {
-                                dst: zero,
-                                value: 0,
-                            });
-                            zero
-                        });
-                    block.push(MInst::StorePtrIndexed {
-                        ptr: event_ptr,
-                        offset: slot_base
-                            + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
-                                + (arg_layout.value_word_offset + word_idx) * 8)
-                                as i32,
-                        index: slot_off,
-                        src: value_vreg,
-                        size: OpSize::S64,
-                    });
-
-                    let mask_vreg = mask_chunks.get(word_idx).copied().unwrap_or_else(|| {
-                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                        block.push(MInst::LoadImm {
-                            dst: zero,
-                            value: 0,
-                        });
-                        zero
-                    });
-                    block.push(MInst::StorePtrIndexed {
-                        ptr: event_ptr,
-                        offset: slot_base
-                            + (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
-                                + (arg_layout.mask_word_offset + word_idx) * 8)
-                                as i32,
-                        index: slot_off,
-                        src: mask_vreg,
-                        size: OpSize::S64,
-                    });
-                }
-            }
-            // Publish this slot after all payload writes. This is the release side
-            // of the ring-buffer protocol; payload words themselves are not atomic.
-            block.push(MInst::ReleaseStorePtrIndexed {
-                ptr: event_ptr,
-                offset: slot_base + RUNTIME_EVENT_SLOT_SEQ_OFFSET as i32,
-                index: slot_off,
-                src: seq_v,
-                size: OpSize::S64,
-            });
-            let next_seq = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::AddImm {
-                dst: next_seq,
-                src: seq_v,
-                imm: 1,
-            });
-            let published_seq = if let Some(enabled) = capture_enabled {
-                let selected = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Select {
-                    dst: selected,
-                    cond: enabled,
-                    true_val: next_seq,
-                    false_val: seq_v,
-                });
-                selected
-            } else {
-                next_seq
-            };
-            // Advance the global write sequence after the slot sequence is visible.
-            block.push(MInst::ReleaseStorePtr {
-                ptr: event_ptr,
-                offset: 0,
-                src: published_seq,
-                size: OpSize::S64,
-            });
+        SIRInstruction::RuntimeEvent { site_id, args } => {
+            let event_ptr = load_runtime_event_ptr(ctx, block);
+            lower_runtime_event_write(ctx, block, event_ptr, *site_id, args);
+        }
+        SIRInstruction::CombCaptureEvent { .. } => {
+            unreachable!("comb capture events are CFG-lowered by lower_execution_unit")
         }
         SIRInstruction::Mux(dst, cond, then_val, else_val) => {
             // Expand Mux into Binary/Unary sequence and process through standard ISel.

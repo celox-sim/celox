@@ -160,6 +160,400 @@ module Top (
     assert_eq!(sim.drain_runtime_events(), vec![]);
 }
 
+fn test_comb_inactive_display_and_assert_do_not_leak_or_duplicate(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    b: input logic<8>,
+    y: output logic<8>,
+    z: output logic<8>,
+) {
+    always_comb {
+        y = a;
+        $display("active=%0d", y);
+    }
+
+    always_comb {
+        z = b;
+        $display("inactive_display=%0d", z);
+        $assert_continue(z == 8'd255, "inactive_assert=%0d", z);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    let z = sim.signal("z");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 3u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(y), 3);
+    assert_eq!(sim.get_as::<u8>(z), 0);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "active=3".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(a, 4u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(y), 4);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "active=4".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(b, 7u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(z), 7);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "inactive_display=7".to_string(),
+            },
+            celox::RuntimeEvent::AssertContinue {
+                message: "inactive_assert=7".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_multiple_active_captures_skip_inactive_site_between_evals(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    b: input logic<8>,
+    out: output logic<8>,
+    inactive_out: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    always_comb {
+        tmp = a + 8'd1;
+        $display("first=%0d", tmp);
+        tmp = tmp + 8'd1;
+        $display("second=%0d", tmp);
+        out = tmp;
+    }
+
+    always_comb {
+        inactive_out = b;
+        $display("inactive=%0d", inactive_out);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+    let inactive_out = sim.signal("inactive_out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 7);
+    assert_eq!(sim.get_as::<u8>(inactive_out), 0);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "first=6".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "second=7".to_string(),
+            },
+        ],
+    );
+
+    sim.modify(|io| io.set(a, 6u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 8);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "first=7".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "second=8".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_capture_before_dynamic_for_backedge_keeps_loop_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    count: input logic<4>,
+    base: input logic<8>,
+    out: output logic<8>,
+) {
+    var sum: logic<8>;
+
+    always_comb {
+        sum = base;
+        for i in 0..count {
+            $display("before i=%0d sum=%0d", i, sum);
+            sum = sum + i + 8'd1;
+        }
+        out = sum;
+    }
+}
+"#, "Top");
+
+    let count = sim.signal("count");
+    let base = sim.signal("base");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(count, 3u8);
+        io.set(base, 10u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 16);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "before i=0 sum=10".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "before i=1 sum=11".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "before i=2 sum=13".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_capture_after_branch_preserves_phi_args(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    sel: input logic,
+    a: input logic<8>,
+    b: input logic<8>,
+    out: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    always_comb {
+        if sel {
+            tmp = a;
+            $display("then=%0d", tmp);
+        } else {
+            tmp = b;
+            $display("else=%0d", tmp);
+        }
+        out = tmp + 8'd1;
+    }
+}
+"#, "Top");
+
+    let sel = sim.signal("sel");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(a, 20u8);
+        io.set(b, 40u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 21);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "then=20".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(sel, 0u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 41);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "else=40".to_string(),
+        }],
+    );
+}
+
+fn test_comb_capture_preserves_wide_four_state_args(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<80>,
+    out: output logic<80>,
+) {
+    always_comb {
+        out = a;
+        $display("a=%b", a);
+    }
+}
+"#, "Top").four_state(true);
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set_four_state(
+            a,
+            num_bigint::BigUint::from(0x1234_5678_9abc_def0u64),
+            num_bigint::BigUint::from(0x0000_0000_0000_00f0u64),
+        )
+    })
+    .unwrap();
+    assert_eq!(sim.get_four_state(out).0, num_bigint::BigUint::from(0x1234_5678_9abc_def0u64));
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=000000000000000000010010001101000101011001111000100110101011110011011110xxxx0000"
+                .to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_inside_statement_function_call(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    function bump (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) {
+        y = x + 8'd1;
+        $display("bump=%0d", y);
+    }
+
+    always_comb {
+        bump(a, out);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 9u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 10);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "bump=10".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_inside_expression_function_call(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    function twice (
+        x: input logic<8>,
+    ) -> logic<8> {
+        $display("arg=%0d", x);
+        return x * 8'd2;
+    }
+
+    always_comb {
+        out = twice(a) + 8'd1;
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 6u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 13);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "arg=6".to_string(),
+        }],
+    );
+}
+
+fn test_comb_assert_inside_function_call_uses_caller_sensitivity(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    unrelated: input logic<8>,
+    out: output logic<8>,
+) {
+    function check (
+        x: input logic<8>,
+    ) -> logic<8> {
+        $assert_continue(x != 8'd0, "zero=%0d", x);
+        return x;
+    }
+
+    always_comb {
+        out = check(a);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let unrelated = sim.signal("unrelated");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(unrelated, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 1);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::AssertContinue {
+            message: "zero=0".to_string(),
+        }],
+    );
+}
+
 fn test_comb_display_keeps_static_unrolled_execution_count(sim) {
     @omit_veryl;
     @ignore_on(wasm);
