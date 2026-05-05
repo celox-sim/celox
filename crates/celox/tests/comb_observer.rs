@@ -796,6 +796,81 @@ module Top (
     );
 }
 
+fn test_comb_display_snapshots_between_dynamic_writes_to_same_var(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    base: input logic<8>,
+    i: input logic<3>,
+    x: input logic,
+    j: input logic<3>,
+    k: input logic<3>,
+    y: input logic,
+    out: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    always_comb {
+        tmp = base;
+        tmp[i] = x;
+        $display("mid=%0d", tmp[j]);
+        tmp[k] = y;
+        out = tmp[j];
+    }
+}
+"#, "Top");
+
+    let base = sim.signal("base");
+    let i = sim.signal("i");
+    let x = sim.signal("x");
+    let j = sim.signal("j");
+    let k = sim.signal("k");
+    let y = sim.signal("y");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(base, 0u8);
+        io.set(i, 2u8);
+        io.set(x, 1u8);
+        io.set(j, 2u8);
+        io.set(k, 2u8);
+        io.set(y, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "mid=1".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(y, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "mid=1".to_string(),
+        }],
+    );
+
+    sim.modify(|io| {
+        io.set(j, 3u8);
+        io.set(k, 3u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "mid=0".to_string(),
+        }],
+    );
+}
+
 fn test_comb_display_snapshots_repeated_full_var_writes(sim) {
     @omit_veryl;
     @ignore_on(wasm);
