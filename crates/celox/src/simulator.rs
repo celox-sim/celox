@@ -71,6 +71,7 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     comb_capture_event_read_seq: u64,
     pending_runtime_events: Vec<RawRuntimeEvent>,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
+    comb_observer_initial_eval: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -442,6 +443,7 @@ impl<B: SimBackend> Simulator<B> {
             comb_capture_event_read_seq: 0,
             pending_runtime_events: Vec::new(),
             comb_observer_snapshots: Vec::new(),
+            comb_observer_initial_eval: true,
         };
         sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
         sim
@@ -598,7 +600,7 @@ impl<B: SimBackend> Simulator<B> {
             .iter()
             .zip(active_before.iter().copied())
         {
-            if is_active {
+            if is_active || (self.comb_observer_initial_eval && observer.sensitivity.is_empty()) {
                 active_sites[observer.site_id as usize] = true;
             }
         }
@@ -620,6 +622,7 @@ impl<B: SimBackend> Simulator<B> {
         self.pending_runtime_events.extend(runtime_events);
         self.pending_runtime_events.extend(captures);
         self.comb_observer_snapshots = after;
+        self.comb_observer_initial_eval = false;
         if let Some(err) = fatal_error {
             return Err(err);
         }

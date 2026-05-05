@@ -99,6 +99,68 @@ module Top (
     assert_eq!(sim.drain_runtime_events(), Vec::new());
 }
 
+fn test_comb_constant_display_runs_on_initial_eval_only(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+) {
+    always_comb {
+        $display("hi");
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+
+    // IEEE 1800-2023 9.2.2.2.2 requires always_comb to execute once at time
+    // zero. That process execution is distinct from the implicit sensitivity
+    // in 9.2.2.2.1, so a constant observer still runs once even though it has
+    // no sensitivity inputs.
+    sim.eval_comb().unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "hi".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+}
+
+fn test_comb_constant_fatal_assert_runs_on_initial_eval(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top {
+    always_comb {
+        $assert(1'd0, "constant fail");
+    }
+}
+"#, "Top");
+
+    // IEEE 1800-2023 9.2.2.2.2 time-zero execution applies to assertions too:
+    // a constant fatal assert in always_comb must terminate the initial comb
+    // evaluation instead of waiting for a sensitivity change that cannot occur.
+    let err = sim.eval_comb().unwrap_err();
+    assert_eq!(
+        err,
+        celox::RuntimeErrorCode::Runtime {
+            message: "constant fail".to_string(),
+            signals: Vec::new(),
+        },
+    );
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "constant fail".to_string(),
+        }],
+    );
+}
+
 fn test_comb_assert_continue_follows_always_comb_sensitivity_after_settle(sim) {
     @omit_veryl;
     @ignore_on(wasm);
