@@ -344,6 +344,7 @@ pub struct SLTForEffect {
     pub guard: Option<NodeId>,
     pub emit_on_true: bool,
     pub args: Vec<NodeId>,
+    pub fatal_error_code: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -752,6 +753,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                                     .map_addr(*arg, arena, target_arena, cache, f)
                             })
                             .collect(),
+                        fatal_error_code: effect.fatal_error_code,
                     })
                     .collect();
                 SLTNode::ForFold {
@@ -1000,6 +1002,7 @@ pub enum LogicPathTarget<A: Hash + Eq + Clone> {
         emit_on_true: bool,
         args: Vec<NodeId>,
         loop_runner: Option<NodeId>,
+        fatal_error_code: Option<i64>,
     },
 }
 
@@ -1067,6 +1070,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                     emit_on_true,
                     args,
                     loop_runner,
+                    fatal_error_code,
                 } => LogicPathTarget::CombCaptureEvent {
                     site_id: *site_id,
                     guard: guard.map(|node| {
@@ -1088,6 +1092,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                             .get(node)
                             .map_addr(node, arena, target_arena, cache, f)
                     }),
+                    fatal_error_code: *fatal_error_code,
                 },
             },
             sources: self
@@ -1347,6 +1352,7 @@ fn collect_system_function_effect(
         guard,
         emit_on_true: matches!(kind, RuntimeEventKind::Display),
         args: observer_args.clone(),
+        fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal).then_some(site_id as i64),
     });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();

@@ -392,9 +392,13 @@ impl SIRTranslator {
                     state.mem_ptr,
                     crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
                 );
-                self.translate_runtime_event_inst(state, event_ptr, None, *site_id, args);
+                self.translate_runtime_event_inst(state, event_ptr, None, *site_id, args, None);
             }
-            SIRInstruction::CombCaptureEvent { site_id, args } => {
+            SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+            } => {
                 let capture_ptr = state.builder.ins().load(
                     types::I64,
                     MemFlags::new(),
@@ -422,6 +426,7 @@ impl SIRTranslator {
                     Some(enabled),
                     *site_id,
                     args,
+                    *fatal_error_code,
                 );
             }
         }
@@ -434,6 +439,7 @@ impl SIRTranslator {
         enabled: Option<Value>,
         site_id: u32,
         args: &[RegisterId],
+        fatal_error_code: Option<i64>,
     ) {
         use crate::backend::memory_layout::{
             RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
@@ -564,10 +570,18 @@ impl SIRTranslator {
             incremented,
         );
         if let Some((write_block, done_block)) = guarded_blocks {
-            state.builder.ins().jump(done_block, &[]);
+            if let Some(code) = fatal_error_code {
+                let error = state.builder.ins().iconst(types::I64, code);
+                state.builder.ins().return_(&[error]);
+            } else {
+                state.builder.ins().jump(done_block, &[]);
+            }
             state.builder.switch_to_block(done_block);
             state.builder.seal_block(write_block);
             state.builder.seal_block(done_block);
+        } else if let Some(code) = fatal_error_code {
+            let error = state.builder.ins().iconst(types::I64, code);
+            state.builder.ins().return_(&[error]);
         }
     }
 

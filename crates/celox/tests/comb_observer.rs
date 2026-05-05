@@ -109,6 +109,123 @@ module Top (
     assert_eq!(sim.drain_runtime_events(), vec![]);
 }
 
+fn test_comb_assert_fatal_stops_comb_eval_and_keeps_event(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    y: output logic<8>,
+) {
+    always_comb {
+        y = a;
+        $assert(y != 8'd1, "fatal y");
+        $display("after fatal");
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    let err = sim.eval_comb().unwrap_err();
+    assert_eq!(
+        err,
+        celox::RuntimeErrorCode::Runtime {
+            message: "fatal y".to_string(),
+            signals: Vec::new(),
+        },
+    );
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "fatal y".to_string(),
+        }],
+    );
+}
+
+fn test_comb_assert_fatal_inactive_site_does_not_error(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    unrelated: input logic<8>,
+    y: output logic<8>,
+    z: output logic<8>,
+) {
+    always_comb {
+        y = a;
+        $assert(y != 8'd1, "fatal y");
+    }
+
+    always_comb {
+        z = unrelated;
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let unrelated = sim.signal("unrelated");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert!(sim.eval_comb().is_err());
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(unrelated, 9u8)).unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
+fn test_comb_display_pending_events_drain_before_later_ff_events(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    a: input logic<8>,
+    d: input logic<8>,
+    y: output logic<8>,
+) {
+    always_ff {
+        $display("ff=%0d", d);
+    }
+
+    always_comb {
+        y = a;
+        $display("comb=%0d", y);
+    }
+}
+"#, "Top");
+
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let d = sim.signal("d");
+    let y = sim.signal("y");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(y), 5);
+    sim.modify(|io| io.set(d, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "comb=5".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "ff=7".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_comb_display_ff_triggered_comb_only_captures_active_sites(sim) {
     @omit_veryl;
     @ignore_on(wasm);

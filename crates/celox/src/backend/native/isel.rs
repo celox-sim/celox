@@ -158,7 +158,12 @@ pub fn lower_execution_unit(
 
         // Lower instructions
         for inst in &sir_block.instructions {
-            if let SIRInstruction::CombCaptureEvent { site_id, args } = inst {
+            if let SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+            } = inst
+            {
                 let (event_ptr, enabled) =
                     load_comb_capture_event_ptr_and_enabled(&mut ctx, &mut mblock, *site_id);
                 let write_block_id = BlockId(next_extra_block_id as u32);
@@ -175,9 +180,13 @@ pub fn lower_execution_unit(
 
                 let mut write_block = MBlock::new(write_block_id);
                 lower_runtime_event_write(&mut ctx, &mut write_block, event_ptr, *site_id, args);
-                write_block.push(MInst::Jump {
-                    target: cont_block_id,
-                });
+                if let Some(code) = fatal_error_code {
+                    write_block.push(MInst::ReturnError { code: *code });
+                } else {
+                    write_block.push(MInst::Jump {
+                        target: cont_block_id,
+                    });
+                }
                 func.blocks.push(write_block);
 
                 mblock = MBlock::new(cont_block_id);

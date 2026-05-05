@@ -276,13 +276,24 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 .join(", ");
             format!("RuntimeEvent(site={}, args=[{}])", site_id, args)
         }
-        SIRInstruction::CombCaptureEvent { site_id, args } => {
+        SIRInstruction::CombCaptureEvent {
+            site_id,
+            args,
+            fatal_error_code,
+        } => {
             let args = args
                 .iter()
                 .map(|r| format!("r{}", r.0))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("CombCaptureEvent(site={}, args=[{}])", site_id, args)
+            if let Some(code) = fatal_error_code {
+                format!(
+                    "CombCaptureEvent(site={}, args=[{}], fatal_error={})",
+                    site_id, args, code
+                )
+            } else {
+                format!("CombCaptureEvent(site={}, args=[{}])", site_id, args)
+            }
         }
     }
 }

@@ -852,9 +852,14 @@ fn renumber_sir_inst<A: Clone>(
             site_id: *site_id,
             args: args.iter().map(|a| r(*a)).collect(),
         },
-        SIRInstruction::CombCaptureEvent { site_id, args } => SIRInstruction::CombCaptureEvent {
+        SIRInstruction::CombCaptureEvent {
+            site_id,
+            args,
+            fatal_error_code,
+        } => SIRInstruction::CombCaptureEvent {
             site_id: *site_id,
             args: args.iter().map(|a| r(*a)).collect(),
+            fatal_error_code: *fatal_error_code,
         },
     }
 }
@@ -1170,6 +1175,7 @@ pub enum SIRInstruction<Addr> {
     CombCaptureEvent {
         site_id: u32,
         args: Vec<RegisterId>,
+        fatal_error_code: Option<i64>,
     },
 }
 
@@ -1247,7 +1253,11 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                 }
                 write!(f, "])")
             }
-            SIRInstruction::CombCaptureEvent { site_id, args } => {
+            SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+            } => {
                 write!(f, "CombCaptureEvent(site={}, args=[", site_id)?;
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -1255,7 +1265,11 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     }
                     write!(f, "r{}", arg.0)?;
                 }
-                write!(f, "])")
+                if let Some(code) = fatal_error_code {
+                    write!(f, "], fatal_error={code})")
+                } else {
+                    write!(f, "])")
+                }
             }
         }
     }
@@ -1285,9 +1299,15 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::RuntimeEvent { site_id, args } => {
                 SIRInstruction::RuntimeEvent { site_id, args }
             }
-            SIRInstruction::CombCaptureEvent { site_id, args } => {
-                SIRInstruction::CombCaptureEvent { site_id, args }
-            }
+            SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+            } => SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+            },
         }
     }
     pub fn map_addr<B>(&self, mut f: impl FnMut(&A) -> B) -> SIRInstruction<B> {
@@ -1326,12 +1346,15 @@ impl<A> SIRInstruction<A> {
                 site_id: *site_id,
                 args: args.clone(),
             },
-            SIRInstruction::CombCaptureEvent { site_id, args } => {
-                SIRInstruction::CombCaptureEvent {
-                    site_id: *site_id,
-                    args: args.clone(),
-                }
-            }
+            SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+            } => SIRInstruction::CombCaptureEvent {
+                site_id: *site_id,
+                args: args.clone(),
+                fatal_error_code: *fatal_error_code,
+            },
         }
     }
 }

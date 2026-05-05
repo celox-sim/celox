@@ -122,6 +122,7 @@ impl<B: SimBackend> std::fmt::Debug for Simulator<B> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
 struct RuntimeEventArgValue {
     values: Vec<u64>,
     masks: Vec<u64>,
@@ -131,6 +132,7 @@ struct RuntimeEventArgValue {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
 enum RawRuntimeEvent {
     Event {
         site_id: usize,
@@ -478,8 +480,18 @@ impl<B: SimBackend> Simulator<B> {
         &mut self,
         ctx: RuntimeFormatContext<'_>,
     ) -> Vec<RuntimeEvent> {
+        let collected_events = self.collect_backend_runtime_events();
+        let mut raw_events = std::mem::take(&mut self.pending_runtime_events);
+        raw_events.extend(collected_events);
+        raw_events
+            .into_iter()
+            .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
+            .collect()
+    }
+
+    fn collect_backend_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
         let layout = self.backend.layout();
-        let mut raw_events = if let Some(buffer) = self.backend.runtime_event_buffer() {
+        if let Some(buffer) = self.backend.runtime_event_buffer() {
             collect_runtime_events(
                 layout,
                 &self.program.runtime_event_sites,
@@ -501,12 +513,7 @@ impl<B: SimBackend> Simulator<B> {
                 read_u64,
                 read_u64,
             )
-        };
-        raw_events.append(&mut std::mem::take(&mut self.pending_runtime_events));
-        raw_events
-            .into_iter()
-            .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
-            .collect()
+        }
     }
 
     pub fn runtime_event_drain(&self) -> Option<RuntimeEventDrain> {
@@ -600,16 +607,23 @@ impl<B: SimBackend> Simulator<B> {
             buffer.reset();
             self.comb_capture_event_read_seq = 0;
         }
-        self.backend
+        let eval_result = self
+            .backend
             .eval_comb()
-            .map_err(|e| self.decorate_runtime_error(e))?;
+            .map_err(|e| self.decorate_runtime_error(e));
         let after = self.snapshot_all_comb_observers();
         let captures = self.collect_comb_capture_events();
+        let fatal_error = self.fatal_comb_capture_error(&captures);
         self.backend
             .set_comb_capture_event_enabled(&vec![false; self.program.runtime_event_sites.len()]);
+        let runtime_events = self.collect_backend_runtime_events();
+        self.pending_runtime_events.extend(runtime_events);
         self.pending_runtime_events.extend(captures);
         self.comb_observer_snapshots = after;
-        Ok(())
+        if let Some(err) = fatal_error {
+            return Err(err);
+        }
+        eval_result
     }
 
     fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
@@ -635,6 +649,22 @@ impl<B: SimBackend> Simulator<B> {
                     .collect()
             })
             .collect()
+    }
+
+    fn fatal_comb_capture_error(&self, captures: &[RawRuntimeEvent]) -> Option<RuntimeErrorCode> {
+        captures.iter().find_map(|raw| {
+            let RawRuntimeEvent::Event { site_id, args } = raw else {
+                return None;
+            };
+            let site = self.program.runtime_event_sites.get(*site_id)?;
+            if !matches!(site.kind, RuntimeEventKind::AssertFatal) {
+                return None;
+            }
+            Some(RuntimeErrorCode::Runtime {
+                message: render_runtime_event_message(site, args, RuntimeFormatContext::default()),
+                signals: Vec::new(),
+            })
+        })
     }
 
     fn collect_comb_capture_events(&mut self) -> Vec<RawRuntimeEvent> {

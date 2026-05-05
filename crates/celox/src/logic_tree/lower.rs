@@ -1352,6 +1352,7 @@ impl SLTToSIRLowerer {
                 builder.emit(SIRInstruction::CombCaptureEvent {
                     site_id: effect.site_id,
                     args,
+                    fatal_error_code: effect.fatal_error_code,
                 });
             };
             if let Some(guard) = effect.guard {

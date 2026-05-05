@@ -369,6 +369,7 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
             emit_on_true,
             args,
             loop_runner,
+            fatal_error_code,
         } => {
             if let Some(loop_runner) = loop_runner {
                 lower_logic_path_node(lowerer, builder, path, *loop_runner, arena, lower_cache);
@@ -385,6 +386,7 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
                 builder.emit(SIRInstruction::CombCaptureEvent {
                     site_id: *site_id,
                     args: regs,
+                    fatal_error_code: *fatal_error_code,
                 });
             };
             if let Some(guard) = guard {

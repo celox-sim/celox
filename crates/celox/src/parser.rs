@@ -8,6 +8,38 @@ use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 use veryl_parser::token_range::TokenRange;
 
+fn rebuild_slt_cache<A: std::hash::Hash + Eq + Clone>(arena: &mut SLTNodeArena<A>) {
+    arena.cache.clear();
+    for (idx, node) in arena.nodes.iter().cloned().enumerate() {
+        arena.cache.insert(node, crate::logic_tree::NodeId(idx));
+    }
+}
+
+fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    start: usize,
+    runtime_event_site_map: &HashMap<u32, u32>,
+) {
+    let mut changed = false;
+    for node in arena.nodes.iter_mut().skip(start) {
+        let crate::logic_tree::SLTNode::ForFold { effects, .. } = node else {
+            continue;
+        };
+        for effect in effects {
+            if let Some(global_site) = runtime_event_site_map.get(&effect.site_id) {
+                effect.site_id = *global_site;
+                if effect.fatal_error_code.is_some() {
+                    effect.fatal_error_code = Some(*global_site as i64);
+                }
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        rebuild_slt_cache(arena);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BuildConfig {
     pub clock_type: ClockType,
@@ -717,6 +749,20 @@ pub(crate) fn flatten(
         &runtime_event_sites,
         &mut global_arena,
     );
+    for (site_id, site) in runtime_event_sites.iter().enumerate() {
+        if !matches!(site.kind, crate::ir::RuntimeEventKind::AssertFatal) {
+            continue;
+        }
+        runtime_errors
+            .entry(site_id as i64)
+            .or_insert_with(|| crate::ir::RuntimeErrorInfo {
+                message: site
+                    .template
+                    .clone()
+                    .unwrap_or_else(|| "assertion failed".to_string()),
+                signals: Vec::new(),
+            });
+    }
 
     let sched_start = flatten_timing.then(crate::timing::now);
     let schedule = scheduler::sort(
@@ -1425,15 +1471,18 @@ fn relocate_executation_unit_with_errors<A, B>(
                                         args: args.clone(),
                                     }
                                 }
-                                crate::ir::SIRInstruction::CombCaptureEvent { site_id, args } => {
-                                    crate::ir::SIRInstruction::CombCaptureEvent {
-                                        site_id: runtime_event_sites
-                                            .get(site_id)
-                                            .copied()
-                                            .unwrap_or(*site_id),
-                                        args: args.clone(),
-                                    }
-                                }
+                                crate::ir::SIRInstruction::CombCaptureEvent {
+                                    site_id,
+                                    args,
+                                    fatal_error_code,
+                                } => crate::ir::SIRInstruction::CombCaptureEvent {
+                                    site_id: runtime_event_sites
+                                        .get(site_id)
+                                        .copied()
+                                        .unwrap_or(*site_id),
+                                    args: args.clone(),
+                                    fatal_error_code: *fatal_error_code,
+                                },
                                 _ => inst.map_addr(f),
                             })
                             .collect(),
@@ -1649,6 +1698,7 @@ fn relocate_units(
             runtime_event_sites.push(site.clone());
         }
 
+        let arena_start = global_arena.nodes.len();
         let mut relocated_module = flatting::flatting(
             sim_module,
             path,
@@ -1658,6 +1708,7 @@ fn relocate_units(
             trace_opts,
             trace.as_deref_mut(),
         );
+        remap_for_fold_runtime_event_sites(&mut global_arena, arena_start, &runtime_event_site_map);
         for observer in &mut relocated_module.comb_observers {
             observer.site_id = runtime_event_site_map[&observer.site_id];
         }
@@ -1853,6 +1904,7 @@ fn build_comb_observer_capture_paths(
                     emit_on_true: true,
                     args: Vec::new(),
                     loop_runner: Some(loop_runner),
+                    fatal_error_code: None,
                 },
                 sources,
                 local_inputs: observer.local_inputs.clone(),
@@ -1904,6 +1956,11 @@ fn build_comb_observer_capture_paths(
             sites[observer.site_id as usize].kind,
             crate::ir::RuntimeEventKind::Display
         );
+        let fatal_error_code = matches!(
+            sites[observer.site_id as usize].kind,
+            crate::ir::RuntimeEventKind::AssertFatal
+        )
+        .then_some(observer.site_id as i64);
         comb_blocks.push(LogicPath {
             target: LogicPathTarget::CombCaptureEvent {
                 site_id: observer.site_id,
@@ -1911,6 +1968,7 @@ fn build_comb_observer_capture_paths(
                 emit_on_true,
                 args: observer.args.clone(),
                 loop_runner: None,
+                fatal_error_code,
             },
             sources,
             local_inputs: observer.local_inputs.clone(),
