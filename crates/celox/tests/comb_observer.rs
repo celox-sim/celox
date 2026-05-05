@@ -1,4 +1,4 @@
-use celox::Simulator;
+use celox::{DeadStorePolicy, Simulator};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -56,6 +56,47 @@ module Top (
             message: "y=1".to_string(),
         }],
     );
+}
+
+fn test_comb_display_survives_dead_store_elimination(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    unrelated: input logic<8>,
+    out: output logic,
+) {
+    var tmp: logic<8>;
+
+    always_comb {
+        tmp = a;
+    }
+
+    always_comb {
+        out = tmp[0];
+        $display("tmp=%0d", tmp);
+    }
+}
+"#, "Top").dead_store_policy(DeadStorePolicy::PreserveTopPorts);
+
+    let a = sim.signal("a");
+    let unrelated = sim.signal("unrelated");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "tmp=5".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(unrelated, 7u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
 }
 
 fn test_comb_assert_continue_follows_always_comb_sensitivity_after_settle(sim) {

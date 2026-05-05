@@ -7,7 +7,8 @@ use crate::ir::*;
 /// - It is in `externally_live` (user-specified observable signals), OR
 /// - Any execution unit Loads from it (or Commits from it), OR
 /// - It has a dynamic offset (conservative), OR
-/// - The store has non-empty triggers (edge-detection side effect).
+/// - The store has non-empty triggers (edge-detection side effect), OR
+/// - The store has non-empty comb capture sites (observer activation side effect).
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn eliminate_dead_stores(
     program: &mut Program,
@@ -65,8 +66,14 @@ pub(crate) fn eliminate_dead_stores(
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {
                 match inst {
-                    SIRInstruction::Store(addr, SIROffset::Static(_), _, _, triggers, _)
-                        if triggers.is_empty() =>
+                    SIRInstruction::Store(
+                        addr,
+                        SIROffset::Static(_),
+                        _,
+                        _,
+                        triggers,
+                        comb_capture_sites,
+                    ) if triggers.is_empty() && comb_capture_sites.is_empty() =>
                     {
                         let abs = addr.absolute_addr();
                         externally_live.contains(&abs)
