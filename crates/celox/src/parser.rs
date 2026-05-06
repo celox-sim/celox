@@ -1713,6 +1713,7 @@ fn relocate_units(
         remap_for_fold_runtime_event_sites(&mut global_arena, arena_start, &runtime_event_site_map);
         for observer in &mut relocated_module.comb_observers {
             observer.site_id = runtime_event_site_map[&observer.site_id];
+            observer.activation_group = runtime_event_site_map[&observer.activation_group];
         }
         comb_blocks.extend(relocated_module.comb_blocks);
         comb_observers.extend(relocated_module.comb_observers);
@@ -1882,9 +1883,18 @@ fn build_comb_observer_capture_paths(
 
     annotate_comb_capture_enable_sites(comb_blocks, observers);
 
+    let mut group_members: HashMap<u32, Vec<usize>> = HashMap::default();
+    for (idx, observer) in observers.iter().enumerate() {
+        group_members
+            .entry(observer.activation_group)
+            .or_default()
+            .push(idx);
+    }
+    let mut emitted_group_triggers = HashSet::default();
     let mut previous_primary_capture_path: Option<LogicPathId> = None;
     let mut previous_trigger_capture_path: Option<LogicPathId> = None;
-    for observer in observers {
+    for observer_idx in 0..observers.len() {
+        let observer = &observers[observer_idx];
         let has_statement_position_dependency =
             observer_has_statement_position_dependency(comb_blocks, observer);
         let order_before = observer_order_before(comb_blocks, observer);
@@ -2038,32 +2048,59 @@ fn build_comb_observer_capture_paths(
         });
         previous_primary_capture_path = Some(path_id);
         for trigger_idx in trigger_paths {
+            if !emitted_group_triggers.insert((observer.activation_group, trigger_idx)) {
+                continue;
+            }
             let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
                 continue;
             };
-            let path_id = LogicPathId(comb_blocks.len());
-            if let Some(prev) = previous_trigger_capture_path {
-                comb_blocks[prev.0].order_before.insert(path_id);
+            for &member_idx in &group_members[&observer.activation_group] {
+                let member = &observers[member_idx];
+                let member_emit_on_true = matches!(
+                    sites[member.site_id as usize].kind,
+                    crate::ir::RuntimeEventKind::Display
+                );
+                let member_fatal_error_code = matches!(
+                    sites[member.site_id as usize].kind,
+                    crate::ir::RuntimeEventKind::AssertFatal
+                )
+                .then_some(member.site_id as i64);
+                let member_expr = member
+                    .loop_runner
+                    .or(member.guard)
+                    .or_else(|| member.args.first().copied())
+                    .unwrap_or_else(|| {
+                        arena.alloc(crate::logic_tree::SLTNode::Constant(
+                            num_bigint::BigUint::from(1u8),
+                            num_bigint::BigUint::from(0u8),
+                            1,
+                            false,
+                        ))
+                    });
+                let path_id = LogicPathId(comb_blocks.len());
+                if let Some(prev) = previous_trigger_capture_path {
+                    comb_blocks[prev.0].order_before.insert(path_id);
+                }
+                comb_blocks[trigger_idx.0].order_before.insert(path_id);
+                comb_blocks.push(LogicPath {
+                    target: LogicPathTarget::CombCaptureEvent {
+                        site_id: member.site_id,
+                        guard: member.guard,
+                        emit_on_true: member_emit_on_true,
+                        args: member.args.clone(),
+                        loop_runner: member.loop_runner,
+                        fatal_error_code: member_fatal_error_code,
+                        consume_enabled: true,
+                    },
+                    sources: std::iter::once(trigger_target).collect(),
+                    local_inputs: member.local_inputs.clone(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
+                    expr: member_expr,
+                });
+                previous_trigger_capture_path = Some(path_id);
             }
-            comb_blocks[trigger_idx.0].order_before.insert(path_id);
-            comb_blocks.push(LogicPath {
-                target: LogicPathTarget::CombCaptureEvent {
-                    site_id: observer.site_id,
-                    guard: observer.guard,
-                    emit_on_true,
-                    args: observer.args.clone(),
-                    loop_runner: None,
-                    fatal_error_code,
-                    consume_enabled: true,
-                },
-                sources: std::iter::once(trigger_target).collect(),
-                local_inputs: observer.local_inputs.clone(),
-                order_before: HashSet::default(),
-                comb_capture_enable_sites: Vec::new(),
-                pre_lower_nodes: Vec::new(),
-                expr,
-            });
-            previous_trigger_capture_path = Some(path_id);
         }
     }
 }
@@ -2147,17 +2184,25 @@ fn annotate_comb_capture_enable_sites(
     comb_blocks: &mut [LogicPath<AbsoluteAddr>],
     observers: &[crate::ir::CombObserver<AbsoluteAddr>],
 ) {
+    let mut group_sites: HashMap<u32, Vec<u32>> = HashMap::default();
+    for observer in observers {
+        group_sites
+            .entry(observer.activation_group)
+            .or_default()
+            .push(observer.site_id);
+    }
     for observer in observers {
         for atom in &observer.sensitivity {
             for path in comb_blocks.iter_mut() {
                 let Some(target) = path.target.var() else {
                     continue;
                 };
-                if target.id == atom.id
-                    && target.access.overlaps(&atom.access)
-                    && !path.comb_capture_enable_sites.contains(&observer.site_id)
-                {
-                    path.comb_capture_enable_sites.push(observer.site_id);
+                if target.id == atom.id && target.access.overlaps(&atom.access) {
+                    for site_id in &group_sites[&observer.activation_group] {
+                        if !path.comb_capture_enable_sites.contains(site_id) {
+                            path.comb_capture_enable_sites.push(*site_id);
+                        }
+                    }
                 }
             }
         }

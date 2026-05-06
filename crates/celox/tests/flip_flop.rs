@@ -261,6 +261,47 @@ fn test_ff_runtime_event_drain_handle_can_run_during_simulation(sim) {
     assert_eq!(messages, expected);
 }
 
+fn test_runtime_event_drain_handle_is_exclusive(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<8>) {
+            always_ff (clk) {
+                $display("a=%0d", a);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
+    assert!(sim.runtime_event_drain().is_none());
+
+    sim.modify(|io| io.set(a, 9u8)).unwrap();
+    sim.tick(clk).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sim.drain_runtime_events();
+    }));
+    assert!(result.is_err());
+    assert_eq!(
+        drain.drain(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=9".to_string(),
+        }],
+    );
+
+    drop(drain);
+    sim.modify(|io| io.set(a, 10u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=10".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_fatal_assert_records_event(sim) {
     @omit_veryl;
     @ignore_on(wasm);

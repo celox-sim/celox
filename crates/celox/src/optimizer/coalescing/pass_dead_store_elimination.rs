@@ -73,8 +73,7 @@ pub(crate) fn eliminate_dead_stores(
                         _,
                         triggers,
                         comb_capture_sites,
-                    ) if triggers.is_empty() && comb_capture_sites.is_empty() =>
-                    {
+                    ) if triggers.is_empty() && comb_capture_sites.is_empty() => {
                         let abs = addr.absolute_addr();
                         externally_live.contains(&abs)
                             || loaded_addrs.contains(&abs)

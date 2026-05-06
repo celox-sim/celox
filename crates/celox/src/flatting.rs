@@ -381,6 +381,7 @@ fn convert_comb_observer<
     };
     CombObserver {
         site_id: observer.site_id,
+        activation_group: observer.activation_group,
         guard: observer.guard.map(&mut map_node),
         args: observer.args.iter().copied().map(&mut map_node).collect(),
         loop_runner: observer.loop_runner.map(&mut map_node),

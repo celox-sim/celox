@@ -207,7 +207,11 @@ pub fn eval_var_select(
 
     if let Some((op, range_expr)) = &select.1 {
         let anchor_expr = all_indices.last().unwrap();
-        let anchor = to_u(anchor_expr).unwrap_or(0);
+        let Some(anchor) = to_u(anchor_expr) else {
+            // Dynamic part-select anchor: the longest static prefix stops
+            // before this select, so conservatively use the whole current level.
+            return Ok(get_slice_fallback(base_offset, processed_count));
+        };
         let val = if let Some(v) = to_u(range_expr) {
             v
         } else {

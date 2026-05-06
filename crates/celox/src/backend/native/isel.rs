@@ -165,8 +165,11 @@ pub fn lower_execution_unit(
                 consume_enabled,
             } = inst
             {
-                let (event_ptr, enabled) =
-                    load_comb_capture_event_ptr_and_enabled(&mut ctx, &mut mblock, *site_id);
+                let (event_ptr, enabled) = load_runtime_event_ptr_and_comb_capture_enabled(
+                    &mut ctx,
+                    &mut mblock,
+                    *site_id,
+                );
                 let write_block_id = BlockId(next_extra_block_id as u32);
                 next_extra_block_id += 1;
                 let cont_block_id = BlockId(next_extra_block_id as u32);
@@ -764,7 +767,7 @@ fn load_runtime_event_ptr(ctx: &mut ISelContext, block: &mut MBlock) -> VReg {
     event_ptr
 }
 
-fn load_comb_capture_event_ptr_and_enabled(
+fn load_runtime_event_ptr_and_comb_capture_enabled(
     ctx: &mut ISelContext,
     block: &mut MBlock,
     site_id: u32,
@@ -773,7 +776,7 @@ fn load_comb_capture_event_ptr_and_enabled(
     block.push(MInst::Load {
         dst: event_ptr,
         base: BaseReg::SimState,
-        offset: crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET as i32,
+        offset: crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
         size: OpSize::S64,
     });
     let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());

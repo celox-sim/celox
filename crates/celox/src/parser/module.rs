@@ -7,8 +7,8 @@ use crate::ir::{
 };
 
 use crate::logic_tree::{
-    LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SymbolicStore, eval_expression, get_width,
-    parse_comb, range_store::RangeStore,
+    LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SymbolicStore, eval_expression,
+    get_width, parse_comb, range_store::RangeStore,
 };
 use crate::parser::{
     BuildConfig, LoweringPhase, ParserError, bitaccess::eval_var_select, bitslicer::BitSlicer,
@@ -78,12 +78,16 @@ impl<'a> ModuleParser<'a> {
         &mut self,
         decl: &veryl_analyzer::ir::CombDeclaration,
     ) -> Result<(), ParserError> {
+        let arena_start = self.arena.nodes.len();
         let (paths, store, boundaries, mut observers, sites) =
             parse_comb(self.module, decl, &mut self.arena)?;
         let site_offset = self.comb_runtime_event_sites.len();
         for observer in &mut observers {
             observer.site_id += site_offset as u32;
+            observer.activation_group = site_offset as u32;
         }
+        let arena_end = self.arena.nodes.len();
+        remap_for_effect_site_ids(&mut self.arena, arena_start..arena_end, site_offset as u32);
         self.store.extend(store);
         self.comb_blocks.extend(paths);
         self.comb_observers.extend(observers);
@@ -660,7 +664,10 @@ impl<'a> ModuleParser<'a> {
         let ff_site_count = self.ff_parser.runtime_event_sites().len() as u32;
         for observer in &mut self.comb_observers {
             observer.site_id += ff_site_count;
+            observer.activation_group += ff_site_count;
         }
+        let arena_end = self.arena.nodes.len();
+        remap_for_effect_site_ids(&mut self.arena, 0..arena_end, ff_site_count);
         let mut runtime_event_sites = self.ff_parser.runtime_event_sites().clone();
         runtime_event_sites.extend(self.comb_runtime_event_sites);
         Ok(SimModule {
@@ -680,6 +687,31 @@ impl<'a> ModuleParser<'a> {
             store: self.store,
             reset_clock_map: self.reset_clock_map,
         })
+    }
+}
+
+fn remap_for_effect_site_ids<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    range: std::ops::Range<usize>,
+    offset: u32,
+) {
+    if offset == 0 {
+        return;
+    }
+    let mut changed = false;
+    for node in &mut arena.nodes[range] {
+        if let SLTNode::ForFold { effects, .. } = node {
+            for effect in effects {
+                effect.site_id += offset;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        arena.cache.clear();
+        for (idx, node) in arena.nodes.iter().cloned().enumerate() {
+            arena.cache.entry(node).or_insert(NodeId(idx));
+        }
     }
 }
 

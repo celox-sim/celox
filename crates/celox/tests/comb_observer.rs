@@ -161,6 +161,222 @@ module Top {
     );
 }
 
+fn test_comb_sensitive_display_runs_on_initial_eval(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+) {
+    always_comb {
+        $display("a=%0d", a);
+    }
+}
+"#, "Top");
+
+    // IEEE 1800-2023 9.2.2.2.2 requires always_comb execution at time zero
+    // even when 9.2.2.2.1 gives the process a non-empty implicit sensitivity
+    // list and the sensitized values have not changed from their defaults.
+    sim.eval_comb().unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=0".to_string(),
+        }],
+    );
+}
+
+fn test_comb_sensitive_fatal_assert_runs_on_initial_eval(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+) {
+    always_comb {
+        $assert(a, "a must be set");
+    }
+}
+"#, "Top");
+
+    let err = sim.eval_comb().unwrap_err();
+    assert_eq!(
+        err,
+        celox::RuntimeErrorCode::Runtime {
+            message: "a must be set".to_string(),
+            signals: Vec::new(),
+        },
+    );
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "a must be set".to_string(),
+        }],
+    );
+}
+
+fn test_comb_runtime_event_drain_handle_sees_captured_display(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    always_comb {
+        out = a;
+        $display("a=%0d", a);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+    sim.drain_runtime_events();
+    let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
+
+    sim.modify(|io| io.set(a, 11u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 11);
+    assert_eq!(
+        drain.drain(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=11".to_string(),
+        }],
+    );
+    assert_eq!(drain.drain(), Vec::new());
+}
+
+fn test_comb_runtime_event_drain_handle_starts_after_simulator_drain(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    always_comb {
+        out = a;
+        $display("a=%0d", a);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+    sim.eval_comb().unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=0".to_string(),
+        }],
+    );
+    let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
+    assert_eq!(drain.drain(), Vec::new());
+
+    sim.modify(|io| io.set(a, 13u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 13);
+    assert_eq!(
+        drain.drain(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=13".to_string(),
+        }],
+    );
+}
+
+fn test_comb_runtime_event_drain_handle_preserves_ff_before_comb_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    d: input logic<8>,
+    out: output logic<8>,
+) {
+    var q: logic<8>;
+
+    always_ff {
+        q = d;
+        $display("ff=%0d", d);
+    }
+
+    always_comb {
+        out = q;
+        $display("comb=%0d", out);
+    }
+}
+"#, "Top");
+
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let out = sim.signal("out");
+
+    sim.eval_comb().unwrap();
+    sim.drain_runtime_events();
+    let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
+
+    sim.modify(|io| io.set(d, 3u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 3);
+    assert_eq!(
+        drain.drain(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "ff=3".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "comb=3".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_comb_runtime_event_drain_handle_drains_older_comb_before_later_ff(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    a: input logic<8>,
+    d: input logic<8>,
+    out: output logic<8>,
+) {
+    always_ff {
+        $display("ff=%0d", d);
+    }
+
+    always_comb {
+        out = a;
+        $display("comb=%0d", a);
+    }
+}
+"#, "Top");
+
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let d = sim.signal("d");
+    let out = sim.signal("out");
+
+    sim.eval_comb().unwrap();
+    sim.drain_runtime_events();
+    let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
+
+    sim.modify(|io| io.set(a, 9u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 9);
+    sim.modify(|io| io.set(d, 4u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        drain.drain(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "comb=9".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "ff=4".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_comb_assert_continue_follows_always_comb_sensitivity_after_settle(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -310,6 +526,7 @@ module Top (
     let d = sim.signal("d");
     let y = sim.signal("y");
 
+    sim.eval_comb().unwrap();
     sim.drain_runtime_events();
 
     sim.modify(|io| io.set(a, 5u8)).unwrap();
@@ -364,6 +581,7 @@ module Top (
     let d = sim.signal("d");
     let y = sim.signal("y");
 
+    sim.eval_comb().unwrap();
     sim.drain_runtime_events();
 
     sim.modify(|io| io.set(d, 7u8)).unwrap();
@@ -919,6 +1137,7 @@ module Top (
     let d = sim.signal("d");
     let out = sim.signal("out");
 
+    sim.eval_comb().unwrap();
     sim.drain_runtime_events();
 
     sim.modify(|io| io.set(d, 3u8)).unwrap();
@@ -998,6 +1217,7 @@ module Top (
     let y = sim.signal("y");
     let z = sim.signal("z");
 
+    sim.eval_comb().unwrap();
     sim.drain_runtime_events();
 
     sim.modify(|io| io.set(a, 3u8)).unwrap();
@@ -1065,6 +1285,7 @@ module Top (
     let out = sim.signal("out");
     let inactive_out = sim.signal("inactive_out");
 
+    sim.eval_comb().unwrap();
     sim.drain_runtime_events();
 
     sim.modify(|io| io.set(a, 5u8)).unwrap();
@@ -1340,6 +1561,7 @@ module Top (
     let unrelated = sim.signal("unrelated");
     let out = sim.signal("out");
 
+    sim.eval_comb().unwrap();
     sim.drain_runtime_events();
 
     sim.modify(|io| io.set(unrelated, 1u8)).unwrap();
@@ -2013,6 +2235,64 @@ module Top (
     );
 }
 
+fn test_comb_display_inside_dynamic_for_remaps_site_after_prior_comb_event(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    count: input logic<4>,
+    base: input logic<8>,
+    marker: input logic<8>,
+    out: output logic<8>,
+) {
+    var sum: logic<8>;
+
+    always_comb {
+        $display("first=%0d", marker);
+    }
+
+    always_comb {
+        sum = base;
+        for i in 0..count {
+            sum = sum + i;
+            $display("i=%0d sum=%0d", i, sum);
+        }
+        out = sum;
+    }
+}
+"#, "Top");
+
+    let count = sim.signal("count");
+    let base = sim.signal("base");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(count, 3u8);
+        io.set(base, 10u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 13);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "first=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=0 sum=10".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=1 sum=11".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "i=2 sum=13".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_comb_display_inside_dynamic_for_preserves_repeated_identical_events(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -2333,6 +2613,7 @@ module Top (
     let d = sim.signal("d");
     let out = sim.signal("out");
 
+    sim.eval_comb().unwrap();
     sim.drain_runtime_events();
 
     sim.modify(|io| io.set(d, 11u8)).unwrap();
@@ -2554,6 +2835,192 @@ module Top (
     );
 }
 
+fn test_comb_display_function_output_dynamic_actual_excludes_only_prefix(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    idx: input logic,
+    a: input logic,
+    b: input logic<8>,
+    out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    function poke (
+        value: input logic,
+        dst: output logic,
+    ) {
+        dst = value;
+    }
+
+    always_comb {
+        mem[2] = b;
+    }
+
+    always_comb {
+        $display("v=%0d", mem[2]);
+        poke(a, mem[1][idx]);
+        out = mem[2];
+    }
+}
+"#, "Top");
+
+    let b = sim.signal("b");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(b, 0x33u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0x33);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "v=51".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_conditional_write_excludes_lhs_even_on_unwritten_branch(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    sel: input logic,
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    always_comb {
+        tmp = 8'd0;
+        if sel {
+            tmp = a;
+        } else {
+            $display("tmp=%0d", tmp);
+        }
+        out = tmp;
+    }
+}
+"#, "Top");
+
+    let sel = sim.signal("sel");
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(a, 9u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 9);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+
+    sim.modify(|io| io.set(sel, 0u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "tmp=0".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_dynamic_port_alias_write_excludes_only_prefix(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Child (
+    a: input logic,
+    y: output logic,
+) {
+    always_comb {
+        y = a;
+    }
+}
+
+module Top (
+    idx: input logic,
+    a: input logic,
+    b: input logic<8>,
+    out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    always_comb {
+        mem[2] = b;
+    }
+
+    inst child: Child (
+        a: a,
+        y: mem[1][idx],
+    );
+
+    always_comb {
+        out = mem[2];
+        $display("v=%0d", mem[2]);
+    }
+}
+"#, "Top");
+
+    let b = sim.signal("b");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(b, 0x44u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0x44);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "v=68".to_string(),
+        }],
+    );
+}
+
+fn test_comb_display_duplicate_store_alias_keeps_capture_activation(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    var x: logic<8>;
+    var y: logic<8>;
+
+    always_comb {
+        x = a;
+        y = a;
+    }
+
+    always_comb {
+        out = y;
+        $display("y=%0d", y);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 7u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 7);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "y=7".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(a, 7u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
 }
 
 #[test]
@@ -2584,6 +3051,486 @@ module Top (
         observer.sensitivity.iter().all(|atom| atom.id != tmp_addr),
         "written LHS must be excluded from always_comb sensitivity: {:?}",
         observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_keeps_unwritten_dynamic_prefix_expansion() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    a: input logic,
+    idx: input logic,
+    out: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    always_comb {
+        $display("v=%0d", tmp[idx]);
+        tmp[0] = a;
+        out = tmp;
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let tmp_addr = sim.program().get_addr(&[], &["tmp"]).unwrap();
+    let idx_addr = sim.program().get_addr(&[], &["idx"]).unwrap();
+    let observer = &sim.program().comb_observers[0];
+
+    // IEEE 1800-2023 9.2.2.2.1 uses expansions of the longest static prefix.
+    // For tmp[idx], the dynamic select falls back to tmp's expansion, but the
+    // written expression tmp[0] excludes only that written term. The unwritten
+    // part of tmp must remain in the process sensitivity.
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .any(|atom| atom.id == idx_addr && atom.access.lsb == 0 && atom.access.msb == 0),
+        "dynamic index expression should remain sensitive: {:?}",
+        observer.sensitivity,
+    );
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .all(|atom| atom.id != tmp_addr || atom.access.lsb > 0),
+        "written tmp[0] must be excluded from sensitivity: {:?}",
+        observer.sensitivity,
+    );
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .any(|atom| atom.id == tmp_addr && atom.access.lsb <= 1 && atom.access.msb >= 1),
+        "unwritten expansion terms of tmp must remain sensitive: {:?}",
+        observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_dynamic_select_keeps_static_array_prefix() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    idx: input logic,
+    out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    always_comb {
+        $display("v=%0d", mem[1][idx]);
+        out = 8'd0;
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
+    let observer = &sim.program().comb_observers[0];
+
+    // IEEE 1800-2023 9.2.2.2.1 refers to the expansion of the longest static
+    // prefix. For mem[1][idx], the longest static prefix is mem[1], not mem.
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .all(|atom| atom.id != mem_addr || (8..=15).contains(&atom.access.lsb)),
+        "mem[1][idx] should not make other mem elements sensitive: {:?}",
+        observer.sensitivity,
+    );
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .any(|atom| atom.id == mem_addr && atom.access.lsb <= 8 && atom.access.msb >= 15),
+        "mem[1][idx] should keep mem[1] sensitive: {:?}",
+        observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_dynamic_write_excludes_only_static_prefix() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    idx: input logic,
+    a: input logic,
+    b: input logic<8>,
+    out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    always_comb {
+        mem[2] = b;
+    }
+
+    always_comb {
+        $display("v=%0d", mem[2]);
+        mem[1][idx] = a;
+        out = 8'd0;
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
+    let observer = &sim.program().comb_observers[0];
+
+    // The written expression is mem[1][idx], whose longest static prefix is
+    // mem[1]. Excluding written expressions must not remove mem[2].
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .any(|atom| atom.id == mem_addr && atom.access.lsb <= 16 && atom.access.msb >= 23),
+        "mem[2] should remain sensitive despite dynamic write to mem[1]: {:?}",
+        observer.sensitivity,
+    );
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .all(|atom| atom.id != mem_addr || atom.access.msb < 8 || atom.access.lsb > 15),
+        "written mem[1] should be excluded from sensitivity: {:?}",
+        observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_indexed_part_select_keeps_static_prefix() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    idx: input logic<3>,
+    out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    always_comb {
+        $display("v=%0d", mem[1][idx +: 2]);
+        out = 8'd0;
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
+    let observer = &sim.program().comb_observers[0];
+
+    // The indexed part-select anchor is dynamic, so the longest static prefix
+    // is mem[1], not the bits selected when idx is treated as zero.
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .any(|atom| atom.id == mem_addr && atom.access.lsb <= 8 && atom.access.msb >= 15),
+        "dynamic indexed part-select should keep all of mem[1] sensitive: {:?}",
+        observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_function_output_dynamic_actual_excludes_only_prefix() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    idx: input logic,
+    a: input logic,
+    b: input logic<8>,
+    out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    function poke (
+        value: input logic,
+        dst: output logic,
+    ) {
+        dst = value;
+    }
+
+    always_comb {
+        mem[2] = b;
+    }
+
+    always_comb {
+        $display("v=%0d", mem[2]);
+        poke(a, mem[1][idx]);
+        out = 8'd0;
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
+    let observer = &sim.program().comb_observers[0];
+
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .any(|atom| atom.id == mem_addr && atom.access.lsb <= 16 && atom.access.msb >= 23),
+        "function output dynamic actual must not remove mem[2]: {:?}",
+        observer.sensitivity,
+    );
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .all(|atom| atom.id != mem_addr || atom.access.msb < 8 || atom.access.lsb > 15),
+        "function output dynamic actual should exclude written mem[1]: {:?}",
+        observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_conditional_write_excludes_lhs_in_all_branches() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    sel: input logic,
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    always_comb {
+        tmp = 8'd0;
+        if sel {
+            tmp = a;
+        } else {
+            $display("tmp=%0d", tmp);
+        }
+        out = tmp;
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let tmp_addr = sim.program().get_addr(&[], &["tmp"]).unwrap();
+    let observer = &sim.program().comb_observers[0];
+
+    assert!(
+        observer.sensitivity.iter().all(|atom| atom.id != tmp_addr),
+        "a written expression is excluded from always_comb sensitivity even if read on another branch: {:?}",
+        observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_dynamic_part_select_write_excludes_only_static_prefix() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    idx: input logic<3>,
+    a: input logic<2>,
+    b: input logic<8>,
+    out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    always_comb {
+        mem[2] = b;
+    }
+
+    always_comb {
+        $display("v=%0d", mem[2]);
+        mem[1][idx +: 2] = a;
+        out = 8'd0;
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
+    let observer = &sim.program().comb_observers[0];
+
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .any(|atom| atom.id == mem_addr && atom.access.lsb <= 16 && atom.access.msb >= 23),
+        "dynamic part-select write must not remove mem[2]: {:?}",
+        observer.sensitivity,
+    );
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .all(|atom| atom.id != mem_addr || atom.access.msb < 8 || atom.access.lsb > 15),
+        "dynamic part-select write should exclude written mem[1]: {:?}",
+        observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_generate_static_index_stays_per_element() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    out: output logic<8>[4],
+) {
+    var mem: logic<8>[4];
+
+    always_comb {
+        mem[0] = 8'd10;
+        mem[1] = 8'd11;
+        mem[2] = 8'd12;
+        mem[3] = 8'd13;
+    }
+
+    for j in 0..4 :g_obs {
+        always_comb {
+            $display("v=%0d", mem[j]);
+            out[j] = mem[j];
+        }
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
+    let mut observed_ranges: Vec<_> = sim
+        .program()
+        .comb_observers
+        .iter()
+        .map(|observer| {
+            observer
+                .sensitivity
+                .iter()
+                .filter(|atom| atom.id == mem_addr)
+                .map(|atom| (atom.access.lsb, atom.access.msb))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    observed_ranges.sort();
+
+    assert_eq!(
+        observed_ranges,
+        vec![vec![(0, 7)], vec![(8, 15)], vec![(16, 23)], vec![(24, 31)],],
+        "generated static indices should not fall back to whole mem sensitivity",
+    );
+}
+
+#[test]
+fn test_comb_observer_sensitivity_dynamic_port_alias_write_excludes_only_prefix() {
+    let sim = Simulator::builder(
+        r#"
+module Child (
+    a: input logic,
+    y: output logic,
+) {
+    always_comb {
+        y = a;
+    }
+}
+
+module Top (
+    idx: input logic,
+    a: input logic,
+    b: input logic<8>,
+    out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    always_comb {
+        mem[2] = b;
+    }
+
+    inst child: Child (
+        a: a,
+        y: mem[1][idx],
+    );
+
+    always_comb {
+        out = 8'd0;
+        $display("v=%0d", mem[2]);
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
+    let observer =
+        sim.program()
+            .comb_observers
+            .iter()
+            .find(|observer| {
+                observer.sensitivity.iter().any(|atom| {
+                    atom.id == mem_addr && atom.access.lsb <= 16 && atom.access.msb >= 23
+                })
+            })
+            .expect("missing observer sensitive to mem[2]");
+
+    assert!(
+        observer
+            .sensitivity
+            .iter()
+            .all(|atom| atom.id != mem_addr || atom.access.msb < 8 || atom.access.lsb > 15),
+        "dynamic port alias write should exclude only written mem[1]: {:?}",
+        observer.sensitivity,
+    );
+}
+
+#[test]
+fn test_comb_observer_duplicate_store_alias_preserves_capture_enabled_store() {
+    let sim = Simulator::builder(
+        r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    var x: logic<8>;
+    var y: logic<8>;
+
+    always_comb {
+        x = a;
+        y = a;
+    }
+
+    always_comb {
+        out = y;
+        $display("y=%0d", y);
+    }
+}
+"#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+
+    let y_addr = sim.program().get_addr(&[], &["y"]).unwrap();
+    assert!(
+        !sim.program().address_aliases.contains_key(&y_addr),
+        "capture-enabled duplicate store must not be removed as an alias: {:?}",
+        sim.program().address_aliases,
     );
 }
 

@@ -12,9 +12,7 @@ use crate::{
         BinaryOp, BitAccess, CombObserver, LogicPathId, RuntimeEventKind, RuntimeEventSite,
         UnaryOp, VarAtomBase,
     },
-    parser::bitaccess::{
-        celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
-    },
+    parser::bitaccess::{celox_value_from_comptime, eval_constexpr, eval_var_select},
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
@@ -1209,18 +1207,20 @@ pub fn parse_comb(
         }
     }
     let mut process_sensitivity = effects.sensitivity;
-    let written_atoms: Vec<_> = paths
-        .iter()
-        .filter_map(|path| path.target.var().copied())
+    let mut written_accesses = HashMap::default();
+    collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
+    let written_atoms: Vec<_> = written_accesses
+        .into_iter()
+        .flat_map(|(id, accesses)| {
+            accesses
+                .into_iter()
+                .map(move |access| VarAtomBase::new(id, access.lsb, access.msb))
+        })
         .collect();
     for path in &paths {
         process_sensitivity.extend(path.sources.iter().copied());
     }
-    process_sensitivity.retain(|atom| {
-        !written_atoms
-            .iter()
-            .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
-    });
+    let process_sensitivity = subtract_written_sensitivity(process_sensitivity, &written_atoms);
     let process_sensitivity: Vec<_> = process_sensitivity.into_iter().collect();
     for observer in &mut effects.observers {
         observer.sensitivity = process_sensitivity.clone();
@@ -1248,6 +1248,41 @@ pub fn parse_comb(
         effects.observers,
         effects.sites,
     ))
+}
+
+fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
+    atoms: impl IntoIterator<Item = VarAtomBase<A>>,
+    written_atoms: &[VarAtomBase<A>],
+) -> HashSet<VarAtomBase<A>> {
+    let mut result = HashSet::default();
+    for atom in atoms {
+        let mut ranges = vec![(atom.access.lsb, atom.access.msb)];
+        for written in written_atoms {
+            if written.id != atom.id {
+                continue;
+            }
+            ranges = ranges
+                .into_iter()
+                .flat_map(|(lsb, msb)| {
+                    if written.access.msb < lsb || written.access.lsb > msb {
+                        return vec![(lsb, msb)];
+                    }
+                    let mut kept = Vec::new();
+                    if lsb < written.access.lsb {
+                        kept.push((lsb, written.access.lsb - 1));
+                    }
+                    if written.access.msb < msb {
+                        kept.push((written.access.msb + 1, msb));
+                    }
+                    kept
+                })
+                .collect();
+        }
+        for (lsb, msb) in ranges {
+            result.insert(VarAtomBase::new(atom.id, lsb, msb));
+        }
+    }
+    result
 }
 
 #[derive(Default)]
@@ -1380,7 +1415,8 @@ fn collect_system_function_effect(
         guard,
         emit_on_true: matches!(kind, RuntimeEventKind::Display),
         args: observer_args.clone(),
-        fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal).then_some(site_id as i64),
+        fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
+            .then_some(1_000_000 + site_id as i64),
     });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
@@ -1399,6 +1435,7 @@ fn collect_system_function_effect(
         .collect();
     collector.observers.push(CombObserver {
         site_id,
+        activation_group: 0,
         guard,
         args: observer_args,
         loop_runner: None,
@@ -2780,12 +2817,7 @@ fn collect_written_destination(
     out: &mut HashMap<VarId, Vec<BitAccess>>,
     dst: &veryl_analyzer::ir::AssignDestination,
 ) -> Result<(), ParserError> {
-    let width = resolve_total_width(module, &module.variables[&dst.id])?;
-    let access = if is_static_access(&dst.index, &dst.select) {
-        eval_var_select(module, dst.id, &dst.index, &dst.select)?
-    } else {
-        BitAccess::new(0, width - 1)
-    };
+    let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
     out.entry(dst.id).or_default().push(access);
     Ok(())
 }
@@ -3517,7 +3549,16 @@ fn eval_dynamic_assign(
     let new_val_masked = arena.alloc(SLTNode::Binary(old_val, BinaryOp::And, mask_node));
     let final_val = arena.alloc(SLTNode::Binary(new_val_masked, BinaryOp::Or, new_val_term));
 
-    range_store.update(access_full, Some((final_val, all_sources)));
+    let prefix_access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
+    let stored_expr = if prefix_access.lsb == 0 && prefix_access.msb == width - 1 {
+        final_val
+    } else {
+        arena.alloc(SLTNode::Slice {
+            expr: final_val,
+            access: prefix_access,
+        })
+    };
+    range_store.update(prefix_access, Some((stored_expr, all_sources)));
 
     Ok((store, boundaries))
 }
@@ -5861,7 +5902,12 @@ fn eval_factor(
                     }
                 }
 
-                all_sources.insert(VarAtomBase::new(*var_id, 0, width - 1));
+                let prefix_access = eval_var_select(module, *var_id, index, select)?;
+                all_sources.insert(VarAtomBase::new(
+                    *var_id,
+                    prefix_access.lsb,
+                    prefix_access.msb,
+                ));
                 Ok(((extracted_expr, all_sources), all_bounds))
             }
         }

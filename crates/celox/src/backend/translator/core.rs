@@ -402,12 +402,11 @@ impl SIRTranslator {
                 fatal_error_code,
                 consume_enabled,
             } => {
-                let capture_ptr = state.builder.ins().load(
+                let event_ptr = state.builder.ins().load(
                     types::I64,
                     MemFlags::new(),
                     state.mem_ptr,
-                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET
-                        as i32,
+                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
                 );
                 let enabled_ptr = state.builder.ins().load(
                     types::I64,
@@ -425,7 +424,7 @@ impl SIRTranslator {
                 let enabled = state.builder.ins().icmp_imm(IntCC::NotEqual, enabled, 0);
                 self.translate_runtime_event_inst(
                     state,
-                    capture_ptr,
+                    event_ptr,
                     Some(enabled),
                     *site_id,
                     args,

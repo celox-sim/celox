@@ -12,8 +12,7 @@ use crate::{
     backend::{
         MemoryLayout, SimulatorErrorCode, get_byte_size,
         memory_layout::{
-            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET,
-            STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         },
     },
     ir::{AbsoluteAddr, Program, SignalRef},
@@ -108,9 +107,6 @@ impl super::traits::SimBackend for WasmBackend {
     }
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
         WasmBackend::runtime_event_buffer_as_ptr(self)
-    }
-    fn comb_capture_event_buffer_as_ptr(&self) -> Option<(*const u8, usize)> {
-        Some(WasmBackend::comb_capture_event_buffer_as_ptr(self))
     }
     fn set_comb_capture_event_enabled(&mut self, active_sites: &[bool]) {
         WasmBackend::set_comb_capture_event_enabled(self, active_sites)
@@ -314,8 +310,7 @@ impl WasmBackend {
         // Create store and shared memory
         let mut store = Store::new(&engine, ());
         let runtime_event_base = layout.merged_total_size;
-        let comb_capture_event_base = runtime_event_base + layout.runtime_event_buffer_size;
-        let comb_capture_enabled_base = comb_capture_event_base + layout.runtime_event_buffer_size;
+        let comb_capture_enabled_base = runtime_event_base + layout.runtime_event_buffer_size;
         let comb_capture_enabled_size = layout.runtime_event_site_layouts.len().max(1);
         let wasm_state_size = comb_capture_enabled_base + comb_capture_enabled_size;
         let mem_pages = wasm_state_size.div_ceil(65536) as u64;
@@ -331,8 +326,6 @@ impl WasmBackend {
             let mem_data = memory.data_mut(&mut store);
             mem_data[STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET..][..8]
                 .copy_from_slice(&(runtime_event_base as u64).to_le_bytes());
-            mem_data[STATE_HEADER_COMB_CAPTURE_EVENT_ADDR_OFFSET..][..8]
-                .copy_from_slice(&(comb_capture_event_base as u64).to_le_bytes());
             mem_data[STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET..][..8]
                 .copy_from_slice(&(comb_capture_enabled_base as u64).to_le_bytes());
             for &(offset, allocated_size) in &four_state_inits {
@@ -615,18 +608,8 @@ impl WasmBackend {
         )
     }
 
-    pub fn comb_capture_event_buffer_as_ptr(&self) -> (*const u8, usize) {
-        let data = self.memory.data(&self.store);
-        let event_base = self.layout.merged_total_size + self.layout.runtime_event_buffer_size;
-        (
-            unsafe { data.as_ptr().add(event_base) },
-            self.layout.runtime_event_buffer_size,
-        )
-    }
-
     pub fn set_comb_capture_event_enabled(&mut self, active_sites: &[bool]) {
-        let enabled_base =
-            self.layout.merged_total_size + self.layout.runtime_event_buffer_size * 2;
+        let enabled_base = self.layout.merged_total_size + self.layout.runtime_event_buffer_size;
         let enabled_len = self.layout.runtime_event_site_layouts.len().max(1);
         let mem = self.memory.data_mut(&mut self.store);
         mem[enabled_base..enabled_base + enabled_len].fill(0);

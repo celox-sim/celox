@@ -1,5 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::backend::RuntimeEventBuffer;
@@ -67,9 +69,8 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(crate) vcd_writer: Option<crate::vcd::VcdWriter>,
     pub(crate) dirty: bool,
     pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
-    runtime_event_read_seq: u64,
-    comb_capture_event_read_seq: u64,
-    pending_runtime_events: Vec<RawRuntimeEvent>,
+    runtime_event_read_seq: Arc<AtomicU64>,
+    runtime_event_drain_active: Arc<AtomicBool>,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
 }
@@ -96,6 +97,8 @@ pub struct RuntimeEventDrain {
     layout: MemoryLayout,
     sites: Vec<RuntimeEventSite>,
     read_seq: u64,
+    shared_read_seq: Arc<AtomicU64>,
+    active: Arc<AtomicBool>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -105,13 +108,25 @@ impl RuntimeEventDrain {
     }
 
     pub fn drain_with_context(&mut self, ctx: RuntimeFormatContext<'_>) -> Vec<RuntimeEvent> {
-        drain_runtime_events_from_buffer(
+        let events = drain_raw_runtime_events_from_buffer(
             &self.buffer,
             &self.layout,
             &self.sites,
             &mut self.read_seq,
-            ctx,
-        )
+        );
+        self.shared_read_seq.store(self.read_seq, Ordering::Release);
+        events
+            .into_iter()
+            .filter_map(|raw| render_raw_runtime_event(raw, &self.sites, ctx))
+            .collect()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for RuntimeEventDrain {
+    fn drop(&mut self) {
+        self.shared_read_seq.store(self.read_seq, Ordering::Release);
+        self.active.store(false, Ordering::Release);
     }
 }
 
@@ -379,13 +394,12 @@ fn collect_runtime_events(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn drain_runtime_events_from_buffer(
+fn drain_raw_runtime_events_from_buffer(
     buffer: &RuntimeEventBuffer,
     layout: &MemoryLayout,
     sites: &[RuntimeEventSite],
     read_seq: &mut u64,
-    ctx: RuntimeFormatContext<'_>,
-) -> Vec<RuntimeEvent> {
+) -> Vec<RawRuntimeEvent> {
     use std::sync::atomic::Ordering;
 
     collect_runtime_events(
@@ -396,9 +410,6 @@ fn drain_runtime_events_from_buffer(
         |offset| buffer.read_u64(offset),
         |offset| buffer.load_atomic_u64(offset, Ordering::Acquire),
     )
-    .into_iter()
-    .filter_map(|raw| render_raw_runtime_event(raw, sites, ctx))
-    .collect()
 }
 
 // ── Generic methods available for any backend ────────────────────────
@@ -439,9 +450,8 @@ impl<B: SimBackend> Simulator<B> {
             vcd_writer: None,
             dirty: false,
             warnings,
-            runtime_event_read_seq: 0,
-            comb_capture_event_read_seq: 0,
-            pending_runtime_events: Vec::new(),
+            runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
+            runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
             comb_observer_snapshots: Vec::new(),
             comb_observer_initial_eval: true,
         };
@@ -482,10 +492,11 @@ impl<B: SimBackend> Simulator<B> {
         &mut self,
         ctx: RuntimeFormatContext<'_>,
     ) -> Vec<RuntimeEvent> {
-        let collected_events = self.collect_backend_runtime_events();
-        let mut raw_events = std::mem::take(&mut self.pending_runtime_events);
-        raw_events.extend(collected_events);
-        raw_events
+        assert!(
+            !self.runtime_event_drain_active.load(Ordering::Acquire),
+            "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
+        );
+        self.collect_backend_runtime_events()
             .into_iter()
             .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
             .collect()
@@ -493,11 +504,55 @@ impl<B: SimBackend> Simulator<B> {
 
     fn collect_backend_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
         let layout = self.backend.layout();
+        let mut read_seq = self.runtime_event_read_seq.load(Ordering::Acquire);
+        if let Some(buffer) = self.backend.runtime_event_buffer() {
+            let events = collect_runtime_events(
+                layout,
+                &self.program.runtime_event_sites,
+                &mut read_seq,
+                buffer.byte_size(),
+                |offset| buffer.read_u64(offset),
+                |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
+            );
+            self.runtime_event_read_seq
+                .store(read_seq, Ordering::Release);
+            events
+        } else {
+            let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
+            let read_u64 = |offset: usize| -> u64 {
+                unsafe { std::ptr::read_volatile(ptr.add(offset) as *const u64) }
+            };
+            let events = collect_runtime_events(
+                layout,
+                &self.program.runtime_event_sites,
+                &mut read_seq,
+                size,
+                read_u64,
+                read_u64,
+            );
+            self.runtime_event_read_seq
+                .store(read_seq, Ordering::Release);
+            events
+        }
+    }
+
+    fn runtime_event_write_seq(&self) -> u64 {
+        if let Some(buffer) = self.backend.runtime_event_buffer() {
+            buffer.load_atomic_u64(0, std::sync::atomic::Ordering::Acquire)
+        } else {
+            let (ptr, _size) = self.backend.runtime_event_buffer_as_ptr();
+            unsafe { std::ptr::read_volatile(ptr as *const u64) }
+        }
+    }
+
+    fn peek_backend_runtime_events_from(&self, read_seq: u64) -> Vec<RawRuntimeEvent> {
+        let mut read_seq = read_seq;
+        let layout = self.backend.layout();
         if let Some(buffer) = self.backend.runtime_event_buffer() {
             collect_runtime_events(
                 layout,
                 &self.program.runtime_event_sites,
-                &mut self.runtime_event_read_seq,
+                &mut read_seq,
                 buffer.byte_size(),
                 |offset| buffer.read_u64(offset),
                 |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
@@ -510,7 +565,7 @@ impl<B: SimBackend> Simulator<B> {
             collect_runtime_events(
                 layout,
                 &self.program.runtime_event_sites,
-                &mut self.runtime_event_read_seq,
+                &mut read_seq,
                 size,
                 read_u64,
                 read_u64,
@@ -518,12 +573,18 @@ impl<B: SimBackend> Simulator<B> {
         }
     }
 
-    pub fn runtime_event_drain(&self) -> Option<RuntimeEventDrain> {
+    pub fn runtime_event_drain(&mut self) -> Option<RuntimeEventDrain> {
+        let buffer = self.backend.runtime_event_buffer()?;
+        self.runtime_event_drain_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
         Some(RuntimeEventDrain {
-            buffer: self.backend.runtime_event_buffer()?,
+            buffer,
             layout: self.backend.layout().clone(),
             sites: self.program.runtime_event_sites.clone(),
-            read_seq: 0,
+            read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
+            shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
+            active: Arc::clone(&self.runtime_event_drain_active),
         })
     }
 
@@ -600,27 +661,26 @@ impl<B: SimBackend> Simulator<B> {
             .iter()
             .zip(active_before.iter().copied())
         {
-            if is_active || (self.comb_observer_initial_eval && observer.sensitivity.is_empty()) {
-                active_sites[observer.site_id as usize] = true;
+            if is_active || self.comb_observer_initial_eval {
+                let group = observer.activation_group;
+                for group_observer in &self.program.comb_observers {
+                    if group_observer.activation_group == group {
+                        active_sites[group_observer.site_id as usize] = true;
+                    }
+                }
             }
         }
         self.backend.set_comb_capture_event_enabled(&active_sites);
-        if let Some(buffer) = self.backend.comb_capture_event_buffer() {
-            buffer.reset();
-            self.comb_capture_event_read_seq = 0;
-        }
+        let runtime_event_start_seq = self.runtime_event_write_seq();
         let eval_result = self
             .backend
             .eval_comb()
             .map_err(|e| self.decorate_runtime_error(e));
         let after = self.snapshot_all_comb_observers();
-        let captures = self.collect_comb_capture_events();
-        let fatal_error = self.fatal_comb_capture_error(&captures);
+        let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
+        let fatal_error = self.fatal_comb_capture_error(&runtime_events);
         self.backend
             .set_comb_capture_event_enabled(&vec![false; self.program.runtime_event_sites.len()]);
-        let runtime_events = self.collect_backend_runtime_events();
-        self.pending_runtime_events.extend(runtime_events);
-        self.pending_runtime_events.extend(captures);
         self.comb_observer_snapshots = after;
         self.comb_observer_initial_eval = false;
         if let Some(err) = fatal_error {
@@ -654,8 +714,8 @@ impl<B: SimBackend> Simulator<B> {
             .collect()
     }
 
-    fn fatal_comb_capture_error(&self, captures: &[RawRuntimeEvent]) -> Option<RuntimeErrorCode> {
-        captures.iter().find_map(|raw| {
+    fn fatal_comb_capture_error(&self, events: &[RawRuntimeEvent]) -> Option<RuntimeErrorCode> {
+        events.iter().find_map(|raw| {
             let RawRuntimeEvent::Event { site_id, args } = raw else {
                 return None;
             };
@@ -668,45 +728,6 @@ impl<B: SimBackend> Simulator<B> {
                 signals: Vec::new(),
             })
         })
-    }
-
-    fn collect_comb_capture_events(&mut self) -> Vec<RawRuntimeEvent> {
-        let mut out = Vec::new();
-        let raw_events = if let Some(buffer) = self.backend.comb_capture_event_buffer() {
-            collect_runtime_events(
-                self.backend.layout(),
-                &self.program.runtime_event_sites,
-                &mut self.comb_capture_event_read_seq,
-                buffer.byte_size(),
-                |offset| buffer.read_u64(offset),
-                |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
-            )
-        } else if let Some((ptr, size)) = self.backend.comb_capture_event_buffer_as_ptr() {
-            let read_u64 = |offset: usize| -> u64 {
-                unsafe { std::ptr::read_volatile(ptr.add(offset) as *const u64) }
-            };
-            collect_runtime_events(
-                self.backend.layout(),
-                &self.program.runtime_event_sites,
-                &mut self.comb_capture_event_read_seq,
-                size,
-                read_u64,
-                read_u64,
-            )
-        } else {
-            return Vec::new();
-        };
-        for raw in raw_events {
-            match raw {
-                RawRuntimeEvent::Event { site_id, args } => {
-                    out.push(RawRuntimeEvent::Event { site_id, args });
-                }
-                RawRuntimeEvent::Missed { count } => self
-                    .pending_runtime_events
-                    .push(RawRuntimeEvent::Missed { count }),
-            }
-        }
-        out
     }
 
     pub(crate) fn eval_apply_ff_at_checked(

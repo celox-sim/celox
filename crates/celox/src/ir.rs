@@ -131,6 +131,7 @@ pub struct LogicPathId(pub usize);
 #[derive(Clone, Debug)]
 pub struct CombObserver<A = AbsoluteAddr> {
     pub site_id: u32,
+    pub activation_group: u32,
     pub guard: Option<crate::logic_tree::NodeId>,
     pub args: Vec<crate::logic_tree::NodeId>,
     pub loop_runner: Option<crate::logic_tree::NodeId>,
@@ -205,12 +206,8 @@ impl Program {
                 .collect();
             self.address_aliases
                 .retain(|alias_addr, _| !observed_written.contains(alias_addr));
-            self.address_aliases.retain(|alias_addr, canonical_addr| {
-                !comb_capture_enable_needs_unaliased_old_value(
-                    &self.eval_comb,
-                    *alias_addr,
-                    *canonical_addr,
-                )
+            self.address_aliases.retain(|alias_addr, _| {
+                !comb_capture_enable_needs_unaliased_old_value(&self.eval_comb, *alias_addr)
             });
         }
         let layout = crate::backend::MemoryLayout::build(self, four_state);
@@ -396,28 +393,21 @@ impl Program {
 fn comb_capture_enable_needs_unaliased_old_value(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     alias_addr: AbsoluteAddr,
-    canonical_addr: AbsoluteAddr,
 ) -> bool {
     for eu in units {
         for block in eu.blocks.values() {
-            let mut canonical_written = false;
             let mut last_store = None;
             for inst in &block.instructions {
                 match inst {
                     SIRInstruction::Store(addr, _, _, _, _, comb_capture_sites) => {
                         let abs = addr.absolute_addr();
-                        if abs == canonical_addr {
-                            canonical_written = true;
-                        }
-                        if abs == alias_addr && !comb_capture_sites.is_empty() && !canonical_written
-                        {
+                        if abs == alias_addr && !comb_capture_sites.is_empty() {
                             return true;
                         }
                         last_store = Some(abs);
                     }
                     SIRInstruction::CombCaptureEnableIfChanged { sites, .. } => {
-                        if !sites.is_empty() && last_store == Some(alias_addr) && !canonical_written
-                        {
+                        if !sites.is_empty() && last_store == Some(alias_addr) {
                             return true;
                         }
                         last_store = None;
