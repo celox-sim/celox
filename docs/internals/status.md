@@ -21,6 +21,7 @@ This is an overview of the current implementation status and supported features 
 ### Combinational Circuits
 -   **Basic Operations**: Arithmetic, logic, comparison, shift, concatenation, slicing.
 -   **Control Structures**: Conditional branching with `if`, `case`, etc.
+-   **Runtime Effects in `always_comb`**: `$display` / `$write` and `$assert` / `$assert_continue` are supported through combinational observers. Observers follow `always_comb` sensitivity, run once at initial combinational settle when required, and support effects inside dynamic `for` loops.
 -   **Optimizations**: Common sub-expression hoisting at the SLT stage, Load/Store Coalescing and scheduler-level store coalescing at the SIR stage.
 
 ### Sequential Circuits
@@ -38,8 +39,8 @@ This is an overview of the current implementation status and supported features 
 
 ## 4. Unimplemented Features and Future Work
 
--   **System Tasks**: Host-side callback style tasks such as `$display` are not generally implemented. `$finish` is supported by the native testbench VM.
--   **Assertions**: Native testbench `$assert` and `$assert_continue` are implemented. Broader assertion/assumption constructs outside that testbench path remain future work.
+-   **System Tasks**: `$display` / `$write` are implemented for `always_comb`, and `$finish` is supported by the native testbench VM. General host-side callback style system tasks remain future work.
+-   **Assertions**: Native testbench `$assert` / `$assert_continue` and `always_comb` `$assert` / `$assert_continue` are implemented. Broader assertion/assumption constructs remain future work.
 -   **Multithreading**: Parallel execution at the execution-unit or domain level.
 
 ## 5. Intentional Design Limitations
