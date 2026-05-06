@@ -126,7 +126,6 @@ impl std::error::Error for SimulatorErrorCode {}
 pub struct SharedJitCode {
     _engine: JitEngine,
     pub(crate) comb_func: SimFunc,
-    pub(crate) comb_observer_funcs: Vec<SimFunc>,
     pub(crate) event_map: HashMap<AbsoluteAddr, EventRef>,
     pub(crate) eval_only_event_map: HashMap<AbsoluteAddr, EventRef>,
     pub(crate) apply_event_map: HashMap<AbsoluteAddr, EventRef>,
@@ -159,7 +158,6 @@ pub struct JitBackend {
     comb_capture_enabled: Vec<u8>,
     /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
     comb_func: SimFunc,
-    comb_observer_funcs: Vec<SimFunc>,
 }
 
 impl JitBackend {
@@ -340,13 +338,6 @@ impl JitBackend {
         }
 
         let comb_code_ptr = res.map_err(SimulatorError::from)?;
-        let mut comb_observer_funcs = Vec::new();
-        for unit in &sir.eval_comb_observers {
-            let ptr = engine
-                .compile_units(std::slice::from_ref(unit), None, None, None)
-                .map_err(SimulatorError::from)?;
-            comb_observer_funcs.push(unsafe { std::mem::transmute::<*const u8, SimFunc>(ptr) });
-        }
 
         let mut next_id = 0;
         let mut addr_to_id = HashMap::default();
@@ -516,7 +507,6 @@ impl JitBackend {
         Ok(SharedJitCode {
             _engine: engine,
             comb_func,
-            comb_observer_funcs,
             event_map,
             eval_only_event_map,
             apply_event_map,
@@ -551,14 +541,12 @@ impl JitBackend {
         }
 
         let comb_func = shared.comb_func;
-        let comb_observer_funcs = shared.comb_observer_funcs.clone();
         let mut backend = Self {
             shared,
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
             comb_func,
-            comb_observer_funcs,
         };
         backend.install_event_buffers();
         backend
@@ -611,13 +599,6 @@ impl JitBackend {
     /// Execute combinational logic
     pub fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         self.run_sim_func(self.comb_func)
-    }
-
-    pub fn eval_comb_observer(&mut self, idx: usize) -> Result<(), SimulatorErrorCode> {
-        let Some(func) = self.comb_observer_funcs.get(idx).copied() else {
-            return Ok(());
-        };
-        self.run_sim_func(func)
     }
 
     /// Resolves an `AbsoluteAddr` into a performance-optimized [`SignalRef`].
@@ -967,10 +948,6 @@ impl super::SimBackend for JitBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         self.eval_comb()
-    }
-
-    fn eval_comb_observer(&mut self, idx: usize) -> Result<(), SimulatorErrorCode> {
-        self.eval_comb_observer(idx)
     }
 
     fn eval_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {

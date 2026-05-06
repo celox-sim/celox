@@ -108,7 +108,6 @@ pub trait SimBackend {
 
     // ── evaluation ──────────────────────────────────────────────
     fn eval_comb(&mut self) -> Result<(), super::SimulatorErrorCode>;
-    fn eval_comb_observer(&mut self, idx: usize) -> Result<(), super::SimulatorErrorCode>;
 
     /// Evaluate and apply a flip-flop domain for the given event.
     fn eval_apply_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;

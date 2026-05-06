@@ -781,7 +781,6 @@ pub(crate) fn flatten(
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             eval_comb: Vec::new(),
-            eval_comb_observers: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             comb_observers: Vec::new(),
@@ -854,7 +853,6 @@ pub(crate) fn flatten(
             register_map: eu.register_map,
         })
         .collect();
-    let eval_comb_observers = Vec::new();
     let eval_comb = schduled.clone();
 
     if let Some(t) = trace
@@ -911,7 +909,6 @@ pub(crate) fn flatten(
         eval_only_ffs,
         apply_ffs,
         eval_comb,
-        eval_comb_observers,
         runtime_errors,
         runtime_event_sites,
         comb_observers,

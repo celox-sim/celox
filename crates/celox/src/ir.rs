@@ -152,7 +152,6 @@ pub struct Program {
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub eval_comb_observers: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
