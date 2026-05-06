@@ -1,13 +1,14 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    BitAccess, BlockId, ExecutionUnit, GlueAddr, GlueBlock, ModuleId, ModuleInitialMemoryValue,
-    SIRBuilder, SIRTerminator, SimModule, TriggerSet, VarAtomBase,
+    BitAccess, BlockId, CombObserver, ExecutionUnit, GlueAddr, GlueBlock, ModuleId,
+    ModuleInitialMemoryValue, RuntimeEventSite, SIRBuilder, SIRTerminator, SimModule, TriggerSet,
+    VarAtomBase,
 };
 
 use crate::logic_tree::{
-    LogicPath, SLTNode, SLTNodeArena, SymbolicStore, eval_expression, get_width, parse_comb,
-    range_store::RangeStore,
+    LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SymbolicStore, eval_expression,
+    get_width, parse_comb, range_store::RangeStore,
 };
 use crate::parser::{
     BuildConfig, LoweringPhase, ParserError, bitaccess::eval_var_select, bitslicer::BitSlicer,
@@ -30,6 +31,8 @@ pub struct ModuleParser<'a> {
     slicer: BitSlicer,
     store: SymbolicStore<VarId>,
     comb_blocks: Vec<LogicPath<VarId>>,
+    comb_observers: Vec<CombObserver<VarId>>,
+    comb_runtime_event_sites: Vec<RuntimeEventSite>,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
     glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     initial_memory_values: Vec<ModuleInitialMemoryValue>,
@@ -60,6 +63,8 @@ impl<'a> ModuleParser<'a> {
             slicer: BitSlicer::new(module)?,
             store: SymbolicStore::default(),
             comb_blocks: Vec::new(),
+            comb_observers: Vec::new(),
+            comb_runtime_event_sites: Vec::new(),
             comb_boundaries: HashMap::default(),
             glue_blocks: HashMap::default(),
             initial_memory_values: Vec::new(),
@@ -73,9 +78,20 @@ impl<'a> ModuleParser<'a> {
         &mut self,
         decl: &veryl_analyzer::ir::CombDeclaration,
     ) -> Result<(), ParserError> {
-        let (paths, store, boundaries) = parse_comb(self.module, decl, &mut self.arena)?;
+        let arena_start = self.arena.nodes.len();
+        let (paths, store, boundaries, mut observers, sites) =
+            parse_comb(self.module, decl, &mut self.arena)?;
+        let site_offset = self.comb_runtime_event_sites.len();
+        for observer in &mut observers {
+            observer.site_id += site_offset as u32;
+            observer.activation_group = site_offset as u32;
+        }
+        let arena_end = self.arena.nodes.len();
+        remap_for_effect_site_ids(&mut self.arena, arena_start..arena_end, site_offset as u32);
         self.store.extend(store);
         self.comb_blocks.extend(paths);
+        self.comb_observers.extend(observers);
+        self.comb_runtime_event_sites.extend(sites);
         for (id, bounds) in boundaries {
             self.comb_boundaries.entry(id).or_default().extend(bounds);
         }
@@ -158,9 +174,17 @@ impl<'a> ModuleParser<'a> {
             };
 
             let path = LogicPath {
-                target: VarAtomBase::new(GlueAddr::Child(child_port_id), 0, width - 1),
+                target: LogicPathTarget::Var(VarAtomBase::new(
+                    GlueAddr::Child(child_port_id),
+                    0,
+                    width - 1,
+                )),
                 expr: sliced,
                 sources: collect_glue_sources(sliced, &glue_arena),
+                local_inputs: Vec::new(),
+                order_before: HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
+                pre_lower_nodes: Vec::new(),
             };
 
             let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
@@ -220,8 +244,16 @@ impl<'a> ModuleParser<'a> {
                 ));
 
                 let path = LogicPath {
-                    target: VarAtomBase::new(GlueAddr::Parent(dst.id), access.lsb, access.msb),
+                    target: LogicPathTarget::Var(VarAtomBase::new(
+                        GlueAddr::Parent(dst.id),
+                        access.lsb,
+                        access.msb,
+                    )),
                     sources,
+                    local_inputs: Vec::new(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
                     expr: rhs_part,
                 };
                 output_ports.push((vec![dst.id], path));
@@ -627,6 +659,15 @@ impl<'a> ModuleParser<'a> {
         for (id, bounds) in self.comb_boundaries {
             comb_boundaries.entry(id).or_default().extend(bounds);
         }
+        let ff_site_count = self.ff_parser.runtime_event_sites().len() as u32;
+        for observer in &mut self.comb_observers {
+            observer.site_id += ff_site_count;
+            observer.activation_group += ff_site_count;
+        }
+        let arena_end = self.arena.nodes.len();
+        remap_for_effect_site_ids(&mut self.arena, 0..arena_end, ff_site_count);
+        let mut runtime_event_sites = self.ff_parser.runtime_event_sites().clone();
+        runtime_event_sites.extend(self.comb_runtime_event_sites);
         Ok(SimModule {
             variables: self.module.variables.clone(),
             name: self.module.name,
@@ -635,14 +676,40 @@ impl<'a> ModuleParser<'a> {
             apply_ff_blocks,
             eval_apply_ff_blocks,
             comb_blocks: self.comb_blocks,
+            comb_observers: self.comb_observers,
             runtime_errors: self.ff_parser.runtime_errors().clone(),
-            runtime_event_sites: self.ff_parser.runtime_event_sites().clone(),
+            runtime_event_sites,
             initial_memory_values: self.initial_memory_values,
             comb_boundaries,
             arena: self.arena,
             store: self.store,
             reset_clock_map: self.reset_clock_map,
         })
+    }
+}
+
+fn remap_for_effect_site_ids<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    range: std::ops::Range<usize>,
+    offset: u32,
+) {
+    if offset == 0 {
+        return;
+    }
+    let mut changed = false;
+    for node in &mut arena.nodes[range] {
+        if let SLTNode::ForFold { effects, .. } = node {
+            for effect in effects {
+                effect.site_id += offset;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        arena.cache.clear();
+        for (idx, node) in arena.nodes.iter().cloned().enumerate() {
+            arena.cache.entry(node).or_insert(NodeId(idx));
+        }
     }
 }
 
@@ -717,6 +784,7 @@ fn collect_glue_sources_with_window(
             end,
             initials,
             updates,
+            effects,
             continue_cond,
             ..
         } => {
@@ -731,6 +799,14 @@ fn collect_glue_sources_with_window(
             }
             for update in updates {
                 collect_glue_sources_with_window(update.expr, None, arena, set);
+            }
+            for effect in effects {
+                if let Some(guard) = effect.guard {
+                    collect_glue_sources_with_window(guard, None, arena, set);
+                }
+                for arg in &effect.args {
+                    collect_glue_sources_with_window(*arg, None, arena, set);
+                }
             }
             collect_glue_sources_with_window(*continue_cond, None, arena, set);
             set.retain(|atom| atom.id != *loop_var);

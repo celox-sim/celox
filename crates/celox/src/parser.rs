@@ -8,6 +8,38 @@ use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 use veryl_parser::token_range::TokenRange;
 
+fn rebuild_slt_cache<A: std::hash::Hash + Eq + Clone>(arena: &mut SLTNodeArena<A>) {
+    arena.cache.clear();
+    for (idx, node) in arena.nodes.iter().cloned().enumerate() {
+        arena.cache.insert(node, crate::logic_tree::NodeId(idx));
+    }
+}
+
+fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    start: usize,
+    runtime_event_site_map: &HashMap<u32, u32>,
+) {
+    let mut changed = false;
+    for node in arena.nodes.iter_mut().skip(start) {
+        let crate::logic_tree::SLTNode::ForFold { effects, .. } = node else {
+            continue;
+        };
+        for effect in effects {
+            if let Some(global_site) = runtime_event_site_map.get(&effect.site_id) {
+                effect.site_id = *global_site;
+                if effect.fatal_error_code.is_some() {
+                    effect.fatal_error_code = Some(*global_site as i64);
+                }
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        rebuild_slt_cache(arena);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BuildConfig {
     pub clock_type: ClockType,
@@ -38,10 +70,11 @@ pub mod module;
 pub mod registry;
 mod scheduler;
 use crate::ir::{
-    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, ModuleId, Program,
-    RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule, VariableInfo,
+    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, LogicPathId,
+    ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule,
+    VarAtomBase, VariableInfo,
 };
-use crate::logic_tree::{LogicPath, SLTNodeArena};
+use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
 use veryl_analyzer::ir::Declaration;
@@ -552,7 +585,7 @@ fn scheduler_source_locations(
     blocks
         .iter()
         .filter_map(|block| {
-            let addr = block.target.id;
+            let addr = block.target.var()?.id;
             if !seen.insert(addr) {
                 return None;
             }
@@ -620,6 +653,7 @@ pub(crate) fn flatten(
         eval_only_ffs,
         apply_ffs,
         mut comb_blocks,
+        mut comb_observers,
         mut runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
@@ -709,6 +743,27 @@ pub(crate) fn flatten(
         })
         .collect();
 
+    build_comb_observer_capture_paths(
+        &mut comb_blocks,
+        &mut comb_observers,
+        &runtime_event_sites,
+        &mut global_arena,
+    );
+    for (site_id, site) in runtime_event_sites.iter().enumerate() {
+        if !matches!(site.kind, crate::ir::RuntimeEventKind::AssertFatal) {
+            continue;
+        }
+        runtime_errors
+            .entry(site_id as i64)
+            .or_insert_with(|| crate::ir::RuntimeErrorInfo {
+                message: site
+                    .template
+                    .clone()
+                    .unwrap_or_else(|| "assertion failed".to_string()),
+                signals: Vec::new(),
+            });
+    }
+
     let sched_start = flatten_timing.then(crate::timing::now);
     let schedule = scheduler::sort(
         comb_blocks,
@@ -728,6 +783,7 @@ pub(crate) fn flatten(
             eval_comb: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
+            comb_observers: Vec::new(),
             eval_comb_plan: None,
             instance_ids: expanded.clone(),
             instance_module: instance_modules.clone(),
@@ -797,6 +853,7 @@ pub(crate) fn flatten(
             register_map: eu.register_map,
         })
         .collect();
+    let eval_comb = schduled.clone();
 
     if let Some(t) = trace
         && trace_opts.scheduled_units
@@ -851,9 +908,10 @@ pub(crate) fn flatten(
         eval_apply_ffs,
         eval_only_ffs,
         apply_ffs,
-        eval_comb: schduled,
+        eval_comb,
         runtime_errors,
         runtime_event_sites,
+        comb_observers,
         eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
@@ -901,7 +959,7 @@ pub(crate) fn flatten(
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
                     match inst {
-                        crate::ir::SIRInstruction::Store(addr, .., triggers) => {
+                        crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                             let abs = addr.absolute_addr();
                             let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
@@ -926,7 +984,7 @@ pub(crate) fn flatten(
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
                     match inst {
-                        crate::ir::SIRInstruction::Store(addr, .., triggers) => {
+                        crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                             let abs = addr.absolute_addr();
                             let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
@@ -955,7 +1013,9 @@ pub(crate) fn flatten(
                             let abs = addr.absolute_addr();
                             let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
-                                if let crate::ir::SIRInstruction::Store(.., triggers) = inst {
+                                if let crate::ir::SIRInstruction::Store(_, _, _, _, triggers, _) =
+                                    inst
+                                {
                                     *triggers = ts.clone();
                                 }
                             }
@@ -979,7 +1039,7 @@ pub(crate) fn flatten(
         for bb in eu.blocks.values_mut() {
             for inst in &mut bb.instructions {
                 match inst {
-                    crate::ir::SIRInstruction::Store(addr, .., triggers) => {
+                    crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                         let abs = addr.absolute_addr();
                         let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
                         if let Some(ts) = trigger_map.get(&canonical) {
@@ -1175,7 +1235,9 @@ fn propagate_boundaries(
 
                     // Propagate from Parent to Child (Input Ports)
                     for (parent_vars, child_addr) in &glue_block.input_ports {
-                        if let GlueAddr::Child(child_var_id) = child_addr.target.id {
+                        if let Some(target) = child_addr.target.var()
+                            && let GlueAddr::Child(child_var_id) = target.id
+                        {
                             let child_abs = AbsoluteAddr {
                                 instance_id: child_id,
                                 var_id: child_var_id,
@@ -1406,6 +1468,20 @@ fn relocate_executation_unit_with_errors<A, B>(
                                         args: args.clone(),
                                     }
                                 }
+                                crate::ir::SIRInstruction::CombCaptureEvent {
+                                    site_id,
+                                    args,
+                                    fatal_error_code,
+                                    consume_enabled,
+                                } => crate::ir::SIRInstruction::CombCaptureEvent {
+                                    site_id: runtime_event_sites
+                                        .get(site_id)
+                                        .copied()
+                                        .unwrap_or(*site_id),
+                                    args: args.clone(),
+                                    fatal_error_code: *fatal_error_code,
+                                    consume_enabled: *consume_enabled,
+                                },
                                 _ => inst.map_addr(f),
                             })
                             .collect(),
@@ -1448,9 +1524,12 @@ fn unify_clock_domains(
                         | crate::logic_tree::SLTNode::Slice { .. }
                 );
                 if is_alias {
+                    let Some(target) = logic_path.target.var() else {
+                        continue;
+                    };
                     let target_abs = AbsoluteAddr {
                         instance_id: *id,
-                        var_id: logic_path.target.id,
+                        var_id: target.id,
                     };
                     let source_abs = AbsoluteAddr {
                         instance_id: *id,
@@ -1468,7 +1547,9 @@ fn unify_clock_domains(
 
                 // Inputs: Parent -> Child (Parent drives Child)
                 for (parent_vars, logic_path) in &glue_block.input_ports {
-                    if let GlueAddr::Child(child_var_id) = logic_path.target.id {
+                    if let Some(target) = logic_path.target.var()
+                        && let GlueAddr::Child(child_var_id) = target.id
+                    {
                         let child_abs = AbsoluteAddr {
                             instance_id: child_id,
                             var_id: child_var_id,
@@ -1563,6 +1644,7 @@ fn relocate_units(
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
+    Vec<crate::ir::CombObserver<AbsoluteAddr>>,
     HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     Vec<crate::ir::RuntimeEventSite>,
     i64,
@@ -1579,6 +1661,7 @@ fn relocate_units(
     let mut apply_ffs: HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>> =
         HashMap::default();
     let mut comb_blocks = Vec::new();
+    let mut comb_observers = Vec::new();
     let mut runtime_errors = HashMap::default();
     let mut runtime_event_sites = Vec::new();
     let mut next_runtime_error_code = 2000;
@@ -1614,7 +1697,8 @@ fn relocate_units(
             runtime_event_sites.push(site.clone());
         }
 
-        let relocated_module = flatting::flatting(
+        let arena_start = global_arena.nodes.len();
+        let mut relocated_module = flatting::flatting(
             sim_module,
             path,
             expanded,
@@ -1623,7 +1707,13 @@ fn relocate_units(
             trace_opts,
             trace.as_deref_mut(),
         );
+        remap_for_fold_runtime_event_sites(&mut global_arena, arena_start, &runtime_event_site_map);
+        for observer in &mut relocated_module.comb_observers {
+            observer.site_id = runtime_event_site_map[&observer.site_id];
+            observer.activation_group = runtime_event_site_map[&observer.activation_group];
+        }
         comb_blocks.extend(relocated_module.comb_blocks);
+        comb_observers.extend(relocated_module.comb_observers);
 
         // Relocate sequential blocks for this instance
         for (trigger_set, eu) in &sim_module.eval_apply_ff_blocks {
@@ -1771,10 +1861,435 @@ fn relocate_units(
         eval_only_ffs,
         apply_ffs,
         comb_blocks,
+        comb_observers,
         runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
     )
+}
+
+fn build_comb_observer_capture_paths(
+    comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
+    observers: &mut [crate::ir::CombObserver<AbsoluteAddr>],
+    sites: &[crate::ir::RuntimeEventSite],
+    arena: &mut SLTNodeArena<AbsoluteAddr>,
+) {
+    if observers.is_empty() {
+        return;
+    }
+
+    annotate_comb_capture_enable_sites(comb_blocks, observers);
+
+    let mut group_members: HashMap<u32, Vec<usize>> = HashMap::default();
+    for (idx, observer) in observers.iter().enumerate() {
+        group_members
+            .entry(observer.activation_group)
+            .or_default()
+            .push(idx);
+    }
+    let mut emitted_group_triggers = HashSet::default();
+    let mut previous_primary_capture_path: Option<LogicPathId> = None;
+    let mut previous_trigger_capture_path: Option<LogicPathId> = None;
+    for observer_idx in 0..observers.len() {
+        let observer = &observers[observer_idx];
+        let has_statement_position_dependency =
+            observer_has_statement_position_dependency(comb_blocks, observer);
+        let order_before = observer_order_before(comb_blocks, observer);
+        let order_after = observer_order_after(comb_blocks, observer);
+        let trigger_paths = if has_statement_position_dependency {
+            observer_trigger_paths(comb_blocks, observer)
+        } else {
+            Vec::new()
+        };
+        if observer.captured_in_loop {
+            let Some(loop_runner) = observer.loop_runner else {
+                continue;
+            };
+            let sources: HashSet<_> = observer
+                .sensitivity
+                .iter()
+                .copied()
+                .filter(|atom| !observer_written_input_overlaps(observer, atom))
+                .filter(|atom| !observer_statement_position_overlaps(comb_blocks, observer, atom))
+                .collect();
+            let path_id = LogicPathId(comb_blocks.len());
+            if let Some(prev) = previous_primary_capture_path {
+                comb_blocks[prev.0].order_before.insert(path_id);
+            }
+            for idx in &order_after {
+                comb_blocks[idx.0].order_before.insert(path_id);
+            }
+            comb_blocks.push(LogicPath {
+                target: LogicPathTarget::CombCaptureEvent {
+                    site_id: observer.site_id,
+                    guard: None,
+                    emit_on_true: true,
+                    args: Vec::new(),
+                    loop_runner: Some(loop_runner),
+                    fatal_error_code: None,
+                    consume_enabled: true,
+                },
+                sources,
+                local_inputs: observer.local_inputs.clone(),
+                order_before: order_before.clone(),
+                comb_capture_enable_sites: Vec::new(),
+                pre_lower_nodes: Vec::new(),
+                expr: loop_runner,
+            });
+            previous_primary_capture_path = Some(path_id);
+            for trigger_idx in trigger_paths {
+                let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
+                    continue;
+                };
+                let path_id = LogicPathId(comb_blocks.len());
+                if let Some(prev) = previous_trigger_capture_path {
+                    comb_blocks[prev.0].order_before.insert(path_id);
+                }
+                comb_blocks[trigger_idx.0].order_before.insert(path_id);
+                comb_blocks.push(LogicPath {
+                    target: LogicPathTarget::CombCaptureEvent {
+                        site_id: observer.site_id,
+                        guard: None,
+                        emit_on_true: true,
+                        args: Vec::new(),
+                        loop_runner: Some(loop_runner),
+                        fatal_error_code: None,
+                        consume_enabled: true,
+                    },
+                    sources: std::iter::once(trigger_target).collect(),
+                    local_inputs: observer.local_inputs.clone(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
+                    expr: loop_runner,
+                });
+                previous_trigger_capture_path = Some(path_id);
+            }
+            continue;
+        }
+        let local_input_ids: HashSet<_> = observer
+            .local_inputs
+            .iter()
+            .map(|(addr, _)| *addr)
+            .collect();
+        let mut sources: HashSet<_> = observer
+            .observed_inputs
+            .iter()
+            .copied()
+            .filter(|atom| !observer_written_input_overlaps(observer, atom))
+            .filter(|atom| !local_input_ids.contains(&atom.id))
+            .filter(|atom| !observer_statement_position_overlaps(comb_blocks, observer, atom))
+            .collect();
+        for (_, node) in &observer.local_inputs {
+            let mut local_sources = HashSet::default();
+            crate::flatting::collect_inputs(*node, arena, &mut local_sources);
+            sources.extend(
+                local_sources
+                    .into_iter()
+                    .filter(|atom| !observer_written_input_overlaps(observer, atom))
+                    .filter(|atom| !local_input_ids.contains(&atom.id))
+                    .filter(|atom| {
+                        !observer_statement_position_overlaps(comb_blocks, observer, atom)
+                    }),
+            );
+        }
+        let expr = observer
+            .guard
+            .or_else(|| observer.args.first().copied())
+            .unwrap_or_else(|| {
+                arena.alloc(crate::logic_tree::SLTNode::Constant(
+                    num_bigint::BigUint::from(1u8),
+                    num_bigint::BigUint::from(0u8),
+                    1,
+                    false,
+                ))
+            });
+        let emit_on_true = matches!(
+            sites[observer.site_id as usize].kind,
+            crate::ir::RuntimeEventKind::Display
+        );
+        let fatal_error_code = matches!(
+            sites[observer.site_id as usize].kind,
+            crate::ir::RuntimeEventKind::AssertFatal
+        )
+        .then_some(observer.site_id as i64);
+        let pre_lower_nodes = observer_pre_lower_nodes(observer);
+        for idx in &order_after {
+            comb_blocks[idx.0]
+                .pre_lower_nodes
+                .extend(pre_lower_nodes.iter().copied());
+        }
+        let path_id = LogicPathId(comb_blocks.len());
+        if let Some(prev) = previous_primary_capture_path {
+            comb_blocks[prev.0].order_before.insert(path_id);
+        }
+        for idx in &order_after {
+            comb_blocks[idx.0].order_before.insert(path_id);
+        }
+        comb_blocks.push(LogicPath {
+            target: LogicPathTarget::CombCaptureEvent {
+                site_id: observer.site_id,
+                guard: observer.guard,
+                emit_on_true,
+                args: observer.args.clone(),
+                loop_runner: None,
+                fatal_error_code,
+                consume_enabled: !trigger_paths.is_empty(),
+            },
+            sources,
+            local_inputs: observer.local_inputs.clone(),
+            order_before,
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr,
+        });
+        previous_primary_capture_path = Some(path_id);
+        for trigger_idx in trigger_paths {
+            if !emitted_group_triggers.insert((observer.activation_group, trigger_idx)) {
+                continue;
+            }
+            let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
+                continue;
+            };
+            for &member_idx in &group_members[&observer.activation_group] {
+                let member = &observers[member_idx];
+                let member_emit_on_true = matches!(
+                    sites[member.site_id as usize].kind,
+                    crate::ir::RuntimeEventKind::Display
+                );
+                let member_fatal_error_code = matches!(
+                    sites[member.site_id as usize].kind,
+                    crate::ir::RuntimeEventKind::AssertFatal
+                )
+                .then_some(member.site_id as i64);
+                let member_expr = member
+                    .loop_runner
+                    .or(member.guard)
+                    .or_else(|| member.args.first().copied())
+                    .unwrap_or_else(|| {
+                        arena.alloc(crate::logic_tree::SLTNode::Constant(
+                            num_bigint::BigUint::from(1u8),
+                            num_bigint::BigUint::from(0u8),
+                            1,
+                            false,
+                        ))
+                    });
+                let path_id = LogicPathId(comb_blocks.len());
+                if let Some(prev) = previous_trigger_capture_path {
+                    comb_blocks[prev.0].order_before.insert(path_id);
+                }
+                comb_blocks[trigger_idx.0].order_before.insert(path_id);
+                comb_blocks.push(LogicPath {
+                    target: LogicPathTarget::CombCaptureEvent {
+                        site_id: member.site_id,
+                        guard: member.guard,
+                        emit_on_true: member_emit_on_true,
+                        args: member.args.clone(),
+                        loop_runner: member.loop_runner,
+                        fatal_error_code: member_fatal_error_code,
+                        consume_enabled: true,
+                    },
+                    sources: std::iter::once(trigger_target).collect(),
+                    local_inputs: member.local_inputs.clone(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
+                    expr: member_expr,
+                });
+                previous_trigger_capture_path = Some(path_id);
+            }
+        }
+    }
+}
+
+fn observer_written_input_overlaps(
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+    atom: &VarAtomBase<AbsoluteAddr>,
+) -> bool {
+    observer
+        .written_input_atoms
+        .iter()
+        .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
+}
+
+fn observer_statement_position_overlaps(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+    atom: &VarAtomBase<AbsoluteAddr>,
+) -> bool {
+    atom_overlaps_any(atom, observer_affected_by_preceding_writes(paths, observer))
+}
+
+fn observer_has_statement_position_dependency(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> bool {
+    if observer.preceding_writes.is_empty() {
+        return false;
+    }
+    let affected = observer_affected_by_preceding_writes(paths, observer);
+    observer
+        .position_inputs
+        .iter()
+        .chain(observer.observed_inputs.iter())
+        .any(|input| atom_overlaps_any(input, &affected))
+}
+
+fn observer_trigger_paths(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> Vec<LogicPathId> {
+    let mut seen_targets = HashSet::default();
+    let affected = observer_affected_by_preceding_writes(paths, observer);
+    paths
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, path)| {
+            let target = path.target.var()?;
+            if observer_written_input_overlaps(observer, target) {
+                return None;
+            }
+            let matches_observer_operand = observer
+                .position_inputs
+                .iter()
+                .chain(observer.observed_inputs.iter())
+                .any(|atom| target.id == atom.id && target.access.overlaps(&atom.access));
+            if !matches_observer_operand
+                || !atom_overlaps_any(target, &affected)
+                || !seen_targets.insert((target.id, target.access.lsb, target.access.msb))
+            {
+                return None;
+            }
+            Some(LogicPathId(idx))
+        })
+        .collect()
+}
+
+fn observer_pre_lower_nodes(observer: &crate::ir::CombObserver<AbsoluteAddr>) -> Vec<NodeId> {
+    if !observer.local_inputs.is_empty() {
+        return Vec::new();
+    }
+    let mut nodes = Vec::with_capacity(observer.args.len() + usize::from(observer.guard.is_some()));
+    if let Some(guard) = observer.guard {
+        nodes.push(guard);
+    }
+    nodes.extend(observer.args.iter().copied());
+    nodes
+}
+
+fn annotate_comb_capture_enable_sites(
+    comb_blocks: &mut [LogicPath<AbsoluteAddr>],
+    observers: &[crate::ir::CombObserver<AbsoluteAddr>],
+) {
+    let mut group_sites: HashMap<u32, Vec<u32>> = HashMap::default();
+    for observer in observers {
+        group_sites
+            .entry(observer.activation_group)
+            .or_default()
+            .push(observer.site_id);
+    }
+    for observer in observers {
+        for atom in &observer.sensitivity {
+            for path in comb_blocks.iter_mut() {
+                let Some(target) = path.target.var() else {
+                    continue;
+                };
+                if target.id == atom.id && target.access.overlaps(&atom.access) {
+                    for site_id in &group_sites[&observer.activation_group] {
+                        if !path.comb_capture_enable_sites.contains(site_id) {
+                            path.comb_capture_enable_sites.push(*site_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn observer_order_after(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> HashSet<LogicPathId> {
+    let mut result = HashSet::default();
+    if !observer_has_statement_position_dependency(paths, observer) {
+        return result;
+    }
+    for written in &observer.preceding_writes {
+        for (idx, path) in paths.iter().enumerate() {
+            let Some(target) = path.target.var() else {
+                continue;
+            };
+            if target.id == written.id && target.access.overlaps(&written.access) {
+                result.insert(LogicPathId(idx));
+            }
+        }
+    }
+    result
+}
+
+fn observer_order_before(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> HashSet<LogicPathId> {
+    if !observer_has_statement_position_dependency(paths, observer) {
+        return HashSet::default();
+    }
+    let preceding_writes = observer.preceding_writes.iter().collect::<Vec<_>>();
+    let affected_by_preceding_writes = observer_affected_by_preceding_writes(paths, observer);
+    let mut result = HashSet::default();
+    for (idx, path) in paths.iter().enumerate() {
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        if !atom_overlaps_any(target, &affected_by_preceding_writes) {
+            continue;
+        }
+        let already_written = preceding_writes
+            .iter()
+            .any(|written| target.id == written.id && target.access.overlaps(&written.access));
+        if !already_written {
+            result.insert(LogicPathId(idx));
+        }
+    }
+    result
+}
+
+fn observer_affected_by_preceding_writes(
+    paths: &[LogicPath<AbsoluteAddr>],
+    observer: &crate::ir::CombObserver<AbsoluteAddr>,
+) -> HashSet<VarAtomBase<AbsoluteAddr>> {
+    let mut affected: HashSet<VarAtomBase<AbsoluteAddr>> =
+        observer.preceding_writes.iter().copied().collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for path in paths {
+            let Some(target) = path.target.var() else {
+                continue;
+            };
+            if !path
+                .sources
+                .iter()
+                .any(|source| atom_overlaps_any(source, &affected))
+            {
+                continue;
+            }
+            if affected.insert(*target) {
+                changed = true;
+            }
+        }
+    }
+    affected
+}
+
+fn atom_overlaps_any<A: Eq + std::hash::Hash + Copy>(
+    atom: &VarAtomBase<A>,
+    atoms: impl IntoIterator<Item = impl std::borrow::Borrow<VarAtomBase<A>>>,
+) -> bool {
+    atoms.into_iter().any(|other| {
+        let other = other.borrow();
+        atom.id == other.id && atom.access.overlaps(&other.access)
+    })
 }
 
 fn analyze_clock_dependencies(
@@ -1823,7 +2338,10 @@ fn analyze_clock_dependencies(
     let acd_start = acd_timing.then(crate::timing::now);
     let mut comb_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     for path in comb_blocks {
-        let target_abs = path.target.id;
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        let target_abs = target.id;
         let mut sources = crate::HashSet::default();
         crate::flatting::collect_inputs(path.expr, arena, &mut sources);
         for source in sources {

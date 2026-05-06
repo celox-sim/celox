@@ -5,10 +5,10 @@ use veryl_analyzer::ir::VarId;
 
 use crate::HashMap;
 use crate::ir::{
-    AbsoluteAddr, BitAccess, GlueAddr, GlueBlock, InstanceId, InstancePath, RelocationModule,
-    SimModule, VarAtomBase,
+    AbsoluteAddr, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
+    RelocationModule, SimModule, VarAtomBase,
 };
-use crate::logic_tree::{LogicPath, NodeId, SLTNode, SLTNodeArena, get_width};
+use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, get_width};
 
 pub fn flatting(
     module: &SimModule,
@@ -30,6 +30,14 @@ pub fn flatting(
         .comb_blocks
         .iter()
         .map(|e| convert_logic_path(e, &module.arena, arena, &mut comb_cache, &cv))
+        .collect();
+    let mut observer_cache = HashMap::default();
+    let comb_observers: Vec<_> = module
+        .comb_observers
+        .iter()
+        .map(|observer| {
+            convert_comb_observer(observer, &module.arena, arena, &mut observer_cache, &cv)
+        })
         .collect();
     for (child_instance_name, gbs) in &module.glue_blocks {
         for (idx, gb) in gbs.iter().enumerate() {
@@ -77,6 +85,7 @@ pub fn flatting(
         eval_only_ff_blocks: HashMap::default(),
         apply_ff_blocks: HashMap::default(),
         comb_blocks: atomized_comb_blocks,
+        comb_observers,
     }
 }
 
@@ -89,9 +98,13 @@ fn atomize_logic_paths(
     let mut atomized_paths = Vec::new();
 
     for path in paths {
-        if let Some(bounds) = boundaries.get(&path.target.id) {
+        let Some(target_var) = path.target.var() else {
+            atomized_paths.push(path.clone());
+            continue;
+        };
+        if let Some(bounds) = boundaries.get(&target_var.id) {
             // This variable has defined boundaries, so we need to split it.
-            let atoms = path.target.access.calculate_atoms(bounds);
+            let atoms = target_var.access.calculate_atoms(bounds);
 
             // Extract the set of variable IDs that were originally declared as sources.
             // This acts as a "source mask" to filter out unintended dependencies.
@@ -104,8 +117,8 @@ fn atomize_logic_paths(
                 Vec::new();
             for atom_access in &atoms {
                 let relative_atom_access = crate::ir::BitAccess::new(
-                    atom_access.lsb - path.target.access.lsb,
-                    atom_access.msb - path.target.access.lsb,
+                    atom_access.lsb - target_var.access.lsb,
+                    atom_access.msb - target_var.access.lsb,
                 );
                 let new_expr = arena.alloc(SLTNode::Slice {
                     expr: path.expr,
@@ -136,11 +149,11 @@ fn atomize_logic_paths(
 
                 // Build the merged path expression.
                 let relative_access = crate::ir::BitAccess::new(
-                    merged_lsb - path.target.access.lsb,
-                    merged_msb - path.target.access.lsb,
+                    merged_lsb - target_var.access.lsb,
+                    merged_msb - target_var.access.lsb,
                 );
                 let merged_width = merged_msb - merged_lsb + 1;
-                let original_width = path.target.access.msb - path.target.access.lsb + 1;
+                let original_width = target_var.access.msb - target_var.access.lsb + 1;
 
                 let merged_expr = if merged_width == original_width {
                     // Covers the full original range — use the expression directly.
@@ -160,10 +173,14 @@ fn atomize_logic_paths(
                     .filter(|input_atom| original_source_ids.contains(&input_atom.id))
                     .collect();
 
-                let target = VarAtomBase::new(path.target.id, merged_lsb, merged_msb);
+                let target = VarAtomBase::new(target_var.id, merged_lsb, merged_msb);
                 atomized_paths.push(LogicPath {
-                    target,
+                    target: LogicPathTarget::Var(target),
                     sources: filtered_sources,
+                    local_inputs: path.local_inputs.clone(),
+                    order_before: path.order_before.clone(),
+                    comb_capture_enable_sites: path.comb_capture_enable_sites.clone(),
+                    pre_lower_nodes: path.pre_lower_nodes.clone(),
                     expr: merged_expr,
                 });
             }
@@ -304,6 +321,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             end,
             initials,
             updates,
+            effects,
             continue_cond,
             ..
         } => {
@@ -318,6 +336,14 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             }
             for update in updates {
                 collect_inputs_with_window(update.expr, None, arena, set, visited);
+            }
+            for effect in effects {
+                if let Some(guard) = effect.guard {
+                    collect_inputs_with_window(guard, None, arena, set, visited);
+                }
+                for arg in &effect.args {
+                    collect_inputs_with_window(*arg, None, arena, set, visited);
+                }
             }
             collect_inputs_with_window(*continue_cond, None, arena, set, visited);
             set.retain(|atom| atom.id != *loop_var);
@@ -337,6 +363,75 @@ fn convert_logic_path<
 ) -> LogicPath<B> {
     lp.map_addr(arena, target_arena, cache, f)
 }
+
+fn convert_comb_observer<
+    A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
+    B: Hash + Eq + Clone,
+>(
+    observer: &CombObserver<A>,
+    arena: &SLTNodeArena<A>,
+    target_arena: &mut SLTNodeArena<B>,
+    cache: &mut HashMap<NodeId, NodeId>,
+    f: &impl Fn(&A) -> B,
+) -> CombObserver<B> {
+    let mut map_node = |node| {
+        arena
+            .get(node)
+            .map_addr(node, arena, target_arena, cache, f)
+    };
+    CombObserver {
+        site_id: observer.site_id,
+        activation_group: observer.activation_group,
+        guard: observer.guard.map(&mut map_node),
+        args: observer.args.iter().copied().map(&mut map_node).collect(),
+        loop_runner: observer.loop_runner.map(&mut map_node),
+        sensitivity: observer
+            .sensitivity
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        local_inputs: observer
+            .local_inputs
+            .iter()
+            .map(|(id, node)| {
+                (
+                    f(id),
+                    arena
+                        .get(*node)
+                        .map_addr(*node, arena, target_arena, cache, f),
+                )
+            })
+            .collect(),
+        observed_inputs: observer
+            .observed_inputs
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        position_inputs: observer
+            .position_inputs
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        preceding_writes: observer
+            .preceding_writes
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        written_before: observer
+            .written_before
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        written_input_atoms: observer
+            .written_input_atoms
+            .iter()
+            .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+            .collect(),
+        written_inputs: observer.written_inputs.iter().map(f).collect(),
+        captured_in_loop: observer.captured_in_loop,
+    }
+}
+
 fn convert_glue_block(
     gb: &GlueBlock,
     parent_id: InstanceId,
@@ -557,7 +652,7 @@ mod tests {
         let path1 = paths
             .iter()
             .find(|p| {
-                p.target.id
+                p.target.var().unwrap().id
                     == (AbsoluteAddr {
                         instance_id: InstanceId(0),
                         var_id: top_ic_id,
@@ -578,7 +673,7 @@ mod tests {
         let path2 = paths
             .iter()
             .find(|p| {
-                p.target.id
+                p.target.var().unwrap().id
                     == (AbsoluteAddr {
                         instance_id: InstanceId(0),
                         var_id: top_o_id,
@@ -599,7 +694,7 @@ mod tests {
         let path3 = paths
             .iter()
             .find(|p| {
-                p.target.id
+                p.target.var().unwrap().id
                     == (AbsoluteAddr {
                         instance_id: InstanceId(1),
                         var_id: child_i_id,
@@ -620,7 +715,7 @@ mod tests {
         let path4 = paths
             .iter()
             .find(|p| {
-                p.target.id
+                p.target.var().unwrap().id
                     == (AbsoluteAddr {
                         instance_id: InstanceId(0),
                         var_id: top_oc_id,

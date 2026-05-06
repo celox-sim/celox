@@ -91,6 +91,18 @@ impl SLTToSIRLowerer {
         self.lower_inner(builder, node, arena, cache, None, true)
     }
 
+    pub fn lower_with_inputs<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        inputs: crate::HashMap<VarAtomBase<A>, RegisterId>,
+    ) -> RegisterId {
+        let env = LowerEnv { inputs };
+        self.lower_inner(builder, node, arena, cache, Some(&env), false)
+    }
+
     fn lower_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -178,6 +190,7 @@ impl SLTToSIRLowerer {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => self.lower_for_fold(
                 builder,
@@ -195,6 +208,7 @@ impl SLTToSIRLowerer {
                 result,
                 initials,
                 updates,
+                effects,
                 *continue_cond,
             ),
         };
@@ -853,6 +867,7 @@ impl SLTToSIRLowerer {
         result: &VarAtomBase<A>,
         initials: &[crate::logic_tree::comb::SLTForUpdate<A>],
         updates: &[crate::logic_tree::comb::SLTForUpdate<A>],
+        effects: &[crate::logic_tree::comb::SLTForEffect],
         continue_cond: NodeId,
     ) -> RegisterId {
         let mut counter_width = loop_width.max(1);
@@ -1109,15 +1124,16 @@ impl SLTToSIRLowerer {
             self.cast_reg_width_ext(builder, loop_value, loop_width, loop_signed);
 
         let mut env_inputs = crate::HashMap::default();
+        for (update, state_reg) in updates.iter().zip(body_states.iter().copied()) {
+            env_inputs.insert(update.target.clone(), state_reg);
+        }
         env_inputs.insert(
             VarAtomBase::new(loop_var.clone(), 0, loop_width - 1),
             loop_value_trunc,
         );
-        for (update, state_reg) in updates.iter().zip(body_states.iter().copied()) {
-            env_inputs.insert(update.target.clone(), state_reg);
-        }
         let env = LowerEnv { inputs: env_inputs };
         let mut local_cache = crate::HashMap::default();
+        self.lower_for_effects(builder, arena, &mut local_cache, &env, effects);
         let next_states: Vec<_> = updates
             .iter()
             .map(|update| {
@@ -1314,6 +1330,56 @@ impl SLTToSIRLowerer {
             .position(|update| update.target == *result)
             .expect("ForFold result target must be present in updates");
         exit_states[result_idx]
+    }
+
+    fn lower_for_effects<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: &LowerEnv<A>,
+        effects: &[crate::logic_tree::comb::SLTForEffect],
+    ) {
+        for effect in effects {
+            let emit = |builder: &mut SIRBuilder<A>,
+                        this: &Self,
+                        cache: &mut crate::HashMap<NodeId, RegisterId>| {
+                let args = effect
+                    .args
+                    .iter()
+                    .map(|arg| this.lower_inner(builder, *arg, arena, cache, Some(env), false))
+                    .collect();
+                builder.emit(SIRInstruction::CombCaptureEvent {
+                    site_id: effect.site_id,
+                    args,
+                    fatal_error_code: effect.fatal_error_code,
+                    consume_enabled: false,
+                });
+            };
+            if let Some(guard) = effect.guard {
+                let cond = self.lower_inner(builder, guard, arena, cache, Some(env), false);
+                let branch_cond = if effect.emit_on_true {
+                    cond
+                } else {
+                    let inverted = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Unary(inverted, UnaryOp::LogicNot, cond));
+                    inverted
+                };
+                let event_block = builder.new_block();
+                let done_block = builder.new_block();
+                builder.seal_block(SIRTerminator::Branch {
+                    cond: branch_cond,
+                    true_block: (event_block, vec![]),
+                    false_block: (done_block, vec![]),
+                });
+                builder.switch_to_block(event_block);
+                emit(builder, self, cache);
+                builder.seal_block(SIRTerminator::Jump(done_block, vec![]));
+                builder.switch_to_block(done_block);
+            } else {
+                emit(builder, self, cache);
+            }
+        }
     }
 }
 

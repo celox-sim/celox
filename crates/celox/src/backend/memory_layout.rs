@@ -4,9 +4,11 @@ use crate::ir::{AbsoluteAddr, Program, SIRInstruction};
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
-pub const STATE_HEADER_SIZE: usize = 8;
+pub const STATE_HEADER_SIZE: usize = 32;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub const STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET: usize = 16;
 pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
@@ -248,7 +250,7 @@ fn collect_ff_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
             for inst in &block.instructions {
                 match inst {
                     SIRInstruction::Load(_, addr, _, _)
-                    | SIRInstruction::Store(addr, _, _, _, _) => {
+                    | SIRInstruction::Store(addr, _, _, _, _, _) => {
                         addrs.insert(addr.absolute_addr());
                     }
                     SIRInstruction::Commit(src, dst, _, _, _) => {

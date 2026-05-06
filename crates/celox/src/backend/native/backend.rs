@@ -243,6 +243,7 @@ pub struct NativeBackend {
     compiled: Arc<SharedNativeCode>,
     memory: Vec<u64>,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
+    comb_capture_enabled: Vec<u8>,
 }
 
 impl NativeBackend {
@@ -260,6 +261,7 @@ impl NativeBackend {
         let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
             shared.layout.runtime_event_buffer_size,
         ));
+        let comb_capture_enabled = vec![0; shared.layout.runtime_event_site_layouts.len().max(1)];
 
         // Initialize 4-state regions to X (v=1, m=1)
         for &(offset, allocated_size) in &shared.four_state_inits {
@@ -275,17 +277,28 @@ impl NativeBackend {
             compiled: shared,
             memory,
             runtime_event_buffer,
+            comb_capture_enabled,
         };
-        backend.install_runtime_event_buffer();
+        backend.install_event_buffers();
         backend
     }
 
-    fn install_runtime_event_buffer(&mut self) {
-        use crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
+    fn install_event_buffers(&mut self) {
+        use crate::backend::memory_layout::{
+            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+        };
 
         let addr = self.runtime_event_buffer.as_mut_ptr() as u64;
         let ptr = unsafe {
             (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET)
+                as *mut u64
+        };
+        unsafe {
+            std::ptr::write_unaligned(ptr, addr);
+        }
+        let addr = self.comb_capture_enabled.as_ptr() as u64;
+        let ptr = unsafe {
+            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET)
                 as *mut u64
         };
         unsafe {
@@ -509,6 +522,15 @@ impl super::super::SimBackend for NativeBackend {
 
     fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
         Some(Arc::clone(&self.runtime_event_buffer))
+    }
+
+    fn set_comb_capture_event_enabled(&mut self, active_sites: &[bool]) {
+        self.comb_capture_enabled.fill(0);
+        for (idx, active) in active_sites.iter().copied().enumerate() {
+            if active && idx < self.comb_capture_enabled.len() {
+                self.comb_capture_enabled[idx] = 1;
+            }
+        }
     }
 
     fn stable_region_size(&self) -> usize {

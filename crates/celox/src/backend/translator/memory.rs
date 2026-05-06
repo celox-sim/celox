@@ -216,6 +216,7 @@ impl SIRTranslator {
         op_width: &usize,
         src_reg: &RegisterId,
         triggers: &[TriggerIdWithKind],
+        comb_capture_sites: &[u32],
     ) {
         // width=0: identity Store optimized away by alias; emit triggers only.
         if *op_width == 0 {
@@ -312,6 +313,75 @@ impl SIRTranslator {
             .ins()
             .iadd_imm(mem_base, base_offset_bytes as i64);
         let final_addr = state.builder.ins().iadd(final_addr, byte_offset_val);
+
+        let captures_four_state = self.options.four_state && self.layout.is_4states[&abs];
+        let old_value_chunks = if comb_capture_sites.is_empty() {
+            Vec::new()
+        } else if s_phys_width <= 64 {
+            vec![self.translate_load_native(
+                state,
+                final_addr,
+                bit_shift_val,
+                *op_width,
+                s_phys_width,
+            )]
+        } else {
+            let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
+            let full_word_store = (*op_width).is_multiple_of(64);
+            if is_static_aligned && full_word_store {
+                self.translate_load_multi_word_aligned_words(
+                    state,
+                    final_addr,
+                    *op_width,
+                    s_phys_width,
+                )
+            } else {
+                self.translate_load_multi_word(
+                    state,
+                    final_addr,
+                    bit_shift_val,
+                    *op_width,
+                    s_phys_width,
+                )
+            }
+        };
+        let old_mask_chunks = if comb_capture_sites.is_empty() || !captures_four_state {
+            Vec::new()
+        } else {
+            let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+            let final_addr_m = state
+                .builder
+                .ins()
+                .iadd_imm(final_addr, var_byte_size as i64);
+            if s_phys_width <= 64 {
+                vec![self.translate_load_native(
+                    state,
+                    final_addr_m,
+                    bit_shift_val,
+                    *op_width,
+                    s_phys_width,
+                )]
+            } else {
+                let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
+                let full_word_store = (*op_width).is_multiple_of(64);
+                if is_static_aligned && full_word_store {
+                    self.translate_load_multi_word_aligned_words(
+                        state,
+                        final_addr_m,
+                        *op_width,
+                        s_phys_width,
+                    )
+                } else {
+                    self.translate_load_multi_word(
+                        state,
+                        final_addr_m,
+                        bit_shift_val,
+                        *op_width,
+                        s_phys_width,
+                    )
+                }
+            }
+        };
 
         // 3. Dispatch functions based on physical width
         let v_chunks = state.regs[src_reg].load_value_chunks(state.builder);
@@ -432,8 +502,174 @@ impl SIRTranslator {
                 },
             );
         }
+        if !comb_capture_sites.is_empty() {
+            let new_value_chunks = if s_phys_width <= 64 {
+                vec![self.translate_load_native(
+                    state,
+                    final_addr,
+                    bit_shift_val,
+                    *op_width,
+                    s_phys_width,
+                )]
+            } else {
+                let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
+                let full_word_store = (*op_width).is_multiple_of(64);
+                if is_static_aligned && full_word_store {
+                    self.translate_load_multi_word_aligned_words(
+                        state,
+                        final_addr,
+                        *op_width,
+                        s_phys_width,
+                    )
+                } else {
+                    self.translate_load_multi_word(
+                        state,
+                        final_addr,
+                        bit_shift_val,
+                        *op_width,
+                        s_phys_width,
+                    )
+                }
+            };
+            let mut changed =
+                self.translate_chunks_changed(state, &old_value_chunks, &new_value_chunks);
+            if captures_four_state {
+                let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                let final_addr_m = state
+                    .builder
+                    .ins()
+                    .iadd_imm(final_addr, var_byte_size as i64);
+                let new_mask_chunks = if s_phys_width <= 64 {
+                    vec![self.translate_load_native(
+                        state,
+                        final_addr_m,
+                        bit_shift_val,
+                        *op_width,
+                        s_phys_width,
+                    )]
+                } else {
+                    let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
+                    let full_word_store = (*op_width).is_multiple_of(64);
+                    if is_static_aligned && full_word_store {
+                        self.translate_load_multi_word_aligned_words(
+                            state,
+                            final_addr_m,
+                            *op_width,
+                            s_phys_width,
+                        )
+                    } else {
+                        self.translate_load_multi_word(
+                            state,
+                            final_addr_m,
+                            bit_shift_val,
+                            *op_width,
+                            s_phys_width,
+                        )
+                    }
+                };
+                let mask_changed =
+                    self.translate_chunks_changed(state, &old_mask_chunks, &new_mask_chunks);
+                changed = state.builder.ins().bor(changed, mask_changed);
+            }
+            self.translate_enable_comb_capture_sites(state, changed, comb_capture_sites);
+        }
         // 5. Trigger detection
         self.translate_trigger_detection(state, addr, offset, op_width, triggers);
+    }
+
+    fn translate_chunks_changed(
+        &self,
+        state: &mut TranslationState,
+        old_chunks: &[Value],
+        new_chunks: &[Value],
+    ) -> Value {
+        let first_ty = state.builder.func.dfg.value_type(old_chunks[0]);
+        let first_new = cast_type(state.builder, new_chunks[0], first_ty);
+        let mut changed = state
+            .builder
+            .ins()
+            .icmp(IntCC::NotEqual, old_chunks[0], first_new);
+        for (old, new) in old_chunks.iter().zip(new_chunks.iter()).skip(1) {
+            let old_ty = state.builder.func.dfg.value_type(*old);
+            let new = cast_type(state.builder, *new, old_ty);
+            let chunk_changed = state.builder.ins().icmp(IntCC::NotEqual, *old, new);
+            changed = state.builder.ins().bor(changed, chunk_changed);
+        }
+        changed
+    }
+
+    fn translate_enable_comb_capture_sites(
+        &self,
+        state: &mut TranslationState,
+        changed: Value,
+        site_ids: &[u32],
+    ) {
+        let enabled_ptr = state.builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            state.mem_ptr,
+            crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+        );
+        let one = state.builder.ins().iconst(types::I8, 1);
+        for &site_id in site_ids {
+            let old =
+                state
+                    .builder
+                    .ins()
+                    .load(types::I8, MemFlags::new(), enabled_ptr, site_id as i32);
+            let next = state.builder.ins().select(changed, one, old);
+            state
+                .builder
+                .ins()
+                .store(MemFlags::new(), next, enabled_ptr, site_id as i32);
+        }
+    }
+
+    pub(super) fn translate_comb_capture_enable_if_changed(
+        &self,
+        state: &mut TranslationState,
+        old: &RegisterId,
+        new: &RegisterId,
+        sites: &[u32],
+    ) {
+        if sites.is_empty() {
+            return;
+        }
+
+        let old_value_chunks = state.regs[old].load_value_chunks(state.builder);
+        let new_value_chunks = state.regs[new].load_value_chunks(state.builder);
+        let mut changed =
+            self.translate_chunks_changed(state, &old_value_chunks, &new_value_chunks);
+
+        if self.options.four_state {
+            let old_mask_chunks = state.regs[old]
+                .load_mask_chunks(state.builder)
+                .unwrap_or_else(|| {
+                    old_value_chunks
+                        .iter()
+                        .map(|chunk| {
+                            let ty = state.builder.func.dfg.value_type(*chunk);
+                            state.builder.ins().iconst(ty, 0)
+                        })
+                        .collect()
+                });
+            let new_mask_chunks = state.regs[new]
+                .load_mask_chunks(state.builder)
+                .unwrap_or_else(|| {
+                    new_value_chunks
+                        .iter()
+                        .map(|chunk| {
+                            let ty = state.builder.func.dfg.value_type(*chunk);
+                            state.builder.ins().iconst(ty, 0)
+                        })
+                        .collect()
+                });
+            let mask_changed =
+                self.translate_chunks_changed(state, &old_mask_chunks, &new_mask_chunks);
+            changed = state.builder.ins().bor(changed, mask_changed);
+        }
+
+        self.translate_enable_comb_capture_sites(state, changed, sites);
     }
 
     pub(super) fn translate_commit_inst(

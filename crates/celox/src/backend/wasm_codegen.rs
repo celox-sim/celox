@@ -14,7 +14,15 @@ use wasm_encoder::{
 
 use crate::{
     HashMap,
-    backend::MemoryLayout,
+    backend::{
+        MemoryLayout,
+        memory_layout::{
+            RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+            RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+            RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+        },
+    },
     ir::{
         AbsoluteAddr, BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId,
         RegisterType, SIRInstruction, SIROffset, SIRTerminator, SIRValue, STABLE_REGION,
@@ -439,13 +447,14 @@ fn compile_instruction(
                 dst, addr, offset, *op_width, layout, four_state, locals, instrs,
             );
         }
-        SIRInstruction::Store(addr, offset, op_width, src, triggers) => {
+        SIRInstruction::Store(addr, offset, op_width, src, triggers, comb_capture_sites) => {
             compile_store(
                 addr,
                 offset,
                 *op_width,
                 src,
                 triggers,
+                comb_capture_sites,
                 layout,
                 four_state,
                 emit_triggers,
@@ -478,12 +487,329 @@ fn compile_instruction(
                 dst, cond, then_val, else_val, unit, four_state, locals, instrs,
             );
         }
-        SIRInstruction::RuntimeEvent { .. } => {
-            // Runtime event ring emission is implemented for CPU backends first.
-            // WASM keeps the instruction as a no-op until the shared-memory
-            // atomic path is wired through the JS bridge.
+        SIRInstruction::RuntimeEvent { site_id, args } => {
+            compile_runtime_event(
+                STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+                None,
+                *site_id,
+                args,
+                None,
+                layout,
+                locals,
+                instrs,
+            );
+        }
+        SIRInstruction::CombCaptureEvent {
+            site_id,
+            args,
+            fatal_error_code,
+            consume_enabled,
+        } => {
+            compile_runtime_event(
+                STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+                Some((*site_id, *consume_enabled)),
+                *site_id,
+                args,
+                *fatal_error_code,
+                layout,
+                locals,
+                instrs,
+            );
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+            compile_comb_capture_enable_if_changed(old, new, sites, four_state, locals, instrs);
         }
     }
+}
+
+fn compile_runtime_event(
+    event_header_offset: usize,
+    enabled_site: Option<(u32, bool)>,
+    site_id: u32,
+    args: &[RegisterId],
+    fatal_error_code: Option<i64>,
+    layout: &MemoryLayout,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let enabled_ptr = enabled_site.map(|(site, _)| {
+        let ptr = locals.alloc(1);
+        instrs.push(Instruction::I32Const(
+            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+        ));
+        instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        }));
+        instrs.push(Instruction::LocalSet(ptr));
+        instrs.push(Instruction::LocalGet(ptr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
+            offset: site as u64,
+            align: 0,
+            memory_index: 0,
+        }));
+        instrs.push(Instruction::I32Const(0));
+        instrs.push(Instruction::I32Ne);
+        instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+        ptr
+    });
+
+    emit_runtime_event_write(event_header_offset, site_id, args, layout, locals, instrs);
+
+    if let Some((site, consume_enabled)) = enabled_site {
+        if consume_enabled {
+            let ptr = enabled_ptr.expect("enabled pointer must be available");
+            instrs.push(Instruction::LocalGet(ptr));
+            instrs.push(Instruction::I32WrapI64);
+            instrs.push(Instruction::I32Const(0));
+            instrs.push(Instruction::I32Store8(wasm_encoder::MemArg {
+                offset: site as u64,
+                align: 0,
+                memory_index: 0,
+            }));
+        }
+    }
+
+    if let Some(code) = fatal_error_code {
+        instrs.push(Instruction::I64Const(code));
+        instrs.push(Instruction::Return);
+    }
+    if enabled_site.is_some() {
+        instrs.push(Instruction::End);
+    }
+}
+
+fn emit_runtime_event_write(
+    event_header_offset: usize,
+    site_id: u32,
+    args: &[RegisterId],
+    layout: &MemoryLayout,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let event_ptr = locals.alloc(1);
+    let seq = locals.alloc(1);
+    let slot_addr = locals.alloc(1);
+
+    instrs.push(Instruction::I32Const(event_header_offset as i32));
+    instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    instrs.push(Instruction::LocalSet(event_ptr));
+
+    instrs.push(Instruction::LocalGet(event_ptr));
+    instrs.push(Instruction::I32WrapI64);
+    instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    instrs.push(Instruction::LocalSet(seq));
+
+    instrs.push(Instruction::LocalGet(event_ptr));
+    instrs.push(Instruction::I64Const(RUNTIME_EVENT_HEADER_SIZE as i64));
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalGet(seq));
+    instrs.push(Instruction::I64Const(
+        (layout.runtime_event_capacity as i64) - 1,
+    ));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::I64Const(layout.runtime_event_slot_size as i64));
+    instrs.push(Instruction::I64Mul);
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalSet(slot_addr));
+
+    emit_i64_store_at_ptr_local(
+        slot_addr,
+        RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+        RUNTIME_EVENT_WRITING,
+        instrs,
+    );
+    emit_i64_store_at_ptr_local(
+        slot_addr,
+        RUNTIME_EVENT_SLOT_SITE_OFFSET,
+        site_id as u64,
+        instrs,
+    );
+    emit_i64_store_at_ptr_local(
+        slot_addr,
+        RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+        args.len() as u64,
+        instrs,
+    );
+
+    if let Some(site_layout) = layout.runtime_event_site_layouts.get(site_id as usize) {
+        for (idx, arg) in args.iter().enumerate() {
+            let Some(arg_layout) = site_layout.args.get(idx) else {
+                continue;
+            };
+            let reg = &locals.reg_map[arg];
+            for word_idx in 0..arg_layout.word_count {
+                instrs.push(Instruction::LocalGet(slot_addr));
+                instrs.push(Instruction::I32WrapI64);
+                if word_idx < reg.num_chunks {
+                    instrs.push(Instruction::LocalGet(reg.value_idx + word_idx as u32));
+                } else {
+                    instrs.push(Instruction::I64Const(0));
+                }
+                instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+                    offset: (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                        + (arg_layout.value_word_offset + word_idx) * 8)
+                        as u64,
+                    align: 0,
+                    memory_index: 0,
+                }));
+
+                instrs.push(Instruction::LocalGet(slot_addr));
+                instrs.push(Instruction::I32WrapI64);
+                if let Some(mask_idx) = reg.mask_idx {
+                    if word_idx < reg.num_chunks {
+                        instrs.push(Instruction::LocalGet(mask_idx + word_idx as u32));
+                    } else {
+                        instrs.push(Instruction::I64Const(0));
+                    }
+                } else {
+                    instrs.push(Instruction::I64Const(0));
+                }
+                instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+                    offset: (RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                        + (arg_layout.mask_word_offset + word_idx) * 8)
+                        as u64,
+                    align: 0,
+                    memory_index: 0,
+                }));
+            }
+        }
+    }
+
+    instrs.push(Instruction::LocalGet(slot_addr));
+    instrs.push(Instruction::I32WrapI64);
+    instrs.push(Instruction::LocalGet(seq));
+    instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+        offset: RUNTIME_EVENT_SLOT_SEQ_OFFSET as u64,
+        align: 0,
+        memory_index: 0,
+    }));
+
+    instrs.push(Instruction::LocalGet(event_ptr));
+    instrs.push(Instruction::I32WrapI64);
+    instrs.push(Instruction::LocalGet(seq));
+    instrs.push(Instruction::I64Const(1));
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+}
+
+fn emit_i64_store_at_ptr_local(
+    ptr_local: u32,
+    offset: usize,
+    value: u64,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    instrs.push(Instruction::LocalGet(ptr_local));
+    instrs.push(Instruction::I32WrapI64);
+    instrs.push(Instruction::I64Const(value as i64));
+    instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+        offset: offset as u64,
+        align: 0,
+        memory_index: 0,
+    }));
+}
+
+fn compile_comb_capture_enable_if_changed(
+    old: &RegisterId,
+    new: &RegisterId,
+    sites: &[u32],
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    if sites.is_empty() {
+        return;
+    }
+    let changed = locals.alloc(1);
+    emit_regs_changed(old, new, four_state, locals, instrs);
+    instrs.push(Instruction::I64ExtendI32U);
+    instrs.push(Instruction::LocalSet(changed));
+    emit_enable_comb_capture_sites(changed, sites, locals, instrs);
+}
+
+fn emit_regs_changed(
+    old: &RegisterId,
+    new: &RegisterId,
+    four_state: bool,
+    locals: &LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let old_reg = &locals.reg_map[old];
+    let new_reg = &locals.reg_map[new];
+    let chunks = old_reg.num_chunks.max(new_reg.num_chunks);
+    instrs.push(Instruction::I32Const(0));
+    for c in 0..chunks {
+        emit_wide_get_chunk(instrs, old_reg, c);
+        emit_wide_get_chunk(instrs, new_reg, c);
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I32Or);
+    }
+    if four_state {
+        for c in 0..chunks {
+            emit_mask_get_chunk(instrs, old_reg, c);
+            emit_mask_get_chunk(instrs, new_reg, c);
+            instrs.push(Instruction::I64Ne);
+            instrs.push(Instruction::I32Or);
+        }
+    }
+}
+
+fn emit_mask_get_chunk(instrs: &mut Vec<Instruction<'static>>, reg: &RegLocal, chunk: usize) {
+    if let Some(mask_idx) = reg.mask_idx
+        && chunk < reg.num_chunks
+    {
+        instrs.push(Instruction::LocalGet(mask_idx + chunk as u32));
+    } else {
+        instrs.push(Instruction::I64Const(0));
+    }
+}
+
+fn emit_enable_comb_capture_sites(
+    changed_local: u32,
+    sites: &[u32],
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let enabled_ptr = locals.alloc(1);
+    instrs.push(Instruction::I32Const(
+        STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+    ));
+    instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    instrs.push(Instruction::LocalSet(enabled_ptr));
+
+    instrs.push(Instruction::LocalGet(changed_local));
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::I64Ne);
+    instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+    for &site in sites {
+        instrs.push(Instruction::LocalGet(enabled_ptr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I32Const(1));
+        instrs.push(Instruction::I32Store8(wasm_encoder::MemArg {
+            offset: site as u64,
+            align: 0,
+            memory_index: 0,
+        }));
+    }
+    instrs.push(Instruction::End);
 }
 
 // ============================================================
@@ -2989,6 +3315,7 @@ fn compile_store(
     op_width: usize,
     src: &RegisterId,
     triggers: &[TriggerIdWithKind],
+    comb_capture_sites: &[u32],
     layout: &MemoryLayout,
     four_state: bool,
     emit_triggers: bool,
@@ -3007,6 +3334,25 @@ fn compile_store(
     let base_offset = compute_byte_offset(layout, &abs, addr.region);
     let var_width = layout.widths[&abs];
     let var_byte_size = get_byte_size(var_width);
+    let old_value_probe = if comb_capture_sites.is_empty() {
+        None
+    } else {
+        capture_store_old_value(offset, op_width, base_offset, locals, instrs)
+    };
+    let old_mask_local = if comb_capture_sites.is_empty()
+        || !four_state
+        || !layout.is_4states.get(&abs).copied().unwrap_or(false)
+    {
+        None
+    } else {
+        capture_store_old_value(
+            offset,
+            op_width,
+            base_offset + var_byte_size,
+            locals,
+            instrs,
+        )
+    };
 
     match offset {
         SIROffset::Static(bit_off) => {
@@ -3104,10 +3450,194 @@ fn compile_store(
         }
     }
 
+    if !comb_capture_sites.is_empty() {
+        emit_store_comb_capture_enable(
+            old_value_probe,
+            old_mask_local,
+            offset,
+            op_width,
+            base_offset,
+            var_byte_size,
+            four_state && layout.is_4states.get(&abs).copied().unwrap_or(false),
+            comb_capture_sites,
+            locals,
+            instrs,
+        );
+    }
+
     // Trigger detection
     if emit_triggers && !triggers.is_empty() {
         emit_trigger_detection(addr, triggers, layout, locals, instrs);
     }
+}
+
+fn capture_store_old_value(
+    offset: &SIROffset,
+    op_width: usize,
+    base_offset: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> Option<RegLocal> {
+    if op_width == 0 {
+        return None;
+    }
+    let num_chunks = num_i64_chunks(op_width);
+    let value_idx = locals.alloc(num_chunks);
+    let probe = RegLocal {
+        value_idx,
+        num_chunks,
+        mask_idx: None,
+    };
+    emit_load_store_value(offset, op_width, base_offset, &probe, locals, instrs)?;
+    Some(probe)
+}
+
+fn emit_load_store_value(
+    offset: &SIROffset,
+    op_width: usize,
+    base_offset: usize,
+    dst: &RegLocal,
+    locals: &LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> Option<()> {
+    match offset {
+        SIROffset::Static(bit_off) => {
+            let byte_off = bit_off / 8;
+            let bit_shift = bit_off % 8;
+            if bit_shift != 0 && op_width > 64 {
+                return None;
+            }
+            if op_width <= 64 {
+                let byte_len = get_byte_size(op_width + bit_shift);
+                if byte_len > 8 {
+                    return None;
+                }
+                emit_load_small_word(base_offset + byte_off, byte_len, instrs);
+                if bit_shift != 0 {
+                    instrs.push(Instruction::I64Const(bit_shift as i64));
+                    instrs.push(Instruction::I64ShrU);
+                }
+                if op_width < 64 {
+                    instrs.push(Instruction::I64Const(((1u64 << op_width) - 1) as i64));
+                    instrs.push(Instruction::I64And);
+                }
+                instrs.push(Instruction::LocalSet(dst.value_idx));
+            } else {
+                let store_bytes = get_byte_size(op_width);
+                for c in 0..dst.num_chunks {
+                    let remaining = store_bytes.saturating_sub(c * 8);
+                    let byte_len = remaining.min(8);
+                    emit_load_small_word(base_offset + byte_off + c * 8, byte_len, instrs);
+                    instrs.push(Instruction::LocalSet(dst.value_idx + c as u32));
+                }
+            }
+        }
+        SIROffset::Dynamic(reg) => {
+            let dyn_bit_offset_local = locals.reg_map[reg].value_idx;
+            if op_width <= 64 {
+                compile_load_dynamic(dst, base_offset, dyn_bit_offset_local, op_width, instrs);
+            } else {
+                let store_bytes = get_byte_size(op_width);
+                for c in 0..dst.num_chunks {
+                    let remaining = store_bytes.saturating_sub(c * 8);
+                    let byte_len = remaining.min(8);
+                    instrs.push(Instruction::I64Const(base_offset as i64));
+                    instrs.push(Instruction::LocalGet(dyn_bit_offset_local));
+                    instrs.push(Instruction::I64Const(3));
+                    instrs.push(Instruction::I64ShrU);
+                    instrs.push(Instruction::I64Add);
+                    if c > 0 {
+                        instrs.push(Instruction::I64Const((c * 8) as i64));
+                        instrs.push(Instruction::I64Add);
+                    }
+                    let addr_local = dst.value_idx + c as u32;
+                    instrs.push(Instruction::LocalSet(addr_local));
+                    emit_load_small_word_dynamic(addr_local, byte_len, instrs);
+                    instrs.push(Instruction::LocalSet(addr_local));
+                }
+            }
+        }
+    }
+    Some(())
+}
+
+fn emit_store_comb_capture_enable(
+    old_value_probe: Option<RegLocal>,
+    old_mask_probe: Option<RegLocal>,
+    offset: &SIROffset,
+    op_width: usize,
+    base_offset: usize,
+    var_byte_size: usize,
+    is_4state: bool,
+    sites: &[u32],
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let Some(old_value_probe) = old_value_probe else {
+        return;
+    };
+    let changed = locals.alloc(1);
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::LocalSet(changed));
+
+    let new_value_probe = RegLocal {
+        value_idx: locals.alloc(old_value_probe.num_chunks),
+        num_chunks: old_value_probe.num_chunks,
+        mask_idx: None,
+    };
+    if emit_load_store_value(
+        offset,
+        op_width,
+        base_offset,
+        &new_value_probe,
+        locals,
+        instrs,
+    )
+    .is_none()
+    {
+        return;
+    }
+    for c in 0..old_value_probe.num_chunks {
+        instrs.push(Instruction::LocalGet(changed));
+        instrs.push(Instruction::LocalGet(old_value_probe.value_idx + c as u32));
+        instrs.push(Instruction::LocalGet(new_value_probe.value_idx + c as u32));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::I64Or);
+        instrs.push(Instruction::LocalSet(changed));
+    }
+
+    if is_4state {
+        if let Some(old_mask_probe) = old_mask_probe {
+            let new_mask_probe = RegLocal {
+                value_idx: locals.alloc(old_mask_probe.num_chunks),
+                num_chunks: old_mask_probe.num_chunks,
+                mask_idx: None,
+            };
+            if emit_load_store_value(
+                offset,
+                op_width,
+                base_offset + var_byte_size,
+                &new_mask_probe,
+                locals,
+                instrs,
+            )
+            .is_some()
+            {
+                for c in 0..old_mask_probe.num_chunks {
+                    instrs.push(Instruction::LocalGet(changed));
+                    instrs.push(Instruction::LocalGet(old_mask_probe.value_idx + c as u32));
+                    instrs.push(Instruction::LocalGet(new_mask_probe.value_idx + c as u32));
+                    instrs.push(Instruction::I64Ne);
+                    instrs.push(Instruction::I64ExtendI32U);
+                    instrs.push(Instruction::I64Or);
+                    instrs.push(Instruction::LocalSet(changed));
+                }
+            }
+        }
+    }
+
+    emit_enable_comb_capture_sites(changed, sites, locals, instrs);
 }
 
 fn compile_store_at_offset(
@@ -4160,7 +4690,7 @@ fn collect_trigger_addrs(
         for block in unit.blocks.values() {
             for inst in &block.instructions {
                 match inst {
-                    SIRInstruction::Store(addr, _, _, _, triggers) if !triggers.is_empty() => {
+                    SIRInstruction::Store(addr, _, _, _, triggers, _) if !triggers.is_empty() => {
                         addrs.insert((addr.absolute_addr(), addr.region));
                     }
                     SIRInstruction::Commit(_, dst, _, _, triggers) if !triggers.is_empty() => {

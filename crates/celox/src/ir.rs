@@ -125,6 +125,27 @@ pub struct RuntimeEventSite {
     pub arg_is_string: Vec<bool>,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LogicPathId(pub usize);
+
+#[derive(Clone, Debug)]
+pub struct CombObserver<A = AbsoluteAddr> {
+    pub site_id: u32,
+    pub activation_group: u32,
+    pub guard: Option<crate::logic_tree::NodeId>,
+    pub args: Vec<crate::logic_tree::NodeId>,
+    pub loop_runner: Option<crate::logic_tree::NodeId>,
+    pub sensitivity: Vec<VarAtomBase<A>>,
+    pub local_inputs: Vec<(A, crate::logic_tree::NodeId)>,
+    pub observed_inputs: Vec<VarAtomBase<A>>,
+    pub position_inputs: Vec<VarAtomBase<A>>,
+    pub preceding_writes: Vec<VarAtomBase<A>>,
+    pub written_before: Vec<VarAtomBase<A>>,
+    pub written_input_atoms: Vec<VarAtomBase<A>>,
+    pub written_inputs: Vec<A>,
+    pub captured_in_loop: bool,
+}
+
 #[derive(Clone)]
 pub struct Program {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
@@ -133,6 +154,7 @@ pub struct Program {
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
     /// Tail-call chain compilation plan, populated by the optimizer when the
     /// estimated CLIF instruction count exceeds Cranelift's limit.
     pub eval_comb_plan: Option<EvalCombPlan>,
@@ -175,6 +197,18 @@ impl Program {
     /// Build and store the memory layout. Also removes identity Stores for
     /// validated aliases and runs DCE to clean up dead instruction chains.
     pub fn build_layout(&mut self, four_state: bool) {
+        if !self.comb_observers.is_empty() && !self.address_aliases.is_empty() {
+            let observed_written: crate::HashSet<AbsoluteAddr> = self
+                .comb_observers
+                .iter()
+                .flat_map(|observer| observer.written_inputs.iter().copied())
+                .collect();
+            self.address_aliases
+                .retain(|alias_addr, _| !observed_written.contains(alias_addr));
+            self.address_aliases.retain(|alias_addr, _| {
+                !comb_capture_enable_needs_unaliased_old_value(&self.eval_comb, *alias_addr)
+            });
+        }
         let layout = crate::backend::MemoryLayout::build(self, four_state);
 
         // Remove identity Stores for aliases validated by the layout
@@ -195,7 +229,7 @@ impl Program {
                 for eu in &mut self.eval_comb {
                     for block in eu.blocks.values_mut() {
                         for inst in &mut block.instructions {
-                            if let SIRInstruction::Store(addr, _, width, _, triggers) = inst {
+                            if let SIRInstruction::Store(addr, _, width, _, triggers, _) = inst {
                                 if aliased.contains(&addr.absolute_addr()) {
                                     if triggers.is_empty() {
                                         // Mark for removal
@@ -211,7 +245,8 @@ impl Program {
                         block.instructions.retain(|inst| {
                             !matches!(
                                 inst,
-                                SIRInstruction::Store(_, _, 0, _, triggers) if triggers.is_empty()
+                                SIRInstruction::Store(_, _, 0, _, triggers, _)
+                                    if triggers.is_empty()
                             )
                         });
                     }
@@ -325,7 +360,7 @@ impl Program {
                         for block in eu.blocks.values() {
                             for inst in &block.instructions {
                                 match inst {
-                                    SIRInstruction::Store(addr, _, _, _, _)
+                                    SIRInstruction::Store(addr, _, _, _, _, _)
                                         if addr.region == WORKING_REGION =>
                                     {
                                         addrs.insert(addr.absolute_addr());
@@ -353,6 +388,39 @@ impl Program {
         addrs
     }
 }
+
+fn comb_capture_enable_needs_unaliased_old_value(
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    alias_addr: AbsoluteAddr,
+) -> bool {
+    for eu in units {
+        for block in eu.blocks.values() {
+            let mut last_store = None;
+            for inst in &block.instructions {
+                match inst {
+                    SIRInstruction::Store(addr, _, _, _, _, comb_capture_sites) => {
+                        let abs = addr.absolute_addr();
+                        if abs == alias_addr && !comb_capture_sites.is_empty() {
+                            return true;
+                        }
+                        last_store = Some(abs);
+                    }
+                    SIRInstruction::CombCaptureEnableIfChanged { sites, .. } => {
+                        if !sites.is_empty() && last_store == Some(alias_addr) {
+                            return true;
+                        }
+                        last_store = None;
+                    }
+                    _ => {
+                        last_store = None;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
 pub struct BitAccess {
     pub lsb: usize,
@@ -553,6 +621,7 @@ pub struct RelocationModule {
     pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
     pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
     pub comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
+    pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
 }
 
 impl fmt::Debug for RelocationModule {
@@ -564,6 +633,7 @@ impl fmt::Debug for RelocationModule {
             .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("comb_blocks", &self.comb_blocks)
+            .field("comb_observers", &self.comb_observers)
             .finish()
     }
 }
@@ -613,6 +683,7 @@ pub struct SimModule {
     pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
+    pub comb_observers: Vec<CombObserver<VarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     pub initial_memory_values: Vec<ModuleInitialMemoryValue>,
@@ -785,8 +856,15 @@ fn renumber_sir_inst<A: Clone>(
         SIRInstruction::Load(dst, addr, offset, width) => {
             SIRInstruction::Load(r(*dst), addr.clone(), off(offset), *width)
         }
-        SIRInstruction::Store(addr, offset, width, src, triggers) => {
-            SIRInstruction::Store(addr.clone(), off(offset), *width, r(*src), triggers.clone())
+        SIRInstruction::Store(addr, offset, width, src, triggers, comb_capture_sites) => {
+            SIRInstruction::Store(
+                addr.clone(),
+                off(offset),
+                *width,
+                r(*src),
+                triggers.clone(),
+                comb_capture_sites.clone(),
+            )
         }
         SIRInstruction::Commit(src, dst, offset, width, triggers) => SIRInstruction::Commit(
             src.clone(),
@@ -812,6 +890,24 @@ fn renumber_sir_inst<A: Clone>(
             site_id: *site_id,
             args: args.iter().map(|a| r(*a)).collect(),
         },
+        SIRInstruction::CombCaptureEvent {
+            site_id,
+            args,
+            fatal_error_code,
+            consume_enabled,
+        } => SIRInstruction::CombCaptureEvent {
+            site_id: *site_id,
+            args: args.iter().map(|a| r(*a)).collect(),
+            fatal_error_code: *fatal_error_code,
+            consume_enabled: *consume_enabled,
+        },
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+            SIRInstruction::CombCaptureEnableIfChanged {
+                old: r(*old),
+                new: r(*new),
+                sites: sites.clone(),
+            }
+        }
     }
 }
 
@@ -1099,7 +1195,14 @@ pub enum SIRInstruction<Addr> {
     Binary(RegisterId, RegisterId, BinaryOp, RegisterId),
     Unary(RegisterId, UnaryOp, RegisterId),
     Load(RegisterId, Addr, SIROffset, usize),
-    Store(Addr, SIROffset, usize, RegisterId, Vec<TriggerIdWithKind>),
+    Store(
+        Addr,
+        SIROffset,
+        usize,
+        RegisterId,
+        Vec<TriggerIdWithKind>,
+        Vec<u32>,
+    ),
     /// Commits a value from `src` region to `dst` region with the same offset/width.
     Commit(Addr, Addr, SIROffset, usize, Vec<TriggerIdWithKind>),
     /// Concatenates multiple registers into a single register.
@@ -1115,6 +1218,17 @@ pub enum SIRInstruction<Addr> {
     RuntimeEvent {
         site_id: u32,
         args: Vec<RegisterId>,
+    },
+    CombCaptureEvent {
+        site_id: u32,
+        args: Vec<RegisterId>,
+        fatal_error_code: Option<i64>,
+        consume_enabled: bool,
+    },
+    CombCaptureEnableIfChanged {
+        old: RegisterId,
+        new: RegisterId,
+        sites: Vec<u32>,
     },
 }
 
@@ -1137,11 +1251,18 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     rd.0, addr, offset, bits
                 )
             }
-            SIRInstruction::Store(addr, offset, op_width, src_reg, triggers) => {
+            SIRInstruction::Store(
+                addr,
+                offset,
+                op_width,
+                src_reg,
+                triggers,
+                comb_capture_sites,
+            ) => {
                 write!(
                     f,
-                    "Store(addr={}, offset={}, src_reg = {}, bits={}, triggers={:?})",
-                    addr, offset, src_reg.0, op_width, triggers
+                    "Store(addr={}, offset={}, src_reg = {}, bits={}, triggers={:?}, comb_capture_sites={:?})",
+                    addr, offset, src_reg.0, op_width, triggers, comb_capture_sites
                 )
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
@@ -1185,6 +1306,34 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                 }
                 write!(f, "])")
             }
+            SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+                consume_enabled,
+            } => {
+                write!(f, "CombCaptureEvent(site={}, args=[", site_id)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "r{}", arg.0)?;
+                }
+                if let Some(code) = fatal_error_code {
+                    write!(f, "], fatal_error={code})")
+                } else if *consume_enabled {
+                    write!(f, "], consume_enabled=true)")
+                } else {
+                    write!(f, "])")
+                }
+            }
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+                write!(
+                    f,
+                    "CombCaptureEnableIfChanged(old=r{}, new=r{}, sites={:?})",
+                    old.0, new.0, sites
+                )
+            }
         }
     }
 }
@@ -1197,8 +1346,8 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Load(rd, addr, offset, bits) => {
                 SIRInstruction::Load(rd, f(addr), offset, bits)
             }
-            SIRInstruction::Store(addr, offset, bits, rs, triggers) => {
-                SIRInstruction::Store(f(addr), offset, bits, rs, triggers)
+            SIRInstruction::Store(addr, offset, bits, rs, triggers, comb_capture_sites) => {
+                SIRInstruction::Store(f(addr), offset, bits, rs, triggers, comb_capture_sites)
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
                 SIRInstruction::Commit(f(src), f(dst), offset, bits, triggers)
@@ -1212,6 +1361,20 @@ impl<A> SIRInstruction<A> {
             }
             SIRInstruction::RuntimeEvent { site_id, args } => {
                 SIRInstruction::RuntimeEvent { site_id, args }
+            }
+            SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+                consume_enabled,
+            } => SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+                consume_enabled,
+            },
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+                SIRInstruction::CombCaptureEnableIfChanged { old, new, sites }
             }
         }
     }
@@ -1227,8 +1390,15 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Load(rd, addr, offset, bits) => {
                 SIRInstruction::Load(*rd, f(addr), offset.clone(), *bits)
             }
-            SIRInstruction::Store(addr, offset, bits, rs, triggers) => {
-                SIRInstruction::Store(f(addr), offset.clone(), *bits, *rs, triggers.clone())
+            SIRInstruction::Store(addr, offset, bits, rs, triggers, comb_capture_sites) => {
+                SIRInstruction::Store(
+                    f(addr),
+                    offset.clone(),
+                    *bits,
+                    *rs,
+                    triggers.clone(),
+                    comb_capture_sites.clone(),
+                )
             }
             SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
                 SIRInstruction::Commit(f(src), f(dst), offset.clone(), *bits, triggers.clone())
@@ -1244,6 +1414,24 @@ impl<A> SIRInstruction<A> {
                 site_id: *site_id,
                 args: args.clone(),
             },
+            SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+                consume_enabled,
+            } => SIRInstruction::CombCaptureEvent {
+                site_id: *site_id,
+                args: args.clone(),
+                fatal_error_code: *fatal_error_code,
+                consume_enabled: *consume_enabled,
+            },
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+                SIRInstruction::CombCaptureEnableIfChanged {
+                    old: *old,
+                    new: *new,
+                    sites: sites.clone(),
+                }
+            }
         }
     }
 }

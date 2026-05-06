@@ -48,7 +48,7 @@ impl ExecutionUnitPass for IdentityStoreBypassPass {
         let mut store_counts: HashMap<AbsoluteAddr, usize> = HashMap::default();
         for block in eu.blocks.values() {
             for inst in &block.instructions {
-                if let SIRInstruction::Store(addr, _, _, _, _) = inst {
+                if let SIRInstruction::Store(addr, _, _, _, _, _) = inst {
                     *store_counts.entry(addr.absolute_addr()).or_default() += 1;
                 }
             }
@@ -65,8 +65,14 @@ impl ExecutionUnitPass for IdentityStoreBypassPass {
             HashMap::default();
         for block in eu.blocks.values() {
             for inst in &block.instructions {
-                let SIRInstruction::Store(addr_b, SIROffset::Static(0), width, src_reg, _triggers) =
-                    inst
+                let SIRInstruction::Store(
+                    addr_b,
+                    SIROffset::Static(0),
+                    width,
+                    src_reg,
+                    _triggers,
+                    _,
+                ) = inst
                 else {
                     continue;
                 };

@@ -9,11 +9,12 @@ use crate::ir::SIRTerminator;
 use crate::ir::SIRValue;
 use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo};
 use crate::logic_tree::NodeId;
-use crate::logic_tree::{LogicPath, SLTNodeArena};
+use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNodeArena};
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
 use thiserror::Error;
+
 fn greedy_fas_sort(scc: &[usize], global_adj: &[Vec<usize>]) -> Vec<usize> {
     let scc_set: HashSet<usize> = scc.iter().cloned().collect();
     let mut local_adj: HashMap<usize, Vec<usize>> = HashMap::default();
@@ -195,6 +196,7 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             end,
             initials,
             updates,
+            effects,
             continue_cond,
             ..
         } => {
@@ -226,8 +228,16 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                     memo,
                     inverse_memo,
                 ));
-                set.remove(loop_var);
             }
+            for effect in effects {
+                if let Some(guard) = effect.guard {
+                    set.extend(collect_node_input_deps(guard, arena, memo, inverse_memo));
+                }
+                for arg in &effect.args {
+                    set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
+                }
+            }
+            set.remove(loop_var);
             set.extend(collect_node_input_deps(
                 *continue_cond,
                 arena,
@@ -246,6 +256,22 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
     memo.insert(node, deps.clone());
     deps
 }
+
+fn collect_logic_path_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
+    path: &LogicPath<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+) {
+    collect_node_input_deps(path.expr, arena, memo, inverse_memo);
+    for (_, node) in &path.local_inputs {
+        collect_node_input_deps(*node, arena, memo, inverse_memo);
+    }
+    for node in &path.pre_lower_nodes {
+        collect_node_input_deps(*node, arena, memo, inverse_memo);
+    }
+}
+
 struct TarjanContext {
     index: usize,
     stack: Vec<usize>,
@@ -283,6 +309,178 @@ fn strong_connect(u: usize, adj: &Vec<Vec<usize>>, ctx: &mut TarjanContext) {
         ctx.sccs.push(scc);
     }
 }
+
+fn lower_logic_path_expr<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    path: &LogicPath<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+) -> RegisterId {
+    if path.local_inputs.is_empty() {
+        return lowerer.lower(builder, path.expr, arena, lower_cache);
+    }
+
+    let mut env_inputs = HashMap::default();
+    for (addr, node) in &path.local_inputs {
+        let reg = lowerer.lower(builder, *node, arena, lower_cache);
+        let width = crate::logic_tree::get_width(*node, arena);
+        if width > 0 {
+            env_inputs.insert(crate::ir::VarAtomBase::new(*addr, 0, width - 1), reg);
+        }
+    }
+    lowerer.lower_with_inputs(builder, path.expr, arena, lower_cache, env_inputs)
+}
+
+fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    path: &LogicPath<Addr>,
+    node: NodeId,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+) -> RegisterId {
+    let mut env_inputs = HashMap::default();
+    for (addr, local_node) in &path.local_inputs {
+        let reg = lowerer.lower(builder, *local_node, arena, lower_cache);
+        let width = crate::logic_tree::get_width(*local_node, arena);
+        if width > 0 {
+            env_inputs.insert(crate::ir::VarAtomBase::new(*addr, 0, width - 1), reg);
+        }
+    }
+    lowerer.lower_with_inputs(builder, node, arena, lower_cache, env_inputs)
+}
+
+fn pre_lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    path: &LogicPath<Addr>,
+    node: NodeId,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+) {
+    if path.local_inputs.is_empty() {
+        lowerer.lower(builder, node, arena, lower_cache);
+    }
+}
+
+fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    path: &LogicPath<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+) {
+    match &path.target {
+        LogicPathTarget::Var(target) => {
+            for node in &path.pre_lower_nodes {
+                pre_lower_logic_path_node(lowerer, builder, path, *node, arena, lower_cache);
+            }
+            let result_reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
+            let width = 1 + target.access.msb - target.access.lsb;
+            let old_reg = if path.comb_capture_enable_sites.is_empty() {
+                None
+            } else {
+                let old_reg = builder.alloc_bit(width, false);
+                builder.emit(SIRInstruction::Load(
+                    old_reg,
+                    target.id,
+                    SIROffset::Static(target.access.lsb),
+                    width,
+                ));
+                Some(old_reg)
+            };
+            builder.emit(SIRInstruction::Store(
+                target.id,
+                SIROffset::Static(target.access.lsb),
+                width,
+                result_reg,
+                Vec::new(),
+                Vec::new(),
+            ));
+            if let Some(old) = old_reg {
+                builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
+                    old,
+                    new: result_reg,
+                    sites: path.comb_capture_enable_sites.clone(),
+                });
+            }
+        }
+        LogicPathTarget::CombCaptureEvent {
+            site_id,
+            guard,
+            emit_on_true,
+            args,
+            loop_runner,
+            fatal_error_code,
+            consume_enabled,
+        } => {
+            if let Some(loop_runner) = loop_runner {
+                lower_logic_path_node(lowerer, builder, path, *loop_runner, arena, lower_cache);
+                return;
+            }
+            let emit = |builder: &mut SIRBuilder<Addr>,
+                        lower_cache: &mut HashMap<NodeId, RegisterId>| {
+                let regs = args
+                    .iter()
+                    .map(|arg| {
+                        lower_logic_path_node(lowerer, builder, path, *arg, arena, lower_cache)
+                    })
+                    .collect();
+                builder.emit(SIRInstruction::CombCaptureEvent {
+                    site_id: *site_id,
+                    args: regs,
+                    fatal_error_code: *fatal_error_code,
+                    consume_enabled: *consume_enabled,
+                });
+            };
+            if let Some(guard) = guard {
+                let cond =
+                    lower_logic_path_node(lowerer, builder, path, *guard, arena, lower_cache);
+                let branch_cond = if *emit_on_true {
+                    cond
+                } else {
+                    let inverted = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Unary(
+                        inverted,
+                        crate::ir::UnaryOp::LogicNot,
+                        cond,
+                    ));
+                    inverted
+                };
+                let event_block = builder.new_block();
+                let done_block = builder.new_block();
+                builder.seal_block(SIRTerminator::Branch {
+                    cond: branch_cond,
+                    true_block: (event_block, vec![]),
+                    false_block: (done_block, vec![]),
+                });
+                builder.switch_to_block(event_block);
+                emit(builder, lower_cache);
+                builder.seal_block(SIRTerminator::Jump(done_block, vec![]));
+                builder.switch_to_block(done_block);
+            } else {
+                emit(builder, lower_cache);
+            }
+        }
+    }
+}
+
+fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    path: &LogicPath<Addr>,
+    inverse_dep_memo: &HashMap<Addr, HashSet<NodeId>>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+) {
+    let Some(target) = path.target.var() else {
+        return;
+    };
+    if let Some(to_remove) = inverse_dep_memo.get(&target.id) {
+        for node in to_remove {
+            lower_cache.remove(node);
+        }
+    }
+}
+
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum SchedulerError<A: Display + Debug + Eq + Hash + Clone> {
     #[error("Combinational loop detected: {}", .blocks.iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join(" -> "))]
@@ -347,92 +545,108 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     let can_coalesce = pending.len() > 1 && !four_state;
 
     if can_coalesce {
-        // Sort a COPY by lsb to check contiguity — don't mutate pending (preserve topo order).
-        let mut sorted_by_lsb: Vec<usize> = pending.clone();
-        sorted_by_lsb.sort_by_key(|&idx| input[idx].target.access.lsb);
+        if pending
+            .iter()
+            .any(|&idx| !matches!(input[idx].target, LogicPathTarget::Var(_)))
+        {
+            // Observer storage paths are standalone stores. They are ordered by
+            // scheduler edges, not coalesced with variable writes.
+        } else {
+            // Sort a COPY by lsb to check contiguity — don't mutate pending (preserve topo order).
+            let mut sorted_by_lsb: Vec<usize> = pending.clone();
+            sorted_by_lsb.sort_by_key(|&idx| input[idx].target.var().unwrap().access.lsb);
 
-        // Check contiguity: every next path's lsb == previous path's msb + 1
-        let contiguous = sorted_by_lsb
-            .windows(2)
-            .all(|w| input[w[1]].target.access.lsb == input[w[0]].target.access.msb + 1);
+            // Check contiguity: every next path's lsb == previous path's msb + 1
+            let contiguous = sorted_by_lsb.windows(2).all(|w| {
+                input[w[1]].target.var().unwrap().access.lsb
+                    == input[w[0]].target.var().unwrap().access.msb + 1
+            });
 
-        // Check total merged width doesn't exceed variable's declared width.
-        let target_addr = input[sorted_by_lsb[0]].target.id;
-        let merged_lsb = input[sorted_by_lsb[0]].target.access.lsb;
-        let merged_msb = input[*sorted_by_lsb.last().unwrap()].target.access.msb;
-        let merged_width = merged_msb - merged_lsb + 1;
-        let within_var_width = var_widths
-            .get(&target_addr)
-            .is_some_and(|&vw| merged_width <= vw);
+            // Check total merged width doesn't exceed variable's declared width.
+            let target_addr = input[sorted_by_lsb[0]].target.var().unwrap().id;
+            let merged_lsb = input[sorted_by_lsb[0]].target.var().unwrap().access.lsb;
+            let merged_msb = input[*sorted_by_lsb.last().unwrap()]
+                .target
+                .var()
+                .unwrap()
+                .access
+                .msb;
+            let merged_width = merged_msb - merged_lsb + 1;
+            let within_var_width = var_widths
+                .get(&target_addr)
+                .is_some_and(|&vw| merged_width <= vw);
 
-        // Don't coalesce if any path has a self-reference (source reads from same var as target).
-        let has_self_ref = sorted_by_lsb.iter().any(|&idx| {
-            let path = &input[idx];
-            path.sources.iter().any(|s| s.id == path.target.id)
-        });
-
-        if contiguous && within_var_width && !has_self_ref {
-            // Coalesce: lower each path expression, then concat + single wide store.
-            // SIR Concat order is [MSB, ..., LSB], so reverse after lsb sort.
-            let mut regs: Vec<(RegisterId, usize)> = Vec::with_capacity(sorted_by_lsb.len());
-            for &idx in &sorted_by_lsb {
+            // Don't coalesce if any path has a self-reference (source reads from same var as target).
+            let has_self_ref = sorted_by_lsb.iter().any(|&idx| {
                 let path = &input[idx];
-                collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
-                let reg = lowerer.lower(builder, path.expr, arena, lower_cache);
-                let w = 1 + path.target.access.msb - path.target.access.lsb;
-                regs.push((reg, w));
-            }
+                path.target
+                    .var()
+                    .is_some_and(|target| path.sources.iter().any(|s| s.id == target.id))
+            });
+            let no_comb_capture_enable_sites = sorted_by_lsb
+                .iter()
+                .all(|idx| input[*idx].comb_capture_enable_sites.is_empty());
 
-            // Reverse so that MSB comes first (Concat order).
-            regs.reverse();
-
-            let concat_reg = builder.alloc_bit(merged_width, false);
-            builder.emit(SIRInstruction::Concat(
-                concat_reg,
-                regs.iter().map(|(r, _)| *r).collect(),
-            ));
-
-            builder.emit(SIRInstruction::Store(
-                target_addr,
-                SIROffset::Static(merged_lsb),
-                merged_width,
-                concat_reg,
-                Vec::new(),
-            ));
-
-            // Invalidate cache for the target variable.
-            if let Some(to_remove) = inverse_dep_memo.get(&target_addr) {
-                for node in to_remove {
-                    lower_cache.remove(node);
+            if contiguous && within_var_width && !has_self_ref && no_comb_capture_enable_sites {
+                // Coalesce: lower each path expression, then concat + single wide store.
+                // SIR Concat order is [MSB, ..., LSB], so reverse after lsb sort.
+                let mut regs: Vec<(RegisterId, usize)> = Vec::with_capacity(sorted_by_lsb.len());
+                for &idx in &sorted_by_lsb {
+                    let path = &input[idx];
+                    collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
+                    for node in &path.pre_lower_nodes {
+                        pre_lower_logic_path_node(
+                            lowerer,
+                            builder,
+                            path,
+                            *node,
+                            arena,
+                            lower_cache,
+                        );
+                    }
+                    let reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
+                    let target = path.target.var().unwrap();
+                    let w = 1 + target.access.msb - target.access.lsb;
+                    regs.push((reg, w));
                 }
-            }
 
-            pending.clear();
-            return;
+                // Reverse so that MSB comes first (Concat order).
+                regs.reverse();
+
+                let concat_reg = builder.alloc_bit(merged_width, false);
+                builder.emit(SIRInstruction::Concat(
+                    concat_reg,
+                    regs.iter().map(|(r, _)| *r).collect(),
+                ));
+
+                builder.emit(SIRInstruction::Store(
+                    target_addr,
+                    SIROffset::Static(merged_lsb),
+                    merged_width,
+                    concat_reg,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+
+                // Invalidate cache for the target variable.
+                if let Some(to_remove) = inverse_dep_memo.get(&target_addr) {
+                    for node in to_remove {
+                        lower_cache.remove(node);
+                    }
+                }
+
+                pending.clear();
+                return;
+            }
         }
     }
 
     // Fallback: emit in original topological order (don't sort pending).
     for &idx in pending.iter() {
         let path = &input[idx];
-        collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
-        let result_reg = lowerer.lower(builder, path.expr, arena, lower_cache);
-        let width = 1 + path.target.access.msb - path.target.access.lsb;
-        let addr = path.target.id;
-
-        builder.emit(SIRInstruction::Store(
-            addr,
-            SIROffset::Static(path.target.access.lsb),
-            width,
-            result_reg,
-            Vec::new(),
-        ));
-
-        if let Some(to_remove) = inverse_dep_memo.get(&addr) {
-            for node in to_remove {
-                lower_cache.remove(node);
-            }
-        }
+        collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
+        emit_logic_path_store(lowerer, builder, path, arena, lower_cache);
+        invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
     }
 
     pending.clear();
@@ -464,7 +678,16 @@ fn reorder_dag_runs<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             indices.sort_by(|&a, &b| {
                 let na = sccs[a][0];
                 let nb = sccs[b][0];
-                (layer[na], input[na].target.id).cmp(&(layer[nb], input[nb].target.id))
+                (
+                    layer[na],
+                    input[na].target.var().map(|target| target.id),
+                    matches!(input[na].target, LogicPathTarget::CombCaptureEvent { .. }),
+                )
+                    .cmp(&(
+                        layer[nb],
+                        input[nb].target.var().map(|target| target.id),
+                        matches!(input[nb].target, LogicPathTarget::CombCaptureEvent { .. }),
+                    ))
             });
             for i in indices {
                 result.push(sccs[i].clone());
@@ -510,10 +733,12 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     // 1. Build Atom Map & Multiple Driver Check
     let mut atoms_map: HashMap<Addr, Vec<(BitAccess, usize)>> = HashMap::default();
     for (i, path) in input.iter().enumerate() {
-        atoms_map
-            .entry(path.target.id)
-            .or_default()
-            .push((path.target.access, i));
+        if let Some(target) = path.target.var() {
+            atoms_map
+                .entry(target.id)
+                .or_default()
+                .push((target.access, i));
+        }
     }
     for entries in atoms_map.values_mut() {
         entries.sort_by_key(|(access, _)| access.lsb);
@@ -536,6 +761,11 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                         adj[*v].push(u); // Dependency: v must be evaluated for u
                     }
                 }
+            }
+        }
+        for target in &path.order_before {
+            if target.0 < n {
+                adj[u].push(target.0);
             }
         }
     }
@@ -614,26 +844,9 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                      inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>| {
         let path = &input[idx];
 
-        let result_reg = lowerer.lower(builder, path.expr, arena, lower_cache);
-
-        collect_node_input_deps(path.expr, arena, dep_memo, inverse_dep_memo);
-        let width = 1 + path.target.access.msb - path.target.access.lsb;
-        let addr = path.target.id;
-
-        // Store instructions don't return values, so no alloc needed
-        builder.emit(SIRInstruction::Store(
-            addr,
-            SIROffset::Static(path.target.access.lsb),
-            width,
-            result_reg,
-            Vec::new(),
-        ));
-
-        if let Some(to_remove) = inverse_dep_memo.get(&addr) {
-            for node in to_remove {
-                lower_cache.remove(node);
-            }
-        }
+        collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
+        emit_logic_path_store(&lowerer, builder, path, arena, lower_cache);
+        invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
     };
     // Maximum blocks in a single EU before flushing to a new one.
     // This prevents Cranelift from choking on massive functions.
@@ -652,10 +865,14 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         for &v_idx in &scc {
             for &u_idx in &adj[v_idx] {
                 if scc.contains(&u_idx) {
-                    let edge = (input[v_idx].target.id, input[u_idx].target.id);
-                    if let Some(&limit) = true_loops.get(&edge) {
-                        user_safety_limit =
-                            Some(user_safety_limit.map_or(limit, |l: usize| l.max(limit)));
+                    if let (Some(v_target), Some(u_target)) =
+                        (input[v_idx].target.var(), input[u_idx].target.var())
+                    {
+                        let edge = (v_target.id, u_target.id);
+                        if let Some(&limit) = true_loops.get(&edge) {
+                            user_safety_limit =
+                                Some(user_safety_limit.map_or(limit, |l: usize| l.max(limit)));
+                        }
                     }
                 }
             }
@@ -682,7 +899,11 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             'check_scc: for &v_idx in &scc {
                 for &u_idx in &adj[v_idx] {
                     if scc.contains(&u_idx)
-                        && ignored_loops.contains(&(input[v_idx].target.id, input[u_idx].target.id))
+                        && input[v_idx]
+                            .target
+                            .var()
+                            .zip(input[u_idx].target.var())
+                            .is_some_and(|(v, u)| ignored_loops.contains(&(v.id, u.id)))
                     {
                         // Some loops are explicitly allowed by the user (e.g., false loops).
                         authorized = true;
@@ -723,7 +944,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 let sources = scc
                     .iter()
                     .filter_map(|idx| {
-                        let addr = input[*idx].target.id;
+                        let addr = input[*idx].target.var()?.id;
                         seen.insert(addr).then_some(addr)
                     })
                     .collect::<Vec<_>>();
@@ -785,8 +1006,18 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 builder.emit(SIRInstruction::Imm(current_dirty_reg, SIRValue::new(0u32)));
                 for &idx in &optimized_scc_order {
                     let path = &input[idx];
-                    let width = 1 + path.target.access.msb - path.target.access.lsb;
-                    let addr = path.target.id;
+                    let Some(target) = path.target.var() else {
+                        emit_logic_path_store(
+                            &lowerer,
+                            &mut builder,
+                            path,
+                            arena,
+                            &mut lower_cache,
+                        );
+                        continue;
+                    };
+                    let width = 1 + target.access.msb - target.access.lsb;
+                    let addr = target.id;
 
                     // --- Dynamic Convergence Check Logic ---
                     // For each node in the SCC, we verify if its value changed after this iteration.
@@ -796,15 +1027,23 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     builder.emit(SIRInstruction::Load(
                         old_val_reg,
                         addr,
-                        SIROffset::Static(path.target.access.lsb),
+                        SIROffset::Static(target.access.lsb),
                         width,
                     ));
-                    collect_node_input_deps(path.expr, arena, &mut dep_memo, &mut inverse_dep_memo);
-                    let width = 1 + path.target.access.msb - path.target.access.lsb;
-                    let addr = path.target.id;
+                    collect_logic_path_input_deps(
+                        path,
+                        arena,
+                        &mut dep_memo,
+                        &mut inverse_dep_memo,
+                    );
                     // b. Compute the new value
-                    let new_val_reg =
-                        lowerer.lower(&mut builder, path.expr, arena, &mut lower_cache);
+                    let new_val_reg = lower_logic_path_expr(
+                        &lowerer,
+                        &mut builder,
+                        path,
+                        arena,
+                        &mut lower_cache,
+                    );
 
                     // c. Compare: changed = (old != new)
                     let is_changed_reg = builder.alloc_bit(1, false);
@@ -828,11 +1067,19 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     // e. Store the new value
                     builder.emit(SIRInstruction::Store(
                         addr,
-                        SIROffset::Static(path.target.access.lsb),
+                        SIROffset::Static(target.access.lsb),
                         width,
                         new_val_reg,
                         Vec::new(),
+                        Vec::new(),
                     ));
+                    if !path.comb_capture_enable_sites.is_empty() {
+                        builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
+                            old: old_val_reg,
+                            new: new_val_reg,
+                            sites: path.comb_capture_enable_sites.clone(),
+                        });
+                    }
                     if let Some(to_remove) = inverse_dep_memo.get(&addr) {
                         for node in to_remove {
                             lower_cache.remove(node);
@@ -894,9 +1141,9 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             }
 
             let idx = scc[0];
-            let this_target = input[idx].target.id;
+            let this_target = input[idx].target.var().map(|target| target.id);
 
-            if pending_target.as_ref() == Some(&this_target) {
+            if this_target.is_some() && pending_target.as_ref() == this_target.as_ref() {
                 // Same target variable — buffer into pending.
                 pending_indices.push(idx);
             } else {
@@ -914,7 +1161,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     four_state,
                     var_widths,
                 );
-                pending_target = Some(this_target);
+                pending_target = this_target;
                 pending_indices.push(idx);
             }
         }

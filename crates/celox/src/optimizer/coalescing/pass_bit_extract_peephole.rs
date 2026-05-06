@@ -158,11 +158,11 @@ fn optimize_bit_extracts(
             SIRInstruction::Unary(_, _, src) => {
                 *use_count.entry(*src).or_default() += 1;
             }
-            SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+            SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
                 *use_count.entry(*off).or_default() += 1;
                 *use_count.entry(*src).or_default() += 1;
             }
-            SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+            SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
                 *use_count.entry(*src).or_default() += 1;
             }
             SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
@@ -185,10 +185,15 @@ fn optimize_bit_extracts(
                 *use_count.entry(*then_val).or_default() += 1;
                 *use_count.entry(*else_val).or_default() += 1;
             }
-            SIRInstruction::RuntimeEvent { args, .. } => {
+            SIRInstruction::RuntimeEvent { args, .. }
+            | SIRInstruction::CombCaptureEvent { args, .. } => {
                 for arg in args {
                     *use_count.entry(*arg).or_default() += 1;
                 }
+            }
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+                *use_count.entry(*old).or_default() += 1;
+                *use_count.entry(*new).or_default() += 1;
             }
             _ => {}
         }

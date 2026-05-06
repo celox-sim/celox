@@ -47,7 +47,7 @@ pub(super) fn eliminate_dead_working_stores(eu: &mut ExecutionUnit<RegionedAbsol
 
     fn working_store_key(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<WorkingKey> {
         match inst {
-            SIRInstruction::Store(addr, SIROffset::Static(offset), bits, _, _)
+            SIRInstruction::Store(addr, SIROffset::Static(offset), bits, _, _, _)
                 if addr.region == WORKING_REGION =>
             {
                 Some(WorkingKey {

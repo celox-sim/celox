@@ -692,6 +692,25 @@ fn process_block(
             } else {
                 rf.find_free_excluding(&blocked)
                     .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
+                    .or_else(|| {
+                        evict_farthest(
+                            &mut rf,
+                            &mut s,
+                            &mut new_insts,
+                            func,
+                            analysis,
+                            block_idx,
+                            inst_idx + 1,
+                            block.insts.len(),
+                            &use_positions,
+                            slots,
+                            &pinned,
+                            &blocked,
+                            result,
+                        );
+                        rf.find_free_excluding(&blocked)
+                            .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
+                    })
                     .expect("no free register for def")
             };
 

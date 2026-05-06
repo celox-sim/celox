@@ -220,7 +220,9 @@ fn gvn_block(
             // Store/Commit: side-effecting. Invalidate all Load-derived values.
             SIRInstruction::Store(..)
             | SIRInstruction::Commit(..)
-            | SIRInstruction::RuntimeEvent { .. } => {
+            | SIRInstruction::RuntimeEvent { .. }
+            | SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
                 // Conservative: don't invalidate value table for pure
                 // computations (Binary/Unary/Concat/Slice/Imm are
                 // memory-independent). Only Loads would be affected by
@@ -290,7 +292,7 @@ fn apply_aliases(
             }
         }
         SIRInstruction::Load(_, _, _, _) => {}
-        SIRInstruction::Store(_, _, _, src, _) => {
+        SIRInstruction::Store(_, _, _, src, _, _) => {
             if let Some(&a) = aliases.get(src) {
                 *src = a;
             }
@@ -319,11 +321,20 @@ fn apply_aliases(
                 *else_val = a;
             }
         }
-        SIRInstruction::RuntimeEvent { args, .. } => {
+        SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => {
             for arg in args {
                 if let Some(&a) = aliases.get(arg) {
                     *arg = a;
                 }
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            if let Some(&a) = aliases.get(old) {
+                *old = a;
+            }
+            if let Some(&a) = aliases.get(new) {
+                *new = a;
             }
         }
     }

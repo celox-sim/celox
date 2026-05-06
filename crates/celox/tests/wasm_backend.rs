@@ -9,6 +9,171 @@ fn build_wasm(code: &str, top: &str) -> (WasmBackend, celox::Simulator) {
 }
 
 #[test]
+fn test_wasm_comb_constant_display_runtime_event() {
+    let code = r#"
+        module Top {
+            always_comb {
+                $display("hi");
+            }
+        }
+    "#;
+    let mut sim = celox::Simulator::builder(code, "Top")
+        .build_wasm()
+        .expect("build_wasm failed");
+
+    sim.eval_comb().expect("eval_comb failed");
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "hi".to_string(),
+        }],
+    );
+
+    sim.eval_comb().expect("second eval_comb failed");
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+}
+
+#[test]
+fn test_wasm_comb_store_enables_downstream_display() {
+    let code = r#"
+        module Top (
+            a: input logic<8>,
+        ) {
+            var x: logic<8>;
+
+            always_comb {
+                x = a;
+            }
+
+            always_comb {
+                $display("x=%0d", x);
+            }
+        }
+    "#;
+    let mut sim = celox::Simulator::builder(code, "Top")
+        .build_wasm()
+        .expect("build_wasm failed");
+    let a = sim.signal("a");
+
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(a, 7u8)).expect("modify failed");
+    sim.eval_comb().expect("eval_comb failed");
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "x=7".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(a, 7u8)).expect("same modify failed");
+    sim.eval_comb().expect("same eval_comb failed");
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+}
+
+#[test]
+fn test_wasm_comb_dynamic_store_enables_downstream_display() {
+    let code = r#"
+        module Top (
+            idx: input logic<7>,
+            val: input logic<8>,
+            unrelated: input logic,
+            out: output logic<8>,
+        ) {
+            var tmp: logic<128>;
+
+            always_comb {
+                tmp = 128'd0;
+                tmp[idx +: 8] = val;
+            }
+
+            always_comb {
+                out = tmp[67:60];
+                $display("slice=%0d", tmp[67:60]);
+            }
+        }
+    "#;
+    let mut sim = celox::Simulator::builder(code, "Top")
+        .build_wasm()
+        .expect("build_wasm failed");
+    let idx = sim.signal("idx");
+    let val = sim.signal("val");
+    let unrelated = sim.signal("unrelated");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+    sim.modify(|io| {
+        io.set(idx, 60u8);
+        io.set(val, 0xABu8);
+    })
+    .expect("dynamic modify failed");
+    assert_eq!(sim.get_as::<u8>(out), 0xAB);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "slice=171".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(val, 0xABu8))
+        .expect("same value modify failed");
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+
+    sim.modify(|io| io.set(unrelated, 1u8))
+        .expect("unrelated modify failed");
+    assert_eq!(sim.get_as::<u8>(out), 0xAB);
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+}
+
+#[test]
+fn test_wasm_comb_wide_store_enables_downstream_display() {
+    let code = r#"
+        module Top (
+            a: input logic<128>,
+            unrelated: input logic<8>,
+            out: output logic<8>,
+        ) {
+            var tmp: logic<128>;
+
+            always_comb {
+                tmp = a;
+            }
+
+            always_comb {
+                out = tmp[7:0];
+                $display("lo=%0d hi=%0d", tmp[7:0], tmp[71:64]);
+            }
+        }
+    "#;
+    let mut sim = celox::Simulator::builder(code, "Top")
+        .build_wasm()
+        .expect("build_wasm failed");
+    let a = sim.signal("a");
+    let unrelated = sim.signal("unrelated");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+    let value: BigUint = (BigUint::from(0x12u8) << 64) | BigUint::from(0x34u8);
+    sim.modify(|io| io.set_wide(a, value.clone()))
+        .expect("wide modify failed");
+    assert_eq!(sim.get_as::<u8>(out), 0x34);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "lo=52 hi=18".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set_wide(a, value))
+        .expect("same wide modify failed");
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+
+    sim.modify(|io| io.set(unrelated, 1u8))
+        .expect("unrelated modify failed");
+    assert_eq!(sim.get_as::<u8>(out), 0x34);
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+}
+
+#[test]
 fn test_wasm_adder_combinational() {
     let code = r#"
         module Top (

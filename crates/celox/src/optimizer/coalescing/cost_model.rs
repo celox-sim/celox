@@ -158,7 +158,7 @@ pub fn estimate_clif_cost(
             };
             base * state_mul
         }
-        SIRInstruction::Store(_, offset, op_width, _, _) => {
+        SIRInstruction::Store(_, offset, op_width, _, _, _) => {
             let nc = num_chunks(*op_width);
             let base = if *op_width <= 64 {
                 6
@@ -196,7 +196,9 @@ pub fn estimate_clif_cost(
         }
         SIRInstruction::Concat(_, args) => 3 * args.len() * state_mul,
         SIRInstruction::Slice(_, _, _, _) => 3 * state_mul,
-        SIRInstruction::RuntimeEvent { args, .. } => 12 + args.len() * 2,
+        SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => 12 + args.len() * 2,
+        SIRInstruction::CombCaptureEnableIfChanged { sites, .. } => 4 + sites.len() * 2,
     }
 }
 

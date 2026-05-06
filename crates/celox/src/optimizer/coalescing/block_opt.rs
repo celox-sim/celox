@@ -3,6 +3,16 @@ use crate::ir::*;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 
+fn union_u32<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
+    let mut out = Vec::new();
+    for item in items {
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
+}
+
 fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
     match inst {
         SIRInstruction::Imm(_, _) => {}
@@ -17,11 +27,11 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.push(*off);
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
             out.push(*off);
             out.push(*src);
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
             out.push(*src);
         }
         SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
@@ -37,14 +47,22 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.push(*then_val);
             out.push(*else_val);
         }
-        SIRInstruction::RuntimeEvent { args, .. } => out.extend(args.iter().copied()),
+        SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => out.extend(args.iter().copied()),
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            out.push(*old);
+            out.push(*new);
+        }
     }
 }
 
 fn is_memory_barrier<A>(inst: &SIRInstruction<A>) -> bool {
     matches!(
         inst,
-        SIRInstruction::Commit(_, _, _, _, _) | SIRInstruction::RuntimeEvent { .. }
+        SIRInstruction::Commit(_, _, _, _, _)
+            | SIRInstruction::RuntimeEvent { .. }
+            | SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. }
     )
 }
 
@@ -56,10 +74,10 @@ fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, us
         SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), bits) => {
             Some((addr, None, *bits, false))
         }
-        SIRInstruction::Store(addr, SIROffset::Static(off), bits, _, _) => {
+        SIRInstruction::Store(addr, SIROffset::Static(off), bits, _, _, _) => {
             Some((addr, Some(*off), *bits, true))
         }
-        SIRInstruction::Store(addr, SIROffset::Dynamic(_), bits, _, _) => {
+        SIRInstruction::Store(addr, SIROffset::Dynamic(_), bits, _, _, _) => {
             Some((addr, None, *bits, true))
         }
         _ => None,
@@ -187,7 +205,7 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
         let pick = ready
             .iter()
             .copied()
-            .find(|&i| matches!(window[i], SIRInstruction::Store(_, _, _, _, _)))
+            .find(|&i| matches!(window[i], SIRInstruction::Store(_, _, _, _, _, _)))
             .or_else(|| {
                 if inflight_loads.len() < max_inflight_loads {
                     ready
@@ -276,7 +294,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     let mut groups: HashMap<StoreGroupKey<A>, Vec<usize>> = HashMap::default();
 
     for (idx, inst) in instructions.iter().enumerate() {
-        if let SIRInstruction::Store(addr, SIROffset::Static(_), _, _, _) = inst {
+        if let SIRInstruction::Store(addr, SIROffset::Static(_), _, _, _, _) = inst {
             let key = addr.clone();
             groups.entry(key).or_default().push(idx);
         }
@@ -314,17 +332,21 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
             index: usize,
             src: RegisterId,
             triggers: Vec<crate::ir::TriggerIdWithKind>,
+            comb_capture_sites: Vec<u32>,
         }
         let mut details: Vec<StoreInfo> = Vec::new();
 
         for &idx in &indices {
-            if let SIRInstruction::Store(_, SIROffset::Static(o), w, s, t) = &instructions[idx] {
+            if let SIRInstruction::Store(_, SIROffset::Static(o), w, s, t, sites) =
+                &instructions[idx]
+            {
                 details.push(StoreInfo {
                     offset: *o,
                     width: *w,
                     index: idx,
                     src: *s,
                     triggers: t.clone(),
+                    comb_capture_sites: sites.clone(),
                 });
             }
         }
@@ -421,6 +443,11 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                     let args: Vec<RegisterId> = segment.iter().rev().map(|s| s.src).collect();
                     let triggers: Vec<crate::ir::TriggerIdWithKind> =
                         segment.iter().flat_map(|s| s.triggers.clone()).collect();
+                    let comb_capture_sites = union_u32(
+                        segment
+                            .iter()
+                            .flat_map(|s| s.comb_capture_sites.iter().copied()),
+                    );
 
                     *next_id += 1;
                     while register_map.contains_key(&RegisterId(*next_id)) {
@@ -441,6 +468,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                             total_width,
                             new_reg_id,
                             triggers,
+                            comb_capture_sites,
                         ),
                     ];
 
@@ -557,7 +585,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
                     width: *width,
                 });
             }
-            SIRInstruction::Store(addr, _, _, _, _) => {
+            SIRInstruction::Store(addr, _, _, _, _, _) => {
                 active.remove(addr);
             }
             SIRInstruction::Commit(_, dst, _, _, _) => {
@@ -733,7 +761,7 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                     *src = *r;
                 }
             }
-            SIRInstruction::Store(_, SIROffset::Dynamic(off_reg), _, src, _) => {
+            SIRInstruction::Store(_, SIROffset::Dynamic(off_reg), _, src, _, _) => {
                 if let Some(r) = replacement_map.get(off_reg) {
                     *off_reg = *r;
                 }
@@ -741,7 +769,7 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                     *src = *r;
                 }
             }
-            SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+            SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
                 if let Some(r) = replacement_map.get(src) {
                     *src = *r;
                 }
@@ -780,7 +808,7 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                 known_values.insert(key, (*dst, *width));
                 new_instructions.push(inst);
             }
-            SIRInstruction::Store(addr, offset, width, src, _) => {
+            SIRInstruction::Store(addr, offset, width, src, _, _) => {
                 let keys_to_remove: Vec<_> = known_values
                     .keys()
                     .filter(|(a, _)| *a == *addr)
@@ -857,6 +885,7 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                         *width,
                         src_reg,
                         triggers.clone(),
+                        Vec::new(),
                     ));
                     continue;
                 }

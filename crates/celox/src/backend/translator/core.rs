@@ -35,7 +35,7 @@ fn preload_trigger_old_values<'a>(
     for block in blocks {
         for inst in &block.instructions {
             match inst {
-                SIRInstruction::Store(addr, _, _, _, triggers) if !triggers.is_empty() => {
+                SIRInstruction::Store(addr, _, _, _, triggers, _) if !triggers.is_empty() => {
                     trigger_addrs.insert((addr.absolute_addr(), addr.region));
                 }
                 SIRInstruction::Commit(_, dst, _, _, triggers) if !triggers.is_empty() => {
@@ -358,8 +358,23 @@ impl SIRTranslator {
             SIRInstruction::Load(dst, addr, offset, op_width) => {
                 self.translate_load_inst(state, dst, addr, offset, op_width);
             }
-            SIRInstruction::Store(addr, offset, op_width, src_reg, triggers) => {
-                self.translate_store_inst(state, addr, offset, op_width, src_reg, triggers);
+            SIRInstruction::Store(
+                addr,
+                offset,
+                op_width,
+                src_reg,
+                triggers,
+                comb_capture_sites,
+            ) => {
+                self.translate_store_inst(
+                    state,
+                    addr,
+                    offset,
+                    op_width,
+                    src_reg,
+                    triggers,
+                    comb_capture_sites,
+                );
             }
             SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
                 self.translate_commit_inst(state, src_addr, dst_addr, offset, op_width, triggers);
@@ -371,7 +386,54 @@ impl SIRTranslator {
                 self.translate_mux_inst(state, dst, cond, then_val, else_val);
             }
             SIRInstruction::RuntimeEvent { site_id, args } => {
-                self.translate_runtime_event_inst(state, *site_id, args);
+                let event_ptr = state.builder.ins().load(
+                    types::I64,
+                    MemFlags::new(),
+                    state.mem_ptr,
+                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                );
+                self.translate_runtime_event_inst(
+                    state, event_ptr, None, *site_id, args, None, None,
+                );
+            }
+            SIRInstruction::CombCaptureEvent {
+                site_id,
+                args,
+                fatal_error_code,
+                consume_enabled,
+            } => {
+                let event_ptr = state.builder.ins().load(
+                    types::I64,
+                    MemFlags::new(),
+                    state.mem_ptr,
+                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                );
+                let enabled_ptr = state.builder.ins().load(
+                    types::I64,
+                    MemFlags::new(),
+                    state.mem_ptr,
+                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+                        as i32,
+                );
+                let enabled = state.builder.ins().load(
+                    types::I8,
+                    MemFlags::new(),
+                    enabled_ptr,
+                    *site_id as i32,
+                );
+                let enabled = state.builder.ins().icmp_imm(IntCC::NotEqual, enabled, 0);
+                self.translate_runtime_event_inst(
+                    state,
+                    event_ptr,
+                    Some(enabled),
+                    *site_id,
+                    args,
+                    *fatal_error_code,
+                    (*consume_enabled).then_some((enabled_ptr, *site_id)),
+                );
+            }
+            SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+                self.translate_comb_capture_enable_if_changed(state, old, new, sites);
             }
         }
     }
@@ -379,22 +441,30 @@ impl SIRTranslator {
     fn translate_runtime_event_inst(
         &self,
         state: &mut TranslationState,
+        event_ptr: Value,
+        enabled: Option<Value>,
         site_id: u32,
         args: &[RegisterId],
+        fatal_error_code: Option<i64>,
+        consume_enabled: Option<(Value, u32)>,
     ) {
         use crate::backend::memory_layout::{
             RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
             RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
             RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
-            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         };
 
-        let event_ptr = state.builder.ins().load(
-            types::I64,
-            MemFlags::new(),
-            state.mem_ptr,
-            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
-        );
+        let guarded_blocks = enabled.map(|enabled| {
+            let write_block = state.builder.create_block();
+            let done_block = state.builder.create_block();
+            state
+                .builder
+                .ins()
+                .brif(enabled, write_block, &[], done_block, &[]);
+            state.builder.switch_to_block(write_block);
+            (write_block, done_block)
+        });
+
         let write_seq_addr = event_ptr;
         let seq = state
             .builder
@@ -497,15 +567,36 @@ impl SIRTranslator {
             slot_seq_addr,
             seq,
         );
-        let next = state.builder.ins().iadd_imm(seq, 1);
+        let incremented = state.builder.ins().iadd_imm(seq, 1);
         // Advance the global write sequence after the slot sequence is visible.
         state.builder.ins().atomic_rmw(
             types::I64,
             MemFlags::new(),
             cranelift::codegen::ir::AtomicRmwOp::Xchg,
             write_seq_addr,
-            next,
+            incremented,
         );
+        if let Some((enabled_ptr, site_id)) = consume_enabled {
+            let zero = state.builder.ins().iconst(types::I8, 0);
+            state
+                .builder
+                .ins()
+                .store(MemFlags::new(), zero, enabled_ptr, site_id as i32);
+        }
+        if let Some((write_block, done_block)) = guarded_blocks {
+            if let Some(code) = fatal_error_code {
+                let error = state.builder.ins().iconst(types::I64, code);
+                state.builder.ins().return_(&[error]);
+            } else {
+                state.builder.ins().jump(done_block, &[]);
+            }
+            state.builder.switch_to_block(done_block);
+            state.builder.seal_block(write_block);
+            state.builder.seal_block(done_block);
+        } else if let Some(code) = fatal_error_code {
+            let error = state.builder.ins().iconst(types::I64, code);
+            state.builder.ins().return_(&[error]);
+        }
     }
 
     /// Slice: extract bits [bit_offset, bit_offset+width) from src register.

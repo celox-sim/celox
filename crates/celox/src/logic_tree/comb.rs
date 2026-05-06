@@ -8,19 +8,20 @@ use crate::logic_tree::range_store::RangeStore;
 use crate::parser::{LoweringPhase, resolve_total_width};
 use crate::{
     HashMap, HashSet,
-    ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
-    parser::bitaccess::{
-        celox_value_from_comptime, eval_constexpr, eval_var_select, is_static_access,
+    ir::{
+        BinaryOp, BitAccess, CombObserver, LogicPathId, RuntimeEventKind, RuntimeEventSite,
+        UnaryOp, VarAtomBase,
     },
+    parser::bitaccess::{celox_value_from_comptime, eval_constexpr, eval_var_select},
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
-    ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionKind, Type,
-    ValueVariant, VarId, VarSelectOp,
+    ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionInput,
+    SystemFunctionKind, Type, ValueVariant, VarId, VarSelectOp,
 };
-use veryl_analyzer::value::Value;
+use veryl_analyzer::value::{Value, byte_value_to_string};
 
 // SymbolicStore: Maps variable IDs to their current symbolic representation.
 // Each variable is managed by a RangeStore, which tracks bit-ranges and their associated SLT nodes.
@@ -336,6 +337,15 @@ pub struct SLTForUpdate<A: Hash + Eq + Clone> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SLTForEffect {
+    pub site_id: u32,
+    pub guard: Option<NodeId>,
+    pub emit_on_true: bool,
+    pub args: Vec<NodeId>,
+    pub fatal_error_code: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(
     into = "SLTNodeSerde<A>",
     from = "SLTNodeSerde<A>",
@@ -372,6 +382,7 @@ pub enum SLTNode<A: Hash + Eq + Clone> {
         result: VarAtomBase<A>,
         initials: Vec<SLTForUpdate<A>>,
         updates: Vec<SLTForUpdate<A>>,
+        effects: Vec<SLTForEffect>,
         continue_cond: NodeId,
     },
     // Concat/Slice are primarily used for RHS expression evaluation.
@@ -419,6 +430,7 @@ enum SLTNodeSerde<A: Hash + Eq + Clone> {
         result: VarAtomBase<A>,
         initials: Vec<SLTForUpdate<A>>,
         updates: Vec<SLTForUpdate<A>>,
+        effects: Vec<SLTForEffect>,
         continue_cond: NodeId,
     },
     Concat(Vec<(NodeId, usize)>),
@@ -472,6 +484,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => SLTNodeSerde::ForFold {
                 loop_var,
@@ -486,6 +499,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             },
             SLTNode::Concat(parts) => SLTNodeSerde::Concat(parts),
@@ -543,6 +557,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => SLTNode::ForFold {
                 loop_var,
@@ -557,6 +572,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             },
             SLTNodeSerde::Concat(parts) => SLTNode::Concat(parts),
@@ -665,6 +681,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => {
                 let map_bound =
@@ -715,6 +732,28 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                         ),
                     })
                     .collect();
+                let mapped_effects = effects
+                    .iter()
+                    .map(|effect| SLTForEffect {
+                        site_id: effect.site_id,
+                        guard: effect.guard.map(|guard| {
+                            arena
+                                .get(guard)
+                                .map_addr(guard, arena, target_arena, cache, f)
+                        }),
+                        emit_on_true: effect.emit_on_true,
+                        args: effect
+                            .args
+                            .iter()
+                            .map(|arg| {
+                                arena
+                                    .get(*arg)
+                                    .map_addr(*arg, arena, target_arena, cache, f)
+                            })
+                            .collect(),
+                        fatal_error_code: effect.fatal_error_code,
+                    })
+                    .collect();
                 SLTNode::ForFold {
                     loop_var: f(loop_var),
                     loop_width: *loop_width,
@@ -728,6 +767,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     result: VarAtomBase::new(f(&result.id), result.access.lsb, result.access.msb),
                     initials: mapped_initials,
                     updates: mapped_updates,
+                    effects: mapped_effects,
                     continue_cond: arena.get(*continue_cond).map_addr(
                         *continue_cond,
                         arena,
@@ -881,6 +921,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 result,
                 initials,
                 updates,
+                effects,
                 continue_cond,
             } => {
                 writeln!(
@@ -907,6 +948,19 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     writeln!(f, "{}update {}:", child_indent, update.target)?;
                     arena.get(update.expr).fmt_recursive(f, depth + 2, arena)?;
                     writeln!(f)?;
+                }
+                for effect in effects {
+                    writeln!(f, "{}effect site={}:", child_indent, effect.site_id)?;
+                    if let Some(guard) = effect.guard {
+                        writeln!(f, "{}guard:", child_indent)?;
+                        arena.get(guard).fmt_recursive(f, depth + 2, arena)?;
+                        writeln!(f)?;
+                    }
+                    for arg in &effect.args {
+                        writeln!(f, "{}arg:", child_indent)?;
+                        arena.get(*arg).fmt_recursive(f, depth + 2, arena)?;
+                        writeln!(f)?;
+                    }
                 }
                 writeln!(f, "{}continue:", child_indent)?;
                 arena
@@ -938,9 +992,51 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
     serialize = "A: Serialize + std::hash::Hash + Eq",
     deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
 ))]
+pub enum LogicPathTarget<A: Hash + Eq + Clone> {
+    Var(VarAtomBase<A>),
+    CombCaptureEvent {
+        site_id: u32,
+        guard: Option<NodeId>,
+        emit_on_true: bool,
+        args: Vec<NodeId>,
+        loop_runner: Option<NodeId>,
+        fatal_error_code: Option<i64>,
+        consume_enabled: bool,
+    },
+}
+
+impl<A: Hash + Eq + Clone> LogicPathTarget<A> {
+    pub fn var(&self) -> Option<&VarAtomBase<A>> {
+        match self {
+            LogicPathTarget::Var(var) => Some(var),
+            LogicPathTarget::CombCaptureEvent { .. } => None,
+        }
+    }
+}
+
+impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for LogicPathTarget<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicPathTarget::Var(var) => write!(f, "{var}"),
+            LogicPathTarget::CombCaptureEvent { site_id, .. } => {
+                write!(f, "capture_event({site_id})")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + std::hash::Hash + Eq",
+    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
 pub struct LogicPath<A: Hash + Eq + Clone> {
-    pub target: VarAtomBase<A>,
+    pub target: LogicPathTarget<A>,
     pub sources: HashSet<VarAtomBase<A>>,
+    pub local_inputs: Vec<(A, NodeId)>,
+    pub order_before: HashSet<LogicPathId>,
+    pub comb_capture_enable_sites: Vec<u32>,
+    pub pre_lower_nodes: Vec<NodeId>,
     pub expr: NodeId,
 }
 
@@ -962,15 +1058,72 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
         F: Fn(&A) -> B,
     {
         LogicPath {
-            target: VarAtomBase::new(
-                f(&self.target.id),
-                self.target.access.lsb,
-                self.target.access.msb,
-            ),
+            target: match &self.target {
+                LogicPathTarget::Var(var) => LogicPathTarget::Var(VarAtomBase::new(
+                    f(&var.id),
+                    var.access.lsb,
+                    var.access.msb,
+                )),
+                LogicPathTarget::CombCaptureEvent {
+                    site_id,
+                    guard,
+                    emit_on_true,
+                    args,
+                    loop_runner,
+                    fatal_error_code,
+                    consume_enabled,
+                } => LogicPathTarget::CombCaptureEvent {
+                    site_id: *site_id,
+                    guard: guard.map(|node| {
+                        arena
+                            .get(node)
+                            .map_addr(node, arena, target_arena, cache, f)
+                    }),
+                    emit_on_true: *emit_on_true,
+                    args: args
+                        .iter()
+                        .map(|node| {
+                            arena
+                                .get(*node)
+                                .map_addr(*node, arena, target_arena, cache, f)
+                        })
+                        .collect(),
+                    loop_runner: loop_runner.map(|node| {
+                        arena
+                            .get(node)
+                            .map_addr(node, arena, target_arena, cache, f)
+                    }),
+                    fatal_error_code: *fatal_error_code,
+                    consume_enabled: *consume_enabled,
+                },
+            },
             sources: self
                 .sources
                 .iter()
                 .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+                .collect(),
+            local_inputs: self
+                .local_inputs
+                .iter()
+                .map(|(id, node)| {
+                    (
+                        f(id),
+                        arena
+                            .get(*node)
+                            .map_addr(*node, arena, target_arena, cache, f),
+                    )
+                })
+                .collect(),
+            order_before: self.order_before.clone(),
+            comb_capture_enable_sites: self.comb_capture_enable_sites.clone(),
+            pre_lower_nodes: self
+                .pre_lower_nodes
+                .iter()
+                .map(|node| {
+                    arena
+                        .get(*node)
+                        .map_addr(*node, arena, target_arena, cache, f)
+                })
                 .collect(),
             expr: arena
                 .get(self.expr)
@@ -988,6 +1141,8 @@ pub fn parse_comb(
         Vec<LogicPath<VarId>>,
         SymbolicStore<VarId>,
         BoundaryMap<VarId>,
+        Vec<CombObserver<VarId>>,
+        Vec<RuntimeEventSite>,
     ),
     ParserError,
 > {
@@ -1000,12 +1155,21 @@ pub fn parse_comb(
     }
 
     // 2. Symbolic Execution: Evaluate statements sequentially to update the symbolic state.
+    let effect_initial_store = current_store.clone();
     let (final_store, boundaries) = decl
         .statements
         .iter()
         .try_fold((current_store, BoundaryMap::default()), |(s, b), stmt| {
             eval_statement(module, s, b, stmt, arena)
         })?;
+    let mut effects = CombEffectCollector::default();
+    collect_comb_effects_statements(
+        module,
+        effect_initial_store,
+        &decl.statements,
+        arena,
+        &mut effects,
+    )?;
 
     // 3. Path Extraction: Convert the final symbolic store into a list of LogicPaths.
     // Each LogicPath represents a modified bit-range and the logic required to compute it.
@@ -1031,14 +1195,1094 @@ pub fn parse_comb(
                 };
 
                 paths.push(LogicPath::<VarId> {
-                    target: VarAtomBase::new(*id, lsb, msb),
+                    target: LogicPathTarget::Var(VarAtomBase::new(*id, lsb, msb)),
                     sources: sources.clone(),
+                    local_inputs: Vec::new(),
+                    order_before: HashSet::default(),
+                    comb_capture_enable_sites: Vec::new(),
+                    pre_lower_nodes: Vec::new(),
                     expr: final_expr,
                 });
             }
         }
     }
-    Ok((paths, final_store, boundaries))
+    let mut process_sensitivity = effects.sensitivity;
+    let mut written_accesses = HashMap::default();
+    collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
+    let written_atoms: Vec<_> = written_accesses
+        .into_iter()
+        .flat_map(|(id, accesses)| {
+            accesses
+                .into_iter()
+                .map(move |access| VarAtomBase::new(id, access.lsb, access.msb))
+        })
+        .collect();
+    for path in &paths {
+        process_sensitivity.extend(path.sources.iter().copied());
+    }
+    let process_sensitivity = subtract_written_sensitivity(process_sensitivity, &written_atoms);
+    let process_sensitivity: Vec<_> = process_sensitivity.into_iter().collect();
+    for observer in &mut effects.observers {
+        observer.sensitivity = process_sensitivity.clone();
+        observer.written_input_atoms = observer
+            .observed_inputs
+            .iter()
+            .chain(observer.position_inputs.iter())
+            .copied()
+            .filter(|atom| {
+                written_atoms
+                    .iter()
+                    .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
+            })
+            .collect();
+        let mut written_inputs = HashSet::default();
+        for atom in &observer.written_input_atoms {
+            written_inputs.insert(atom.id);
+        }
+        observer.written_inputs = written_inputs.into_iter().collect();
+    }
+    Ok((
+        paths,
+        final_store,
+        boundaries,
+        effects.observers,
+        effects.sites,
+    ))
+}
+
+fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
+    atoms: impl IntoIterator<Item = VarAtomBase<A>>,
+    written_atoms: &[VarAtomBase<A>],
+) -> HashSet<VarAtomBase<A>> {
+    let mut result = HashSet::default();
+    for atom in atoms {
+        let mut ranges = vec![(atom.access.lsb, atom.access.msb)];
+        for written in written_atoms {
+            if written.id != atom.id {
+                continue;
+            }
+            ranges = ranges
+                .into_iter()
+                .flat_map(|(lsb, msb)| {
+                    if written.access.msb < lsb || written.access.lsb > msb {
+                        return vec![(lsb, msb)];
+                    }
+                    let mut kept = Vec::new();
+                    if lsb < written.access.lsb {
+                        kept.push((lsb, written.access.lsb - 1));
+                    }
+                    if written.access.msb < msb {
+                        kept.push((written.access.msb + 1, msb));
+                    }
+                    kept
+                })
+                .collect();
+        }
+        for (lsb, msb) in ranges {
+            result.insert(VarAtomBase::new(atom.id, lsb, msb));
+        }
+    }
+    result
+}
+
+#[derive(Default)]
+struct CombEffectCollector {
+    observers: Vec<CombObserver<VarId>>,
+    sites: Vec<RuntimeEventSite>,
+    sensitivity: HashSet<VarAtomBase<VarId>>,
+    active_guard: Option<NodeId>,
+    active_guard_sources: HashSet<VarAtomBase<VarId>>,
+    loop_effects: Option<Vec<SLTForEffect>>,
+}
+
+fn static_string_expr(expr: &Expression) -> Option<String> {
+    if !expr.comptime().r#type.is_string() {
+        return None;
+    }
+    let value = expr.comptime().get_value().ok()?;
+    byte_value_to_string(value)
+}
+
+fn register_comb_runtime_event_site<'a>(
+    collector: &mut CombEffectCollector,
+    kind: RuntimeEventKind,
+    args: &'a [SystemFunctionInput],
+) -> (u32, &'a [SystemFunctionInput]) {
+    let (template, value_args) = if args
+        .first()
+        .and_then(|arg| static_string_expr(&arg.0))
+        .is_some()
+    {
+        (
+            args.first().and_then(|arg| static_string_expr(&arg.0)),
+            &args[1..],
+        )
+    } else {
+        (None, args)
+    };
+    let site = RuntimeEventSite {
+        kind,
+        template,
+        arg_widths: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().r#type.total_width().unwrap_or(1))
+            .collect(),
+        arg_signed: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().expr_context.signed)
+            .collect(),
+        arg_is_string: value_args
+            .iter()
+            .map(|arg| arg.0.comptime().r#type.is_string())
+            .collect(),
+    };
+    let id = collector.sites.len() as u32;
+    collector.sites.push(site);
+    (id, value_args)
+}
+
+fn collect_system_function_effect(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    call: &SystemFunctionCall,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    let (kind, cond, args) = match &call.kind {
+        SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+            (RuntimeEventKind::Display, None, args.as_slice())
+        }
+        SystemFunctionKind::Assert { kind, cond, args } => {
+            let event_kind = match kind {
+                veryl_analyzer::ir::AssertKind::Fatal => RuntimeEventKind::AssertFatal,
+                veryl_analyzer::ir::AssertKind::Continue => RuntimeEventKind::AssertContinue,
+            };
+            (event_kind, Some(&cond.0), args.as_slice())
+        }
+        _ => {
+            return Err(ParserError::unsupported(
+                66,
+                LoweringPhase::CombLowering,
+                "system function call",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            ));
+        }
+    };
+    let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
+    let mut observer_args = Vec::new();
+    let mut observed_inputs = HashSet::default();
+    let mut position_inputs = HashSet::default();
+    for arg in value_args {
+        collect_expression_effects(module, store, &arg.0, arena, collector)?;
+        let ((node, sources), _) = eval_expression(module, store, &arg.0, arena, None)?;
+        observed_inputs.extend(sources.iter().copied());
+        collector.sensitivity.extend(sources);
+        collect_expression_position_inputs(module, &arg.0, &mut position_inputs)?;
+        observer_args.push(node);
+    }
+    let explicit_guard = if let Some(cond) = cond {
+        collect_expression_effects(module, store, cond, arena, collector)?;
+        let ((cond_node, cond_sources), _) = eval_expression(module, store, cond, arena, None)?;
+        observed_inputs.extend(cond_sources.iter().copied());
+        collector.sensitivity.extend(cond_sources);
+        collect_expression_position_inputs(module, cond, &mut position_inputs)?;
+        Some(cond_node)
+    } else {
+        None
+    };
+    observed_inputs.extend(collector.active_guard_sources.iter().copied());
+    let guard = match (kind, collector.active_guard, explicit_guard) {
+        (RuntimeEventKind::Display, active, None) => active,
+        (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, None, explicit) => {
+            explicit
+        }
+        (
+            RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal,
+            Some(active),
+            Some(explicit),
+        ) => {
+            let inactive = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, active));
+            Some(arena.alloc(SLTNode::Binary(inactive, BinaryOp::LogicOr, explicit)))
+        }
+        (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, Some(active), None) => {
+            Some(active)
+        }
+        (RuntimeEventKind::Display, _, Some(_)) => unreachable!("display has no explicit guard"),
+    };
+    let loop_effect = collector.loop_effects.as_ref().map(|_| SLTForEffect {
+        site_id,
+        guard,
+        emit_on_true: matches!(kind, RuntimeEventKind::Display),
+        args: observer_args.clone(),
+        fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
+            .then_some(1_000_000 + site_id as i64),
+    });
+    let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
+    let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
+    let preceding_writes: Vec<_> = store
+        .iter()
+        .flat_map(|(id, range_store)| {
+            range_store
+                .ranges
+                .iter()
+                .filter_map(move |(&lsb, (value, width, _))| {
+                    value
+                        .is_some()
+                        .then_some(VarAtomBase::new(*id, lsb, lsb + width - 1))
+                })
+        })
+        .collect();
+    collector.observers.push(CombObserver {
+        site_id,
+        activation_group: 0,
+        guard,
+        args: observer_args,
+        loop_runner: None,
+        sensitivity: Vec::new(),
+        local_inputs: store
+            .iter()
+            .filter_map(|(id, range_store)| {
+                if !observed_ids.contains(id) {
+                    return None;
+                }
+                if guard.is_none() {
+                    let overlaps_observed_input =
+                        range_store.ranges.iter().any(|(&lsb, (value, width, _))| {
+                            value.is_some()
+                                && observed_inputs.iter().chain(position_inputs.iter()).any(
+                                    |atom| {
+                                        atom.id == *id
+                                            && atom
+                                                .access
+                                                .overlaps(&BitAccess::new(lsb, lsb + width - 1))
+                                    },
+                                )
+                        });
+                    if !overlaps_observed_input {
+                        return None;
+                    }
+                }
+                let width = module
+                    .variables
+                    .get(id)
+                    .and_then(|var| resolve_total_width(module, var).ok())?;
+                if width == 0 {
+                    return None;
+                }
+                let parts = range_store.get_parts(BitAccess::new(0, width - 1));
+                let modified = parts.iter().any(|(value, _)| value.is_some());
+                if !modified {
+                    return None;
+                }
+                let (node, _) = combine_parts_with_default(*id, 0, parts, arena);
+                Some((*id, node))
+            })
+            .collect(),
+        observed_inputs: observed_inputs.into_iter().collect(),
+        position_inputs: position_inputs.into_iter().collect(),
+        preceding_writes: preceding_writes.clone(),
+        written_before: store
+            .iter()
+            .filter(|(id, _)| position_ids.contains(id))
+            .flat_map(|(id, range_store)| {
+                range_store
+                    .ranges
+                    .iter()
+                    .filter_map(move |(&lsb, (value, width, _))| {
+                        value
+                            .is_some()
+                            .then_some(VarAtomBase::new(*id, lsb, lsb + width - 1))
+                    })
+            })
+            .collect(),
+        written_input_atoms: Vec::new(),
+        written_inputs: Vec::new(),
+        captured_in_loop: loop_effect.is_some(),
+    });
+    if let (Some(loop_effects), Some(loop_effect)) = (&mut collector.loop_effects, loop_effect) {
+        loop_effects.push(loop_effect);
+    }
+    Ok(())
+}
+
+fn with_collector_guard<T, F>(
+    collector: &mut CombEffectCollector,
+    arena: &mut SLTNodeArena<VarId>,
+    guard: NodeId,
+    guard_sources: HashSet<VarAtomBase<VarId>>,
+    f: F,
+) -> Result<T, ParserError>
+where
+    F: FnOnce(&mut CombEffectCollector, &mut SLTNodeArena<VarId>) -> Result<T, ParserError>,
+{
+    let saved_guard = collector.active_guard;
+    let saved_guard_sources = collector.active_guard_sources.clone();
+    let active_guard = if let Some(active) = saved_guard {
+        arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, guard))
+    } else {
+        guard
+    };
+    let mut active_guard_sources = saved_guard_sources.clone();
+    active_guard_sources.extend(guard_sources);
+    collector.active_guard = Some(active_guard);
+    collector.active_guard_sources = active_guard_sources;
+    let result = f(collector, arena);
+    collector.active_guard = saved_guard;
+    collector.active_guard_sources = saved_guard_sources;
+    result
+}
+
+fn collect_function_call_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    call: &veryl_analyzer::ir::FunctionCall,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    let Some(function) = module.functions.get(&call.id) else {
+        return Err(ParserError::unsupported(
+            62,
+            LoweringPhase::CombLowering,
+            "function call",
+            format!("unknown function id: {:?}", call.id),
+            Some(&call.comptime.token),
+        ));
+    };
+
+    let Some(function_body) = (if let Some(index) = &call.index {
+        function.get_function(index)
+    } else {
+        function.get_function(&[])
+    }) else {
+        return Err(ParserError::unsupported(
+            62,
+            LoweringPhase::CombLowering,
+            "function call specialization",
+            format!("{call}"),
+            Some(&call.comptime.token),
+        ));
+    };
+
+    let mut local_store = store.clone();
+    for (arg_path, arg_id) in &function_body.arg_map {
+        let Some(arg_expr) = call.inputs.get(arg_path) else {
+            continue;
+        };
+        collect_expression_effects(module, store, arg_expr, arena, collector)?;
+
+        let formal = &module.variables[arg_id];
+        let arg_width = resolve_total_width(module, formal)?;
+        let ((arg_node, arg_sources), _) =
+            eval_expression(module, store, arg_expr, arena, Some(arg_width))?;
+        local_store.insert(
+            *arg_id,
+            RangeStore::new(Some((arg_node, arg_sources)), arg_width),
+        );
+    }
+
+    if !statements_contain_runtime_effect(module, &function_body.statements) {
+        return Ok(());
+    }
+
+    if let Some(ret_id) = function_body.ret {
+        collect_function_body_effects(
+            module,
+            local_store,
+            &function_body.statements,
+            ret_id,
+            arena,
+            collector,
+        )?;
+    } else {
+        let _ = collect_comb_effects_statements(
+            module,
+            local_store,
+            &function_body.statements,
+            arena,
+            collector,
+        )?;
+    }
+    Ok(())
+}
+
+fn statements_contain_runtime_effect(module: &Module, statements: &[Statement]) -> bool {
+    statements
+        .iter()
+        .any(|stmt| statement_contains_runtime_effect(module, stmt))
+}
+
+fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool {
+    match stmt {
+        Statement::SystemFunctionCall(call) => matches!(
+            call.kind,
+            SystemFunctionKind::Display(_)
+                | SystemFunctionKind::Write(_)
+                | SystemFunctionKind::Assert { .. }
+        ),
+        Statement::If(if_stmt) => {
+            statements_contain_runtime_effect(module, &if_stmt.true_side)
+                || statements_contain_runtime_effect(module, &if_stmt.false_side)
+        }
+        Statement::For(for_stmt) => statements_contain_runtime_effect(module, &for_stmt.body),
+        Statement::FunctionCall(call) => module
+            .functions
+            .get(&call.id)
+            .and_then(|function| {
+                if let Some(index) = &call.index {
+                    function.get_function(index)
+                } else {
+                    function.get_function(&[])
+                }
+            })
+            .is_some_and(|body| statements_contain_runtime_effect(module, &body.statements)),
+        Statement::Assign(_)
+        | Statement::IfReset(_)
+        | Statement::TbMethodCall(_)
+        | Statement::Break
+        | Statement::Unsupported(_)
+        | Statement::Null => false,
+    }
+}
+
+fn collect_expression_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    match expr {
+        Expression::Term(factor) => collect_factor_effects(module, store, factor, arena, collector),
+        Expression::Unary(_, inner, _) => {
+            collect_expression_effects(module, store, inner, arena, collector)
+        }
+        Expression::Binary(lhs, _, rhs, _) => {
+            collect_expression_effects(module, store, lhs, arena, collector)?;
+            collect_expression_effects(module, store, rhs, arena, collector)
+        }
+        Expression::Ternary(cond, then_expr, else_expr, _) => {
+            collect_expression_effects(module, store, cond, arena, collector)?;
+            collect_expression_effects(module, store, then_expr, arena, collector)?;
+            collect_expression_effects(module, store, else_expr, arena, collector)
+        }
+        Expression::Concatenation(items, _) => {
+            for (item_expr, repeat_expr) in items {
+                collect_expression_effects(module, store, item_expr, arena, collector)?;
+                if let Some(repeat_expr) = repeat_expr {
+                    collect_expression_effects(module, store, repeat_expr, arena, collector)?;
+                }
+            }
+            Ok(())
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(item_expr, repeat_expr) => {
+                        collect_expression_effects(module, store, item_expr, arena, collector)?;
+                        if let Some(repeat_expr) = repeat_expr {
+                            collect_expression_effects(
+                                module,
+                                store,
+                                repeat_expr,
+                                arena,
+                                collector,
+                            )?;
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(default_expr) => {
+                        collect_expression_effects(module, store, default_expr, arena, collector)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, field_expr) in fields {
+                collect_expression_effects(module, store, field_expr, arena, collector)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn collect_factor_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    factor: &Factor,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    match factor {
+        Factor::Variable(_, index, select, _) => {
+            for expr in index.0.iter().chain(select.0.iter()) {
+                collect_expression_effects(module, store, expr, arena, collector)?;
+            }
+            if let Some((_, expr)) = &select.1 {
+                collect_expression_effects(module, store, expr, arena, collector)?;
+            }
+            Ok(())
+        }
+        Factor::FunctionCall(call) => {
+            collect_function_call_effects(module, store, call, arena, collector)
+        }
+        Factor::SystemFunctionCall(call) => match &call.kind {
+            SystemFunctionKind::Bits(input)
+            | SystemFunctionKind::Size(input)
+            | SystemFunctionKind::Clog2(input)
+            | SystemFunctionKind::Onehot(input)
+            | SystemFunctionKind::Signed(input)
+            | SystemFunctionKind::Unsigned(input) => {
+                collect_expression_effects(module, store, &input.0, arena, collector)
+            }
+            _ => Ok(()),
+        },
+        Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+    }
+}
+
+fn collect_function_body_effects(
+    module: &Module,
+    local_store: SymbolicStore<VarId>,
+    statements: &[Statement],
+    ret_id: VarId,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    fn collect_statements(
+        module: &Module,
+        mut state: FunctionControlState,
+        statements: &[Statement],
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+        collector: &mut CombEffectCollector,
+    ) -> Result<FunctionControlState, ParserError> {
+        for stmt in statements {
+            if matches!(constant_bool(arena, state.live_expr), Some(false)) {
+                break;
+            }
+            state = collect_statement(module, state, stmt, ret_id, arena, collector)?;
+        }
+        Ok(state)
+    }
+
+    fn collect_statement(
+        module: &Module,
+        state: FunctionControlState,
+        stmt: &Statement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+        collector: &mut CombEffectCollector,
+    ) -> Result<FunctionControlState, ParserError> {
+        if matches!(constant_bool(arena, state.live_expr), Some(false)) {
+            return Ok(state);
+        }
+        match stmt {
+            Statement::Assign(assign) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_expression_effects(module, &store, &assign.expr, arena, collector)
+                })?;
+                let (store, boundaries) =
+                    eval_assign(module, state.store, state.boundaries, assign, arena)?;
+                let live_expr = if function_assigns_whole_var(assign, ret_id) {
+                    bool_node(arena, false)
+                } else {
+                    bool_node(arena, true)
+                };
+                Ok(FunctionControlState {
+                    store,
+                    boundaries,
+                    live_expr,
+                    live_sources: HashSet::default(),
+                })
+            }
+            Statement::SystemFunctionCall(call) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_system_function_effect(module, &store, call, arena, collector)
+                })?;
+                Ok(state)
+            }
+            Statement::FunctionCall(call) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_function_call_effects(module, &store, call, arena, collector)
+                })?;
+                let (store, boundaries) = eval_statement_form_function_call(
+                    module,
+                    state.store,
+                    state.boundaries,
+                    call,
+                    arena,
+                    LoweringPhase::CombLowering,
+                )?;
+                Ok(FunctionControlState {
+                    store,
+                    boundaries,
+                    live_expr: bool_node(arena, true),
+                    live_sources: HashSet::default(),
+                })
+            }
+            Statement::If(if_stmt) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)
+                })?;
+
+                let ((cond_node, cond_sources), _) =
+                    eval_expression(module, &state.store, &if_stmt.cond, arena, None)?;
+                let true_guard = arena.alloc(SLTNode::Binary(
+                    state.live_expr,
+                    BinaryOp::LogicAnd,
+                    cond_node,
+                ));
+                let mut true_sources = state.live_sources.clone();
+                true_sources.extend(cond_sources.iter().copied());
+                with_collector_guard(
+                    collector,
+                    arena,
+                    true_guard,
+                    true_sources,
+                    |collector, arena| {
+                        let _ = collect_statements(
+                            module,
+                            state.clone(),
+                            &if_stmt.true_side,
+                            ret_id,
+                            arena,
+                            collector,
+                        )?;
+                        Ok(())
+                    },
+                )?;
+
+                let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+                let false_guard = arena.alloc(SLTNode::Binary(
+                    state.live_expr,
+                    BinaryOp::LogicAnd,
+                    false_cond,
+                ));
+                let mut false_sources = state.live_sources.clone();
+                false_sources.extend(cond_sources.iter().copied());
+                with_collector_guard(
+                    collector,
+                    arena,
+                    false_guard,
+                    false_sources,
+                    |collector, arena| {
+                        let _ = collect_statements(
+                            module,
+                            state.clone(),
+                            &if_stmt.false_side,
+                            ret_id,
+                            arena,
+                            collector,
+                        )?;
+                        Ok(())
+                    },
+                )?;
+
+                let (store, boundaries) =
+                    eval_if(module, state.store, state.boundaries, if_stmt, arena)?;
+                Ok(FunctionControlState {
+                    store,
+                    boundaries,
+                    live_expr: bool_node(arena, true),
+                    live_sources: HashSet::default(),
+                })
+            }
+            Statement::For(for_stmt) => {
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    let _ = collect_comb_effects_for(module, store, for_stmt, arena, collector)?;
+                    Ok(())
+                })?;
+                let (store, boundaries) =
+                    eval_for(module, state.store, state.boundaries, for_stmt, arena)?;
+                Ok(FunctionControlState {
+                    store,
+                    boundaries,
+                    live_expr: bool_node(arena, true),
+                    live_sources: HashSet::default(),
+                })
+            }
+            Statement::Null => Ok(state),
+            Statement::IfReset(ir) => Err(ParserError::illegal_context(
+                "statement in comb function body",
+                format!("{stmt}"),
+                Some(&ir.token),
+            )),
+            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
+                Err(ParserError::illegal_context(
+                    "statement in comb function body",
+                    format!("{stmt}"),
+                    None,
+                ))
+            }
+        }
+    }
+
+    let _ = collect_statements(
+        module,
+        FunctionControlState {
+            store: local_store,
+            boundaries: BoundaryMap::default(),
+            live_expr: bool_node(arena, true),
+            live_sources: HashSet::default(),
+        },
+        statements,
+        ret_id,
+        arena,
+        collector,
+    )?;
+    Ok(())
+}
+
+fn collect_expression_position_inputs(
+    module: &Module,
+    expr: &Expression,
+    out: &mut HashSet<VarAtomBase<VarId>>,
+) -> Result<(), ParserError> {
+    match expr {
+        Expression::Term(factor) => collect_factor_position_inputs(module, factor, out),
+        Expression::Binary(lhs, _, rhs, _) => {
+            collect_expression_position_inputs(module, lhs, out)?;
+            collect_expression_position_inputs(module, rhs, out)
+        }
+        Expression::Unary(_, inner, _) => collect_expression_position_inputs(module, inner, out),
+        Expression::Ternary(cond, then_expr, else_expr, _) => {
+            collect_expression_position_inputs(module, cond, out)?;
+            collect_expression_position_inputs(module, then_expr, out)?;
+            collect_expression_position_inputs(module, else_expr, out)
+        }
+        Expression::Concatenation(parts, _) => {
+            for (part, repeat) in parts {
+                collect_expression_position_inputs(module, part, out)?;
+                if let Some(repeat) = repeat {
+                    collect_expression_position_inputs(module, repeat, out)?;
+                }
+            }
+            Ok(())
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(expr, repeat) => {
+                        collect_expression_position_inputs(module, expr, out)?;
+                        if let Some(repeat) = repeat {
+                            collect_expression_position_inputs(module, repeat, out)?;
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(expr) => {
+                        collect_expression_position_inputs(module, expr, out)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, field_expr) in fields {
+                collect_expression_position_inputs(module, field_expr, out)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn collect_factor_position_inputs(
+    module: &Module,
+    factor: &Factor,
+    out: &mut HashSet<VarAtomBase<VarId>>,
+) -> Result<(), ParserError> {
+    match factor {
+        Factor::Variable(var_id, index, select, comptime) => {
+            if !comptime.is_const {
+                let access = eval_var_select(module, *var_id, index, select)?;
+                out.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
+            }
+            for expr in index.0.iter().chain(select.0.iter()) {
+                collect_expression_position_inputs(module, expr, out)?;
+            }
+            if let Some((_, expr)) = &select.1 {
+                collect_expression_position_inputs(module, expr, out)?;
+            }
+            Ok(())
+        }
+        Factor::Value(_) => Ok(()),
+        Factor::FunctionCall(call) => {
+            for arg in call.inputs.values() {
+                collect_expression_position_inputs(module, arg, out)?;
+            }
+            Ok(())
+        }
+        Factor::SystemFunctionCall(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+    }
+}
+
+fn collect_comb_effects_statements(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    statements: &[Statement],
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<SymbolicStore<VarId>, ParserError> {
+    for stmt in statements {
+        match stmt {
+            Statement::Assign(assign) => {
+                collect_expression_effects(module, &store, &assign.expr, arena, collector)?;
+                let (next_store, _) =
+                    eval_assign(module, store, BoundaryMap::default(), assign, arena)?;
+                store = next_store;
+            }
+            Statement::SystemFunctionCall(call) => {
+                collect_system_function_effect(module, &store, call, arena, collector)?;
+            }
+            Statement::FunctionCall(call) => {
+                collect_function_call_effects(module, &store, call, arena, collector)?;
+                let (next_store, _) = eval_statement_form_function_call(
+                    module,
+                    store,
+                    BoundaryMap::default(),
+                    call,
+                    arena,
+                    LoweringPhase::CombLowering,
+                )?;
+                store = next_store;
+            }
+            Statement::For(for_stmt) => {
+                store = collect_comb_effects_for(module, store, for_stmt, arena, collector)?;
+            }
+            Statement::If(if_stmt) => {
+                collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)?;
+                let ((cond_node, sources), _) =
+                    eval_expression(module, &store, &if_stmt.cond, arena, None)?;
+                collector.sensitivity.extend(sources.iter().copied());
+                let saved_guard = collector.active_guard;
+                let saved_guard_sources = collector.active_guard_sources.clone();
+                let true_guard = if let Some(active) = saved_guard {
+                    arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, cond_node))
+                } else {
+                    cond_node
+                };
+                let mut true_sources = saved_guard_sources.clone();
+                true_sources.extend(sources.iter().copied());
+                collector.active_guard = Some(true_guard);
+                collector.active_guard_sources = true_sources;
+                let side_store = collect_comb_effects_statements(
+                    module,
+                    store.clone(),
+                    &if_stmt.true_side,
+                    arena,
+                    collector,
+                )?;
+                let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+                let false_guard = if let Some(active) = saved_guard {
+                    arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, false_cond))
+                } else {
+                    false_cond
+                };
+                let mut false_sources = saved_guard_sources.clone();
+                false_sources.extend(sources.iter().copied());
+                collector.active_guard = Some(false_guard);
+                collector.active_guard_sources = false_sources;
+                let else_store = collect_comb_effects_statements(
+                    module,
+                    store,
+                    &if_stmt.false_side,
+                    arena,
+                    collector,
+                )?;
+                collector.active_guard = saved_guard;
+                collector.active_guard_sources = saved_guard_sources;
+                store = merge_symbolic_stores(
+                    module,
+                    &side_store,
+                    &else_store,
+                    bool_node(arena, true),
+                    &HashSet::default(),
+                    arena,
+                )?;
+            }
+            Statement::IfReset(_)
+            | Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => {}
+        }
+    }
+    Ok(store)
+}
+
+fn collect_comb_effects_for(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    for_stmt: &ForStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<SymbolicStore<VarId>, ParserError> {
+    let loop_width = for_stmt.var_type.total_width().unwrap_or(32);
+    let original_store = store.clone();
+    let ForRange::Forward {
+        start,
+        end,
+        inclusive,
+        ..
+    } = &for_stmt.range
+    else {
+        let (loop_effects, observer_start) =
+            collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        let (store, _, runner) = eval_for_with_effects(
+            module,
+            store,
+            BoundaryMap::default(),
+            for_stmt,
+            arena,
+            &loop_effects,
+        )?;
+        attach_loop_runner_to_first_observer(collector, observer_start, runner);
+        return Ok(store);
+    };
+    let Some(start) = const_for_bound_i64(start) else {
+        let (loop_effects, observer_start) =
+            collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        let (store, _, runner) = eval_for_with_effects(
+            module,
+            store,
+            BoundaryMap::default(),
+            for_stmt,
+            arena,
+            &loop_effects,
+        )?;
+        attach_loop_runner_to_first_observer(collector, observer_start, runner);
+        return Ok(store);
+    };
+    let Some(end) = const_for_bound_i64(end) else {
+        let (loop_effects, observer_start) =
+            collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
+        let (store, _, runner) = eval_for_with_effects(
+            module,
+            store,
+            BoundaryMap::default(),
+            for_stmt,
+            arena,
+            &loop_effects,
+        )?;
+        attach_loop_runner_to_first_observer(collector, observer_start, runner);
+        return Ok(store);
+    };
+    let final_end = if *inclusive { end + 1 } else { end };
+    for i in start..final_end {
+        let mut iter_store = store.clone();
+        let node = arena.alloc(SLTNode::Constant(
+            BigUint::from(i as u64),
+            BigUint::from(0u8),
+            loop_width,
+            for_stmt.var_type.signed,
+        ));
+        iter_store.insert(
+            for_stmt.var_id,
+            RangeStore::new(Some((node, HashSet::default())), loop_width),
+        );
+        store =
+            collect_comb_effects_statements(module, iter_store, &for_stmt.body, arena, collector)?;
+        store.remove(&for_stmt.var_id);
+    }
+    eval_for(
+        module,
+        original_store,
+        BoundaryMap::default(),
+        for_stmt,
+        arena,
+    )
+    .map(|(s, _)| s)
+}
+
+fn collect_dynamic_for_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    for_stmt: &ForStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(Vec<SLTForEffect>, usize), ParserError> {
+    let Some(loop_width) = for_stmt.var_type.total_width() else {
+        return Ok((Vec::new(), collector.observers.len()));
+    };
+    let mut iter_store = store.clone();
+    let mut written_accesses = HashMap::default();
+    collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
+    for (id, accesses) in written_accesses {
+        let width = resolve_total_width(module, &module.variables[&id])?;
+        let mut loop_store = RangeStore::new(None, width);
+        let mut covered = vec![false; width];
+        for access in accesses {
+            for slot in covered.iter_mut().take(access.msb + 1).skip(access.lsb) {
+                *slot = true;
+            }
+        }
+        let original = store
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| RangeStore::new(None, width));
+        let mut bit = 0usize;
+        while bit < width {
+            if covered[bit] {
+                bit += 1;
+                continue;
+            }
+            let start = bit;
+            while bit < width && !covered[bit] {
+                bit += 1;
+            }
+            let end = bit - 1;
+            let access = BitAccess::new(start, end);
+            let parts = original.get_parts(access);
+            let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena);
+            loop_store.update(access, Some((expr, sources)));
+        }
+        iter_store.insert(id, loop_store);
+    }
+    iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+    let observer_start = collector.observers.len();
+    let saved = collector.loop_effects.take();
+    collector.loop_effects = Some(Vec::new());
+    let _ = collect_comb_effects_statements(module, iter_store, &for_stmt.body, arena, collector)?;
+    let effects = collector.loop_effects.take().unwrap_or_default();
+    collector.loop_effects = saved;
+    Ok((effects, observer_start))
+}
+
+fn attach_loop_runner_to_first_observer(
+    collector: &mut CombEffectCollector,
+    observer_start: usize,
+    runner: Option<NodeId>,
+) {
+    let Some(runner) = runner else {
+        return;
+    };
+    if let Some(observer) = collector.observers[observer_start..]
+        .iter_mut()
+        .find(|observer| observer.captured_in_loop)
+    {
+        observer.loop_runner = Some(runner);
+    }
+}
+
+fn const_for_bound_i64(bound: &ForBound) -> Option<i64> {
+    match bound {
+        ForBound::Const(v) => (*v).try_into().ok(),
+        ForBound::Expression(expr) => eval_constexpr(expr)?.to_i64(),
+    }
 }
 
 fn eval_statement(
@@ -1057,11 +2301,7 @@ fn eval_statement(
             "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(fc) => Err(ParserError::illegal_context(
-            "statement in always_comb",
-            "system function call".to_string(),
-            Some(&fc.comptime.token),
-        )),
+        Statement::SystemFunctionCall(_) => Ok((store, boundaries)),
         Statement::FunctionCall(fc) => eval_statement_form_function_call(
             module,
             store,
@@ -1100,6 +2340,14 @@ fn bool_node(arena: &mut SLTNodeArena<VarId>, value: bool) -> NodeId {
         1,
         false,
     ))
+}
+
+fn function_assigns_whole_var(assign: &AssignStatement, var_id: VarId) -> bool {
+    assign.dst.len() == 1
+        && assign.dst[0].id == var_id
+        && assign.dst[0].index.0.is_empty()
+        && assign.dst[0].select.0.is_empty()
+        && assign.dst[0].select.1.is_none()
 }
 
 fn constant_bool(arena: &SLTNodeArena<VarId>, node: NodeId) -> Option<bool> {
@@ -1295,11 +2543,7 @@ fn eval_loop_statement(
             "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(fc) => Err(ParserError::illegal_context(
-            "statement in always_comb",
-            "system function call".to_string(),
-            Some(&fc.comptime.token),
-        )),
+        Statement::SystemFunctionCall(_) => Ok(state),
         Statement::FunctionCall(fc) => {
             let guard_state = state.clone();
             let (next_store, next_boundaries) = eval_statement_form_function_call(
@@ -1573,12 +2817,7 @@ fn collect_written_destination(
     out: &mut HashMap<VarId, Vec<BitAccess>>,
     dst: &veryl_analyzer::ir::AssignDestination,
 ) -> Result<(), ParserError> {
-    let width = resolve_total_width(module, &module.variables[&dst.id])?;
-    let access = if is_static_access(&dst.index, &dst.select) {
-        eval_var_select(module, dst.id, &dst.index, &dst.select)?
-    } else {
-        BitAccess::new(0, width - 1)
-    };
+    let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
     out.entry(dst.id).or_default().push(access);
     Ok(())
 }
@@ -1590,6 +2829,25 @@ fn eval_for(
     for_stmt: &ForStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
+    eval_for_with_effects(module, store, boundaries, for_stmt, arena, &[])
+        .map(|(store, boundaries, _)| (store, boundaries))
+}
+
+fn eval_for_with_effects(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: HashMap<VarId, BTreeSet<usize>>,
+    for_stmt: &ForStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    effects: &[SLTForEffect],
+) -> Result<
+    (
+        SymbolicStore<VarId>,
+        HashMap<VarId, BTreeSet<usize>>,
+        Option<NodeId>,
+    ),
+    ParserError,
+> {
     let Some(loop_width) = for_stmt.var_type.total_width() else {
         return Err(ParserError::unsupported(
             65,
@@ -1770,34 +3028,79 @@ fn eval_for(
     merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
 
     let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena);
-    if updates.is_empty() {
+    if updates.is_empty() && effects.is_empty() {
         let mut store = store;
         store.remove(&for_stmt.var_id);
-        return Ok((store, merged_boundaries));
+        return Ok((store, merged_boundaries, None));
     }
 
-    let folded_updates: Vec<_> = updates
-        .iter()
-        .map(|(target, expr, _)| SLTForUpdate {
-            target: *target,
-            expr: *expr,
-        })
-        .collect();
+    let folded_updates: Vec<_> = if updates.is_empty() {
+        let one = bool_node(arena, true);
+        vec![SLTForUpdate {
+            target: VarAtomBase::new(for_stmt.var_id, 0, loop_width - 1),
+            expr: one,
+        }]
+    } else {
+        updates
+            .iter()
+            .map(|(target, expr, _)| SLTForUpdate {
+                target: *target,
+                expr: *expr,
+            })
+            .collect()
+    };
     let loop_updated_vars: HashSet<_> = folded_updates
         .iter()
         .map(|update| update.target.id)
         .collect();
-    let initial_updates: Vec<_> = updates
-        .iter()
-        .map(|(target, _, _)| {
-            let parts = store[&target.id].get_parts(target.access);
-            let (expr, _) = combine_parts_with_default(target.id, target.access.lsb, parts, arena);
-            SLTForUpdate {
-                target: *target,
-                expr,
-            }
-        })
-        .collect();
+    let initial_updates: Vec<_> = if updates.is_empty() {
+        let one = bool_node(arena, true);
+        vec![SLTForUpdate {
+            target: VarAtomBase::new(for_stmt.var_id, 0, loop_width - 1),
+            expr: one,
+        }]
+    } else {
+        updates
+            .iter()
+            .map(|(target, _, _)| {
+                let parts = store[&target.id].get_parts(target.access);
+                let (expr, _) =
+                    combine_parts_with_default(target.id, target.access.lsb, parts, arena);
+                SLTForUpdate {
+                    target: *target,
+                    expr,
+                }
+            })
+            .collect()
+    };
+
+    let loop_runner = if effects.is_empty() {
+        None
+    } else {
+        let result = folded_updates[0].target;
+        Some(arena.alloc(SLTNode::ForFold {
+            loop_var: for_stmt.var_id,
+            loop_width,
+            loop_signed: for_stmt.var_type.signed,
+            start: start.clone(),
+            end: end.clone(),
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            result,
+            initials: initial_updates.clone(),
+            updates: folded_updates.clone(),
+            effects: effects.to_vec(),
+            continue_cond: loop_state.continue_expr,
+        }))
+    };
+
+    if updates.is_empty() {
+        let mut store = store;
+        store.remove(&for_stmt.var_id);
+        return Ok((store, merged_boundaries, loop_runner));
+    }
 
     let mut result_store = store;
     for (target, _expr, sources) in updates {
@@ -1829,6 +3132,7 @@ fn eval_for(
             result: target,
             initials: initial_updates.clone(),
             updates: folded_updates.clone(),
+            effects: Vec::new(),
             continue_cond: loop_state.continue_expr,
         });
 
@@ -1842,7 +3146,7 @@ fn eval_for(
     }
 
     result_store.remove(&for_stmt.var_id);
-    Ok((result_store, merged_boundaries))
+    Ok((result_store, merged_boundaries, loop_runner))
 }
 
 fn eval_assign(
@@ -2245,7 +3549,16 @@ fn eval_dynamic_assign(
     let new_val_masked = arena.alloc(SLTNode::Binary(old_val, BinaryOp::And, mask_node));
     let final_val = arena.alloc(SLTNode::Binary(new_val_masked, BinaryOp::Or, new_val_term));
 
-    range_store.update(access_full, Some((final_val, all_sources)));
+    let prefix_access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
+    let stored_expr = if prefix_access.lsb == 0 && prefix_access.msb == width - 1 {
+        final_val
+    } else {
+        arena.alloc(SLTNode::Slice {
+            expr: final_val,
+            access: prefix_access,
+        })
+    };
+    range_store.update(prefix_access, Some((stored_expr, all_sources)));
 
     Ok((store, boundaries))
 }
@@ -2633,6 +3946,19 @@ fn eval_function_body_return(
             | SystemFunctionKind::Unsigned(input) => {
                 validate_function_body_expression(module, &input.0)
             }
+            SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                for arg in args {
+                    validate_function_body_expression(module, &arg.0)?;
+                }
+                Ok(())
+            }
+            SystemFunctionKind::Assert { cond, args, .. } => {
+                validate_function_body_expression(module, &cond.0)?;
+                for arg in args {
+                    validate_function_body_expression(module, &arg.0)?;
+                }
+                Ok(())
+            }
             _ => Err(ParserError::unsupported(
                 59,
                 LoweringPhase::CombLowering,
@@ -2708,13 +4034,7 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                59,
-                LoweringPhase::CombLowering,
-                "system function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
+            Statement::SystemFunctionCall(fc) => validate_function_body_system_function(module, fc),
             Statement::FunctionCall(call) => {
                 for expr in call.inputs.values() {
                     validate_function_body_expression(module, expr)?;
@@ -3071,13 +4391,7 @@ fn eval_function_body_return(
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
-                Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                    59,
-                    LoweringPhase::CombLowering,
-                    "system function call in comb function body",
-                    format!("{stmt}"),
-                    Some(&fc.comptime.token),
-                )),
+                Statement::SystemFunctionCall(_) => Ok(state),
                 Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                     Err(ParserError::illegal_context(
                         "statement in comb function body",
@@ -3340,6 +4654,7 @@ fn eval_function_body_return(
                 result: *target,
                 initials: initial_updates.clone(),
                 updates: folded_updates.clone(),
+                effects: Vec::new(),
                 continue_cond: loop_effective_continue,
             });
 
@@ -3385,6 +4700,7 @@ fn eval_function_body_return(
                 result: control_target,
                 initials: control_initials,
                 updates: control_updates,
+                effects: Vec::new(),
                 continue_cond: iter_state.continue_expr,
             })
         } else {
@@ -3605,13 +4921,7 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                59,
-                LoweringPhase::CombLowering,
-                "system function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
+            Statement::SystemFunctionCall(_) => Ok(state),
             Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                 Err(ParserError::illegal_context(
                     "statement in comb function body",
@@ -3736,13 +5046,7 @@ fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::SystemFunctionCall(fc) => Err(ParserError::unsupported(
-                59,
-                LoweringPhase::CombLowering,
-                "system function call in comb function body",
-                format!("{stmt}"),
-                Some(&fc.comptime.token),
-            )),
+            Statement::SystemFunctionCall(_) => Ok(state),
             Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                 Err(ParserError::illegal_context(
                     "statement in comb function body",
@@ -4598,7 +5902,12 @@ fn eval_factor(
                     }
                 }
 
-                all_sources.insert(VarAtomBase::new(*var_id, 0, width - 1));
+                let prefix_access = eval_var_select(module, *var_id, index, select)?;
+                all_sources.insert(VarAtomBase::new(
+                    *var_id,
+                    prefix_access.lsb,
+                    prefix_access.msb,
+                ));
                 Ok(((extracted_expr, all_sources), all_bounds))
             }
         }
@@ -5146,7 +6455,8 @@ mod tests {
             })
             .expect("No always_comb found in Top");
         let mut arena = SLTNodeArena::new();
-        let (paths, _, boundaries) = super::parse_comb(&top_module, comb_decl, &mut arena).unwrap();
+        let (paths, _, boundaries, _, _) =
+            super::parse_comb(&top_module, comb_decl, &mut arena).unwrap();
         (top_module, CombResult { paths, boundaries })
     }
     pub fn var_id_of(module: &Module, var_path: &[&str]) -> VarId {
@@ -5186,7 +6496,11 @@ mod tests {
         let path = result
             .paths
             .iter()
-            .find(|p| p.target.id == b_id && p.target.access.lsb == 4 && p.target.access.msb == 7)
+            .find(|p| {
+                p.target.var().unwrap().id == b_id
+                    && p.target.var().unwrap().access.lsb == 4
+                    && p.target.var().unwrap().access.msb == 7
+            })
             .unwrap();
         let a_id = var_id_of(&module, &["a"]);
 
@@ -5288,7 +6602,7 @@ mod tests {
         let path_a0 = res
             .paths
             .iter()
-            .find(|p| p.target.id == id_a && p.target.access.lsb == 0)
+            .find(|p| p.target.var().unwrap().id == id_a && p.target.var().unwrap().access.lsb == 0)
             .expect("Path for a[0] not found");
 
         // a[0] depends on c
@@ -5306,7 +6620,7 @@ mod tests {
         let path_a_upper = res
             .paths
             .iter()
-            .find(|p| p.target.id == id_a && p.target.access.lsb == 1)
+            .find(|p| p.target.var().unwrap().id == id_a && p.target.var().unwrap().access.lsb == 1)
             .expect("Path for a[7:1] not found");
         assert!(
             path_a_upper.sources.iter().any(|s| s.id == id_b),
@@ -5326,7 +6640,11 @@ mod tests {
         let id_b = var_id_of(&module, &["b"]);
         let id_c = var_id_of(&module, &["c"]);
 
-        let path_oa = res.paths.iter().find(|p| p.target.id == id_oa).unwrap();
+        let path_oa = res
+            .paths
+            .iter()
+            .find(|p| p.target.var().unwrap().id == id_oa)
+            .unwrap();
 
         // o_a depends on b and c
         assert!(path_oa.sources.iter().any(|s| s.id == id_b));
@@ -5353,7 +6671,7 @@ mod tests {
         let path_a0 = res
             .paths
             .iter()
-            .find(|p| p.target.id == id_a && p.target.access.lsb == 0)
+            .find(|p| p.target.var().unwrap().id == id_a && p.target.var().unwrap().access.lsb == 0)
             .unwrap();
 
         assert!(
@@ -5383,7 +6701,10 @@ mod tests {
 
         // d is updated dynamically, so we expect a path covering d[0..31]
         let id_d = var_id_of(&module, &["d"]);
-        let path = result.paths.iter().find(|p| p.target.id == id_d);
+        let path = result
+            .paths
+            .iter()
+            .find(|p| p.target.var().unwrap().id == id_d);
 
         // Dynamic assignment essentially combines all bits, so we should find a path for d.
         // It might be split or single, but since we updated full range in eval_dynamic_assign, it should be single if initialized so.
@@ -5391,8 +6712,8 @@ mod tests {
         // So `d` starts as [0:31]. Dynamic update updates [0:31]. So it should stay [0:31].
 
         let path = path.expect("Path for d not found");
-        assert_eq!(path.target.access.lsb, 0);
-        assert_eq!(path.target.access.msb, 31);
+        assert_eq!(path.target.var().unwrap().access.lsb, 0);
+        assert_eq!(path.target.var().unwrap().access.msb, 31);
 
         let id_a = var_id_of(&module, &["a"]);
         let id_idx = var_id_of(&module, &["idx"]);

@@ -464,7 +464,9 @@ fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. } => None,
+        | SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
     }
 }
 
@@ -482,11 +484,11 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.push(*off);
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
             out.push(*off);
             out.push(*src);
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _) => {
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
             out.push(*src);
         }
         SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
@@ -502,7 +504,12 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.push(*then_val);
             out.push(*else_val);
         }
-        SIRInstruction::RuntimeEvent { args, .. } => out.extend(args.iter().copied()),
+        SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => out.extend(args.iter().copied()),
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            out.push(*old);
+            out.push(*new);
+        }
     }
 }
 
@@ -1366,6 +1373,7 @@ mod tests {
                 32,
                 result_reg,
                 Vec::new(),
+                Vec::new(),
             ));
         }
 
@@ -1486,6 +1494,7 @@ mod tests {
                     32,
                     param_reg,
                     Vec::new(),
+                    Vec::new(),
                 ));
             }
 
@@ -1543,6 +1552,7 @@ mod tests {
                     SIROffset::Static(0),
                     32,
                     result_reg,
+                    Vec::new(),
                     Vec::new(),
                 ));
             }

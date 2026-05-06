@@ -77,7 +77,7 @@ fn partial_forward_block(
                 );
                 new_instructions.push(inst);
             }
-            SIRInstruction::Store(addr, SIROffset::Static(off), width, src, triggers)
+            SIRInstruction::Store(addr, SIROffset::Static(off), width, src, triggers, _)
                 if triggers.is_empty() =>
             {
                 if let Some(state) = var_states.get_mut(addr) {
@@ -97,7 +97,7 @@ fn partial_forward_block(
                 var_states.remove(addr);
                 new_instructions.push(inst);
             }
-            SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _) => {
+            SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _, _) => {
                 var_states.remove(addr);
                 new_instructions.push(inst);
             }

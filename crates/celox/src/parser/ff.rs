@@ -1420,6 +1420,7 @@ impl<'a> FfParser<'a> {
             loop_width,
             fitcheck_visible_reg,
             Vec::new(),
+            Vec::new(),
         ));
         if compare_width != loop_width {
             let fits_loop_reg = if compare_width > 64 {

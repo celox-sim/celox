@@ -230,7 +230,7 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 bits
             )
         }
-        SIRInstruction::Store(addr, offset, bits, src, _) => {
+        SIRInstruction::Store(addr, offset, bits, src, _, _) => {
             format!(
                 "Store(addr={}, offset={}, bits={}, src_reg = {})",
                 format_regioned_addr(addr, program),
@@ -275,6 +275,37 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("RuntimeEvent(site={}, args=[{}])", site_id, args)
+        }
+        SIRInstruction::CombCaptureEvent {
+            site_id,
+            args,
+            fatal_error_code,
+            consume_enabled,
+        } => {
+            let args = args
+                .iter()
+                .map(|r| format!("r{}", r.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if let Some(code) = fatal_error_code {
+                format!(
+                    "CombCaptureEvent(site={}, args=[{}], fatal_error={})",
+                    site_id, args, code
+                )
+            } else if *consume_enabled {
+                format!(
+                    "CombCaptureEvent(site={}, args=[{}], consume_enabled=true)",
+                    site_id, args
+                )
+            } else {
+                format!("CombCaptureEvent(site={}, args=[{}])", site_id, args)
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+            format!(
+                "CombCaptureEnableIfChanged(old=r{}, new=r{}, sites={:?})",
+                old.0, new.0, sites
+            )
         }
     }
 }
