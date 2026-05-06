@@ -65,7 +65,7 @@ assign c = b;
 assign b = a;
 }
 "#; }
-        @build Simulator::builder(code, "Top");
+    @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
     let c = sim.signal("c");
 
@@ -145,6 +145,39 @@ o = tmp;
     })
     .unwrap();
     assert_eq!(sim.get(o), 0xEEu64.into());
+
+    }
+
+    fn test_always_comb_read_before_write_uses_previous_value(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    a: input logic,
+    c: output logic,
+) {
+    var b: logic;
+
+    always_comb {
+        c = b;
+        b = a;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let c = sim.signal("c");
+
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(c), 0u8.into());
+
+    // This may differ from synthesis-oriented intuition, but it follows the
+    // LRM procedural ordering for always_comb: `c = b` observes the value of
+    // `b` from before this block execution, even though `b = a` follows it.
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(c), 0u8.into());
+
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(c), 1u8.into());
 
     }
 

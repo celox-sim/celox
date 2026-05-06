@@ -724,6 +724,7 @@ pub(crate) fn flatten(
     // This eliminates Store→Load roundtrips for compile-time constants
     // (e.g. genvar-expanded parity-check matrices).
     crate::logic_tree::const_inline::inline_constant_variables(&mut comb_blocks, &mut global_arena);
+    apply_always_comb_previous_source_ordering(&mut comb_blocks);
 
     let var_widths: HashMap<AbsoluteAddr, usize> = instance_modules
         .iter()
@@ -1930,6 +1931,7 @@ fn build_comb_observer_capture_paths(
                     consume_enabled: true,
                 },
                 sources,
+                previous_sources: HashSet::default(),
                 local_inputs: observer.local_inputs.clone(),
                 order_before: order_before.clone(),
                 comb_capture_enable_sites: Vec::new(),
@@ -1957,6 +1959,7 @@ fn build_comb_observer_capture_paths(
                         consume_enabled: true,
                     },
                     sources: std::iter::once(trigger_target).collect(),
+                    previous_sources: HashSet::default(),
                     local_inputs: observer.local_inputs.clone(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
@@ -2037,6 +2040,7 @@ fn build_comb_observer_capture_paths(
                 consume_enabled: !trigger_paths.is_empty(),
             },
             sources,
+            previous_sources: HashSet::default(),
             local_inputs: observer.local_inputs.clone(),
             order_before,
             comb_capture_enable_sites: Vec::new(),
@@ -2090,6 +2094,7 @@ fn build_comb_observer_capture_paths(
                         consume_enabled: true,
                     },
                     sources: std::iter::once(trigger_target).collect(),
+                    previous_sources: HashSet::default(),
                     local_inputs: member.local_inputs.clone(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
@@ -2099,6 +2104,42 @@ fn build_comb_observer_capture_paths(
                 previous_trigger_capture_path = Some(path_id);
             }
         }
+    }
+}
+
+fn apply_always_comb_previous_source_ordering(comb_blocks: &mut [LogicPath<AbsoluteAddr>]) {
+    let targets: Vec<_> = comb_blocks
+        .iter()
+        .map(|path| path.target.var().copied())
+        .collect();
+
+    for (idx, path) in comb_blocks.iter_mut().enumerate() {
+        if path.previous_sources.is_empty() {
+            continue;
+        }
+
+        let previous_sources = path.previous_sources.clone();
+        path.sources.retain(|source| {
+            !previous_sources.iter().any(|previous| {
+                previous.id == source.id && previous.access.overlaps(&source.access)
+            })
+        });
+
+        let mut order_before = Vec::new();
+        for (target_idx, target) in targets.iter().enumerate() {
+            if target_idx == idx {
+                continue;
+            }
+            let Some(target) = target else {
+                continue;
+            };
+            if previous_sources.iter().any(|previous| {
+                previous.id == target.id && previous.access.overlaps(&target.access)
+            }) {
+                order_before.push(LogicPathId(target_idx));
+            }
+        }
+        path.order_before.extend(order_before);
     }
 }
 

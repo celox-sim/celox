@@ -1033,6 +1033,7 @@ impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for LogicPathTarget<A> {
 pub struct LogicPath<A: Hash + Eq + Clone> {
     pub target: LogicPathTarget<A>,
     pub sources: HashSet<VarAtomBase<A>>,
+    pub previous_sources: HashSet<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, NodeId)>,
     pub order_before: HashSet<LogicPathId>,
     pub comb_capture_enable_sites: Vec<u32>,
@@ -1102,6 +1103,11 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                 .iter()
                 .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
                 .collect(),
+            previous_sources: self
+                .previous_sources
+                .iter()
+                .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+                .collect(),
             local_inputs: self
                 .local_inputs
                 .iter()
@@ -1154,6 +1160,17 @@ pub fn parse_comb(
         current_store.insert(*id, RangeStore::new(None, width));
     }
 
+    let mut written_accesses = HashMap::default();
+    collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
+    let written_atoms: Vec<_> = written_accesses
+        .iter()
+        .flat_map(|(&id, accesses)| {
+            accesses
+                .iter()
+                .map(move |access| VarAtomBase::new(id, access.lsb, access.msb))
+        })
+        .collect();
+
     // 2. Symbolic Execution: Evaluate statements sequentially to update the symbolic state.
     let effect_initial_store = current_store.clone();
     let (final_store, boundaries) = decl
@@ -1197,6 +1214,18 @@ pub fn parse_comb(
                 paths.push(LogicPath::<VarId> {
                     target: LogicPathTarget::Var(VarAtomBase::new(*id, lsb, msb)),
                     sources: sources.clone(),
+                    previous_sources: sources
+                        .iter()
+                        .copied()
+                        .filter(|source| {
+                            source.id != *id || !source.access.overlaps(&BitAccess::new(lsb, msb))
+                        })
+                        .filter(|source| {
+                            written_atoms.iter().any(|written| {
+                                written.id == source.id && written.access.overlaps(&source.access)
+                            })
+                        })
+                        .collect(),
                     local_inputs: Vec::new(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
@@ -1207,16 +1236,6 @@ pub fn parse_comb(
         }
     }
     let mut process_sensitivity = effects.sensitivity;
-    let mut written_accesses = HashMap::default();
-    collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
-    let written_atoms: Vec<_> = written_accesses
-        .into_iter()
-        .flat_map(|(id, accesses)| {
-            accesses
-                .into_iter()
-                .map(move |access| VarAtomBase::new(id, access.lsb, access.msb))
-        })
-        .collect();
     for path in &paths {
         process_sensitivity.extend(path.sources.iter().copied());
     }
