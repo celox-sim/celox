@@ -2158,6 +2158,57 @@ module Top (
     );
 }
 
+fn test_comb_display_snapshots_after_multiple_function_output_arguments(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    tail: input logic<8>,
+    out: output logic<8>,
+) {
+    function split (
+        x: input logic<8>,
+        lo: output logic<8>,
+        hi: output logic<8>,
+    ) {
+        lo = x + 8'd1;
+        hi = x + 8'd2;
+    }
+
+    var lo: logic<8>;
+    var hi: logic<8>;
+
+    always_comb {
+        split(a, lo, hi);
+        $display("after_split=%0d,%0d", lo, hi);
+        lo = tail;
+        hi = tail + 8'd1;
+        out = lo + hi;
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let tail = sim.signal("tail");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(a, 10u8);
+        io.set(tail, 20u8);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "after_split=11,12".to_string(),
+        }],
+    );
+    assert_eq!(sim.get_as::<u8>(out), 41);
+}
+
 fn test_comb_display_snapshots_partial_overlap_position(sim) {
     @omit_veryl;
     @ignore_on(wasm);
