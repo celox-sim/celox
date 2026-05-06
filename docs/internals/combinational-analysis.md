@@ -271,6 +271,12 @@ eval_if(module, store, boundaries, stmt)
 In the final stage, `None` parts are restored as `Input` (a reference to the current value of the variable itself).
 This corresponds to latch inference in combinational circuits.
 
+#### Read-Before-Write in `always_comb`
+
+When an `always_comb` block reads a variable before assigning to that same variable, the read observes the value from before the procedural block execution. This can disagree with synthesis-oriented intuition, but it is the behavior that follows from reading the LRM procedural ordering directly. Celox tracks these reads as `previous_sources` on the generated `LogicPath`.
+
+After flattening and atomization, `previous_sources` are removed from normal dataflow dependencies and converted into ordering edges. This prevents the scheduler from moving the later write before the earlier read. Identity aliasing is also blocked for addresses that are loaded as snapshots in the same evaluation, because sharing storage would turn the required previous-value read into a read of the later write.
+
 #### `eval_for` -- Runtime Fold for `always_comb` Loops
 
 `always_comb` `for` loops are not always expanded into repeated statements. Constant forward loops can be walked directly while collecting side effects, but the data-path evaluator still uses `eval_for_with_effects` as the common representation for dynamic loops, reverse loops, stepped loops, and loops with runtime side effects.

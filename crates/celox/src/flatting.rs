@@ -110,6 +110,7 @@ fn atomize_logic_paths(
             // This acts as a "source mask" to filter out unintended dependencies.
             let original_source_ids: crate::HashSet<_> =
                 path.sources.iter().map(|s| s.id).collect();
+            let original_previous_sources = path.previous_sources.clone();
 
             // Compute per-atom source sets (with bit ranges), then coalesce
             // consecutive atoms whose source sets are identical into wider paths.
@@ -169,14 +170,25 @@ fn atomize_logic_paths(
                 let mut merged_sources = crate::HashSet::default();
                 collect_inputs(merged_expr, arena, &mut merged_sources);
                 let filtered_sources: crate::HashSet<_> = merged_sources
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|input_atom| original_source_ids.contains(&input_atom.id))
+                    .collect();
+                let filtered_previous_sources: crate::HashSet<_> = merged_sources
+                    .into_iter()
+                    .filter(|input_atom| {
+                        original_previous_sources.iter().any(|previous| {
+                            previous.id == input_atom.id
+                                && previous.access.overlaps(&input_atom.access)
+                        })
+                    })
                     .collect();
 
                 let target = VarAtomBase::new(target_var.id, merged_lsb, merged_msb);
                 atomized_paths.push(LogicPath {
                     target: LogicPathTarget::Var(target),
                     sources: filtered_sources,
+                    previous_sources: filtered_previous_sources,
                     local_inputs: path.local_inputs.clone(),
                     order_before: path.order_before.clone(),
                     comb_capture_enable_sites: path.comb_capture_enable_sites.clone(),

@@ -53,6 +53,14 @@ impl ExecutionUnitPass for IdentityStoreBypassPass {
                 }
             }
         }
+        let mut load_counts: HashMap<AbsoluteAddr, usize> = HashMap::default();
+        for block in eu.blocks.values() {
+            for inst in &block.instructions {
+                if let SIRInstruction::Load(_, addr, _, _) = inst {
+                    *load_counts.entry(addr.absolute_addr()).or_default() += 1;
+                }
+            }
+        }
 
         // Find aliasable Stores:
         // 1. Identity Stores: Store(B, 0, W, reg) where reg = identity_copy(A)
@@ -87,6 +95,29 @@ impl ExecutionUnitPass for IdentityStoreBypassPass {
                 }
                 if let Some(addr_a) = trace_identity_source(*src_reg, *width, &defs) {
                     if addr_a.absolute_addr() != addr_b.absolute_addr() {
+                        // If B is loaded elsewhere in the same evaluation,
+                        // aliasing B to A can rewrite a required snapshot of
+                        // B's previous value into a read of A.
+                        if load_counts
+                            .get(&addr_b.absolute_addr())
+                            .copied()
+                            .unwrap_or(0)
+                            > 0
+                        {
+                            continue;
+                        }
+                        // Store(B, Load(A)) is only an alias if A is stable for the
+                        // whole evaluation. In LRM-ordered always_comb code such as
+                        // `B = A; A = next;`, B must snapshot A's previous value,
+                        // so sharing storage with A would observe the later store.
+                        if store_counts
+                            .get(&addr_a.absolute_addr())
+                            .copied()
+                            .unwrap_or(0)
+                            > 0
+                        {
+                            continue;
+                        }
                         found_aliases.push((*addr_b, addr_a));
                         continue;
                     }

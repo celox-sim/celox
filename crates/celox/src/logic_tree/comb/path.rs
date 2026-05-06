@@ -55,6 +55,7 @@ impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for LogicPathTarget<A> {
 pub struct LogicPath<A: Hash + Eq + Clone> {
     pub target: LogicPathTarget<A>,
     pub sources: HashSet<VarAtomBase<A>>,
+    pub previous_sources: HashSet<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, NodeId)>,
     pub order_before: HashSet<LogicPathId>,
     pub comb_capture_enable_sites: Vec<u32>,
@@ -121,6 +122,11 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
             },
             sources: self
                 .sources
+                .iter()
+                .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+                .collect(),
+            previous_sources: self
+                .previous_sources
                 .iter()
                 .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
                 .collect(),
