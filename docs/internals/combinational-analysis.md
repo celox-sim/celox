@@ -19,6 +19,8 @@ LogicPath<AbsoluteAddr>
     v  atomize (flatting.rs)
 LogicPath<AbsoluteAddr>  --  Split along bit boundaries
     |
+    +  CombObserver / RuntimeEventSite metadata for always_comb side effects
+    |
     v  Topological sort + lowering (scheduler.rs + lower.rs)
 ExecutionUnit<AbsoluteAddr>  --  SIR instruction sequence
 ```
@@ -53,6 +55,20 @@ pub enum SLTNode<A> {
         else_expr: NodeId,
     },
 
+    // Runtime for-loop fold. This represents a loop as a state transition
+    // instead of unrolling every iteration at parse time.
+    ForFold {
+        loop_var: A,
+        start: SLTLoopBound,
+        end: SLTLoopBound,
+        result: VarAtomBase<A>,
+        initials: Vec<SLTForUpdate<A>>,
+        updates: Vec<SLTForUpdate<A>>,
+        effects: Vec<SLTForEffect>,
+        continue_cond: NodeId,
+        // loop width, signedness, inclusivity, step, and direction omitted here
+    },
+
     // Bit concatenation ({a, b} or reconstruction from partial assignments)
     Concat(Vec<(NodeId, usize)>),       // List of (expression reference, bit width)
 
@@ -72,6 +88,20 @@ pub struct SLTIndex {
     pub stride: usize,   // Byte stride per index step (element size)
 }
 ```
+
+### `ForFold` -- Runtime Loop Fold
+
+`ForFold` is used when an `always_comb` `for` loop must stay as a runtime loop. This happens for dynamic bounds and for loops whose body contains runtime side effects.
+
+The node models one loop as a fold over a small symbolic state:
+
+- `initials`: values of each loop-carried target before the first iteration
+- `updates`: next-state expressions produced by one symbolic iteration
+- `result`: the target bit range whose final value this `ForFold` node returns
+- `continue_cond`: a predicate that keeps assignments disabled after a `break`
+- `effects`: side effects to emit inside each runtime iteration
+
+This is intentionally different from syntactic unrolling. The parser symbolically evaluates the loop body once with the loop variable represented as an input-like value, extracts the changed ranges as `updates`, and lowers the fold into SIR control flow later.
 
 ### Dynamic Indexing in `Input` Nodes
 
@@ -247,6 +277,91 @@ When an `always_comb` block reads a variable before assigning to that same varia
 
 After flattening and atomization, `previous_sources` are removed from normal dataflow dependencies and converted into ordering edges. This prevents the scheduler from moving the later write before the earlier read. Identity aliasing is also blocked for addresses that are loaded as snapshots in the same evaluation, because sharing storage would turn the required previous-value read into a read of the later write.
 
+#### `eval_for` -- Runtime Fold for `always_comb` Loops
+
+`always_comb` `for` loops are not always expanded into repeated statements. Constant forward loops can be walked directly while collecting side effects, but the data-path evaluator still uses `eval_for_with_effects` as the common representation for dynamic loops, reverse loops, stepped loops, and loops with runtime side effects.
+
+The algorithm is:
+
+1. Validate the loop variable width and bounds. An exclusive upper bound one past the loop type's maximum is allowed for full-range loops such as `0..256` with an 8-bit loop variable; other out-of-range bounds are rejected.
+2. Collect every destination range written by the loop body, including writes through statement-form function output arguments.
+3. Build a loop-local store:
+   - written ranges start as `None` because they are produced by the loop
+   - untouched ranges are copied from the pre-loop store so partial writes preserve their old symbolic value
+   - the loop variable is inserted as an unknown symbolic value
+4. Evaluate the loop body once as a state transition. Assignments, nested `if`s, nested loops, and statement-form function calls update the loop-local store.
+5. Extract changed ranges from the one-iteration store diff. These become `SLTForUpdate` records.
+6. Allocate one `ForFold` node per changed target range. The final store for each target is updated with that `ForFold` expression.
+
+The loop variable and loop-carried variables are removed from the dependency source set of the final `ForFold`. Dependencies come from the loop bounds, initial values, non-loop-carried inputs used by the update expressions, and the `continue_cond`.
+
+`break` is represented by `continue_cond`. After a `break` path is taken, subsequent statements in the same symbolic loop iteration are merged against the previous store, so they do not keep updating state after the logical loop has stopped.
+
+When a loop contains side effects but has no data-path updates, the evaluator creates a dummy loop-carried update for the loop variable. This gives the lowerer a concrete `ForFold` node to execute, even though the only externally visible behavior is the effect emission.
+
+## `always_comb` Runtime Effects
+
+Most `always_comb` statements can be represented as pure symbolic expressions. Runtime effects such as `$display`, `$write`, `$assert`, and `$assert_continue` cannot: they must run at the observation point required by `always_comb` sensitivity, and their arguments must be captured at the correct statement position.
+
+Celox handles these statements through a side-channel:
+
+```rust
+struct CombObserver<A> {
+    site_id: u32,
+    guard: Option<NodeId>,
+    args: Vec<NodeId>,
+    loop_runner: Option<NodeId>,
+    sensitivity: Vec<VarAtomBase<A>>,
+    local_inputs: Vec<(A, NodeId)>,
+    observed_inputs: Vec<VarAtomBase<A>>,
+    position_inputs: Vec<VarAtomBase<A>>,
+    preceding_writes: Vec<VarAtomBase<A>>,
+    written_before: Vec<VarAtomBase<A>>,
+    written_inputs: Vec<A>,
+    captured_in_loop: bool,
+}
+```
+
+`CombEffectCollector` walks the same statements as the data-path evaluator, but records runtime event sites and observers instead of producing assignments. For each effect it:
+
+1. Creates a `RuntimeEventSite` with the event kind, optional format template, argument widths, signedness, and string flags.
+2. Evaluates the effect arguments into `NodeId`s using the current `SymbolicStore`.
+3. Adds argument and guard sources to the observer sensitivity set.
+4. Captures local symbolic values for variables that were assigned earlier in the same `always_comb` and are read by the effect.
+5. Records statement-position dependencies (`preceding_writes`, `written_before`, and `position_inputs`) so the scheduler can place the capture after the writes whose values the effect must see.
+
+The sensitivity computation follows the `always_comb` rule that expressions written in the block are excluded from the implicit sensitivity list. For dynamic accesses, Celox excludes only the statically known written prefix and keeps the remaining possible read atoms sensitive.
+
+Effect emission is split from observer activation. Stores that can change an observer's sensitive inputs lower as:
+
+```text
+old = Load(target)
+Store(target, new)
+CombCaptureEnableIfChanged(old, new, sites)
+```
+
+The eventual `CombCaptureEvent` consumes the enabled site and writes a runtime event record with the captured arguments. Keeping activation as a separate instruction is important because store coalescing and address aliasing must not erase the old-value comparison needed to decide whether an observer should run.
+
+### Effects Inside `for`
+
+Effects inside dynamic `always_comb` loops are the tricky case. A single static observer is not enough because `$display` or assert arguments may depend on the loop variable and on loop-carried state for each runtime iteration.
+
+For these loops, `collect_dynamic_for_effects` performs a second, effect-only symbolic pass over one loop iteration:
+
+1. It builds the same loop-local store as `eval_for_with_effects`.
+2. It temporarily enables `collector.loop_effects`.
+3. Runtime effects encountered in the loop body are recorded as `SLTForEffect` entries instead of only as top-level observers.
+4. `eval_for_with_effects` receives those `SLTForEffect`s and embeds them in the loop's `ForFold`.
+5. The first observer captured in the loop receives `loop_runner = Some(for_fold_node)`, so the scheduler has a path that executes the loop even when the loop only produces effects.
+
+During lowering, `SLTToSIRLowerer::lower_for_effects` runs inside the generated loop body. It lowers each effect argument with an environment that binds the current loop variable and loop-carried state registers, then emits `CombCaptureEvent`.
+
+Guard handling is encoded per effect:
+
+- `$display` / `$write` emit when the active branch guard is true.
+- `$assert` / `$assert_continue` emit when their assertion condition fails, combined with any active branch guard.
+- `$assert` with fatal severity stores a synthetic fatal error code in the emitted event.
+
 ### Bit Boundary Collection
 
 `BoundaryMap<A>` holds the set of bit boundaries for each variable.
@@ -345,6 +460,7 @@ Key conversion rules:
 | `Binary` | Recursively lower left and right -> `Binary` instruction |
 | `Unary` | Recursively lower operand -> `Unary` instruction |
 | `Mux` | Lower both arms and emit the dedicated `Mux` SIR instruction |
+| `ForFold` | Emit SIR loop control flow, loop-carried state registers, optional `CombCaptureEvent`s, and return the requested final state |
 | `Concat` | Lower each part and emit the dedicated `Concat` SIR instruction |
 | `Slice` | Lower expression -> `Slice` instruction |
 
@@ -360,6 +476,12 @@ result = Mux(cond_reg, then_reg, else_reg)
 ```
 
 The dedicated instruction is important for 4-state simulation because it selects the exact value/mask pair of the chosen branch and preserves Z bits. Control-flow branches still exist in SIR for loops and dynamic convergence handling.
+
+### `ForFold` Lowering
+
+`ForFold` lowering creates explicit SIR blocks for loop header, body, and exit. The loop counter is cast to the declared loop variable width before body expressions are lowered. Each loop-carried update target is assigned a state register that is threaded through the loop header and updated at the end of the body.
+
+When `effects` is non-empty, they are lowered before the next-state update expressions in the body. This preserves statement order for side effects that observe values produced earlier in the loop iteration. The same `ForFold` node can therefore both compute a folded data-path result and emit per-iteration runtime events.
 
 ## Related Documents
 
