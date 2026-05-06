@@ -496,6 +496,10 @@ impl<B: SimBackend> Simulator<B> {
             !self.runtime_event_drain_active.load(Ordering::Acquire),
             "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
         );
+        if self.dirty {
+            self.eval_comb_checked().unwrap();
+            self.dirty = false;
+        }
         self.collect_backend_runtime_events()
             .into_iter()
             .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
@@ -620,18 +624,21 @@ impl<B: SimBackend> Simulator<B> {
     pub fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
         self.backend.set(signal, val);
         self.dirty = true;
+        self.settle_dirty_for_runtime_event_drain();
     }
 
     /// Sets a wide signal value and marks combinational logic as dirty.
     pub fn set_wide(&mut self, signal: SignalRef, val: BigUint) {
         self.backend.set_wide(signal, val);
         self.dirty = true;
+        self.settle_dirty_for_runtime_event_drain();
     }
 
     /// Sets a four-state signal value and marks combinational logic as dirty.
     pub fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint) {
         self.backend.set_four_state(signal, val, mask);
         self.dirty = true;
+        self.settle_dirty_for_runtime_event_drain();
     }
 
     /// Modifies internal state via a callback and marks combinational logic as dirty.
@@ -644,7 +651,18 @@ impl<B: SimBackend> Simulator<B> {
         };
         f(&mut ctx);
         self.dirty = true;
+        if self.runtime_event_drain_active.load(Ordering::Acquire) {
+            self.eval_comb_checked()?;
+            self.dirty = false;
+        }
         Ok(())
+    }
+
+    fn settle_dirty_for_runtime_event_drain(&mut self) {
+        if self.runtime_event_drain_active.load(Ordering::Acquire) {
+            self.eval_comb_checked().unwrap();
+            self.dirty = false;
+        }
     }
 
     pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {

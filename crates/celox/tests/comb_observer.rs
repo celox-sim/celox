@@ -215,6 +215,35 @@ module Top (
     );
 }
 
+fn test_comb_runtime_event_drain_settles_dirty_comb_before_reading_events(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    always_comb {
+        out = a;
+        $display("a=%0d", a);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 7u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=7".to_string(),
+        }],
+    );
+    assert_eq!(sim.get_as::<u8>(out), 7);
+}
+
 fn test_comb_runtime_event_drain_handle_sees_captured_display(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -236,14 +265,44 @@ module Top (
     let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
 
     sim.modify(|io| io.set(a, 11u8)).unwrap();
-    assert_eq!(sim.get_as::<u8>(out), 11);
     assert_eq!(
         drain.drain(),
         vec![celox::RuntimeEvent::Display {
             message: "a=11".to_string(),
         }],
     );
+    assert_eq!(sim.get_as::<u8>(out), 11);
     assert_eq!(drain.drain(), Vec::new());
+}
+
+fn test_comb_runtime_event_drain_handle_sees_direct_set_capture(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    always_comb {
+        out = a;
+        $display("a=%0d", a);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+    sim.drain_runtime_events();
+    let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
+
+    sim.set(a, 12u8);
+    assert_eq!(
+        drain.drain(),
+        vec![celox::RuntimeEvent::Display {
+            message: "a=12".to_string(),
+        }],
+    );
+    assert_eq!(sim.get_as::<u8>(out), 12);
 }
 
 fn test_comb_runtime_event_drain_handle_starts_after_simulator_drain(sim) {
@@ -274,13 +333,13 @@ module Top (
     assert_eq!(drain.drain(), Vec::new());
 
     sim.modify(|io| io.set(a, 13u8)).unwrap();
-    assert_eq!(sim.get_as::<u8>(out), 13);
     assert_eq!(
         drain.drain(),
         vec![celox::RuntimeEvent::Display {
             message: "a=13".to_string(),
         }],
     );
+    assert_eq!(sim.get_as::<u8>(out), 13);
 }
 
 fn test_comb_runtime_event_drain_handle_preserves_ff_before_comb_order(sim) {
@@ -361,9 +420,9 @@ module Top (
     let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
 
     sim.modify(|io| io.set(a, 9u8)).unwrap();
-    assert_eq!(sim.get_as::<u8>(out), 9);
     sim.modify(|io| io.set(d, 4u8)).unwrap();
     sim.tick(clk).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 9);
     assert_eq!(
         drain.drain(),
         vec![
@@ -2266,7 +2325,12 @@ module Top (
     let base = sim.signal("base");
     let out = sim.signal("out");
 
-    sim.drain_runtime_events();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "first=0".to_string(),
+        }],
+    );
 
     sim.modify(|io| {
         io.set(count, 3u8);
@@ -2277,9 +2341,6 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![
-            celox::RuntimeEvent::Display {
-                message: "first=0".to_string(),
-            },
             celox::RuntimeEvent::Display {
                 message: "i=0 sum=10".to_string(),
             },
