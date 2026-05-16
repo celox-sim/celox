@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778942323857,
+  "lastUpdate": 1778942325493,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -70296,6 +70296,282 @@ window.BENCHMARK_DATA = {
             "name": "ts/testbench_tick_gray_counter_w32_x1000000",
             "value": 151534.54299999672,
             "range": "± 0.5%",
+            "unit": "us",
+            "extra": "3 samples"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "29139614+renovate[bot]@users.noreply.github.com",
+            "name": "renovate[bot]",
+            "username": "renovate[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "902c54e3159e4cdce29fc12a76f34ea8508f61fe",
+          "message": "Merge pull request #150 from celox-sim/renovate/vite-8.x-lockfile\n\nchore(deps): update dependency vite to v8.0.11",
+          "timestamp": "2026-05-16T13:58:26Z",
+          "tree_id": "6e778d61a0be2f21821df7340e8b8a497c1ba002",
+          "url": "https://github.com/celox-sim/celox/commit/902c54e3159e4cdce29fc12a76f34ea8508f61fe"
+        },
+        "date": 1778942324731,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "ts/simulation_build_top_n1000",
+            "value": 277.9053216666669,
+            "range": "± 1.4%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_tick_top_n1000_x1",
+            "value": 0.0006424252352238151,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "778301 samples"
+          },
+          {
+            "name": "ts/simulation_tick_top_n1000_x1000000",
+            "value": 544.6967410000003,
+            "range": "± 2.7%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_tick_top_n1000_x1",
+            "value": 0.0010568721969161459,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "473095 samples"
+          },
+          {
+            "name": "ts/testbench_tick_top_n1000_x1000000",
+            "value": 925.2903506666662,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_array_tick_top_n1000_x1",
+            "value": 0.0010300455094211923,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "485416 samples"
+          },
+          {
+            "name": "ts/testbench_array_tick_top_n1000_x1000000",
+            "value": 906.6262663333328,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulator_tick_x10000",
+            "value": 5.4113866666678705,
+            "range": "± 2.6%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_step_x20000",
+            "value": 14.96361866666848,
+            "range": "± 7.7%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_build_top_n1000",
+            "value": 278.57330299999984,
+            "range": "± 0.7%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_step_x1",
+            "value": 0.0008664794376307439,
+            "range": "± 0.2%",
+            "unit": "ms",
+            "extra": "577049 samples"
+          },
+          {
+            "name": "ts/simulation_time_step_x1000000",
+            "value": 735.3051983333329,
+            "range": "± 0.1%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_time_runUntil_1000000",
+            "value": 114.96893366666579,
+            "range": "± 2.0%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/waitForCycles_x1000",
+            "value": 0.9694603333337,
+            "range": "± 2.9%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/manual_step_loop_x2000",
+            "value": 0.9199343333311845,
+            "range": "± 1.8%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/runUntil_fast_path_100000",
+            "value": 6.501352666663782,
+            "range": "± 3.9%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/runUntil_guarded_100000",
+            "value": 11.626031666666677,
+            "range": "± 1.9%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/build_without_optimize",
+            "value": 288.61076500000246,
+            "range": "± 11.8%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/build_with_optimize",
+            "value": 277.9286089999999,
+            "range": "± 1.0%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/tick_x10000_without_optimize",
+            "value": 5.365364666666816,
+            "range": "± 1.7%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/tick_x10000_with_optimize",
+            "value": 5.38309466666639,
+            "range": "± 1.5%",
+            "unit": "ms",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_build_linear_sec_p6",
+            "value": 195411.2723333334,
+            "range": "± 2.2%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_eval_linear_sec_p6_x1",
+            "value": 0.6773252989074929,
+            "range": "± 0.2%",
+            "unit": "us",
+            "extra": "738198 samples"
+          },
+          {
+            "name": "ts/simulation_eval_linear_sec_p6_x1000000",
+            "value": 527440.1803333337,
+            "range": "± 0.9%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_eval_linear_sec_p6_x1000000",
+            "value": 486281.17699999956,
+            "range": "± 2.7%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_build_countones_w64",
+            "value": 21787.588999997144,
+            "range": "± 0.5%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_eval_countones_w64_x1",
+            "value": 0.7632215036096688,
+            "range": "± 0.3%",
+            "unit": "us",
+            "extra": "655118 samples"
+          },
+          {
+            "name": "ts/simulation_eval_countones_w64_x1000000",
+            "value": 636696.8113333327,
+            "range": "± 0.1%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_build_std_counter_w32",
+            "value": 6233.770000001338,
+            "range": "± 1.6%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_tick_std_counter_w32_x1",
+            "value": 0.2180556879183468,
+            "range": "± 0.1%",
+            "unit": "us",
+            "extra": "2292993 samples"
+          },
+          {
+            "name": "ts/simulation_tick_std_counter_w32_x1000000",
+            "value": 134190.0893333368,
+            "range": "± 0.3%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_tick_std_counter_w32_x1000000",
+            "value": 149866.14033333413,
+            "range": "± 0.2%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_build_gray_counter_w32",
+            "value": 8306.91133333797,
+            "range": "± 1.7%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/simulation_tick_gray_counter_w32_x1",
+            "value": 0.21883387932109197,
+            "range": "± 0.1%",
+            "unit": "us",
+            "extra": "2284839 samples"
+          },
+          {
+            "name": "ts/simulation_tick_gray_counter_w32_x1000000",
+            "value": 132414.99366667026,
+            "range": "± 0.2%",
+            "unit": "us",
+            "extra": "3 samples"
+          },
+          {
+            "name": "ts/testbench_tick_gray_counter_w32_x1000000",
+            "value": 153608.7056666632,
+            "range": "± 0.4%",
             "unit": "us",
             "extra": "3 samples"
           }
