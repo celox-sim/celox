@@ -31,7 +31,7 @@ chrono                = "0.4"
 cranelift             = "0.131.0"
 cranelift-module      = "0.131.0"
 cranelift-jit         = "0.131.0"
-cranelift-frontend    = "0.131.0"
+cranelift-frontend    = "0.132.0"
 cranelift-native      = "0.131.0"
 wasmtime              = "45"
 iced-x86              = { version = "1.21", default-features = false, features = ["std", "encoder", "block_encoder", "decoder", "nasm", "op_code_info", "code_asm"] }

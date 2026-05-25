@@ -386,7 +386,7 @@ dependencies = [
  "chrono",
  "clap",
  "cranelift",
- "cranelift-frontend 0.131.1",
+ "cranelift-frontend 0.132.0",
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native 0.131.1",
