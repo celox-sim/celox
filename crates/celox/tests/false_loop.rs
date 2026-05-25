@@ -194,6 +194,34 @@ fn test_struct_member_dynamic_access_false_loop() {
     assert!(result.is_ok());
 }
 
+#[test]
+fn test_local_let_in_conditional_for_is_not_scheduled_as_comb_output() {
+    let code = r#"
+module Top (
+    sel: input logic,
+    a  : input logic [1],
+    o  : output logic,
+) {
+    var y: logic;
+
+    always_comb {
+        y = 0;
+        if sel {
+            for b in 0..1 {
+                let idx: u32 = b;
+                y = y | a[idx];
+            }
+        }
+    }
+
+    assign o = y;
+}
+    "#;
+
+    let result = SimulatorBuilder::new(code, "Top").build();
+    assert!(result.is_ok(), "{result:?}");
+}
+
 all_backends! {
 
 fn test_large_scc_dynamic_loop_convergence(sim) {

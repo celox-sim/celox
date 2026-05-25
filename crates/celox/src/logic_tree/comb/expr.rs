@@ -952,6 +952,7 @@ pub(super) fn eval_function_body_return(
                     src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)
                 }),
             );
+            all_sources.retain(|src| src.id != target.id);
 
             let folded_expr = arena.alloc(SLTNode::ForFold {
                 loop_var: for_stmt.var_id,
