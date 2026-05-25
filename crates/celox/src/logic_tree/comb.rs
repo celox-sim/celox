@@ -91,6 +91,9 @@ pub fn parse_comb(
     // Each LogicPath represents a modified bit-range and the logic required to compute it.
     let mut paths = Vec::new();
     for (id, range_store) in &final_store {
+        if module.variables[id].affiliation == veryl_analyzer::symbol::Affiliation::AlwaysComb {
+            continue;
+        }
         for (&lsb, (val_opt, width, origin)) in &range_store.ranges {
             if let Some((expr, sources)) = val_opt {
                 let msb = lsb + width - 1;
@@ -1008,6 +1011,7 @@ fn eval_for_with_effects(
                 .into_iter()
                 .filter(|src| src.id != for_stmt.var_id && !loop_updated_vars.contains(&src.id)),
         );
+        all_sources.retain(|src| src.id != target.id);
 
         let folded_expr = arena.alloc(SLTNode::ForFold {
             loop_var: for_stmt.var_id,
