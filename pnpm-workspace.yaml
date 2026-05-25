@@ -1,6 +1,9 @@
 packages:
   - "packages/*"
   - "crates/celox-napi"
+allowBuilds:
+  esbuild: true
+  lefthook: true
 minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
   # Renovate security update: vite@6.4.2
