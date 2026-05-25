@@ -41,6 +41,19 @@
     },
     {
       "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "cranelift",
+        "cranelift-frontend",
+        "cranelift-jit",
+        "cranelift-module",
+        "cranelift-native"
+      ],
+      "groupName": "cranelift crates"
+    },
+    {
+      "matchManagers": [
         "cargo",
         "npm"
       ],
