@@ -4,11 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@celox-sim/celox': workspace:*
-  '@celox-sim/celox-napi': workspace:*
-  '@celox-sim/vite-plugin': workspace:*
-
 importers:
 
   .:
