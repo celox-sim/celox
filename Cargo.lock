@@ -389,7 +389,7 @@ dependencies = [
  "cranelift-frontend 0.131.1",
  "cranelift-jit",
  "cranelift-module",
- "cranelift-native 0.131.1",
+ "cranelift-native 0.132.0",
  "criterion",
  "fxhash",
  "iced-x86",
