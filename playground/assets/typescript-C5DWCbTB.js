@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-5W-fCuoe.js";export{t as conf,e as language};
