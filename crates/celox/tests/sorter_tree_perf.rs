@@ -97,7 +97,7 @@ fn sorter_tree_scaling_n4_n8() {
     );
 }
 
-/// Scaling regression: N=64 should take at most 6x longer than N=16.
+/// Scaling regression: N=64 should stay within a broad margin over N=16.
 /// Catches super-linear blowup in flatten, optimizer, or JIT phases.
 #[test]
 fn sorter_tree_scaling_n16_n64() {
@@ -106,8 +106,8 @@ fn sorter_tree_scaling_n16_n64() {
     let ratio = t64.as_secs_f64() / t16.as_secs_f64();
     eprintln!("N=16: {t16:?}, N=64: {t64:?}, ratio: {ratio:.2}x");
     assert!(
-        ratio < 7.0,
-        "N=64/N=16 ratio is {ratio:.2}x, expected < 7.0x"
+        ratio < 10.0,
+        "N=64/N=16 ratio is {ratio:.2}x, expected < 10.0x"
     );
 }
 

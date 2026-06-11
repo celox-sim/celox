@@ -153,6 +153,16 @@ pub(super) fn eval_function_body_return(
                         .iter()
                         .any(|stmt| statement_contains_return(stmt, ret_id))
             }
+            Statement::Case(case_stmt) => {
+                case_stmt.arms.iter().any(|arm| {
+                    arm.body
+                        .iter()
+                        .any(|stmt| statement_contains_return(stmt, ret_id))
+                }) || case_stmt
+                    .default
+                    .iter()
+                    .any(|stmt| statement_contains_return(stmt, ret_id))
+            }
             Statement::For(for_stmt) => for_stmt
                 .body
                 .iter()
@@ -308,6 +318,12 @@ pub(super) fn eval_function_body_return(
                 }
                 for stmt in &if_stmt.false_side {
                     validate_function_body_statement(module, stmt)?;
+                }
+                Ok(())
+            }
+            Statement::Case(case_stmt) => {
+                for stmt in case_stmt.lower_to_nested_if() {
+                    validate_function_body_statement(module, &stmt)?;
                 }
                 Ok(())
             }
@@ -684,6 +700,12 @@ pub(super) fn eval_function_body_return(
                 Statement::If(if_stmt) => {
                     eval_function_loop_if(module, state, if_stmt, ret_id, arena)
                 }
+                Statement::Case(case_stmt) => case_stmt
+                    .lower_to_nested_if()
+                    .iter()
+                    .try_fold(state, |state, stmt| {
+                        eval_function_loop_statement(module, state, stmt, ret_id, arena)
+                    }),
                 Statement::Assign(_)
                 | Statement::For(_)
                 | Statement::FunctionCall(_)
@@ -1215,6 +1237,12 @@ pub(super) fn eval_function_body_return(
 
         match stmt {
             Statement::If(if_stmt) => eval_function_break_if(module, state, if_stmt, ret_id, arena),
+            Statement::Case(case_stmt) => case_stmt
+                .lower_to_nested_if()
+                .iter()
+                .try_fold(state, |state, stmt| {
+                    eval_function_break_statement(module, state, stmt, ret_id, arena)
+                }),
             Statement::Assign(_)
             | Statement::For(_)
             | Statement::FunctionCall(_)
@@ -1332,6 +1360,12 @@ pub(super) fn eval_function_body_return(
                 )
             }
             Statement::If(if_stmt) => eval_function_if(module, state, if_stmt, ret_id, arena),
+            Statement::Case(case_stmt) => case_stmt
+                .lower_to_nested_if()
+                .iter()
+                .try_fold(state, |state, stmt| {
+                    eval_function_statement(module, state, stmt, ret_id, arena)
+                }),
             Statement::For(for_stmt) => eval_function_for(module, state, for_stmt, ret_id, arena),
             Statement::FunctionCall(call) => {
                 let guard_state = state.clone();

@@ -2079,6 +2079,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
 
     let mut all_modules = Vec::new();
     let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
+    let mut post_pass_ir = Ir::default();
 
     for (i, (path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
@@ -2100,6 +2101,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
 
         let modules = generate_all(&ir, &source_file_refs);
+        post_pass_ir.append(&mut ir);
         let source_file = all_source_files[i].clone();
 
         let module_names: Vec<String> = modules.iter().map(|m| m.module_name.clone()).collect();
@@ -2121,7 +2123,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
         }
     }
 
-    let results = Analyzer::analyze_post_pass2();
+    let results = Analyzer::analyze_post_pass2(&post_pass_ir);
     let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
     if !real_errors.is_empty() {
         return Err(Error::from_reason(format_errors_with_warnings(
@@ -2229,6 +2231,7 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
 
     let mut all_modules = Vec::new();
     let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
+    let mut post_pass_ir = Ir::default();
 
     for (i, (prj, _path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
@@ -2246,6 +2249,7 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
         all_warnings.extend(results.into_iter().filter(|e| !e.is_error()));
 
         let modules = generate_all(&ir, &source_file_refs);
+        post_pass_ir.append(&mut ir);
         let source_file = all_source_files[i].clone();
 
         let module_names: Vec<String> = modules.iter().map(|m| m.module_name.clone()).collect();
@@ -2267,7 +2271,7 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
         }
     }
 
-    let results = Analyzer::analyze_post_pass2();
+    let results = Analyzer::analyze_post_pass2(&post_pass_ir);
     let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
     if !real_errors.is_empty() {
         return Err(Error::from_reason(format_errors_with_warnings(

@@ -1,0 +1,780 @@
+use crate::git::Git;
+use crate::lockfile_compat;
+use crate::metadata::{Dependency, Metadata, UrlPath};
+use crate::metadata_error::MetadataError;
+use crate::pubfile::{Pubfile, Release};
+use log::info;
+use pathdiff::diff_paths;
+use semver::{Version, VersionReq};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use url::Url;
+use uuid::Uuid;
+use veryl_path::{PathSet, ignore_already_exists};
+use walkdir::WalkDir;
+
+const LOCKFILE_VERSION: usize = 1;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lockfile {
+    version: usize,
+    projects: Vec<Lock>,
+    #[serde(skip)]
+    pub lock_table: HashMap<UrlPath, Vec<Lock>>,
+    #[serde(skip)]
+    force_update: bool,
+    #[serde(skip)]
+    pub metadata_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lock {
+    pub name: String,
+    pub source: LockSource,
+    pub dependencies: Vec<LockDependency>,
+    #[serde(skip)]
+    pub visible: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+#[serde(untagged)]
+pub enum LockSource {
+    Repository(Box<LockSourceRepository>),
+    Path(PathBuf),
+    // TODO
+    // Registory
+}
+
+impl LockSource {
+    pub fn to_url(&self) -> UrlPath {
+        match self {
+            LockSource::Repository(x) => x.url.clone(),
+            LockSource::Path(x) => UrlPath::Path(x.clone()),
+        }
+    }
+
+    pub fn get_version(&self) -> Option<&Version> {
+        match self {
+            LockSource::Repository(x) => Some(&x.version),
+            LockSource::Path(_) => None,
+        }
+    }
+
+    pub fn get_revision(&self) -> Option<&str> {
+        match self {
+            LockSource::Repository(x) => Some(&x.revision),
+            LockSource::Path(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct LockSourceRepository {
+    uuid: Uuid,
+    url: UrlPath,
+    path: PathBuf,
+    project: String,
+    version: Version,
+    revision: String,
+    r#override: Option<PathBuf>,
+}
+
+impl PartialOrd for LockSource {
+    fn partial_cmp(&self, other: &LockSource) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LockSource {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (LockSource::Repository(x), LockSource::Repository(y)) => x
+                .url
+                .cmp(&y.url)
+                .then(x.project.cmp(&y.project))
+                .then(x.version.cmp(&y.version)),
+            (LockSource::Path(x), LockSource::Path(y)) => x.cmp(y),
+            (LockSource::Repository(_), LockSource::Path(_)) => std::cmp::Ordering::Less,
+            (LockSource::Path(_), LockSource::Repository(_)) => std::cmp::Ordering::Greater,
+        }
+    }
+}
+
+impl fmt::Display for LockSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ret = String::new();
+        match self {
+            LockSource::Repository(x) => {
+                ret.push_str(&format!("{} : {} @ {}", x.project, x.url, x.version));
+            }
+            LockSource::Path(x) => {
+                ret.push_str(&format!("{}", x.to_string_lossy()));
+            }
+        }
+        ret.fmt(f)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockDependency {
+    pub name: String,
+    pub source: LockSource,
+}
+
+impl Lockfile {
+    pub fn load(metadata: &Metadata) -> Result<Self, MetadataError> {
+        let path = metadata
+            .lockfile_path
+            .canonicalize()
+            .map_err(|x| MetadataError::file_io(x, &metadata.lockfile_path))?;
+        let text = fs::read_to_string(&path).map_err(|x| MetadataError::file_io(x, &path))?;
+        let mut ret = LockfileCompat::load(&text, &path, metadata)?;
+        ret.metadata_path = metadata.metadata_path.clone();
+
+        let mut locks = Vec::new();
+        locks.append(&mut ret.projects);
+
+        ret.lock_table.clear();
+        for lock in locks {
+            ret.lock_table
+                .entry(lock.source.to_url())
+                .and_modify(|x| x.push(lock.clone()))
+                .or_insert(vec![lock]);
+        }
+        ret.sort_table();
+
+        Ok(ret)
+    }
+
+    pub fn save<T: AsRef<Path>>(&mut self, path: T) -> Result<(), MetadataError> {
+        self.projects.clear();
+        for locks in self.lock_table.values() {
+            for lock in locks {
+                self.projects.push(lock.clone());
+            }
+        }
+        self.projects.sort_by(|x, y| x.source.cmp(&y.source));
+
+        let mut text = String::new();
+        text.push_str("# This file is automatically @generated by Veryl.\n");
+        text.push_str("# It is not intended for manual editing.\n");
+        text.push_str(&toml::to_string_pretty(&self)?);
+        fs::write(&path, text.as_bytes()).map_err(|x| MetadataError::file_io(x, path.as_ref()))?;
+        Ok(())
+    }
+
+    pub fn new(metadata: &Metadata) -> Result<Self, MetadataError> {
+        let mut ret = Lockfile {
+            version: LOCKFILE_VERSION,
+            metadata_path: metadata.metadata_path.clone(),
+            ..Default::default()
+        };
+
+        let mut name_table = HashSet::new();
+        let mut src_table = HashMap::new();
+        let locks = ret.gen_locks(metadata, &mut name_table, &mut src_table, true, metadata)?;
+
+        for lock in locks {
+            info!("Adding dependency ({})", lock.source);
+            ret.lock_table
+                .entry(lock.source.to_url())
+                .and_modify(|x| x.push(lock.clone()))
+                .or_insert(vec![lock]);
+        }
+        ret.sort_table();
+
+        Ok(ret)
+    }
+
+    pub fn update(
+        &mut self,
+        metadata: &Metadata,
+        force_update: bool,
+    ) -> Result<bool, MetadataError> {
+        self.force_update = force_update;
+
+        let mut name_table = HashSet::new();
+        let mut src_table = HashMap::new();
+        let locks = self.gen_locks(metadata, &mut name_table, &mut src_table, true, metadata)?;
+
+        let old_table = self.lock_table.clone();
+        self.lock_table.clear();
+
+        let mut modified = false;
+
+        for lock in &locks {
+            let add = if let Some(old_locks) = old_table.get(&lock.source.to_url()) {
+                !old_locks.iter().any(|x| x.source == lock.source)
+            } else {
+                true
+            };
+
+            if add {
+                info!("Adding dependency ({})", lock.source);
+                modified = true;
+            }
+
+            self.lock_table
+                .entry(lock.source.to_url())
+                .and_modify(|x| x.push(lock.clone()))
+                .or_insert(vec![lock.clone()]);
+        }
+        self.sort_table();
+
+        for old_locks in old_table.values() {
+            for old_lock in old_locks {
+                if !locks.iter().any(|x| x.source == old_lock.source) {
+                    info!("Removing dependency ({})", old_lock.source);
+                    modified = true;
+                }
+            }
+        }
+
+        Ok(modified)
+    }
+
+    pub fn paths(&self, base_dst: &Path) -> Result<Vec<PathSet>, MetadataError> {
+        let mut ret = Vec::new();
+
+        for locks in self.lock_table.values() {
+            for lock in locks {
+                let metadata = self.get_metadata(&lock.source)?;
+                let path = metadata.project_path();
+
+                for src in &veryl_path::gather_files_with_extension(&path, "veryl", false)? {
+                    let Ok(rel) = src.strip_prefix(&path) else {
+                        return Err(MetadataError::InvalidSourceLocation(src.clone()));
+                    };
+                    let mut dst = base_dst.join(&lock.name);
+                    dst.push(rel);
+                    dst.set_extension("sv");
+                    let mut map = dst.clone();
+                    map.set_extension("sv.map");
+                    ret.push(PathSet {
+                        prj: lock.name.clone(),
+                        src: src.to_path_buf(),
+                        dst,
+                        map,
+                    });
+                }
+            }
+        }
+
+        Ok(ret)
+    }
+
+    pub fn clear_cache(&self) -> Result<(), MetadataError> {
+        let lock_resolve = veryl_path::lock_dir("resolve")?;
+        let lock_dependencies = veryl_path::lock_dir("dependencies")?;
+
+        for locks in self.lock_table.values() {
+            for lock in locks {
+                if let LockSource::Repository(x) = &lock.source {
+                    let resolve_path = Self::resolve_path(&x.url)?;
+                    let dependency_path = Self::dependency_path(&x.url, &x.path, &x.revision)?;
+                    if resolve_path.exists() {
+                        fs::remove_dir_all(&resolve_path)
+                            .map_err(|x| MetadataError::file_io(x, &resolve_path))?;
+                    }
+                    if dependency_path.exists() {
+                        fs::remove_dir_all(&dependency_path)
+                            .map_err(|x| MetadataError::file_io(x, &dependency_path))?;
+                    }
+                }
+            }
+        }
+
+        veryl_path::unlock_dir(lock_resolve)?;
+        veryl_path::unlock_dir(lock_dependencies)?;
+
+        Ok(())
+    }
+
+    fn git_clone(&self, url: &UrlPath, path: &Path) -> Result<Git, MetadataError> {
+        let url = match url {
+            UrlPath::Url(x) => UrlPath::Url(x.clone()),
+            UrlPath::Path(x) => {
+                if x.is_relative() {
+                    let path = self.metadata_path.parent().unwrap().join(x);
+                    UrlPath::Path(path)
+                } else {
+                    UrlPath::Path(x.clone())
+                }
+            }
+        };
+
+        Git::clone(&url, path)
+    }
+
+    fn sort_table(&mut self) {
+        for locks in self.lock_table.values_mut() {
+            locks.sort_by(|a, b| b.source.cmp(&a.source));
+        }
+    }
+
+    fn gen_uuid(url: &UrlPath, path: &Path, revision: &str) -> Result<Uuid, MetadataError> {
+        let mut url = url.to_string();
+        url.push_str(&path.to_string_lossy());
+        url.push_str(revision);
+        Ok(Uuid::new_v5(&Uuid::NAMESPACE_URL, url.as_bytes()))
+    }
+
+    fn gen_locks(
+        &mut self,
+        metadata: &Metadata,
+        name_table: &mut HashSet<String>,
+        src_table: &mut HashMap<LockSource, String>,
+        root: bool,
+        root_metadata: &Metadata,
+    ) -> Result<Vec<Lock>, MetadataError> {
+        let mut ret = Vec::new();
+
+        // breadth first search because root has top priority of name
+        let mut dependencies_metadata = Vec::new();
+        for (name, dep) in &metadata.dependencies {
+            let dependency = self.resolve_dependency(metadata, name, dep, root, root_metadata)?;
+            let metadata = self.get_metadata(&dependency.source)?;
+            let mut name = dependency.name.clone();
+
+            // avoid name conflict by adding suffix
+            if name_table.contains(&name) {
+                if root {
+                    return Err(MetadataError::NameConflict(name));
+                }
+                let mut suffix = 0;
+                loop {
+                    let new_name = format!("{name}_{suffix}");
+                    if !name_table.contains(&new_name) {
+                        name = new_name;
+                        break;
+                    }
+                    suffix += 1;
+                }
+            }
+            name_table.insert(name.clone());
+
+            let mut dependencies = Vec::new();
+            for (name, dep) in &metadata.dependencies {
+                let dependency =
+                    self.resolve_dependency(&metadata, name, dep, root, root_metadata)?;
+                // project local name is not required to check name_table
+                dependencies.push(dependency);
+            }
+
+            if let Some(x) = src_table.get(&dependency.source) {
+                if root {
+                    return Err(MetadataError::InvalidDependency {
+                        name: dependency.name.clone(),
+                        cause: format!("it conflicts with {x}"),
+                    });
+                }
+            } else {
+                let lock = Lock {
+                    name: name.clone(),
+                    source: dependency.source.clone(),
+                    dependencies,
+                    visible: root,
+                };
+
+                ret.push(lock);
+                src_table.insert(dependency.source.clone(), name.clone());
+                dependencies_metadata.push(metadata);
+            }
+        }
+
+        for metadata in dependencies_metadata {
+            let mut dependency_locks =
+                self.gen_locks(&metadata, name_table, src_table, false, root_metadata)?;
+            ret.append(&mut dependency_locks);
+        }
+
+        Ok(ret)
+    }
+
+    fn resolve_dependency(
+        &mut self,
+        metadata: &Metadata,
+        name: &str,
+        dep: &Dependency,
+        root: bool,
+        root_metadata: &Metadata,
+    ) -> Result<LockDependency, MetadataError> {
+        Ok(match dep {
+            Dependency::Version(_) => {
+                unimplemented!();
+            }
+            Dependency::Entry(x) => {
+                let url = if let Some(git) = &x.git {
+                    Some(git.clone())
+                } else if let Some(github) = &x.github {
+                    let url = format!("https://github.com/{github}");
+                    let url = Url::parse(&url).unwrap();
+                    Some(UrlPath::Url(url))
+                } else {
+                    None
+                };
+                let project = x.project.clone().unwrap_or(name.to_string());
+                let source = if let Some(url) = &url {
+                    let Some(version) = &x.version else {
+                        return Err(MetadataError::InvalidDependency {
+                            name: name.to_string(),
+                            cause: "version is not specified".to_string(),
+                        });
+                    };
+                    let (release, path) = self.resolve_version(url, &project, version)?;
+                    let uuid = Self::gen_uuid(url, &path, &release.revision)?;
+
+                    // Path override is disabled if it is not root
+                    let r#override = if root { x.path.clone() } else { None };
+
+                    LockSource::Repository(Box::new(LockSourceRepository {
+                        uuid,
+                        url: url.clone(),
+                        path,
+                        project,
+                        version: release.version,
+                        revision: release.revision,
+                        r#override,
+                    }))
+                } else if let Some(path) = &x.path {
+                    let path = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        let base = root_metadata.project_path();
+                        let path = base.join(metadata.project_path()).join(path);
+                        if !path.exists() {
+                            let project = x.project.clone().unwrap_or(name.to_string());
+                            return Err(MetadataError::ProjectNotFound {
+                                url: UrlPath::Path(path),
+                                project,
+                            });
+                        }
+                        diff_paths(path.canonicalize().unwrap(), base).unwrap()
+                    };
+                    LockSource::Path(path)
+                } else {
+                    return Err(MetadataError::InvalidDependency {
+                        name: name.to_string(),
+                        cause: "[git|github|path] are not specified".to_string(),
+                    });
+                };
+                LockDependency {
+                    name: name.to_string(),
+                    source,
+                }
+            }
+        })
+    }
+
+    fn resolve_version(
+        &mut self,
+        url: &UrlPath,
+        project: &str,
+        version_req: &VersionReq,
+    ) -> Result<(Release, PathBuf), MetadataError> {
+        if let Some(release) = self.resolve_version_from_lockfile(url, project, version_req)? {
+            if self.force_update {
+                let latest = self.resolve_version_from_latest(url, project, version_req)?;
+                Ok(latest)
+            } else {
+                Ok(release)
+            }
+        } else {
+            let latest = self.resolve_version_from_latest(url, project, version_req)?;
+            Ok(latest)
+        }
+    }
+
+    fn resolve_version_from_lockfile(
+        &mut self,
+        url: &UrlPath,
+        project: &str,
+        version_req: &VersionReq,
+    ) -> Result<Option<(Release, PathBuf)>, MetadataError> {
+        if let Some(locks) = self.lock_table.get_mut(url) {
+            for lock in locks {
+                if let LockSource::Repository(x) = &lock.source
+                    && x.project == project
+                    && version_req.matches(&x.version)
+                {
+                    let release = Release {
+                        version: x.version.clone(),
+                        revision: x.revision.clone(),
+                    };
+                    let path = x.path.clone();
+                    return Ok(Some((release, path)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn resolve_path(url: &UrlPath) -> Result<PathBuf, MetadataError> {
+        let resolve_dir = veryl_path::cache_path().join("resolve");
+        let uuid = Self::gen_uuid(url, &PathBuf::new(), "")?;
+        Ok(resolve_dir.join(uuid.simple().encode_lower(&mut Uuid::encode_buffer())))
+    }
+
+    fn search_project(path: &Path, project: &str) -> Option<PathBuf> {
+        for entry in WalkDir::new(path).into_iter().flatten() {
+            if entry.file_name() == "Veryl.toml"
+                && let Ok(metadata) = Metadata::load(entry.path())
+                && metadata.project.name == project
+            {
+                let ret = entry.path();
+                let ret = ret.parent().unwrap().strip_prefix(path).unwrap();
+                return Some(ret.to_path_buf());
+            }
+        }
+        None
+    }
+
+    fn resolve_version_from_latest(
+        &mut self,
+        url: &UrlPath,
+        project: &str,
+        version_req: &VersionReq,
+    ) -> Result<(Release, PathBuf), MetadataError> {
+        let resolve_dir = veryl_path::cache_path().join("resolve");
+
+        if !resolve_dir.exists() {
+            ignore_already_exists(fs::create_dir_all(&resolve_dir))
+                .map_err(|x| MetadataError::file_io(x, &resolve_dir))?;
+        }
+
+        let path = Self::resolve_path(url)?;
+        let lock = veryl_path::lock_dir("resolve")?;
+        let git = self.git_clone(url, &path)?;
+        git.fetch()?;
+        git.checkout(None)?;
+        veryl_path::unlock_dir(lock)?;
+
+        let Some(prj_path) = Self::search_project(&path, project) else {
+            return Err(MetadataError::ProjectNotFound {
+                url: url.clone(),
+                project: project.to_string(),
+            });
+        };
+
+        let toml = path.join(&prj_path).join("Veryl.pub");
+        let mut pubfile = Pubfile::load(toml)?;
+
+        pubfile.releases.sort_by(|a, b| b.version.cmp(&a.version));
+
+        for release in &pubfile.releases {
+            if version_req.matches(&release.version) {
+                return Ok((release.clone(), prj_path));
+            }
+        }
+
+        Err(MetadataError::VersionNotFound {
+            url: url.clone(),
+            version: version_req.to_string(),
+        })
+    }
+
+    fn dependency_path(
+        url: &UrlPath,
+        path: &Path,
+        revision: &str,
+    ) -> Result<PathBuf, MetadataError> {
+        let dependencies_dir = veryl_path::cache_path().join("dependencies");
+        let uuid = Self::gen_uuid(url, path, revision)?;
+        Ok(dependencies_dir.join(uuid.simple().encode_lower(&mut Uuid::encode_buffer())))
+    }
+
+    fn get_metadata(&self, source: &LockSource) -> Result<Metadata, MetadataError> {
+        // try to load from local path
+        let path = match source {
+            LockSource::Path(x) => Some(x.clone()),
+            LockSource::Repository(x) => x.r#override.clone(),
+        };
+        let path_metadata = if let Some(x) = path {
+            let path = self.metadata_path.parent().unwrap().join(x);
+            let path = path.join("Veryl.toml");
+            if path.exists() {
+                Some(Metadata::load(path)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match source {
+            LockSource::Path(_) => {
+                if let Some(x) = path_metadata {
+                    Ok(x)
+                } else {
+                    Err(MetadataError::FileNotFound)
+                }
+            }
+            LockSource::Repository(x) => {
+                if let Some(x) = path_metadata {
+                    Ok(x)
+                } else {
+                    let dependencies_dir = veryl_path::cache_path().join("dependencies");
+
+                    if !dependencies_dir.exists() {
+                        ignore_already_exists(fs::create_dir_all(&dependencies_dir))
+                            .map_err(|x| MetadataError::file_io(x, &dependencies_dir))?;
+                    }
+
+                    let path = Self::dependency_path(&x.url, &x.path, &x.revision)?;
+                    let toml = path.join(&x.path).join("Veryl.toml");
+
+                    // Acquire the lock before checking path existence to prevent
+                    // race conditions where gix::prepare_clone creates an
+                    // incomplete directory that other threads may observe.
+                    let lock = veryl_path::lock_dir("dependencies")?;
+                    if !path.exists() {
+                        let git = self.git_clone(&x.url, &path)?;
+                        git.fetch()?;
+                        git.checkout(Some(&x.revision))?;
+                    } else {
+                        let git = Git::open(&path)?;
+                        let ret = git.is_clean().is_ok_and(|x| x);
+
+                        // If the existing path is not git repository, cleanup and re-try
+                        if !ret || !toml.exists() {
+                            veryl_path::ignore_directory_not_empty(fs::remove_dir_all(&path))
+                                .map_err(|x| MetadataError::file_io(x, &path))?;
+                            let git = self.git_clone(&x.url, &path)?;
+                            git.fetch()?;
+                            git.checkout(Some(&x.revision))?;
+                        }
+                    }
+                    veryl_path::unlock_dir(lock)?;
+
+                    Metadata::load(toml)
+                }
+            }
+        }
+    }
+}
+
+impl FromStr for Lockfile {
+    type Err = MetadataError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let lockfile: Lockfile = toml::from_str(s)?;
+        Ok(lockfile)
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LockfileCompat {
+    version: Option<usize>,
+}
+
+impl LockfileCompat {
+    pub fn load(
+        text: &str,
+        lockfile_path: &Path,
+        metadata: &Metadata,
+    ) -> Result<Lockfile, MetadataError> {
+        let compat: LockfileCompat = toml::from_str(text)?;
+        let version = compat.version.unwrap_or(0);
+        let mut lockfile = match version {
+            0 => {
+                info!(
+                    "Migrating lockfile to v1 ({})",
+                    lockfile_path.to_string_lossy()
+                );
+                let lockfile: lockfile_compat::v0::Lockfile = toml::from_str(text)?;
+                let mut lockfile = Lockfile::from_v0(lockfile, &metadata.metadata_path)?;
+                lockfile.save(lockfile_path)?;
+                lockfile
+            }
+            1 => toml::from_str(text)?,
+            _ => unreachable!(),
+        };
+
+        for lock in lockfile.projects.iter_mut() {
+            lock.visible = metadata.dependencies.contains_key(&lock.name);
+        }
+
+        Ok(lockfile)
+    }
+}
+
+impl Lockfile {
+    fn set_project(
+        mut source: LockSource,
+        metadata_path: &Path,
+    ) -> Result<LockSource, MetadataError> {
+        let lockfile = Lockfile {
+            metadata_path: metadata_path.to_path_buf(),
+            ..Default::default()
+        };
+        let metadata = lockfile.get_metadata(&source)?;
+        if let LockSource::Repository(x) = &mut source {
+            x.project = metadata.project.name;
+        }
+        Ok(source)
+    }
+
+    pub fn from_v0(
+        x: lockfile_compat::v0::Lockfile,
+        metadata_path: &Path,
+    ) -> Result<Self, MetadataError> {
+        let mut projects = Vec::new();
+        for lock in x.projects {
+            let mut dependencies = Vec::new();
+            for dep in lock.dependencies {
+                let uuid = Lockfile::gen_uuid(&dep.url, &PathBuf::new(), &dep.revision)?;
+                let source = LockSource::Repository(Box::new(LockSourceRepository {
+                    uuid,
+                    url: dep.url,
+                    path: PathBuf::new(),
+                    project: String::new(),
+                    version: dep.version,
+                    revision: dep.revision,
+                    r#override: None,
+                }));
+                let source = Self::set_project(source, metadata_path)?;
+                let new_dep = LockDependency {
+                    name: dep.name,
+                    source,
+                };
+                dependencies.push(new_dep);
+            }
+
+            let uuid = Lockfile::gen_uuid(&lock.url, &PathBuf::new(), &lock.revision).unwrap();
+            let source = LockSource::Repository(Box::new(LockSourceRepository {
+                uuid,
+                url: lock.url,
+                path: PathBuf::new(),
+                project: String::new(),
+                version: lock.version,
+                revision: lock.revision,
+                r#override: lock.path,
+            }));
+            let source = Self::set_project(source, metadata_path)?;
+
+            let new_lock = Lock {
+                name: lock.name,
+                source,
+                dependencies,
+                visible: false,
+            };
+
+            projects.push(new_lock);
+        }
+
+        Ok(Lockfile {
+            version: LOCKFILE_VERSION,
+            projects,
+            ..Default::default()
+        })
+    }
+}

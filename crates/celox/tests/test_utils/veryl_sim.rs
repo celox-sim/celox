@@ -229,7 +229,7 @@ pub fn build_veryl_adapter(sources: &[(&str, &Path)], top: &str) -> VerylSimAdap
     for parsed in &parsers {
         analyzer.analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir));
     }
-    Analyzer::analyze_post_pass2();
+    Analyzer::analyze_post_pass2(&ir);
 
     let top_id = veryl_parser::resource_table::insert_str(top);
     let config = Config {

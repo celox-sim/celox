@@ -374,6 +374,13 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
             statements_contain_runtime_effect(module, &if_stmt.true_side)
                 || statements_contain_runtime_effect(module, &if_stmt.false_side)
         }
+        Statement::Case(case_stmt) => {
+            case_stmt
+                .arms
+                .iter()
+                .any(|arm| statements_contain_runtime_effect(module, &arm.body))
+                || statements_contain_runtime_effect(module, &case_stmt.default)
+        }
         Statement::For(for_stmt) => statements_contain_runtime_effect(module, &for_stmt.body),
         Statement::FunctionCall(call) => module
             .functions
@@ -650,6 +657,12 @@ fn collect_function_body_effects(
                     live_sources: HashSet::default(),
                 })
             }
+            Statement::Case(case_stmt) => case_stmt
+                .lower_to_nested_if()
+                .iter()
+                .try_fold(state, |state, stmt| {
+                    collect_statement(module, state, stmt, ret_id, arena, collector)
+                }),
             Statement::For(for_stmt) => {
                 let store = state.store.clone();
                 let live = state.live_expr;
@@ -862,6 +875,15 @@ pub(super) fn collect_comb_effects_statements(
                     bool_node(arena, true),
                     &HashSet::default(),
                     arena,
+                )?;
+            }
+            Statement::Case(case_stmt) => {
+                store = collect_comb_effects_statements(
+                    module,
+                    store,
+                    &case_stmt.lower_to_nested_if(),
+                    arena,
+                    collector,
                 )?;
             }
             Statement::IfReset(_)

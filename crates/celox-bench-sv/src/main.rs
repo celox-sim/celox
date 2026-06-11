@@ -5,7 +5,7 @@
 //! Outputs .sv files to benches/verilator/
 
 use std::path::PathBuf;
-use veryl_analyzer::{Analyzer, Context, attribute_table, symbol_table};
+use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_emitter::Emitter;
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
@@ -25,14 +25,15 @@ fn emit_sv(code: &str) -> String {
 
     let analyzer = Analyzer::new(&metadata);
     let mut context = Context::default();
+    let mut ir = Ir::default();
 
     let errors = analyzer.analyze_pass1(&"prj", &parser.veryl);
     assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass1();
     assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
-    let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, None);
+    let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
     assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
-    let errors = Analyzer::analyze_post_pass2();
+    let errors = Analyzer::analyze_post_pass2(&ir);
     assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
     let mut emitter = Emitter::new(

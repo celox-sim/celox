@@ -45,7 +45,7 @@ mod tests {
             Some(&mut ir),
         );
         assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
-        let errors = Analyzer::analyze_post_pass2();
+        let errors = Analyzer::analyze_post_pass2(&ir);
         assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
         let generated_tokens = generate_project(&ir);
@@ -97,7 +97,7 @@ mod tests {
                 analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
             assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
         }
-        let errors = Analyzer::analyze_post_pass2();
+        let errors = Analyzer::analyze_post_pass2(&ir);
         assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
         let tokens = generate_project(&ir);
