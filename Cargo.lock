@@ -1330,7 +1330,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2120,9 +2120,9 @@ dependencies = [
 
 [[package]]
 name = "merkle_hash"
-version = "3.8.0"
+version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "025450e7f75788743d2f9465c120a0ad0b350367715e1230c0d21a9e4a8fdc9d"
+checksum = "ffc9dee3efaf0a2f827ad50f29b98f520992b4dbc301b90ae8c3c1d76658663a"
 dependencies = [
  "blake3",
  "camino",
@@ -2886,7 +2886,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3230,7 +3230,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3713,9 +3713,9 @@ dependencies = [
 
 [[package]]
 name = "veryl-std"
-version = "0.20.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f06dc9231d7ae8d0c349428adbf857a8e39b905bb7e518ee14aa6c0f11cca43f"
+checksum = "a52e576e7ed845ba29fc1cdebfc9381843ba74ac1bc0b29bd3209d388cebc8ab"
 dependencies = [
  "merkle_hash",
  "miette",
@@ -4213,7 +4213,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
