@@ -1,0 +1,466 @@
+use crate::git::Git;
+use crate::*;
+use semver::Version;
+use std::fs;
+use std::path::Path;
+use tempfile::TempDir;
+
+const GIT_IGNORE: &'static str = r#"
+Veryl.lock
+"#;
+
+const TEST_TOML: &'static str = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[build]
+clock_type = "posedge"
+reset_type = "async_low"
+reset_low_suffix = "_n"
+target = {type = "source"}
+#target = {type = "directory", path = "aaa"}
+
+[format]
+indent_width = 4
+"#;
+
+const MAIN_TOML: &'static str = r#"
+[project]
+name = "main"
+version = "0.1.0"
+
+[dependencies]
+sub1   = {git = "file://{}/sub1", version = "0.1.0"}
+sub2   = {git = "file://{}/sub2", version = "0.1.0"}
+sub3_2 = {git = "file://{}/sub3", project = "sub3", version = "0.2.0"}
+sub3_3 = {git = "file://{}/sub3", project = "sub3", version = "1.0.0"}
+sub4   = {path = "../sub4"}
+sub6   = {path = "../sub6"}
+"#;
+
+const SUB1_TOML: &'static str = r#"
+[project]
+name = "sub1"
+version = "0.1.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+
+[dependencies]
+sub2 = {git = "file://{}/sub2", version = "1.0.0"}
+"#;
+
+const SUB2_TOML: &'static str = r#"
+[project]
+name = "sub2"
+version = "0.1.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+"#;
+
+const SUB3_TOML: &'static str = r#"
+[project]
+name = "sub3"
+version = "0.1.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+
+[dependencies]
+sub1 = {git = "file://{}/sub1", version = "0.1.0"}
+"#;
+
+const SUB4_TOML: &'static str = r#"
+[project]
+name = "sub4"
+version = "0.4.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+
+[dependencies]
+sub5 = {path = "./sub5"}
+sub6 = {path = "../sub6"}
+"#;
+
+const SUB5_TOML: &'static str = r#"
+[project]
+name = "sub5"
+version = "0.5.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+"#;
+
+const SUB6_TOML: &'static str = r#"
+[project]
+name = "sub6"
+version = "0.6.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+"#;
+
+fn create_metadata_simple() -> (Metadata, TempDir) {
+    let tempdir = tempfile::tempdir().unwrap();
+    let metadata = create_project(tempdir.path(), "test", TEST_TOML, false);
+
+    (metadata, tempdir)
+}
+
+fn create_metadata_multi() -> (Metadata, TempDir) {
+    let tempdir = tempfile::tempdir().unwrap();
+    let metadata = create_project(tempdir.path(), "main", MAIN_TOML, false);
+    create_project(tempdir.path(), "sub1", SUB1_TOML, true);
+    create_project(tempdir.path(), "sub2", SUB2_TOML, true);
+    create_project(tempdir.path(), "sub3", SUB3_TOML, true);
+    create_project(tempdir.path(), "sub4", SUB4_TOML, true);
+    create_project(&tempdir.path().join("sub4"), "sub5", SUB5_TOML, true);
+    create_project(tempdir.path(), "sub6", SUB6_TOML, true);
+
+    (metadata, tempdir)
+}
+
+const INNER_A_TOML: &'static str = r#"
+[project]
+name = "inner_a"
+version = "0.1.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+"#;
+
+const INNER_B_TOML: &'static str = r#"
+[project]
+name = "inner_b"
+version = "0.1.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+"#;
+
+fn create_metadata_inner_repo() -> (Metadata, TempDir) {
+    unsafe {
+        std::env::set_var("GIT_AUTHOR_NAME", "veryl");
+        std::env::set_var("GIT_AUTHOR_EMAIL", "veryl");
+        std::env::set_var("GIT_COMMITTER_NAME", "veryl");
+        std::env::set_var("GIT_COMMITTER_EMAIL", "veryl");
+    }
+
+    let tempdir = tempfile::tempdir().unwrap();
+
+    let repo_path = tempdir.path().join("repo");
+    fs::create_dir(&repo_path).unwrap();
+    let gitignore_path = repo_path.join(".gitignore");
+    fs::write(&gitignore_path, GIT_IGNORE).unwrap();
+
+    let a_path = repo_path.join("a_prj");
+    fs::create_dir(&a_path).unwrap();
+    let a_toml_path = a_path.join("Veryl.toml");
+    fs::write(&a_toml_path, INNER_A_TOML).unwrap();
+
+    let b_path = repo_path.join("b_prj");
+    fs::create_dir(&b_path).unwrap();
+    let b_toml_path = b_path.join("Veryl.toml");
+    fs::write(&b_toml_path, INNER_B_TOML).unwrap();
+
+    let git = Git::init(&repo_path).unwrap();
+    git.add(&gitignore_path).unwrap();
+    git.add(&a_toml_path).unwrap();
+    git.add(&b_toml_path).unwrap();
+    git.commit(&"Add inner projects").unwrap();
+
+    let mut a_metadata = Metadata::load(&a_toml_path).unwrap();
+    a_metadata.publish().unwrap();
+    let mut b_metadata = Metadata::load(&b_toml_path).unwrap();
+    b_metadata.publish().unwrap();
+
+    let main_toml = format!(
+        r#"
+[project]
+name = "main"
+version = "0.1.0"
+
+[dependencies]
+inner_a = {{git = "file://{repo}", project = "inner_a", version = "0.1.0"}}
+inner_b = {{git = "file://{repo}", project = "inner_b", version = "0.1.0"}}
+"#,
+        repo = repo_path.to_string_lossy().replace("\\", "/"),
+    );
+    let metadata = create_project(tempdir.path(), "main", &main_toml, false);
+
+    (metadata, tempdir)
+}
+
+fn create_project(root: &Path, name: &str, toml: &str, publish: bool) -> Metadata {
+    unsafe {
+        std::env::set_var("GIT_AUTHOR_NAME", "veryl");
+        std::env::set_var("GIT_AUTHOR_EMAIL", "veryl");
+        std::env::set_var("GIT_COMMITTER_NAME", "veryl");
+        std::env::set_var("GIT_COMMITTER_EMAIL", "veryl");
+    }
+
+    let path = root.join(name);
+    fs::create_dir(&path).unwrap();
+    let toml_path = path.join("Veryl.toml");
+    fs::write(
+        &toml_path,
+        &toml.replace("{}", &root.to_string_lossy().replace("\\", "/")),
+    )
+    .unwrap();
+    let git_ignore_path = path.join(".gitignore");
+    fs::write(&git_ignore_path, GIT_IGNORE).unwrap();
+    let git = Git::init(&path).unwrap();
+    git.add(&toml_path).unwrap();
+    git.add(&git_ignore_path).unwrap();
+    git.commit(&"Add Veryl.toml").unwrap();
+    let mut metadata = Metadata::load(&toml_path).unwrap();
+    if publish {
+        metadata.publish().unwrap();
+        metadata.bump_version(BumpKind::Patch).unwrap();
+        metadata.publish().unwrap();
+        metadata.bump_version(BumpKind::Minor).unwrap();
+        metadata.publish().unwrap();
+        metadata.bump_version(BumpKind::Major).unwrap();
+        metadata.publish().unwrap();
+    }
+    metadata
+}
+
+#[test]
+fn check_toml() {
+    let metadata: Metadata = toml::from_str(TEST_TOML).unwrap();
+    assert_eq!(metadata.project.name, "test");
+    assert_eq!(
+        metadata.project.version,
+        Some(Version::parse("0.1.0").unwrap())
+    );
+    assert_eq!(metadata.build.clock_type, ClockType::PosEdge);
+    assert_eq!(metadata.build.reset_type, ResetType::AsyncLow);
+    assert!(metadata.build.clock_posedge_prefix.is_none());
+    assert!(metadata.build.clock_posedge_suffix.is_none());
+    assert!(metadata.build.clock_negedge_prefix.is_none());
+    assert!(metadata.build.clock_negedge_suffix.is_none());
+    assert!(metadata.build.reset_high_prefix.is_none());
+    assert!(metadata.build.reset_high_suffix.is_none());
+    assert!(metadata.build.reset_low_prefix.is_none());
+    assert_eq!(metadata.build.reset_low_suffix.unwrap(), "_n");
+    assert_eq!(metadata.format.indent_width, 4);
+}
+
+#[test]
+fn search_config() {
+    let path = Metadata::search_from_current();
+    assert!(path.is_ok());
+}
+
+#[test]
+fn load() {
+    let (metadata, _tempdir) = create_metadata_simple();
+    assert!(metadata.metadata_path.exists());
+}
+
+#[test]
+fn check() {
+    let (mut metadata, _tempdir) = create_metadata_simple();
+    assert!(metadata.check().is_ok());
+
+    metadata.project.name = "0".to_string();
+    assert!(metadata.check().is_err());
+
+    metadata.project.name = "---".to_string();
+    assert!(metadata.check().is_err());
+}
+
+#[test]
+fn publish() {
+    let (mut metadata, tempdir) = create_metadata_simple();
+    metadata.publish().unwrap();
+
+    let project_version = metadata.project.version.clone().unwrap();
+
+    assert_eq!(metadata.pubfile.releases[0].version, project_version);
+    assert!(metadata.pubfile_path.exists());
+    let git = Git::open(&tempdir.path().join("test")).unwrap();
+    assert!(!git.is_clean().unwrap());
+}
+
+#[test]
+fn publish_with_commit() {
+    let (mut metadata, tempdir) = create_metadata_simple();
+    metadata.publish.publish_commit = true;
+    metadata.publish.publish_commit_message = "chore: Publish".to_string();
+    metadata.publish().unwrap();
+
+    let project_version = metadata.project.version.clone().unwrap();
+
+    assert_eq!(metadata.pubfile.releases[0].version, project_version);
+    assert!(metadata.pubfile_path.exists());
+    let git = Git::open(&tempdir.path().join("test")).unwrap();
+    assert!(git.is_clean().unwrap());
+}
+
+#[test]
+fn bump_version() {
+    let (mut metadata, tempdir) = create_metadata_simple();
+
+    metadata.bump_version(BumpKind::Major).unwrap();
+    assert_eq!(
+        metadata.project.version,
+        Some(Version::parse("1.0.0").unwrap())
+    );
+
+    metadata.bump_version(BumpKind::Minor).unwrap();
+    assert_eq!(
+        metadata.project.version,
+        Some(Version::parse("1.1.0").unwrap())
+    );
+
+    metadata.bump_version(BumpKind::Patch).unwrap();
+    assert_eq!(
+        metadata.project.version,
+        Some(Version::parse("1.1.1").unwrap())
+    );
+
+    let git = Git::open(&tempdir.path().join("test")).unwrap();
+    assert!(!git.is_clean().unwrap());
+}
+
+#[test]
+fn bump_version_with_commit() {
+    let (mut metadata, tempdir) = create_metadata_simple();
+    metadata.publish.bump_commit = true;
+    metadata.publish.bump_commit_message = "chore: Bump version".to_string();
+
+    metadata.bump_version(BumpKind::Major).unwrap();
+    assert_eq!(
+        metadata.project.version,
+        Some(Version::parse("1.0.0").unwrap())
+    );
+
+    metadata.bump_version(BumpKind::Minor).unwrap();
+    assert_eq!(
+        metadata.project.version,
+        Some(Version::parse("1.1.0").unwrap())
+    );
+
+    metadata.bump_version(BumpKind::Patch).unwrap();
+    assert_eq!(
+        metadata.project.version,
+        Some(Version::parse("1.1.1").unwrap())
+    );
+
+    let git = Git::open(&tempdir.path().join("test")).unwrap();
+    assert!(git.is_clean().unwrap());
+}
+
+#[test]
+fn lockfile() {
+    let (metadata, _tempdir) = create_metadata_multi();
+    let lockfile = Lockfile::new(&metadata).unwrap();
+    let tbl = &lockfile.lock_table;
+    let sub1 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub1"));
+    let sub1_0 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub1_0"));
+    let sub2 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub2"));
+    let sub2_0 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub2_0"));
+    let sub3_2 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub3_2"));
+    let sub3_3 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub3_3"));
+    let sub4 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub4"));
+    let sub5 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub5"));
+    let sub6 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub6"));
+    let sub6_0 = tbl
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub6_0"));
+    assert!(sub1.is_some());
+    assert!(sub1_0.is_none());
+    assert!(sub2.is_some());
+    assert!(sub2_0.is_some());
+    assert!(sub3_2.is_some());
+    assert!(sub3_3.is_some());
+    assert!(sub4.is_some());
+    assert!(sub5.is_some());
+    assert!(sub6.is_some());
+    assert!(sub6_0.is_none());
+    assert_eq!(
+        sub1.unwrap().source.get_version(),
+        Some(&Version::parse("0.1.1").unwrap())
+    );
+    assert_eq!(
+        sub2.unwrap().source.get_version(),
+        Some(&Version::parse("0.1.1").unwrap())
+    );
+    assert_eq!(
+        sub2_0.unwrap().source.get_version(),
+        Some(&Version::parse("1.0.0").unwrap())
+    );
+    assert_eq!(
+        sub3_2.unwrap().source.get_version(),
+        Some(&Version::parse("0.2.0").unwrap())
+    );
+    assert_eq!(
+        sub3_3.unwrap().source.get_version(),
+        Some(&Version::parse("1.0.0").unwrap())
+    );
+
+    let _ = lockfile.clear_cache();
+}
+
+#[test]
+fn lockfile_inner_projects() {
+    let (metadata, _tempdir) = create_metadata_inner_repo();
+    let lockfile = Lockfile::new(&metadata).unwrap();
+
+    let inner_a = lockfile
+        .lock_table
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "inner_a"))
+        .expect("inner_a should be present in the lockfile");
+    let inner_b = lockfile
+        .lock_table
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "inner_b"))
+        .expect("inner_b should be present in the lockfile");
+
+    assert_eq!(
+        inner_a.source.get_version(),
+        Some(&Version::parse("0.1.0").unwrap())
+    );
+    assert_eq!(
+        inner_b.source.get_version(),
+        Some(&Version::parse("0.1.0").unwrap())
+    );
+
+    let _paths = lockfile
+        .paths(Path::new("target"))
+        .expect("paths() should resolve inner-project metadata");
+
+    let _ = lockfile.clear_cache();
+}

@@ -76,7 +76,7 @@ fn analyze(
             Some(&mut ir),
         ));
     }
-    errors.append(&mut Analyzer::analyze_post_pass2());
+    errors.append(&mut Analyzer::analyze_post_pass2(&ir));
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);

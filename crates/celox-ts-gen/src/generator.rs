@@ -850,7 +850,7 @@ mod tests {
         assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
         let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
         assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
-        let errors = Analyzer::analyze_post_pass2();
+        let errors = Analyzer::analyze_post_pass2(&ir);
         assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
         generate_all(&ir, &["test.veryl"])

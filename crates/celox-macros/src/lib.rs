@@ -52,7 +52,7 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
     let analyzer = Analyzer::new(&metadata);
     analyzer.clear();
 
-    let paths = match metadata.paths::<PathBuf>(&[], true, true) {
+    let paths = match metadata.paths::<PathBuf>(&[], false, true) {
         Ok(p) => p,
         Err(e) => exit_with_error!(&format!("Failed to gather paths: {}", e)),
     };
@@ -148,7 +148,7 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
             exit_with_error!(&format!("Analysis pass2 errors: {}", msgs.join("; ")));
         }
     }
-    let errors = Analyzer::analyze_post_pass2();
+    let errors = Analyzer::analyze_post_pass2(&ir);
     if !errors.is_empty() {
         let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
         exit_with_error!(&format!("Analysis post-pass2 errors: {}", msgs.join("; ")));

@@ -2,16 +2,17 @@
 source: crates/celox/tests/error_readability.rs
 expression: err
 ---
-scheduler
+combinational_loop (https://doc.veryl-lang.org/book/07_appendix/02_semantic_error.html#combinational_loop)
 
-  × Combinational loop detected: y[0]
-   ╭─[:4:13]
- 3 │             a: input logic,
- 4 │             y: output logic
-   ·             ┬
-   ·             ╰── loop participant
+  × combinational loop detected on "y"
+   ╭─[:6:20]
  5 │         ) {
+ 6 │             assign y = ~y & a;
+   ·                    ┬
+   ·                    ╰── Error location
+ 7 │         }
    ╰────
+  help: 
 
 
 --- warnings ---

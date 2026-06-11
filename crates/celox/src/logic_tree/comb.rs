@@ -188,6 +188,12 @@ fn eval_statement(
     match stmt {
         Statement::Assign(assign) => eval_assign(module, store, boundaries, assign, arena),
         Statement::If(if_stmt) => eval_if(module, store, boundaries, if_stmt, arena),
+        Statement::Case(case_stmt) => case_stmt
+            .lower_to_nested_if()
+            .iter()
+            .try_fold((store, boundaries), |(store, boundaries), stmt| {
+                eval_statement(module, store, boundaries, stmt, arena)
+            }),
         Statement::For(for_stmt) => eval_for(module, store, boundaries, for_stmt, arena),
         Statement::IfReset(ir) => Err(ParserError::illegal_context(
             "statement in always_comb",
@@ -379,6 +385,13 @@ fn statement_contains_break(stmt: &Statement) -> bool {
             if_stmt.true_side.iter().any(statement_contains_break)
                 || if_stmt.false_side.iter().any(statement_contains_break)
         }
+        Statement::Case(case_stmt) => {
+            case_stmt
+                .arms
+                .iter()
+                .any(|arm| arm.body.iter().any(statement_contains_break))
+                || case_stmt.default.iter().any(statement_contains_break)
+        }
         Statement::For(for_stmt) => for_stmt.body.iter().any(statement_contains_break),
         Statement::IfReset(if_reset) => {
             if_reset.true_side.iter().any(statement_contains_break)
@@ -420,6 +433,12 @@ fn eval_loop_statement(
                 apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
             }
         }
+        Statement::Case(case_stmt) => case_stmt
+            .lower_to_nested_if()
+            .iter()
+            .try_fold(state, |state, stmt| {
+                eval_loop_statement(module, state, stmt, arena)
+            }),
         Statement::For(for_stmt) => {
             let guard_state = state.clone();
             let (next_store, next_boundaries) =
@@ -682,6 +701,12 @@ fn collect_written_accesses(
             Statement::If(if_stmt) => {
                 collect_written_accesses(module, &if_stmt.true_side, out)?;
                 collect_written_accesses(module, &if_stmt.false_side, out)?;
+            }
+            Statement::Case(case_stmt) => {
+                for arm in &case_stmt.arms {
+                    collect_written_accesses(module, &arm.body, out)?;
+                }
+                collect_written_accesses(module, &case_stmt.default, out)?;
             }
             Statement::For(for_stmt) => collect_written_accesses(module, &for_stmt.body, out)?,
             Statement::IfReset(if_reset) => {
@@ -1621,7 +1646,7 @@ mod tests {
         assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
         let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
         assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
-        let errors = Analyzer::analyze_post_pass2();
+        let errors = Analyzer::analyze_post_pass2(&ir);
         assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
         // Top モジュールを探す

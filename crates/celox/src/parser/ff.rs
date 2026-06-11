@@ -616,6 +616,16 @@ impl<'a> FfParser<'a> {
                 return self
                     .parse_if_statement(stmt, targets, domain, convert, sources, ir_builder);
             }
+            Statement::Case(stmt) => {
+                for lowered in stmt.lower_to_nested_if() {
+                    if self
+                        .parse_statement(&lowered, targets, domain, convert, sources, ir_builder)?
+                        == ControlFlow::Break
+                    {
+                        return Ok(ControlFlow::Break);
+                    }
+                }
+            }
             Statement::IfReset(stmt) => {
                 return self
                     .parse_if_reset_statement(stmt, targets, domain, convert, sources, ir_builder);
@@ -1915,6 +1925,13 @@ impl<'a> FfParser<'a> {
                 .true_side
                 .iter()
                 .chain(s.false_side.iter())
+                .flat_map(Self::collect_assigned_var_ids)
+                .collect(),
+            Statement::Case(s) => s
+                .arms
+                .iter()
+                .flat_map(|arm| arm.body.iter())
+                .chain(s.default.iter())
                 .flat_map(Self::collect_assigned_var_ids)
                 .collect(),
             Statement::IfReset(s) => s

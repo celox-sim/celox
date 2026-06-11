@@ -43,6 +43,11 @@ tempfile        = "3.26"
 thiserror       = "2.0"
 toml            = "1.0.3"
 
+[patch.crates-io]
+# Disable veryl-metadata's default gitoxide feature to avoid pulling aws-lc-sys
+# into napi-cross builds.
+veryl-metadata = { path = "vendor/veryl-metadata" }
+
 [workspace.lints.rust]
 warnings = "deny"
 

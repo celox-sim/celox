@@ -70,6 +70,8 @@ jobs:
       - name: Build (napi-cross)
         if: matrix.napi-cross
         working-directory: crates/celox-napi
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
         run: npx napi build --platform --release --manifest-path ../../Cargo.toml -p celox-napi --target ${{ matrix.target }} --use-napi-cross
 
       - name: Build (zigbuild)

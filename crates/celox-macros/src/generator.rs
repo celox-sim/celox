@@ -16,23 +16,28 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
         // Group ports by interface
         let mut interface_map: std::collections::HashMap<
             String,
-            Vec<(&VarPath, &veryl_analyzer::ir::Type)>,
+            Vec<(
+                &VarPath,
+                veryl_analyzer::ir::VarId,
+                &veryl_analyzer::ir::Type,
+            )>,
         > = std::collections::HashMap::new();
         let mut top_level_ports = Vec::new();
 
-        for var_path in module.ports.keys() {
+        for (var_path, var_id) in &module.ports {
             if let Some((r#type, _clock)) = module.port_types.get(var_path) {
                 if var_path.0.len() > 1 {
                     let interface_name = var_path.0[0].to_string();
                     interface_map
                         .entry(interface_name)
                         .or_default()
-                        .push((var_path, r#type));
+                        .push((var_path, *var_id, r#type));
                 } else {
-                    top_level_ports.push((var_path, r#type));
+                    top_level_ports.push((var_path, *var_id, r#type));
                 }
             }
         }
+        top_level_ports.sort_by_key(|(_, var_id, _)| *var_id);
 
         let struct_name = &module_name;
         let bound_name = format_ident!("{}Bound", struct_name);
@@ -48,7 +53,7 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
         let mut clk_ident = None;
 
         // Process top-level ports
-        for (var_path, r#type) in top_level_ports {
+        for (var_path, _, r#type) in top_level_ports {
             let name =
                 veryl_parser::resource_table::get_str_value(*var_path.0.iter().last().unwrap())
                     .unwrap();
@@ -185,7 +190,11 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
         }
 
         // Process interfaces
-        for (if_name, if_ports) in interface_map {
+        let mut interfaces: Vec<_> = interface_map.into_iter().collect();
+        interfaces.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        for (if_name, mut if_ports) in interfaces {
+            if_ports.sort_by_key(|(_, var_id, _)| *var_id);
             let if_struct_name = format_ident!("{}", if_name);
             let if_bound_name = format_ident!("{}Bound", if_struct_name);
             let if_io_name = format_ident!("{}IO", if_struct_name);
@@ -196,7 +205,7 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
             let mut if_bound_methods = quote! {};
             let mut if_io_methods = quote! {};
 
-            for (var_path, r#type) in if_ports {
+            for (var_path, _, r#type) in if_ports {
                 let member_name = var_path.0.last().unwrap().to_string();
                 let member_ident = format_ident!("{}", member_name);
 

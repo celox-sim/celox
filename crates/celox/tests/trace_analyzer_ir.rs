@@ -69,7 +69,7 @@ fn test_trace_analyzer_ir_nested_static_break_escapes_dynamic_loop() {
     let mut context = Context::default();
     let mut analyzer_ir = Ir::default();
     analyzer.analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut analyzer_ir));
-    Analyzer::analyze_post_pass2();
+    Analyzer::analyze_post_pass2(&analyzer_ir);
 
     let analyzer_ir = analyzer_ir.to_string();
     assert!(analyzer_ir.contains("for i in 0..var5 {"));

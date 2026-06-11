@@ -408,6 +408,12 @@ impl<'a> FfParser<'a> {
                     let cond = substitute(&if_stmt.cond, state);
                     Ok(merge_branch_state(&cond, then_state, else_state))
                 }
+                Statement::Case(case_stmt) => build_state_from_statements(
+                    parser,
+                    &case_stmt.lower_to_nested_if(),
+                    state,
+                    substitute,
+                ),
                 Statement::Null => Ok(state.clone()),
                 Statement::IfReset(ir) => Err(ParserError::unsupported(
                     43,
@@ -565,6 +571,11 @@ impl<'a> FfParser<'a> {
                         ))),
                         _ => Ok(None),
                     }
+                }
+                Statement::Case(case_stmt) => {
+                    let mut lowered = case_stmt.lower_to_nested_if();
+                    lowered.extend_from_slice(rest);
+                    resolve_return_expr(parser, &lowered, ret_id, defs, substitute)
                 }
                 Statement::Null => resolve_return_expr(parser, rest, ret_id, defs, substitute),
                 Statement::IfReset(ir) => Err(ParserError::unsupported(

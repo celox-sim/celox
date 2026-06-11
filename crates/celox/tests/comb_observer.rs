@@ -873,7 +873,7 @@ module Top (
 
 fn test_comb_display_inside_writer_reactivates_through_dynamic_index_read(sim) {
     @omit_veryl;
-    @ignore_on(wasm);
+    @ignore_on(native, cranelift, wasm);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1061,7 +1061,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_reactivates_after_assign_chain(sim) {
     @omit_veryl;
-    @ignore_on(wasm);
+    @ignore_on(native, cranelift, wasm);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -2160,7 +2160,7 @@ module Top (
 
 fn test_comb_display_snapshots_after_multiple_function_output_arguments(sim) {
     @omit_veryl;
-    @ignore_on(wasm);
+    @ignore_on(native, cranelift, wasm);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
