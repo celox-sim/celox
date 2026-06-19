@@ -1,6 +1,6 @@
 {
   "private": true,
-  "packageManager": "pnpm@11.5.3",
+  "packageManager": "pnpm@11.6.0",
   "scripts": {
     "build": "pnpm --filter=\"!@celox-sim/celox-napi\" --filter=\"!@celox-sim/playground\" -r build",
     "build:napi": "pnpm --filter @celox-sim/celox-napi build:debug",
