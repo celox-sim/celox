@@ -2080,37 +2080,55 @@ fn lower_instruction(
                                     size: OpSize::from_bits(*width_bits).unwrap(),
                                 });
                             } else {
-                                // Unaligned: RMW via BitFieldInsert
-                                let containing_byte_off =
-                                    ctx.byte_offset(addr, 0) + (bit_off / 8) as i32;
-                                let load_size =
-                                    ISelContext::op_size_for_width(*width_bits + intra_byte);
+                                let mut consumed = 0usize;
+                                while consumed < *width_bits {
+                                    let part_bit_off = *bit_off + consumed;
+                                    let intra = part_bit_off % 8;
+                                    let part_width = (*width_bits - consumed).min(64 - intra);
+                                    let containing_byte_off =
+                                        ctx.byte_offset(addr, 0) + (part_bit_off / 8) as i32;
+                                    let load_size =
+                                        ISelContext::op_size_for_width(part_width + intra);
 
-                                let old_word = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: old_word,
-                                    base: BaseReg::SimState,
-                                    offset: containing_byte_off,
-                                    size: load_size,
-                                });
+                                    let part_src = if consumed == 0 {
+                                        src_vreg
+                                    } else {
+                                        let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                                        block.push(MInst::ShrImm {
+                                            dst: shifted,
+                                            src: src_vreg,
+                                            imm: consumed as u8,
+                                        });
+                                        shifted
+                                    };
 
-                                let mask = mask_for_width(*width_bits);
-                                let new_word = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_bfi(
-                                    block,
-                                    new_word,
-                                    old_word,
-                                    src_vreg,
-                                    intra_byte as u8,
-                                    mask,
-                                );
+                                    let old_word = ctx.alloc_vreg(SpillDesc::transient());
+                                    block.push(MInst::Load {
+                                        dst: old_word,
+                                        base: BaseReg::SimState,
+                                        offset: containing_byte_off,
+                                        size: load_size,
+                                    });
 
-                                block.push(MInst::Store {
-                                    base: BaseReg::SimState,
-                                    offset: containing_byte_off,
-                                    src: new_word,
-                                    size: load_size,
-                                });
+                                    let new_word = ctx.alloc_vreg(SpillDesc::transient());
+                                    ctx.emit_bfi(
+                                        block,
+                                        new_word,
+                                        old_word,
+                                        part_src,
+                                        intra as u8,
+                                        mask_for_width(part_width),
+                                    );
+
+                                    block.push(MInst::Store {
+                                        base: BaseReg::SimState,
+                                        offset: containing_byte_off,
+                                        src: new_word,
+                                        size: load_size,
+                                    });
+
+                                    consumed += part_width;
+                                }
                             }
                         }
                     }
@@ -2543,113 +2561,63 @@ fn lower_instruction(
             // Commit = load from src region, store to dst region (same offset/width)
             match offset {
                 SIROffset::Static(bit_off) => {
-                    let src_byte_off = ctx.byte_offset(src_addr, *bit_off);
-                    let dst_byte_off = ctx.byte_offset(dst_addr, *bit_off);
-                    let op_size = ISelContext::op_size_for_width(*width_bits);
+                    let mut copied = 0usize;
+                    while copied < *width_bits {
+                        let part_bit_off = *bit_off + copied;
+                        let intra = part_bit_off % 8;
+                        let part_width = (*width_bits - copied).min(64 - intra);
+                        let load_size = ISelContext::op_size_for_width(part_width + intra);
+                        let containing_src =
+                            ctx.byte_offset(src_addr, 0) + (part_bit_off / 8) as i32;
+                        let containing_dst =
+                            ctx.byte_offset(dst_addr, 0) + (part_bit_off / 8) as i32;
 
-                    // For wide commits (> 64 bits), emit chunk-by-chunk
-                    if *width_bits <= 64 {
-                        let intra_byte = bit_off % 8;
-                        if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
-                            let tmp = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Load {
-                                dst: tmp,
-                                base: BaseReg::SimState,
-                                offset: src_byte_off,
-                                size: op_size,
+                        let raw = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Load {
+                            dst: raw,
+                            base: BaseReg::SimState,
+                            offset: containing_src,
+                            size: load_size,
+                        });
+
+                        let shifted = if intra > 0 {
+                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::ShrImm {
+                                dst: shifted,
+                                src: raw,
+                                imm: intra as u8,
                             });
-                            block.push(MInst::Store {
-                                base: BaseReg::SimState,
-                                offset: dst_byte_off,
-                                src: tmp,
-                                size: op_size,
-                            });
+                            shifted
                         } else {
-                            let containing_src =
-                                ctx.byte_offset(src_addr, 0) + (bit_off / 8) as i32;
-                            let containing_dst =
-                                ctx.byte_offset(dst_addr, 0) + (bit_off / 8) as i32;
-                            let load_size =
-                                ISelContext::op_size_for_width(*width_bits + intra_byte);
+                            raw
+                        };
+                        let value = ctx.alloc_vreg(SpillDesc::transient());
+                        ctx.emit_and_imm(block, value, shifted, mask_for_width(part_width));
 
-                            let raw = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Load {
-                                dst: raw,
-                                base: BaseReg::SimState,
-                                offset: containing_src,
-                                size: load_size,
-                            });
+                        let old = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Load {
+                            dst: old,
+                            base: BaseReg::SimState,
+                            offset: containing_dst,
+                            size: load_size,
+                        });
+                        let new = ctx.alloc_vreg(SpillDesc::transient());
+                        ctx.emit_bfi(
+                            block,
+                            new,
+                            old,
+                            value,
+                            intra as u8,
+                            mask_for_width(part_width),
+                        );
+                        block.push(MInst::Store {
+                            base: BaseReg::SimState,
+                            offset: containing_dst,
+                            src: new,
+                            size: load_size,
+                        });
 
-                            let value = if intra_byte > 0 {
-                                let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::ShrImm {
-                                    dst: shifted,
-                                    src: raw,
-                                    imm: intra_byte as u8,
-                                });
-                                let masked = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_and_imm(
-                                    block,
-                                    masked,
-                                    shifted,
-                                    mask_for_width(*width_bits),
-                                );
-                                masked
-                            } else {
-                                let masked = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_and_imm(block, masked, raw, mask_for_width(*width_bits));
-                                masked
-                            };
-
-                            let old = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Load {
-                                dst: old,
-                                base: BaseReg::SimState,
-                                offset: containing_dst,
-                                size: load_size,
-                            });
-                            let new = ctx.alloc_vreg(SpillDesc::transient());
-                            ctx.emit_bfi(
-                                block,
-                                new,
-                                old,
-                                value,
-                                intra_byte as u8,
-                                mask_for_width(*width_bits),
-                            );
-                            block.push(MInst::Store {
-                                base: BaseReg::SimState,
-                                offset: containing_dst,
-                                src: new,
-                                size: load_size,
-                            });
-                        }
-                    } else {
-                        // Chunk-by-chunk copy (64 bits at a time)
-                        let mut remaining = *width_bits;
-                        let mut src_off = src_byte_off;
-                        let mut dst_off = dst_byte_off;
-                        while remaining > 0 {
-                            let chunk_bits = remaining.min(64);
-                            let chunk_size = ISelContext::op_size_for_width(chunk_bits);
-                            let tmp = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Load {
-                                dst: tmp,
-                                base: BaseReg::SimState,
-                                offset: src_off,
-                                size: chunk_size,
-                            });
-                            block.push(MInst::Store {
-                                base: BaseReg::SimState,
-                                offset: dst_off,
-                                src: tmp,
-                                size: chunk_size,
-                            });
-                            let advance = chunk_bits.div_ceil(8);
-                            src_off += advance as i32;
-                            dst_off += advance as i32;
-                            remaining -= chunk_bits;
-                        }
+                        copied += part_width;
                     }
                 }
                 SIROffset::Dynamic(offset_reg) => {
@@ -2705,114 +2673,62 @@ fn lower_instruction(
             if ctx.is_4state_var(src_addr) && ctx.is_4state_var(dst_addr) {
                 match offset {
                     SIROffset::Static(bit_off) => {
-                        let src_mask_off = ctx.mask_byte_offset(src_addr, *bit_off);
-                        let dst_mask_off = ctx.mask_byte_offset(dst_addr, *bit_off);
-                        if *width_bits <= 64 {
-                            let intra_byte = bit_off % 8;
-                            if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
-                                let op_size = ISelContext::op_size_for_width(*width_bits);
-                                let tmp = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: tmp,
-                                    base: BaseReg::SimState,
-                                    offset: src_mask_off,
-                                    size: op_size,
+                        let mut copied = 0usize;
+                        while copied < *width_bits {
+                            let part_bit_off = *bit_off + copied;
+                            let intra = part_bit_off % 8;
+                            let part_width = (*width_bits - copied).min(64 - intra);
+                            let load_size = ISelContext::op_size_for_width(part_width + intra);
+                            let containing_src =
+                                ctx.mask_byte_offset(src_addr, 0) + (part_bit_off / 8) as i32;
+                            let containing_dst =
+                                ctx.mask_byte_offset(dst_addr, 0) + (part_bit_off / 8) as i32;
+
+                            let raw = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Load {
+                                dst: raw,
+                                base: BaseReg::SimState,
+                                offset: containing_src,
+                                size: load_size,
+                            });
+                            let shifted = if intra > 0 {
+                                let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::ShrImm {
+                                    dst: shifted,
+                                    src: raw,
+                                    imm: intra as u8,
                                 });
-                                block.push(MInst::Store {
-                                    base: BaseReg::SimState,
-                                    offset: dst_mask_off,
-                                    src: tmp,
-                                    size: op_size,
-                                });
+                                shifted
                             } else {
-                                let containing_src =
-                                    ctx.mask_byte_offset(src_addr, 0) + (bit_off / 8) as i32;
-                                let containing_dst =
-                                    ctx.mask_byte_offset(dst_addr, 0) + (bit_off / 8) as i32;
-                                let load_size =
-                                    ISelContext::op_size_for_width(*width_bits + intra_byte);
+                                raw
+                            };
+                            let value = ctx.alloc_vreg(SpillDesc::transient());
+                            ctx.emit_and_imm(block, value, shifted, mask_for_width(part_width));
 
-                                let raw = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: raw,
-                                    base: BaseReg::SimState,
-                                    offset: containing_src,
-                                    size: load_size,
-                                });
-                                let value = if intra_byte > 0 {
-                                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::ShrImm {
-                                        dst: shifted,
-                                        src: raw,
-                                        imm: intra_byte as u8,
-                                    });
-                                    let masked = ctx.alloc_vreg(SpillDesc::transient());
-                                    ctx.emit_and_imm(
-                                        block,
-                                        masked,
-                                        shifted,
-                                        mask_for_width(*width_bits),
-                                    );
-                                    masked
-                                } else {
-                                    let masked = ctx.alloc_vreg(SpillDesc::transient());
-                                    ctx.emit_and_imm(
-                                        block,
-                                        masked,
-                                        raw,
-                                        mask_for_width(*width_bits),
-                                    );
-                                    masked
-                                };
+                            let old = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Load {
+                                dst: old,
+                                base: BaseReg::SimState,
+                                offset: containing_dst,
+                                size: load_size,
+                            });
+                            let new = ctx.alloc_vreg(SpillDesc::transient());
+                            ctx.emit_bfi(
+                                block,
+                                new,
+                                old,
+                                value,
+                                intra as u8,
+                                mask_for_width(part_width),
+                            );
+                            block.push(MInst::Store {
+                                base: BaseReg::SimState,
+                                offset: containing_dst,
+                                src: new,
+                                size: load_size,
+                            });
 
-                                let old = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: old,
-                                    base: BaseReg::SimState,
-                                    offset: containing_dst,
-                                    size: load_size,
-                                });
-                                let new = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_bfi(
-                                    block,
-                                    new,
-                                    old,
-                                    value,
-                                    intra_byte as u8,
-                                    mask_for_width(*width_bits),
-                                );
-                                block.push(MInst::Store {
-                                    base: BaseReg::SimState,
-                                    offset: containing_dst,
-                                    src: new,
-                                    size: load_size,
-                                });
-                            }
-                        } else {
-                            let mut remaining = *width_bits;
-                            let mut s_off = src_mask_off;
-                            let mut d_off = dst_mask_off;
-                            while remaining > 0 {
-                                let cb = remaining.min(64);
-                                let cs = ISelContext::op_size_for_width(cb);
-                                let tmp = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: tmp,
-                                    base: BaseReg::SimState,
-                                    offset: s_off,
-                                    size: cs,
-                                });
-                                block.push(MInst::Store {
-                                    base: BaseReg::SimState,
-                                    offset: d_off,
-                                    src: tmp,
-                                    size: cs,
-                                });
-                                let adv = cb.div_ceil(8);
-                                s_off += adv as i32;
-                                d_off += adv as i32;
-                                remaining -= cb;
-                            }
+                            copied += part_width;
                         }
                     }
                     SIROffset::Dynamic(offset_reg) => {
