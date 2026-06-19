@@ -72,6 +72,56 @@ assign o = {a, b, c};
 
     }
 
+    fn test_nested_wide_concatenation(sim) {
+        @setup { use num_bigint::ToBigUint;
+let code = r#"
+module Top (
+a: input logic<65>,
+b: input logic<63>,
+c: input logic<1>,
+d: input logic<70>,
+o_nested: output logic<199>,
+o_flat: output logic<199>
+) {
+var ab: logic<128>;
+assign ab = {a, b};
+assign o_nested = {ab, c, d};
+assign o_flat = {a, b, c, d};
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let o_nested = sim.signal("o_nested");
+    let o_flat = sim.signal("o_flat");
+
+    let val_a = (1u128 << 64) | 0x0123_4567_89AB_CDEFu128;
+    let val_b = 0x2345_6789_ABCD_EF01u64 & ((1u64 << 63) - 1);
+    let val_c = 1u8;
+    let val_d: BigUint =
+        (BigUint::from(1u32) << 69) | BigUint::from(0x3456_789A_BCDE_F012u64);
+
+    sim.modify(|io| {
+        io.set_wide(a, val_a.to_biguint().unwrap());
+        io.set(b, val_b);
+        io.set(c, val_c);
+        io.set_wide(d, val_d.clone());
+    })
+    .unwrap();
+
+    let expected = (val_a.to_biguint().unwrap() << (63 + 1 + 70))
+        | (val_b.to_biguint().unwrap() << (1 + 70))
+        | (val_c.to_biguint().unwrap() << 70)
+        | val_d;
+
+    assert_eq!(sim.get(o_nested), expected);
+    assert_eq!(sim.get(o_flat), expected);
+    assert_eq!(sim.get(o_nested), sim.get(o_flat));
+
+    }
+
     fn test_wide_partial_write(sim) {
         @ignore_on(veryl);
         @setup { use num_bigint::ToBigUint;
