@@ -1,4 +1,5 @@
 use super::*;
+use crate::parser::case::case_arm_condition_expr;
 
 pub(super) fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
     atoms: impl IntoIterator<Item = VarAtomBase<A>>,
@@ -523,6 +524,135 @@ fn collect_function_body_effects(
         Ok(state)
     }
 
+    fn collect_case_from_arm(
+        module: &Module,
+        state: FunctionControlState,
+        case_stmt: &CaseStatement,
+        arm_index: usize,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+        collector: &mut CombEffectCollector,
+    ) -> Result<FunctionControlState, ParserError> {
+        let Some(arm) = case_stmt.arms.get(arm_index) else {
+            return collect_statements(module, state, &case_stmt.default, ret_id, arena, collector);
+        };
+
+        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
+        let store = state.store.clone();
+        let live = state.live_expr;
+        let live_sources = state.live_sources.clone();
+        with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+            collect_expression_effects(module, &store, &cond, arena, collector)
+        })?;
+
+        let ((cond_node, cond_sources), cond_bounds) =
+            eval_expression(module, &state.store, &cond, arena, None)?;
+        let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+
+        if let Some(cond_val) = constant_bool(arena, cond_node) {
+            let state = FunctionControlState {
+                boundaries,
+                ..state
+            };
+            return if cond_val {
+                collect_statements(module, state, &arm.body, ret_id, arena, collector)
+            } else {
+                collect_case_from_arm(
+                    module,
+                    state,
+                    case_stmt,
+                    arm_index + 1,
+                    ret_id,
+                    arena,
+                    collector,
+                )
+            };
+        }
+
+        let true_guard = arena.alloc(SLTNode::Binary(
+            state.live_expr,
+            BinaryOp::LogicAnd,
+            cond_node,
+        ));
+        let mut true_sources = state.live_sources.clone();
+        true_sources.extend(cond_sources.iter().copied());
+        let then_state = with_collector_guard(
+            collector,
+            arena,
+            true_guard,
+            true_sources,
+            |collector, arena| {
+                collect_statements(
+                    module,
+                    FunctionControlState {
+                        store: state.store.clone(),
+                        boundaries: boundaries.clone(),
+                        live_expr: state.live_expr,
+                        live_sources: state.live_sources.clone(),
+                    },
+                    &arm.body,
+                    ret_id,
+                    arena,
+                    collector,
+                )
+            },
+        )?;
+
+        let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+        let false_guard = arena.alloc(SLTNode::Binary(
+            state.live_expr,
+            BinaryOp::LogicAnd,
+            false_cond,
+        ));
+        let mut false_sources = state.live_sources.clone();
+        false_sources.extend(cond_sources.iter().copied());
+        let else_state = with_collector_guard(
+            collector,
+            arena,
+            false_guard,
+            false_sources,
+            |collector, arena| {
+                collect_case_from_arm(
+                    module,
+                    FunctionControlState {
+                        store: state.store,
+                        boundaries,
+                        live_expr: state.live_expr,
+                        live_sources: state.live_sources,
+                    },
+                    case_stmt,
+                    arm_index + 1,
+                    ret_id,
+                    arena,
+                    collector,
+                )
+            },
+        )?;
+
+        let mut live_sources = cond_sources;
+        live_sources.extend(then_state.live_sources);
+        live_sources.extend(else_state.live_sources);
+
+        Ok(FunctionControlState {
+            store: merge_symbolic_stores(
+                module,
+                &then_state.store,
+                &else_state.store,
+                cond_node,
+                &live_sources,
+                arena,
+            )?,
+            boundaries: merge_boundaries(then_state.boundaries, else_state.boundaries),
+            live_expr: merge_control_expr(
+                cond_node,
+                then_state.live_expr,
+                else_state.live_expr,
+                arena,
+            ),
+            live_sources,
+        })
+    }
+
     fn collect_statement(
         module: &Module,
         state: FunctionControlState,
@@ -657,12 +787,9 @@ fn collect_function_body_effects(
                     live_sources: HashSet::default(),
                 })
             }
-            Statement::Case(case_stmt) => case_stmt
-                .lower_to_nested_if()
-                .iter()
-                .try_fold(state, |state, stmt| {
-                    collect_statement(module, state, stmt, ret_id, arena, collector)
-                }),
+            Statement::Case(case_stmt) => {
+                collect_case_from_arm(module, state, case_stmt, 0, ret_id, arena, collector)
+            }
             Statement::For(for_stmt) => {
                 let store = state.store.clone();
                 let live = state.live_expr;
@@ -878,13 +1005,7 @@ pub(super) fn collect_comb_effects_statements(
                 )?;
             }
             Statement::Case(case_stmt) => {
-                store = collect_comb_effects_statements(
-                    module,
-                    store,
-                    &case_stmt.lower_to_nested_if(),
-                    arena,
-                    collector,
-                )?;
+                store = collect_comb_effects_case(module, store, case_stmt, arena, collector)?;
             }
             Statement::IfReset(_)
             | Statement::TbMethodCall(_)
@@ -894,6 +1015,78 @@ pub(super) fn collect_comb_effects_statements(
         }
     }
     Ok(store)
+}
+
+fn collect_comb_effects_case(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    case_stmt: &CaseStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<SymbolicStore<VarId>, ParserError> {
+    fn collect_from_arm(
+        module: &Module,
+        store: SymbolicStore<VarId>,
+        case_stmt: &CaseStatement,
+        arm_index: usize,
+        arena: &mut SLTNodeArena<VarId>,
+        collector: &mut CombEffectCollector,
+    ) -> Result<SymbolicStore<VarId>, ParserError> {
+        let Some(arm) = case_stmt.arms.get(arm_index) else {
+            return collect_comb_effects_statements(
+                module,
+                store,
+                &case_stmt.default,
+                arena,
+                collector,
+            );
+        };
+
+        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
+        collect_expression_effects(module, &store, &cond, arena, collector)?;
+        let ((cond_node, sources), _) = eval_expression(module, &store, &cond, arena, None)?;
+        collector.sensitivity.extend(sources.iter().copied());
+
+        let saved_guard = collector.active_guard;
+        let saved_guard_sources = collector.active_guard_sources.clone();
+        let true_guard = if let Some(active) = saved_guard {
+            arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, cond_node))
+        } else {
+            cond_node
+        };
+        let mut true_sources = saved_guard_sources.clone();
+        true_sources.extend(sources.iter().copied());
+        collector.active_guard = Some(true_guard);
+        collector.active_guard_sources = true_sources;
+        let side_store =
+            collect_comb_effects_statements(module, store.clone(), &arm.body, arena, collector)?;
+
+        let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+        let false_guard = if let Some(active) = saved_guard {
+            arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, false_cond))
+        } else {
+            false_cond
+        };
+        let mut false_sources = saved_guard_sources.clone();
+        false_sources.extend(sources.iter().copied());
+        collector.active_guard = Some(false_guard);
+        collector.active_guard_sources = false_sources;
+        let else_store =
+            collect_from_arm(module, store, case_stmt, arm_index + 1, arena, collector)?;
+
+        collector.active_guard = saved_guard;
+        collector.active_guard_sources = saved_guard_sources;
+        merge_symbolic_stores(
+            module,
+            &side_store,
+            &else_store,
+            bool_node(arena, true),
+            &HashSet::default(),
+            arena,
+        )
+    }
+
+    collect_from_arm(module, store, case_stmt, 0, arena, collector)
 }
 
 fn collect_comb_effects_for(

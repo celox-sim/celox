@@ -1,8 +1,11 @@
 use super::*;
 
-use crate::{context_width::get_context_width, parser::bitaccess::celox_value_from_comptime};
+use crate::{
+    context_width::get_context_width,
+    parser::{bitaccess::celox_value_from_comptime, case::case_arm_condition_expr},
+};
 use num_traits::ToPrimitive as _;
-use veryl_analyzer::ir::{Type, ValueVariant};
+use veryl_analyzer::ir::{CasePattern, Type, ValueVariant};
 
 use super::state::{FunctionControlState, FunctionLoopControlState};
 
@@ -322,8 +325,25 @@ pub(super) fn eval_function_body_return(
                 Ok(())
             }
             Statement::Case(case_stmt) => {
-                for stmt in case_stmt.lower_to_nested_if() {
-                    validate_function_body_statement(module, &stmt)?;
+                validate_function_body_expression(module, &case_stmt.case_target)?;
+                for arm in &case_stmt.arms {
+                    for pattern in &arm.patterns {
+                        match pattern {
+                            CasePattern::Eq(expr) => {
+                                validate_function_body_expression(module, expr)?
+                            }
+                            CasePattern::Range { lo, hi, .. } => {
+                                validate_function_body_expression(module, lo)?;
+                                validate_function_body_expression(module, hi)?;
+                            }
+                        }
+                    }
+                    for stmt in &arm.body {
+                        validate_function_body_statement(module, stmt)?;
+                    }
+                }
+                for stmt in &case_stmt.default {
+                    validate_function_body_statement(module, stmt)?;
                 }
                 Ok(())
             }
@@ -683,6 +703,126 @@ pub(super) fn eval_function_body_return(
             })
         }
 
+        fn eval_function_loop_case(
+            module: &Module,
+            state: FunctionLoopControlState,
+            case_stmt: &CaseStatement,
+            ret_id: VarId,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionLoopControlState, ParserError> {
+            fn eval_from_arm(
+                module: &Module,
+                state: FunctionLoopControlState,
+                case_stmt: &CaseStatement,
+                arm_index: usize,
+                ret_id: VarId,
+                arena: &mut SLTNodeArena<VarId>,
+            ) -> Result<FunctionLoopControlState, ParserError> {
+                let Some(arm) = case_stmt.arms.get(arm_index) else {
+                    return case_stmt.default.iter().try_fold(state, |s, step| {
+                        eval_function_loop_statement(module, s, step, ret_id, arena)
+                    });
+                };
+
+                let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+                    module,
+                    &state.function.store,
+                    &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+                    arena,
+                    Some(1),
+                )?;
+                let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+
+                if let Some(cond_val) = constant_bool(arena, cond_expr) {
+                    let state = FunctionLoopControlState {
+                        function: FunctionControlState {
+                            boundaries,
+                            ..state.function
+                        },
+                        ..state
+                    };
+                    return if cond_val {
+                        arm.body.iter().try_fold(state, |s, step| {
+                            eval_function_loop_statement(module, s, step, ret_id, arena)
+                        })
+                    } else {
+                        eval_from_arm(module, state, case_stmt, arm_index + 1, ret_id, arena)
+                    };
+                }
+
+                let then_state = arm.body.iter().try_fold(
+                    FunctionLoopControlState {
+                        function: FunctionControlState {
+                            store: state.function.store.clone(),
+                            boundaries: boundaries.clone(),
+                            live_expr: state.function.live_expr,
+                            live_sources: state.function.live_sources.clone(),
+                        },
+                        continue_expr: state.continue_expr,
+                        continue_sources: state.continue_sources.clone(),
+                    },
+                    |s, step| eval_function_loop_statement(module, s, step, ret_id, arena),
+                )?;
+                let else_state = eval_from_arm(
+                    module,
+                    FunctionLoopControlState {
+                        function: FunctionControlState {
+                            store: state.function.store,
+                            boundaries,
+                            live_expr: state.function.live_expr,
+                            live_sources: state.function.live_sources,
+                        },
+                        continue_expr: state.continue_expr,
+                        continue_sources: state.continue_sources,
+                    },
+                    case_stmt,
+                    arm_index + 1,
+                    ret_id,
+                    arena,
+                )?;
+
+                let mut merged_sources = cond_sources;
+                merged_sources.extend(then_state.continue_sources);
+                merged_sources.extend(else_state.continue_sources);
+                let mut live_sources = merged_sources.clone();
+                live_sources.extend(then_state.function.live_sources);
+                live_sources.extend(else_state.function.live_sources);
+
+                Ok(FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: merge_symbolic_stores(
+                            module,
+                            &then_state.function.store,
+                            &else_state.function.store,
+                            cond_expr,
+                            &live_sources,
+                            arena,
+                        )?,
+                        boundaries: merge_boundaries(
+                            then_state.function.boundaries,
+                            else_state.function.boundaries,
+                        ),
+                        live_expr: merge_control_expr(
+                            cond_expr,
+                            then_state.function.live_expr,
+                            else_state.function.live_expr,
+                            arena,
+                        ),
+                        live_sources,
+                    },
+                    continue_expr: merge_control_expr(
+                        cond_expr,
+                        then_state.continue_expr,
+                        else_state.continue_expr,
+                        arena,
+                    ),
+                    continue_sources: merged_sources,
+                })
+            }
+
+            eval_from_arm(module, state, case_stmt, 0, ret_id, arena)
+        }
+
         fn eval_function_loop_statement(
             module: &Module,
             state: FunctionLoopControlState,
@@ -700,12 +840,9 @@ pub(super) fn eval_function_body_return(
                 Statement::If(if_stmt) => {
                     eval_function_loop_if(module, state, if_stmt, ret_id, arena)
                 }
-                Statement::Case(case_stmt) => case_stmt
-                    .lower_to_nested_if()
-                    .iter()
-                    .try_fold(state, |state, stmt| {
-                        eval_function_loop_statement(module, state, stmt, ret_id, arena)
-                    }),
+                Statement::Case(case_stmt) => {
+                    eval_function_loop_case(module, state, case_stmt, ret_id, arena)
+                }
                 Statement::Assign(_)
                 | Statement::For(_)
                 | Statement::FunctionCall(_)
@@ -1222,6 +1359,154 @@ pub(super) fn eval_function_body_return(
         })
     }
 
+    fn eval_function_break_case(
+        module: &Module,
+        state: FunctionLoopControlState,
+        case_stmt: &CaseStatement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionLoopControlState, ParserError> {
+        fn eval_from_arm(
+            module: &Module,
+            state: FunctionLoopControlState,
+            case_stmt: &CaseStatement,
+            arm_index: usize,
+            ret_id: VarId,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionLoopControlState, ParserError> {
+            let Some(arm) = case_stmt.arms.get(arm_index) else {
+                return case_stmt.default.iter().try_fold(state, |s, step| {
+                    eval_function_break_statement(module, s, step, ret_id, arena)
+                });
+            };
+
+            let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+                module,
+                &state.function.store,
+                &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+                arena,
+                Some(1),
+            )?;
+            let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+
+            if let Some(cond_val) = constant_bool(arena, cond_expr) {
+                let state = FunctionLoopControlState {
+                    function: FunctionControlState {
+                        boundaries,
+                        ..state.function
+                    },
+                    ..state
+                };
+                return if cond_val {
+                    arm.body.iter().try_fold(state, |s, step| {
+                        eval_function_break_statement(module, s, step, ret_id, arena)
+                    })
+                } else {
+                    eval_from_arm(module, state, case_stmt, arm_index + 1, ret_id, arena)
+                };
+            }
+
+            let then_state = arm.body.iter().try_fold(
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store.clone(),
+                        boundaries: boundaries.clone(),
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources.clone(),
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources.clone(),
+                },
+                |s, step| eval_function_break_statement(module, s, step, ret_id, arena),
+            )?;
+            let else_state = eval_from_arm(
+                module,
+                FunctionLoopControlState {
+                    function: FunctionControlState {
+                        store: state.function.store,
+                        boundaries,
+                        live_expr: state.function.live_expr,
+                        live_sources: state.function.live_sources,
+                    },
+                    continue_expr: state.continue_expr,
+                    continue_sources: state.continue_sources,
+                },
+                case_stmt,
+                arm_index + 1,
+                ret_id,
+                arena,
+            )?;
+
+            let mut merged_sources = cond_sources;
+            merged_sources.extend(then_state.continue_sources);
+            merged_sources.extend(else_state.continue_sources);
+            let mut live_sources = merged_sources.clone();
+            live_sources.extend(then_state.function.live_sources);
+            live_sources.extend(else_state.function.live_sources);
+
+            Ok(FunctionLoopControlState {
+                function: FunctionControlState {
+                    store: merge_symbolic_stores(
+                        module,
+                        &then_state.function.store,
+                        &else_state.function.store,
+                        cond_expr,
+                        &live_sources,
+                        arena,
+                    )?,
+                    boundaries: merge_boundaries(
+                        then_state.function.boundaries,
+                        else_state.function.boundaries,
+                    ),
+                    live_expr: merge_control_expr(
+                        cond_expr,
+                        then_state.function.live_expr,
+                        else_state.function.live_expr,
+                        arena,
+                    ),
+                    live_sources,
+                },
+                continue_expr: merge_control_expr(
+                    cond_expr,
+                    then_state.continue_expr,
+                    else_state.continue_expr,
+                    arena,
+                ),
+                continue_sources: merged_sources,
+            })
+        }
+
+        let outer_state = state.clone();
+        let executed_state = eval_from_arm(module, state, case_stmt, 0, ret_id, arena)?;
+
+        if matches!(constant_bool(arena, outer_state.continue_expr), Some(true)) {
+            return Ok(executed_state);
+        }
+
+        let guarded = apply_function_break_guard(
+            module,
+            outer_state.clone(),
+            executed_state.function,
+            arena,
+        )?;
+        let continue_expr = match constant_bool(arena, executed_state.continue_expr) {
+            Some(true) => outer_state.continue_expr,
+            Some(false) => bool_node(arena, false),
+            None => arena.alloc(SLTNode::Binary(
+                outer_state.continue_expr,
+                BinaryOp::And,
+                executed_state.continue_expr,
+            )),
+        };
+        let mut continue_sources = outer_state.continue_sources;
+        continue_sources.extend(executed_state.continue_sources);
+        Ok(FunctionLoopControlState {
+            function: guarded.function,
+            continue_expr,
+            continue_sources,
+        })
+    }
+
     fn eval_function_break_statement(
         module: &Module,
         state: FunctionLoopControlState,
@@ -1237,12 +1522,9 @@ pub(super) fn eval_function_body_return(
 
         match stmt {
             Statement::If(if_stmt) => eval_function_break_if(module, state, if_stmt, ret_id, arena),
-            Statement::Case(case_stmt) => case_stmt
-                .lower_to_nested_if()
-                .iter()
-                .try_fold(state, |state, stmt| {
-                    eval_function_break_statement(module, state, stmt, ret_id, arena)
-                }),
+            Statement::Case(case_stmt) => {
+                eval_function_break_case(module, state, case_stmt, ret_id, arena)
+            }
             Statement::Assign(_)
             | Statement::For(_)
             | Statement::FunctionCall(_)
@@ -1328,6 +1610,99 @@ pub(super) fn eval_function_body_return(
         Ok(state)
     }
 
+    fn eval_function_case(
+        module: &Module,
+        state: FunctionControlState,
+        case_stmt: &CaseStatement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        fn eval_from_arm(
+            module: &Module,
+            state: FunctionControlState,
+            case_stmt: &CaseStatement,
+            arm_index: usize,
+            ret_id: VarId,
+            arena: &mut SLTNodeArena<VarId>,
+        ) -> Result<FunctionControlState, ParserError> {
+            let Some(arm) = case_stmt.arms.get(arm_index) else {
+                return eval_function_statements(module, state, &case_stmt.default, ret_id, arena);
+            };
+
+            let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+                module,
+                &state.store,
+                &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+                arena,
+                Some(1),
+            )?;
+            let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+
+            if let Some(cond_val) = constant_bool(arena, cond_expr) {
+                let state = FunctionControlState {
+                    boundaries,
+                    ..state
+                };
+                return if cond_val {
+                    eval_function_statements(module, state, &arm.body, ret_id, arena)
+                } else {
+                    eval_from_arm(module, state, case_stmt, arm_index + 1, ret_id, arena)
+                };
+            }
+
+            let then_state = eval_function_statements(
+                module,
+                FunctionControlState {
+                    store: state.store.clone(),
+                    boundaries: boundaries.clone(),
+                    live_expr: state.live_expr,
+                    live_sources: state.live_sources.clone(),
+                },
+                &arm.body,
+                ret_id,
+                arena,
+            )?;
+            let else_state = eval_from_arm(
+                module,
+                FunctionControlState {
+                    store: state.store,
+                    boundaries,
+                    live_expr: state.live_expr,
+                    live_sources: state.live_sources,
+                },
+                case_stmt,
+                arm_index + 1,
+                ret_id,
+                arena,
+            )?;
+
+            let mut live_sources = cond_sources;
+            live_sources.extend(then_state.live_sources);
+            live_sources.extend(else_state.live_sources);
+
+            Ok(FunctionControlState {
+                store: merge_symbolic_stores(
+                    module,
+                    &then_state.store,
+                    &else_state.store,
+                    cond_expr,
+                    &live_sources,
+                    arena,
+                )?,
+                boundaries: merge_boundaries(then_state.boundaries, else_state.boundaries),
+                live_expr: merge_control_expr(
+                    cond_expr,
+                    then_state.live_expr,
+                    else_state.live_expr,
+                    arena,
+                ),
+                live_sources,
+            })
+        }
+
+        eval_from_arm(module, state, case_stmt, 0, ret_id, arena)
+    }
+
     fn eval_function_statement(
         module: &Module,
         state: FunctionControlState,
@@ -1360,12 +1735,9 @@ pub(super) fn eval_function_body_return(
                 )
             }
             Statement::If(if_stmt) => eval_function_if(module, state, if_stmt, ret_id, arena),
-            Statement::Case(case_stmt) => case_stmt
-                .lower_to_nested_if()
-                .iter()
-                .try_fold(state, |state, stmt| {
-                    eval_function_statement(module, state, stmt, ret_id, arena)
-                }),
+            Statement::Case(case_stmt) => {
+                eval_function_case(module, state, case_stmt, ret_id, arena)
+            }
             Statement::For(for_stmt) => eval_function_for(module, state, for_stmt, ret_id, arena),
             Statement::FunctionCall(call) => {
                 let guard_state = state.clone();

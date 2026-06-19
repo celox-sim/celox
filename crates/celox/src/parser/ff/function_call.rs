@@ -5,11 +5,13 @@ use crate::{
     parser::{
         LoweringPhase, ParserError,
         bitaccess::{build_partial_assign_expr, is_static_access},
+        case::case_arm_condition_expr,
     },
 };
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, Comptime, Expression, Factor, Statement, VarId, VarIndex, VarSelect,
+    ArrayLiteralItem, CaseStatement, Comptime, Expression, Factor, Statement, VarId, VarIndex,
+    VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -408,12 +410,9 @@ impl<'a> FfParser<'a> {
                     let cond = substitute(&if_stmt.cond, state);
                     Ok(merge_branch_state(&cond, then_state, else_state))
                 }
-                Statement::Case(case_stmt) => build_state_from_statements(
-                    parser,
-                    &case_stmt.lower_to_nested_if(),
-                    state,
-                    substitute,
-                ),
+                Statement::Case(case_stmt) => {
+                    build_state_from_case(parser, case_stmt, 0, state, substitute)
+                }
                 Statement::Null => Ok(state.clone()),
                 Statement::IfReset(ir) => Err(ParserError::unsupported(
                     43,
@@ -447,6 +446,27 @@ impl<'a> FfParser<'a> {
                     ))
                 }
             }
+        }
+
+        fn build_state_from_case(
+            parser: &FfParser,
+            case_stmt: &CaseStatement,
+            arm_index: usize,
+            state: &HashMap<VarId, Expression>,
+            substitute: &impl Fn(&Expression, &HashMap<VarId, Expression>) -> Expression,
+        ) -> Result<HashMap<VarId, Expression>, ParserError> {
+            let Some(arm) = case_stmt.arms.get(arm_index) else {
+                return build_state_from_statements(parser, &case_stmt.default, state, substitute);
+            };
+
+            let then_state = build_state_from_statements(parser, &arm.body, state, substitute)?;
+            let else_state =
+                build_state_from_case(parser, case_stmt, arm_index + 1, state, substitute)?;
+            let cond = substitute(
+                &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+                state,
+            );
+            Ok(merge_branch_state(&cond, then_state, else_state))
         }
 
         fn build_state_from_statements(
@@ -573,9 +593,7 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Statement::Case(case_stmt) => {
-                    let mut lowered = case_stmt.lower_to_nested_if();
-                    lowered.extend_from_slice(rest);
-                    resolve_return_expr(parser, &lowered, ret_id, defs, substitute)
+                    resolve_return_expr_case(parser, case_stmt, rest, ret_id, defs, substitute)
                 }
                 Statement::Null => resolve_return_expr(parser, rest, ret_id, defs, substitute),
                 Statement::IfReset(ir) => Err(ParserError::unsupported(
@@ -613,6 +631,61 @@ impl<'a> FfParser<'a> {
                     ))
                 }
             }
+        }
+
+        fn resolve_return_expr_case(
+            parser: &FfParser,
+            case_stmt: &CaseStatement,
+            rest: &[Statement],
+            ret_id: VarId,
+            defs: &HashMap<VarId, Expression>,
+            substitute: &impl Fn(&Expression, &HashMap<VarId, Expression>) -> Expression,
+        ) -> Result<Option<Expression>, ParserError> {
+            fn resolve_from_arm(
+                parser: &FfParser,
+                case_stmt: &CaseStatement,
+                arm_index: usize,
+                rest: &[Statement],
+                ret_id: VarId,
+                defs: &HashMap<VarId, Expression>,
+                substitute: &impl Fn(&Expression, &HashMap<VarId, Expression>) -> Expression,
+            ) -> Result<Option<Expression>, ParserError> {
+                let Some(arm) = case_stmt.arms.get(arm_index) else {
+                    let mut default_stmts = case_stmt.default.clone();
+                    default_stmts.extend_from_slice(rest);
+                    return resolve_return_expr(parser, &default_stmts, ret_id, defs, substitute);
+                };
+
+                let cond = substitute(
+                    &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+                    defs,
+                );
+
+                let mut then_stmts = arm.body.clone();
+                then_stmts.extend_from_slice(rest);
+                let then_expr = resolve_return_expr(parser, &then_stmts, ret_id, defs, substitute)?;
+                let else_expr = resolve_from_arm(
+                    parser,
+                    case_stmt,
+                    arm_index + 1,
+                    rest,
+                    ret_id,
+                    defs,
+                    substitute,
+                )?;
+
+                match (then_expr, else_expr) {
+                    (Some(then_expr), Some(else_expr)) => Ok(Some(Expression::Ternary(
+                        Box::new(cond),
+                        Box::new(then_expr),
+                        Box::new(else_expr),
+                        Box::new(Comptime::create_unknown(TokenRange::default())),
+                    ))),
+                    _ => Ok(None),
+                }
+            }
+
+            resolve_from_arm(parser, case_stmt, 0, rest, ret_id, defs, substitute)
         }
 
         resolve_return_expr(

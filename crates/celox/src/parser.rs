@@ -65,6 +65,7 @@ impl From<&veryl_metadata::Build> for BuildConfig {
 }
 pub mod bitaccess;
 mod bitslicer;
+pub(crate) mod case;
 pub mod ff;
 pub mod module;
 pub mod registry;
