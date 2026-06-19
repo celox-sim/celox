@@ -206,7 +206,7 @@ fn compute_entry_regfile(
             let src = phi
                 .sources
                 .iter()
-                .find_map(|(pred_id, src)| (*pred_id == BlockId(pred_idx as u32)).then_some(*src));
+                .find_map(|(pred_id, src)| (*pred_id == func.blocks[pred_idx].id).then_some(*src));
             let preferred = src.and_then(|src_vreg| {
                 let preg = rf.get_preg(src_vreg)?;
                 if analysis.entry_distances[block_idx].contains_key(&src_vreg) {
