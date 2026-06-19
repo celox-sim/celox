@@ -11,7 +11,7 @@ use std::{collections::BTreeSet, hash::Hash};
 
 use crate::ParserError;
 use crate::logic_tree::range_store::RangeStore;
-use crate::parser::{LoweringPhase, resolve_total_width};
+use crate::parser::{LoweringPhase, case::case_arm_condition_expr, resolve_total_width};
 use crate::{
     HashMap, HashSet,
     ir::{
@@ -22,9 +22,9 @@ use crate::{
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignStatement, CombDeclaration, Expression, Factor, ForBound, ForRange,
-    ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionInput,
-    SystemFunctionKind, VarId, VarSelectOp,
+    ArrayLiteralItem, AssignStatement, CaseStatement, CombDeclaration, Expression, Factor,
+    ForBound, ForRange, ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall,
+    SystemFunctionInput, SystemFunctionKind, VarId, VarSelectOp,
 };
 use veryl_analyzer::value::{Value, byte_value_to_string};
 
@@ -188,12 +188,7 @@ fn eval_statement(
     match stmt {
         Statement::Assign(assign) => eval_assign(module, store, boundaries, assign, arena),
         Statement::If(if_stmt) => eval_if(module, store, boundaries, if_stmt, arena),
-        Statement::Case(case_stmt) => case_stmt
-            .lower_to_nested_if()
-            .iter()
-            .try_fold((store, boundaries), |(store, boundaries), stmt| {
-                eval_statement(module, store, boundaries, stmt, arena)
-            }),
+        Statement::Case(case_stmt) => eval_case(module, store, boundaries, case_stmt, arena),
         Statement::For(for_stmt) => eval_for(module, store, boundaries, for_stmt, arena),
         Statement::IfReset(ir) => Err(ParserError::illegal_context(
             "statement in always_comb",
@@ -230,6 +225,73 @@ fn eval_statement(
             None,
         )),
     }
+}
+
+fn eval_statements(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: BoundaryMap<VarId>,
+    statements: &[Statement],
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    statements
+        .iter()
+        .try_fold((store, boundaries), |(store, boundaries), stmt| {
+            eval_statement(module, store, boundaries, stmt, arena)
+        })
+}
+
+fn eval_case(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: BoundaryMap<VarId>,
+    case_stmt: &CaseStatement,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    fn eval_from_arm(
+        module: &Module,
+        store: SymbolicStore<VarId>,
+        boundaries: BoundaryMap<VarId>,
+        case_stmt: &CaseStatement,
+        arm_index: usize,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+        let Some(arm) = case_stmt.arms.get(arm_index) else {
+            return eval_statements(module, store, boundaries, &case_stmt.default, arena);
+        };
+
+        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
+        let ((cond_expr, cond_sources), cond_bounds) =
+            eval_expression(module, &store, &cond, arena, None)?;
+        let boundaries = merge_boundaries(boundaries, cond_bounds);
+
+        if let Some(cond_val) = constant_bool(arena, cond_expr) {
+            return if cond_val {
+                eval_statements(module, store, boundaries, &arm.body, arena)
+            } else {
+                eval_from_arm(module, store, boundaries, case_stmt, arm_index + 1, arena)
+            };
+        }
+
+        let (then_store, then_boundaries) =
+            eval_statements(module, store.clone(), boundaries.clone(), &arm.body, arena)?;
+        let (else_store, else_boundaries) =
+            eval_from_arm(module, store, boundaries, case_stmt, arm_index + 1, arena)?;
+
+        Ok((
+            merge_symbolic_stores(
+                module,
+                &then_store,
+                &else_store,
+                cond_expr,
+                &cond_sources,
+                arena,
+            )?,
+            merge_boundaries(then_boundaries, else_boundaries),
+        ))
+    }
+
+    eval_from_arm(module, store, boundaries, case_stmt, 0, arena)
 }
 
 fn bool_node(arena: &mut SLTNodeArena<VarId>, value: bool) -> NodeId {
@@ -433,12 +495,7 @@ fn eval_loop_statement(
                 apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
             }
         }
-        Statement::Case(case_stmt) => case_stmt
-            .lower_to_nested_if()
-            .iter()
-            .try_fold(state, |state, stmt| {
-                eval_loop_statement(module, state, stmt, arena)
-            }),
+        Statement::Case(case_stmt) => eval_loop_case(module, state, case_stmt, arena),
         Statement::For(for_stmt) => {
             let guard_state = state.clone();
             let (next_store, next_boundaries) =
@@ -484,6 +541,98 @@ fn eval_loop_statement(
             None,
         )),
     }
+}
+
+fn eval_loop_case(
+    module: &Module,
+    state: LoopControlState,
+    case_stmt: &CaseStatement,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<LoopControlState, ParserError> {
+    fn eval_from_arm(
+        module: &Module,
+        state: LoopControlState,
+        case_stmt: &CaseStatement,
+        arm_index: usize,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<LoopControlState, ParserError> {
+        let Some(arm) = case_stmt.arms.get(arm_index) else {
+            return case_stmt
+                .default
+                .iter()
+                .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena));
+        };
+
+        let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+            module,
+            &state.store,
+            &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+            arena,
+            None,
+        )?;
+        let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+
+        if let Some(cond_val) = constant_bool(arena, cond_expr) {
+            let state = LoopControlState {
+                boundaries,
+                ..state
+            };
+            return if cond_val {
+                arm.body
+                    .iter()
+                    .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena))
+            } else {
+                eval_from_arm(module, state, case_stmt, arm_index + 1, arena)
+            };
+        }
+
+        let then_state = arm.body.iter().try_fold(
+            LoopControlState {
+                store: state.store.clone(),
+                boundaries: boundaries.clone(),
+                continue_expr: state.continue_expr,
+                continue_sources: state.continue_sources.clone(),
+            },
+            |s, step| eval_loop_statement(module, s, step, arena),
+        )?;
+        let else_state = eval_from_arm(
+            module,
+            LoopControlState {
+                store: state.store,
+                boundaries,
+                continue_expr: state.continue_expr,
+                continue_sources: state.continue_sources,
+            },
+            case_stmt,
+            arm_index + 1,
+            arena,
+        )?;
+
+        let mut merged_sources = cond_sources;
+        merged_sources.extend(then_state.continue_sources);
+        merged_sources.extend(else_state.continue_sources);
+
+        Ok(LoopControlState {
+            store: merge_symbolic_stores(
+                module,
+                &then_state.store,
+                &else_state.store,
+                cond_expr,
+                &merged_sources,
+                arena,
+            )?,
+            boundaries: merge_boundaries(then_state.boundaries, else_state.boundaries),
+            continue_expr: merge_control_expr(
+                cond_expr,
+                then_state.continue_expr,
+                else_state.continue_expr,
+                arena,
+            ),
+            continue_sources: merged_sources,
+        })
+    }
+
+    eval_from_arm(module, state, case_stmt, 0, arena)
 }
 
 fn eval_loop_if(

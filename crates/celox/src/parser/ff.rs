@@ -9,6 +9,7 @@ use crate::{
     parser::{
         BuildConfig, LoweringPhase, ParserError,
         bitaccess::{eval_constexpr, get_access_width},
+        case::case_arm_condition_expr,
     },
 };
 use bit_set::BitSet;
@@ -16,9 +17,9 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
 
 use veryl_analyzer::ir::{
-    AssertKind, Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange, ForStatement,
-    IfResetStatement, IfStatement, Module, Op, Statement, SystemFunctionCall, SystemFunctionInput,
-    SystemFunctionKind, TypeKind, ValueVariant, VarId,
+    AssertKind, CaseStatement, Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange,
+    ForStatement, IfResetStatement, IfStatement, Module, Op, Statement, SystemFunctionCall,
+    SystemFunctionInput, SystemFunctionKind, TypeKind, ValueVariant, VarId,
 };
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
@@ -563,6 +564,120 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    fn parse_case_statement<A>(
+        &mut self,
+        stmt: &CaseStatement,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<ControlFlow, ParserError> {
+        self.parse_case_arm(stmt, 0, targets, domain, convert, sources, ir_builder)
+    }
+
+    fn parse_case_arm<A>(
+        &mut self,
+        stmt: &CaseStatement,
+        arm_index: usize,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<ControlFlow, ParserError> {
+        let Some(arm) = stmt.arms.get(arm_index) else {
+            return self.parse_statement_list(
+                &stmt.default,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            );
+        };
+
+        let cond = case_arm_condition_expr(&stmt.case_target, &arm.patterns);
+        if let Some(const_val) = self.get_constant_value(&cond) {
+            return if const_val != 0 {
+                self.parse_statement_list(&arm.body, targets, domain, convert, sources, ir_builder)
+            } else {
+                self.parse_case_arm(
+                    stmt,
+                    arm_index + 1,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )
+            };
+        }
+
+        self.parse_expression(&cond, targets, domain, convert, sources, ir_builder, None)?;
+        let cond_reg = self.stack.pop_back().unwrap();
+
+        let then_bb = ir_builder.new_block();
+        let else_bb = ir_builder.new_block();
+        let merge_bb = ir_builder.new_block();
+
+        let pre_case_defined = self.defined_ranges.clone();
+        let pre_case_dynamic = self.dynamic_defined_vars.clone();
+
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: cond_reg,
+            true_block: (then_bb, vec![]),
+            false_block: (else_bb, vec![]),
+        });
+
+        ir_builder.switch_to_block(then_bb);
+        let then_flow =
+            self.parse_statement_list(&arm.body, targets, domain, convert, sources, ir_builder)?;
+        let then_defined = std::mem::replace(&mut self.defined_ranges, pre_case_defined.clone());
+        let then_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, pre_case_dynamic);
+        if matches!(then_flow, ControlFlow::Continue) {
+            ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        }
+
+        ir_builder.switch_to_block(else_bb);
+        let else_flow = self.parse_case_arm(
+            stmt,
+            arm_index + 1,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        let else_defined = std::mem::take(&mut self.defined_ranges);
+        let else_dynamic = std::mem::take(&mut self.dynamic_defined_vars);
+        if matches!(else_flow, ControlFlow::Continue) {
+            ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
+        }
+
+        match (then_flow, else_flow) {
+            (ControlFlow::Continue, ControlFlow::Continue) => {
+                self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
+                self.dynamic_defined_vars = self.intersect_dynamic_vars(then_dynamic, else_dynamic);
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Continue, ControlFlow::Break) => {
+                self.defined_ranges = then_defined;
+                self.dynamic_defined_vars = then_dynamic;
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Break, ControlFlow::Continue) => {
+                self.defined_ranges = else_defined;
+                self.dynamic_defined_vars = else_dynamic;
+                ir_builder.switch_to_block(merge_bb);
+                Ok(ControlFlow::Continue)
+            }
+            (ControlFlow::Break, ControlFlow::Break) => Ok(ControlFlow::Break),
+        }
+    }
+
     /// Helper to take intersection of dynamic defined variables
     fn intersect_dynamic_vars(
         &self,
@@ -617,14 +732,8 @@ impl<'a> FfParser<'a> {
                     .parse_if_statement(stmt, targets, domain, convert, sources, ir_builder);
             }
             Statement::Case(stmt) => {
-                for lowered in stmt.lower_to_nested_if() {
-                    if self
-                        .parse_statement(&lowered, targets, domain, convert, sources, ir_builder)?
-                        == ControlFlow::Break
-                    {
-                        return Ok(ControlFlow::Break);
-                    }
-                }
+                return self
+                    .parse_case_statement(stmt, targets, domain, convert, sources, ir_builder);
             }
             Statement::IfReset(stmt) => {
                 return self

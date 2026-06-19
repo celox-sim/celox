@@ -228,4 +228,120 @@ o2 = 8'h00;
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(o), 0xFFu8.into());
     }
+
+    fn test_case_in_comb_function_return(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    sel: input logic<2>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<2>,
+    ) -> logic<8> {
+        case x {
+            2'd0: return 8'h11;
+            2'd1: return 8'h22;
+            default: return 8'h33;
+        }
+    }
+
+    always_comb {
+        q = f(sel);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let sel = sim.signal("sel");
+        let q = sim.signal("q");
+
+        sim.modify(|io| io.set(sel, 0u8)).unwrap();
+        assert_eq!(sim.get(q), 0x11u8.into());
+
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        assert_eq!(sim.get(q), 0x22u8.into());
+
+        sim.modify(|io| io.set(sel, 3u8)).unwrap();
+        assert_eq!(sim.get(q), 0x33u8.into());
+    }
+
+    fn test_case_in_comb_function_output_argument(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    sel: input logic<2>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<2>,
+        y: output logic<8>,
+    ) {
+        case x {
+            2'd0: y = 8'h44;
+            2'd1: y = 8'h55;
+            default: y = 8'h66;
+        }
+    }
+
+    always_comb {
+        f(sel, q);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let sel = sim.signal("sel");
+        let q = sim.signal("q");
+
+        sim.modify(|io| io.set(sel, 0u8)).unwrap();
+        assert_eq!(sim.get(q), 0x44u8.into());
+
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        assert_eq!(sim.get(q), 0x55u8.into());
+
+        sim.modify(|io| io.set(sel, 2u8)).unwrap();
+        assert_eq!(sim.get(q), 0x66u8.into());
+    }
+
+    fn test_case_break_inside_comb_function_for(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<4>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 8'd0;
+        for i in 0..4 {
+            case x[i] {
+                1'b1: {
+                    tmp = i + 8'd1;
+                    break;
+                }
+                default: {}
+            }
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        sim.modify(|io| io.set(d, 0b0000u8)).unwrap();
+        assert_eq!(sim.get(q), 0u8.into());
+
+        sim.modify(|io| io.set(d, 0b1010u8)).unwrap();
+        assert_eq!(sim.get(q), 2u8.into());
+    }
 }
