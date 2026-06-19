@@ -1311,7 +1311,8 @@ pub fn emit_chained_eus(
         let (mut merged, boundaries) = crate::ir::merge_sir_eus(units);
         // Cross-EU SIR optimization
         crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
-            &mut merged, &boundaries,
+            &mut merged,
+            &boundaries,
         );
         crate::optimizer::coalescing::commit_ops::inline_commit_forwarding(&mut merged);
         (merged, boundaries)
