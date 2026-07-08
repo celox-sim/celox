@@ -3,12 +3,17 @@
 //! Values wider than 64 bits are represented as `Vec<Value>` where each element
 //! is an `i64` chunk in little-endian order (chunk 0 = LSB).
 
-use cranelift::prelude::*;
+use cranelift::{codegen::ir::MemFlagsData as MemFlags, prelude::*};
 use cranelift_frontend::FunctionBuilder;
 
 use crate::ir::{BinaryOp, UnaryOp};
 
 use super::translator::core::{cast_type, get_chunk_as_i64};
+
+fn isub_from_imm(builder: &mut FunctionBuilder, imm: i64, rhs: Value) -> Value {
+    let lhs = builder.ins().iconst(types::I64, imm);
+    builder.ins().isub(lhs, rhs)
+}
 
 // ─────────────────────────────────────────────────────────
 //  Wide Binary Operations
@@ -268,7 +273,7 @@ pub(crate) fn emit_wide_shift(
             let next = builder.ins().iadd_imm(base, 1);
             (base, next)
         } else {
-            let base = builder.ins().irsub_imm(word_offset_val, i as i64);
+            let base = isub_from_imm(builder, i as i64, word_offset_val);
             let prev = builder.ins().iadd_imm(base, -1);
             (base, prev)
         };
@@ -498,7 +503,7 @@ pub fn emit_wide_shift_mem(
             let next = builder.ins().iadd_imm(base, 1);
             (base, next)
         } else {
-            let base = builder.ins().irsub_imm(word_offset_val, i as i64);
+            let base = isub_from_imm(builder, i as i64, word_offset_val);
             let prev = builder.ins().iadd_imm(base, -1);
             (base, prev)
         };
