@@ -30,19 +30,26 @@ toolchain.
 
 ## Current Status
 
-The first native-JIT improvement targets `linear_sec` bit placement:
+The first native-JIT improvement targets `linear_sec` bit placement and scalar
+testbench-style I/O:
 
 - MIR has BMI2 `pdep` in addition to the existing `pext` and `popcnt`.
 - The optimizer folds chunked bit scatter/gather OR chains into `pdep`/`pext`.
   These folds are enabled only when the host CPU reports BMI2 support.
+- Dynamic bit-toggle insertions are folded to `xor` when the source shape is
+  provably a two-state single-bit toggle.
+- Native scalar `set`/`get_as` uses direct unaligned scalar access for matching
+  widths.
 - `eval_comb_checked` bypasses observer/runtime-event bookkeeping when a
   program has no such sites.
 
-On the local x86-64 benchmark slice, `dse_eval_linear_sec_p6_x1000000` improved
-from about 49 ms to about 12 ms. The raw pointer/I/O isolation case improved
-from about 58 ms to about 23 ms. Verilator's matching harness measured about
-15 ms on the same run. Default non-DSE simulation still preserves more internal
-state than the Verilator harness and remains a separate target.
+On the local x86-64 benchmark slice, the generated DSE `linear_sec` comb kernel
+measured about 6.9 ns/eval, while Verilator's matching `linear_sec` harness
+measured about 14.6 ns/eval. The scalar `set`/`get_as` benchmark measured about
+8.9 ms per million iterations, so the generated code itself is past the 2x
+target and the public scalar API path remains about 1.6x faster. Default non-DSE
+simulation still preserves more internal state than the Verilator harness and
+remains a separate target.
 
 ## Goals
 
