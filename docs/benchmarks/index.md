@@ -9,6 +9,7 @@ Celox includes benchmark suites for the Rust core, the TypeScript runtime, and V
 This page shows only the primary graphs: one main sequential workload, one main testbench workload, and a small set of representative stdlib workloads. The stdlib tab is organized by optimization character, not by catalog completeness: general combinational optimization, combinational workloads that are sensitive to liveness and DSE, larger structured datapaths, and sequential/runtime-dominated modules. Where relevant, Celox-specific variants such as DSE remain visible as separate series on the same chart.
 For the full benchmark matrix and raw data, use the [external dashboard](https://celox-sim.github.io/celox/dev/bench/).
 For more compiler-facing graphs, use the [diagnostic page](/benchmarks/diagnostic).
+For a long-running external Veryl project benchmark, see the [Heliodor macro benchmark](/benchmarks/heliodor).
 
 ## What is Measured
 
@@ -137,6 +138,14 @@ bash scripts/run-verilator-bench.sh
 ```
 
 Requires `verilator` and a C++ toolchain.
+
+### Heliodor
+
+```bash
+bash scripts/run-heliodor-bench.sh run
+```
+
+Requires network access for the first Heliodor checkout. Veryl runners also require `veryl`; the Celox runner is built from this workspace.
 
 ## CI Environment
 
