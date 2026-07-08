@@ -1,8 +1,13 @@
-use cranelift::prelude::*;
+use cranelift::{codegen::ir::MemFlagsData as MemFlags, prelude::*};
 
 use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type};
 use super::{SIRTranslator, TranslationState, get_byte_size};
 use crate::ir::{RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION, TriggerIdWithKind};
+
+fn isub_from_imm(state: &mut TranslationState, imm: i64, rhs: Value) -> Value {
+    let lhs = state.builder.ins().iconst(types::I64, imm);
+    state.builder.ins().isub(lhs, rhs)
+}
 
 impl SIRTranslator {
     pub(super) fn translate_load_inst(
@@ -1099,7 +1104,7 @@ impl SIRTranslator {
         d_phys_width: usize,
     ) -> Vec<Value> {
         let bit_shift_i64 = cast_type(state.builder, bit_shift, types::I64);
-        let inv_bit_shift = state.builder.ins().irsub_imm(bit_shift_i64, 64);
+        let inv_bit_shift = isub_from_imm(state, 64, bit_shift_i64);
         let has_bit_shift = state.builder.ins().icmp_imm(IntCC::NotEqual, bit_shift, 0);
 
         let num_phys_chunks = d_phys_width.div_ceil(64);
@@ -1174,7 +1179,7 @@ impl SIRTranslator {
         chunks: &[Value],
     ) {
         let bit_shift_i64 = cast_type(state.builder, bit_shift, types::I64);
-        let inv_bit_shift = state.builder.ins().irsub_imm(bit_shift_i64, 64);
+        let inv_bit_shift = isub_from_imm(state, 64, bit_shift_i64);
         let has_bit_shift = state
             .builder
             .ins()

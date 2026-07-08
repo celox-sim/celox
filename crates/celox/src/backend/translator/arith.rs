@@ -1,4 +1,4 @@
-use cranelift::prelude::*;
+use cranelift::{codegen::ir::MemFlagsData as MemFlags, prelude::*};
 use cranelift_frontend::FunctionBuilder;
 
 use super::core::{

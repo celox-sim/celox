@@ -1,4 +1,6 @@
-use cranelift::codegen::ir::{BlockArg, FuncRef, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{
+    BlockArg, FuncRef, MemFlagsData as MemFlags, StackSlotData, StackSlotKind,
+};
 use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
 
