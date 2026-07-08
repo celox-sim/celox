@@ -167,6 +167,21 @@ build_celox_runner() {
         --example run_veryl_project_test --release >"$log" 2>&1
 }
 
+test_source_files() {
+    local test="$1"
+    local tb_file
+    tb_file="$(rg -l "^\\s*#\\[test\\(${test}\\)\\]" "$HELIODOR_DIR/tb" --glob '*.veryl' | head -n 1)"
+    if [[ -z "$tb_file" ]]; then
+        echo "error: could not find #[test($test)] under $HELIODOR_DIR/tb" >&2
+        return 1
+    fi
+    (
+        cd "$HELIODOR_DIR"
+        find src -type f -name '*.veryl' | sort
+        realpath --relative-to="$HELIODOR_DIR" "$tb_file"
+    )
+}
+
 fallback_timeout_sec() {
     local test="$1"
     case "$test" in
@@ -232,6 +247,12 @@ run_one() {
     local runner="$1"
     local test="$2"
     local stamp log status start end elapsed ignored_flag timeout_sec
+    local -a source_files celox_args
+    mapfile -t source_files < <(test_source_files "$test")
+    celox_args=()
+    for source_file in "${source_files[@]}"; do
+        celox_args+=(--source-file "$source_file")
+    done
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     log="$HELIODOR_RESULTS_DIR/${stamp}_${runner}_${test}.log"
     timeout_sec="$(timeout_sec_for "$runner" "$test")"
@@ -247,22 +268,25 @@ run_one() {
         celox)
             run_in_heliodor "$timeout_sec" "$log" \
                 "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
-                --opt-level "$CELOX_OPT_LEVEL"
+                "${celox_args[@]}" --opt-level "$CELOX_OPT_LEVEL"
             status="$?"
             ;;
         veryl-cc)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend cc
+                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend cc \
+                "${source_files[@]}"
             status="$?"
             ;;
         veryl-cranelift)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend cranelift
+                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend cranelift \
+                "${source_files[@]}"
             status="$?"
             ;;
         veryl-interpret)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend interpret
+                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend interpret \
+                "${source_files[@]}"
             status="$?"
             ;;
         *)
