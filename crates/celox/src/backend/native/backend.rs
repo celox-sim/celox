@@ -413,7 +413,9 @@ impl super::super::SimBackend for NativeBackend {
                 return;
             }
 
-            std::ptr::write_bytes(base_ptr, 0, allocated_size);
+            if provided_size < allocated_size {
+                std::ptr::write_bytes(base_ptr, 0, allocated_size);
+            }
             std::ptr::write_unaligned(base_ptr as *mut T, val);
 
             if clear_mask {
@@ -472,11 +474,16 @@ impl super::super::SimBackend for NativeBackend {
 
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
         let bs = get_byte_size(signal.width);
+        let provided_size = std::mem::size_of::<T>();
+        let ptr = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
+        if provided_size <= bs {
+            return unsafe { std::ptr::read_unaligned(ptr as *const T) };
+        }
+
         let bytes = self.mem_bytes();
         let mut val = T::default();
-        let val_bytes = unsafe {
-            std::slice::from_raw_parts_mut(&mut val as *mut T as *mut u8, std::mem::size_of::<T>())
-        };
+        let val_bytes =
+            unsafe { std::slice::from_raw_parts_mut(&mut val as *mut T as *mut u8, provided_size) };
         let copy_len = val_bytes.len().min(bs);
         val_bytes[..copy_len].copy_from_slice(&bytes[signal.offset..signal.offset + copy_len]);
         val
