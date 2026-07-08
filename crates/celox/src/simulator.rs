@@ -666,6 +666,13 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
+        if self.program.comb_observers.is_empty() && self.program.runtime_event_sites.is_empty() {
+            return self
+                .backend
+                .eval_comb()
+                .map_err(|e| self.decorate_runtime_error(e));
+        }
+
         let before = self.snapshot_all_comb_observers();
         let active_before: Vec<bool> = before
             .iter()

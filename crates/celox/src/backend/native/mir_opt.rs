@@ -26,8 +26,11 @@ pub fn optimize(func: &mut MFunction) {
         dead_code_eliminate(func);
         sink_loads(func);
         split_live_ranges(func);
+        fold_deposit_chain_to_pdep(func);
+        fold_extract_chain_to_pext(func);
         fold_add_chain_to_popcnt(func);
         fold_xor_chain_to_pext(func);
+        dead_code_eliminate(func);
     } else {
         // Low-pressure: lightweight but complete pipeline
         constant_fold(func);
@@ -37,6 +40,8 @@ pub fn optimize(func: &mut MFunction) {
         eliminate_redundant_local_stores(func);
         algebraic_simplify(func);
         redundant_mask_eliminate(func);
+        fold_deposit_chain_to_pdep(func);
+        fold_extract_chain_to_pext(func);
         fold_add_chain_to_popcnt(func);
         fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
@@ -377,6 +382,7 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
             _ => None,
         },
         MInst::Pext { .. } => Some(64), // conservative
+        MInst::Pdep { .. } => Some(64), // conservative
         _ => None,
     }
 }
@@ -422,6 +428,7 @@ const GVN_NEG: u8 = 16;
 const GVN_POPCNT: u8 = 17;
 const GVN_CMP: u8 = 18;
 const GVN_PEXT: u8 = 19;
+const GVN_PDEP: u8 = 20;
 
 fn gvn_is_commutative(op: u8) -> bool {
     matches!(op, GVN_ADD | GVN_MUL | GVN_AND | GVN_OR | GVN_XOR)
@@ -447,6 +454,7 @@ fn gvn_key(inst: &MInst) -> Option<GvnKey> {
         MInst::Neg { src, .. } => Some(GvnKey::Unary(GVN_NEG, *src)),
         MInst::Popcnt { src, .. } => Some(GvnKey::Unary(GVN_POPCNT, *src)),
         MInst::Pext { src, mask, .. } => Some(GvnKey::BinRR(GVN_PEXT, *src, *mask)),
+        MInst::Pdep { src, mask, .. } => Some(GvnKey::BinRR(GVN_PDEP, *src, *mask)),
         MInst::Cmp { lhs, rhs, kind, .. } => Some(GvnKey::Cmp(GVN_CMP, *lhs, *rhs, *kind as u8)),
         MInst::CmpImm { lhs, imm, kind, .. } => {
             Some(GvnKey::CmpI(GVN_CMP, *lhs, *imm, *kind as u8))
@@ -1638,6 +1646,7 @@ fn compute_value_widths(func: &mut MFunction) {
                     (Some(t), Some(f)) => Some(t.max(f)),
                     _ => None,
                 },
+                MInst::Pext { .. } | MInst::Pdep { .. } => Some(64),
                 _ => None,
             };
 
@@ -1659,6 +1668,386 @@ fn get_w(widths: &[Option<u8>], vreg: VReg) -> Option<u8> {
 // ────────────────────────────────────────────────────────────────
 // Existing passes
 // ────────────────────────────────────────────────────────────────
+
+/// Fold a bit-deposit OR chain into BMI2 PDEP.
+///
+/// Pattern:
+///   `((src[0] << d0) | (src[1] << d1) | ...)`
+/// where source bits are the contiguous low bits `0..N` and destination bits
+/// are strictly increasing. This is exactly `pdep(src, mask)`.
+fn fold_deposit_chain_to_pdep(func: &mut MFunction) {
+    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let Some(d) = inst.def() {
+                defs.insert(d, inst.clone());
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
+
+        for (inst_idx, inst) in block.insts.iter().enumerate() {
+            let Some(dst) = inst.def() else { continue };
+            if !matches!(inst, MInst::Or { .. } | MInst::OrImm { .. }) {
+                continue;
+            }
+
+            let mut chunks: Vec<(u8, u8, u8)> = Vec::new();
+            let mut source_reg: Option<VReg> = None;
+            if !collect_deposit_chain_chunks(dst, &defs, &mut chunks, &mut source_reg) {
+                continue;
+            }
+
+            let Some(src) = source_reg else { continue };
+            let total_width: usize = chunks.iter().map(|(_, width, _)| *width as usize).sum();
+            if total_width < 8 || total_width > 64 {
+                continue;
+            }
+            chunks.sort_unstable();
+
+            let mut mask_val = 0u64;
+            let mut expected_src_lsb = 0u8;
+            let mut prev_dst_end = 0u8;
+            let mut valid = true;
+            for &(src_lsb, width, dst_lsb) in &chunks {
+                if width == 0
+                    || src_lsb != expected_src_lsb
+                    || src_lsb as u16 + width as u16 > 64
+                    || dst_lsb as u16 + width as u16 > 64
+                    || dst_lsb < prev_dst_end
+                {
+                    valid = false;
+                    break;
+                }
+                for bit in dst_lsb..dst_lsb + width {
+                    mask_val |= 1u64 << bit;
+                }
+                expected_src_lsb += width;
+                prev_dst_end = dst_lsb + width;
+            }
+            if !valid || mask_val == 0 {
+                continue;
+            }
+
+            let new_insts = if mask_width(mask_val) == Some(total_width) {
+                if mask_val == u64::MAX {
+                    vec![MInst::Mov { dst, src }]
+                } else if u32::try_from(mask_val).is_ok() {
+                    vec![MInst::AndImm {
+                        dst,
+                        src,
+                        imm: mask_val,
+                    }]
+                } else {
+                    let mask_vreg = func.vregs.alloc();
+                    while func.spill_descs.len() <= mask_vreg.0 as usize {
+                        func.spill_descs.push(SpillDesc::remat(mask_val));
+                    }
+                    vec![
+                        MInst::LoadImm {
+                            dst: mask_vreg,
+                            value: mask_val,
+                        },
+                        MInst::And {
+                            dst,
+                            lhs: src,
+                            rhs: mask_vreg,
+                        },
+                    ]
+                }
+            } else {
+                let mask_vreg = func.vregs.alloc();
+                while func.spill_descs.len() <= mask_vreg.0 as usize {
+                    func.spill_descs.push(SpillDesc::remat(mask_val));
+                }
+                vec![
+                    MInst::LoadImm {
+                        dst: mask_vreg,
+                        value: mask_val,
+                    },
+                    MInst::Pdep {
+                        dst,
+                        src,
+                        mask: mask_vreg,
+                    },
+                ]
+            };
+
+            replacements.push((inst_idx, new_insts));
+        }
+
+        for (idx, new_insts) in replacements.into_iter().rev() {
+            block.insts.splice(idx..=idx, new_insts);
+        }
+    }
+}
+
+fn collect_deposit_chain_chunks(
+    reg: VReg,
+    defs: &HashMap<VReg, MInst>,
+    chunks: &mut Vec<(u8, u8, u8)>,
+    source_reg: &mut Option<VReg>,
+) -> bool {
+    let Some(def) = defs.get(&reg) else {
+        return false;
+    };
+
+    match def {
+        MInst::Or { lhs, rhs, .. } => {
+            collect_deposit_chain_chunks(*lhs, defs, chunks, source_reg)
+                && collect_deposit_chain_chunks(*rhs, defs, chunks, source_reg)
+        }
+        MInst::OrImm { src, imm, .. } if *imm == 0 => {
+            collect_deposit_chain_chunks(*src, defs, chunks, source_reg)
+        }
+        MInst::Mov { src, .. } => collect_deposit_chain_chunks(*src, defs, chunks, source_reg),
+        _ => collect_deposit_term(reg, defs, chunks, source_reg),
+    }
+}
+
+fn collect_deposit_term(
+    reg: VReg,
+    defs: &HashMap<VReg, MInst>,
+    chunks: &mut Vec<(u8, u8, u8)>,
+    source_reg: &mut Option<VReg>,
+) -> bool {
+    let Some((src, src_lsb, width, dst_lsb)) = trace_deposit_term(reg, defs) else {
+        return false;
+    };
+    match source_reg {
+        Some(existing) if *existing != src => return false,
+        None => *source_reg = Some(src),
+        _ => {}
+    }
+    chunks.push((src_lsb, width, dst_lsb));
+    true
+}
+
+fn trace_deposit_term(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8, u8)> {
+    trace_deposit_term_inner(reg, defs)
+        .filter(|(_, _, width, dst_lsb)| *width > 0 && (*dst_lsb as u16 + *width as u16) <= 64)
+}
+
+fn trace_deposit_term_inner(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8, u8)> {
+    let Some(def) = defs.get(&reg) else {
+        return Some((reg, 0, 64, 0));
+    };
+    match def {
+        MInst::Mov { src, .. } => trace_deposit_term_inner(*src, defs),
+        MInst::ShlImm { src, imm, .. } if *imm < 64 => {
+            let (base, src_lsb, width) = trace_value_window(*src, defs)?;
+            Some((base, src_lsb, width.min(64 - *imm), *imm))
+        }
+        MInst::AndImm { src, imm, .. } => {
+            let (base, src_lsb, width, dst_lsb) = trace_deposit_term_inner(*src, defs)?;
+            let mask_w = mask_width(*imm)? as u8;
+            Some((
+                base,
+                src_lsb,
+                width.min(mask_w.saturating_sub(dst_lsb)),
+                dst_lsb,
+            ))
+        }
+        MInst::And { lhs, rhs, .. } => {
+            if let Some(mask) = load_imm_value(*lhs, defs) {
+                let (base, src_lsb, width, dst_lsb) = trace_deposit_term_inner(*rhs, defs)?;
+                let mask_w = mask_width(mask)? as u8;
+                Some((
+                    base,
+                    src_lsb,
+                    width.min(mask_w.saturating_sub(dst_lsb)),
+                    dst_lsb,
+                ))
+            } else if let Some(mask) = load_imm_value(*rhs, defs) {
+                let (base, src_lsb, width, dst_lsb) = trace_deposit_term_inner(*lhs, defs)?;
+                let mask_w = mask_width(mask)? as u8;
+                Some((
+                    base,
+                    src_lsb,
+                    width.min(mask_w.saturating_sub(dst_lsb)),
+                    dst_lsb,
+                ))
+            } else {
+                None
+            }
+        }
+        _ => {
+            let (base, src_lsb, width) = trace_value_window(reg, defs)?;
+            Some((base, src_lsb, width, 0))
+        }
+    }
+}
+
+fn trace_value_window(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8)> {
+    let Some(def) = defs.get(&reg) else {
+        return Some((reg, 0, 64));
+    };
+    match def {
+        MInst::Mov { src, .. } => trace_value_window(*src, defs),
+        MInst::ShrImm { src, imm, .. } => {
+            let (base, lsb, width) = trace_value_window(*src, defs).unwrap_or((*src, 0, 64));
+            let new_lsb = lsb.checked_add(*imm)?;
+            Some((base, new_lsb, width.saturating_sub(*imm)))
+        }
+        MInst::AndImm { src, imm, .. } => {
+            let mask_w = mask_width(*imm)? as u8;
+            if let Some((base, lsb, width)) = trace_value_window(*src, defs) {
+                Some((base, lsb, width.min(mask_w)))
+            } else {
+                Some((reg, 0, mask_w))
+            }
+        }
+        MInst::And { lhs, rhs, .. } => {
+            if let Some(mask) = load_imm_value(*lhs, defs) {
+                let mask_w = mask_width(mask)? as u8;
+                if let Some((base, lsb, width)) = trace_value_window(*rhs, defs) {
+                    Some((base, lsb, width.min(mask_w)))
+                } else {
+                    Some((reg, 0, mask_w))
+                }
+            } else if let Some(mask) = load_imm_value(*rhs, defs) {
+                let mask_w = mask_width(mask)? as u8;
+                if let Some((base, lsb, width)) = trace_value_window(*lhs, defs) {
+                    Some((base, lsb, width.min(mask_w)))
+                } else {
+                    Some((reg, 0, mask_w))
+                }
+            } else {
+                None
+            }
+        }
+        MInst::Load { .. } | MInst::LoadIndexed { .. } | MInst::LoadPtr { .. } => {
+            Some((reg, 0, 64))
+        }
+        _ => None,
+    }
+}
+
+fn load_imm_value(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<u64> {
+    match defs.get(&reg)? {
+        MInst::LoadImm { value, .. } => Some(*value),
+        MInst::Mov { src, .. } => load_imm_value(*src, defs),
+        _ => None,
+    }
+}
+
+/// Fold a bit-extract OR chain into BMI2 PEXT.
+///
+/// Pattern:
+///   `((src >> s0) & lowmask(w0)) << 0
+///    | ((src >> s1) & lowmask(w1)) << w0 | ...`
+/// where destination chunks are contiguous low bits and source chunks are
+/// strictly increasing. This is `pext(src, mask)`.
+fn fold_extract_chain_to_pext(func: &mut MFunction) {
+    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let Some(d) = inst.def() {
+                defs.insert(d, inst.clone());
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
+
+        for (inst_idx, inst) in block.insts.iter().enumerate() {
+            let Some(dst) = inst.def() else { continue };
+            if !matches!(inst, MInst::Or { .. } | MInst::OrImm { .. }) {
+                continue;
+            }
+
+            let mut chunks: Vec<(u8, u8, u8)> = Vec::new();
+            let mut source_reg: Option<VReg> = None;
+            if !collect_deposit_chain_chunks(dst, &defs, &mut chunks, &mut source_reg) {
+                continue;
+            }
+
+            let Some(src) = source_reg else { continue };
+            let total_width: usize = chunks.iter().map(|(_, width, _)| *width as usize).sum();
+            if total_width < 8 || total_width > 64 {
+                continue;
+            }
+            chunks.sort_unstable_by_key(|(src_lsb, _, _)| *src_lsb);
+
+            let mut mask_val = 0u64;
+            let mut expected_dst_lsb = 0u8;
+            let mut prev_src_end = 0u8;
+            let mut valid = true;
+            for &(src_lsb, width, dst_lsb) in &chunks {
+                if width == 0
+                    || dst_lsb != expected_dst_lsb
+                    || src_lsb as u16 + width as u16 > 64
+                    || dst_lsb as u16 + width as u16 > 64
+                    || src_lsb < prev_src_end
+                {
+                    valid = false;
+                    break;
+                }
+                for bit in src_lsb..src_lsb + width {
+                    mask_val |= 1u64 << bit;
+                }
+                expected_dst_lsb += width;
+                prev_src_end = src_lsb + width;
+            }
+            if !valid || mask_val == 0 {
+                continue;
+            }
+
+            let new_insts = if mask_width(mask_val) == Some(total_width) {
+                if mask_val == u64::MAX {
+                    vec![MInst::Mov { dst, src }]
+                } else if u32::try_from(mask_val).is_ok() {
+                    vec![MInst::AndImm {
+                        dst,
+                        src,
+                        imm: mask_val,
+                    }]
+                } else {
+                    let mask_vreg = func.vregs.alloc();
+                    while func.spill_descs.len() <= mask_vreg.0 as usize {
+                        func.spill_descs.push(SpillDesc::remat(mask_val));
+                    }
+                    vec![
+                        MInst::LoadImm {
+                            dst: mask_vreg,
+                            value: mask_val,
+                        },
+                        MInst::And {
+                            dst,
+                            lhs: src,
+                            rhs: mask_vreg,
+                        },
+                    ]
+                }
+            } else {
+                let mask_vreg = func.vregs.alloc();
+                while func.spill_descs.len() <= mask_vreg.0 as usize {
+                    func.spill_descs.push(SpillDesc::remat(mask_val));
+                }
+                vec![
+                    MInst::LoadImm {
+                        dst: mask_vreg,
+                        value: mask_val,
+                    },
+                    MInst::Pext {
+                        dst,
+                        src,
+                        mask: mask_vreg,
+                    },
+                ]
+            };
+
+            replacements.push((inst_idx, new_insts));
+        }
+
+        for (idx, new_insts) in replacements.into_iter().rev() {
+            block.insts.splice(idx..=idx, new_insts);
+        }
+    }
+}
 
 /// Fold XOR chains of single-bit extractions from the same source into
 /// PEXT + POPCNT + AND 1.
@@ -2540,6 +2929,140 @@ mod tests {
                 src: _
             }
         )));
+    }
+
+    #[test]
+    fn folds_chunk_deposit_chain_to_pdep() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::AndImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0xf,
+                },
+                MInst::ShlImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 2,
+                },
+                MInst::ShrImm {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 4,
+                },
+                MInst::AndImm {
+                    dst: VReg(4),
+                    src: VReg(3),
+                    imm: 0xf,
+                },
+                MInst::ShlImm {
+                    dst: VReg(5),
+                    src: VReg(4),
+                    imm: 8,
+                },
+                MInst::Or {
+                    dst: VReg(6),
+                    lhs: VReg(2),
+                    rhs: VReg(5),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(6),
+                    size: OpSize::S16,
+                },
+                MInst::Return,
+            ],
+            7,
+        );
+
+        optimize(&mut func);
+
+        let insts = &func.blocks[0].insts;
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Pdep {
+                    dst: VReg(6),
+                    src: VReg(0),
+                    ..
+                }
+            )),
+            "{insts:#?}"
+        );
+    }
+
+    #[test]
+    fn folds_chunk_extract_chain_to_pext() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::ShrImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 2,
+                },
+                MInst::AndImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 0xf,
+                },
+                MInst::ShrImm {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 8,
+                },
+                MInst::AndImm {
+                    dst: VReg(4),
+                    src: VReg(3),
+                    imm: 0xf,
+                },
+                MInst::ShlImm {
+                    dst: VReg(5),
+                    src: VReg(4),
+                    imm: 4,
+                },
+                MInst::Or {
+                    dst: VReg(6),
+                    lhs: VReg(2),
+                    rhs: VReg(5),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(6),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            7,
+        );
+
+        optimize(&mut func);
+
+        let insts = &func.blocks[0].insts;
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Pext {
+                    dst: VReg(6),
+                    src: VReg(0),
+                    ..
+                }
+            )),
+            "{insts:#?}"
+        );
     }
 
     #[test]

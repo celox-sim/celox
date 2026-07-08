@@ -956,6 +956,13 @@ fn emit_inst(
             asm.pext(d, s, m)?;
         }
 
+        MInst::Pdep { dst, src, mask } => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            let m = preg_to_reg64(resolve(assignment, *mask));
+            asm.pdep(d, s, m)?;
+        }
+
         MInst::Select {
             dst,
             cond,

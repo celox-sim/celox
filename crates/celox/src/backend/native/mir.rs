@@ -510,6 +510,9 @@ pub enum MInst {
     /// Extracts bits from src at positions where mask has 1s,
     /// and packs them contiguously starting at bit 0.
     Pext { dst: VReg, src: VReg, mask: VReg },
+    /// dst = pdep(src, mask) — parallel bit deposit (BMI2).
+    /// Deposits contiguous low bits from src into positions where mask has 1s.
+    Pdep { dst: VReg, src: VReg, mask: VReg },
 
     // ── Select (for div-by-zero guard, etc.) ───────────────────
     /// dst = cond ? true_val : false_val
@@ -643,6 +646,7 @@ impl fmt::Display for MInst {
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
             MInst::Popcnt { dst, src } => write!(f, "{dst} = popcnt {src}"),
             MInst::Pext { dst, src, mask } => write!(f, "{dst} = pext {src}, {mask}"),
+            MInst::Pdep { dst, src, mask } => write!(f, "{dst} = pdep {src}, {mask}"),
             MInst::Select {
                 dst,
                 cond,
@@ -736,6 +740,7 @@ impl MInst {
             | MInst::Neg { dst, .. }
             | MInst::Popcnt { dst, .. }
             | MInst::Pext { dst, .. }
+            | MInst::Pdep { dst, .. }
             | MInst::Select { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
@@ -783,7 +788,7 @@ impl MInst {
             | MInst::Cmp { lhs, rhs, .. }
             | MInst::UDiv { lhs, rhs, .. }
             | MInst::URem { lhs, rhs, .. } => Uses::two(*lhs, *rhs),
-            MInst::Pext { src, mask, .. } => Uses::two(*src, *mask),
+            MInst::Pext { src, mask, .. } | MInst::Pdep { src, mask, .. } => Uses::two(*src, *mask),
             MInst::AndImm { src, .. }
             | MInst::OrImm { src, .. }
             | MInst::ShrImm { src, .. }
@@ -926,7 +931,7 @@ impl MInst {
                     *lhs = new;
                 }
             }
-            MInst::Pext { src, mask, .. } => {
+            MInst::Pext { src, mask, .. } | MInst::Pdep { src, mask, .. } => {
                 if *src == old {
                     *src = new;
                 }
