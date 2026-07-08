@@ -140,6 +140,7 @@ export default defineConfig({
             { text: "Architecture", link: "/internals/architecture" },
             { text: "IR Reference", link: "/internals/ir-reference" },
             { text: "Optimizations", link: "/internals/optimizations" },
+            { text: "JIT Roadmap", link: "/internals/jit-roadmap" },
             { text: "4-State Simulation", link: "/internals/four-state" },
             {
               text: "Combinational Analysis",
