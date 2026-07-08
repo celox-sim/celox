@@ -495,19 +495,10 @@ impl<'a> ModuleParser<'a> {
         filename: &str,
         token: &veryl_parser::token_range::TokenRange,
     ) -> std::path::PathBuf {
-        let path = std::path::PathBuf::from(filename);
-        if path.is_absolute() {
-            return path;
-        }
-
         let source_path = token.beg.source.to_string();
-        if source_path.is_empty() {
-            return path;
-        }
-        std::path::Path::new(&source_path)
-            .parent()
-            .map(|parent| parent.join(&path))
-            .unwrap_or(path)
+        let source_path = (!source_path.is_empty()).then(|| std::path::Path::new(&source_path));
+        let cwd = std::env::current_dir().ok();
+        resolve_readmem_path_with_fallback(filename, source_path, cwd.as_deref())
     }
 
     fn parse_inner(mut self) -> Result<SimModule, ParserError> {
@@ -929,4 +920,75 @@ fn invalid_memory_word(token: &str) -> ParserError {
         format!("invalid data token {token}"),
         None,
     )
+}
+
+fn resolve_readmem_path_with_fallback(
+    filename: &str,
+    source_path: Option<&std::path::Path>,
+    cwd: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(filename);
+    if path.is_absolute() {
+        return path;
+    }
+
+    let source_relative = source_path
+        .and_then(std::path::Path::parent)
+        .map(|parent| parent.join(&path))
+        .unwrap_or_else(|| path.clone());
+    if source_relative.exists() {
+        return source_relative;
+    }
+
+    if let Some(cwd) = cwd {
+        let cwd_relative = cwd.join(&path);
+        if cwd_relative.exists() {
+            return cwd_relative;
+        }
+    }
+
+    source_relative
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_readmem_path_with_fallback;
+
+    #[test]
+    fn readmem_path_falls_back_to_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_dir = tmp.path().join("tb");
+        let data_dir = tmp.path().join("test/hex");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("boot.hex"), "00\n").unwrap();
+
+        let resolved = resolve_readmem_path_with_fallback(
+            "test/hex/boot.hex",
+            Some(&source_dir.join("testbench.veryl")),
+            Some(tmp.path()),
+        );
+
+        assert_eq!(resolved, data_dir.join("boot.hex"));
+    }
+
+    #[test]
+    fn readmem_path_prefers_source_relative_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_dir = tmp.path().join("tb");
+        let source_data_dir = source_dir.join("test/hex");
+        let root_data_dir = tmp.path().join("test/hex");
+        std::fs::create_dir_all(&source_data_dir).unwrap();
+        std::fs::create_dir_all(&root_data_dir).unwrap();
+        std::fs::write(source_data_dir.join("boot.hex"), "11\n").unwrap();
+        std::fs::write(root_data_dir.join("boot.hex"), "00\n").unwrap();
+
+        let resolved = resolve_readmem_path_with_fallback(
+            "test/hex/boot.hex",
+            Some(&source_dir.join("testbench.veryl")),
+            Some(tmp.path()),
+        );
+
+        assert_eq!(resolved, source_data_dir.join("boot.hex"));
+    }
 }
