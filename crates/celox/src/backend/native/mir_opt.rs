@@ -26,10 +26,12 @@ pub fn optimize(func: &mut MFunction) {
         dead_code_eliminate(func);
         sink_loads(func);
         split_live_ranges(func);
-        fold_deposit_chain_to_pdep(func);
-        fold_extract_chain_to_pext(func);
+        if bmi2_available() {
+            fold_deposit_chain_to_pdep(func);
+            fold_extract_chain_to_pext(func);
+            fold_xor_chain_to_pext(func);
+        }
         fold_add_chain_to_popcnt(func);
-        fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
     } else {
         // Low-pressure: lightweight but complete pipeline
@@ -40,10 +42,12 @@ pub fn optimize(func: &mut MFunction) {
         eliminate_redundant_local_stores(func);
         algebraic_simplify(func);
         redundant_mask_eliminate(func);
-        fold_deposit_chain_to_pdep(func);
-        fold_extract_chain_to_pext(func);
+        if bmi2_available() {
+            fold_deposit_chain_to_pdep(func);
+            fold_extract_chain_to_pext(func);
+            fold_xor_chain_to_pext(func);
+        }
         fold_add_chain_to_popcnt(func);
-        fold_xor_chain_to_pext(func);
         dead_code_eliminate(func);
         lower_to_imm_forms(func);
         dead_code_eliminate(func); // clean up dead LoadImm from imm lowering
@@ -51,6 +55,18 @@ pub fn optimize(func: &mut MFunction) {
     if_convert(func);
     simplify_cfg(func);
     compute_value_widths(func);
+}
+
+#[inline]
+fn bmi2_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::arch::is_x86_feature_detected!("bmi2")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -2933,6 +2949,10 @@ mod tests {
 
     #[test]
     fn folds_chunk_deposit_chain_to_pdep() {
+        if !bmi2_available() {
+            return;
+        }
+
         let mut func = make_func(
             vec![
                 MInst::Load {
@@ -3000,6 +3020,10 @@ mod tests {
 
     #[test]
     fn folds_chunk_extract_chain_to_pext() {
+        if !bmi2_available() {
+            return;
+        }
+
         let mut func = make_func(
             vec![
                 MInst::Load {

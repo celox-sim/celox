@@ -34,6 +34,7 @@ The first native-JIT improvement targets `linear_sec` bit placement:
 
 - MIR has BMI2 `pdep` in addition to the existing `pext` and `popcnt`.
 - The optimizer folds chunked bit scatter/gather OR chains into `pdep`/`pext`.
+  These folds are enabled only when the host CPU reports BMI2 support.
 - `eval_comb_checked` bypasses observer/runtime-event bookkeeping when a
   program has no such sites.
 
