@@ -19,6 +19,7 @@ pub fn optimize(func: &mut MFunction) {
             eliminate_redundant_local_stores(func);
             algebraic_simplify(func);
             redundant_mask_eliminate(func);
+            fold_bit_toggle_insert(func);
             global_gvn(func);
             dead_code_eliminate(func);
         }
@@ -42,6 +43,7 @@ pub fn optimize(func: &mut MFunction) {
         eliminate_redundant_local_stores(func);
         algebraic_simplify(func);
         redundant_mask_eliminate(func);
+        fold_bit_toggle_insert(func);
         if bmi2_available() {
             fold_deposit_chain_to_pdep(func);
             fold_extract_chain_to_pext(func);
@@ -1685,6 +1687,145 @@ fn get_w(widths: &[Option<u8>], vreg: VReg) -> Option<u8> {
 // Existing passes
 // ────────────────────────────────────────────────────────────────
 
+/// Fold a single-bit clear-and-insert toggle into XOR.
+///
+/// Pattern:
+///   `(x & ~(1 << s)) | ((((x >> s) & 1) ^ 1) << s)`
+///
+/// This is produced by dynamic bit-select XOR assignment such as
+/// `x[s] ^= 1`. For 2-state values it is equivalent to `x ^ (1 << s)`.
+fn fold_bit_toggle_insert(func: &mut MFunction) {
+    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let Some(d) = inst.def() {
+                defs.insert(d, inst.clone());
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            let MInst::Or { dst, lhs, rhs } = *inst else {
+                continue;
+            };
+
+            if let Some((value, mask)) = match_bit_toggle_insert(lhs, rhs, &defs)
+                .or_else(|| match_bit_toggle_insert(rhs, lhs, &defs))
+            {
+                *inst = MInst::Xor {
+                    dst,
+                    lhs: value,
+                    rhs: mask,
+                };
+            }
+        }
+    }
+}
+
+fn match_bit_toggle_insert(
+    clear_part: VReg,
+    insert_part: VReg,
+    defs: &HashMap<VReg, MInst>,
+) -> Option<(VReg, VReg)> {
+    let MInst::And {
+        lhs: clear_lhs,
+        rhs: clear_rhs,
+        ..
+    } = defs.get(&clear_part)?
+    else {
+        return None;
+    };
+
+    let (value, inverted_mask) = match defs.get(clear_lhs) {
+        Some(MInst::BitNot { .. }) => (*clear_rhs, *clear_lhs),
+        _ => match defs.get(clear_rhs) {
+            Some(MInst::BitNot { .. }) => (*clear_lhs, *clear_rhs),
+            _ => return None,
+        },
+    };
+
+    let MInst::BitNot { src: mask, .. } = defs.get(&inverted_mask)? else {
+        return None;
+    };
+
+    let MInst::Shl {
+        lhs: one_for_mask,
+        rhs: shift_for_mask,
+        ..
+    } = defs.get(mask)?
+    else {
+        return None;
+    };
+    if !is_const_one(*one_for_mask, defs) {
+        return None;
+    }
+
+    let MInst::Shl {
+        lhs: toggled_bit,
+        rhs: shift_for_insert,
+        ..
+    } = defs.get(&insert_part)?
+    else {
+        return None;
+    };
+    if shift_for_insert != shift_for_mask {
+        return None;
+    }
+
+    let MInst::Xor {
+        lhs: xor_lhs,
+        rhs: xor_rhs,
+        ..
+    } = defs.get(toggled_bit)?
+    else {
+        return None;
+    };
+
+    let extracted_bit = if is_const_one(*xor_lhs, defs) {
+        *xor_rhs
+    } else if is_const_one(*xor_rhs, defs) {
+        *xor_lhs
+    } else {
+        return None;
+    };
+
+    let MInst::And {
+        lhs: bit_lhs,
+        rhs: bit_rhs,
+        ..
+    } = defs.get(&extracted_bit)?
+    else {
+        return None;
+    };
+    let shifted_value = if is_const_one(*bit_lhs, defs) {
+        *bit_rhs
+    } else if is_const_one(*bit_rhs, defs) {
+        *bit_lhs
+    } else {
+        return None;
+    };
+
+    let MInst::Shr {
+        lhs: shifted_src,
+        rhs: shift_for_extract,
+        ..
+    } = defs.get(&shifted_value)?
+    else {
+        return None;
+    };
+
+    if *shifted_src == value && shift_for_extract == shift_for_mask {
+        Some((value, *mask))
+    } else {
+        None
+    }
+}
+
+fn is_const_one(reg: VReg, defs: &HashMap<VReg, MInst>) -> bool {
+    matches!(defs.get(&reg), Some(MInst::LoadImm { value: 1, .. }))
+}
+
 /// Fold a bit-deposit OR chain into BMI2 PDEP.
 ///
 /// Pattern:
@@ -3083,6 +3224,96 @@ mod tests {
                     dst: VReg(6),
                     src: VReg(0),
                     ..
+                }
+            )),
+            "{insts:#?}"
+        );
+    }
+
+    #[test]
+    fn folds_dynamic_bit_toggle_insert_to_xor() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 1,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S8,
+                },
+                MInst::Shl {
+                    dst: VReg(3),
+                    lhs: VReg(1),
+                    rhs: VReg(2),
+                },
+                MInst::BitNot {
+                    dst: VReg(4),
+                    src: VReg(3),
+                },
+                MInst::And {
+                    dst: VReg(5),
+                    lhs: VReg(0),
+                    rhs: VReg(4),
+                },
+                MInst::Shr {
+                    dst: VReg(6),
+                    lhs: VReg(0),
+                    rhs: VReg(2),
+                },
+                MInst::And {
+                    dst: VReg(7),
+                    lhs: VReg(6),
+                    rhs: VReg(1),
+                },
+                MInst::Xor {
+                    dst: VReg(8),
+                    lhs: VReg(7),
+                    rhs: VReg(1),
+                },
+                MInst::Shl {
+                    dst: VReg(9),
+                    lhs: VReg(8),
+                    rhs: VReg(2),
+                },
+                MInst::Or {
+                    dst: VReg(10),
+                    lhs: VReg(5),
+                    rhs: VReg(9),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(10),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            11,
+        );
+
+        optimize(&mut func);
+
+        let insts = &func.blocks[0].insts;
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Xor {
+                    dst: VReg(10),
+                    lhs: VReg(0),
+                    rhs: VReg(3),
+                } | MInst::Xor {
+                    dst: VReg(10),
+                    lhs: VReg(3),
+                    rhs: VReg(0),
                 }
             )),
             "{insts:#?}"
