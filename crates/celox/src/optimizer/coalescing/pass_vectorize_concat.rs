@@ -27,7 +27,14 @@ impl ExecutionUnitPass for VectorizeConcatPass {
         "vectorize_concat"
     }
 
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
+    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
+        // This pass rewrites Concat into bitwise/arithmetic operations. In
+        // 4-state mode those operations normalize Z to X, while Concat must
+        // preserve the original value+mask bits exactly.
+        if options.four_state {
+            return;
+        }
+
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
         let mut any_changed = false;
 
@@ -180,6 +187,103 @@ enum Replacement {
         groups: Vec<(usize, usize, usize)>,
         width: usize,
     },
+    /// Replace `{low[MSB]..., low}` with `(low << n) >>> n`.
+    SignExtend {
+        inst_idx: usize,
+        dst: RegisterId,
+        low: RegisterId,
+        width: usize,
+        prefix_width: usize,
+    },
+}
+
+fn concat_width(
+    args: &[RegisterId],
+    register_map: &HashMap<RegisterId, RegisterType>,
+) -> Option<usize> {
+    args.iter().try_fold(0usize, |acc, arg| {
+        Some(acc + register_map.get(arg)?.width())
+    })
+}
+
+fn sign_bit_matches_low_msb(
+    sign: RegisterId,
+    low: RegisterId,
+    low_width: usize,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> bool {
+    if low_width == 0 {
+        return false;
+    }
+    if low_width == 1 && sign == low {
+        return true;
+    }
+
+    let sign_bit = low_width - 1;
+    match resolve_bit_source(sign, defs) {
+        Some(BitSource::Register {
+            source,
+            bit_position,
+        }) if source == low && bit_position == sign_bit => return true,
+        Some(BitSource::Register {
+            source,
+            bit_position,
+        }) => {
+            if let Some(SIRInstruction::Slice(_, low_source, base, width)) = defs.get(&low)
+                && source == *low_source
+                && low_width == *width
+                && bit_position == base + sign_bit
+            {
+                return true;
+            }
+        }
+        Some(BitSource::Load { addr, bit_position }) => {
+            if let Some(SIRInstruction::Load(_, low_addr, SIROffset::Static(base), width)) =
+                defs.get(&low)
+                && addr == *low_addr
+                && low_width == *width
+                && bit_position == base + sign_bit
+            {
+                return true;
+            }
+        }
+        _ => {}
+    }
+
+    false
+}
+
+fn find_sign_extend(
+    args: &[RegisterId],
+    concat_width: usize,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> Option<(RegisterId, usize, usize)> {
+    if args.len() < 2 || concat_width > 64 {
+        return None;
+    }
+
+    let low = *args.last()?;
+    let low_width = register_map.get(&low)?.width();
+    if low_width == 0 || low_width >= concat_width {
+        return None;
+    }
+
+    let prefix_width = concat_width - low_width;
+    let prefix = &args[..args.len() - 1];
+    if prefix.len() != prefix_width {
+        return None;
+    }
+
+    let sign = prefix[0];
+    if !prefix
+        .iter()
+        .all(|arg| *arg == sign && register_map.get(arg).is_some_and(|rt| rt.width() == 1))
+    {
+        return None;
+    }
+
+    sign_bit_matches_low_msb(sign, low, low_width, defs).then_some((low, low_width, prefix_width))
 }
 
 /// Find contiguous shift groups in a non-in-place Concat.
@@ -256,8 +360,23 @@ fn vectorize_concats(
             continue;
         };
 
-        let concat_width = args.len();
+        let Some(concat_width) = concat_width(args, register_map) else {
+            continue;
+        };
         if !(3..=64).contains(&concat_width) {
+            continue;
+        }
+
+        if let Some((low, _low_width, prefix_width)) =
+            find_sign_extend(args, concat_width, register_map, defs)
+        {
+            replacements.push(Replacement::SignExtend {
+                inst_idx: idx,
+                dst: *dst,
+                low,
+                width: concat_width,
+                prefix_width,
+            });
             continue;
         }
 
@@ -550,8 +669,216 @@ fn vectorize_concats(
                 // Insert all new instructions at inst_idx, remove the Concat
                 instructions.splice(inst_idx..=inst_idx, new_insts);
             }
+            Replacement::SignExtend {
+                inst_idx,
+                dst,
+                low,
+                width,
+                prefix_width,
+            } => {
+                let shift_reg = alloc_reg(next_reg, register_map, width);
+                let shifted_reg = alloc_reg(next_reg, register_map, width);
+                instructions.splice(
+                    inst_idx..=inst_idx,
+                    [
+                        SIRInstruction::Imm(shift_reg, SIRValue::new(prefix_width as u64)),
+                        SIRInstruction::Binary(shifted_reg, low, BinaryOp::Shl, shift_reg),
+                        SIRInstruction::Binary(dst, shifted_reg, BinaryOp::Sar, shift_reg),
+                    ],
+                );
+            }
         }
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{BasicBlock, BlockId, InstanceId, SIRTerminator, STABLE_REGION};
+    use veryl_analyzer::ir::VarId;
+
+    fn test_addr() -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region: STABLE_REGION,
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        }
+    }
+
+    fn make_eu(
+        instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+        register_map: HashMap<RegisterId, RegisterType>,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
+    #[test]
+    fn sign_extend_concat_from_shifted_low_msb() {
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(1),
+            RegisterType::Bit {
+                width: 16,
+                signed: false,
+            },
+        );
+        for reg in 2..=5 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+        }
+
+        let instructions = vec![
+            SIRInstruction::Imm(RegisterId(2), SIRValue::new(7u64)),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(0), BinaryOp::Shr, RegisterId(2)),
+            SIRInstruction::Imm(RegisterId(4), SIRValue::new(1u64)),
+            SIRInstruction::Binary(RegisterId(5), RegisterId(3), BinaryOp::And, RegisterId(4)),
+            SIRInstruction::Concat(
+                RegisterId(1),
+                vec![
+                    RegisterId(5),
+                    RegisterId(5),
+                    RegisterId(5),
+                    RegisterId(5),
+                    RegisterId(5),
+                    RegisterId(5),
+                    RegisterId(5),
+                    RegisterId(5),
+                    RegisterId(0),
+                ],
+            ),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![RegisterId(1)],
+            },
+        ];
+
+        let mut eu = make_eu(instructions, register_map);
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        let block = eu.blocks.get(&BlockId(0)).unwrap();
+
+        assert!(block.instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::Binary(RegisterId(1), _, BinaryOp::Sar, _)
+        )));
+        assert!(
+            !block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Concat(..)))
+        );
+    }
+
+    #[test]
+    fn sign_extend_concat_from_load_msb() {
+        let addr = test_addr();
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(1),
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(2),
+            RegisterType::Bit {
+                width: 16,
+                signed: false,
+            },
+        );
+
+        let instructions = vec![
+            SIRInstruction::Load(RegisterId(0), addr, SIROffset::Static(4), 8),
+            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(11), 1),
+            SIRInstruction::Concat(
+                RegisterId(2),
+                vec![
+                    RegisterId(1),
+                    RegisterId(1),
+                    RegisterId(1),
+                    RegisterId(1),
+                    RegisterId(1),
+                    RegisterId(1),
+                    RegisterId(1),
+                    RegisterId(1),
+                    RegisterId(0),
+                ],
+            ),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![RegisterId(2)],
+            },
+        ];
+
+        let mut eu = make_eu(instructions, register_map);
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        let block = eu.blocks.get(&BlockId(0)).unwrap();
+
+        assert!(block.instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::Binary(RegisterId(2), _, BinaryOp::Sar, _)
+        )));
+    }
+
+    #[test]
+    fn keeps_concat_in_four_state_mode() {
+        let mut register_map = HashMap::default();
+        for (reg, width) in [(0, 1), (1, 1), (2, 1), (3, 3)] {
+            register_map.insert(RegisterId(reg), RegisterType::Logic { width });
+        }
+        let instructions = vec![SIRInstruction::Concat(
+            RegisterId(3),
+            vec![RegisterId(2), RegisterId(1), RegisterId(0)],
+        )];
+
+        let mut eu = make_eu(instructions, register_map);
+        VectorizeConcatPass.run(
+            &mut eu,
+            &PassOptions {
+                four_state: true,
+                ..PassOptions::default()
+            },
+        );
+        let block = eu.blocks.get(&BlockId(0)).unwrap();
+
+        assert!(matches!(
+            block.instructions.as_slice(),
+            [SIRInstruction::Concat(RegisterId(3), _)]
+        ));
+    }
 }
