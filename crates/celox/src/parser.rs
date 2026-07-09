@@ -900,9 +900,7 @@ pub(crate) fn flatten(
                         instance_id,
                         var_id: init.var_id,
                     },
-                    value: init.value.clone(),
-                    mask: init.mask.clone(),
-                    written_mask: init.written_mask.clone(),
+                    data: init.data.clone(),
                 })
         })
         .collect();

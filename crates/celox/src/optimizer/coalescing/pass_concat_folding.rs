@@ -18,6 +18,8 @@ struct BitSource {
 
 pub(super) struct ConcatFoldingPass;
 
+const MAX_FOLDED_LOAD_WIDTH: usize = 64;
+
 impl ExecutionUnitPass for ConcatFoldingPass {
     fn name(&self) -> &'static str {
         "concat_folding"
@@ -105,7 +107,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                             }
                         }
 
-                        if run_count >= 2 {
+                        if run_count >= 2 && run_width <= MAX_FOLDED_LOAD_WIDTH {
                             // Create a new wider Load
                             max_reg += 1;
                             let new_reg = RegisterId(max_reg);

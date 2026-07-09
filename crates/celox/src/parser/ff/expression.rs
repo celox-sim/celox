@@ -690,11 +690,14 @@ impl<'a> FfParser<'a> {
 
         // Use conservative range from eval_var_select for tracking (covers all possible bits).
         let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
-        if is_static_access(&dst.index, &dst.select) {
+        let is_static = is_static_access(&dst.index, &dst.select);
+        if is_static {
             let bits = self.defined_ranges.entry(dst.id).or_default();
             for i in access.lsb..=access.msb {
                 bits.insert(i);
             }
+        } else {
+            self.dynamic_write_vars.insert(dst.id);
         }
         self.dynamic_defined_vars.insert(dst.id);
 

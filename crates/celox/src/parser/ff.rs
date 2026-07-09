@@ -67,11 +67,18 @@ impl Domain {
     }
 }
 
+#[derive(Default)]
+pub struct FfGroupParseResult {
+    pub targets: Vec<VarAtomBase<crate::ir::RegionedVarAddr>>,
+    pub dynamic_write_vars: HashSet<VarId>,
+}
+
 pub struct FfParser<'a> {
     module: &'a Module,
     stack: VecDeque<RegisterId>,
     defined_ranges: HashMap<VarId, BitSet>,
     dynamic_defined_vars: HashSet<VarId>,
+    dynamic_write_vars: HashSet<VarId>,
     local_working_vars: HashSet<VarId>,
     loop_exit_blocks: Vec<crate::ir::BlockId>,
     reset: Option<FfReset>,
@@ -95,6 +102,7 @@ impl<'a> FfParser<'a> {
             stack: VecDeque::new(),
             defined_ranges: HashMap::default(),
             dynamic_defined_vars: HashSet::default(),
+            dynamic_write_vars: HashSet::default(),
             local_working_vars: HashSet::default(),
             loop_exit_blocks: Vec::new(),
             reset: None,
@@ -1928,13 +1936,14 @@ impl<'a> FfParser<'a> {
         &mut self,
         decls: &[&FfDeclaration],
         ir_builder: &mut SIRBuilder<crate::ir::RegionedVarAddr>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<FfGroupParseResult, ParserError> {
         if decls.is_empty() {
-            return Ok(());
+            return Ok(FfGroupParseResult::default());
         }
 
         self.defined_ranges.clear();
         self.dynamic_defined_vars.clear();
+        self.dynamic_write_vars.clear();
         self.reset = decls[0].reset.clone();
 
         let mut targets = Vec::new();
@@ -1978,89 +1987,10 @@ impl<'a> FfParser<'a> {
             )?;
         }
 
-        Ok(())
-    }
-
-    /// Returns the set of variables written by this FF group (deduplicated).
-    /// Used by the caller to generate Commit instructions.
-    pub fn collect_written_vars(decls: &[&FfDeclaration]) -> impl Iterator<Item = VarId> {
-        let mut seen = crate::HashSet::default();
-        decls
-            .iter()
-            .flat_map(|d| d.statements.iter())
-            .flat_map(Self::collect_assigned_var_ids)
-            .filter(move |id| seen.insert(*id))
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    fn collect_expr_output_var_ids(expr: &Expression) -> Vec<VarId> {
-        match expr {
-            Expression::Term(factor) => {
-                if let Factor::FunctionCall(call) = factor.as_ref() {
-                    call.outputs
-                        .values()
-                        .flat_map(|dsts| dsts.iter().map(|d| d.id))
-                        .collect()
-                } else {
-                    vec![]
-                }
-            }
-            Expression::Binary(lhs, _, rhs, _) => {
-                let mut v = Self::collect_expr_output_var_ids(lhs);
-                v.extend(Self::collect_expr_output_var_ids(rhs));
-                v
-            }
-            Expression::Unary(_, inner, _) => Self::collect_expr_output_var_ids(inner),
-            Expression::Ternary(cond, then_e, else_e, _) => {
-                let mut v = Self::collect_expr_output_var_ids(cond);
-                v.extend(Self::collect_expr_output_var_ids(then_e));
-                v.extend(Self::collect_expr_output_var_ids(else_e));
-                v
-            }
-            _ => vec![],
-        }
-    }
-
-    fn collect_assigned_var_ids(stmt: &Statement) -> Vec<VarId> {
-        match stmt {
-            Statement::Assign(a) => {
-                let mut ids: Vec<VarId> = a.dst.iter().map(|d| d.id).collect();
-                // Also collect output args of any FunctionCall embedded in the RHS expression
-                ids.extend(Self::collect_expr_output_var_ids(&a.expr));
-                ids
-            }
-            Statement::If(s) => s
-                .true_side
-                .iter()
-                .chain(s.false_side.iter())
-                .flat_map(Self::collect_assigned_var_ids)
-                .collect(),
-            Statement::Case(s) => s
-                .arms
-                .iter()
-                .flat_map(|arm| arm.body.iter())
-                .chain(s.default.iter())
-                .flat_map(Self::collect_assigned_var_ids)
-                .collect(),
-            Statement::IfReset(s) => s
-                .true_side
-                .iter()
-                .chain(s.false_side.iter())
-                .flat_map(Self::collect_assigned_var_ids)
-                .collect(),
-            Statement::For(s) => s
-                .body
-                .iter()
-                .flat_map(Self::collect_assigned_var_ids)
-                .collect(),
-            Statement::FunctionCall(call) => call
-                .outputs
-                .values()
-                .flat_map(|dsts| dsts.iter().map(|d| d.id))
-                .collect(),
-            _ => vec![],
-        }
+        Ok(FfGroupParseResult {
+            targets,
+            dynamic_write_vars: self.dynamic_write_vars.clone(),
+        })
     }
 
     fn bound_const_value(bound: &ForBound) -> Option<usize> {

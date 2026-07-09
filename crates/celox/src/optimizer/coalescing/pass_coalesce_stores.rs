@@ -7,6 +7,8 @@ use super::pass_manager::ExecutionUnitPass;
 
 pub(super) struct CoalesceStoresPass;
 
+const MAX_COALESCED_STORE_WIDTH: usize = 64;
+
 impl ExecutionUnitPass for CoalesceStoresPass {
     fn name(&self) -> &'static str {
         "coalesce_stores"
@@ -107,6 +109,10 @@ fn coalesce_block(
                 let sub_run = &group[run_start..=run_end];
                 let merged_lsb = sub_run[0].offset;
                 let total_width: usize = sub_run.iter().map(|c| c.width).sum();
+                if total_width > MAX_COALESCED_STORE_WIDTH {
+                    run_start = run_end + 1;
+                    continue;
+                }
                 let anchor_index = sub_run.iter().map(|c| c.inst_index).max().unwrap();
                 let removed_indices: Vec<usize> = sub_run.iter().map(|c| c.inst_index).collect();
 

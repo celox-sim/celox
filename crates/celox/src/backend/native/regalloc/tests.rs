@@ -267,3 +267,74 @@ fn test_select_aliasing() {
     ];
     let _asgn = run_and_verify(insts, descs);
 }
+
+#[test]
+fn test_phi_dst_gets_register_under_entry_pressure() {
+    let mut vregs = VRegAllocator::new();
+    while vregs.count() < 15 {
+        vregs.alloc();
+    }
+
+    let mut descs = Vec::new();
+    for i in 0..15 {
+        descs.push(if i == 13 {
+            SpillDesc::transient()
+        } else {
+            SpillDesc::remat(i as u64)
+        });
+    }
+
+    let mut func = MFunction::new(vregs, descs);
+
+    let mut entry = MBlock::new(BlockId(0));
+    for i in 0..13 {
+        entry.push(MInst::LoadImm {
+            dst: VReg(i),
+            value: i as u64,
+        });
+    }
+    entry.push(MInst::LoadImm {
+        dst: VReg(14),
+        value: 1,
+    });
+    entry.push(MInst::Branch {
+        cond: VReg(14),
+        true_bb: BlockId(1),
+        false_bb: BlockId(2),
+    });
+    func.push_block(entry);
+
+    let mut pass_through = MBlock::new(BlockId(1));
+    pass_through.push(MInst::Jump { target: BlockId(2) });
+    func.push_block(pass_through);
+
+    let mut join = MBlock::new(BlockId(2));
+    join.phis.push(PhiNode {
+        dst: VReg(13),
+        sources: vec![(BlockId(0), VReg(0)), (BlockId(1), VReg(1))],
+    });
+    let mut acc = VReg(13);
+    for i in 0..13 {
+        let dst = func.vregs.alloc();
+        func.spill_descs.push(SpillDesc::transient());
+        join.push(MInst::Add {
+            dst,
+            lhs: acc,
+            rhs: VReg(i),
+        });
+        acc = dst;
+    }
+    join.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 0,
+        src: acc,
+        size: OpSize::S64,
+    });
+    join.push(MInst::Return);
+    func.push_block(join);
+
+    let result = run_regalloc(&mut func);
+    assert!(result.assignment.get(VReg(13)).is_some());
+    let analysis = analysis::analyze(&func);
+    super::verify_assignment(&func, &analysis, &result.assignment);
+}

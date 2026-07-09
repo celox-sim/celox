@@ -507,6 +507,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         ),
         SimulatorError,
     > {
+        let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+        let compile_start = phase_timing.then(crate::timing::now);
         let (mut program, warnings) = compile_to_sir(
             &self.sources,
             self.top,
@@ -521,19 +523,42 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.param_overrides,
             &self.options.optimize_options,
         )?;
+        if let Some(start) = compile_start {
+            eprintln!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
+        }
 
         // Register testbench runtime-event sites before layout fixes the ring geometry.
+        let runtime_sites_start = phase_timing.then(crate::timing::now);
         crate::testbench::register_runtime_event_sites(&mut program);
+        if let Some(start) = runtime_sites_start {
+            eprintln!(
+                "[phase-timing] register_runtime_event_sites: {:?} runtime_event_sites={} comb_observers={}",
+                start.elapsed(),
+                program.runtime_event_sites.len(),
+                program.comb_observers.len()
+            );
+        }
 
         // Build memory layout (consumes address_aliases for offset sharing)
+        let layout_start = phase_timing.then(crate::timing::now);
         program.build_layout(self.options.four_state);
+        if let Some(start) = layout_start {
+            eprintln!("[phase-timing] build_layout: {:?}", start.elapsed());
+        }
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
+            let dse_start = phase_timing.then(crate::timing::now);
             run_dead_store_elimination(
                 &mut program,
                 &self.live_signals,
                 self.options.dead_store_policy,
             );
+            if let Some(start) = dse_start {
+                eprintln!(
+                    "[phase-timing] dead_store_elimination: {:?}",
+                    start.elapsed()
+                );
+            }
         }
 
         Ok((program, warnings, self.options, self.vcd_path))
@@ -586,8 +611,17 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn build_native(
         self,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+        let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+        let sir_start = phase_timing.then(crate::timing::now);
         let (program, warnings, options, vcd_path) = self.into_sir()?;
+        if let Some(start) = sir_start {
+            eprintln!("[phase-timing] into_sir total: {:?}", start.elapsed());
+        }
+        let backend_start = phase_timing.then(crate::timing::now);
         let backend = crate::backend::native::NativeBackend::new(&program, &options)?;
+        if let Some(start) = backend_start {
+            eprintln!("[phase-timing] native_backend: {:?}", start.elapsed());
+        }
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
@@ -595,8 +629,16 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
             sim.vcd_writer = Some(vcd_writer);
         }
+        let apply_initial_start = phase_timing.then(crate::timing::now);
         sim.apply_initial_values();
+        if let Some(start) = apply_initial_start {
+            eprintln!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
+        }
+        let settle_start = phase_timing.then(crate::timing::now);
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
+        if let Some(start) = settle_start {
+            eprintln!("[phase-timing] initial_settle: {:?}", start.elapsed());
+        }
         Ok(sim)
     }
 

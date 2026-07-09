@@ -438,6 +438,11 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
+    MemCopy {
+        src_offset: i32,
+        dst_offset: i32,
+        byte_len: usize,
+    },
 
     // ── ALU (3-operand SSA) ────────────────────────────────────
     /// dst = lhs + rhs
@@ -611,6 +616,14 @@ impl fmt::Display for MInst {
                 f,
                 "release_store.{size} [{ptr} + {offset} + {index}], {src}"
             ),
+            MInst::MemCopy {
+                src_offset,
+                dst_offset,
+                byte_len,
+            } => write!(
+                f,
+                "memcopy [sim + {dst_offset}], [sim + {src_offset}], {byte_len}"
+            ),
             MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
             MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
             MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
@@ -749,6 +762,7 @@ impl MInst {
             | MInst::StoreIndexed { .. }
             | MInst::StorePtrIndexed { .. }
             | MInst::ReleaseStorePtrIndexed { .. }
+            | MInst::MemCopy { .. }
             | MInst::Branch { .. }
             | MInst::Jump { .. }
             | MInst::Return
@@ -761,7 +775,7 @@ impl MInst {
     pub fn uses(&self) -> Uses {
         match self {
             MInst::Mov { src, .. } => Uses::one(*src),
-            MInst::LoadImm { .. } | MInst::Load { .. } => Uses::none(),
+            MInst::LoadImm { .. } | MInst::Load { .. } | MInst::MemCopy { .. } => Uses::none(),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -962,6 +976,7 @@ impl MInst {
             }
             MInst::LoadImm { .. }
             | MInst::Load { .. }
+            | MInst::MemCopy { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}
@@ -1090,16 +1105,22 @@ impl MFunction {
 
         // Collect all defs across all blocks (instructions + phi nodes)
         let mut global_defs = HashSet::default();
-        for block in &self.blocks {
-            for phi in &block.phis {
-                global_defs.insert(phi.dst);
+        for (bi, block) in self.blocks.iter().enumerate() {
+            for (pi, phi) in block.phis.iter().enumerate() {
+                if !global_defs.insert(phi.dst) {
+                    panic!(
+                        "MIR verify: VReg v{} defined more than once.\n  \
+                         second def: block {bi}, phi {pi}",
+                        phi.dst.0
+                    );
+                }
             }
-            for inst in &block.insts {
+            for (ii, inst) in block.insts.iter().enumerate() {
                 if let Some(d) = inst.def() {
                     if !global_defs.insert(d) {
                         panic!(
                             "MIR verify: VReg v{} defined more than once.\n  \
-                             second def: {inst}",
+                             second def: block {bi}, inst {ii}: {inst}",
                             d.0
                         );
                     }

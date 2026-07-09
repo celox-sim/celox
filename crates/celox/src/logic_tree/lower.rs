@@ -595,6 +595,20 @@ impl SLTToSIRLowerer {
         env: Option<&LowerEnv<A>>,
         allow_cache: bool,
     ) -> RegisterId {
+        if env.is_none()
+            && let SLTNode::Input {
+                variable,
+                index,
+                access: input_access,
+                ..
+            } = arena.get(expr)
+            && !index.is_empty()
+            && input_access.lsb <= access.lsb
+            && access.msb <= input_access.msb
+        {
+            return self.lower_input(builder, variable, index, access, arena, cache, env);
+        }
+
         let inner_reg = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
         self.slice_reg(builder, inner_reg, access)
     }
@@ -665,9 +679,23 @@ impl SLTToSIRLowerer {
         Some(reg)
     }
 
-    /// Select-based mux lowering: evaluates both branches, then selects.
-    /// result = (cond_broadcast & then_val) | (~cond_broadcast & else_val)
-    /// When cond is X, Sub(0, X) → all-X mask → AND propagates X → result is X.
+    fn is_div_rem_value<A: Hash + Eq + Clone + std::fmt::Debug>(
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        match arena.get(node) {
+            SLTNode::Binary(_, BinaryOp::Div | BinaryOp::Rem, _) => true,
+            SLTNode::Unary(UnaryOp::Ident, inner) => Self::is_div_rem_value(*inner, arena),
+            SLTNode::Slice { expr, .. } => Self::is_div_rem_value(*expr, arena),
+            _ => false,
+        }
+    }
+
+    /// Select-based mux lowering for pure expressions.
+    ///
+    /// If either branch contains division/remainder, lower to CFG so the
+    /// unselected branch is not evaluated. Heliodor's ALU relies on this shape:
+    /// `b == 0 ? fallback : a / b` must not execute the division when b is zero.
     fn lower_mux_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -679,13 +707,48 @@ impl SLTToSIRLowerer {
         env: Option<&LowerEnv<A>>,
         allow_cache: bool,
     ) -> RegisterId {
-        let cond_reg = self.lower_inner(builder, cond, arena, cache, env, allow_cache);
-        let then_val = self.lower_inner(builder, then_expr, arena, cache, env, allow_cache);
-        let else_val = self.lower_inner(builder, else_expr, arena, cache, env, allow_cache);
-
         let then_width = self.get_width(then_expr, arena);
         let else_width = self.get_width(else_expr, arena);
         let res_width = then_width.max(else_width);
+
+        if (Self::is_div_rem_value(then_expr, arena) || Self::is_div_rem_value(else_expr, arena))
+            && then_width == else_width
+        {
+            cache.clear();
+            let mut cond_cache = crate::HashMap::default();
+            let cond_reg =
+                self.lower_inner(builder, cond, arena, &mut cond_cache, env, allow_cache);
+            let result = builder.alloc_logic(res_width);
+            let then_block = builder.new_block();
+            let else_block = builder.new_block();
+            let merge_block = builder.new_block_with(vec![result]);
+
+            builder.seal_block(SIRTerminator::Branch {
+                cond: cond_reg,
+                true_block: (then_block, vec![]),
+                false_block: (else_block, vec![]),
+            });
+
+            let mut then_cache = crate::HashMap::default();
+            builder.switch_to_block(then_block);
+            let then_val =
+                self.lower_inner(builder, then_expr, arena, &mut then_cache, env, allow_cache);
+            builder.seal_block(SIRTerminator::Jump(merge_block, vec![then_val]));
+
+            let mut else_cache = crate::HashMap::default();
+            builder.switch_to_block(else_block);
+            let else_val =
+                self.lower_inner(builder, else_expr, arena, &mut else_cache, env, allow_cache);
+            builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_val]));
+
+            builder.switch_to_block(merge_block);
+            cache.clear();
+            return result;
+        }
+
+        let cond_reg = self.lower_inner(builder, cond, arena, cache, env, allow_cache);
+        let then_val = self.lower_inner(builder, then_expr, arena, cache, env, allow_cache);
+        let else_val = self.lower_inner(builder, else_expr, arena, cache, env, allow_cache);
 
         // Use Mux instruction: preserves Z in 4-state, branchless select in 2-state.
         // Backends handle value and mask selection independently.

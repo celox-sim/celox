@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use crate::ir::{
-    BitAccess, BlockId, CombObserver, ExecutionUnit, GlueAddr, GlueBlock, ModuleId,
-    ModuleInitialMemoryValue, RuntimeEventSite, SIRBuilder, SIRTerminator, SimModule, TriggerSet,
-    VarAtomBase,
+    BitAccess, BlockId, CombObserver, ExecutionUnit, GlueAddr, GlueBlock, InitialMemoryData,
+    InitialMemoryWriteRun, ModuleId, ModuleInitialMemoryValue, RegionedVarAddr, RuntimeEventSite,
+    SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, STABLE_REGION, SimModule, TriggerSet,
+    VarAtomBase, WORKING_REGION,
 };
 
 use crate::logic_tree::{
@@ -442,6 +444,20 @@ impl<'a> ModuleParser<'a> {
         }
 
         let path = self.resolve_readmem_path(&filename, &filename_arg.0.comptime().token);
+        let timing = readmem_timing_enabled();
+        let total_start = timing.then(Instant::now);
+        if timing {
+            eprintln!(
+                "[readmem-timing] start file={} depth={} element_width={} start_addr={} radix={}",
+                path.display(),
+                depth,
+                element_width,
+                start_addr,
+                radix
+            );
+        }
+
+        let read_start = timing.then(Instant::now);
         let content = std::fs::read_to_string(&path).map_err(|err| {
             ParserError::unsupported(
                 111,
@@ -451,42 +467,44 @@ impl<'a> ModuleParser<'a> {
                 Some(&filename_arg.0.comptime().token),
             )
         })?;
-        let words = parse_memory_content(&content, radix, element_width)?;
-        let mut value = BigUint::default();
-        let mut mask = BigUint::default();
-        let mut written_mask = BigUint::default();
-        let element_bits = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
+        if let Some(start) = read_start {
+            eprintln!(
+                "[readmem-timing] read file={} bytes={} elapsed={:?}",
+                path.display(),
+                content.len(),
+                start.elapsed()
+            );
+        }
 
-        for (addr, word_value, word_mask) in words {
-            let Some(addr) = start_addr.checked_add(addr) else {
-                return Err(ParserError::unsupported(
-                    111,
-                    LoweringPhase::SimulatorParser,
-                    "$readmemh address",
-                    "address exceeds destination depth",
-                    Some(&dst.token),
-                ));
-            };
-            if addr >= depth {
-                return Err(ParserError::unsupported(
-                    111,
-                    LoweringPhase::SimulatorParser,
-                    "$readmemh address",
-                    format!("address {addr} exceeds destination depth {depth}"),
-                    Some(&dst.token),
-                ));
-            }
-            let shift = addr * element_width;
-            value |= word_value << shift;
-            mask |= word_mask << shift;
-            written_mask |= &element_bits << shift;
+        let parse_start = timing.then(Instant::now);
+        let writes = parse_memory_write_runs(
+            &content,
+            radix,
+            element_width,
+            start_addr,
+            depth,
+            &dst.token,
+        )?;
+        if let Some(start) = parse_start {
+            eprintln!(
+                "[readmem-timing] parse file={} words={} runs={} elapsed={:?}",
+                path.display(),
+                writes.words,
+                writes.runs.len(),
+                start.elapsed()
+            );
+        }
+        if let Some(start) = total_start {
+            eprintln!(
+                "[readmem-timing] done file={} elapsed={:?}",
+                path.display(),
+                start.elapsed()
+            );
         }
 
         Ok(ModuleInitialMemoryValue {
             var_id: dst.id,
-            value,
-            mask,
-            written_mask,
+            data: InitialMemoryData::Writes(writes.runs),
         })
     }
 
@@ -542,40 +560,25 @@ impl<'a> ModuleParser<'a> {
         let mut eval_apply_ff_blocks = HashMap::default();
 
         for (trigger_set, decls) in &ff_groups {
-            // Shared commit list (WORKING -> STABLE), one entry per unique written var.
-            let mut commits: Vec<crate::ir::SIRInstruction<crate::ir::RegionedVarAddr>> =
-                Vec::new();
-            let mut seen_var = HashSet::default();
-            for var_id in FfParser::collect_written_vars(decls) {
-                if seen_var.insert(var_id) {
-                    let var = &self.module.variables[&var_id];
-                    let width = resolve_total_width(self.module, var)?;
-                    commits.push(crate::ir::SIRInstruction::Commit(
-                        crate::ir::RegionedVarAddr {
-                            region: crate::ir::WORKING_REGION,
-                            var_id,
-                        },
-                        crate::ir::RegionedVarAddr {
-                            region: crate::ir::STABLE_REGION,
-                            var_id,
-                        },
-                        crate::ir::SIROffset::Static(0),
-                        width,
-                        Vec::new(),
-                    ));
-                }
-            }
-
             // --- eval_only and eval_apply ---
             // Run parse_ff_group once. Clone the builder before sealing so that
             // eval_only and eval_apply are produced from independent builder states,
             // each with their own register namespace (no shared RegisterIds).
             let mut builder = SIRBuilder::new();
-            self.ff_parser.parse_ff_group(decls, &mut builder)?;
+            let ff_group = self.ff_parser.parse_ff_group(decls, &mut builder)?;
+            let targets = ff_group.targets;
+            let dynamic_write_vars = ff_group.dynamic_write_vars;
+            let commits = build_ff_region_copies(&targets, WORKING_REGION, STABLE_REGION);
+            let eval_apply_commits = build_ff_region_copies_skipping(
+                &targets,
+                WORKING_REGION,
+                STABLE_REGION,
+                &dynamic_write_vars,
+            );
 
             // Clone before sealing: eval_apply_builder gets the commit instructions appended.
             let mut eval_apply_builder = builder.clone();
-            for commit in &commits {
+            for commit in &eval_apply_commits {
                 eval_apply_builder.emit(commit.clone());
             }
 
@@ -596,35 +599,25 @@ impl<'a> ModuleParser<'a> {
                 entry_block_id: BlockId(0),
                 register_map: ea_regs,
             };
+            rewrite_working_accesses_to_stable(&mut eval_apply_eu, &dynamic_write_vars);
 
             // Build seeds (STABLE -> WORKING) and prepend to both eval_only and eval_apply.
-            let mut seeds: Vec<crate::ir::SIRInstruction<crate::ir::RegionedVarAddr>> = Vec::new();
-            let mut seen_seed = HashSet::default();
-            for var_id in FfParser::collect_written_vars(decls) {
-                if seen_seed.insert(var_id) {
-                    let var = &self.module.variables[&var_id];
-                    let width = resolve_total_width(self.module, var)?;
-                    seeds.push(crate::ir::SIRInstruction::Commit(
-                        crate::ir::RegionedVarAddr {
-                            region: crate::ir::STABLE_REGION,
-                            var_id,
-                        },
-                        crate::ir::RegionedVarAddr {
-                            region: crate::ir::WORKING_REGION,
-                            var_id,
-                        },
-                        crate::ir::SIROffset::Static(0),
-                        width,
-                        Vec::new(),
-                    ));
-                }
+            let seeds = build_ff_region_copies(&targets, STABLE_REGION, WORKING_REGION);
+            if let Some(entry) = eval_only_eu.blocks.get_mut(&BlockId(0)) {
+                let mut s = seeds.clone();
+                s.append(&mut entry.instructions);
+                entry.instructions = s;
             }
-            for eu in [&mut eval_only_eu, &mut eval_apply_eu] {
-                if let Some(entry) = eu.blocks.get_mut(&BlockId(0)) {
-                    let mut s = seeds.clone();
-                    s.append(&mut entry.instructions);
-                    entry.instructions = s;
-                }
+            let eval_apply_seeds = build_ff_region_copies_skipping(
+                &targets,
+                STABLE_REGION,
+                WORKING_REGION,
+                &dynamic_write_vars,
+            );
+            if let Some(entry) = eval_apply_eu.blocks.get_mut(&BlockId(0)) {
+                let mut s = eval_apply_seeds;
+                s.append(&mut entry.instructions);
+                entry.instructions = s;
             }
 
             // --- apply: minimal EU containing only commit instructions ---
@@ -681,6 +674,130 @@ impl<'a> ModuleParser<'a> {
     }
 }
 
+fn build_ff_region_copies(
+    targets: &[VarAtomBase<RegionedVarAddr>],
+    src_region: u32,
+    dst_region: u32,
+) -> Vec<SIRInstruction<RegionedVarAddr>> {
+    build_ff_region_copies_skipping(targets, src_region, dst_region, &HashSet::default())
+}
+
+fn build_ff_region_copies_skipping(
+    targets: &[VarAtomBase<RegionedVarAddr>],
+    src_region: u32,
+    dst_region: u32,
+    skip_vars: &HashSet<VarId>,
+) -> Vec<SIRInstruction<RegionedVarAddr>> {
+    let mut ranges_by_var: HashMap<VarId, Vec<BitAccess>> = HashMap::default();
+    let mut var_order = Vec::new();
+    let mut seen_vars = HashSet::default();
+    for target in targets {
+        if skip_vars.contains(&target.id.var_id) {
+            continue;
+        }
+        if seen_vars.insert(target.id.var_id) {
+            var_order.push(target.id.var_id);
+        }
+        ranges_by_var
+            .entry(target.id.var_id)
+            .or_default()
+            .push(target.access);
+    }
+
+    let mut copies = Vec::new();
+    for var_id in var_order {
+        let Some(mut ranges) = ranges_by_var.remove(&var_id) else {
+            continue;
+        };
+        ranges.sort_by_key(|range| (range.lsb, range.msb));
+
+        let mut current: Option<BitAccess> = None;
+        for range in ranges {
+            match current {
+                Some(mut cur) if range.lsb <= cur.msb.saturating_add(1) => {
+                    cur.msb = cur.msb.max(range.msb);
+                    current = Some(cur);
+                }
+                Some(cur) => {
+                    push_ff_region_copy(&mut copies, var_id, cur, src_region, dst_region);
+                    current = Some(range);
+                }
+                None => current = Some(range),
+            }
+        }
+        if let Some(cur) = current {
+            push_ff_region_copy(&mut copies, var_id, cur, src_region, dst_region);
+        }
+    }
+
+    copies
+}
+
+fn rewrite_working_accesses_to_stable(
+    eu: &mut ExecutionUnit<RegionedVarAddr>,
+    dynamic_write_vars: &HashSet<VarId>,
+) {
+    if dynamic_write_vars.is_empty() {
+        return;
+    }
+    for block in eu.blocks.values_mut() {
+        for inst in &mut block.instructions {
+            rewrite_inst_working_access_to_stable(inst, dynamic_write_vars);
+        }
+    }
+}
+
+fn rewrite_inst_working_access_to_stable(
+    inst: &mut SIRInstruction<RegionedVarAddr>,
+    dynamic_write_vars: &HashSet<VarId>,
+) {
+    let rewrite_addr = |addr: &mut RegionedVarAddr| {
+        if addr.region == WORKING_REGION && dynamic_write_vars.contains(&addr.var_id) {
+            addr.region = STABLE_REGION;
+        }
+    };
+    match inst {
+        SIRInstruction::Load(_, addr, _, _) | SIRInstruction::Store(addr, _, _, _, _, _) => {
+            rewrite_addr(addr);
+        }
+        SIRInstruction::Commit(src, dst, _, _, _) => {
+            rewrite_addr(src);
+            rewrite_addr(dst);
+        }
+        SIRInstruction::Imm(..)
+        | SIRInstruction::Binary(..)
+        | SIRInstruction::Unary(..)
+        | SIRInstruction::Concat(..)
+        | SIRInstruction::Slice(..)
+        | SIRInstruction::Mux(..)
+        | SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => {}
+    }
+}
+
+fn push_ff_region_copy(
+    copies: &mut Vec<SIRInstruction<RegionedVarAddr>>,
+    var_id: VarId,
+    range: BitAccess,
+    src_region: u32,
+    dst_region: u32,
+) {
+    copies.push(SIRInstruction::Commit(
+        RegionedVarAddr {
+            region: src_region,
+            var_id,
+        },
+        RegionedVarAddr {
+            region: dst_region,
+            var_id,
+        },
+        SIROffset::Static(range.lsb),
+        range.msb - range.lsb + 1,
+        Vec::new(),
+    ));
+}
+
 fn remap_for_effect_site_ids<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     range: std::ops::Range<usize>,
@@ -713,6 +830,11 @@ fn collect_glue_sources(
     let mut set = HashSet::default();
     collect_glue_sources_with_window(expr, None, arena, &mut set);
     set
+}
+
+fn readmem_timing_enabled() -> bool {
+    std::env::var_os("CELOX_READMEM_TIMING").is_some()
+        || std::env::var_os("CELOX_PHASE_TIMING").is_some()
 }
 
 fn collect_glue_sources_with_window(
@@ -808,31 +930,102 @@ fn collect_glue_sources_with_window(
     }
 }
 
-fn parse_memory_content(
+struct ParsedMemoryWrites {
+    runs: Vec<InitialMemoryWriteRun>,
+    words: usize,
+}
+
+fn parse_memory_write_runs(
     content: &str,
     radix: u32,
     width: usize,
-) -> Result<Vec<(usize, BigUint, BigUint)>, ParserError> {
-    let mut result = Vec::new();
+    start_addr: usize,
+    depth: usize,
+    location: &veryl_parser::token_range::TokenRange,
+) -> Result<ParsedMemoryWrites, ParserError> {
+    let mut runs: Vec<InitialMemoryWriteRun> = Vec::new();
     let mut addr = 0usize;
-    for token in memory_tokens(content) {
-        if let Some(address) = token.strip_prefix('@') {
+    let mut words = 0usize;
+    for word_token in memory_tokens(content) {
+        if let Some(address) = word_token.strip_prefix('@') {
             addr = usize::from_str_radix(address, 16).map_err(|err| {
                 ParserError::unsupported(
                     111,
                     LoweringPhase::SimulatorParser,
                     "$readmemh address",
-                    format!("invalid address directive {token}: {err}"),
+                    format!("invalid address directive {word_token}: {err}"),
                     None,
                 )
             })?;
             continue;
         }
-        let (value, mask) = parse_memory_word(&token, radix, width)?;
-        result.push((addr, value, mask));
-        addr += 1;
+        let (value, mask) = parse_memory_word(&word_token, radix, width)?;
+        let Some(dst_addr) = start_addr.checked_add(addr) else {
+            return Err(ParserError::unsupported(
+                111,
+                LoweringPhase::SimulatorParser,
+                "$readmemh address",
+                "address exceeds destination depth",
+                Some(location),
+            ));
+        };
+        if dst_addr >= depth {
+            return Err(ParserError::unsupported(
+                111,
+                LoweringPhase::SimulatorParser,
+                "$readmemh address",
+                format!("address {dst_addr} exceeds destination depth {depth}"),
+                Some(location),
+            ));
+        }
+
+        let bit_offset = dst_addr * width;
+        let value_bytes = biguint_to_fixed_le_bytes(&value, width);
+        let mask_bytes = biguint_to_fixed_le_bytes(&mask, width);
+
+        if let Some(last) = runs.last_mut()
+            && last.bit_offset + last.bit_width == bit_offset
+            && last.bit_offset % 8 == 0
+            && last.bit_width % 8 == 0
+            && width % 8 == 0
+        {
+            last.bit_width += width;
+            last.value_bytes.extend(value_bytes);
+            last.mask_bytes.extend(mask_bytes);
+        } else {
+            runs.push(InitialMemoryWriteRun {
+                bit_offset,
+                bit_width: width,
+                value_bytes,
+                mask_bytes,
+            });
+        }
+
+        words += 1;
+        addr = addr.checked_add(1).ok_or_else(|| {
+            ParserError::unsupported(
+                111,
+                LoweringPhase::SimulatorParser,
+                "$readmemh address",
+                "address exceeds destination depth",
+                Some(location),
+            )
+        })?;
     }
-    Ok(result)
+    Ok(ParsedMemoryWrites { runs, words })
+}
+
+fn biguint_to_fixed_le_bytes(value: &BigUint, width: usize) -> Vec<u8> {
+    let byte_len = width.div_ceil(8);
+    let mut out = vec![0; byte_len];
+    let src = value.to_bytes_le();
+    let copy_len = src.len().min(byte_len);
+    out[..copy_len].copy_from_slice(&src[..copy_len]);
+    if width % 8 != 0 && !out.is_empty() {
+        let keep = (1u8 << (width % 8)) - 1;
+        *out.last_mut().unwrap() &= keep;
+    }
+    out
 }
 
 fn memory_tokens(content: &str) -> Vec<String> {

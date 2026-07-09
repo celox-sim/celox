@@ -17,7 +17,10 @@ use crate::ir::{AbsoluteAddr, Program, RuntimeEventKind, RuntimeEventSite, Signa
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 use veryl_analyzer::ir::{
     AssertKind, Expression, Factor, ForBound, ForRange, Function, Op, Statement,
     SystemFunctionInput, SystemFunctionKind, TbMethod, TbMethodCall, VarId,
@@ -2430,6 +2433,7 @@ fn exec_one_detailed<B: SimBackend>(
         TestbenchStatement::ClockNext { clock_event, count } => {
             match eval_clock_count(sim, count) {
                 Ok(n) => {
+                    let progress_every = testbench_progress_every();
                     for _ in 0..n {
                         if let Err(e) = sim.tick(*clock_event) {
                             ctx.current_time = ctx.current_time.saturating_add(1);
@@ -2440,6 +2444,12 @@ fn exec_one_detailed<B: SimBackend>(
                             return ExecResult::Fail(format!("{e}"));
                         }
                         ctx.current_time = ctx.current_time.saturating_add(1);
+                        if let Some(every) = progress_every
+                            && every != 0
+                            && ctx.current_time % every == 0
+                        {
+                            eprintln!("[testbench-progress] tick={}", ctx.current_time);
+                        }
                         drain_runtime_assertions(sim, ctx, None);
                     }
                     ExecResult::Continue
@@ -2554,6 +2564,15 @@ fn exec_one_detailed<B: SimBackend>(
         TestbenchStatement::Break => ExecResult::Break,
         TestbenchStatement::Finish => ExecResult::Finished,
     }
+}
+
+fn testbench_progress_every() -> Option<u64> {
+    static VALUE: OnceLock<Option<u64>> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("CELOX_TESTBENCH_PROGRESS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+    })
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

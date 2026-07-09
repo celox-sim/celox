@@ -97,7 +97,9 @@ fn compile_units(
     units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
     four_state: bool,
+    label: &str,
 ) -> Result<jit_mem::JitCode, SimulatorError> {
+    let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     if units.is_empty() {
         // Empty function: just return 0
         let mut empty_func = super::mir::MFunction::new(super::mir::VRegAllocator::new(), vec![]);
@@ -113,8 +115,22 @@ fn compile_units(
     // Multi-EU: compile each EU independently (ISel + regalloc), then
     // chain their machine code into a single function. Each EU's return
     // is patched to fall through to the next EU. One prologue/epilogue.
-    let chained_code = emit::emit_chained_eus(units, layout, four_state)
+    if timing {
+        eprintln!(
+            "[native-timing] compile_units start label={label} eus={}",
+            units.len()
+        );
+    }
+    let start = timing.then(crate::timing::now);
+    let chained_code = emit::emit_chained_eus(units, layout, four_state, label)
         .map_err(|e| codegen_err(format!("emit error: {e}")))?;
+    if let Some(start) = start {
+        eprintln!(
+            "[native-timing] compile_units done label={label} bytes={} elapsed={:?}",
+            chained_code.len(),
+            start.elapsed()
+        );
+    }
     jit_mem::JitCode::new(&chained_code).map_err(|e| codegen_err(format!("mmap error: {e}")))
 }
 
@@ -129,7 +145,7 @@ fn compile_program(
     let mut all_jit_codes: Vec<jit_mem::JitCode> = Vec::new();
 
     // Compile eval_comb
-    let comb_jit = compile_units(&sir.eval_comb, layout, options.four_state)?;
+    let comb_jit = compile_units(&sir.eval_comb, layout, options.four_state, "eval_comb")?;
     let comb_func = comb_jit.fn_ptr;
     all_jit_codes.push(comb_jit);
 
@@ -149,10 +165,11 @@ fn compile_program(
                             event_map_out: &mut HashMap<AbsoluteAddr, NativeEventRef>,
                             next_id: &mut usize,
                             id_to_addr: &mut Vec<AbsoluteAddr>,
-                            id_to_event: &mut Vec<NativeEventRef>|
+                            id_to_event: &mut Vec<NativeEventRef>,
+                            label: &str|
      -> Result<(), SimulatorError> {
         for (addr, units) in ff_map {
-            let code = compile_units(units, layout, options.four_state)?;
+            let code = compile_units(units, layout, options.four_state, label)?;
             let func = code.fn_ptr;
             all_codes.push(code);
 
@@ -181,6 +198,7 @@ fn compile_program(
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
+        "eval_apply_ff",
     )?;
     compile_ff_group(
         &sir.eval_only_ffs,
@@ -189,6 +207,7 @@ fn compile_program(
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
+        "eval_only_ff",
     )?;
     compile_ff_group(
         &sir.apply_ffs,
@@ -197,6 +216,7 @@ fn compile_program(
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
+        "apply_ff",
     )?;
 
     // Pre-compute 4-state initialization regions

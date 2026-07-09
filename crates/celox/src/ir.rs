@@ -61,19 +61,33 @@ pub struct VariableInfo {
 }
 
 #[derive(Clone, Debug)]
+pub struct InitialMemoryWriteRun {
+    pub bit_offset: usize,
+    pub bit_width: usize,
+    pub value_bytes: Vec<u8>,
+    pub mask_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub enum InitialMemoryData {
+    Packed {
+        value: BigUint,
+        mask: BigUint,
+        written_mask: BigUint,
+    },
+    Writes(Vec<InitialMemoryWriteRun>),
+}
+
+#[derive(Clone, Debug)]
 pub struct InitialMemoryValue {
     pub addr: AbsoluteAddr,
-    pub value: BigUint,
-    pub mask: BigUint,
-    pub written_mask: BigUint,
+    pub data: InitialMemoryData,
 }
 
 #[derive(Clone, Debug)]
 pub struct ModuleInitialMemoryValue {
     pub var_id: VarId,
-    pub value: BigUint,
-    pub mask: BigUint,
-    pub written_mask: BigUint,
+    pub data: InitialMemoryData,
 }
 
 impl fmt::Debug for VariableInfo {

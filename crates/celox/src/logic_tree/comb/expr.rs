@@ -2558,14 +2558,15 @@ fn eval_factor(
 
                 let mut extracted_expr = if is_unmodified {
                     // --- Code for the approach of aligning at load time ---
-                    // Since it's still None, pack index into Input and let Load instruction handle alignment
+                    // Keep the SLT input footprint conservative for dependency analysis.
+                    // The SIR lowerer recognizes the following Slice(Input(dynamic)) shape
+                    // and emits a narrow dynamic load.
                     let raw_input = arena.alloc(SLTNode::Input {
                         variable: *var_id,
                         signed: module.variables[var_id].r#type.signed,
                         index: dynamic_indices,
                         access: BitAccess::new(0, width - 1),
                     });
-                    // Slice from bit_select_lsb for element_width bits
                     arena.alloc(SLTNode::Slice {
                         expr: raw_input,
                         access: BitAccess::new(bit_select_lsb, bit_select_lsb + element_width - 1),

@@ -72,8 +72,7 @@ fn dynamic_mask_store(sim) {
     })
     .unwrap();
     let (v, m) = sim.get_four_state(id_out);
-    // Comb read-back: And(mem_word, 0xFF) normalizes X positions (v |= m)
-    assert_eq!(v, BigUint::from(0xAFu32), "dynamic mask store: value (X normalized)");
+    assert_eq!(v, BigUint::from(0xABu32), "dynamic mask store: value");
     assert_eq!(m, BigUint::from(0x0Fu32), "dynamic mask store: mask");
 }
 

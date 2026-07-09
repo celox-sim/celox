@@ -39,6 +39,8 @@ fn optimize_bit_extracts(
         return;
     }
 
+    optimize_slice_loads(instructions, register_map);
+
     // Build def map: register -> instruction index
     let mut def_map: HashMap<RegisterId, usize> = HashMap::default();
     for (idx, inst) in instructions.iter().enumerate() {
@@ -271,6 +273,128 @@ fn optimize_bit_extracts(
     }
 
     *instructions = out;
+}
+
+fn optimize_slice_loads(
+    instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    register_map: &mut HashMap<RegisterId, RegisterType>,
+) {
+    let mut def_map: HashMap<RegisterId, usize> = HashMap::default();
+    for (idx, inst) in instructions.iter().enumerate() {
+        match inst {
+            SIRInstruction::Imm(dst, _)
+            | SIRInstruction::Binary(dst, _, _, _)
+            | SIRInstruction::Unary(dst, _, _)
+            | SIRInstruction::Load(dst, _, _, _)
+            | SIRInstruction::Concat(dst, _)
+            | SIRInstruction::Slice(dst, _, _, _) => {
+                def_map.insert(*dst, idx);
+            }
+            _ => {}
+        }
+    }
+
+    let mut replacements = Vec::new();
+    for (idx, inst) in instructions.iter().enumerate() {
+        let SIRInstruction::Slice(dst, src, bit_offset, width) = inst else {
+            continue;
+        };
+        let Some(&load_idx) = def_map.get(src) else {
+            continue;
+        };
+        let SIRInstruction::Load(_, addr, SIROffset::Static(base), load_width) =
+            instructions[load_idx]
+        else {
+            continue;
+        };
+        if bit_offset + width > load_width {
+            continue;
+        }
+        replacements.push((
+            idx,
+            SIRInstruction::Load(*dst, addr, SIROffset::Static(base + bit_offset), *width),
+            *dst,
+            *width,
+        ));
+    }
+
+    if replacements.is_empty() {
+        return;
+    }
+
+    for (idx, replacement, dst, width) in replacements {
+        instructions[idx] = replacement;
+        register_map.insert(dst, RegisterType::Logic { width });
+    }
+
+    remove_dead_loads(instructions);
+}
+
+fn remove_dead_loads(instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>) {
+    let mut use_count: HashMap<RegisterId, usize> = HashMap::default();
+    for inst in instructions.iter() {
+        record_uses(inst, &mut use_count);
+    }
+    instructions.retain(|inst| {
+        if let SIRInstruction::Load(dst, _, _, _) = inst {
+            use_count.get(dst).copied().unwrap_or(0) != 0
+        } else {
+            true
+        }
+    });
+}
+
+fn record_uses(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    use_count: &mut HashMap<RegisterId, usize>,
+) {
+    match inst {
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            *use_count.entry(*lhs).or_default() += 1;
+            *use_count.entry(*rhs).or_default() += 1;
+        }
+        SIRInstruction::Unary(_, _, src) => {
+            *use_count.entry(*src).or_default() += 1;
+        }
+        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
+            *use_count.entry(*off).or_default() += 1;
+            *use_count.entry(*src).or_default() += 1;
+        }
+        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
+            *use_count.entry(*src).or_default() += 1;
+        }
+        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
+            *use_count.entry(*off).or_default() += 1;
+        }
+        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
+            *use_count.entry(*off).or_default() += 1;
+        }
+        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
+        SIRInstruction::Concat(_, args) => {
+            for arg in args {
+                *use_count.entry(*arg).or_default() += 1;
+            }
+        }
+        SIRInstruction::Slice(_, src, _, _) => {
+            *use_count.entry(*src).or_default() += 1;
+        }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            *use_count.entry(*cond).or_default() += 1;
+            *use_count.entry(*then_val).or_default() += 1;
+            *use_count.entry(*else_val).or_default() += 1;
+        }
+        SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => {
+            for arg in args {
+                *use_count.entry(*arg).or_default() += 1;
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            *use_count.entry(*old).or_default() += 1;
+            *use_count.entry(*new).or_default() += 1;
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

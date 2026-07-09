@@ -25,7 +25,6 @@ pub struct RegallocResult {
 }
 
 /// Verify that no two simultaneously-live VRegs share a PhysReg.
-#[cfg(any(debug_assertions, test))]
 fn verify_assignment(
     func: &MFunction,
     analysis: &analysis::AnalysisResult,
@@ -36,6 +35,24 @@ fn verify_assignment(
     use std::collections::HashMap;
 
     for (bi, block) in func.blocks.iter().enumerate() {
+        for phi in &block.phis {
+            assert!(
+                assignment.get(phi.dst).is_some(),
+                "regalloc verify: phi dst {} has no physical assignment at bb{}",
+                phi.dst,
+                block.id
+            );
+            for (pred, src) in &phi.sources {
+                assert!(
+                    assignment.get(*src).is_some(),
+                    "regalloc verify: phi source {src} has no physical assignment at bb{} from bb{} to dst {}",
+                    block.id,
+                    pred,
+                    phi.dst
+                );
+            }
+        }
+
         // Track live VRegs and their PhysRegs at each program point
         let mut live: HashMap<VReg, PhysReg> = HashMap::new();
 
@@ -66,6 +83,25 @@ fn verify_assignment(
         }
 
         for (inst_idx, inst) in block.insts.iter().enumerate() {
+            for use_vreg in inst.uses() {
+                assert!(
+                    assignment.get(use_vreg).is_some(),
+                    "regalloc verify: use {use_vreg} has no physical assignment at bb{} inst {}: {}",
+                    block.id,
+                    inst_idx,
+                    inst
+                );
+            }
+            if let Some(def) = inst.def() {
+                assert!(
+                    assignment.get(def).is_some(),
+                    "regalloc verify: def {def} has no physical assignment at bb{} inst {}: {}",
+                    block.id,
+                    inst_idx,
+                    inst
+                );
+            }
+
             // Remove dead VRegs (O(log n) per VReg via binary search)
             let dead: Vec<VReg> = live
                 .keys()
@@ -118,8 +154,7 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
     let analysis = analysis::analyze(func);
     let (assignment, spill_frame_size) = unified::unified_alloc(func, &analysis);
 
-    #[cfg(debug_assertions)]
-    {
+    if cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some() {
         let analysis = analysis::analyze(func);
         verify_assignment(func, &analysis, &assignment);
     }

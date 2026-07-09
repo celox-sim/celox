@@ -456,6 +456,68 @@ assign r = a % b;
 
     }
 
+    fn test_ternary_div_zero_branch_is_lazy(sim) {
+        @setup { let code = r#"
+module Top (
+a: input  logic<16>,
+b: input  logic<16>,
+q: output logic<16>
+) {
+assign q = if b == 16'd0 ? 16'hFFFF : a / b;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(a, 100u16);
+        io.set(b, 0u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(q), 0xFFFFu16.into());
+
+    sim.modify(|io| {
+        io.set(a, 100u16);
+        io.set(b, 7u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(q), 14u16.into());
+
+    }
+
+    fn test_ternary_rem_zero_branch_is_lazy(sim) {
+        @setup { let code = r#"
+module Top (
+a: input  logic<16>,
+b: input  logic<16>,
+r: output logic<16>
+) {
+assign r = if b == 16'd0 ? a : a % b;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let r = sim.signal("r");
+
+    sim.modify(|io| {
+        io.set(a, 100u16);
+        io.set(b, 0u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(r), 100u16.into());
+
+    sim.modify(|io| {
+        io.set(a, 100u16);
+        io.set(b, 7u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(r), 2u16.into());
+
+    }
+
     // Division in always_ff.
     fn test_ff_div(sim) {
         @setup { let code = r#"

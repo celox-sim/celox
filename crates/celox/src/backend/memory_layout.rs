@@ -33,6 +33,7 @@ pub struct RuntimeEventSiteLayout {
 
 #[derive(Debug, Clone)]
 pub struct MemoryLayout {
+    pub four_state: bool,
     /// Stable region (region = 0) offsets. Includes all declared variables.
     pub offsets: HashMap<AbsoluteAddr, usize>,
     pub widths: HashMap<AbsoluteAddr, usize>,
@@ -187,6 +188,7 @@ impl MemoryLayout {
         }
 
         Self {
+            four_state,
             offsets,
             widths,
             is_4states,
