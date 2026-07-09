@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use iced_x86::BlockEncoderOptions;
 use iced_x86::code_asm::*;
 
 use crate::backend::native::mir::*;
@@ -169,6 +170,8 @@ pub struct EmitResult {
     pub code: Vec<u8>,
     /// Stack frame size (bytes) for spill slots, excluding callee-saved pushes.
     pub frame_size: u32,
+    /// Machine-code offsets for MIR basic-block entry labels.
+    pub block_offsets: Vec<(BlockId, u64)>,
 }
 
 /// Disassemble the emitted code to a string (NASM syntax).
@@ -473,8 +476,20 @@ pub fn emit(
     }
     asm.ret()?;
 
-    let code = asm.assemble(0x0)?;
-    Ok(EmitResult { code, frame_size })
+    let result = asm.assemble_options(0x0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
+    let block_offsets = func
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            let label = block_labels.get(&block.id)?;
+            result.label_ip(label).ok().map(|ip| (block.id, ip))
+        })
+        .collect();
+    Ok(EmitResult {
+        code: result.inner.code_buffer,
+        frame_size,
+        block_offsets,
+    })
 }
 
 fn count_vreg_uses(func: &MFunction) -> HashMap<VReg, usize> {
@@ -1759,7 +1774,7 @@ pub fn emit_chained_eus(
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     label: &str,
-) -> Result<Vec<u8>, IcedError> {
+) -> Result<EmitResult, IcedError> {
     use super::{isel, regalloc};
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
@@ -1903,7 +1918,7 @@ pub fn emit_chained_eus(
             start.elapsed()
         );
     }
-    Ok(result.code)
+    Ok(result)
 }
 
 fn mir_inst_count(func: &super::mir::MFunction) -> usize {

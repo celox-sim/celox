@@ -124,17 +124,55 @@ fn compile_units(
         );
     }
     let start = timing.then(crate::timing::now);
-    let chained_code = emit::emit_chained_eus(units, layout, four_state, label)
+    let emit_result = emit::emit_chained_eus(units, layout, four_state, label)
         .map_err(|e| codegen_err(format!("emit error: {e}")))?;
     if let Some(start) = start {
         eprintln!(
             "[native-timing] compile_units done label={label} bytes={} elapsed={:?}",
-            chained_code.len(),
+            emit_result.code.len(),
             start.elapsed()
         );
     }
-    jit_mem::JitCode::new_named(&chained_code, label)
+    let symbols = perf_symbols_for_emit_result(label, &emit_result);
+    jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
         .map_err(|e| codegen_err(format!("mmap error: {e}")))
+}
+
+fn perf_symbols_for_emit_result(label: &str, result: &emit::EmitResult) -> Vec<jit_mem::JitSymbol> {
+    let code_len = result.code.len();
+    if result.block_offsets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut blocks = result.block_offsets.clone();
+    blocks.sort_by_key(|(_, offset)| *offset);
+
+    let mut symbols = Vec::with_capacity(blocks.len() + 2);
+    let first_offset = blocks[0].1 as usize;
+    if first_offset > 0 {
+        symbols.push(jit_mem::JitSymbol {
+            offset: 0,
+            size: first_offset,
+            name: format!("{label}.prologue"),
+        });
+    }
+
+    for (idx, (block_id, offset)) in blocks.iter().enumerate() {
+        let start = *offset as usize;
+        let end = blocks
+            .get(idx + 1)
+            .map(|(_, next)| *next as usize)
+            .unwrap_or(code_len);
+        if end > start {
+            symbols.push(jit_mem::JitSymbol {
+                offset: start,
+                size: end - start,
+                name: format!("{label}.bb{}", block_id.0),
+            });
+        }
+    }
+
+    symbols
 }
 
 fn fingerprint_ff_units(
