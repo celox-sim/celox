@@ -10,6 +10,7 @@ use crate::ir::{
 use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
 
 use super::mir::*;
+use crate::HashSet;
 use crate::backend::MemoryLayout;
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
@@ -96,6 +97,7 @@ pub fn lower_execution_unit(
         mask_map,
         known_bits: crate::HashMap::default(),
         wide_masks: WideRegMap::default(),
+        trigger_only_seen: HashSet::default(),
     };
 
     // Pre-seed wide block params so instructions in those blocks can read the
@@ -143,6 +145,7 @@ pub fn lower_execution_unit(
         let sir_block = &eu.blocks[&sir_block_id];
         let mir_block_id = BlockId(sir_block_id.0 as u32);
         let mut mblock = MBlock::new(mir_block_id);
+        ctx.trigger_only_seen.clear();
 
         // Pre-scan: record Store target addresses for Slice memory fallback.
         // When SIR does Store(addr, ..., src_reg, ...) followed by
@@ -483,6 +486,10 @@ struct ISelContext<'a> {
     known_bits: crate::HashMap<VReg, usize>,
     /// Wide mask chunks (parallel to wide_regs).
     wide_masks: WideRegMap,
+    /// Width=0 trigger-only stores do not write memory. Within one MIR block,
+    /// rechecking the same physical byte for the same trigger id is redundant
+    /// until a real Store/Commit may change memory.
+    trigger_only_seen: HashSet<(i32, usize)>,
 }
 
 impl<'a> ISelContext<'a> {
@@ -1831,6 +1838,14 @@ fn lower_instruction(
                         // Load current value for trigger comparison
                         // (self-copy alias: addr points to the canonical location)
                         let byte_off = ctx.byte_offset(addr, *bit_off);
+                        let triggers = triggers
+                            .iter()
+                            .copied()
+                            .filter(|trigger| ctx.trigger_only_seen.insert((byte_off, trigger.id)))
+                            .collect::<Vec<_>>();
+                        if triggers.is_empty() {
+                            return;
+                        }
                         // We need *some* value for trigger comparison.
                         // Since width was originally 1 (clock/reset), load 1 byte.
                         let new_val = ctx.alloc_vreg(SpillDesc::transient());
@@ -1841,7 +1856,7 @@ fn lower_instruction(
                             size: OpSize::S8,
                         });
 
-                        for trigger in triggers {
+                        for trigger in &triggers {
                             let trigger_byte_idx = trigger.id / 8;
                             let trigger_bit_idx = trigger.id % 8;
                             let trigger_offset =
@@ -1897,6 +1912,7 @@ fn lower_instruction(
                 }
                 // Skip value store entirely
             } else {
+                ctx.trigger_only_seen.clear();
                 let old_comb_probe = if comb_capture_sites.is_empty() || *width_bits > 64 {
                     None
                 } else {
@@ -2558,6 +2574,7 @@ fn lower_instruction(
         } // Store
 
         SIRInstruction::Commit(src_addr, dst_addr, offset, width_bits, _triggers) => {
+            ctx.trigger_only_seen.clear();
             // Commit = load from src region, store to dst region (same offset/width)
             match offset {
                 SIROffset::Static(bit_off) => {
