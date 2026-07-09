@@ -14,7 +14,14 @@ struct Options {
     test: String,
     source_files: Vec<PathBuf>,
     opt_level: OptLevel,
+    backend: Backend,
     four_state: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Backend {
+    Native,
+    Cranelift,
 }
 
 fn main() {
@@ -37,7 +44,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         .with_metadata(metadata)
         .opt_level(opts.opt_level)
         .four_state(opts.four_state);
-    let result = builder.run_test()?;
+    let result = match opts.backend {
+        Backend::Native => builder.run_test()?,
+        Backend::Cranelift => builder.run_test_cranelift()?,
+    };
     let elapsed = start.elapsed();
 
     match result {
@@ -65,6 +75,7 @@ fn parse_args() -> Result<Options, String> {
     let mut test = None;
     let mut source_files = Vec::new();
     let mut opt_level = OptLevel::O1;
+    let mut backend = Backend::Native;
     let mut four_state = false;
     let mut args = env::args().skip(1);
 
@@ -89,6 +100,12 @@ fn parse_args() -> Result<Options, String> {
                     .ok_or_else(|| "--opt-level requires O0, O1, or O2".to_string())?;
                 opt_level = parse_opt_level(&value)?;
             }
+            "--backend" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--backend requires native or cranelift".to_string())?;
+                backend = parse_backend(&value)?;
+            }
             "--source-file" => {
                 source_files.push(PathBuf::from(
                     args.next()
@@ -107,6 +124,7 @@ fn parse_args() -> Result<Options, String> {
         test: test.ok_or_else(|| "missing test module".to_string())?,
         source_files,
         opt_level,
+        backend,
         four_state,
     })
 }
@@ -120,8 +138,16 @@ fn parse_opt_level(value: &str) -> Result<OptLevel, String> {
     }
 }
 
+fn parse_backend(value: &str) -> Result<Backend, String> {
+    match value {
+        "native" => Ok(Backend::Native),
+        "cranelift" => Ok(Backend::Cranelift),
+        _ => Err(format!("invalid backend: {value}")),
+    }
+}
+
 fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--opt-level O1] [--four-state]"
+    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O1] [--four-state]"
 }
 
 fn load_sources(

@@ -31,6 +31,7 @@ Environment:
   HELIODOR_REF         commit/tag/branch to checkout
   HELIODOR_TESTS       space-separated test modules
   HELIODOR_RUNNERS     space-separated runners (default: veryl-cranelift veryl-cc celox)
+                       Celox runners: celox, celox-cranelift
   HELIODOR_TIMEOUT_SEC absolute timeout for every runner/test
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
                        timeout Celox after N times the fastest successful Veryl baseline
@@ -268,7 +269,13 @@ run_one() {
         celox)
             run_in_heliodor "$timeout_sec" "$log" \
                 "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
-                "${celox_args[@]}" --opt-level "$CELOX_OPT_LEVEL"
+                "${celox_args[@]}" --backend native --opt-level "$CELOX_OPT_LEVEL"
+            status="$?"
+            ;;
+        celox-cranelift)
+            run_in_heliodor "$timeout_sec" "$log" \
+                "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                "${celox_args[@]}" --backend cranelift --opt-level "$CELOX_OPT_LEVEL"
             status="$?"
             ;;
         veryl-cc)
@@ -313,7 +320,7 @@ run_all() {
     if [[ ! -f "$HELIODOR_RESULTS_DIR/results.tsv" ]]; then
         printf 'runner\ttest\tstatus\telapsed_ns\tlog\n' >"$HELIODOR_RESULTS_DIR/results.tsv"
     fi
-    if runner_enabled celox; then
+    if runner_enabled celox || runner_enabled celox-cranelift; then
         build_celox_runner
     fi
     if any_veryl_runner_enabled; then

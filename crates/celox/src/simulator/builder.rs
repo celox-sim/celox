@@ -662,16 +662,18 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
     /// Compiles and runs a native testbench (`#[test]` module).
     pub fn run_test(self) -> Result<crate::testbench::TestResult, SimulatorError> {
-        let mut sim = self.build()?;
-        let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
-            SimulatorError::new(SimulatorErrorKind::Codegen(
-                "no initial block found — this module is not a native testbench".into(),
-            ))
-        })?;
-        let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
-        tb_builder.build_event_map(&initial_stmts);
-        let tb_stmts = tb_builder.convert(&initial_stmts);
-        Ok(crate::testbench::run_testbench(&mut sim, &tb_stmts))
+        run_test_with_sim(self.build()?)
+    }
+
+    /// Compiles and runs a testbench using the Cranelift JIT backend.
+    pub fn run_test_cranelift(self) -> Result<crate::testbench::TestResult, SimulatorError> {
+        run_test_with_sim(self.build_cranelift()?)
+    }
+
+    /// Compiles and runs a testbench using the custom native backend.
+    #[cfg(target_arch = "x86_64")]
+    pub fn run_test_native(self) -> Result<crate::testbench::TestResult, SimulatorError> {
+        run_test_with_sim(self.build_native()?)
     }
 
     /// Compiles and runs a native testbench, returning assertion results
@@ -777,6 +779,20 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             trace,
         }
     }
+}
+
+fn run_test_with_sim<B: crate::backend::SimBackend>(
+    mut sim: Simulator<B>,
+) -> Result<crate::testbench::TestResult, SimulatorError> {
+    let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
+        SimulatorError::new(SimulatorErrorKind::Codegen(
+            "no initial block found — this module is not a native testbench".into(),
+        ))
+    })?;
+    let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
+    tb_builder.build_event_map(&initial_stmts);
+    let tb_stmts = tb_builder.convert(&initial_stmts);
+    Ok(crate::testbench::run_testbench(&mut sim, &tb_stmts))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
