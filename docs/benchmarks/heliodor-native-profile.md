@@ -85,14 +85,16 @@ about `4.63s`, but it is not the order-of-magnitude runtime gap. The runtime gap
 is already present in the per-tick hot code: `eval_comb` alone takes about ten
 times the Veryl cc per-cycle time.
 
-An opt-in priority-encoder lowering exists behind `CELOX_NATIVE_PRIORITY_ENCODE`,
-but it did not help this benchmark in a same-conditions 60 second sample:
+A native priority-encoder lowering handles part of this shape by default
+(`CELOX_NATIVE_PRIORITY_ENCODE=0` disables it for debugging). It reduces
+compile-only `eval_comb` instruction counts, but did not materially improve a
+same-conditions 60 second timed sample:
 
 - without priority lowering: `avg_comb_us=61.508`
 - with priority lowering: `avg_comb_us=62.280`
 
-So the observed `Mux` volume is not primarily the already-recognized priority
-encoder shape, or the lowering is not cost-effective for this generated code.
+So the observed `Mux` volume is not only the already-recognized priority
+encoder shape, and the current lowering is not enough to close the runtime gap.
 
 ## Hot Code
 

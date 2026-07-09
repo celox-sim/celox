@@ -100,8 +100,8 @@ pub fn lower_execution_unit(
         wide_masks: WideRegMap::default(),
         trigger_only_seen: HashSet::default(),
     };
-    let native_priority_encode =
-        !four_state && std::env::var_os("CELOX_NATIVE_PRIORITY_ENCODE").is_some();
+    let native_priority_encode = !four_state
+        && std::env::var_os("CELOX_NATIVE_PRIORITY_ENCODE").is_none_or(|value| value != "0");
     let sir_use_sites = if native_priority_encode {
         Some(collect_sir_use_sites(eu))
     } else {
@@ -172,6 +172,7 @@ pub fn lower_execution_unit(
         } else {
             PriorityEncodePlans::default()
         };
+        let sir_defs = collect_sir_defs(sir_block);
 
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
@@ -241,7 +242,7 @@ pub fn lower_execution_unit(
 
                 mblock = MBlock::new(cont_block_id);
             } else {
-                lower_instruction(&mut ctx, &mut mblock, inst);
+                lower_instruction(&mut ctx, &mut mblock, inst, sir_block, &sir_defs);
             }
 
             // Track known bit width for redundant mask elimination.
@@ -1413,6 +1414,18 @@ fn collect_sir_inst_uses(
     }
 }
 
+fn collect_sir_defs(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, usize> {
+    let mut defs = HashMap::default();
+    for (idx, inst) in block.instructions.iter().enumerate() {
+        if let Some(dst) = sir_def_reg(inst) {
+            defs.insert(dst, idx);
+        }
+    }
+    defs
+}
+
 fn collect_sir_term_uses(term: &SIRTerminator, mut add: impl FnMut(RegisterId)) {
     match term {
         SIRTerminator::Jump(_, args) => {
@@ -1865,6 +1878,8 @@ fn lower_instruction(
     ctx: &mut ISelContext,
     block: &mut MBlock,
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
 ) {
     match inst {
         SIRInstruction::RuntimeEvent { site_id, args } => {
@@ -2020,6 +2035,7 @@ fn lower_instruction(
                 if !ctx.four_state && d_width == 1 {
                     let tv = lower_low_bit(ctx, block, tv);
                     let ev = lower_low_bit(ctx, block, ev);
+
                     block.push(MInst::Select {
                         dst: dst_vreg,
                         cond: cond_vreg,
@@ -2027,6 +2043,41 @@ fn lower_instruction(
                         false_val: ev,
                     });
                     ctx.known_bits.insert(dst_vreg, 1);
+                    return;
+                }
+
+                if !ctx.four_state
+                    && d_width <= 64
+                    && ctx.known_bits.get(&tv).copied().unwrap_or(64) <= d_width
+                    && ctx.known_bits.get(&ev).copied().unwrap_or(64) <= d_width
+                    && let Some((guard, lhs, rhs, kind)) =
+                        match_guarded_cmp_select_cond(ctx, block, sir_block, sir_defs, *cond)
+                {
+                    block.push(MInst::GuardedCmpSelect {
+                        dst: dst_vreg,
+                        guard,
+                        lhs,
+                        rhs,
+                        kind,
+                        true_val: tv,
+                        false_val: ev,
+                    });
+                    ctx.known_bits.insert(dst_vreg, d_width);
+                    return;
+                }
+
+                if !ctx.four_state
+                    && d_width <= 64
+                    && ctx.known_bits.get(&tv).copied().unwrap_or(64) <= d_width
+                    && ctx.known_bits.get(&ev).copied().unwrap_or(64) <= d_width
+                {
+                    block.push(MInst::Select {
+                        dst: dst_vreg,
+                        cond: cond_vreg,
+                        true_val: tv,
+                        false_val: ev,
+                    });
+                    ctx.known_bits.insert(dst_vreg, d_width);
                     return;
                 }
 
@@ -4318,6 +4369,10 @@ fn lower_instruction(
         }
 
         SIRInstruction::Concat(dst, args) => {
+            if try_lower_concat_of_muxes(ctx, block, *dst, args, sir_block, sir_defs) {
+                return;
+            }
+
             // Concat: build a wide value from chunks.
             // For ≤64-bit result, shift and OR the pieces together.
             let dst_vreg = ctx.reg_map.get(*dst);
@@ -4759,6 +4814,321 @@ fn lower_instruction(
             }
         }
     }
+}
+
+fn match_guarded_cmp_select_cond(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
+    cond: RegisterId,
+) -> Option<(VReg, VReg, VReg, CmpKind)> {
+    let &cond_idx = sir_defs.get(&cond)?;
+    let SIRInstruction::Binary(_, lhs, BinaryOp::LogicAnd, rhs) = sir_block.instructions[cond_idx]
+    else {
+        return None;
+    };
+    if let Some((cmp_lhs, cmp_rhs, kind)) = match_cmp_sir_value(ctx, sir_block, sir_defs, lhs) {
+        let guard = lower_sir_bool_value(ctx, block, rhs)?;
+        return Some((guard, cmp_lhs, cmp_rhs, kind));
+    }
+    if let Some((cmp_lhs, cmp_rhs, kind)) = match_cmp_sir_value(ctx, sir_block, sir_defs, rhs) {
+        let guard = lower_sir_bool_value(ctx, block, lhs)?;
+        return Some((guard, cmp_lhs, cmp_rhs, kind));
+    }
+    None
+}
+
+fn match_cmp_sir_value(
+    ctx: &ISelContext,
+    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
+    reg: RegisterId,
+) -> Option<(VReg, VReg, CmpKind)> {
+    let &idx = sir_defs.get(&reg)?;
+    let SIRInstruction::Binary(_, lhs, op, rhs) = sir_block.instructions[idx] else {
+        return None;
+    };
+    let kind = match op {
+        BinaryOp::Eq | BinaryOp::EqWildcard => CmpKind::Eq,
+        BinaryOp::Ne | BinaryOp::NeWildcard => CmpKind::Ne,
+        BinaryOp::LtU => CmpKind::LtU,
+        BinaryOp::LtS => CmpKind::LtS,
+        BinaryOp::LeU => CmpKind::LeU,
+        BinaryOp::LeS => CmpKind::LeS,
+        BinaryOp::GtU => CmpKind::GtU,
+        BinaryOp::GtS => CmpKind::GtS,
+        BinaryOp::GeU => CmpKind::GeU,
+        BinaryOp::GeS => CmpKind::GeS,
+        _ => return None,
+    };
+    if ctx.sir_width(&lhs) > 64
+        || ctx.sir_width(&rhs) > 64
+        || ctx.wide_regs.contains_key(&lhs)
+        || ctx.wide_regs.contains_key(&rhs)
+    {
+        return None;
+    }
+    Some((ctx.reg_map.get(lhs), ctx.reg_map.get(rhs), kind))
+}
+
+fn lower_sir_bool_value(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    reg: RegisterId,
+) -> Option<VReg> {
+    if ctx.sir_width(&reg) > 64 {
+        return None;
+    }
+    let raw = if ctx.wide_regs.contains_key(&reg) {
+        ctx.get_wide_chunks(&reg, block)[0].0
+    } else {
+        ctx.reg_map.get(reg)
+    };
+    Some(lower_bool_value(ctx, block, raw))
+}
+
+fn try_lower_concat_of_muxes(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    args: &[RegisterId],
+    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
+) -> bool {
+    if ctx.four_state || args.len() < 2 {
+        return false;
+    }
+
+    let total_width = args.iter().map(|arg| ctx.sir_width(arg)).sum::<usize>();
+    if total_width == 0 || total_width != ctx.sir_width(&dst) {
+        return false;
+    }
+
+    let mut cond = None;
+    let mut then_parts = Vec::with_capacity(args.len());
+    let mut else_parts = Vec::with_capacity(args.len());
+
+    for &arg in args {
+        let Some(&idx) = sir_defs.get(&arg) else {
+            return false;
+        };
+        let SIRInstruction::Mux(mux_dst, mux_cond, then_val, else_val) =
+            sir_block.instructions[idx]
+        else {
+            return false;
+        };
+        if mux_dst != arg {
+            return false;
+        }
+        if let Some(existing_cond) = cond {
+            if existing_cond != mux_cond {
+                return false;
+            }
+        } else {
+            cond = Some(mux_cond);
+        }
+        let width = ctx.sir_width(&arg);
+        if ctx.sir_width(&then_val) < width || ctx.sir_width(&else_val) < width {
+            return false;
+        }
+        then_parts.push((then_val, width));
+        else_parts.push((else_val, width));
+    }
+
+    let cond = cond.expect("non-empty mux concat must have a condition");
+    let cond_raw = if ctx.wide_regs.contains_key(&cond) {
+        ctx.get_wide_chunks(&cond, block)[0].0
+    } else {
+        ctx.reg_map.get(cond)
+    };
+    let cond_vreg = lower_low_bit(ctx, block, cond_raw);
+
+    let then_chunks = lower_concat_parts_to_chunks(ctx, block, &then_parts, total_width);
+    let else_chunks = lower_concat_parts_to_chunks(ctx, block, &else_parts, total_width);
+    let result_chunks = lower_mux_chunk_blend(
+        ctx,
+        block,
+        cond_vreg,
+        &then_chunks,
+        &else_chunks,
+        total_width,
+    );
+
+    if total_width <= 64 {
+        let dst_vreg = ctx.reg_map.get(dst);
+        if let Some(&(result, _)) = result_chunks.first() {
+            ctx.emit_mov(block, dst_vreg, result);
+            ctx.known_bits.insert(dst_vreg, total_width);
+        }
+    } else {
+        ctx.set_wide_chunks(dst, result_chunks);
+    }
+    true
+}
+
+fn lower_concat_parts_to_chunks(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    parts: &[(RegisterId, usize)],
+    total_width: usize,
+) -> Vec<(VReg, usize)> {
+    let n_dst_chunks = ISelContext::num_chunks(total_width);
+    let mut flat_bits: Vec<(VReg, usize)> = Vec::with_capacity(parts.len());
+    for &(reg, width) in parts.iter().rev() {
+        if width > 64 || ctx.wide_regs.contains_key(&reg) {
+            let chunks = ctx.get_wide_chunks(&reg, block);
+            let mut remaining = width;
+            for (chunk, chunk_width) in chunks {
+                if remaining == 0 {
+                    break;
+                }
+                let take = chunk_width.min(remaining);
+                flat_bits.push((chunk, take));
+                remaining -= take;
+            }
+        } else {
+            let vreg = ctx.reg_map.get(reg);
+            flat_bits.push((vreg, width));
+        }
+    }
+
+    let mut dst_chunks = Vec::with_capacity(n_dst_chunks);
+    let mut flat_idx = 0usize;
+    let mut flat_consumed = 0usize;
+
+    for chunk_i in 0..n_dst_chunks {
+        let chunk_width = if chunk_i == n_dst_chunks - 1 {
+            let rem = total_width % 64;
+            if rem == 0 { 64 } else { rem }
+        } else {
+            64
+        };
+
+        let mut acc = ctx.alloc_vreg(SpillDesc::remat(0));
+        block.push(MInst::LoadImm { dst: acc, value: 0 });
+        let mut acc_pos = 0usize;
+
+        while acc_pos < chunk_width && flat_idx < flat_bits.len() {
+            let (fv, fw) = flat_bits[flat_idx];
+            let remaining_in_flat = fw - flat_consumed;
+            let need = chunk_width - acc_pos;
+            let take = remaining_in_flat.min(need);
+
+            let mut piece = fv;
+            if flat_consumed > 0 {
+                let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::ShrImm {
+                    dst: shifted,
+                    src: piece,
+                    imm: flat_consumed as u8,
+                });
+                piece = shifted;
+            }
+            if take < 64 {
+                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                ctx.emit_and_imm(block, masked, piece, mask_for_width(take));
+                piece = masked;
+            }
+
+            if acc_pos > 0 {
+                let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::ShlImm {
+                    dst: shifted,
+                    src: piece,
+                    imm: acc_pos as u8,
+                });
+                piece = shifted;
+            }
+
+            let merged = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or {
+                dst: merged,
+                lhs: acc,
+                rhs: piece,
+            });
+            acc = merged;
+
+            acc_pos += take;
+            flat_consumed += take;
+            if flat_consumed >= fw {
+                flat_idx += 1;
+                flat_consumed = 0;
+            }
+        }
+
+        dst_chunks.push((acc, chunk_width));
+    }
+
+    dst_chunks
+}
+
+fn lower_mux_chunk_blend(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    cond_vreg: VReg,
+    then_chunks: &[(VReg, usize)],
+    else_chunks: &[(VReg, usize)],
+    total_width: usize,
+) -> Vec<(VReg, usize)> {
+    let n_chunks = ISelContext::num_chunks(total_width);
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
+    });
+    let cond_bc_raw = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Sub {
+        dst: cond_bc_raw,
+        lhs: zero,
+        rhs: cond_vreg,
+    });
+
+    let mut result_chunks = Vec::with_capacity(n_chunks);
+    for i in 0..n_chunks {
+        let chunk_width = if i == n_chunks - 1 {
+            let rem = total_width % 64;
+            if rem == 0 { 64 } else { rem }
+        } else {
+            64
+        };
+        let tv = then_chunks.get(i).map(|&(v, _)| v).unwrap_or(zero);
+        let ev = else_chunks.get(i).map(|&(v, _)| v).unwrap_or(zero);
+        let cond_bc = if chunk_width < 64 {
+            let masked = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, masked, cond_bc_raw, mask_for_width(chunk_width));
+            masked
+        } else {
+            cond_bc_raw
+        };
+
+        let result = if tv == ev {
+            tv
+        } else {
+            let diff = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Xor {
+                dst: diff,
+                lhs: tv,
+                rhs: ev,
+            });
+            let selected_diff = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And {
+                dst: selected_diff,
+                lhs: diff,
+                rhs: cond_bc,
+            });
+            let res = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Xor {
+                dst: res,
+                lhs: ev,
+                rhs: selected_diff,
+            });
+            res
+        };
+        result_chunks.push((result, chunk_width));
+    }
+
+    result_chunks
 }
 
 // ────────────────────────────────────────────────────────────────

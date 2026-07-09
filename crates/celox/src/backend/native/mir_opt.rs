@@ -572,6 +572,11 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
             true_val,
             false_val,
             ..
+        }
+        | MInst::GuardedCmpSelect {
+            true_val,
+            false_val,
+            ..
         } => match (known.get(true_val), known.get(false_val)) {
             (Some(&t), Some(&f)) => Some(t.max(f)),
             _ => None,
@@ -1256,6 +1261,7 @@ fn if_convert(func: &mut MFunction) {
                         | MInst::AddImm { .. }
                         | MInst::SubImm { .. }
                         | MInst::Select { .. }
+                        | MInst::GuardedCmpSelect { .. }
                         | MInst::Jump { .. }
                 )
             })
@@ -1823,6 +1829,11 @@ fn compute_value_widths(func: &mut MFunction) {
                     _ => None,
                 },
                 MInst::Select {
+                    true_val,
+                    false_val,
+                    ..
+                }
+                | MInst::GuardedCmpSelect {
                     true_val,
                     false_val,
                     ..

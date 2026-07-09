@@ -1308,6 +1308,20 @@ fn emit_inst(
             }
         }
 
+        MInst::GuardedCmpSelect {
+            dst,
+            guard,
+            lhs,
+            rhs,
+            kind,
+            true_val,
+            false_val,
+        } => {
+            emit_guarded_cmp_select(
+                asm, assignment, *dst, *guard, *lhs, *rhs, *kind, *true_val, *false_val,
+            )?;
+        }
+
         // Branch and Jump are handled in the main emit loop (with phi moves).
         MInst::Branch { .. } | MInst::Jump { .. } => {
             unreachable!("Branch/Jump should be handled in main emit loop");
@@ -1342,6 +1356,128 @@ fn emit_jcc(asm: &mut CodeAssembler, label: CodeLabel, kind: CmpKind) -> Result<
         CmpKind::GeU => asm.jae(label),
         CmpKind::GeS => asm.jge(label),
     }
+}
+
+fn emit_cmovcc(
+    asm: &mut CodeAssembler,
+    dst: AsmRegister64,
+    src: AsmRegister64,
+    kind: CmpKind,
+) -> Result<(), IcedError> {
+    match kind {
+        CmpKind::Eq => asm.cmove(dst, src),
+        CmpKind::Ne => asm.cmovne(dst, src),
+        CmpKind::LtU => asm.cmovb(dst, src),
+        CmpKind::LtS => asm.cmovl(dst, src),
+        CmpKind::LeU => asm.cmovbe(dst, src),
+        CmpKind::LeS => asm.cmovle(dst, src),
+        CmpKind::GtU => asm.cmova(dst, src),
+        CmpKind::GtS => asm.cmovg(dst, src),
+        CmpKind::GeU => asm.cmovae(dst, src),
+        CmpKind::GeS => asm.cmovge(dst, src),
+    }
+}
+
+fn emit_inverse_cmovcc(
+    asm: &mut CodeAssembler,
+    dst: AsmRegister64,
+    src: AsmRegister64,
+    kind: CmpKind,
+) -> Result<(), IcedError> {
+    match kind {
+        CmpKind::Eq => asm.cmovne(dst, src),
+        CmpKind::Ne => asm.cmove(dst, src),
+        CmpKind::LtU => asm.cmovae(dst, src),
+        CmpKind::LtS => asm.cmovge(dst, src),
+        CmpKind::LeU => asm.cmova(dst, src),
+        CmpKind::LeS => asm.cmovg(dst, src),
+        CmpKind::GtU => asm.cmovbe(dst, src),
+        CmpKind::GtS => asm.cmovle(dst, src),
+        CmpKind::GeU => asm.cmovb(dst, src),
+        CmpKind::GeS => asm.cmovl(dst, src),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_guarded_cmp_select(
+    asm: &mut CodeAssembler,
+    assignment: &AssignmentMap,
+    dst: VReg,
+    guard: VReg,
+    lhs: VReg,
+    rhs: VReg,
+    kind: CmpKind,
+    true_val: VReg,
+    false_val: VReg,
+) -> Result<(), IcedError> {
+    let d = preg_to_reg64(resolve(assignment, dst));
+    let g = preg_to_reg64(resolve(assignment, guard));
+    let l = preg_to_reg64(resolve(assignment, lhs));
+    let r = preg_to_reg64(resolve(assignment, rhs));
+    let tv = preg_to_reg64(resolve(assignment, true_val));
+    let fv = preg_to_reg64(resolve(assignment, false_val));
+
+    if d == g || d == l || d == r {
+        emit_guarded_cmp_select_branchy(asm, d, g, l, r, kind, tv, fv)?;
+        return Ok(());
+    }
+
+    if tv == fv {
+        if d != tv {
+            asm.mov(d, tv)?;
+        }
+    } else if d == fv {
+        let mut done = asm.create_label();
+        asm.test(g, g)?;
+        asm.je(done)?;
+        asm.cmp(l, r)?;
+        emit_cmovcc(asm, d, tv, kind)?;
+        asm.set_label(&mut done)?;
+    } else if d == tv {
+        asm.cmp(l, r)?;
+        emit_inverse_cmovcc(asm, d, fv, kind)?;
+        asm.test(g, g)?;
+        asm.cmove(d, fv)?;
+    } else {
+        asm.mov(d, fv)?;
+        asm.cmp(l, r)?;
+        emit_cmovcc(asm, d, tv, kind)?;
+        asm.test(g, g)?;
+        asm.cmove(d, fv)?;
+    }
+    Ok(())
+}
+
+fn emit_guarded_cmp_select_branchy(
+    asm: &mut CodeAssembler,
+    dst: AsmRegister64,
+    guard: AsmRegister64,
+    lhs: AsmRegister64,
+    rhs: AsmRegister64,
+    kind: CmpKind,
+    true_val: AsmRegister64,
+    false_val: AsmRegister64,
+) -> Result<(), IcedError> {
+    let mut false_label = asm.create_label();
+    let mut true_label = asm.create_label();
+    let mut done = asm.create_label();
+    asm.test(guard, guard)?;
+    asm.je(false_label)?;
+    asm.cmp(lhs, rhs)?;
+    emit_jcc(asm, true_label, kind)?;
+    asm.set_label(&mut false_label)?;
+    if dst != false_val {
+        asm.mov(dst, false_val)?;
+    }
+    asm.jmp(done)?;
+    asm.set_label(&mut true_label)?;
+    if dst != true_val {
+        asm.mov(dst, true_val)?;
+    } else {
+        asm.nop()?;
+    }
+    asm.set_label(&mut done)?;
+    Ok(())
 }
 
 fn emit_setcc(asm: &mut CodeAssembler, d8: AsmRegister8, kind: CmpKind) -> Result<(), IcedError> {
@@ -1998,7 +2134,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 | MInst::BsrOr { .. }
                 | MInst::Pext { .. }
                 | MInst::Pdep { .. } => bit_ops += 1,
-                MInst::Select { .. } => select += 1,
+                MInst::Select { .. } | MInst::GuardedCmpSelect { .. } => select += 1,
                 MInst::Branch { .. } => branch += 1,
                 MInst::Jump { .. } => jump += 1,
                 MInst::Return | MInst::ReturnError { .. } => ret += 1,
@@ -2072,7 +2208,7 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     | MInst::BsrOr { .. }
                     | MInst::Pext { .. }
                     | MInst::Pdep { .. } => bit_ops += 1,
-                    MInst::Select { .. } => select += 1,
+                    MInst::Select { .. } | MInst::GuardedCmpSelect { .. } => select += 1,
                     MInst::Branch { .. }
                     | MInst::Jump { .. }
                     | MInst::Return

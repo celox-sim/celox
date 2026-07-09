@@ -13,10 +13,10 @@ use crate::ir::RegionedAbsoluteAddr;
 // Uses: stack-allocated list of VReg operands (no heap allocation)
 // ────────────────────────────────────────────────────────────────
 
-/// Stack-allocated list of up to 3 VReg uses. Avoids Vec heap allocation
+/// Stack-allocated list of up to 5 VReg uses. Avoids Vec heap allocation
 /// in the regalloc inner loop.
 pub struct Uses {
-    buf: [VReg; 3],
+    buf: [VReg; 5],
     len: u8,
 }
 
@@ -24,29 +24,36 @@ impl Uses {
     #[inline]
     pub fn none() -> Self {
         Self {
-            buf: [VReg(0); 3],
+            buf: [VReg(0); 5],
             len: 0,
         }
     }
     #[inline]
     pub fn one(a: VReg) -> Self {
         Self {
-            buf: [a, VReg(0), VReg(0)],
+            buf: [a, VReg(0), VReg(0), VReg(0), VReg(0)],
             len: 1,
         }
     }
     #[inline]
     pub fn two(a: VReg, b: VReg) -> Self {
         Self {
-            buf: [a, b, VReg(0)],
+            buf: [a, b, VReg(0), VReg(0), VReg(0)],
             len: 2,
         }
     }
     #[inline]
     pub fn three(a: VReg, b: VReg, c: VReg) -> Self {
         Self {
-            buf: [a, b, c],
+            buf: [a, b, c, VReg(0), VReg(0)],
             len: 3,
+        }
+    }
+    #[inline]
+    pub fn five(a: VReg, b: VReg, c: VReg, d: VReg, e: VReg) -> Self {
+        Self {
+            buf: [a, b, c, d, e],
+            len: 5,
         }
     }
     #[inline]
@@ -84,7 +91,7 @@ impl<'a> IntoIterator for &'a Uses {
 
 impl IntoIterator for Uses {
     type Item = VReg;
-    type IntoIter = std::iter::Take<std::array::IntoIter<VReg, 3>>;
+    type IntoIter = std::iter::Take<std::array::IntoIter<VReg, 5>>;
     fn into_iter(self) -> Self::IntoIter {
         self.buf.into_iter().take(self.len as usize)
     }
@@ -541,6 +548,16 @@ pub enum MInst {
         true_val: VReg,
         false_val: VReg,
     },
+    /// dst = (guard != 0 && lhs cmp rhs) ? true_val : false_val
+    GuardedCmpSelect {
+        dst: VReg,
+        guard: VReg,
+        lhs: VReg,
+        rhs: VReg,
+        kind: CmpKind,
+        true_val: VReg,
+        false_val: VReg,
+    },
 
     // ── Control flow ───────────────────────────────────────────
     /// Conditional branch: if cond != 0 then goto true_bb else goto false_bb
@@ -686,6 +703,18 @@ impl fmt::Display for MInst {
                 true_val,
                 false_val,
             } => write!(f, "{dst} = select {cond}, {true_val}, {false_val}"),
+            MInst::GuardedCmpSelect {
+                dst,
+                guard,
+                lhs,
+                rhs,
+                kind,
+                true_val,
+                false_val,
+            } => write!(
+                f,
+                "{dst} = guarded_cmp_select {guard}, cmp.{kind:?} {lhs}, {rhs}, {true_val}, {false_val}"
+            ),
             MInst::Branch {
                 cond,
                 true_bb,
@@ -776,7 +805,8 @@ impl MInst {
             | MInst::BsrOr { dst, .. }
             | MInst::Pext { dst, .. }
             | MInst::Pdep { dst, .. }
-            | MInst::Select { dst, .. } => Some(*dst),
+            | MInst::Select { dst, .. }
+            | MInst::GuardedCmpSelect { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
             | MInst::StorePtr { .. }
@@ -844,6 +874,14 @@ impl MInst {
                 false_val,
                 ..
             } => Uses::three(*cond, *true_val, *false_val),
+            MInst::GuardedCmpSelect {
+                guard,
+                lhs,
+                rhs,
+                true_val,
+                false_val,
+                ..
+            } => Uses::five(*guard, *lhs, *rhs, *true_val, *false_val),
             MInst::Branch { cond, .. } => Uses::one(*cond),
             MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => Uses::none(),
         }
@@ -987,6 +1025,30 @@ impl MInst {
             } => {
                 if *cond == old {
                     *cond = new;
+                }
+                if *true_val == old {
+                    *true_val = new;
+                }
+                if *false_val == old {
+                    *false_val = new;
+                }
+            }
+            MInst::GuardedCmpSelect {
+                guard,
+                lhs,
+                rhs,
+                true_val,
+                false_val,
+                ..
+            } => {
+                if *guard == old {
+                    *guard = new;
+                }
+                if *lhs == old {
+                    *lhs = new;
+                }
+                if *rhs == old {
+                    *rhs = new;
                 }
                 if *true_val == old {
                     *true_val = new;
