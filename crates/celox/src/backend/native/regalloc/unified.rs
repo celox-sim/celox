@@ -1123,8 +1123,39 @@ fn process_block(
             result.set(def_vreg, preg);
         }
 
+        let clobbered_residents = collect_clobbered_residents(&rf, inst, def);
+        for &vreg in &clobbered_residents {
+            let next_use = next_use_for_resident(
+                &use_positions,
+                &alias_source,
+                analysis,
+                block_idx,
+                block.insts.len(),
+                inst_idx + 1,
+                vreg,
+            );
+            if !alias_source.contains_key(&vreg) && next_use != u32::MAX {
+                emit_spill(
+                    &mut new_insts,
+                    vreg,
+                    &mut s,
+                    func,
+                    slots,
+                    result,
+                    "clobber",
+                    next_use,
+                    trace.as_deref_mut(),
+                );
+            }
+        }
+
         // Emit instruction
         new_insts.push(rewritten_inst);
+
+        for vreg in clobbered_residents {
+            evict_resident_alias(&mut reload_alias, &mut alias_source, vreg);
+            rf.evict(vreg);
+        }
 
         // Step E: Remove dead VRegs
         let block_len = block.insts.len();
@@ -1203,6 +1234,22 @@ fn edge_phi_sources(func: &MFunction, pred_id: BlockId, inst: &MInst) -> Vec<VRe
         _ => {}
     }
     sources
+}
+
+fn collect_clobbered_residents(rf: &RegFile, inst: &MInst, def: Option<VReg>) -> Vec<VReg> {
+    let mut residents = Vec::new();
+    for &preg in clobbers(inst) {
+        let Some(vreg) = rf.get_vreg(preg) else {
+            continue;
+        };
+        if Some(vreg) == def {
+            continue;
+        }
+        if !residents.contains(&vreg) {
+            residents.push(vreg);
+        }
+    }
+    residents
 }
 
 fn collect_edge_phi_sources(

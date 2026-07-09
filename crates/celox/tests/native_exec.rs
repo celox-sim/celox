@@ -168,6 +168,102 @@ fn test_native_bsr_nonzero() {
 }
 
 #[test]
+fn test_native_div_zero_safe_rhs_select() {
+    use celox::native_backend::mir::{BaseReg, CmpKind, MInst, OpSize, VReg};
+
+    let run = |lhs, rhs| {
+        run_single_block_mir(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: lhs,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: rhs,
+                },
+                MInst::LoadImm {
+                    dst: VReg(2),
+                    value: 0,
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 1,
+                },
+                MInst::Cmp {
+                    dst: VReg(4),
+                    lhs: VReg(1),
+                    rhs: VReg(2),
+                    kind: CmpKind::Eq,
+                },
+                MInst::Select {
+                    dst: VReg(5),
+                    cond: VReg(4),
+                    true_val: VReg(3),
+                    false_val: VReg(1),
+                },
+                MInst::UDiv {
+                    dst: VReg(6),
+                    lhs: VReg(0),
+                    rhs: VReg(5),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(6),
+                    size: OpSize::S64,
+                },
+            ],
+            7,
+        )
+    };
+
+    assert_eq!(run(42, 0), 42);
+    assert_eq!(run(42, 7), 6);
+}
+
+#[test]
+fn test_native_div_preserves_live_divisor_across_div() {
+    use celox::native_backend::mir::{BaseReg, MInst, OpSize, VReg};
+
+    let result = run_single_block_mir(
+        vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 100,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 2,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 50,
+            },
+            MInst::UDiv {
+                dst: VReg(3),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::UDiv {
+                dst: VReg(4),
+                lhs: VReg(2),
+                rhs: VReg(1),
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: VReg(4),
+                size: OpSize::S64,
+            },
+        ],
+        5,
+    );
+
+    assert_eq!(result, 25);
+}
+
+#[test]
 fn test_native_add() {
     let code = r#"
         module Top (x: input logic<32>, y: input logic<32>, z: output logic<32>) {
