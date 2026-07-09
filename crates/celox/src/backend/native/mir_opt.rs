@@ -1571,18 +1571,9 @@ fn split_live_ranges(func: &mut MFunction) {
                     size,
                     ..
                 } => {
-                    // Check no Store between def and use (conservative)
-                    let has_store = block.insts[def_ii + 1..use_pos].iter().any(|i| {
-                        matches!(
-                            i,
-                            MInst::Store { .. }
-                                | MInst::StorePtr { .. }
-                                | MInst::ReleaseStorePtr { .. }
-                                | MInst::StoreIndexed { .. }
-                                | MInst::StorePtrIndexed { .. }
-                                | MInst::ReleaseStorePtrIndexed { .. }
-                        )
-                    });
+                    let has_store = block.insts[def_ii + 1..use_pos]
+                        .iter()
+                        .any(|i| may_clobber_static_load(i, BaseReg::SimState, *offset, *size));
                     if !has_store {
                         Some(RematKind::SimLoad(*offset, *size))
                     } else {
@@ -1664,6 +1655,37 @@ struct SplitAction {
 enum RematKind {
     SimLoad(i32, OpSize),
     StackSpill,
+}
+
+fn may_clobber_static_load(inst: &MInst, base: BaseReg, offset: i32, size: OpSize) -> bool {
+    let load_start = i64::from(offset);
+    let load_end = load_start + i64::from(size.bytes());
+    match inst {
+        MInst::Store {
+            base: store_base,
+            offset: store_offset,
+            size: store_size,
+            ..
+        } if *store_base == base => ranges_overlap(
+            load_start,
+            load_end,
+            i64::from(*store_offset),
+            i64::from(*store_offset) + i64::from(store_size.bytes()),
+        ),
+        MInst::Store { .. } => false,
+        MInst::StoreIndexed {
+            base: store_base, ..
+        } if *store_base == base => true,
+        MInst::StorePtr { .. }
+        | MInst::ReleaseStorePtr { .. }
+        | MInst::StorePtrIndexed { .. }
+        | MInst::ReleaseStorePtrIndexed { .. } => true,
+        _ => false,
+    }
+}
+
+fn ranges_overlap(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> bool {
+    a_start < b_end && b_start < a_end
 }
 
 // ────────────────────────────────────────────────────────────────
