@@ -1441,6 +1441,17 @@ pub fn emit_chained_eus(
             start.elapsed()
         );
     }
+    let post_regalloc_start = timing.then(crate::timing::now);
+    super::mir_opt::post_regalloc_peephole(&mut mfunc);
+    if let Some(start) = post_regalloc_start {
+        eprintln!(
+            "[native-timing] emit_chained post_regalloc_peephole mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
+            mfunc.blocks.len(),
+            mir_inst_count(&mfunc),
+            mfunc.vregs.count(),
+            start.elapsed()
+        );
+    }
     if mir_stats {
         log_mir_stats(label, "after_regalloc", &mfunc);
     }

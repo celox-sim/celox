@@ -59,6 +59,152 @@ pub fn optimize(func: &mut MFunction) {
     compute_value_widths(func);
 }
 
+/// Run peepholes that are safe after register allocation.
+///
+/// Regalloc rematerializes constants as fresh `LoadImm` instructions. When such
+/// a constant has exactly one use in the immediately following instruction, we
+/// can fold it back into an existing immediate-form MIR instruction without
+/// changing liveness or adding new VRegs. The assignment map may still contain
+/// the removed VReg; it is simply no longer referenced by emitted code.
+pub fn post_regalloc_peephole(func: &mut MFunction) {
+    let mut use_counts: HashMap<VReg, usize> = HashMap::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for (_, src) in &phi.sources {
+                *use_counts.entry(*src).or_default() += 1;
+            }
+        }
+        for inst in &block.insts {
+            for use_vreg in inst.uses() {
+                *use_counts.entry(use_vreg).or_default() += 1;
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut rewritten = Vec::with_capacity(block.insts.len());
+        let mut idx = 0usize;
+        while idx < block.insts.len() {
+            let MInst::LoadImm {
+                dst: imm_vreg,
+                value,
+            } = block.insts[idx]
+            else {
+                rewritten.push(block.insts[idx].clone());
+                idx += 1;
+                continue;
+            };
+            if use_counts.get(&imm_vreg).copied().unwrap_or(0) != 1 || idx + 1 >= block.insts.len()
+            {
+                rewritten.push(block.insts[idx].clone());
+                idx += 1;
+                continue;
+            }
+
+            let Some(next) = fold_adjacent_imm_use(&block.insts[idx + 1], imm_vreg, value) else {
+                rewritten.push(block.insts[idx].clone());
+                idx += 1;
+                continue;
+            };
+
+            rewritten.push(next);
+            idx += 2;
+        }
+        block.insts = rewritten;
+    }
+    compute_value_widths(func);
+}
+
+fn fold_adjacent_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
+    match inst {
+        MInst::Cmp {
+            dst,
+            lhs,
+            rhs,
+            kind,
+        } if *rhs == imm_vreg => signed_i32(value).map(|imm| MInst::CmpImm {
+            dst: *dst,
+            lhs: *lhs,
+            imm,
+            kind: *kind,
+        }),
+        MInst::Add { dst, lhs, rhs } if *rhs == imm_vreg => {
+            signed_i32(value).map(|imm| MInst::AddImm {
+                dst: *dst,
+                src: *lhs,
+                imm,
+            })
+        }
+        MInst::Add { dst, lhs, rhs } if *lhs == imm_vreg => {
+            signed_i32(value).map(|imm| MInst::AddImm {
+                dst: *dst,
+                src: *rhs,
+                imm,
+            })
+        }
+        MInst::Sub { dst, lhs, rhs } if *rhs == imm_vreg => {
+            signed_i32(value).map(|imm| MInst::SubImm {
+                dst: *dst,
+                src: *lhs,
+                imm,
+            })
+        }
+        MInst::And { dst, lhs, rhs } if *rhs == imm_vreg => {
+            and_imm_ok(value).then_some(MInst::AndImm {
+                dst: *dst,
+                src: *lhs,
+                imm: value,
+            })
+        }
+        MInst::And { dst, lhs, rhs } if *lhs == imm_vreg => {
+            and_imm_ok(value).then_some(MInst::AndImm {
+                dst: *dst,
+                src: *rhs,
+                imm: value,
+            })
+        }
+        MInst::Or { dst, lhs, rhs } if *rhs == imm_vreg => {
+            signed_i32(value).map(|imm| MInst::OrImm {
+                dst: *dst,
+                src: *lhs,
+                imm: imm as u64,
+            })
+        }
+        MInst::Or { dst, lhs, rhs } if *lhs == imm_vreg => {
+            signed_i32(value).map(|imm| MInst::OrImm {
+                dst: *dst,
+                src: *rhs,
+                imm: imm as u64,
+            })
+        }
+        MInst::Shr { dst, lhs, rhs } if *rhs == imm_vreg && value < 64 => Some(MInst::ShrImm {
+            dst: *dst,
+            src: *lhs,
+            imm: value as u8,
+        }),
+        MInst::Shl { dst, lhs, rhs } if *rhs == imm_vreg && value < 64 => Some(MInst::ShlImm {
+            dst: *dst,
+            src: *lhs,
+            imm: value as u8,
+        }),
+        MInst::Sar { dst, lhs, rhs } if *rhs == imm_vreg && value < 64 => Some(MInst::SarImm {
+            dst: *dst,
+            src: *lhs,
+            imm: value as u8,
+        }),
+        _ => None,
+    }
+}
+
+fn signed_i32(value: u64) -> Option<i32> {
+    let signed = value as i64;
+    (signed >= i32::MIN as i64 && signed <= i32::MAX as i64).then_some(signed as i32)
+}
+
+fn and_imm_ok(value: u64) -> bool {
+    signed_i32(value).is_some() || value <= u32::MAX as u64
+}
+
 #[inline]
 fn bmi2_available() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -2937,6 +3083,175 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    #[test]
+    fn post_regalloc_peephole_folds_adjacent_single_use_cmp() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0,
+                },
+                MInst::Cmp {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                    kind: CmpKind::Ne,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        post_regalloc_peephole(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::CmpImm {
+                lhs: VReg(0),
+                imm: 0,
+                kind: CmpKind::Ne,
+                ..
+            }
+        ));
+        assert_eq!(func.blocks[0].insts.len(), 3);
+    }
+
+    #[test]
+    fn post_regalloc_peephole_keeps_multi_use_constant() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Add {
+                    dst: VReg(1),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                },
+                MInst::Or {
+                    dst: VReg(3),
+                    lhs: VReg(1),
+                    rhs: VReg(0),
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        post_regalloc_peephole(&mut func);
+
+        assert!(matches!(func.blocks[0].insts[0], MInst::LoadImm { .. }));
+        assert_eq!(func.blocks[0].insts.len(), 4);
+    }
+
+    #[test]
+    fn post_regalloc_peephole_folds_adjacent_alu_immediates() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 5,
+                },
+                MInst::Add {
+                    dst: VReg(1),
+                    lhs: VReg(0),
+                    rhs: VReg(2),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 0xffff_ffff,
+                },
+                MInst::And {
+                    dst: VReg(4),
+                    lhs: VReg(5),
+                    rhs: VReg(3),
+                },
+                MInst::LoadImm {
+                    dst: VReg(6),
+                    value: 31,
+                },
+                MInst::Shr {
+                    dst: VReg(7),
+                    lhs: VReg(8),
+                    rhs: VReg(6),
+                },
+                MInst::Return,
+            ],
+            9,
+        );
+
+        post_regalloc_peephole(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[0],
+            MInst::AddImm {
+                dst: VReg(1),
+                src: VReg(2),
+                imm: 5,
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::AndImm {
+                dst: VReg(4),
+                src: VReg(5),
+                imm: 0xffff_ffff,
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::ShrImm {
+                dst: VReg(7),
+                src: VReg(8),
+                imm: 31,
+            }
+        ));
+        assert_eq!(func.blocks[0].insts.len(), 4);
+    }
+
+    #[test]
+    fn post_regalloc_peephole_rejects_unsupported_immediates() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: i32::MAX as u64 + 1,
+                },
+                MInst::Or {
+                    dst: VReg(1),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 64,
+                },
+                MInst::Shl {
+                    dst: VReg(4),
+                    lhs: VReg(5),
+                    rhs: VReg(3),
+                },
+                MInst::Return,
+            ],
+            6,
+        );
+
+        post_regalloc_peephole(&mut func);
+
+        assert!(matches!(func.blocks[0].insts[0], MInst::LoadImm { .. }));
+        assert!(matches!(func.blocks[0].insts[1], MInst::Or { .. }));
+        assert!(matches!(func.blocks[0].insts[2], MInst::LoadImm { .. }));
+        assert!(matches!(func.blocks[0].insts[3], MInst::Shl { .. }));
+        assert_eq!(func.blocks[0].insts.len(), 5);
     }
 
     #[test]
