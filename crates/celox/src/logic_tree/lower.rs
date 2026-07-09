@@ -103,6 +103,21 @@ impl SLTToSIRLowerer {
         self.lower_inner(builder, node, arena, cache, Some(&env), false)
     }
 
+    pub fn lower_region_slice<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        node: NodeId,
+        access: BitAccess,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+    ) -> RegisterId {
+        let node_width = self.get_width(node, arena);
+        if access.lsb == 0 && access.msb + 1 == node_width {
+            return self.lower(builder, node, arena, cache);
+        }
+        self.lower_region_slice_inner(builder, node, &access, arena, cache)
+    }
+
     fn lower_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -611,6 +626,45 @@ impl SLTToSIRLowerer {
 
         let inner_reg = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
         self.slice_reg(builder, inner_reg, access)
+    }
+
+    fn lower_region_slice_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        expr: NodeId,
+        access: &crate::ir::BitAccess,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+    ) -> RegisterId {
+        match arena.get(expr) {
+            SLTNode::Slice {
+                expr: inner,
+                access: inner_access,
+            } if access.msb <= inner_access.msb - inner_access.lsb => {
+                let composed =
+                    BitAccess::new(inner_access.lsb + access.lsb, inner_access.lsb + access.msb);
+                self.lower_region_slice_inner(builder, *inner, &composed, arena, cache)
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } if !Self::is_div_rem_value(*then_expr, arena)
+                && !Self::is_div_rem_value(*else_expr, arena)
+                && access.msb < self.get_width(*then_expr, arena)
+                && access.msb < self.get_width(*else_expr, arena) =>
+            {
+                let cond_reg = self.lower_inner(builder, *cond, arena, cache, None, true);
+                let then_val =
+                    self.lower_region_slice_inner(builder, *then_expr, access, arena, cache);
+                let else_val =
+                    self.lower_region_slice_inner(builder, *else_expr, access, arena, cache);
+                let result = builder.alloc_logic(access.msb - access.lsb + 1);
+                builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
+                result
+            }
+            _ => self.lower_slice_inner(builder, expr, access, arena, cache, None, true),
+        }
     }
 
     fn lower_concat_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(

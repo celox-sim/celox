@@ -9,7 +9,7 @@ use crate::ir::SIRTerminator;
 use crate::ir::SIRValue;
 use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo};
 use crate::logic_tree::NodeId;
-use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNodeArena};
+use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeArena};
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -481,6 +481,109 @@ fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + D
     }
 }
 
+fn slice_source<Addr: Clone + Eq + Hash>(
+    node: NodeId,
+    target_width: usize,
+    arena: &SLTNodeArena<Addr>,
+) -> Option<(NodeId, BitAccess)> {
+    if target_width == 0 {
+        return None;
+    }
+    match arena.get(node) {
+        SLTNode::Slice { expr, access } => Some((*expr, *access)),
+        _ if crate::logic_tree::get_width(node, arena) == target_width => {
+            Some((node, BitAccess::new(0, target_width - 1)))
+        }
+        _ => None,
+    }
+}
+
+fn try_emit_common_slice_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    sorted_by_lsb: &[usize],
+    input: &[LogicPath<Addr>],
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+    target_addr: Addr,
+    merged_lsb: usize,
+    merged_width: usize,
+) -> bool {
+    let Some((&first_idx, rest)) = sorted_by_lsb.split_first() else {
+        return false;
+    };
+    let first_path = &input[first_idx];
+    if !first_path.local_inputs.is_empty() || !first_path.pre_lower_nodes.is_empty() {
+        return false;
+    }
+    let first_target = first_path.target.var().unwrap();
+    let first_width = first_target.access.msb - first_target.access.lsb + 1;
+    let Some((common_expr, first_access)) = slice_source(first_path.expr, first_width, arena)
+    else {
+        return false;
+    };
+    let source_lsb = first_access.lsb;
+    let mut source_msb = first_access.msb;
+    for &idx in rest {
+        let path = &input[idx];
+        if !path.local_inputs.is_empty() || !path.pre_lower_nodes.is_empty() {
+            return false;
+        }
+        let target = path.target.var().unwrap();
+        let target_width = target.access.msb - target.access.lsb + 1;
+        let Some((expr, access)) = slice_source(path.expr, target_width, arena) else {
+            return false;
+        };
+        if expr != common_expr {
+            return false;
+        }
+        if access.msb - access.lsb + 1 != target_width {
+            return false;
+        }
+        let Some(lhs) = target.access.lsb.checked_add(first_access.lsb) else {
+            return false;
+        };
+        let Some(rhs) = first_target.access.lsb.checked_add(access.lsb) else {
+            return false;
+        };
+        if lhs != rhs {
+            return false;
+        }
+        if access.lsb != source_msb + 1 {
+            return false;
+        }
+        source_msb = access.msb;
+    }
+
+    let source_width = crate::logic_tree::get_width(common_expr, arena);
+    if source_msb >= source_width || source_msb - source_lsb + 1 != merged_width {
+        return false;
+    }
+
+    for &idx in sorted_by_lsb {
+        collect_logic_path_input_deps(&input[idx], arena, dep_memo, inverse_dep_memo);
+    }
+
+    let value_reg = lowerer.lower_region_slice(
+        builder,
+        common_expr,
+        BitAccess::new(source_lsb, source_msb),
+        arena,
+        lower_cache,
+    );
+    builder.emit(SIRInstruction::Store(
+        target_addr,
+        SIROffset::Static(merged_lsb),
+        merged_width,
+        value_reg,
+        Vec::new(),
+        Vec::new(),
+    ));
+    true
+}
+
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum SchedulerError<A: Display + Debug + Eq + Hash + Clone> {
     #[error("Combinational loop detected: {}", .blocks.iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join(" -> "))]
@@ -588,6 +691,29 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 .all(|idx| input[*idx].comb_capture_enable_sites.is_empty());
 
             if contiguous && within_var_width && !has_self_ref && no_comb_capture_enable_sites {
+                if try_emit_common_slice_store(
+                    &sorted_by_lsb,
+                    input,
+                    lowerer,
+                    builder,
+                    arena,
+                    lower_cache,
+                    dep_memo,
+                    inverse_dep_memo,
+                    target_addr,
+                    merged_lsb,
+                    merged_width,
+                ) {
+                    if let Some(to_remove) = inverse_dep_memo.get(&target_addr) {
+                        for node in to_remove {
+                            lower_cache.remove(node);
+                        }
+                    }
+
+                    pending.clear();
+                    return;
+                }
+
                 // Coalesce: lower each path expression, then concat + single wide store.
                 // SIR Concat order is [MSB, ..., LSB], so reverse after lsb sort.
                 let mut regs: Vec<(RegisterId, usize)> = Vec::with_capacity(sorted_by_lsb.len());
@@ -650,6 +776,98 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     }
 
     pending.clear();
+}
+
+fn flush_pending_layer<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    pending: &mut Vec<usize>,
+    input: &[LogicPath<Addr>],
+    atoms_map: &HashMap<Addr, Vec<(BitAccess, usize)>>,
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+
+    let mut segment = Vec::new();
+    let flush_var_segment = |segment: &mut Vec<usize>,
+                             lower_cache: &mut HashMap<NodeId, RegisterId>,
+                             dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
+                             inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+                             builder: &mut SIRBuilder<Addr>| {
+        if segment.is_empty() {
+            return;
+        }
+        let mut groups: Vec<(Addr, Vec<usize>)> = Vec::new();
+        for &idx in segment.iter() {
+            let target = input[idx].target.var().unwrap().id;
+            if let Some((_, group)) = groups
+                .iter_mut()
+                .find(|(group_target, _)| *group_target == target)
+            {
+                group.push(idx);
+            } else {
+                groups.push((target, vec![idx]));
+            }
+        }
+        for (_, mut group) in groups {
+            flush_pending_coalesce(
+                &mut group,
+                input,
+                atoms_map,
+                lowerer,
+                builder,
+                arena,
+                lower_cache,
+                dep_memo,
+                inverse_dep_memo,
+                four_state,
+                var_widths,
+            );
+        }
+        segment.clear();
+    };
+
+    for idx in pending.drain(..) {
+        if input[idx].target.var().is_some() {
+            segment.push(idx);
+        } else {
+            flush_var_segment(
+                &mut segment,
+                lower_cache,
+                dep_memo,
+                inverse_dep_memo,
+                builder,
+            );
+            let mut singleton = vec![idx];
+            flush_pending_coalesce(
+                &mut singleton,
+                input,
+                atoms_map,
+                lowerer,
+                builder,
+                arena,
+                lower_cache,
+                dep_memo,
+                inverse_dep_memo,
+                four_state,
+                var_widths,
+            );
+        }
+    }
+    flush_var_segment(
+        &mut segment,
+        lower_cache,
+        dep_memo,
+        inverse_dep_memo,
+        builder,
+    );
 }
 
 /// Reorders consecutive runs of DAG SCCs (single-node, no self-loop) so that
@@ -788,7 +1006,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     // ── Layer computation + DAG reordering ──
     // Compute topological layers so that same-target paths at the same layer
     // are adjacent, enabling flush_pending_coalesce to merge them.
-    let sccs = {
+    let (sccs, layer) = {
         // Build reverse adjacency: rev_adj[u] = predecessors of u
         let mut rev_adj = vec![Vec::new(); n];
         for (v, neighbors) in adj.iter().enumerate() {
@@ -823,7 +1041,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
 
         // Reorder consecutive DAG SCCs by (layer, target_id) so that
         // same-target paths at the same layer become adjacent.
-        reorder_dag_runs(&ctx.sccs, &adj, &layer, &input)
+        (reorder_dag_runs(&ctx.sccs, &adj, &layer, &input), layer)
     };
 
     let mut builder = SIRBuilder::new();
@@ -856,8 +1074,8 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
     let mut next_runtime_error_code = first_runtime_error_code;
 
-    let mut pending_indices: Vec<usize> = Vec::new();
-    let mut pending_target: Option<Addr> = None;
+    let mut pending_layer_indices: Vec<usize> = Vec::new();
+    let mut pending_layer: Option<usize> = None;
 
     // 4. Scheduling: Process each SCC by selecting either Static Unrolling (A) or Dynamic Convergence (B).
     for scc in sccs {
@@ -881,8 +1099,8 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
 
         if is_loop {
             // Flush any buffered DAG nodes before entering a loop SCC.
-            flush_pending_coalesce(
-                &mut pending_indices,
+            flush_pending_layer(
+                &mut pending_layer_indices,
                 &input,
                 &atoms_map,
                 &lowerer,
@@ -894,7 +1112,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 four_state,
                 var_widths,
             );
-            pending_target = None;
+            pending_layer = None;
             let mut authorized = user_safety_limit.is_some();
             'check_scc: for &v_idx in &scc {
                 for &u_idx in &adj[v_idx] {
@@ -1119,8 +1337,8 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         } else {
             // DAG Part — flush before emitting if the EU has grown too large
             if builder.block_count() >= EU_BLOCK_LIMIT {
-                flush_pending_coalesce(
-                    &mut pending_indices,
+                flush_pending_layer(
+                    &mut pending_layer_indices,
                     &input,
                     &atoms_map,
                     &lowerer,
@@ -1132,7 +1350,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     four_state,
                     var_widths,
                 );
-                pending_target = None;
+                pending_layer = None;
                 if let Some(eu) = builder.flush_eu() {
                     result_eus.push(eu);
                     // Clear the lowering cache — register IDs are EU-scoped
@@ -1141,15 +1359,13 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             }
 
             let idx = scc[0];
-            let this_target = input[idx].target.var().map(|target| target.id);
+            let this_layer = layer[idx];
 
-            if this_target.is_some() && pending_target.as_ref() == this_target.as_ref() {
-                // Same target variable — buffer into pending.
-                pending_indices.push(idx);
+            if pending_layer == Some(this_layer) {
+                pending_layer_indices.push(idx);
             } else {
-                // Different target — flush previous pending, start new group.
-                flush_pending_coalesce(
-                    &mut pending_indices,
+                flush_pending_layer(
+                    &mut pending_layer_indices,
                     &input,
                     &atoms_map,
                     &lowerer,
@@ -1161,15 +1377,15 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     four_state,
                     var_widths,
                 );
-                pending_target = this_target;
-                pending_indices.push(idx);
+                pending_layer = Some(this_layer);
+                pending_layer_indices.push(idx);
             }
         }
     }
 
     // Flush remaining pending DAG nodes after the SCC loop.
-    flush_pending_coalesce(
-        &mut pending_indices,
+    flush_pending_layer(
+        &mut pending_layer_indices,
         &input,
         &atoms_map,
         &lowerer,
