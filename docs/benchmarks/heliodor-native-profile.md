@@ -55,6 +55,31 @@ This means the fix needs two layers: reduce the pre-regalloc scalar work, then
 make allocation pressure-aware. Only doing one side is unlikely to recover the
 full order of magnitude.
 
+The hot `eval_comb.bb0` SIR block confirms that the pre-regalloc work is already
+large. A dump of block 0 after SIR optimization contained `72,345` SIR
+instructions. The largest instruction classes were:
+
+- `And`: `13,068`
+- `Mux`: `11,808`
+- `LogicAnd`: `8,234`
+- `Eq`: `6,944`
+- `Shr`: `6,350`
+- `Load`: `5,107`
+- `Concat`: `4,607`
+- `Store`: `2,020`
+
+This is why the gap should not be described as "just regalloc". The allocator
+amplifies an already oversized scalar boolean/bitfield program.
+
+An opt-in priority-encoder lowering exists behind `CELOX_NATIVE_PRIORITY_ENCODE`,
+but it did not help this benchmark in a same-conditions 60 second sample:
+
+- without priority lowering: `avg_comb_us=61.508`
+- with priority lowering: `avg_comb_us=62.280`
+
+So the observed `Mux` volume is not primarily the already-recognized priority
+encoder shape, or the lowering is not cost-effective for this generated code.
+
 ## Hot Code
 
 Function-level JIT perf map:
