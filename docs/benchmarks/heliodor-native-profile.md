@@ -166,6 +166,50 @@ evaluation can be fast when generated code is compact and register allocation is
 good. The current Celox native path expands a large amount of scalar logic and
 then spills heavily.
 
+After block-level MIR stats were expanded, `eval_comb` top blocks showed that
+the largest blocks are dominated by ALU and immediate ALU even before regalloc:
+
+- `eval_comb.bb0` after MIR optimization: `82,885` instructions, including
+  `43,817` ALU, `16,760` ALU-immediate, `8,909` compares, and only `2,854`
+  sim-state loads.
+- `eval_comb.bb432` after MIR optimization: `74,696` instructions, including
+  `39,088` ALU, `15,647` ALU-immediate, and `8,114` compares.
+
+So the primary issue is not memory access count alone. Many memory accesses are
+surrounded by scalar bit manipulation and trigger-byte accumulation logic.
+
+## Accepted Improvements
+
+### Direct full-variable sub-byte stores
+
+Full-variable static stores where the declared variable width equals the store
+width no longer use bitfield read-modify-write lowering just because the width
+is not exactly 8/16/32/64 bits. For example, a whole 1-bit variable store now
+lowers to a masked byte store instead of:
+
+```text
+load dst byte
+and clear unused destination bits
+or source bit
+store dst byte
+```
+
+Measured Heliodor effect:
+
+- `eval_comb` after MIR optimization: about `263.5k` -> `256.0k`
+  instructions
+- `eval_comb` after regalloc: about `347.6k` -> `340.1k` instructions
+- `eval_comb` sim-state loads: `6,158` -> `3,625`
+- 40 second timeout sample still measured roughly `avg_comb_us=63.933`, so this
+  reduces hot code size but is not sufficient by itself to close the runtime
+  gap.
+
+The remaining top-of-block shape is now repeated direct full-variable stores
+followed by trigger-byte accumulation. That points at trigger/dirty byte
+accumulation and long boolean chains as the next places to attack, but those
+must be pressure-aware because earlier broad accumulation experiments worsened
+runtime.
+
 ## Rejected Experiments
 
 The following changes were implemented locally and measured. They should not be

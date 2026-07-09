@@ -2017,21 +2017,35 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
         .iter()
         .map(|block| {
             let insts = block.phis.len() + block.insts.len();
+            let mut load_sim = 0usize;
             let mut load_stack = 0usize;
+            let mut store_sim = 0usize;
             let mut store_stack = 0usize;
+            let mut indexed_mem = 0usize;
+            let mut memcopy = 0usize;
             let mut imm = 0usize;
             let mut alu = 0usize;
             let mut alu_imm = 0usize;
+            let mut cmp = 0usize;
+            let mut bit_ops = 0usize;
+            let mut select = 0usize;
+            let mut control = 0usize;
             for inst in &block.insts {
                 match inst {
-                    MInst::Load {
-                        base: BaseReg::StackFrame,
-                        ..
-                    } => load_stack += 1,
-                    MInst::Store {
-                        base: BaseReg::StackFrame,
-                        ..
-                    } => store_stack += 1,
+                    MInst::Load { base, .. } => match base {
+                        BaseReg::SimState => load_sim += 1,
+                        BaseReg::StackFrame => load_stack += 1,
+                    },
+                    MInst::Store { base, .. } => match base {
+                        BaseReg::SimState => store_sim += 1,
+                        BaseReg::StackFrame => store_stack += 1,
+                    },
+                    MInst::LoadIndexed { .. }
+                    | MInst::LoadPtrIndexed { .. }
+                    | MInst::StoreIndexed { .. }
+                    | MInst::StorePtrIndexed { .. }
+                    | MInst::ReleaseStorePtrIndexed { .. } => indexed_mem += 1,
+                    MInst::MemCopy { .. } => memcopy += 1,
                     MInst::LoadImm { .. } => imm += 1,
                     MInst::Add { .. }
                     | MInst::Sub { .. }
@@ -2050,6 +2064,19 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     | MInst::SarImm { .. }
                     | MInst::AddImm { .. }
                     | MInst::SubImm { .. } => alu_imm += 1,
+                    MInst::Cmp { .. } | MInst::CmpImm { .. } => cmp += 1,
+                    MInst::BitNot { .. }
+                    | MInst::Neg { .. }
+                    | MInst::Popcnt { .. }
+                    | MInst::Bsr { .. }
+                    | MInst::BsrOr { .. }
+                    | MInst::Pext { .. }
+                    | MInst::Pdep { .. } => bit_ops += 1,
+                    MInst::Select { .. } => select += 1,
+                    MInst::Branch { .. }
+                    | MInst::Jump { .. }
+                    | MInst::Return
+                    | MInst::ReturnError { .. } => control += 1,
                     _ => {}
                 }
             }
@@ -2058,30 +2085,66 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 block.id.0,
                 block.phis.len(),
                 block.insts.len(),
+                load_sim,
                 load_stack,
+                store_sim,
                 store_stack,
+                indexed_mem,
+                memcopy,
                 imm,
                 alu,
                 alu_imm,
+                cmp,
+                bit_ops,
+                select,
+                control,
             )
         })
         .collect::<Vec<_>>();
-    blocks.sort_unstable_by(|a, b| b.cmp(a));
-    for (rank, (total, block_id, phis, insts, load_stack, store_stack, imm, alu, alu_imm)) in
-        blocks.into_iter().take(10).enumerate()
+    blocks.sort_unstable_by_key(|entry| (std::cmp::Reverse(entry.0), entry.1));
+    for (
+        rank,
+        (
+            total,
+            block_id,
+            phis,
+            insts,
+            load_sim,
+            load_stack,
+            store_sim,
+            store_stack,
+            indexed_mem,
+            memcopy,
+            imm,
+            alu,
+            alu_imm,
+            cmp,
+            bit_ops,
+            select,
+            control,
+        ),
+    ) in blocks.into_iter().take(10).enumerate()
     {
         eprintln!(
-            "[native-mir-block-stats] label={label} stage={stage} rank={} block={} total={} phis={} insts={} load_stack={} store_stack={} imm={} alu={} alu_imm={}",
+            "[native-mir-block-stats] label={label} stage={stage} rank={} block={} total={} phis={} insts={} load_sim={} load_stack={} store_sim={} store_stack={} indexed_mem={} memcopy={} imm={} alu={} alu_imm={} cmp={} bit_ops={} select={} control={}",
             rank + 1,
             block_id,
             total,
             phis,
             insts,
+            load_sim,
             load_stack,
+            store_sim,
             store_stack,
+            indexed_mem,
+            memcopy,
             imm,
             alu,
-            alu_imm
+            alu_imm,
+            cmp,
+            bit_ops,
+            select,
+            control
         );
     }
 }

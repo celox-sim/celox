@@ -595,6 +595,33 @@ impl<'a> ISelContext<'a> {
         }
     }
 
+    fn full_static_store_size(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        bit_offset: usize,
+        width_bits: usize,
+    ) -> Option<OpSize> {
+        if bit_offset != 0 || width_bits == 0 || width_bits > 64 {
+            return None;
+        }
+        let var_width = self.layout.widths.get(&addr.absolute_addr()).copied()?;
+        (var_width == width_bits).then(|| Self::op_size_for_width(width_bits))
+    }
+
+    fn mask_for_store_width(&mut self, block: &mut MBlock, src: VReg, width_bits: usize) -> VReg {
+        if width_bits >= 64
+            || self
+                .known_bits
+                .get(&src)
+                .is_some_and(|&known_bits| known_bits <= width_bits)
+        {
+            return src;
+        }
+        let masked = self.alloc_vreg(SpillDesc::transient());
+        self.emit_and_imm(block, masked, src, mask_for_width(width_bits));
+        masked
+    }
+
     /// Emit AND with immediate, handling 64-bit values that don't fit i32.
     /// Elides the AND entirely if the source is already known to fit within
     /// the mask (redundant mask elimination).
@@ -2693,7 +2720,18 @@ fn lower_instruction(
                             let byte_off = ctx.byte_offset(addr, *bit_off);
                             let intra_byte = bit_off % 8;
 
-                            if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
+                            if let Some(size) =
+                                ctx.full_static_store_size(addr, *bit_off, *width_bits)
+                            {
+                                let src_vreg =
+                                    ctx.mask_for_store_width(block, src_vreg, *width_bits);
+                                block.push(MInst::Store {
+                                    base: BaseReg::SimState,
+                                    offset: byte_off,
+                                    src: src_vreg,
+                                    size,
+                                });
+                            } else if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
                                 // Word-aligned, native size: direct store
                                 block.push(MInst::Store {
                                     base: BaseReg::SimState,
@@ -2891,7 +2929,20 @@ fn lower_instruction(
                             } else {
                                 let mask_off = ctx.mask_byte_offset(addr, *bit_off);
                                 let intra_byte = bit_off % 8;
-                                if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
+                                if let Some(size) =
+                                    ctx.full_static_store_size(addr, *bit_off, *width_bits)
+                                {
+                                    let mask_vreg =
+                                        ctx.mask_for_store_width(block, mask_vreg, *width_bits);
+                                    block.push(MInst::Store {
+                                        base: BaseReg::SimState,
+                                        offset: mask_off,
+                                        src: mask_vreg,
+                                        size,
+                                    });
+                                } else if intra_byte == 0
+                                    && OpSize::from_bits(*width_bits).is_some()
+                                {
                                     block.push(MInst::Store {
                                         base: BaseReg::SimState,
                                         offset: mask_off,
