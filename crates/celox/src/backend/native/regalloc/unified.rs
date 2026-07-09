@@ -5,7 +5,7 @@
 //! which physical registers to assign. This eliminates the analysis
 //! divergence that required the k-1 hack.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::backend::native::mir::*;
 
@@ -112,15 +112,279 @@ impl RegFile {
     }
 }
 
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct TraceKey {
+    event: &'static str,
+    reason: &'static str,
+    kind: &'static str,
+    def: &'static str,
+    next: &'static str,
+}
+
+#[derive(Default)]
+struct TraceCount {
+    count: usize,
+    stack_mem: usize,
+    sim_mem: usize,
+    remat: usize,
+    no_store: usize,
+}
+
+struct RegallocTrace {
+    label: String,
+    def_opcodes: Vec<Option<&'static str>>,
+    rows: BTreeMap<TraceKey, TraceCount>,
+}
+
+impl RegallocTrace {
+    fn new_if_enabled(label: &str, func: &MFunction) -> Option<Self> {
+        std::env::var_os("CELOX_REGALLOC_TRACE").map(|_| {
+            let mut def_opcodes = vec![None; func.vregs.count() as usize];
+            for block in &func.blocks {
+                for inst in &block.insts {
+                    if let Some(def) = inst.def() {
+                        if let Some(slot) = def_opcodes.get_mut(def.0 as usize) {
+                            *slot = Some(inst_opcode(inst));
+                        }
+                    }
+                }
+            }
+            Self {
+                label: label.to_string(),
+                def_opcodes,
+                rows: BTreeMap::new(),
+            }
+        })
+    }
+
+    fn record_spill(
+        &mut self,
+        vreg: VReg,
+        func: &MFunction,
+        reason: &'static str,
+        next_use: u32,
+        inst: Option<&MInst>,
+    ) {
+        let mut count = TraceCount {
+            count: 1,
+            ..TraceCount::default()
+        };
+        match inst {
+            Some(MInst::Store {
+                base: BaseReg::StackFrame,
+                ..
+            }) => count.stack_mem = 1,
+            Some(MInst::Store {
+                base: BaseReg::SimState,
+                ..
+            }) => count.sim_mem = 1,
+            Some(_) => {}
+            None => count.no_store = 1,
+        }
+        self.add("spill", vreg, func, reason, next_use, count);
+    }
+
+    fn record_reload(
+        &mut self,
+        source: VReg,
+        func: &MFunction,
+        reason: &'static str,
+        next_use: u32,
+        inst: &MInst,
+    ) {
+        let mut count = TraceCount {
+            count: 1,
+            ..TraceCount::default()
+        };
+        match inst {
+            MInst::Load {
+                base: BaseReg::StackFrame,
+                ..
+            } => count.stack_mem = 1,
+            MInst::Load {
+                base: BaseReg::SimState,
+                ..
+            } => count.sim_mem = 1,
+            MInst::LoadImm { .. } => count.remat = 1,
+            _ => {}
+        }
+        self.add("reload", source, func, reason, next_use, count);
+    }
+
+    fn add(
+        &mut self,
+        event: &'static str,
+        vreg: VReg,
+        func: &MFunction,
+        reason: &'static str,
+        next_use: u32,
+        count: TraceCount,
+    ) {
+        let key = TraceKey {
+            event,
+            reason,
+            kind: spill_kind_name(func.spill_desc(vreg)),
+            def: self
+                .def_opcodes
+                .get(vreg.0 as usize)
+                .copied()
+                .flatten()
+                .unwrap_or("allocator"),
+            next: next_use_bucket(next_use),
+        };
+        let row = self.rows.entry(key).or_default();
+        row.count += count.count;
+        row.stack_mem += count.stack_mem;
+        row.sim_mem += count.sim_mem;
+        row.remat += count.remat;
+        row.no_store += count.no_store;
+    }
+
+    fn log(self) {
+        let mut rows = self.rows.into_iter().collect::<Vec<_>>();
+        rows.sort_by_key(|(_, count)| std::cmp::Reverse(count.count));
+        let total: usize = rows.iter().map(|(_, count)| count.count).sum();
+        eprintln!(
+            "[regalloc-trace] label={} total_events={} groups={}",
+            self.label,
+            total,
+            rows.len()
+        );
+        for (rank, (key, count)) in rows.into_iter().take(40).enumerate() {
+            eprintln!(
+                "[regalloc-trace] label={} rank={} event={} reason={} kind={} def={} next={} count={} stack_mem={} sim_mem={} remat={} no_store={}",
+                self.label,
+                rank + 1,
+                key.event,
+                key.reason,
+                key.kind,
+                key.def,
+                key.next,
+                count.count,
+                count.stack_mem,
+                count.sim_mem,
+                count.remat,
+                count.no_store
+            );
+        }
+    }
+}
+
+fn spill_kind_name(desc: Option<&SpillDesc>) -> &'static str {
+    match desc {
+        Some(SpillDesc {
+            kind: SpillKind::Remat { .. },
+            ..
+        }) => "remat",
+        Some(SpillDesc {
+            kind: SpillKind::Stack,
+            ..
+        }) => "stack",
+        Some(SpillDesc {
+            kind: SpillKind::SimState { .. },
+            spill_cost: 0,
+            ..
+        }) => "sim_state_home",
+        Some(SpillDesc {
+            kind: SpillKind::SimState { .. },
+            ..
+        }) => "sim_state_snapshot",
+        Some(SpillDesc {
+            kind: SpillKind::SimStateAlias { .. },
+            spill_cost: 0,
+            ..
+        }) => "sim_alias_home",
+        Some(SpillDesc {
+            kind: SpillKind::SimStateAlias { .. },
+            ..
+        }) => "sim_alias_snapshot",
+        None => "missing",
+    }
+}
+
+fn next_use_bucket(next_use: u32) -> &'static str {
+    match next_use {
+        u32::MAX => "dead",
+        0 => "now",
+        1..=4 => "1-4",
+        5..=16 => "5-16",
+        17..=64 => "17-64",
+        65..=256 => "65-256",
+        257..=1024 => "257-1024",
+        _ => ">1024",
+    }
+}
+
+fn inst_opcode(inst: &MInst) -> &'static str {
+    match inst {
+        MInst::Mov { .. } => "mov",
+        MInst::LoadImm { .. } => "imm",
+        MInst::Load { .. } => "load",
+        MInst::LoadPtr { .. } => "load_ptr",
+        MInst::LoadIndexed { .. } => "load_indexed",
+        MInst::LoadPtrIndexed { .. } => "load_ptr_indexed",
+        MInst::Add { .. } => "add",
+        MInst::Sub { .. } => "sub",
+        MInst::Mul { .. } => "mul",
+        MInst::UMulHi { .. } => "umulhi",
+        MInst::And { .. } => "and",
+        MInst::Or { .. } => "or",
+        MInst::Xor { .. } => "xor",
+        MInst::Shr { .. } => "shr",
+        MInst::Shl { .. } => "shl",
+        MInst::Sar { .. } => "sar",
+        MInst::AndImm { .. } => "and_imm",
+        MInst::OrImm { .. } => "or_imm",
+        MInst::ShrImm { .. } => "shr_imm",
+        MInst::ShlImm { .. } => "shl_imm",
+        MInst::SarImm { .. } => "sar_imm",
+        MInst::AddImm { .. } => "add_imm",
+        MInst::SubImm { .. } => "sub_imm",
+        MInst::Cmp { .. } => "cmp",
+        MInst::CmpImm { .. } => "cmp_imm",
+        MInst::UDiv { .. } => "udiv",
+        MInst::URem { .. } => "urem",
+        MInst::BitNot { .. } => "not",
+        MInst::Neg { .. } => "neg",
+        MInst::Popcnt { .. } => "popcnt",
+        MInst::Bsr { .. } => "bsr",
+        MInst::BsrOr { .. } => "bsr_or",
+        MInst::Pext { .. } => "pext",
+        MInst::Pdep { .. } => "pdep",
+        MInst::Select { .. } => "select",
+        MInst::Store { .. }
+        | MInst::StorePtr { .. }
+        | MInst::ReleaseStorePtr { .. }
+        | MInst::StoreIndexed { .. }
+        | MInst::StorePtrIndexed { .. }
+        | MInst::ReleaseStorePtrIndexed { .. }
+        | MInst::MemCopy { .. }
+        | MInst::Branch { .. }
+        | MInst::Jump { .. }
+        | MInst::Return
+        | MInst::ReturnError { .. } => "none",
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Unified allocator
 // ────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
 pub fn unified_alloc(func: &mut MFunction, analysis: &AnalysisResult) -> (AssignmentMap, u32) {
+    unified_alloc_with_label(func, analysis, "unknown")
+}
+
+pub fn unified_alloc_with_label(
+    func: &mut MFunction,
+    analysis: &AnalysisResult,
+    label: &str,
+) -> (AssignmentMap, u32) {
     let num_blocks = func.blocks.len();
     let k = NUM_REGS;
     let mut result = AssignmentMap::default();
     let mut slots = SpillSlotAllocator::new();
+    let mut trace = RegallocTrace::new_if_enabled(label, func);
 
     let mut regfile_exit: Vec<RegFile> = vec![RegFile::new(); num_blocks];
     let mut s_exit: Vec<HashSet<VReg>> = vec![HashSet::new(); num_blocks];
@@ -139,6 +403,7 @@ pub fn unified_alloc(func: &mut MFunction, analysis: &AnalysisResult) -> (Assign
             &regfile_exit,
             &mut s_exit,
             &mut slots,
+            trace.as_mut(),
         );
 
         // Record entry assignments
@@ -155,11 +420,16 @@ pub fn unified_alloc(func: &mut MFunction, analysis: &AnalysisResult) -> (Assign
             k,
             &mut slots,
             &mut result,
+            trace.as_mut(),
         );
 
         func.blocks[bi].insts = new_insts;
         regfile_exit[bi] = exit_rf;
         s_exit[bi] = exit_s;
+    }
+
+    if let Some(trace) = trace {
+        trace.log();
     }
 
     (result, slots.total_size() as u32)
@@ -354,6 +624,7 @@ fn insert_coupling_code(
     regfile_exit: &[RegFile],
     s_exit: &mut [HashSet<VReg>],
     slots: &mut SpillSlotAllocator,
+    mut trace: Option<&mut RegallocTrace>,
 ) {
     let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
     let mut reload_set: HashSet<VReg> = HashSet::new();
@@ -397,8 +668,21 @@ fn insert_coupling_code(
                 continue;
             }
             if let Some(spill_inst) = make_spill(vreg, func, slots) {
+                if let Some(trace) = trace.as_deref_mut() {
+                    let next_use = analysis.exit_distances[pred_idx]
+                        .get(&vreg)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    trace.record_spill(vreg, func, "coupling", next_use, Some(&spill_inst));
+                }
                 let term_idx = func.blocks[pred_idx].insts.len().saturating_sub(1);
                 func.blocks[pred_idx].insts.insert(term_idx, spill_inst);
+            } else if let Some(trace) = trace.as_deref_mut() {
+                let next_use = analysis.exit_distances[pred_idx]
+                    .get(&vreg)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                trace.record_spill(vreg, func, "coupling", next_use, None);
             }
             s_exit[pred_idx].insert(vreg);
         }
@@ -429,6 +713,7 @@ fn process_block(
     k: usize,
     slots: &mut SpillSlotAllocator,
     result: &mut AssignmentMap,
+    mut trace: Option<&mut RegallocTrace>,
 ) -> (RegFile, HashSet<VReg>, Vec<MInst>) {
     let block = func.blocks[block_idx].clone();
     let mut new_insts: Vec<MInst> = Vec::with_capacity(block.insts.len());
@@ -511,7 +796,25 @@ fn process_block(
                         {
                             // emit_spill is idempotent (checks s.contains), so
                             // calling it on an already-spilled VReg is a no-op.
-                            emit_spill(&mut new_insts, occupant, &mut s, func, slots, result);
+                            let next_use = fast_next_use(
+                                &use_positions,
+                                analysis,
+                                block_idx,
+                                block.insts.len(),
+                                inst_idx,
+                                occupant,
+                            );
+                            emit_spill(
+                                &mut new_insts,
+                                occupant,
+                                &mut s,
+                                func,
+                                slots,
+                                result,
+                                "fixed-clobber",
+                                next_use,
+                                trace.as_deref_mut(),
+                            );
                         }
 
                         if pinned.contains(&occupant) {
@@ -538,6 +841,7 @@ fn process_block(
                                 &mut reload_alias,
                                 &mut alias_source,
                                 result,
+                                trace.as_deref_mut(),
                             );
                             let fresh_occ = func.vregs.alloc();
                             while func.spill_descs.len() <= fresh_occ.0 as usize {
@@ -602,6 +906,9 @@ fn process_block(
                         }
                         copy_value_width(func, fresh, use_vreg);
                         let mut reload = make_reload(use_vreg, func, slots);
+                        if let Some(trace) = trace.as_deref_mut() {
+                            trace.record_reload(use_vreg, func, "fixed-reload", 0, &reload);
+                        }
                         match &mut reload {
                             MInst::LoadImm { dst, .. } | MInst::Load { dst, .. } => *dst = fresh,
                             _ => {}
@@ -654,9 +961,13 @@ fn process_block(
                         &mut reload_alias,
                         &mut alias_source,
                         result,
+                        trace.as_deref_mut(),
                     );
 
                     let mut reload = make_reload(use_vreg, func, slots);
+                    if let Some(trace) = trace.as_deref_mut() {
+                        trace.record_reload(use_vreg, func, "reload", 0, &reload);
+                    }
                     match &mut reload {
                         MInst::LoadImm { dst, .. } | MInst::Load { dst, .. } => *dst = fresh,
                         _ => {}
@@ -694,6 +1005,7 @@ fn process_block(
                 &mut reload_alias,
                 &mut alias_source,
                 result,
+                trace.as_deref_mut(),
             );
         }
 
@@ -719,6 +1031,7 @@ fn process_block(
                     &mut reload_alias,
                     &mut alias_source,
                     result,
+                    trace.as_deref_mut(),
                 );
             }
 
@@ -774,6 +1087,7 @@ fn process_block(
                     &mut reload_alias,
                     &mut alias_source,
                     result,
+                    trace.as_deref_mut(),
                 )
             };
 
@@ -819,7 +1133,21 @@ fn process_block(
         spill_live_out.sort();
         let mut spill_insts = Vec::new();
         for vreg in spill_live_out {
-            emit_spill(&mut spill_insts, vreg, &mut s, func, slots, result);
+            let next_use = analysis.exit_distances[block_idx]
+                .get(&vreg)
+                .copied()
+                .unwrap_or(u32::MAX);
+            emit_spill(
+                &mut spill_insts,
+                vreg,
+                &mut s,
+                func,
+                slots,
+                result,
+                "backedge",
+                next_use,
+                trace.as_deref_mut(),
+            );
         }
         if !spill_insts.is_empty() {
             let insert_at = new_insts.len().saturating_sub(1);
@@ -841,9 +1169,16 @@ fn emit_spill(
     func: &MFunction,
     slots: &mut SpillSlotAllocator,
     _result: &mut AssignmentMap,
+    reason: &'static str,
+    next_use: u32,
+    trace: Option<&mut RegallocTrace>,
 ) {
     if !s.contains(&vreg) {
-        if let Some(spill_inst) = make_spill(vreg, func, slots) {
+        let spill_inst = make_spill(vreg, func, slots);
+        if let Some(trace) = trace {
+            trace.record_spill(vreg, func, reason, next_use, spill_inst.as_ref());
+        }
+        if let Some(spill_inst) = spill_inst {
             new_insts.push(spill_inst);
         }
         s.insert(vreg);
@@ -874,6 +1209,7 @@ fn evict_farthest(
     reload_alias: &mut HashMap<VReg, VReg>,
     alias_source: &mut HashMap<VReg, VReg>,
     result: &mut AssignmentMap,
+    trace: Option<&mut RegallocTrace>,
 ) {
     let candidates = rf
         .vregs()
@@ -924,7 +1260,17 @@ fn evict_farthest(
     if alias_source.contains_key(&victim) {
         evict_resident_alias(reload_alias, alias_source, victim);
     } else if victim_next_use != u32::MAX {
-        emit_spill(new_insts, victim, s, func, slots, result);
+        emit_spill(
+            new_insts,
+            victim,
+            s,
+            func,
+            slots,
+            result,
+            "evict",
+            victim_next_use,
+            trace,
+        );
     }
     rf.evict(victim);
 }
@@ -945,6 +1291,7 @@ fn find_or_evict_free(
     reload_alias: &mut HashMap<VReg, VReg>,
     alias_source: &mut HashMap<VReg, VReg>,
     result: &mut AssignmentMap,
+    mut trace: Option<&mut RegallocTrace>,
 ) -> PhysReg {
     loop {
         if let Some(preg) = rf.find_free_excluding(blocked) {
@@ -967,6 +1314,7 @@ fn find_or_evict_free(
             reload_alias,
             alias_source,
             result,
+            trace.as_deref_mut(),
         );
     }
 }

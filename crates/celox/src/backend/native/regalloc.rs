@@ -164,7 +164,7 @@ pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocRes
     // No separate analysis → spill → re-analyze → assign pipeline.
     // No k-1 hack — uses k = NUM_REGS directly.
     let analysis = analysis::analyze(func);
-    let (assignment, spill_frame_size) = unified::unified_alloc(func, &analysis);
+    let (assignment, spill_frame_size) = unified::unified_alloc_with_label(func, &analysis, label);
 
     if cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some() {
         let analysis = analysis::analyze(func);

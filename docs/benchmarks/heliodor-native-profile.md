@@ -22,6 +22,39 @@ The dominant gap is host instructions per simulated tick, not host IPC.
 Veryl cc is about `62.8k` host instructions per tick for this benchmark.
 Celox native is roughly an order of magnitude higher.
 
+## Tenfold Gap Model
+
+The roughly tenfold gap is too large to explain with register allocation alone.
+The current data decomposes the problem as follows:
+
+- Veryl cc boots `10,150,000` simulated cycles in `65.667s`, about `6.47 us`
+  per simulated cycle.
+- Celox native spends about `59.893 us` per tick in `eval_comb` alone, before
+  counting `eval_apply_ff`.
+- Celox `eval_comb` has about `263k` MIR instructions after normal MIR
+  optimization, before regalloc.
+- Regalloc then expands this to about `357k` MIR instructions.
+
+So the allocator expansion is a serious multiplier, but removing all regalloc
+overhead would not make the code competitive by itself. The native backend is
+already generating several times too much scalar work before allocation.
+
+The likely structural causes are:
+
+- bitfield and trigger/dirty updates are lowered as many independent scalar
+  load/modify/store sequences;
+- constants, masks, and boolean results are represented as SSA VRegs too often
+  instead of being kept as immediates, flags, or memory operands at x86 lowering
+  time;
+- very large merged `eval_comb` blocks create high live pressure and poor
+  locality;
+- regalloc then amplifies this shape by repeatedly spilling long-lived
+  boolean/bitfield transients and reloading rematerialized constants.
+
+This means the fix needs two layers: reduce the pre-regalloc scalar work, then
+make allocation pressure-aware. Only doing one side is unlikely to recover the
+full order of magnitude.
+
 ## Hot Code
 
 Function-level JIT perf map:
@@ -56,6 +89,24 @@ Top block example:
 - `bb0` after regalloc: about `113k` instructions
 - `bb0` stack loads: about `13.9k`
 - `bb0` stack stores: about `7.8k`
+
+Regalloc spill/reload attribution with `CELOX_REGALLOC_TRACE=1`:
+
+- `eval_comb` produced `91,848` regalloc spill/reload events.
+- Largest group: rematerialized immediate reloads, `28,340` events.
+- Largest stack reload groups:
+  - `and` results: `8,484` reloads
+  - `cmp_imm` results: `6,173` reloads
+  - `sim_state_snapshot` loads: `4,347` reloads
+  - `sim_state_snapshot` `and_imm` results: `3,981` reloads
+- Largest stack spill groups:
+  - `and` results with next use beyond `1024` MIR positions: `1,974` spills
+  - `and` results with next use `257-1024`: `1,750` spills
+  - `cmp_imm` results with next use `257-1024`: `1,611` spills
+
+This points to two separate problems: constants are still being loaded into
+registers too often after regalloc, and long-lived boolean/bitfield transient
+values are being kept across large regions and later reloaded from stack.
 
 ## What The Hot Blocks Look Like
 
@@ -151,10 +202,14 @@ Promising directions:
 - Add regalloc diagnostics that attribute each spill to the victim VReg, its
   defining instruction, next-use distance, and whether it is reloaded in the
   same block or a successor.
+- Fold rematerialized constants into immediate operands or rematerialize at the
+  x86 operand level where possible, instead of materializing every use into a
+  GPR before instruction selection.
+- Split long-lived boolean/bitfield transients when their next use is far away,
+  especially `and` and `cmp_imm` results in large `eval_comb` blocks.
 - Improve allocator decisions before changing high-level store scheduling.
 - Prefer rematerialization and memory-operand folding that does not lengthen
   live ranges.
 - Consider block-local scheduling only with a register-pressure budget.
 - Treat broad store sinking and trigger-byte accumulation as unsafe until they
   are pressure-aware.
-
