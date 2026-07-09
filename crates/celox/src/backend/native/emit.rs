@@ -1393,7 +1393,7 @@ pub fn emit_chained_eus(
             start.elapsed()
         );
     }
-    dump_native_block_context(label, &sir_eu, &mfunc);
+    dump_native_block_context(label, "after_isel", &sir_eu, &mfunc);
     if verify_mir {
         if timing {
             eprintln!("[native-timing] emit_chained verify after_isel label={label}");
@@ -1434,6 +1434,7 @@ pub fn emit_chained_eus(
     if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
         log_mir_block_stats(label, "after_mir_opt", &mfunc);
     }
+    dump_native_block_context(label, "after_mir_opt", &sir_eu, &mfunc);
     if verify_mir {
         if timing {
             eprintln!("[native-timing] emit_chained verify after_mir_opt label={label}");
@@ -1469,6 +1470,7 @@ pub fn emit_chained_eus(
     if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
         log_mir_block_stats(label, "after_regalloc", &mfunc);
     }
+    dump_native_block_context(label, "after_regalloc", &sir_eu, &mfunc);
     let emit_start = timing.then(crate::timing::now);
     let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
     if let Some(start) = emit_start {
@@ -1652,22 +1654,36 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
 
 fn dump_native_block_context(
     label: &str,
+    stage: &str,
     eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
     func: &super::mir::MFunction,
 ) {
     let Some(raw) = std::env::var_os("CELOX_NATIVE_DUMP_BLOCK") else {
         return;
     };
+    if let Some(raw_stage) = std::env::var_os("CELOX_NATIVE_DUMP_STAGE") {
+        if raw_stage != stage {
+            return;
+        }
+    } else if stage != "after_isel" {
+        return;
+    }
     let Some(block_id) = raw.to_string_lossy().parse::<u32>().ok() else {
         return;
     };
+    let dump_sir = std::env::var_os("CELOX_NATIVE_DUMP_SIR").is_none_or(|raw| raw != "0");
+    let mir_limit = std::env::var_os("CELOX_NATIVE_DUMP_MIR_LIMIT")
+        .and_then(|raw| raw.to_string_lossy().parse::<usize>().ok())
+        .unwrap_or(64);
     let sir_id = crate::ir::BlockId(block_id as usize);
-    eprintln!("[native-dump] label={label} block={block_id}");
-    if let Some(block) = eu.blocks.get(&sir_id) {
-        eprintln!("[native-dump] SIR:\n{block}");
-        dump_sir_operand_defs(eu, block);
-    } else {
-        eprintln!("[native-dump] SIR block b{block_id} not found");
+    eprintln!("[native-dump] label={label} stage={stage} block={block_id}");
+    if dump_sir {
+        if let Some(block) = eu.blocks.get(&sir_id) {
+            eprintln!("[native-dump] SIR:\n{block}");
+            dump_sir_operand_defs(eu, block);
+        } else {
+            eprintln!("[native-dump] SIR block b{block_id} not found");
+        }
     }
     if let Some(block) = func
         .blocks
@@ -1689,11 +1705,11 @@ fn dump_native_block_context(
                 .join(", ");
             eprintln!("  {} = phi({sources})", phi.dst);
         }
-        for (idx, inst) in block.insts.iter().enumerate().take(64) {
+        for (idx, inst) in block.insts.iter().enumerate().take(mir_limit) {
             eprintln!("  {idx}: {inst}");
         }
-        if block.insts.len() > 64 {
-            eprintln!("  ... {} more insts", block.insts.len() - 64);
+        if block.insts.len() > mir_limit {
+            eprintln!("  ... {} more insts", block.insts.len() - mir_limit);
         }
     } else {
         eprintln!("[native-dump] MIR block b{block_id} not found");
