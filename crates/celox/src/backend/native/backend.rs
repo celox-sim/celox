@@ -3,6 +3,8 @@
 //! Mirrors the structure of JitBackend but compiles through
 //! ISel → MIR → regalloc → x86-64 emit instead of Cranelift.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use bit_set::BitSet;
@@ -134,6 +136,16 @@ fn compile_units(
     jit_mem::JitCode::new(&chained_code).map_err(|e| codegen_err(format!("mmap error: {e}")))
 }
 
+fn fingerprint_ff_units(
+    units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for unit in units {
+        unit.to_string().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn compile_program(
     sir: &Program,
     options: &SimulatorOptions,
@@ -156,6 +168,8 @@ fn compile_program(
     let mut event_map = HashMap::default();
     let mut eval_only_event_map = HashMap::default();
     let mut apply_event_map = HashMap::default();
+    let mut addr_to_id = HashMap::default();
+    let mut compiled_ff_cache: HashMap<u64, NativeSimFunc> = HashMap::default();
 
     let compile_ff_group = |ff_map: &HashMap<
         AbsoluteAddr,
@@ -163,28 +177,51 @@ fn compile_program(
     >,
                             all_codes: &mut Vec<jit_mem::JitCode>,
                             event_map_out: &mut HashMap<AbsoluteAddr, NativeEventRef>,
+                            addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
+                            compiled_ff_cache: &mut HashMap<u64, NativeSimFunc>,
                             next_id: &mut usize,
                             id_to_addr: &mut Vec<AbsoluteAddr>,
                             id_to_event: &mut Vec<NativeEventRef>,
                             label: &str|
      -> Result<(), SimulatorError> {
         for (addr, units) in ff_map {
-            let code = compile_units(units, layout, options.four_state, label)?;
-            let func = code.fn_ptr;
-            all_codes.push(code);
+            let canonical = sir.clock_domains.get(addr).copied().unwrap_or(*addr);
+            if let Some(&event) = event_map_out.get(&canonical) {
+                event_map_out.insert(*addr, event);
+                continue;
+            }
 
-            let id = *next_id;
-            *next_id += 1;
+            let fingerprint = fingerprint_ff_units(units);
+            let func = if let Some(&func) = compiled_ff_cache.get(&fingerprint) {
+                func
+            } else {
+                let code = compile_units(units, layout, options.four_state, label)?;
+                let func = code.fn_ptr;
+                all_codes.push(code);
+                compiled_ff_cache.insert(fingerprint, func);
+                func
+            };
+
+            let (id, is_new_id) = if let Some(&id) = addr_to_id.get(&canonical) {
+                (id, false)
+            } else {
+                let id = *next_id;
+                *next_id += 1;
+                addr_to_id.insert(canonical, id);
+                id_to_addr.push(canonical);
+                (id, true)
+            };
 
             let event = NativeEventRef {
                 func,
-                addr: *addr,
+                addr: canonical,
                 id,
             };
-            event_map_out.insert(*addr, event);
-
-            if !id_to_addr.contains(addr) {
-                id_to_addr.push(*addr);
+            event_map_out.insert(canonical, event);
+            if *addr != canonical {
+                event_map_out.insert(*addr, event);
+            }
+            if is_new_id {
                 id_to_event.push(event);
             }
         }
@@ -195,6 +232,8 @@ fn compile_program(
         &sir.eval_apply_ffs,
         &mut all_jit_codes,
         &mut event_map,
+        &mut addr_to_id,
+        &mut compiled_ff_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
@@ -204,6 +243,8 @@ fn compile_program(
         &sir.eval_only_ffs,
         &mut all_jit_codes,
         &mut eval_only_event_map,
+        &mut addr_to_id,
+        &mut compiled_ff_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
@@ -213,6 +254,8 @@ fn compile_program(
         &sir.apply_ffs,
         &mut all_jit_codes,
         &mut apply_event_map,
+        &mut addr_to_id,
+        &mut compiled_ff_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
