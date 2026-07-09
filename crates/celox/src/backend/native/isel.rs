@@ -1214,6 +1214,27 @@ fn lower_runtime_event_write(
     });
 }
 
+fn lower_bool_value(ctx: &mut ISelContext, block: &mut MBlock, src: VReg) -> VReg {
+    if ctx.known_bits.get(&src).is_some_and(|&bits| bits <= 1) {
+        return src;
+    }
+
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
+    });
+    let dst = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Cmp {
+        dst,
+        lhs: src,
+        rhs: zero,
+        kind: CmpKind::Ne,
+    });
+    ctx.known_bits.insert(dst, 1);
+    dst
+}
+
 fn lower_instruction(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -3173,25 +3194,8 @@ fn lower_instruction(
                 }
                 BinaryOp::LogicAnd => {
                     // dst = (lhs != 0) && (rhs != 0) ? 1 : 0
-                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm {
-                        dst: zero,
-                        value: 0,
-                    });
-                    let l_bool = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Cmp {
-                        dst: l_bool,
-                        lhs: lhs_vreg,
-                        rhs: zero,
-                        kind: CmpKind::Ne,
-                    });
-                    let r_bool = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Cmp {
-                        dst: r_bool,
-                        lhs: rhs_vreg,
-                        rhs: zero,
-                        kind: CmpKind::Ne,
-                    });
+                    let l_bool = lower_bool_value(ctx, block, lhs_vreg);
+                    let r_bool = lower_bool_value(ctx, block, rhs_vreg);
                     block.push(MInst::And {
                         dst: dst_vreg,
                         lhs: l_bool,
@@ -3199,25 +3203,8 @@ fn lower_instruction(
                     });
                 }
                 BinaryOp::LogicOr => {
-                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm {
-                        dst: zero,
-                        value: 0,
-                    });
-                    let l_bool = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Cmp {
-                        dst: l_bool,
-                        lhs: lhs_vreg,
-                        rhs: zero,
-                        kind: CmpKind::Ne,
-                    });
-                    let r_bool = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Cmp {
-                        dst: r_bool,
-                        lhs: rhs_vreg,
-                        rhs: zero,
-                        kind: CmpKind::Ne,
-                    });
+                    let l_bool = lower_bool_value(ctx, block, lhs_vreg);
+                    let r_bool = lower_bool_value(ctx, block, rhs_vreg);
                     block.push(MInst::Or {
                         dst: dst_vreg,
                         lhs: l_bool,
@@ -3340,6 +3327,26 @@ fn lower_instruction(
                         });
                     }
                 }
+            }
+
+            if matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::LtU
+                    | BinaryOp::LtS
+                    | BinaryOp::LeU
+                    | BinaryOp::LeS
+                    | BinaryOp::GtU
+                    | BinaryOp::GtS
+                    | BinaryOp::GeU
+                    | BinaryOp::GeS
+                    | BinaryOp::LogicAnd
+                    | BinaryOp::LogicOr
+                    | BinaryOp::EqWildcard
+                    | BinaryOp::NeWildcard
+            ) {
+                ctx.known_bits.insert(dst_vreg, 1);
             }
 
             // 4-state: compute result mask (skip for wildcards which handle it inline)
