@@ -21,8 +21,8 @@ pub struct AnalysisResult {
     pub exit_distances: Vec<HashMap<VReg, u32>>,
     /// Predecessor list for each block (by index).
     pub predecessors: Vec<Vec<usize>>,
-    /// Successor list for each block (by index).
-    pub successors: Vec<Vec<usize>>,
+    /// Successor indices that are real DFS backedges for each block.
+    pub backedge_successors: Vec<Vec<usize>>,
 }
 
 /// Compute liveness and next-use distances for the entire MFunction.
@@ -47,6 +47,7 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
             }
         }
     }
+    let backedge_successors = compute_backedge_successors(&successors);
 
     // Initialize next-use distance maps
     let mut entry_distances: Vec<HashMap<VReg, u32>> = vec![HashMap::new(); num_blocks];
@@ -82,9 +83,8 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
             let mut new_exit: HashMap<VReg, u32> = HashMap::new();
             let my_block_id = block_order[bi];
             for &succ_idx in &successors[bi] {
-                // Edge length: 0 for normal edges, LOOP_EXIT_LENGTH for back edges
-                let edge_len = if succ_idx <= bi {
-                    LOOP_EXIT_LENGTH // back edge (loop)
+                let edge_len = if backedge_successors[bi].contains(&succ_idx) {
+                    LOOP_EXIT_LENGTH
                 } else {
                     0
                 };
@@ -150,6 +150,81 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
         entry_distances,
         exit_distances,
         predecessors,
-        successors,
+        backedge_successors,
+    }
+}
+
+fn compute_backedge_successors(successors: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+
+    fn dfs(
+        node: usize,
+        successors: &[Vec<usize>],
+        colors: &mut [Color],
+        backedges: &mut [Vec<usize>],
+    ) {
+        colors[node] = Color::Gray;
+        for &succ in &successors[node] {
+            match colors[succ] {
+                Color::White => dfs(succ, successors, colors, backedges),
+                Color::Gray => backedges[node].push(succ),
+                Color::Black => {}
+            }
+        }
+        colors[node] = Color::Black;
+    }
+
+    let mut colors = vec![Color::White; successors.len()];
+    let mut backedges = vec![Vec::new(); successors.len()];
+    for node in 0..successors.len() {
+        if colors[node] == Color::White {
+            dfs(node, successors, &mut colors, &mut backedges);
+        }
+    }
+    backedges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_func(blocks: Vec<MBlock>) -> MFunction {
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        func.blocks = blocks;
+        func
+    }
+
+    #[test]
+    fn lower_index_successor_is_not_backedge_in_dag() {
+        let mut b0 = MBlock::new(BlockId(0));
+        b0.push(MInst::Jump { target: BlockId(1) });
+
+        let mut b2 = MBlock::new(BlockId(2));
+        b2.push(MInst::Return);
+
+        let mut b1 = MBlock::new(BlockId(1));
+        b1.push(MInst::Jump { target: BlockId(2) });
+
+        // Layout order is intentionally not topological: b1 jumps to b2,
+        // whose layout index is lower. This must not be treated as a loop.
+        let analysis = analyze(&empty_func(vec![b0, b2, b1]));
+        assert!(analysis.backedge_successors[2].is_empty());
+    }
+
+    #[test]
+    fn dfs_gray_edge_is_backedge() {
+        let mut b0 = MBlock::new(BlockId(0));
+        b0.push(MInst::Jump { target: BlockId(1) });
+
+        let mut b1 = MBlock::new(BlockId(1));
+        b1.push(MInst::Jump { target: BlockId(0) });
+
+        let analysis = analyze(&empty_func(vec![b0, b1]));
+        assert_eq!(analysis.backedge_successors[1], vec![0]);
     }
 }

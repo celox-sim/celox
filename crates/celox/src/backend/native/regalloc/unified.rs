@@ -1149,9 +1149,7 @@ fn process_block(
         // (Live range splitting placeholder - currently no eager spill)
     }
 
-    let needs_backedge_spills = analysis.successors[block_idx]
-        .iter()
-        .any(|&succ_idx| succ_idx <= block_idx);
+    let needs_backedge_spills = !analysis.backedge_successors[block_idx].is_empty();
     if needs_backedge_spills {
         let mut spill_live_out: Vec<VReg> = rf
             .vregs()
