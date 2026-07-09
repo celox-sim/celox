@@ -3,7 +3,7 @@
 //! - Copy propagation: `v2 = mov v1` → replace all uses of v2 with v1
 //! - Dead code elimination: remove instructions whose defs are unused
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::mir::*;
 
@@ -27,6 +27,8 @@ pub fn optimize(func: &mut MFunction) {
         dead_code_eliminate(func);
         sink_loads(func);
         split_live_ranges(func);
+        eliminate_redundant_or_terms(func);
+        dead_code_eliminate(func);
         if bmi2_available() {
             fold_deposit_chain_to_pdep(func);
             fold_extract_chain_to_pext(func);
@@ -44,6 +46,7 @@ pub fn optimize(func: &mut MFunction) {
         algebraic_simplify(func);
         redundant_mask_eliminate(func);
         fold_bit_toggle_insert(func);
+        eliminate_redundant_or_terms(func);
         if bmi2_available() {
             fold_deposit_chain_to_pdep(func);
             fold_extract_chain_to_pext(func);
@@ -2777,6 +2780,119 @@ struct MemorySlot {
     size: OpSize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SelectTerm {
+    cond: VReg,
+    true_val: VReg,
+    false_val: VReg,
+}
+
+fn eliminate_redundant_or_terms(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        let mut mov_aliases: HashMap<VReg, VReg> = HashMap::new();
+        let mut rewrite_aliases: HashMap<VReg, VReg> = HashMap::new();
+        let mut select_terms: HashMap<VReg, SelectTerm> = HashMap::new();
+        let mut or_terms: HashMap<VReg, HashSet<SelectTerm>> = HashMap::new();
+
+        for inst in &mut block.insts {
+            if !rewrite_aliases.is_empty() {
+                rewrite_uses(inst, &rewrite_aliases);
+            }
+
+            match inst {
+                MInst::Mov { dst, src } => {
+                    let canonical = resolve_alias(*src, &mov_aliases);
+                    mov_aliases.insert(*dst, canonical);
+                    if let Some(term) = select_terms.get(&canonical).copied() {
+                        select_terms.insert(*dst, term);
+                    }
+                    if let Some(terms) = or_terms.get(&canonical).cloned() {
+                        or_terms.insert(*dst, terms);
+                    }
+                }
+                MInst::Select {
+                    dst,
+                    cond,
+                    true_val,
+                    false_val,
+                } => {
+                    let term = SelectTerm {
+                        cond: resolve_alias(*cond, &mov_aliases),
+                        true_val: resolve_alias(*true_val, &mov_aliases),
+                        false_val: resolve_alias(*false_val, &mov_aliases),
+                    };
+                    select_terms.insert(*dst, term);
+                    mov_aliases.remove(dst);
+                    or_terms.remove(dst);
+                }
+                MInst::Or { dst, lhs, rhs } => {
+                    let lhs = resolve_alias(*lhs, &rewrite_aliases);
+                    let rhs = resolve_alias(*rhs, &rewrite_aliases);
+                    let lhs_terms = or_terms.get(&lhs).cloned();
+                    let rhs_terms = or_terms.get(&rhs).cloned();
+                    let lhs_term = select_terms.get(&lhs).copied();
+                    let rhs_term = select_terms.get(&rhs).copied();
+
+                    let replacement = lhs_terms
+                        .as_ref()
+                        .and_then(|terms| rhs_term.filter(|term| terms.contains(term)).map(|_| lhs))
+                        .or_else(|| {
+                            rhs_terms.as_ref().and_then(|terms| {
+                                lhs_term.filter(|term| terms.contains(term)).map(|_| rhs)
+                            })
+                        });
+
+                    if let Some(src) = replacement {
+                        let dst_vreg = *dst;
+                        *inst = MInst::Mov { dst: dst_vreg, src };
+                        rewrite_aliases.insert(dst_vreg, src);
+                        mov_aliases.insert(dst_vreg, src);
+                        if let Some(terms) = or_terms.get(&src).cloned() {
+                            or_terms.insert(dst_vreg, terms);
+                        }
+                        continue;
+                    }
+
+                    let mut terms = lhs_terms.unwrap_or_default();
+                    if let Some(rhs_terms) = rhs_terms {
+                        terms.extend(rhs_terms);
+                    }
+                    if let Some(term) = lhs_term {
+                        terms.insert(term);
+                    }
+                    if let Some(term) = rhs_term {
+                        terms.insert(term);
+                    }
+                    if terms.is_empty() {
+                        or_terms.remove(dst);
+                    } else {
+                        or_terms.insert(*dst, terms);
+                    }
+                    mov_aliases.remove(dst);
+                    select_terms.remove(dst);
+                }
+                _ => {
+                    if let Some(dst) = inst.def() {
+                        mov_aliases.remove(&dst);
+                        select_terms.remove(&dst);
+                        or_terms.remove(&dst);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn resolve_alias(mut reg: VReg, aliases: &HashMap<VReg, VReg>) -> VReg {
+    while let Some(&next) = aliases.get(&reg) {
+        if next == reg {
+            break;
+        }
+        reg = next;
+    }
+    reg
+}
+
 fn forward_local_store_loads(func: &mut MFunction) {
     let (vregs, spill_descs, blocks) = (&mut func.vregs, &mut func.spill_descs, &mut func.blocks);
     for block in blocks {
@@ -4116,6 +4232,169 @@ mod tests {
                 size: OpSize::S8,
             }
         )));
+    }
+
+    #[test]
+    fn eliminates_redundant_or_of_same_select_term() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 0,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S8,
+                },
+                MInst::Cmp {
+                    dst: VReg(3),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                    kind: CmpKind::Ne,
+                },
+                MInst::Select {
+                    dst: VReg(4),
+                    cond: VReg(3),
+                    true_val: VReg(1),
+                    false_val: VReg(0),
+                },
+                MInst::Or {
+                    dst: VReg(5),
+                    lhs: VReg(2),
+                    rhs: VReg(4),
+                },
+                MInst::Mov {
+                    dst: VReg(6),
+                    src: VReg(3),
+                },
+                MInst::Select {
+                    dst: VReg(7),
+                    cond: VReg(6),
+                    true_val: VReg(1),
+                    false_val: VReg(0),
+                },
+                MInst::Or {
+                    dst: VReg(8),
+                    lhs: VReg(5),
+                    rhs: VReg(7),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(8),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            9,
+        );
+
+        optimize(&mut func);
+
+        assert!(
+            !func.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, MInst::Or { dst: VReg(8), .. })),
+            "{:#?}",
+            func.blocks[0].insts
+        );
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(5),
+                size: OpSize::S8,
+            }
+        )));
+    }
+
+    #[test]
+    fn keeps_or_of_different_select_terms() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 0,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(3),
+                    base: BaseReg::SimState,
+                    offset: 17,
+                    size: OpSize::S8,
+                },
+                MInst::Cmp {
+                    dst: VReg(4),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                    kind: CmpKind::Ne,
+                },
+                MInst::Cmp {
+                    dst: VReg(5),
+                    lhs: VReg(3),
+                    rhs: VReg(0),
+                    kind: CmpKind::Ne,
+                },
+                MInst::Select {
+                    dst: VReg(6),
+                    cond: VReg(4),
+                    true_val: VReg(1),
+                    false_val: VReg(0),
+                },
+                MInst::Or {
+                    dst: VReg(7),
+                    lhs: VReg(2),
+                    rhs: VReg(6),
+                },
+                MInst::Select {
+                    dst: VReg(8),
+                    cond: VReg(5),
+                    true_val: VReg(1),
+                    false_val: VReg(0),
+                },
+                MInst::Or {
+                    dst: VReg(9),
+                    lhs: VReg(7),
+                    rhs: VReg(8),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(9),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            10,
+        );
+
+        optimize(&mut func);
+
+        assert!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, MInst::Or { dst: VReg(9), .. })),
+            "{:#?}",
+            func.blocks[0].insts
+        );
     }
 
     #[test]
