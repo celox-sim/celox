@@ -608,6 +608,9 @@ impl<B: SimBackend> Simulator<B> {
             self.eval_comb_checked().unwrap();
             self.dirty = false;
         }
+        if self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq() {
+            return Vec::new();
+        }
         self.collect_backend_runtime_events()
             .into_iter()
             .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
