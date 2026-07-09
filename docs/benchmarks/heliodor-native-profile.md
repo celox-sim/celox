@@ -191,6 +191,27 @@ Reason:
 - A same-block-only liveness test is not a valid proof that the spill store is
 dead.
 
+### Regalloc-time rematerialized constant folding
+
+Folding rematerialized constants into MIR immediate operands during regalloc
+reduced the number of recorded regalloc events but worsened runtime.
+
+Measured result:
+
+- `eval_comb` regalloc events fell from `91,848` to `75,998`
+- rematerialized immediate reloads fell from `28,340` to `12,605`
+- `avg_comb_us` worsened from about `63.911` to about `64.565` in the
+  trace-enabled 60 second sample
+
+Reason:
+
+- Reducing allocator events is not the same as improving generated machine code.
+- This transform changes instruction selection after MIR optimization and can
+  trade explicit reloads for less favorable immediate instruction forms without
+  addressing the large scalar `And`/`Mux`/`LogicAnd`/`Eq` workload.
+- Immediate folding should be revisited in the x86 emitter or ISel cost model,
+  not as a blind regalloc rewrite.
+
 ## Implications
 
 The next optimization should be pressure-aware. Transformations that remove
