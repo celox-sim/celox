@@ -2007,22 +2007,11 @@ fn lower_instruction(
                 if !ctx.four_state && d_width == 1 {
                     let tv = lower_low_bit(ctx, block, tv);
                     let ev = lower_low_bit(ctx, block, ev);
-                    let diff = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Xor {
-                        dst: diff,
-                        lhs: tv,
-                        rhs: ev,
-                    });
-                    let selected_diff = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::And {
-                        dst: selected_diff,
-                        lhs: cond_vreg,
-                        rhs: diff,
-                    });
-                    block.push(MInst::Xor {
+                    block.push(MInst::Select {
                         dst: dst_vreg,
-                        lhs: ev,
-                        rhs: selected_diff,
+                        cond: cond_vreg,
+                        true_val: tv,
+                        false_val: ev,
                     });
                     ctx.known_bits.insert(dst_vreg, 1);
                     return;
