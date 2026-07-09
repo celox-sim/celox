@@ -93,6 +93,7 @@ pub fn lower_execution_unit(
         wide_regs: WideRegMap::default(),
         reg_addrs: crate::HashMap::default(),
         consts: ConstMap::default(),
+        low_zero_bits: crate::HashMap::default(),
         four_state,
         mask_map,
         known_bits: crate::HashMap::default(),
@@ -496,6 +497,10 @@ struct ISelContext<'a> {
     /// RegisterId → sim state address, recorded at Store instructions.
     /// Used by Slice to load directly from memory instead of stale VRegs.
     reg_addrs: crate::HashMap<RegisterId, RegionedAbsoluteAddr>,
+    /// Conservative lower bound for the number of low zero bits in a SIR value.
+    /// This lets dynamic bit offsets that are known byte-aligned use indexed
+    /// byte addressing without a dynamic intra-byte shift.
+    low_zero_bits: crate::HashMap<RegisterId, u32>,
     /// Whether 4-state simulation is enabled.
     four_state: bool,
     /// Maps SIR RegisterId → mask VReg (parallel to reg_map).
@@ -808,6 +813,26 @@ impl<'a> ISelContext<'a> {
             z
         })
     }
+}
+
+fn low_zero_bits_const(value: u64) -> u32 {
+    if value == 0 {
+        64
+    } else {
+        value.trailing_zeros()
+    }
+}
+
+fn low_zero_bits_reg(ctx: &ISelContext<'_>, reg: RegisterId) -> u32 {
+    ctx.consts
+        .get(&reg)
+        .copied()
+        .map(low_zero_bits_const)
+        .unwrap_or_else(|| ctx.low_zero_bits.get(&reg).copied().unwrap_or(0))
+}
+
+fn set_low_zero_bits(ctx: &mut ISelContext<'_>, reg: RegisterId, bits: u32) {
+    ctx.low_zero_bits.insert(reg, bits.min(64));
 }
 
 fn load_runtime_event_ptr(ctx: &mut ISelContext, block: &mut MBlock) -> VReg {
@@ -2110,6 +2135,7 @@ fn lower_instruction(
             });
             // Track constant value for later folding
             ctx.consts.insert(*dst, imm_val);
+            set_low_zero_bits(ctx, *dst, low_zero_bits_const(imm_val));
             // Known bits from the constant value
             let imm_bits = if imm_val == 0 {
                 0
@@ -2311,35 +2337,52 @@ fn lower_instruction(
                         src: offset_vreg,
                         imm: 3,
                     });
-                    let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
-                    ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
-
-                    // Load containing word at [sim + base_off + byte_off]
-                    // Use a slightly larger load to account for bit_shift
-                    let load_size = ISelContext::op_size_for_width(*width_bits + 7);
-                    let raw = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::LoadIndexed {
-                        dst: raw,
-                        base: BaseReg::SimState,
-                        offset: base_off,
-                        index: byte_off,
-                        size: load_size,
-                    });
-
-                    // Shift right by bit_shift (dynamic)
-                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Shr {
-                        dst: shifted,
-                        lhs: raw,
-                        rhs: bit_shift,
-                    });
-
-                    // Mask to width
-                    if *width_bits < 64 {
-                        let mask = mask_for_width(*width_bits);
-                        ctx.emit_and_imm(block, vreg, shifted, mask);
+                    if low_zero_bits_reg(ctx, *offset_reg) >= 3 {
+                        let load_size = ISelContext::op_size_for_width(*width_bits);
+                        let raw = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::LoadIndexed {
+                            dst: raw,
+                            base: BaseReg::SimState,
+                            offset: base_off,
+                            index: byte_off,
+                            size: load_size,
+                        });
+                        if *width_bits < 64 {
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
+                        } else {
+                            ctx.emit_mov(block, vreg, raw);
+                        }
                     } else {
-                        ctx.emit_mov(block, vreg, shifted);
+                        let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+                        ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
+
+                        // Load containing word at [sim + base_off + byte_off]
+                        // Use a slightly larger load to account for bit_shift
+                        let load_size = ISelContext::op_size_for_width(*width_bits + 7);
+                        let raw = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::LoadIndexed {
+                            dst: raw,
+                            base: BaseReg::SimState,
+                            offset: base_off,
+                            index: byte_off,
+                            size: load_size,
+                        });
+
+                        // Shift right by bit_shift (dynamic)
+                        let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Shr {
+                            dst: shifted,
+                            lhs: raw,
+                            rhs: bit_shift,
+                        });
+
+                        // Mask to width
+                        if *width_bits < 64 {
+                            let mask = mask_for_width(*width_bits);
+                            ctx.emit_and_imm(block, vreg, shifted, mask);
+                        } else {
+                            ctx.emit_mov(block, vreg, shifted);
+                        }
                     }
                 }
             }
@@ -2426,6 +2469,25 @@ fn lower_instruction(
                             src: offset_vreg,
                             imm: 3,
                         });
+                        if low_zero_bits_reg(ctx, *offset_reg) >= 3 {
+                            let load_size = ISelContext::op_size_for_width(*width_bits);
+                            let raw = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::LoadIndexed {
+                                dst: raw,
+                                base: BaseReg::SimState,
+                                offset: mask_base_off,
+                                index: byte_off,
+                                size: load_size,
+                            });
+                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
+                            if *width_bits < 64 {
+                                ctx.emit_and_imm(block, mvreg, raw, mask_for_width(*width_bits));
+                            } else {
+                                ctx.emit_mov(block, mvreg, raw);
+                            }
+                            ctx.set_mask(*dst, mvreg);
+                            return;
+                        }
                         let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
                         ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
                         let load_size = ISelContext::op_size_for_width(*width_bits + 7);
@@ -2804,102 +2866,159 @@ fn lower_instruction(
                             src: offset_vreg,
                             imm: 3,
                         });
-                        let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
-                        ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
-
-                        let rw_size = ISelContext::op_size_for_width(*width_bits + 7);
-
-                        // Load old word
-                        let old_word = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::LoadIndexed {
-                            dst: old_word,
-                            base: BaseReg::SimState,
-                            offset: base_off,
-                            index: byte_off,
-                            size: rw_size,
-                        });
-
-                        // Build mask and shifted value
-                        let mask_val = if *width_bits < 64 {
-                            mask_for_width(*width_bits)
-                        } else {
-                            u64::MAX
-                        };
-
-                        // masked_src = src & mask
-                        let masked_src = ctx.alloc_vreg(SpillDesc::transient());
-                        if mask_val != u64::MAX {
-                            ctx.emit_and_imm(block, masked_src, src_vreg, mask_val);
-                        } else {
-                            block.push(MInst::Mov {
-                                dst: masked_src,
-                                src: src_vreg,
+                        if low_zero_bits_reg(ctx, *offset_reg) >= 3
+                            && let Some(store_size) = OpSize::from_bits(*width_bits)
+                        {
+                            let store_src = if *width_bits < 64 {
+                                let masked = ctx.alloc_vreg(SpillDesc::transient());
+                                ctx.emit_and_imm(
+                                    block,
+                                    masked,
+                                    src_vreg,
+                                    mask_for_width(*width_bits),
+                                );
+                                masked
+                            } else {
+                                src_vreg
+                            };
+                            let old_word = if comb_capture_sites.is_empty() {
+                                None
+                            } else {
+                                let old = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::LoadIndexed {
+                                    dst: old,
+                                    base: BaseReg::SimState,
+                                    offset: base_off,
+                                    index: byte_off,
+                                    size: store_size,
+                                });
+                                Some(old)
+                            };
+                            block.push(MInst::StoreIndexed {
+                                base: BaseReg::SimState,
+                                offset: base_off,
+                                index: byte_off,
+                                src: store_src,
+                                size: store_size,
                             });
-                        }
+                            if let Some(old_word) = old_word {
+                                let changed = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Cmp {
+                                    dst: changed,
+                                    lhs: old_word,
+                                    rhs: store_src,
+                                    kind: CmpKind::Ne,
+                                });
+                                emit_enable_comb_capture_sites(
+                                    ctx,
+                                    block,
+                                    changed,
+                                    comb_capture_sites,
+                                );
+                            }
+                        } else {
+                            let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+                            ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
 
-                        // shifted_src = masked_src << bit_shift
-                        let shifted_src = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Shl {
-                            dst: shifted_src,
-                            lhs: masked_src,
-                            rhs: bit_shift,
-                        });
+                            let rw_size = ISelContext::op_size_for_width(*width_bits + 7);
 
-                        // Create shifted mask for clearing: mask_imm_vreg = mask_val
-                        let mask_imm = ctx.alloc_vreg(SpillDesc::remat(mask_val));
-                        block.push(MInst::LoadImm {
-                            dst: mask_imm,
-                            value: mask_val,
-                        });
+                            // Load old word
+                            let old_word = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::LoadIndexed {
+                                dst: old_word,
+                                base: BaseReg::SimState,
+                                offset: base_off,
+                                index: byte_off,
+                                size: rw_size,
+                            });
 
-                        // shifted_mask = mask_imm << bit_shift
-                        let shifted_mask = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Shl {
-                            dst: shifted_mask,
-                            lhs: mask_imm,
-                            rhs: bit_shift,
-                        });
+                            // Build mask and shifted value
+                            let mask_val = if *width_bits < 64 {
+                                mask_for_width(*width_bits)
+                            } else {
+                                u64::MAX
+                            };
 
-                        // not_mask = ~shifted_mask
-                        let not_mask = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::BitNot {
-                            dst: not_mask,
-                            src: shifted_mask,
-                        });
+                            // masked_src = src & mask
+                            let masked_src = ctx.alloc_vreg(SpillDesc::transient());
+                            if mask_val != u64::MAX {
+                                ctx.emit_and_imm(block, masked_src, src_vreg, mask_val);
+                            } else {
+                                block.push(MInst::Mov {
+                                    dst: masked_src,
+                                    src: src_vreg,
+                                });
+                            }
 
-                        // cleared = old_word & not_mask
-                        let cleared = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::And {
-                            dst: cleared,
-                            lhs: old_word,
-                            rhs: not_mask,
-                        });
+                            // shifted_src = masked_src << bit_shift
+                            let shifted_src = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Shl {
+                                dst: shifted_src,
+                                lhs: masked_src,
+                                rhs: bit_shift,
+                            });
 
-                        // result = cleared | shifted_src
-                        let result = ctx.alloc_vreg(SpillDesc::transient());
-                        block.push(MInst::Or {
-                            dst: result,
-                            lhs: cleared,
-                            rhs: shifted_src,
-                        });
+                            // Create shifted mask for clearing: mask_imm_vreg = mask_val
+                            let mask_imm = ctx.alloc_vreg(SpillDesc::remat(mask_val));
+                            block.push(MInst::LoadImm {
+                                dst: mask_imm,
+                                value: mask_val,
+                            });
 
-                        // Store back
-                        block.push(MInst::StoreIndexed {
-                            base: BaseReg::SimState,
-                            offset: base_off,
-                            index: byte_off,
-                            src: result,
-                            size: rw_size,
-                        });
-                        if !comb_capture_sites.is_empty() {
-                            let changed = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Cmp {
-                                dst: changed,
+                            // shifted_mask = mask_imm << bit_shift
+                            let shifted_mask = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Shl {
+                                dst: shifted_mask,
+                                lhs: mask_imm,
+                                rhs: bit_shift,
+                            });
+
+                            // not_mask = ~shifted_mask
+                            let not_mask = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::BitNot {
+                                dst: not_mask,
+                                src: shifted_mask,
+                            });
+
+                            // cleared = old_word & not_mask
+                            let cleared = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::And {
+                                dst: cleared,
                                 lhs: old_word,
-                                rhs: result,
-                                kind: CmpKind::Ne,
+                                rhs: not_mask,
                             });
-                            emit_enable_comb_capture_sites(ctx, block, changed, comb_capture_sites);
+
+                            // result = cleared | shifted_src
+                            let result = ctx.alloc_vreg(SpillDesc::transient());
+                            block.push(MInst::Or {
+                                dst: result,
+                                lhs: cleared,
+                                rhs: shifted_src,
+                            });
+
+                            // Store back
+                            block.push(MInst::StoreIndexed {
+                                base: BaseReg::SimState,
+                                offset: base_off,
+                                index: byte_off,
+                                src: result,
+                                size: rw_size,
+                            });
+                            if !comb_capture_sites.is_empty() {
+                                let changed = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Cmp {
+                                    dst: changed,
+                                    lhs: old_word,
+                                    rhs: result,
+                                    kind: CmpKind::Ne,
+                                });
+                                emit_enable_comb_capture_sites(
+                                    ctx,
+                                    block,
+                                    changed,
+                                    comb_capture_sites,
+                                );
+                            }
                         }
                     }
                 }
@@ -2991,99 +3110,123 @@ fn lower_instruction(
                                 src: offset_vreg,
                                 imm: 3,
                             });
-                            let m_bit_shift = ctx.alloc_vreg(SpillDesc::transient());
-                            ctx.emit_and_imm(block, m_bit_shift, offset_vreg, 7);
-
-                            let rw_size = ISelContext::op_size_for_width(*width_bits + 7);
-
-                            // Load old mask word
-                            let old_mask_word = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::LoadIndexed {
-                                dst: old_mask_word,
-                                base: BaseReg::SimState,
-                                offset: mask_base_off,
-                                index: m_byte_off,
-                                size: rw_size,
-                            });
-
-                            let width_mask = if *width_bits < 64 {
-                                mask_for_width(*width_bits)
-                            } else {
-                                u64::MAX
-                            };
-
-                            // masked_m = mask_vreg & width_mask
-                            let masked_m = ctx.alloc_vreg(SpillDesc::transient());
-                            if width_mask != u64::MAX {
-                                ctx.emit_and_imm(block, masked_m, mask_vreg, width_mask);
-                            } else {
-                                ctx.emit_mov(block, masked_m, mask_vreg);
-                            }
-
-                            // shifted_m = masked_m << bit_shift
-                            let shifted_m = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Shl {
-                                dst: shifted_m,
-                                lhs: masked_m,
-                                rhs: m_bit_shift,
-                            });
-
-                            // Create clearing mask
-                            let clear_mask_imm = ctx.alloc_vreg(SpillDesc::remat(width_mask));
-                            block.push(MInst::LoadImm {
-                                dst: clear_mask_imm,
-                                value: width_mask,
-                            });
-                            let shifted_clear = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Shl {
-                                dst: shifted_clear,
-                                lhs: clear_mask_imm,
-                                rhs: m_bit_shift,
-                            });
-                            let not_clear = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::BitNot {
-                                dst: not_clear,
-                                src: shifted_clear,
-                            });
-
-                            // cleared = old_mask_word & ~shifted_clear
-                            let cleared = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::And {
-                                dst: cleared,
-                                lhs: old_mask_word,
-                                rhs: not_clear,
-                            });
-
-                            // result = cleared | shifted_m
-                            let m_result = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Or {
-                                dst: m_result,
-                                lhs: cleared,
-                                rhs: shifted_m,
-                            });
-
-                            // Store back
-                            block.push(MInst::StoreIndexed {
-                                base: BaseReg::SimState,
-                                offset: mask_base_off,
-                                index: m_byte_off,
-                                src: m_result,
-                                size: rw_size,
-                            });
-                            if !comb_capture_sites.is_empty() {
-                                let changed = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Cmp {
-                                    dst: changed,
-                                    lhs: old_mask_word,
-                                    rhs: m_result,
-                                    kind: CmpKind::Ne,
+                            if low_zero_bits_reg(ctx, *offset_reg) >= 3
+                                && let Some(store_size) = OpSize::from_bits(*width_bits)
+                            {
+                                let store_src = if *width_bits < 64 {
+                                    let masked = ctx.alloc_vreg(SpillDesc::transient());
+                                    ctx.emit_and_imm(
+                                        block,
+                                        masked,
+                                        mask_vreg,
+                                        mask_for_width(*width_bits),
+                                    );
+                                    masked
+                                } else {
+                                    mask_vreg
+                                };
+                                block.push(MInst::StoreIndexed {
+                                    base: BaseReg::SimState,
+                                    offset: mask_base_off,
+                                    index: m_byte_off,
+                                    src: store_src,
+                                    size: store_size,
                                 });
-                                emit_enable_comb_capture_sites(
-                                    ctx,
-                                    block,
-                                    changed,
-                                    comb_capture_sites,
-                                );
+                            } else {
+                                let m_bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+                                ctx.emit_and_imm(block, m_bit_shift, offset_vreg, 7);
+
+                                let rw_size = ISelContext::op_size_for_width(*width_bits + 7);
+
+                                // Load old mask word
+                                let old_mask_word = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::LoadIndexed {
+                                    dst: old_mask_word,
+                                    base: BaseReg::SimState,
+                                    offset: mask_base_off,
+                                    index: m_byte_off,
+                                    size: rw_size,
+                                });
+
+                                let width_mask = if *width_bits < 64 {
+                                    mask_for_width(*width_bits)
+                                } else {
+                                    u64::MAX
+                                };
+
+                                // masked_m = mask_vreg & width_mask
+                                let masked_m = ctx.alloc_vreg(SpillDesc::transient());
+                                if width_mask != u64::MAX {
+                                    ctx.emit_and_imm(block, masked_m, mask_vreg, width_mask);
+                                } else {
+                                    ctx.emit_mov(block, masked_m, mask_vreg);
+                                }
+
+                                // shifted_m = masked_m << bit_shift
+                                let shifted_m = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Shl {
+                                    dst: shifted_m,
+                                    lhs: masked_m,
+                                    rhs: m_bit_shift,
+                                });
+
+                                // Create clearing mask
+                                let clear_mask_imm = ctx.alloc_vreg(SpillDesc::remat(width_mask));
+                                block.push(MInst::LoadImm {
+                                    dst: clear_mask_imm,
+                                    value: width_mask,
+                                });
+                                let shifted_clear = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Shl {
+                                    dst: shifted_clear,
+                                    lhs: clear_mask_imm,
+                                    rhs: m_bit_shift,
+                                });
+                                let not_clear = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::BitNot {
+                                    dst: not_clear,
+                                    src: shifted_clear,
+                                });
+
+                                // cleared = old_mask_word & ~shifted_clear
+                                let cleared = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::And {
+                                    dst: cleared,
+                                    lhs: old_mask_word,
+                                    rhs: not_clear,
+                                });
+
+                                // result = cleared | shifted_m
+                                let m_result = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Or {
+                                    dst: m_result,
+                                    lhs: cleared,
+                                    rhs: shifted_m,
+                                });
+
+                                // Store back
+                                block.push(MInst::StoreIndexed {
+                                    base: BaseReg::SimState,
+                                    offset: mask_base_off,
+                                    index: m_byte_off,
+                                    src: m_result,
+                                    size: rw_size,
+                                });
+                                if !comb_capture_sites.is_empty() {
+                                    let changed = ctx.alloc_vreg(SpillDesc::transient());
+                                    block.push(MInst::Cmp {
+                                        dst: changed,
+                                        lhs: old_mask_word,
+                                        rhs: m_result,
+                                        kind: CmpKind::Ne,
+                                    });
+                                    emit_enable_comb_capture_sites(
+                                        ctx,
+                                        block,
+                                        changed,
+                                        comb_capture_sites,
+                                    );
+                                }
                             }
                         }
                     }
@@ -3519,6 +3662,7 @@ fn lower_instruction(
                         value: val,
                     });
                     ctx.consts.insert(*dst, val);
+                    set_low_zero_bits(ctx, *dst, low_zero_bits_const(val));
                     // 4-state: constants always have mask=0
                     if ctx.four_state {
                         let z = ctx.alloc_vreg(SpillDesc::remat(0));
@@ -3562,6 +3706,22 @@ fn lower_instruction(
                     if d_width < 64 {
                         ctx.emit_and_imm(block, dst_vreg, raw, mask_for_width(d_width));
                     }
+                    let lhs_lz = low_zero_bits_reg(ctx, *lhs);
+                    let rhs_lz = low_zero_bits_reg(ctx, *rhs);
+                    let lz = match op {
+                        BinaryOp::Add | BinaryOp::Sub => lhs_lz.min(rhs_lz),
+                        BinaryOp::Mul => {
+                            let lhs_const = ctx.consts.get(lhs).copied();
+                            let rhs_const = ctx.consts.get(rhs).copied();
+                            match (lhs_const, rhs_const) {
+                                (_, Some(rc)) => lhs_lz.saturating_add(low_zero_bits_const(rc)),
+                                (Some(lc), _) => rhs_lz.saturating_add(low_zero_bits_const(lc)),
+                                _ => lhs_lz.saturating_add(rhs_lz),
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                    set_low_zero_bits(ctx, *dst, lz);
                 }
                 BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
                     // For bitwise ops, result width = max(lhs_bits, rhs_bits).
@@ -3597,6 +3757,14 @@ fn lower_instruction(
                     if needs_mask {
                         ctx.emit_and_imm(block, dst_vreg, raw, mask_for_width(d_width));
                     }
+                    let lhs_lz = low_zero_bits_reg(ctx, *lhs);
+                    let rhs_lz = low_zero_bits_reg(ctx, *rhs);
+                    let lz = match op {
+                        BinaryOp::And => lhs_lz.max(rhs_lz),
+                        BinaryOp::Or | BinaryOp::Xor => lhs_lz.min(rhs_lz),
+                        _ => unreachable!(),
+                    };
+                    set_low_zero_bits(ctx, *dst, lz);
                 }
                 BinaryOp::Shr => {
                     // Check for wide-to-narrow extraction: lhs is >64 bits, dst is ≤64 bits
@@ -3633,6 +3801,12 @@ fn lower_instruction(
                     } else {
                         ctx.emit_mov(block, dst_vreg, shifted);
                     }
+                    let lz = if let Some(&shift_amt) = ctx.consts.get(rhs) {
+                        low_zero_bits_reg(ctx, *lhs).saturating_sub(shift_amt as u32)
+                    } else {
+                        0
+                    };
+                    set_low_zero_bits(ctx, *dst, lz);
                 }
                 BinaryOp::Shl => {
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
@@ -3657,6 +3831,12 @@ fn lower_instruction(
                     } else {
                         ctx.emit_mov(block, dst_vreg, shifted);
                     }
+                    let lz = if let Some(&shift_amt) = ctx.consts.get(rhs) {
+                        low_zero_bits_reg(ctx, *lhs).saturating_add(shift_amt as u32)
+                    } else {
+                        0
+                    };
+                    set_low_zero_bits(ctx, *dst, lz);
                 }
                 BinaryOp::Sar => {
                     // Arithmetic shift right: sign-extend lhs to 64 bits, shift, mask result.

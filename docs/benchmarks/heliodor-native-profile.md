@@ -312,6 +312,29 @@ Reason:
 - On this workload, the allocator pays more for the longer live ranges than the
   optimizer saves by removing local algebraic operations.
 
+### Byte-aligned dynamic memory access
+
+Native ISel now tracks a conservative lower bound for the number of low zero
+bits in SIR integer registers. Dynamic bit offsets proven to be byte-aligned
+can use indexed byte addressing directly instead of always generating an
+intra-byte shift path.
+
+Measured result:
+
+- `test_soc_linux_boot` 45 second Celox timeout sample:
+  `avg_comb_us=59.49`
+- Previous comparable samples were around `63us` per comb evaluation.
+- Hot indexed-memory FF blocks also dropped from about `683-685` MIR
+  instructions after MIR opt to about `563-565`.
+
+Reason:
+
+- Unpacked array element accesses usually have byte-aligned strides.
+- The SIR still represents offsets in bits, but native lowering no longer has
+  to assume every dynamic offset may point into the middle of a byte.
+- This is a semantic-preserving unpacked-array improvement; it does not solve
+  the remaining large scalar `And`/`Mux`/`Eq` workload by itself.
+
 ## Implications
 
 The next optimization should be pressure-aware. Transformations that remove
