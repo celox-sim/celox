@@ -1235,6 +1235,16 @@ fn lower_bool_value(ctx: &mut ISelContext, block: &mut MBlock, src: VReg) -> VRe
     dst
 }
 
+fn lower_low_bit(ctx: &mut ISelContext, block: &mut MBlock, src: VReg) -> VReg {
+    if ctx.known_bits.get(&src).is_some_and(|&bits| bits <= 1) {
+        return src;
+    }
+
+    let dst = ctx.alloc_vreg(SpillDesc::transient());
+    ctx.emit_and_imm(block, dst, src, 1);
+    dst
+}
+
 fn lower_instruction(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -1390,6 +1400,30 @@ fn lower_instruction(
                 } else {
                     ctx.reg_map.get(*else_val)
                 };
+
+                if !ctx.four_state && d_width == 1 {
+                    let tv = lower_low_bit(ctx, block, tv);
+                    let ev = lower_low_bit(ctx, block, ev);
+                    let diff = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Xor {
+                        dst: diff,
+                        lhs: tv,
+                        rhs: ev,
+                    });
+                    let selected_diff = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::And {
+                        dst: selected_diff,
+                        lhs: cond_vreg,
+                        rhs: diff,
+                    });
+                    block.push(MInst::Xor {
+                        dst: dst_vreg,
+                        lhs: ev,
+                        rhs: selected_diff,
+                    });
+                    ctx.known_bits.insert(dst_vreg, 1);
+                    return;
+                }
 
                 // cond_broadcast = 0 - cond
                 let zero_v = ctx.alloc_vreg(SpillDesc::remat(0));
