@@ -1133,19 +1133,23 @@ fn emit_divrem(
         DivOp::Rem => rdx,
     };
 
-    // Divisor cannot be in RAX or RDX (clobbered by div).
-    let effective_rhs = if r == rax || r == rdx {
-        asm.mov(rcx, r)?;
-        rcx
-    } else {
-        r
-    };
+    // Divisor cannot be read from RAX/RDX because div consumes RDX:RAX.
+    // Use a stack copy instead of an unmodeled scratch register clobber.
+    let rhs_on_stack = r == rax || r == rdx;
+    if rhs_on_stack {
+        asm.push(r)?;
+    }
 
     if l != rax {
         asm.mov(rax, l)?;
     }
     asm.xor(edx, edx)?;
-    asm.div(effective_rhs)?;
+    if rhs_on_stack {
+        asm.div(qword_ptr(rsp))?;
+        asm.add(rsp, 8)?;
+    } else {
+        asm.div(r)?;
+    }
 
     if d != result_reg {
         asm.mov(d, result_reg)?;
