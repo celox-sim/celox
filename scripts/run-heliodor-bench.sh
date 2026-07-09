@@ -16,7 +16,7 @@ CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O1}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/release/examples/run_veryl_project_test}"
 HELIODOR_CELOX_COMPILE_ONLY="${HELIODOR_CELOX_COMPILE_ONLY:-0}"
-HELIODOR_CELOX_COMPILE_TIMEOUT_SEC="${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-120}"
+HELIODOR_CELOX_COMPILE_TIMEOUT_SEC="${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-}"
 HELIODOR_CELOX_TIMEOUT_MULTIPLIER="${HELIODOR_CELOX_TIMEOUT_MULTIPLIER:-2}"
 HELIODOR_INSTALL_TOOLS="${HELIODOR_INSTALL_TOOLS:-1}"
 HELIODOR_VERYL_VERSION="${HELIODOR_VERYL_VERSION:-0.20.2}"
@@ -45,7 +45,7 @@ Environment:
   HELIODOR_CELOX_COMPILE_ONLY
                        for Celox runners, build the simulator and exit without running the testbench
   HELIODOR_CELOX_COMPILE_TIMEOUT_SEC
-                       safety timeout for Celox compile-only mode (default: 120)
+                       optional safety timeout for Celox compile-only mode
   HELIODOR_INSTALL_TOOLS
                        install missing tools into HELIODOR_TOOLS_DIR (default: 1)
   HELIODOR_VERYL_VERSION
@@ -232,7 +232,7 @@ run_in_heliodor() {
     local timeout_sec="$1"
     local log="$2"
     shift 2
-    if command -v timeout >/dev/null; then
+    if [[ -n "$timeout_sec" && "$timeout_sec" != 0 ]] && command -v timeout >/dev/null; then
         timeout --kill-after=10s "${timeout_sec}s" \
             bash -c 'cd "$1" || exit; shift; exec "$@"' bash "$HELIODOR_DIR" "$@" \
             >"$log" 2>&1
@@ -282,9 +282,15 @@ run_one() {
     esac
 
     if [[ "$runner" == celox* && "$HELIODOR_CELOX_COMPILE_ONLY" == 1 ]]; then
-        echo "== $runner :: $test (compile-only, safety timeout ${timeout_sec}s) =="
-    else
+        if [[ -n "$timeout_sec" && "$timeout_sec" != 0 ]]; then
+            echo "== $runner :: $test (compile-only, safety timeout ${timeout_sec}s) =="
+        else
+            echo "== $runner :: $test (compile-only) =="
+        fi
+    elif [[ -n "$timeout_sec" && "$timeout_sec" != 0 ]]; then
         echo "== $runner :: $test (timeout ${timeout_sec}s) =="
+    else
+        echo "== $runner :: $test =="
     fi
     start="$(date +%s%N)"
     set +e
