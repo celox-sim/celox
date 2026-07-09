@@ -2158,6 +2158,11 @@ fn dump_native_block_context(
     let Some(raw) = std::env::var_os("CELOX_NATIVE_DUMP_BLOCK") else {
         return;
     };
+    if let Some(raw_label) = std::env::var_os("CELOX_NATIVE_DUMP_LABEL")
+        && raw_label != label
+    {
+        return;
+    }
     if let Some(raw_stage) = std::env::var_os("CELOX_NATIVE_DUMP_STAGE") {
         if raw_stage != stage {
             return;
