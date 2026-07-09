@@ -2926,10 +2926,10 @@ fn alloc_transient_vreg(vregs: &mut VRegAllocator, spill_descs: &mut Vec<SpillDe
 
 fn eliminate_redundant_local_stores(func: &mut MFunction) {
     for block in &mut func.blocks {
-        let mut available: HashMap<MemorySlot, VReg> = HashMap::new();
-        let mut rewritten = Vec::with_capacity(block.insts.len());
+        let mut later_stores: HashMap<MemorySlot, ()> = HashMap::new();
+        let mut reversed = Vec::with_capacity(block.insts.len());
 
-        for inst in block.insts.drain(..) {
+        for inst in block.insts.drain(..).rev() {
             match inst {
                 MInst::Store {
                     base,
@@ -2938,25 +2938,29 @@ fn eliminate_redundant_local_stores(func: &mut MFunction) {
                     size,
                 } => {
                     let key = MemorySlot { base, offset, size };
-                    let redundant = available.get(&key).copied() == Some(src);
-                    invalidate_overlapping_slots(&mut available, base, offset, size);
-                    available.insert(key, src);
-                    if !redundant {
-                        rewritten.push(MInst::Store {
-                            base,
-                            offset,
-                            src,
-                            size,
-                        });
+                    if later_stores.contains_key(&key) {
+                        continue;
                     }
+                    invalidate_overlapping_slots(&mut later_stores, base, offset, size);
+                    later_stores.insert(key, ());
+                    reversed.push(MInst::Store {
+                        base,
+                        offset,
+                        src,
+                        size,
+                    });
                 }
                 MInst::LoadIndexed { .. }
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::StoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
-                | MInst::ReleaseStorePtrIndexed { .. } => {
-                    available.clear();
-                    rewritten.push(inst);
+                | MInst::ReleaseStorePtrIndexed { .. }
+                | MInst::LoadPtr { .. }
+                | MInst::StorePtr { .. }
+                | MInst::ReleaseStorePtr { .. }
+                | MInst::MemCopy { .. } => {
+                    later_stores.clear();
+                    reversed.push(inst);
                 }
                 MInst::Load {
                     dst,
@@ -2964,24 +2968,26 @@ fn eliminate_redundant_local_stores(func: &mut MFunction) {
                     offset,
                     size,
                 } => {
-                    available.insert(MemorySlot { base, offset, size }, dst);
-                    rewritten.push(MInst::Load {
+                    invalidate_overlapping_slots(&mut later_stores, base, offset, size);
+                    reversed.push(MInst::Load {
                         dst,
                         base,
                         offset,
                         size,
                     });
                 }
-                other => rewritten.push(other),
+                other => reversed.push(other),
             }
         }
 
+        reversed.reverse();
+        let rewritten = reversed;
         block.insts = rewritten;
     }
 }
 
-fn invalidate_overlapping_slots(
-    available: &mut HashMap<MemorySlot, VReg>,
+fn invalidate_overlapping_slots<T>(
+    available: &mut HashMap<MemorySlot, T>,
     base: BaseReg,
     offset: i32,
     size: OpSize,
@@ -3987,6 +3993,129 @@ mod tests {
             })
             .count();
         assert_eq!(store_count, 1, "{:#?}", func.blocks[0].insts);
+    }
+
+    #[test]
+    fn eliminates_dead_store_overwritten_before_any_load() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(1),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        optimize(&mut func);
+
+        assert!(
+            !func.blocks[0].insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                }
+            )),
+            "{:#?}",
+            func.blocks[0].insts
+        );
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(1),
+                size: OpSize::S8,
+            }
+        )));
+    }
+
+    #[test]
+    fn keeps_store_before_unknown_memory_access() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0,
+                },
+                MInst::LoadIndexed {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    index: VReg(1),
+                    size: OpSize::S8,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(2),
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(3),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        optimize(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(0),
+                size: OpSize::S8,
+            }
+        )));
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(3),
+                size: OpSize::S8,
+            }
+        )));
     }
 
     #[test]
