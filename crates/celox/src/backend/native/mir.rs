@@ -511,6 +511,20 @@ pub enum MInst {
     Neg { dst: VReg, src: VReg },
     /// dst = popcnt(src) (population count — number of set bits)
     Popcnt { dst: VReg, src: VReg },
+    /// dst = bsr(src). The result is unspecified when src == 0.
+    ///
+    /// This is intended for guarded lowering where the result is consumed only
+    /// on a path or select arm that has already proven src != 0.
+    Bsr { dst: VReg, src: VReg },
+    /// dst = src != 0 ? bsr(src) : zero_value.
+    ///
+    /// This is a defined wrapper around x86 BSR, whose destination is
+    /// otherwise undefined when the source is zero.
+    BsrOr {
+        dst: VReg,
+        src: VReg,
+        zero_value: u8,
+    },
     /// dst = pext(src, mask) — parallel bit extract (BMI2).
     /// Extracts bits from src at positions where mask has 1s,
     /// and packs them contiguously starting at bit 0.
@@ -658,6 +672,12 @@ impl fmt::Display for MInst {
             MInst::BitNot { dst, src } => write!(f, "{dst} = not {src}"),
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
             MInst::Popcnt { dst, src } => write!(f, "{dst} = popcnt {src}"),
+            MInst::Bsr { dst, src } => write!(f, "{dst} = bsr {src}"),
+            MInst::BsrOr {
+                dst,
+                src,
+                zero_value,
+            } => write!(f, "{dst} = bsr_or {src}, {zero_value}"),
             MInst::Pext { dst, src, mask } => write!(f, "{dst} = pext {src}, {mask}"),
             MInst::Pdep { dst, src, mask } => write!(f, "{dst} = pdep {src}, {mask}"),
             MInst::Select {
@@ -752,6 +772,8 @@ impl MInst {
             | MInst::BitNot { dst, .. }
             | MInst::Neg { dst, .. }
             | MInst::Popcnt { dst, .. }
+            | MInst::Bsr { dst, .. }
+            | MInst::BsrOr { dst, .. }
             | MInst::Pext { dst, .. }
             | MInst::Pdep { dst, .. }
             | MInst::Select { dst, .. } => Some(*dst),
@@ -812,7 +834,9 @@ impl MInst {
             | MInst::SubImm { src, .. }
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
-            | MInst::Popcnt { src, .. } => Uses::one(*src),
+            | MInst::Popcnt { src, .. }
+            | MInst::Bsr { src, .. }
+            | MInst::BsrOr { src, .. } => Uses::one(*src),
             MInst::CmpImm { lhs, .. } => Uses::one(*lhs),
             MInst::Select {
                 cond,
@@ -935,7 +959,9 @@ impl MInst {
             | MInst::SubImm { src, .. }
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
-            | MInst::Popcnt { src, .. } => {
+            | MInst::Popcnt { src, .. }
+            | MInst::Bsr { src, .. }
+            | MInst::BsrOr { src, .. } => {
                 if *src == old {
                     *src = new;
                 }

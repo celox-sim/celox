@@ -979,6 +979,26 @@ fn emit_inst(
             asm.popcnt(d, s)?;
         }
 
+        MInst::Bsr { dst, src } => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            asm.bsr(d, s)?;
+        }
+
+        MInst::BsrOr {
+            dst,
+            src,
+            zero_value,
+        } => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            let mut done = asm.create_label();
+            asm.bsr(d, s)?;
+            asm.jne(done)?;
+            asm.mov(d, *zero_value as i64)?;
+            asm.set_label(&mut done)?;
+        }
+
         MInst::Pext { dst, src, mask } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let s = preg_to_reg64(resolve(assignment, *src));
@@ -1566,6 +1586,8 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 MInst::BitNot { .. }
                 | MInst::Neg { .. }
                 | MInst::Popcnt { .. }
+                | MInst::Bsr { .. }
+                | MInst::BsrOr { .. }
                 | MInst::Pext { .. }
                 | MInst::Pdep { .. } => bit_ops += 1,
                 MInst::Select { .. } => select += 1,

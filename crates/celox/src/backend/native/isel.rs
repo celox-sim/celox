@@ -10,8 +10,8 @@ use crate::ir::{
 use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
 
 use super::mir::*;
-use crate::HashSet;
 use crate::backend::MemoryLayout;
+use crate::{HashMap, HashSet};
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
 struct RegMap {
@@ -99,6 +99,13 @@ pub fn lower_execution_unit(
         wide_masks: WideRegMap::default(),
         trigger_only_seen: HashSet::default(),
     };
+    let native_priority_encode =
+        !four_state && std::env::var_os("CELOX_NATIVE_PRIORITY_ENCODE").is_some();
+    let sir_use_sites = if native_priority_encode {
+        Some(collect_sir_use_sites(eu))
+    } else {
+        None
+    };
 
     // Pre-seed wide block params so instructions in those blocks can read the
     // full chunked value before phi nodes are materialized in a later pass.
@@ -159,8 +166,21 @@ pub fn lower_execution_unit(
             }
         }
 
+        let priority_plans = if native_priority_encode {
+            find_priority_encode_plans(sir_block, sir_use_sites.as_ref().unwrap())
+        } else {
+            PriorityEncodePlans::default()
+        };
+
         // Lower instructions
-        for inst in &sir_block.instructions {
+        for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            if priority_plans.skip_indices.contains(&inst_idx) {
+                if let Some(plan) = priority_plans.roots.get(&inst_idx) {
+                    emit_priority_encode(&mut ctx, &mut mblock, plan);
+                }
+                continue;
+            }
+
             if let SIRInstruction::CombCaptureEvent {
                 site_id,
                 args,
@@ -1243,6 +1263,537 @@ fn lower_low_bit(ctx: &mut ISelContext, block: &mut MBlock, src: VReg) -> VReg {
     let dst = ctx.alloc_vreg(SpillDesc::transient());
     ctx.emit_and_imm(block, dst, src, 1);
     dst
+}
+
+#[derive(Clone, Copy)]
+struct SirUseSite {
+    block: crate::ir::BlockId,
+    inst_idx: Option<usize>,
+}
+
+#[derive(Default)]
+struct PriorityEncodePlans {
+    roots: HashMap<usize, PriorityEncodePlan>,
+    skip_indices: HashSet<usize>,
+}
+
+#[derive(Clone)]
+struct PriorityEncodePlan {
+    root_idx: usize,
+    dst: RegisterId,
+    src: RegisterId,
+    width: usize,
+}
+
+fn collect_sir_use_sites(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, Vec<SirUseSite>> {
+    let mut uses: HashMap<RegisterId, Vec<SirUseSite>> = HashMap::default();
+    for (block_id, block) in &eu.blocks {
+        for (inst_idx, inst) in block.instructions.iter().enumerate() {
+            collect_sir_inst_uses(inst, |reg| {
+                uses.entry(reg).or_default().push(SirUseSite {
+                    block: *block_id,
+                    inst_idx: Some(inst_idx),
+                });
+            });
+        }
+        collect_sir_term_uses(&block.terminator, |reg| {
+            uses.entry(reg).or_default().push(SirUseSite {
+                block: *block_id,
+                inst_idx: None,
+            });
+        });
+    }
+    uses
+}
+
+fn collect_sir_inst_uses(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    mut add: impl FnMut(RegisterId),
+) {
+    match inst {
+        SIRInstruction::Imm(..) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            add(*lhs);
+            add(*rhs);
+        }
+        SIRInstruction::Unary(_, _, src) | SIRInstruction::Slice(_, src, _, _) => add(*src),
+        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => add(*off),
+        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
+        SIRInstruction::Store(_, off, _, src, _, _) => {
+            if let SIROffset::Dynamic(off) = off {
+                add(*off);
+            }
+            add(*src);
+        }
+        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => add(*off),
+        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
+        SIRInstruction::Concat(_, args)
+        | SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => {
+            for &arg in args {
+                add(arg);
+            }
+        }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            add(*cond);
+            add(*then_val);
+            add(*else_val);
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            add(*old);
+            add(*new);
+        }
+    }
+}
+
+fn collect_sir_term_uses(term: &SIRTerminator, mut add: impl FnMut(RegisterId)) {
+    match term {
+        SIRTerminator::Jump(_, args) => {
+            for &arg in args {
+                add(arg);
+            }
+        }
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            add(*cond);
+            for &arg in &true_block.1 {
+                add(arg);
+            }
+            for &arg in &false_block.1 {
+                add(arg);
+            }
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
+}
+
+fn find_priority_encode_plans(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> PriorityEncodePlans {
+    const MIN_PRIORITY_ENCODE_WIDTH: usize = 32;
+
+    let mut defs: HashMap<RegisterId, usize> = HashMap::default();
+    let mut else_children = HashSet::default();
+    for (idx, inst) in block.instructions.iter().enumerate() {
+        if let Some(dst) = sir_def_reg(inst) {
+            defs.insert(dst, idx);
+        }
+    }
+    for inst in &block.instructions {
+        if let SIRInstruction::Mux(_, _, _, else_val) = inst
+            && defs
+                .get(else_val)
+                .is_some_and(|&idx| matches!(block.instructions[idx], SIRInstruction::Mux(..)))
+        {
+            else_children.insert(*else_val);
+        }
+    }
+
+    let mut plans = PriorityEncodePlans::default();
+    for (root_idx, inst) in block.instructions.iter().enumerate().rev() {
+        let SIRInstruction::Mux(root_dst, ..) = inst else {
+            continue;
+        };
+        if else_children.contains(root_dst) || plans.skip_indices.contains(&root_idx) {
+            continue;
+        }
+        let Some((plan, required_indices, optional_indices)) =
+            collect_priority_encode_candidate(block, &defs, root_idx, *root_dst)
+        else {
+            continue;
+        };
+        if plan.width < MIN_PRIORITY_ENCODE_WIDTH
+            || required_indices
+                .iter()
+                .any(|idx| plans.skip_indices.contains(idx))
+        {
+            continue;
+        }
+        if !required_indices.iter().all(|idx| {
+            *idx == root_idx || def_used_only_by_candidate(block, *idx, &required_indices, uses)
+        }) {
+            continue;
+        }
+
+        for idx in required_indices {
+            plans.skip_indices.insert(idx);
+        }
+        for idx in optional_indices {
+            if def_used_only_by_candidate(block, idx, &plans.skip_indices, uses) {
+                plans.skip_indices.insert(idx);
+            }
+        }
+        plans.roots.insert(plan.root_idx, plan);
+    }
+    plans
+}
+
+fn collect_priority_encode_candidate(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    root_idx: usize,
+    root_dst: RegisterId,
+) -> Option<(PriorityEncodePlan, HashSet<usize>, HashSet<usize>)> {
+    let mut cursor = root_dst;
+    let mut default_reg = None;
+    let mut default_value = None;
+    let mut source = None;
+    let mut items: Vec<(usize, usize)> = Vec::new();
+    let mut required_indices = HashSet::default();
+    let mut optional_indices = HashSet::default();
+
+    loop {
+        let &mux_idx = defs.get(&cursor)?;
+        let SIRInstruction::Mux(dst, cond, then_val, else_val) = &block.instructions[mux_idx]
+        else {
+            return None;
+        };
+        if *dst != cursor {
+            return None;
+        }
+
+        let (cond_idx, acc_eq_idx, guard, matched_default_reg, matched_default_value) =
+            match_priority_encode_cond(block, defs, *cond, *else_val)?;
+        if let Some(reg) = default_reg {
+            if reg != matched_default_reg {
+                return None;
+            }
+        } else {
+            default_reg = Some(matched_default_reg);
+            default_value = Some(matched_default_value);
+        }
+
+        let (guard_src, bit_index, guard_required, guard_optional) =
+            match_priority_bit_guard(block, defs, guard)?;
+        if let Some(src) = source {
+            if src != guard_src {
+                return None;
+            }
+        } else {
+            source = Some(guard_src);
+        }
+
+        let then_value = sir_imm_u64(block, defs, *then_val)? as usize;
+        if let Some(&then_idx) = defs.get(then_val) {
+            optional_indices.insert(then_idx);
+        }
+        required_indices.insert(mux_idx);
+        required_indices.insert(cond_idx);
+        required_indices.insert(acc_eq_idx);
+        required_indices.extend(guard_required);
+        optional_indices.extend(guard_optional);
+        items.push((then_value, bit_index));
+
+        if let Some(&prev_idx) = defs.get(else_val)
+            && matches!(block.instructions[prev_idx], SIRInstruction::Mux(..))
+        {
+            cursor = *else_val;
+            continue;
+        }
+        if Some(*else_val) != default_reg {
+            return None;
+        }
+        if let Some(&default_idx) = defs.get(else_val) {
+            optional_indices.insert(default_idx);
+        }
+        break;
+    }
+
+    let width = default_value? as usize;
+    if width != items.len() {
+        return None;
+    }
+    let mut seen_then = vec![false; width];
+    let mut seen_bits = vec![false; width];
+    for (then_value, bit_index) in items {
+        if then_value >= width || bit_index >= width || then_value + bit_index != width - 1 {
+            return None;
+        }
+        if seen_then[then_value] || seen_bits[bit_index] {
+            return None;
+        }
+        seen_then[then_value] = true;
+        seen_bits[bit_index] = true;
+    }
+
+    Some((
+        PriorityEncodePlan {
+            root_idx,
+            dst: root_dst,
+            src: source?,
+            width,
+        },
+        required_indices,
+        optional_indices,
+    ))
+}
+
+fn match_priority_encode_cond(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    cond: RegisterId,
+    prev_acc: RegisterId,
+) -> Option<(usize, usize, RegisterId, RegisterId, u64)> {
+    let &cond_idx = defs.get(&cond)?;
+    let SIRInstruction::Binary(_, lhs, BinaryOp::LogicAnd, rhs) = block.instructions[cond_idx]
+    else {
+        return None;
+    };
+    if let Some((eq_idx, default_reg, default_value)) =
+        match_acc_eq_default(block, defs, lhs, prev_acc)
+    {
+        return Some((cond_idx, eq_idx, rhs, default_reg, default_value));
+    }
+    if let Some((eq_idx, default_reg, default_value)) =
+        match_acc_eq_default(block, defs, rhs, prev_acc)
+    {
+        return Some((cond_idx, eq_idx, lhs, default_reg, default_value));
+    }
+    None
+}
+
+fn match_acc_eq_default(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    eq_reg: RegisterId,
+    prev_acc: RegisterId,
+) -> Option<(usize, RegisterId, u64)> {
+    let &eq_idx = defs.get(&eq_reg)?;
+    let SIRInstruction::Binary(_, lhs, BinaryOp::Eq, rhs) = block.instructions[eq_idx] else {
+        return None;
+    };
+    if lhs == prev_acc {
+        let value = sir_imm_u64(block, defs, rhs)?;
+        return Some((eq_idx, rhs, value));
+    }
+    if rhs == prev_acc {
+        let value = sir_imm_u64(block, defs, lhs)?;
+        return Some((eq_idx, lhs, value));
+    }
+    None
+}
+
+fn match_priority_bit_guard(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    guard: RegisterId,
+) -> Option<(RegisterId, usize, Vec<usize>, Vec<usize>)> {
+    let &eq_idx = defs.get(&guard)?;
+    let SIRInstruction::Binary(_, lhs, BinaryOp::Eq, rhs) = block.instructions[eq_idx] else {
+        return None;
+    };
+
+    let bit_reg = if sir_imm_u64(block, defs, lhs) == Some(1) {
+        if let Some(&idx) = defs.get(&lhs) {
+            let (_, _, mut required, mut optional) = match_bit_extract(block, defs, rhs)?;
+            optional.push(idx);
+            required.push(eq_idx);
+            let (src, bit_index, _, _) = match_bit_extract(block, defs, rhs)?;
+            return Some((src, bit_index, required, optional));
+        }
+        rhs
+    } else if sir_imm_u64(block, defs, rhs) == Some(1) {
+        if let Some(&idx) = defs.get(&rhs) {
+            let (_, _, mut required, mut optional) = match_bit_extract(block, defs, lhs)?;
+            optional.push(idx);
+            required.push(eq_idx);
+            let (src, bit_index, _, _) = match_bit_extract(block, defs, lhs)?;
+            return Some((src, bit_index, required, optional));
+        }
+        lhs
+    } else {
+        return None;
+    };
+    let (src, bit_index, mut required, optional) = match_bit_extract(block, defs, bit_reg)?;
+    required.push(eq_idx);
+    Some((src, bit_index, required, optional))
+}
+
+fn match_bit_extract(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    bit_reg: RegisterId,
+) -> Option<(RegisterId, usize, Vec<usize>, Vec<usize>)> {
+    let mut required = Vec::new();
+    let mut optional = Vec::new();
+    let &and_idx = defs.get(&bit_reg)?;
+    let SIRInstruction::Binary(_, and_lhs, BinaryOp::And, and_rhs) = block.instructions[and_idx]
+    else {
+        return None;
+    };
+    required.push(and_idx);
+    let shifted = if sir_imm_u64(block, defs, and_lhs) == Some(1) {
+        if let Some(&idx) = defs.get(&and_lhs) {
+            optional.push(idx);
+        }
+        and_rhs
+    } else if sir_imm_u64(block, defs, and_rhs) == Some(1) {
+        if let Some(&idx) = defs.get(&and_rhs) {
+            optional.push(idx);
+        }
+        and_lhs
+    } else {
+        return None;
+    };
+
+    let Some(&shr_idx) = defs.get(&shifted) else {
+        return Some((shifted, 0, required, optional));
+    };
+    if let SIRInstruction::Binary(_, src, BinaryOp::Shr, shift_reg) = block.instructions[shr_idx] {
+        let bit_index = sir_imm_u64(block, defs, shift_reg)? as usize;
+        required.push(shr_idx);
+        if let Some(&idx) = defs.get(&shift_reg) {
+            optional.push(idx);
+        }
+        Some((src, bit_index, required, optional))
+    } else {
+        Some((shifted, 0, required, optional))
+    }
+}
+
+fn sir_imm_u64(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    reg: RegisterId,
+) -> Option<u64> {
+    let &idx = defs.get(&reg)?;
+    let SIRInstruction::Imm(_, value) = &block.instructions[idx] else {
+        return None;
+    };
+    if value.mask != num_bigint::BigUint::ZERO {
+        return None;
+    }
+    let digits = value.payload.to_u64_digits();
+    match digits.as_slice() {
+        [] => Some(0),
+        [value] => Some(*value),
+        _ => None,
+    }
+}
+
+fn sir_def_reg(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
+    match inst {
+        SIRInstruction::Imm(dst, _)
+        | SIRInstruction::Binary(dst, _, _, _)
+        | SIRInstruction::Unary(dst, _, _)
+        | SIRInstruction::Load(dst, _, _, _)
+        | SIRInstruction::Concat(dst, _)
+        | SIRInstruction::Slice(dst, _, _, _)
+        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+        SIRInstruction::Store(_, _, _, _, _, _)
+        | SIRInstruction::Commit(_, _, _, _, _)
+        | SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+    }
+}
+
+fn def_used_only_by_candidate(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    idx: usize,
+    candidate_indices: &HashSet<usize>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> bool {
+    let Some(def) = sir_def_reg(&block.instructions[idx]) else {
+        return true;
+    };
+    uses.get(&def).is_none_or(|sites| {
+        sites.iter().all(|site| {
+            site.block == block.id
+                && site
+                    .inst_idx
+                    .is_some_and(|use_idx| candidate_indices.contains(&use_idx))
+        })
+    })
+}
+
+fn emit_priority_encode(ctx: &mut ISelContext<'_>, block: &mut MBlock, plan: &PriorityEncodePlan) {
+    let dst = ctx.reg_map.get(plan.dst);
+    let n_chunks = plan.width.div_ceil(64).max(1);
+    let chunks = if ctx.wide_regs.contains_key(&plan.src) {
+        ctx.get_wide_chunks(&plan.src, block)
+    } else {
+        vec![(ctx.reg_map.get(plan.src), ctx.sir_width(&plan.src).min(64))]
+    };
+
+    let mut result = ctx.alloc_vreg(SpillDesc::remat(plan.width as u64));
+    block.push(MInst::LoadImm {
+        dst: result,
+        value: plan.width as u64,
+    });
+
+    for chunk_idx in 0..n_chunks {
+        let chunk_bits = if chunk_idx + 1 == n_chunks {
+            plan.width - chunk_idx * 64
+        } else {
+            64
+        };
+        let raw_chunk = chunks.get(chunk_idx).map(|(v, _)| *v).unwrap_or_else(|| {
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm {
+                dst: zero,
+                value: 0,
+            });
+            zero
+        });
+        let chunk = if chunk_bits < 64 {
+            let masked = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, masked, raw_chunk, mask_for_width(chunk_bits));
+            masked
+        } else {
+            raw_chunk
+        };
+
+        let nonzero = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::CmpImm {
+            dst: nonzero,
+            lhs: chunk,
+            imm: 0,
+            kind: CmpKind::Ne,
+        });
+        let bsr = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Bsr {
+            dst: bsr,
+            src: chunk,
+        });
+        let high_index = (plan.width - 1 - chunk_idx * 64) as u64;
+        let high = ctx.alloc_vreg(SpillDesc::remat(high_index));
+        block.push(MInst::LoadImm {
+            dst: high,
+            value: high_index,
+        });
+        let candidate = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Sub {
+            dst: candidate,
+            lhs: high,
+            rhs: bsr,
+        });
+        let next = if chunk_idx + 1 == n_chunks {
+            dst
+        } else {
+            ctx.alloc_vreg(SpillDesc::transient())
+        };
+        block.push(MInst::Select {
+            dst: next,
+            cond: nonzero,
+            true_val: candidate,
+            false_val: result,
+        });
+        result = next;
+    }
+
+    let known_bits = if plan.width == 0 {
+        0
+    } else {
+        (usize::BITS as usize - plan.width.leading_zeros() as usize).min(ctx.sir_width(&plan.dst))
+    };
+    ctx.known_bits.insert(dst, known_bits);
 }
 
 fn lower_instruction(

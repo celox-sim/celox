@@ -315,6 +315,23 @@ fn constant_fold(func: &mut MFunction) {
                     MInst::Popcnt { dst, src } => {
                         consts.get(src).map(|&v| (*dst, v.count_ones() as u64))
                     }
+                    MInst::Bsr { dst, src } => consts
+                        .get(src)
+                        .and_then(|&v| (v != 0).then_some((*dst, 63 - v.leading_zeros() as u64))),
+                    MInst::BsrOr {
+                        dst,
+                        src,
+                        zero_value,
+                    } => consts.get(src).map(|&v| {
+                        (
+                            *dst,
+                            if v == 0 {
+                                *zero_value as u64
+                            } else {
+                                63 - v.leading_zeros() as u64
+                            },
+                        )
+                    }),
                     // Comparison with both constant
                     MInst::Cmp {
                         dst,
@@ -494,6 +511,8 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
         }
         MInst::Cmp { .. } | MInst::CmpImm { .. } => Some(1),
         MInst::Popcnt { .. } => Some(7), // max popcnt(u64) = 64, fits in 7 bits
+        MInst::Bsr { .. } => Some(6),    // max bsr(u64) = 63
+        MInst::BsrOr { .. } => Some(6),  // max bsr(u64) = 63
         MInst::Mov { src, .. } => known.get(src).copied(),
         MInst::AndImm { src, imm, .. } => {
             let imm_w = if *imm == 0 {
@@ -593,6 +612,8 @@ const GVN_POPCNT: u8 = 17;
 const GVN_CMP: u8 = 18;
 const GVN_PEXT: u8 = 19;
 const GVN_PDEP: u8 = 20;
+const GVN_BSR: u8 = 21;
+const GVN_BSR_OR: u8 = 22;
 
 fn gvn_is_commutative(op: u8) -> bool {
     matches!(op, GVN_ADD | GVN_MUL | GVN_AND | GVN_OR | GVN_XOR)
@@ -617,6 +638,10 @@ fn gvn_key(inst: &MInst) -> Option<GvnKey> {
         MInst::BitNot { src, .. } => Some(GvnKey::Unary(GVN_NOT, *src)),
         MInst::Neg { src, .. } => Some(GvnKey::Unary(GVN_NEG, *src)),
         MInst::Popcnt { src, .. } => Some(GvnKey::Unary(GVN_POPCNT, *src)),
+        MInst::Bsr { src, .. } => Some(GvnKey::Unary(GVN_BSR, *src)),
+        MInst::BsrOr {
+            src, zero_value, ..
+        } => Some(GvnKey::BinRI(GVN_BSR_OR, *src, *zero_value as u64)),
         MInst::Pext { src, mask, .. } => Some(GvnKey::BinRR(GVN_PEXT, *src, *mask)),
         MInst::Pdep { src, mask, .. } => Some(GvnKey::BinRR(GVN_PDEP, *src, *mask)),
         MInst::Cmp { lhs, rhs, kind, .. } => Some(GvnKey::Cmp(GVN_CMP, *lhs, *rhs, *kind as u8)),
@@ -1746,6 +1771,8 @@ fn compute_value_widths(func: &mut MFunction) {
                 }
                 MInst::Cmp { .. } | MInst::CmpImm { .. } => Some(1),
                 MInst::Popcnt { .. } => Some(7),
+                MInst::Bsr { .. } => Some(6),
+                MInst::BsrOr { .. } => Some(6),
                 MInst::Mov { src, .. } => widths.get(src.0 as usize).copied().flatten(),
                 MInst::AndImm { src, imm, .. } => {
                     let imm_w = if *imm == 0 {
