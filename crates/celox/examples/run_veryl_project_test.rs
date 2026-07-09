@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use celox::{OptLevel, Simulator, TestResult};
+use celox::{OptLevel, Simulator, SirPass, TestResult};
 use veryl_metadata::Metadata;
 
 struct Options {
@@ -16,6 +16,7 @@ struct Options {
     opt_level: OptLevel,
     backend: Backend,
     four_state: bool,
+    pass_overrides: Vec<(bool, SirPass)>,
 }
 
 #[derive(Clone, Copy)]
@@ -40,10 +41,17 @@ fn run() -> Result<(), Box<dyn Error>> {
         .collect();
 
     let start = Instant::now();
-    let builder = Simulator::from_sources(source_refs, &opts.test)
+    let mut builder = Simulator::from_sources(source_refs, &opts.test)
         .with_metadata(metadata)
         .opt_level(opts.opt_level)
         .four_state(opts.four_state);
+    for (enable, pass) in opts.pass_overrides {
+        builder = if enable {
+            builder.enable_pass(pass)
+        } else {
+            builder.disable_pass(pass)
+        };
+    }
     let result = match opts.backend {
         Backend::Native => builder.run_test()?,
         Backend::Cranelift => builder.run_test_cranelift()?,
@@ -77,6 +85,7 @@ fn parse_args() -> Result<Options, String> {
     let mut opt_level = OptLevel::O1;
     let mut backend = Backend::Native;
     let mut four_state = false;
+    let mut pass_overrides = Vec::new();
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -112,6 +121,12 @@ fn parse_args() -> Result<Options, String> {
                         .ok_or_else(|| "--source-file requires a path".to_string())?,
                 ));
             }
+            "--sir-pass" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--sir-pass requires +name or -name".to_string())?;
+                pass_overrides.push(parse_pass_override(&value)?);
+            }
             "--four-state" => four_state = true,
             other if project.is_none() => project = Some(PathBuf::from(other)),
             other if test.is_none() => test = Some(other.to_string()),
@@ -126,6 +141,7 @@ fn parse_args() -> Result<Options, String> {
         opt_level,
         backend,
         four_state,
+        pass_overrides,
     })
 }
 
@@ -146,8 +162,20 @@ fn parse_backend(value: &str) -> Result<Backend, String> {
     }
 }
 
+fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
+    let (enable, name) = if let Some(name) = value.strip_prefix('+') {
+        (true, name)
+    } else if let Some(name) = value.strip_prefix('-') {
+        (false, name)
+    } else {
+        return Err(format!("invalid pass override: {value}"));
+    };
+    let pass = SirPass::parse(name).ok_or_else(|| format!("unknown SIR pass: {name}"))?;
+    Ok((enable, pass))
+}
+
 fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O1] [--four-state]"
+    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O1] [--sir-pass +/-name ...] [--four-state]"
 }
 
 fn load_sources(

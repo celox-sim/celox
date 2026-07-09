@@ -13,6 +13,7 @@ HELIODOR_TOOLS_DIR="${HELIODOR_TOOLS_DIR:-$CELOX_ROOT/target/heliodor/tools}"
 HELIODOR_TESTS="${HELIODOR_TESTS:-test_soc_linux_boot}"
 HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cranelift veryl-cc celox}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O1}"
+CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/release/examples/run_veryl_project_test}"
 HELIODOR_CELOX_TIMEOUT_MULTIPLIER="${HELIODOR_CELOX_TIMEOUT_MULTIPLIER:-2}"
 HELIODOR_INSTALL_TOOLS="${HELIODOR_INSTALL_TOOLS:-1}"
@@ -36,6 +37,8 @@ Environment:
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
                        timeout Celox after N times the fastest successful Veryl baseline
   CELOX_OPT_LEVEL      O0, O1, or O2 for the Celox runner
+  CELOX_SIR_PASS_OVERRIDES
+                       space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
   CELOX_RUNNER_BIN     prebuilt Celox runner path
   HELIODOR_INSTALL_TOOLS
                        install missing tools into HELIODOR_TOOLS_DIR (default: 1)
@@ -253,6 +256,9 @@ run_one() {
     celox_args=()
     for source_file in "${source_files[@]}"; do
         celox_args+=(--source-file "$source_file")
+    done
+    for pass_override in $CELOX_SIR_PASS_OVERRIDES; do
+        celox_args+=(--sir-pass "$pass_override")
     done
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     log="$HELIODOR_RESULTS_DIR/${stamp}_${runner}_${test}.log"
