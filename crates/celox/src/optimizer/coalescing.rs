@@ -7,6 +7,7 @@ pub(crate) mod commit_ops;
 pub mod cost_model;
 mod dead_working_stores;
 mod pass_bit_extract_peephole;
+mod pass_branchify_mux;
 mod pass_coalesce_stores;
 mod pass_commit_sinking;
 mod pass_concat_folding;
@@ -32,6 +33,7 @@ mod shared;
 pub use pass_tail_call_split::TailCallChunk;
 
 use pass_bit_extract_peephole::BitExtractPeepholePass;
+use pass_branchify_mux::BranchifyMuxPass;
 use pass_coalesce_stores::CoalesceStoresPass;
 use pass_commit_sinking::CommitSinkingPass;
 use pass_concat_folding::ConcatFoldingPass;
@@ -428,6 +430,9 @@ fn optimize_with_options(
     }
     if on(SirPass::HoistCommonBranchLoads) {
         comb_passes.add_pass(HoistCommonBranchLoadsPass);
+    }
+    if on(SirPass::BranchifyMux) {
+        comb_passes.add_pass(BranchifyMuxPass);
     }
     if on(SirPass::BitExtractPeephole) {
         comb_passes.add_pass(BitExtractPeepholePass);
