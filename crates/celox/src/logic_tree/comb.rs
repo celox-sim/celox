@@ -27,6 +27,7 @@ use veryl_analyzer::ir::{
     SystemFunctionInput, SystemFunctionKind, VarId, VarSelectOp,
 };
 use veryl_analyzer::value::{Value, byte_value_to_string};
+use veryl_parser::resource_table;
 
 use effect::{CombEffectCollector, collect_comb_effects_statements, subtract_written_sensitivity};
 use expr::{eval_array_literal_expression, eval_function_body_return, merge_boundaries};
@@ -162,6 +163,7 @@ pub fn parse_comb(
         }
         observer.written_inputs = written_inputs.into_iter().collect();
     }
+    dump_comb_path_stats_if_requested(module, &paths, arena);
     Ok((
         paths,
         final_store,
@@ -169,6 +171,161 @@ pub fn parse_comb(
         effects.observers,
         effects.sites,
     ))
+}
+
+#[derive(Default)]
+struct CombPathStats {
+    nodes: usize,
+    for_folds: usize,
+    muxes: usize,
+    inputs: usize,
+}
+
+fn dump_comb_path_stats_if_requested(
+    module: &Module,
+    paths: &[LogicPath<VarId>],
+    arena: &SLTNodeArena<VarId>,
+) {
+    if std::env::var_os("CELOX_COMB_PATH_STATS").is_none() {
+        return;
+    }
+
+    let module_name = resource_table::get_str_value(module.name).unwrap_or_default();
+    if let Some(filter) = std::env::var_os("CELOX_COMB_PATH_MODULE")
+        && !module_name.contains(filter.to_string_lossy().as_ref())
+    {
+        return;
+    }
+
+    let mut entries = Vec::new();
+    let mut total_nodes = 0usize;
+    let mut total_for_folds = 0usize;
+    let mut total_muxes = 0usize;
+    let mut total_inputs = 0usize;
+    for path in paths {
+        let mut visited = HashSet::default();
+        let mut stats = CombPathStats::default();
+        collect_comb_path_stats(path.expr, arena, &mut visited, &mut stats);
+        total_nodes += stats.nodes;
+        total_for_folds += stats.for_folds;
+        total_muxes += stats.muxes;
+        total_inputs += stats.inputs;
+        let target = match &path.target {
+            LogicPathTarget::Var(var) => module.variables.get(&var.id).map_or_else(
+                || var.to_string(),
+                |info| format!("{}[{}:{}]", info.path, var.access.msb, var.access.lsb),
+            ),
+            LogicPathTarget::CombCaptureEvent { site_id, .. } => {
+                format!("capture_event({site_id})")
+            }
+        };
+        entries.push((
+            stats.nodes,
+            stats.for_folds,
+            stats.muxes,
+            stats.inputs,
+            target,
+        ));
+    }
+    entries.sort_by(|a, b| b.cmp(a));
+
+    eprintln!(
+        "[comb-path-summary] module={} paths={} total_nodes={} total_for_folds={} total_muxes={} total_inputs={}",
+        module_name,
+        paths.len(),
+        total_nodes,
+        total_for_folds,
+        total_muxes,
+        total_inputs,
+    );
+
+    let limit = std::env::var("CELOX_COMB_PATH_STATS_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(20);
+    for (rank, (nodes, for_folds, muxes, inputs, target)) in
+        entries.into_iter().take(limit).enumerate()
+    {
+        eprintln!(
+            "[comb-path-stats] module={} rank={} target={} nodes={} for_folds={} muxes={} inputs={}",
+            module_name,
+            rank + 1,
+            target,
+            nodes,
+            for_folds,
+            muxes,
+            inputs,
+        );
+    }
+}
+
+fn collect_comb_path_stats(
+    node: NodeId,
+    arena: &SLTNodeArena<VarId>,
+    visited: &mut HashSet<NodeId>,
+    stats: &mut CombPathStats,
+) {
+    if !visited.insert(node) {
+        return;
+    }
+    stats.nodes += 1;
+    match arena.get(node) {
+        SLTNode::Input { .. } => stats.inputs += 1,
+        SLTNode::Constant(_, _, _, _) => {}
+        SLTNode::Binary(lhs, _, rhs) => {
+            collect_comb_path_stats(*lhs, arena, visited, stats);
+            collect_comb_path_stats(*rhs, arena, visited, stats);
+        }
+        SLTNode::Unary(_, inner) => collect_comb_path_stats(*inner, arena, visited, stats),
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            stats.muxes += 1;
+            collect_comb_path_stats(*cond, arena, visited, stats);
+            collect_comb_path_stats(*then_expr, arena, visited, stats);
+            collect_comb_path_stats(*else_expr, arena, visited, stats);
+        }
+        SLTNode::Concat(parts) => {
+            for (part, _) in parts {
+                collect_comb_path_stats(*part, arena, visited, stats);
+            }
+        }
+        SLTNode::Slice { expr, .. } => collect_comb_path_stats(*expr, arena, visited, stats),
+        SLTNode::ForFold {
+            start,
+            end,
+            initials,
+            updates,
+            effects,
+            continue_cond,
+            ..
+        } => {
+            stats.for_folds += 1;
+            if let SLTLoopBound::Expr(node) = start {
+                collect_comb_path_stats(*node, arena, visited, stats);
+            }
+            if let SLTLoopBound::Expr(node) = end {
+                collect_comb_path_stats(*node, arena, visited, stats);
+            }
+            for init in initials {
+                collect_comb_path_stats(init.expr, arena, visited, stats);
+            }
+            for update in updates {
+                collect_comb_path_stats(update.expr, arena, visited, stats);
+            }
+            for effect in effects {
+                if let Some(guard) = effect.guard {
+                    collect_comb_path_stats(guard, arena, visited, stats);
+                }
+                for arg in &effect.args {
+                    collect_comb_path_stats(*arg, arena, visited, stats);
+                }
+            }
+            collect_comb_path_stats(*continue_cond, arena, visited, stats);
+        }
+    }
 }
 
 fn const_for_bound_i64(bound: &ForBound) -> Option<i64> {
