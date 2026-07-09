@@ -2,6 +2,7 @@ use super::analysis;
 use super::assignment::*;
 use super::*;
 use crate::backend::native::mir::*;
+use crate::backend::native::{emit, jit_mem};
 
 /// Build a simple MFunction with one block, run regalloc, verify.
 fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> AssignmentMap {
@@ -37,6 +38,57 @@ fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> Assignm
     super::verify_assignment(&func, &analysis, &result.assignment);
 
     result.assignment
+}
+
+fn emit_and_run_store0(func: &MFunction, assignment: &AssignmentMap) -> u64 {
+    let emitted = emit::emit(func, assignment, 0).expect("emit failed");
+    let jit = jit_mem::JitCode::new(&emitted.code).expect("jit allocation failed");
+    let mut state = vec![0u8; 8];
+    let status = unsafe { jit.call(&mut state) };
+    assert_eq!(status, 0);
+    u64::from_le_bytes(state[..8].try_into().unwrap())
+}
+
+fn select_store_function(cond_value: u64) -> MFunction {
+    let mut vregs = VRegAllocator::new();
+    while vregs.count() < 4 {
+        vregs.alloc();
+    }
+    let spill_descs = vec![
+        SpillDesc::remat(cond_value),
+        SpillDesc::remat(42),
+        SpillDesc::remat(99),
+        SpillDesc::transient(),
+    ];
+    let mut func = MFunction::new(vregs, spill_descs);
+    let mut block = MBlock::new(BlockId(0));
+    block.push(MInst::LoadImm {
+        dst: VReg(0),
+        value: cond_value,
+    });
+    block.push(MInst::LoadImm {
+        dst: VReg(1),
+        value: 42,
+    });
+    block.push(MInst::LoadImm {
+        dst: VReg(2),
+        value: 99,
+    });
+    block.push(MInst::Select {
+        dst: VReg(3),
+        cond: VReg(0),
+        true_val: VReg(1),
+        false_val: VReg(2),
+    });
+    block.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 0,
+        src: VReg(3),
+        size: OpSize::S64,
+    });
+    block.push(MInst::Return);
+    func.push_block(block);
+    func
 }
 
 #[test]
@@ -266,6 +318,45 @@ fn test_select_aliasing() {
         SpillDesc::transient(),
     ];
     let _asgn = run_and_verify(insts, descs);
+}
+
+#[test]
+fn test_select_emit_with_dst_aliases_cond() {
+    for (cond_value, expected) in [(0, 99), (1, 42)] {
+        let func = select_store_function(cond_value);
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::RAX);
+        assignment.set(VReg(1), PhysReg::RDX);
+        assignment.set(VReg(2), PhysReg::RSI);
+        assignment.set(VReg(3), PhysReg::RAX);
+        assert_eq!(emit_and_run_store0(&func, &assignment), expected);
+    }
+}
+
+#[test]
+fn test_select_emit_with_dst_aliases_true_val() {
+    for (cond_value, expected) in [(0, 99), (1, 42)] {
+        let func = select_store_function(cond_value);
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::RAX);
+        assignment.set(VReg(1), PhysReg::RDX);
+        assignment.set(VReg(2), PhysReg::RSI);
+        assignment.set(VReg(3), PhysReg::RDX);
+        assert_eq!(emit_and_run_store0(&func, &assignment), expected);
+    }
+}
+
+#[test]
+fn test_select_emit_with_dst_aliases_false_val() {
+    for (cond_value, expected) in [(0, 99), (1, 42)] {
+        let func = select_store_function(cond_value);
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::RAX);
+        assignment.set(VReg(1), PhysReg::RDX);
+        assignment.set(VReg(2), PhysReg::RSI);
+        assignment.set(VReg(3), PhysReg::RSI);
+        assert_eq!(emit_and_run_store0(&func, &assignment), expected);
+    }
 }
 
 #[test]

@@ -642,6 +642,12 @@ fn insert_coupling_code(
 
         for &pred_idx in &analysis.predecessors[block_idx] {
             if pred_idx >= block_idx {
+                // Backedges are processed later, but process_block spills their
+                // live-outs to memory before the branch. Force this header to
+                // reload the shared live-in representation at entry.
+                if analysis.exit_distances[pred_idx].contains_key(&vreg) {
+                    needs_memory = true;
+                }
                 continue;
             }
 
@@ -727,6 +733,9 @@ fn process_block(
         for vreg in inst.uses() {
             use_positions.entry(vreg).or_default().push(i);
         }
+        for vreg in edge_phi_sources(func, block.id, inst) {
+            use_positions.entry(vreg).or_default().push(i);
+        }
     }
 
     // Pre-compute shift and clobber points for blocked set
@@ -755,8 +764,11 @@ fn process_block(
     for (inst_idx, inst) in block.insts.iter().enumerate() {
         let mut rewritten_inst = inst.clone();
         let mut uses: Vec<VReg> = inst.uses().into_iter().collect();
+        let edge_sources = edge_phi_sources(func, block.id, inst);
+        uses.extend(edge_sources.iter().copied());
         let def = inst.def();
-        let constraints = use_constraints(inst);
+        let mut constraints = use_constraints(inst);
+        constraints.resize(uses.len(), RegConstraint::Any);
         for use_vreg in &mut uses {
             if let Some(&alias) = reload_alias.get(use_vreg) {
                 if rf.contains(alias) {
@@ -987,6 +999,21 @@ fn process_block(
             }
         }
 
+        let mut edge_rewrites = Vec::new();
+        for &source in &edge_sources {
+            let resident = reload_alias
+                .get(&source)
+                .copied()
+                .filter(|alias| rf.contains(*alias))
+                .unwrap_or(source);
+            if resident != source {
+                edge_rewrites.push((source, resident));
+            }
+        }
+        if !edge_rewrites.is_empty() {
+            rewrite_edge_phi_sources(func, block.id, inst, &edge_rewrites);
+        }
+
         // Step C: Evict to pressure ≤ k
         while rf.occupancy() > k {
             evict_farthest(
@@ -1161,6 +1188,82 @@ fn process_block(
 // ────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────
+
+fn edge_phi_sources(func: &MFunction, pred_id: BlockId, inst: &MInst) -> Vec<VReg> {
+    let mut sources = Vec::new();
+    match inst {
+        MInst::Branch {
+            true_bb, false_bb, ..
+        } => {
+            collect_edge_phi_sources(func, pred_id, *true_bb, &mut sources);
+            collect_edge_phi_sources(func, pred_id, *false_bb, &mut sources);
+        }
+        MInst::Jump { target } => {
+            collect_edge_phi_sources(func, pred_id, *target, &mut sources);
+        }
+        _ => {}
+    }
+    sources
+}
+
+fn collect_edge_phi_sources(
+    func: &MFunction,
+    pred_id: BlockId,
+    target: BlockId,
+    sources: &mut Vec<VReg>,
+) {
+    let Some(block) = func.blocks.iter().find(|block| block.id == target) else {
+        return;
+    };
+    for phi in &block.phis {
+        for (source_pred, source) in &phi.sources {
+            if *source_pred == pred_id && !sources.contains(source) {
+                sources.push(*source);
+            }
+        }
+    }
+}
+
+fn rewrite_edge_phi_sources(
+    func: &mut MFunction,
+    pred_id: BlockId,
+    inst: &MInst,
+    rewrites: &[(VReg, VReg)],
+) {
+    match inst {
+        MInst::Branch {
+            true_bb, false_bb, ..
+        } => {
+            rewrite_edge_phi_sources_for_target(func, pred_id, *true_bb, rewrites);
+            rewrite_edge_phi_sources_for_target(func, pred_id, *false_bb, rewrites);
+        }
+        MInst::Jump { target } => {
+            rewrite_edge_phi_sources_for_target(func, pred_id, *target, rewrites);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_edge_phi_sources_for_target(
+    func: &mut MFunction,
+    pred_id: BlockId,
+    target: BlockId,
+    rewrites: &[(VReg, VReg)],
+) {
+    let Some(block) = func.blocks.iter_mut().find(|block| block.id == target) else {
+        return;
+    };
+    for phi in &mut block.phis {
+        for (source_pred, source) in &mut phi.sources {
+            if *source_pred != pred_id {
+                continue;
+            }
+            if let Some((_, new_source)) = rewrites.iter().find(|(old, _)| old == source) {
+                *source = *new_source;
+            }
+        }
+    }
+}
 
 fn emit_spill(
     new_insts: &mut Vec<MInst>,
