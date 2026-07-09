@@ -94,6 +94,130 @@ fn unit_group_key(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> String {
     key
 }
 
+fn dump_mux_chain_stats(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
+    let mut rows = Vec::new();
+
+    for (eu_idx, eu) in units.iter().enumerate() {
+        for block in eu.blocks.values() {
+            let mut defs: crate::HashMap<RegisterId, usize> = crate::HashMap::default();
+            for (idx, inst) in block.instructions.iter().enumerate() {
+                if let Some(dst) = shared::def_reg(inst) {
+                    defs.insert(dst, idx);
+                }
+            }
+
+            let mut mux_else_children = crate::HashSet::default();
+            for inst in &block.instructions {
+                if let SIRInstruction::Mux(_, _, _, else_val) = inst
+                    && matches!(
+                        defs.get(else_val).map(|&i| &block.instructions[i]),
+                        Some(SIRInstruction::Mux(..))
+                    )
+                {
+                    mux_else_children.insert(*else_val);
+                }
+            }
+
+            for inst in &block.instructions {
+                let SIRInstruction::Mux(dst, ..) = inst else {
+                    continue;
+                };
+                if mux_else_children.contains(dst) {
+                    continue;
+                }
+
+                let mut len = 0usize;
+                let mut case_like = 0usize;
+                let mut cursor = Some(*dst);
+                while let Some(reg) = cursor {
+                    let Some(&idx) = defs.get(&reg) else {
+                        break;
+                    };
+                    let SIRInstruction::Mux(_, cond, _, else_val) = &block.instructions[idx] else {
+                        break;
+                    };
+                    len += 1;
+                    if is_case_like_cond(*cond, &defs, &block.instructions) {
+                        case_like += 1;
+                    }
+                    cursor = match defs.get(else_val).map(|&i| &block.instructions[i]) {
+                        Some(SIRInstruction::Mux(..)) => Some(*else_val),
+                        _ => None,
+                    };
+                }
+
+                if len >= 4 {
+                    rows.push((len, case_like, eu_idx, block.id, *dst));
+                }
+            }
+        }
+    }
+
+    rows.sort_by(|a, b| b.cmp(a));
+    for (rank, (len, case_like, eu_idx, block_id, root)) in rows.into_iter().take(20).enumerate() {
+        eprintln!(
+            "[mux-chain-stats] rank={} eu={} block={} root=r{} len={} case_like={}",
+            rank + 1,
+            eu_idx,
+            block_id.0,
+            root.0,
+            len,
+            case_like
+        );
+    }
+}
+
+fn is_case_like_cond(
+    cond: RegisterId,
+    defs: &crate::HashMap<RegisterId, usize>,
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+) -> bool {
+    contains_case_eq(cond, defs, instructions, &mut crate::HashSet::default(), 0)
+}
+
+fn contains_case_eq(
+    reg: RegisterId,
+    defs: &crate::HashMap<RegisterId, usize>,
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+    seen: &mut crate::HashSet<RegisterId>,
+    depth: usize,
+) -> bool {
+    if depth > 8 || !seen.insert(reg) {
+        return false;
+    }
+
+    let Some(&idx) = defs.get(&reg) else {
+        return false;
+    };
+
+    match &instructions[idx] {
+        SIRInstruction::Binary(_, _, op, rhs)
+            if matches!(op, BinaryOp::Eq | BinaryOp::EqWildcard) =>
+        {
+            defs.get(rhs).is_some_and(|&rhs_idx| {
+                matches!(
+                    &instructions[rhs_idx],
+                    SIRInstruction::Imm(_, value) if value.mask == num_bigint::BigUint::ZERO
+                )
+            })
+        }
+        SIRInstruction::Binary(_, lhs, op, rhs)
+            if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) =>
+        {
+            contains_case_eq(*lhs, defs, instructions, seen, depth + 1)
+                || contains_case_eq(*rhs, defs, instructions, seen, depth + 1)
+        }
+        SIRInstruction::Unary(_, UnaryOp::Ident, src)
+        | SIRInstruction::Unary(_, UnaryOp::LogicNot, src) => {
+            contains_case_eq(*src, defs, instructions, seen, depth + 1)
+        }
+        SIRInstruction::Concat(_, args) => args
+            .iter()
+            .any(|arg| contains_case_eq(*arg, defs, instructions, seen, depth + 1)),
+        _ => false,
+    }
+}
+
 fn optimize_with_options(
     program: &mut Program,
     max_inflight_loads: usize,
@@ -301,6 +425,9 @@ fn optimize_with_options(
             eprintln!("[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}");
         }
         comb_passes.run(eu, &options);
+    }
+    if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
+        dump_mux_chain_stats(&program.eval_comb);
     }
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());

@@ -63,18 +63,20 @@ Local Celox measurements on `test_soc_linux_boot` show a different bottleneck
 from the small `linear_sec` kernels:
 
 - Veryl `cc` baseline for the pinned Heliodor checkout completed the single
-  Linux boot in about 63.4 s.
-- Celox native currently reaches only about 300k ticks in a 45 s timed run.
-  The last stable run reported `avg_comb_us ~= 63.6` and
-  `avg_apply_us ~= 2.3`.
+  Linux boot in about 65.7 s.
+- Celox native currently reaches about 600k ticks in a 70 s timed run. The
+  last stable run reported `avg_comb_us ~= 64.1` and `avg_apply_us ~= 2.35`.
+  Projected to Heliodor's observed boot cycle count, this is still on the
+  order of 10x slower than the Veryl `cc` baseline.
 - Celox Cranelift is not a viable replacement for the custom native backend on
   this workload; its JIT/backend phase was substantially slower than native.
 - The hot Celox native unit is `eval_comb`, not `eval_apply`. A representative
-  post-regalloc `eval_comb` has about 363k MIR instructions, including about
-  44k stack loads and 22k stack stores.
-- The largest `eval_comb` blocks are dominated by byte read-modify-write
-  patterns for packed one-bit state and triggered-bit updates:
-  `load.i8 -> and -> load destination byte -> clear bit -> or -> store.i8`.
+  post-regalloc `eval_comb` has about 282k MIR instructions, including about
+  42k stack loads and 21k stack stores.
+- The largest `eval_comb` blocks are dominated by decoder/case-shaped mux
+  chains. In block 432, the SIR dump after the current stable optimizations
+  still shows about 15k `Mux`, 8k `LogicAnd`, 8k equality checks, and 4k
+  `Concat` operations.
 
 Several instruction-count wins did not survive the Heliodor correctness/perf
 gate:
@@ -87,6 +89,22 @@ gate:
   divisor through memory, or by declaring RCX as a div/rem clobber, avoided the
   crash but prevented the run from reaching the first 50k-tick timing marker
   within a 45 s timeout.
+- Rewriting zero-extension `Concat([0..., low])` to an identity reduced local
+  SIR work but increased Heliodor `avg_comb_us` to roughly 68 us.
+- Replacing general narrow mux bit-blends with MIR `Select` passed small native
+  tests but produced a divide exception during Heliodor.
+- Adding a final `ReschedulePass` to `eval_comb` passed tests but slowed the
+  Heliodor timed run to roughly 66 us per combinational evaluation.
+
+The one accepted Heliodor-facing SIR change so far is conservative:
+
+- `vectorize_concat` now leaves all `Concat` operations intact in 4-state mode,
+  because bitwise/arithmetic rewrites normalize Z to X while `Concat` must
+  preserve value and mask bits exactly.
+- In 2-state mode, proven sign-extension concats such as
+  `{low[MSB], ..., low[MSB], low}` are folded to a shift-left/arithmetic-shift
+  pair. This reduced MIR counts but only improved the timed Heliodor run
+  slightly.
 
 The important conclusion is that Heliodor is exposing a coupled
 codegen/regalloc problem, not a single missing peephole. The native emitter
@@ -101,6 +119,63 @@ register div fast without untracked clobbers.
 This changes the next implementation priority: before more trigger or mux
 shrinking is accepted, native regalloc/emit needs a correct and cheap scratch
 contract for instructions with implicit operands.
+
+### Branchy Case Lowering
+
+Heliodor's decoder-heavy hot block is not primarily a missing peephole. The SIR
+shape computes every case arm first, then selects with a long nested mux chain:
+
+```text
+cond_i = opcode ==? imm_i
+arm_i  = expensive expression for case i
+...
+result = mux(cond_0, arm_0, mux(cond_1, arm_1, ... default))
+```
+
+That is a faithful hardware graph, but it is a poor software simulation shape
+for large decoders. It extends every arm's live range across the full select
+chain, inflates regalloc pressure, and executes arms that the current opcode
+cannot observe. A plain reschedule pass cannot fix this because it must still
+emit a linear program where all operands of each mux are already available.
+
+The next high-leverage optimization is a SIR-to-SIR control-flow conversion for
+large pure mux chains:
+
+```text
+entry:
+  if cond_0 goto arm_0 else test_1
+arm_0:
+  compute arm_0
+  jump join(arm_0_value)
+test_1:
+  if cond_1 goto arm_1 else default
+...
+join(result):
+  use result
+```
+
+Start with a deliberately narrow but useful pattern:
+
+- 2-state mode only. 4-state mux semantics for X/Z conditions must remain on
+  the existing dataflow lowering until branch semantics can preserve mask
+  behavior exactly.
+- The mux result must feed ordinary pure computation or stores after the join;
+  the moved arm slice itself must contain no `Store`, `Commit`,
+  `RuntimeEvent`, `CombCaptureEvent`, or component call.
+- Conditions must be pure and cheap, initially `Eq`/`EqWildcard` against
+  immediates from the same selector register.
+- Arm expressions may be moved only when all definitions in the arm slice are
+  exclusively used by that arm and dominated by the test block. Shared loads or
+  common subexpressions stay before the branch.
+- Require a profitability threshold such as at least 8 arms or at least 200
+  movable SIR instructions. Small muxes should stay branchless.
+
+This transformation should be implemented before more local mux shrinking. It
+attacks the reason Heliodor spills so much: not the cost of an individual mux,
+but the fact that thousands of unselected arm values are simultaneously live.
+Use `CELOX_MUX_CHAIN_STATS=1` while building/running a project to print the
+largest optimized `eval_comb` mux chains and confirm that a candidate workload
+matches this case-like shape.
 
 ## Goals
 
