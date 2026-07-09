@@ -870,14 +870,28 @@ fn evict_farthest(
     use_positions: &HashMap<VReg, Vec<usize>>,
     slots: &mut SpillSlotAllocator,
     pinned: &HashSet<VReg>,
-    _blocked_pregs: &PhysRegSet,
+    blocked_pregs: &PhysRegSet,
     reload_alias: &mut HashMap<VReg, VReg>,
     alias_source: &mut HashMap<VReg, VReg>,
     result: &mut AssignmentMap,
 ) {
-    let (victim, victim_next_use) = rf
+    let candidates = rf
         .vregs()
         .filter(|v| !pinned.contains(v))
+        .filter(|v| {
+            rf.get_preg(*v)
+                .is_none_or(|preg| !blocked_pregs.contains(&preg))
+        })
+        .collect::<Vec<_>>();
+    let candidates = if candidates.is_empty() {
+        rf.vregs()
+            .filter(|v| !pinned.contains(v))
+            .collect::<Vec<_>>()
+    } else {
+        candidates
+    };
+    let (victim, victim_next_use) = candidates
+        .into_iter()
         .map(|v| {
             let next_use = next_use_for_resident(
                 use_positions,
@@ -900,11 +914,8 @@ fn evict_farthest(
             } else {
                 eviction_class
             };
-            (
-                (next_use == u32::MAX, effective_class, next_use, v),
-                v,
-                next_use,
-            )
+            let key = (next_use == u32::MAX, effective_class, next_use, v);
+            (key, v, next_use)
         })
         .max_by_key(|(key, _, _)| *key)
         .map(|(_, v, next_use)| (v, next_use))
@@ -936,10 +947,7 @@ fn find_or_evict_free(
     result: &mut AssignmentMap,
 ) -> PhysReg {
     loop {
-        if let Some(preg) = rf
-            .find_free_excluding(blocked)
-            .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
-        {
+        if let Some(preg) = rf.find_free_excluding(blocked) {
             return preg;
         }
 

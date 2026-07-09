@@ -1466,7 +1466,7 @@ pub fn emit_chained_eus(
         mfunc.verify();
     }
     let regalloc_start = timing.then(crate::timing::now);
-    let ra = regalloc::run_regalloc(&mut mfunc);
+    let ra = regalloc::run_regalloc_with_label(&mut mfunc, label);
     if let Some(start) = regalloc_start {
         eprintln!(
             "[native-timing] emit_chained regalloc mir_blocks={} mir_insts={} vregs={} spill_frame={} elapsed={:?}",

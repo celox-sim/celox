@@ -10,7 +10,7 @@ mod spilling;
 mod tests;
 mod unified;
 
-use super::mir::MFunction;
+use super::mir::{BaseReg, MFunction, MInst};
 pub use assignment::AssignmentMap;
 
 /// Number of available general-purpose registers for allocation.
@@ -151,6 +151,15 @@ fn verify_assignment(
 /// Run the full register allocation pipeline on an MFunction.
 /// Returns the assignment map and required spill frame size.
 pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
+    run_regalloc_with_label(func, "unknown")
+}
+
+/// Run register allocation and optionally log per-block allocation deltas.
+pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocResult {
+    let before_stats = std::env::var_os("CELOX_REGALLOC_STATS")
+        .is_some()
+        .then(|| collect_regalloc_block_stats(func));
+
     // Unified single-pass: simultaneous spilling + assignment.
     // No separate analysis → spill → re-analyze → assign pipeline.
     // No k-1 hack — uses k = NUM_REGS directly.
@@ -162,8 +171,132 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
         verify_assignment(func, &analysis, &assignment);
     }
 
+    if let Some(before) = before_stats {
+        log_regalloc_stats(label, func, &before, spill_frame_size);
+    }
+
     RegallocResult {
         assignment,
         spill_frame_size,
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct RegallocBlockStats {
+    insts: usize,
+    mov: usize,
+    load_stack: usize,
+    store_stack: usize,
+    load_imm: usize,
+}
+
+fn collect_regalloc_block_stats(
+    func: &MFunction,
+) -> Vec<(super::mir::BlockId, RegallocBlockStats)> {
+    func.blocks
+        .iter()
+        .map(|block| {
+            let mut stats = RegallocBlockStats {
+                insts: block.insts.len(),
+                ..RegallocBlockStats::default()
+            };
+            for inst in &block.insts {
+                match inst {
+                    MInst::Mov { .. } => stats.mov += 1,
+                    MInst::LoadImm { .. } => stats.load_imm += 1,
+                    MInst::Load {
+                        base: BaseReg::StackFrame,
+                        ..
+                    } => stats.load_stack += 1,
+                    MInst::Store {
+                        base: BaseReg::StackFrame,
+                        ..
+                    } => stats.store_stack += 1,
+                    _ => {}
+                }
+            }
+            (block.id, stats)
+        })
+        .collect()
+}
+
+fn log_regalloc_stats(
+    label: &str,
+    func: &MFunction,
+    before: &[(super::mir::BlockId, RegallocBlockStats)],
+    spill_frame_size: u32,
+) {
+    let after = collect_regalloc_block_stats(func);
+    let before_by_block = before
+        .iter()
+        .copied()
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut rows = Vec::new();
+    let mut total = RegallocBlockStats::default();
+    let mut total_delta = RegallocBlockStats::default();
+
+    for (block_id, after_stats) in after {
+        let before_stats = before_by_block.get(&block_id).copied().unwrap_or_default();
+        total.insts += after_stats.insts;
+        total.mov += after_stats.mov;
+        total.load_stack += after_stats.load_stack;
+        total.store_stack += after_stats.store_stack;
+        total.load_imm += after_stats.load_imm;
+
+        let delta = RegallocBlockStats {
+            insts: after_stats.insts.saturating_sub(before_stats.insts),
+            mov: after_stats.mov.saturating_sub(before_stats.mov),
+            load_stack: after_stats
+                .load_stack
+                .saturating_sub(before_stats.load_stack),
+            store_stack: after_stats
+                .store_stack
+                .saturating_sub(before_stats.store_stack),
+            load_imm: after_stats.load_imm.saturating_sub(before_stats.load_imm),
+        };
+        total_delta.insts += delta.insts;
+        total_delta.mov += delta.mov;
+        total_delta.load_stack += delta.load_stack;
+        total_delta.store_stack += delta.store_stack;
+        total_delta.load_imm += delta.load_imm;
+        rows.push((
+            delta.load_stack + delta.store_stack + delta.mov + delta.load_imm,
+            block_id,
+            before_stats,
+            after_stats,
+            delta,
+        ));
+    }
+
+    eprintln!(
+        "[regalloc-stats] label={label} spill_frame={spill_frame_size} total_insts={} delta_insts={} total_mov={} delta_mov={} total_load_stack={} delta_load_stack={} total_store_stack={} delta_store_stack={} total_load_imm={} delta_load_imm={}",
+        total.insts,
+        total_delta.insts,
+        total.mov,
+        total_delta.mov,
+        total.load_stack,
+        total_delta.load_stack,
+        total.store_stack,
+        total_delta.store_stack,
+        total.load_imm,
+        total_delta.load_imm,
+    );
+
+    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    for (rank, (_score, block_id, before_stats, after_stats, delta)) in
+        rows.into_iter().take(12).enumerate()
+    {
+        eprintln!(
+            "[regalloc-block-stats] label={label} rank={} block={} before_insts={} after_insts={} delta_insts={} delta_mov={} delta_load_stack={} delta_store_stack={} delta_load_imm={}",
+            rank + 1,
+            block_id.0,
+            before_stats.insts,
+            after_stats.insts,
+            delta.insts,
+            delta.mov,
+            delta.load_stack,
+            delta.store_stack,
+            delta.load_imm,
+        );
     }
 }
