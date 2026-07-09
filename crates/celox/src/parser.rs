@@ -1059,8 +1059,87 @@ pub(crate) fn flatten(
         }
     }
 
+    dump_addr_map_if_requested(&program);
+
     Ok(program)
 }
+
+fn dump_addr_map_if_requested(program: &Program) {
+    if std::env::var_os("CELOX_ADDR_MAP_DUMP").is_none() {
+        return;
+    }
+
+    let filter = parse_addr_map_filter();
+    let mut entries = Vec::new();
+    for (&instance_id, &module_id) in &program.instance_module {
+        let Some(vars) = program.module_variables.get(&module_id) else {
+            continue;
+        };
+        for (&var_id, info) in vars {
+            let inst_key = instance_id.0.to_string();
+            let var_key = normalized_addr_id(&var_id.to_string());
+            if let Some(filter) = &filter
+                && !filter.contains(&(inst_key, var_key))
+            {
+                continue;
+            }
+            entries.push((instance_id, module_id, var_id, info));
+        }
+    }
+
+    entries.sort_by(|(a_inst, _, a_var, _), (b_inst, _, b_var, _)| {
+        (a_inst.0, a_var.to_string()).cmp(&(b_inst.0, b_var.to_string()))
+    });
+
+    for (instance_id, module_id, var_id, info) in entries {
+        let module_name = program
+            .module_names
+            .get(&module_id)
+            .and_then(|name| resource_table::get_str_value(*name))
+            .unwrap_or_default();
+        let addr = AbsoluteAddr {
+            instance_id,
+            var_id,
+        };
+        eprintln!(
+            "[addr-map] inst={} var={} module={} path={} width={} array_dims={:?} 4state={} kind={:?} var_kind={}",
+            instance_id,
+            var_id,
+            module_name,
+            program.get_path(&addr),
+            info.width,
+            info.array_dims,
+            info.is_4state,
+            info.kind,
+            info.var_kind.description(),
+        );
+    }
+}
+
+fn parse_addr_map_filter() -> Option<HashSet<(String, String)>> {
+    let raw = std::env::var_os("CELOX_ADDR_MAP_FILTER")?;
+    let raw = raw.to_string_lossy();
+    let mut filter = HashSet::default();
+    for item in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let Some((inst, var)) = item.split_once(':') else {
+            continue;
+        };
+        filter.insert((normalized_addr_id(inst), normalized_addr_id(var)));
+    }
+    Some(filter)
+}
+
+fn normalized_addr_id(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("inst")
+        .trim_start_matches("var")
+        .to_string()
+}
+
 fn module_variables(
     module_ir: &HashMap<ModuleId, &Module>,
     config: &BuildConfig,
