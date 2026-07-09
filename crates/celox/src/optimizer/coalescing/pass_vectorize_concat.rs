@@ -38,25 +38,39 @@ impl ExecutionUnitPass for VectorizeConcatPass {
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
         let mut any_changed = false;
 
-        // Build global def map across all blocks
-        let mut global_defs: HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>> =
-            HashMap::default();
-        for block in eu.blocks.values() {
-            for inst in &block.instructions {
-                if let Some(d) = def_reg(inst) {
-                    global_defs.insert(d, inst.clone());
+        // Some rewrites intentionally expose new Concat instructions, e.g.
+        // lane-wise binary lifting creates operand vectors that the existing
+        // bit-extract vectorizer can fold on the next iteration.
+        for _ in 0..4 {
+            let mut iteration_changed = false;
+
+            // Build global def map across all blocks. Rebuilding it per
+            // iteration avoids looking through stale definitions after a
+            // Concat has been rewritten.
+            let mut global_defs: HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>> =
+                HashMap::default();
+            for block in eu.blocks.values() {
+                for inst in &block.instructions {
+                    if let Some(d) = def_reg(inst) {
+                        global_defs.insert(d, inst.clone());
+                    }
                 }
             }
-        }
 
-        for block in eu.blocks.values_mut() {
-            if vectorize_concats(
-                &mut block.instructions,
-                &mut eu.register_map,
-                &mut max_reg,
-                &global_defs,
-            ) {
-                any_changed = true;
+            for block in eu.blocks.values_mut() {
+                if vectorize_concats(
+                    &mut block.instructions,
+                    &mut eu.register_map,
+                    &mut max_reg,
+                    &global_defs,
+                ) {
+                    any_changed = true;
+                    iteration_changed = true;
+                }
+            }
+
+            if !iteration_changed {
+                break;
             }
         }
 
@@ -195,6 +209,16 @@ enum Replacement {
         width: usize,
         prefix_width: usize,
     },
+    /// Replace `{a[n] op b[n], ..., a[0] op b[0]}` with
+    /// `{a[n], ..., a[0]} op {b[n], ..., b[0]}`.
+    LaneBinary {
+        inst_idx: usize,
+        dst: RegisterId,
+        lhs_args: Vec<RegisterId>,
+        rhs_args: Vec<RegisterId>,
+        op: BinaryOp,
+        width: usize,
+    },
 }
 
 fn concat_width(
@@ -284,6 +308,137 @@ fn find_sign_extend(
     }
 
     sign_bit_matches_low_msb(sign, low, low_width, defs).then_some((low, low_width, prefix_width))
+}
+
+fn normalized_lane_binary_op(op: BinaryOp) -> Option<BinaryOp> {
+    match op {
+        BinaryOp::And => Some(BinaryOp::And),
+        BinaryOp::Or => Some(BinaryOp::Or),
+        BinaryOp::Xor => Some(BinaryOp::Xor),
+        BinaryOp::LogicAnd => Some(BinaryOp::And),
+        BinaryOp::LogicOr => Some(BinaryOp::Or),
+        _ => None,
+    }
+}
+
+fn find_lane_binary(
+    args: &[RegisterId],
+    concat_width: usize,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> Option<(Vec<RegisterId>, Vec<RegisterId>, BinaryOp)> {
+    if args.len() != concat_width || concat_width < 3 {
+        return None;
+    }
+
+    let mut lane_op = None;
+    let mut lhs_args = Vec::with_capacity(args.len());
+    let mut rhs_args = Vec::with_capacity(args.len());
+
+    for &arg in args {
+        let Some(SIRInstruction::Binary(_, lhs, op, rhs)) = defs.get(&arg) else {
+            return None;
+        };
+        let op = normalized_lane_binary_op(*op)?;
+        if lane_op.is_some_and(|lane_op| lane_op != op) {
+            return None;
+        }
+        if !register_map.get(lhs).is_some_and(|rt| rt.width() == 1)
+            || !register_map.get(rhs).is_some_and(|rt| rt.width() == 1)
+        {
+            return None;
+        }
+
+        lane_op = Some(op);
+        lhs_args.push(*lhs);
+        rhs_args.push(*rhs);
+    }
+
+    let lhs_vectorizable =
+        is_vectorizable_bit_extract_concat(&lhs_args, concat_width, register_map, defs);
+    let rhs_vectorizable =
+        is_vectorizable_bit_extract_concat(&rhs_args, concat_width, register_map, defs);
+    (lhs_vectorizable && rhs_vectorizable).then_some((lhs_args, rhs_args, lane_op?))
+}
+
+fn is_vectorizable_bit_extract_concat(
+    args: &[RegisterId],
+    concat_width: usize,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> bool {
+    if !args
+        .iter()
+        .all(|arg| register_map.get(arg).is_some_and(|rt| rt.width() == 1))
+    {
+        return false;
+    }
+
+    let mut reg_source: Option<RegisterId> = None;
+    let mut load_addr: Option<RegionedAbsoluteAddr> = None;
+    let mut in_place = true;
+    let mut extract_count = 0usize;
+    let mut is_load_based = false;
+
+    for (i, &arg) in args.iter().enumerate() {
+        let concat_position = concat_width - 1 - i;
+
+        if is_zero(arg, defs) {
+            continue;
+        }
+
+        match resolve_bit_source(arg, defs) {
+            Some(BitSource::Register {
+                source,
+                bit_position,
+            }) => {
+                if is_load_based {
+                    return false;
+                }
+                match reg_source {
+                    Some(s) if s != source => return false,
+                    None => reg_source = Some(source),
+                    _ => {}
+                }
+                if bit_position >= 64 {
+                    return false;
+                }
+                if bit_position != concat_position {
+                    in_place = false;
+                }
+                extract_count += 1;
+            }
+            Some(BitSource::Load { addr, bit_position }) => {
+                if reg_source.is_some() {
+                    return false;
+                }
+                is_load_based = true;
+                match load_addr {
+                    Some(a) if a != addr => return false,
+                    None => load_addr = Some(addr),
+                    _ => {}
+                }
+                if bit_position >= 64 {
+                    return false;
+                }
+                if bit_position != concat_position {
+                    in_place = false;
+                }
+                extract_count += 1;
+            }
+            None => return false,
+        }
+    }
+
+    if extract_count < 3 {
+        return false;
+    }
+
+    if in_place {
+        reg_source.is_some() || load_addr.is_some()
+    } else {
+        reg_source.is_some() && find_shift_groups(args, concat_width, defs).is_some()
+    }
 }
 
 /// Find contiguous shift groups in a non-in-place Concat.
@@ -385,6 +540,20 @@ fn vectorize_concats(
             .iter()
             .all(|arg| register_map.get(arg).is_some_and(|rt| rt.width() == 1));
         if !all_single_bit {
+            continue;
+        }
+
+        if let Some((lhs_args, rhs_args, op)) =
+            find_lane_binary(args, concat_width, register_map, defs)
+        {
+            replacements.push(Replacement::LaneBinary {
+                inst_idx: idx,
+                dst: *dst,
+                lhs_args,
+                rhs_args,
+                op,
+                width: concat_width,
+            });
             continue;
         }
 
@@ -687,6 +856,25 @@ fn vectorize_concats(
                     ],
                 );
             }
+            Replacement::LaneBinary {
+                inst_idx,
+                dst,
+                lhs_args,
+                rhs_args,
+                op,
+                width,
+            } => {
+                let lhs_vec = alloc_reg(next_reg, register_map, width);
+                let rhs_vec = alloc_reg(next_reg, register_map, width);
+                instructions.splice(
+                    inst_idx..=inst_idx,
+                    [
+                        SIRInstruction::Concat(lhs_vec, lhs_args),
+                        SIRInstruction::Concat(rhs_vec, rhs_args),
+                        SIRInstruction::Binary(dst, lhs_vec, op, rhs_vec),
+                    ],
+                );
+            }
         }
     }
 
@@ -853,6 +1041,96 @@ mod tests {
             inst,
             SIRInstruction::Binary(RegisterId(2), _, BinaryOp::Sar, _)
         )));
+    }
+
+    #[test]
+    fn lifts_concat_of_bitwise_and_lanes() {
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(1),
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        for reg in 2..=10 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+        }
+        register_map.insert(
+            RegisterId(11),
+            RegisterType::Bit {
+                width: 3,
+                signed: false,
+            },
+        );
+
+        let instructions = vec![
+            SIRInstruction::Slice(RegisterId(2), RegisterId(0), 0, 1),
+            SIRInstruction::Slice(RegisterId(3), RegisterId(0), 1, 1),
+            SIRInstruction::Slice(RegisterId(4), RegisterId(0), 2, 1),
+            SIRInstruction::Slice(RegisterId(5), RegisterId(1), 0, 1),
+            SIRInstruction::Slice(RegisterId(6), RegisterId(1), 1, 1),
+            SIRInstruction::Slice(RegisterId(7), RegisterId(1), 2, 1),
+            SIRInstruction::Binary(RegisterId(8), RegisterId(2), BinaryOp::And, RegisterId(5)),
+            SIRInstruction::Binary(RegisterId(9), RegisterId(3), BinaryOp::And, RegisterId(6)),
+            SIRInstruction::Binary(RegisterId(10), RegisterId(4), BinaryOp::And, RegisterId(7)),
+            SIRInstruction::Concat(
+                RegisterId(11),
+                vec![RegisterId(10), RegisterId(9), RegisterId(8)],
+            ),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![RegisterId(11)],
+            },
+        ];
+
+        let mut eu = make_eu(instructions, register_map);
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        let block = eu.blocks.get(&BlockId(0)).unwrap();
+
+        let Some(SIRInstruction::Binary(RegisterId(11), lhs_vec, BinaryOp::And, rhs_vec)) =
+            block.instructions.iter().find(|inst| {
+                matches!(
+                    inst,
+                    SIRInstruction::Binary(RegisterId(11), _, BinaryOp::And, _)
+                )
+            })
+        else {
+            panic!("expected lifted word And");
+        };
+
+        assert!(block.instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Unary(dst, UnaryOp::Ident, RegisterId(0)) if *dst == *lhs_vec
+            )
+        }));
+        assert!(block.instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Unary(dst, UnaryOp::Ident, RegisterId(1)) if *dst == *rhs_vec
+            )
+        }));
+        assert!(!block.instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Concat(RegisterId(11), args)
+                    if args == &vec![RegisterId(10), RegisterId(9), RegisterId(8)]
+            )
+        }));
     }
 
     #[test]
