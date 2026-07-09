@@ -65,11 +65,13 @@ pub fn optimize(func: &mut MFunction) {
 /// Run peepholes that are safe after register allocation.
 ///
 /// Regalloc rematerializes constants as fresh `LoadImm` instructions. When such
-/// a constant has exactly one use in the immediately following instruction, we
-/// can fold it back into an existing immediate-form MIR instruction without
-/// changing liveness or adding new VRegs. The assignment map may still contain
-/// the removed VReg; it is simply no longer referenced by emitted code.
+/// a constant has exactly one nearby use, we can fold it back into an existing
+/// immediate-form MIR instruction without changing liveness or adding new
+/// VRegs. The assignment map may still contain the removed VReg; it is simply
+/// no longer referenced by emitted code.
 pub fn post_regalloc_peephole(func: &mut MFunction) {
+    const IMM_FOLD_SCAN_LIMIT: usize = 8;
+
     let mut use_counts: HashMap<VReg, usize> = HashMap::new();
     for block in &func.blocks {
         for phi in &block.phis {
@@ -85,40 +87,47 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
     }
 
     for block in &mut func.blocks {
-        let mut rewritten = Vec::with_capacity(block.insts.len());
-        let mut idx = 0usize;
-        while idx < block.insts.len() {
+        let mut remove = vec![false; block.insts.len()];
+        let mut replacements: HashMap<usize, MInst> = HashMap::new();
+
+        for idx in 0..block.insts.len() {
             let MInst::LoadImm {
                 dst: imm_vreg,
                 value,
             } = block.insts[idx]
             else {
-                rewritten.push(block.insts[idx].clone());
-                idx += 1;
                 continue;
             };
-            if use_counts.get(&imm_vreg).copied().unwrap_or(0) != 1 || idx + 1 >= block.insts.len()
-            {
-                rewritten.push(block.insts[idx].clone());
-                idx += 1;
+            if use_counts.get(&imm_vreg).copied().unwrap_or(0) != 1 {
                 continue;
             }
 
-            let Some(next) = fold_adjacent_imm_use(&block.insts[idx + 1], imm_vreg, value) else {
-                rewritten.push(block.insts[idx].clone());
-                idx += 1;
-                continue;
-            };
+            let end = (idx + IMM_FOLD_SCAN_LIMIT + 1).min(block.insts.len());
+            for use_idx in idx + 1..end {
+                if !block.insts[use_idx].uses().contains(&imm_vreg) {
+                    continue;
+                }
+                if let Some(folded) = fold_imm_use(&block.insts[use_idx], imm_vreg, value) {
+                    remove[idx] = true;
+                    replacements.insert(use_idx, folded);
+                }
+                break;
+            }
+        }
 
-            rewritten.push(next);
-            idx += 2;
+        let mut rewritten = Vec::with_capacity(block.insts.len());
+        for (idx, inst) in block.insts.iter().enumerate() {
+            if remove[idx] {
+                continue;
+            }
+            rewritten.push(replacements.remove(&idx).unwrap_or_else(|| inst.clone()));
         }
         block.insts = rewritten;
     }
     compute_value_widths(func);
 }
 
-fn fold_adjacent_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
+fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
     match inst {
         MInst::Cmp {
             dst,
@@ -1695,7 +1704,7 @@ fn ranges_overlap(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> bool {
 // Immediate-form lowering
 // ────────────────────────────────────────────────────────────────
 
-/// Convert Cmp/Add/Sub with one constant operand into CmpImm/AddImm/SubImm.
+/// Convert operations with constant operands into immediate-form MIR.
 /// This runs late (after CSE/constant fold) to maximize opportunities.
 fn lower_to_imm_forms(func: &mut MFunction) {
     // Collect constants
@@ -1710,56 +1719,15 @@ fn lower_to_imm_forms(func: &mut MFunction) {
 
     for block in &mut func.blocks {
         for inst in &mut block.insts {
-            match inst {
-                MInst::Cmp {
-                    dst,
-                    lhs,
-                    rhs,
-                    kind,
-                } => {
-                    if let Some(&val) = consts.get(rhs) {
-                        if let Some(imm) = sign_extended_i32(val) {
-                            *inst = MInst::CmpImm {
-                                dst: *dst,
-                                lhs: *lhs,
-                                imm,
-                                kind: *kind,
-                            };
-                        }
-                    }
-                }
-                MInst::Add { dst, lhs, rhs } => {
-                    if let Some(&val) = consts.get(rhs) {
-                        if let Some(imm) = sign_extended_i32(val) {
-                            *inst = MInst::AddImm {
-                                dst: *dst,
-                                src: *lhs,
-                                imm,
-                            };
-                        }
-                    } else if let Some(&val) = consts.get(lhs) {
-                        // Add is commutative
-                        if let Some(imm) = sign_extended_i32(val) {
-                            *inst = MInst::AddImm {
-                                dst: *dst,
-                                src: *rhs,
-                                imm,
-                            };
-                        }
-                    }
-                }
-                MInst::Sub { dst, lhs, rhs } => {
-                    if let Some(&val) = consts.get(rhs) {
-                        if let Some(imm) = sign_extended_i32(val) {
-                            *inst = MInst::SubImm {
-                                dst: *dst,
-                                src: *lhs,
-                                imm,
-                            };
-                        }
-                    }
-                }
-                _ => {}
+            for use_vreg in inst.uses() {
+                let Some(&value) = consts.get(&use_vreg) else {
+                    continue;
+                };
+                let Some(folded) = fold_imm_use(inst, use_vreg, value) else {
+                    continue;
+                };
+                *inst = folded;
+                break;
             }
         }
     }
@@ -3325,6 +3293,67 @@ mod tests {
     }
 
     #[test]
+    fn post_regalloc_peephole_folds_nearby_single_use_imm() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 7,
+                },
+                MInst::Store {
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::ShrImm {
+                    dst: VReg(2),
+                    src: VReg(0),
+                    imm: 3,
+                },
+                MInst::And {
+                    dst: VReg(3),
+                    lhs: VReg(2),
+                    rhs: VReg(1),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(3),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        post_regalloc_peephole(&mut func);
+
+        assert!(
+            !func.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, MInst::LoadImm { dst: VReg(1), .. })),
+            "{:#?}",
+            func.blocks[0].insts
+        );
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::AndImm {
+                dst: VReg(3),
+                src: VReg(2),
+                imm: 7
+            }
+        )));
+    }
+
+    #[test]
     fn post_regalloc_peephole_folds_adjacent_alu_immediates() {
         let mut func = make_func(
             vec![
@@ -3530,6 +3559,49 @@ mod tests {
             }
         ));
         assert!(matches!(func.blocks[0].insts[3], MInst::Sub { .. }));
+    }
+
+    #[test]
+    fn lower_to_imm_forms_folds_multi_use_and_constants() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 7,
+                },
+                MInst::And {
+                    dst: VReg(1),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                },
+                MInst::And {
+                    dst: VReg(3),
+                    lhs: VReg(4),
+                    rhs: VReg(0),
+                },
+                MInst::Return,
+            ],
+            5,
+        );
+
+        lower_to_imm_forms(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::AndImm {
+                dst: VReg(1),
+                src: VReg(2),
+                imm: 7,
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::AndImm {
+                dst: VReg(3),
+                src: VReg(4),
+                imm: 7,
+            }
+        ));
     }
 
     #[test]
