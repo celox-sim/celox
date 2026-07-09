@@ -1,5 +1,6 @@
 use crate::ir::*;
 use crate::optimizer::{PassOptions, ProgramPass, SirPass};
+use std::fmt::Write as _;
 
 mod block_opt;
 pub(crate) mod commit_ops;
@@ -63,6 +64,34 @@ impl ProgramPass for CoalescingPass {
             &options.optimize_options,
         );
     }
+}
+
+fn optimize_unit_groups_cached(
+    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    passes: &ExecutionUnitPassManager,
+    options: &PassOptions,
+) {
+    let mut cache: crate::HashMap<String, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
+        crate::HashMap::default();
+    for units in groups.values_mut() {
+        let key = unit_group_key(units);
+        if let Some(cached) = cache.get(&key) {
+            *units = cached.clone();
+            continue;
+        }
+        for eu in units.iter_mut() {
+            passes.run(eu, options);
+        }
+        cache.insert(key, units.clone());
+    }
+}
+
+fn unit_group_key(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> String {
+    let mut key = String::new();
+    for unit in units {
+        let _ = write!(&mut key, "{unit}");
+    }
+    key
 }
 
 fn optimize_with_options(
@@ -140,11 +169,7 @@ fn optimize_with_options(
     }
 
     let eu_count: usize = program.eval_apply_ffs.values().map(|v| v.len()).sum();
-    for units in program.eval_apply_ffs.values_mut() {
-        for eu in units {
-            ff_passes.run(eu, &options);
-        }
-    }
+    optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_passes, &options);
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
@@ -184,11 +209,7 @@ fn optimize_with_options(
     }
 
     let eu_count: usize = program.eval_only_ffs.values().map(|v| v.len()).sum();
-    for units in program.eval_only_ffs.values_mut() {
-        for eu in units {
-            eval_only_passes.run(eu, &options);
-        }
-    }
+    optimize_unit_groups_cached(&mut program.eval_only_ffs, &eval_only_passes, &options);
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_only_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
