@@ -613,6 +613,19 @@ impl<'a> ISelContext<'a> {
         (var_width == width_bits).then(|| Self::op_size_for_width(width_bits))
     }
 
+    fn full_static_load_size(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        bit_offset: usize,
+        width_bits: usize,
+    ) -> Option<OpSize> {
+        if bit_offset != 0 || width_bits == 0 || width_bits > 64 {
+            return None;
+        }
+        let var_width = self.layout.widths.get(&addr.absolute_addr()).copied()?;
+        (var_width == width_bits).then(|| Self::op_size_for_width(width_bits))
+    }
+
     fn mask_for_store_width(&mut self, block: &mut MBlock, src: VReg, width_bits: usize) -> VReg {
         if width_bits >= 64
             || self
@@ -2256,7 +2269,18 @@ fn lower_instruction(
                     ctx.spill_descs[vreg.0 as usize] =
                         SpillDesc::sim_state(*addr, *bit_off, *width_bits, false);
 
-                    if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
+                    if !ctx.four_state
+                        && let Some(load_size) =
+                            ctx.full_static_load_size(addr, *bit_off, *width_bits)
+                    {
+                        block.push(MInst::Load {
+                            dst: vreg,
+                            base: BaseReg::SimState,
+                            offset: byte_off,
+                            size: load_size,
+                        });
+                        ctx.known_bits.insert(vreg, *width_bits);
+                    } else if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
                         // Word-aligned, native size: single load.
                         // If the load is wider than the variable (SIR optimizer widening),
                         // mask the result to the variable's actual width.
