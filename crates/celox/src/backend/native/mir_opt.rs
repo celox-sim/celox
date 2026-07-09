@@ -25,6 +25,8 @@ pub fn optimize(func: &mut MFunction) {
         }
         lower_to_imm_forms(func);
         dead_code_eliminate(func);
+        fuse_compare_selects(func);
+        dead_code_eliminate(func);
         sink_loads(func);
         split_live_ranges(func);
         eliminate_redundant_or_terms(func);
@@ -56,6 +58,8 @@ pub fn optimize(func: &mut MFunction) {
         dead_code_eliminate(func);
         lower_to_imm_forms(func);
         dead_code_eliminate(func); // clean up dead LoadImm from imm lowering
+        fuse_compare_selects(func);
+        dead_code_eliminate(func);
     }
     if_convert(func);
     simplify_cfg(func);
@@ -215,6 +219,93 @@ fn sign_extended_i32(value: u64) -> Option<i32> {
 
 fn and_imm_ok(value: u64) -> bool {
     sign_extended_i32(value).is_some() || value <= u32::MAX as u64
+}
+
+fn fuse_compare_selects(func: &mut MFunction) {
+    let mut use_counts: HashMap<VReg, usize> = HashMap::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for (_, src) in &phi.sources {
+                *use_counts.entry(*src).or_default() += 1;
+            }
+        }
+        for inst in &block.insts {
+            for use_vreg in inst.uses() {
+                *use_counts.entry(use_vreg).or_default() += 1;
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut def_pos: HashMap<VReg, usize> = HashMap::new();
+        for (idx, inst) in block.insts.iter().enumerate() {
+            if let Some(def) = inst.def() {
+                def_pos.insert(def, idx);
+            }
+        }
+
+        let mut remove = vec![false; block.insts.len()];
+        let mut replacements: HashMap<usize, MInst> = HashMap::new();
+
+        for (idx, inst) in block.insts.iter().enumerate() {
+            let MInst::Select {
+                dst,
+                cond,
+                true_val,
+                false_val,
+            } = inst
+            else {
+                continue;
+            };
+            if use_counts.get(cond).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(&cmp_idx) = def_pos.get(cond) else {
+                continue;
+            };
+            if cmp_idx >= idx || remove[cmp_idx] {
+                continue;
+            }
+
+            let fused = match block.insts[cmp_idx] {
+                MInst::Cmp { lhs, rhs, kind, .. } => Some(MInst::CmpSelect {
+                    dst: *dst,
+                    lhs,
+                    rhs,
+                    kind,
+                    true_val: *true_val,
+                    false_val: *false_val,
+                }),
+                MInst::CmpImm { lhs, imm, kind, .. } => Some(MInst::CmpImmSelect {
+                    dst: *dst,
+                    lhs,
+                    imm,
+                    kind,
+                    true_val: *true_val,
+                    false_val: *false_val,
+                }),
+                _ => None,
+            };
+
+            if let Some(fused) = fused {
+                remove[cmp_idx] = true;
+                replacements.insert(idx, fused);
+            }
+        }
+
+        if replacements.is_empty() {
+            continue;
+        }
+
+        let mut rewritten = Vec::with_capacity(block.insts.len());
+        for (idx, inst) in block.insts.iter().enumerate() {
+            if remove[idx] {
+                continue;
+            }
+            rewritten.push(replacements.remove(&idx).unwrap_or_else(|| inst.clone()));
+        }
+        block.insts = rewritten;
+    }
 }
 
 #[inline]
@@ -569,6 +660,16 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
             _ => None,
         },
         MInst::Select {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpSelect {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpImmSelect {
             true_val,
             false_val,
             ..
@@ -1261,6 +1362,8 @@ fn if_convert(func: &mut MFunction) {
                         | MInst::AddImm { .. }
                         | MInst::SubImm { .. }
                         | MInst::Select { .. }
+                        | MInst::CmpSelect { .. }
+                        | MInst::CmpImmSelect { .. }
                         | MInst::GuardedCmpSelect { .. }
                         | MInst::Jump { .. }
                 )
@@ -1829,6 +1932,16 @@ fn compute_value_widths(func: &mut MFunction) {
                     _ => None,
                 },
                 MInst::Select {
+                    true_val,
+                    false_val,
+                    ..
+                }
+                | MInst::CmpSelect {
+                    true_val,
+                    false_val,
+                    ..
+                }
+                | MInst::CmpImmSelect {
                     true_val,
                     false_val,
                     ..
@@ -3233,6 +3346,76 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    #[test]
+    fn fuses_single_use_cmp_select() {
+        let mut func = make_func(
+            vec![
+                MInst::Cmp {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                    kind: CmpKind::GtU,
+                },
+                MInst::Select {
+                    dst: VReg(5),
+                    cond: VReg(2),
+                    true_val: VReg(3),
+                    false_val: VReg(4),
+                },
+                MInst::Return,
+            ],
+            6,
+        );
+
+        fuse_compare_selects(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts.as_slice(),
+            [
+                MInst::CmpSelect {
+                    dst: VReg(5),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                    kind: CmpKind::GtU,
+                    true_val: VReg(3),
+                    false_val: VReg(4),
+                },
+                MInst::Return
+            ]
+        ));
+    }
+
+    #[test]
+    fn keeps_multi_use_cmp_select_condition() {
+        let mut func = make_func(
+            vec![
+                MInst::CmpImm {
+                    dst: VReg(1),
+                    lhs: VReg(0),
+                    imm: 0,
+                    kind: CmpKind::Ne,
+                },
+                MInst::Select {
+                    dst: VReg(4),
+                    cond: VReg(1),
+                    true_val: VReg(2),
+                    false_val: VReg(3),
+                },
+                MInst::Branch {
+                    cond: VReg(1),
+                    true_bb: BlockId(1),
+                    false_bb: BlockId(2),
+                },
+            ],
+            5,
+        );
+
+        fuse_compare_selects(&mut func);
+
+        assert!(matches!(func.blocks[0].insts[0], MInst::CmpImm { .. }));
+        assert!(matches!(func.blocks[0].insts[1], MInst::Select { .. }));
     }
 
     #[test]

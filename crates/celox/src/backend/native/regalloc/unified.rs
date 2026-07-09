@@ -352,6 +352,8 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::Pext { .. } => "pext",
         MInst::Pdep { .. } => "pdep",
         MInst::Select { .. } => "select",
+        MInst::CmpSelect { .. } => "cmp_select",
+        MInst::CmpImmSelect { .. } => "cmp_imm_select",
         MInst::GuardedCmpSelect { .. } => "guarded_cmp_select",
         MInst::Store { .. }
         | MInst::StorePtr { .. }

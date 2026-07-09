@@ -50,6 +50,13 @@ impl Uses {
         }
     }
     #[inline]
+    pub fn four(a: VReg, b: VReg, c: VReg, d: VReg) -> Self {
+        Self {
+            buf: [a, b, c, d, VReg(0)],
+            len: 4,
+        }
+    }
+    #[inline]
     pub fn five(a: VReg, b: VReg, c: VReg, d: VReg, e: VReg) -> Self {
         Self {
             buf: [a, b, c, d, e],
@@ -548,6 +555,24 @@ pub enum MInst {
         true_val: VReg,
         false_val: VReg,
     },
+    /// dst = (lhs cmp rhs) ? true_val : false_val
+    CmpSelect {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+        kind: CmpKind,
+        true_val: VReg,
+        false_val: VReg,
+    },
+    /// dst = (lhs cmp imm) ? true_val : false_val
+    CmpImmSelect {
+        dst: VReg,
+        lhs: VReg,
+        imm: i32,
+        kind: CmpKind,
+        true_val: VReg,
+        false_val: VReg,
+    },
     /// dst = (guard != 0 && lhs cmp rhs) ? true_val : false_val
     GuardedCmpSelect {
         dst: VReg,
@@ -703,6 +728,28 @@ impl fmt::Display for MInst {
                 true_val,
                 false_val,
             } => write!(f, "{dst} = select {cond}, {true_val}, {false_val}"),
+            MInst::CmpSelect {
+                dst,
+                lhs,
+                rhs,
+                kind,
+                true_val,
+                false_val,
+            } => write!(
+                f,
+                "{dst} = cmp_select cmp.{kind:?} {lhs}, {rhs}, {true_val}, {false_val}"
+            ),
+            MInst::CmpImmSelect {
+                dst,
+                lhs,
+                imm,
+                kind,
+                true_val,
+                false_val,
+            } => write!(
+                f,
+                "{dst} = cmp_select cmp.{kind:?} {lhs}, {imm}, {true_val}, {false_val}"
+            ),
             MInst::GuardedCmpSelect {
                 dst,
                 guard,
@@ -806,6 +853,8 @@ impl MInst {
             | MInst::Pext { dst, .. }
             | MInst::Pdep { dst, .. }
             | MInst::Select { dst, .. }
+            | MInst::CmpSelect { dst, .. }
+            | MInst::CmpImmSelect { dst, .. }
             | MInst::GuardedCmpSelect { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
@@ -874,6 +923,19 @@ impl MInst {
                 false_val,
                 ..
             } => Uses::three(*cond, *true_val, *false_val),
+            MInst::CmpSelect {
+                lhs,
+                rhs,
+                true_val,
+                false_val,
+                ..
+            } => Uses::four(*lhs, *rhs, *true_val, *false_val),
+            MInst::CmpImmSelect {
+                lhs,
+                true_val,
+                false_val,
+                ..
+            } => Uses::three(*lhs, *true_val, *false_val),
             MInst::GuardedCmpSelect {
                 guard,
                 lhs,
@@ -1025,6 +1087,42 @@ impl MInst {
             } => {
                 if *cond == old {
                     *cond = new;
+                }
+                if *true_val == old {
+                    *true_val = new;
+                }
+                if *false_val == old {
+                    *false_val = new;
+                }
+            }
+            MInst::CmpSelect {
+                lhs,
+                rhs,
+                true_val,
+                false_val,
+                ..
+            } => {
+                if *lhs == old {
+                    *lhs = new;
+                }
+                if *rhs == old {
+                    *rhs = new;
+                }
+                if *true_val == old {
+                    *true_val = new;
+                }
+                if *false_val == old {
+                    *false_val = new;
+                }
+            }
+            MInst::CmpImmSelect {
+                lhs,
+                true_val,
+                false_val,
+                ..
+            } => {
+                if *lhs == old {
+                    *lhs = new;
                 }
                 if *true_val == old {
                     *true_val = new;

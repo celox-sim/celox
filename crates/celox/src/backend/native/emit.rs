@@ -1308,6 +1308,32 @@ fn emit_inst(
             }
         }
 
+        MInst::CmpSelect {
+            dst,
+            lhs,
+            rhs,
+            kind,
+            true_val,
+            false_val,
+        } => {
+            emit_cmp_select(
+                asm, assignment, *dst, *lhs, *rhs, *kind, *true_val, *false_val,
+            )?;
+        }
+
+        MInst::CmpImmSelect {
+            dst,
+            lhs,
+            imm,
+            kind,
+            true_val,
+            false_val,
+        } => {
+            emit_cmp_imm_select(
+                asm, assignment, *dst, *lhs, *imm, *kind, *true_val, *false_val,
+            )?;
+        }
+
         MInst::GuardedCmpSelect {
             dst,
             guard,
@@ -1396,6 +1422,81 @@ fn emit_inverse_cmovcc(
         CmpKind::GeU => asm.cmovb(dst, src),
         CmpKind::GeS => asm.cmovl(dst, src),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_cmp_select(
+    asm: &mut CodeAssembler,
+    assignment: &AssignmentMap,
+    dst: VReg,
+    lhs: VReg,
+    rhs: VReg,
+    kind: CmpKind,
+    true_val: VReg,
+    false_val: VReg,
+) -> Result<(), IcedError> {
+    let d = preg_to_reg64(resolve(assignment, dst));
+    let l = preg_to_reg64(resolve(assignment, lhs));
+    let r = preg_to_reg64(resolve(assignment, rhs));
+    let tv = preg_to_reg64(resolve(assignment, true_val));
+    let fv = preg_to_reg64(resolve(assignment, false_val));
+
+    if tv == fv {
+        if d != tv {
+            asm.mov(d, tv)?;
+        }
+        return Ok(());
+    }
+
+    asm.cmp(l, r)?;
+    if d == fv {
+        emit_cmovcc(asm, d, tv, kind)?;
+    } else if d == tv {
+        emit_inverse_cmovcc(asm, d, fv, kind)?;
+    } else {
+        asm.mov(d, fv)?;
+        emit_cmovcc(asm, d, tv, kind)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_cmp_imm_select(
+    asm: &mut CodeAssembler,
+    assignment: &AssignmentMap,
+    dst: VReg,
+    lhs: VReg,
+    imm: i32,
+    kind: CmpKind,
+    true_val: VReg,
+    false_val: VReg,
+) -> Result<(), IcedError> {
+    let d = preg_to_reg64(resolve(assignment, dst));
+    let l = preg_to_reg64(resolve(assignment, lhs));
+    let tv = preg_to_reg64(resolve(assignment, true_val));
+    let fv = preg_to_reg64(resolve(assignment, false_val));
+
+    if tv == fv {
+        if d != tv {
+            asm.mov(d, tv)?;
+        }
+        return Ok(());
+    }
+
+    if imm == 0 && matches!(kind, CmpKind::Eq | CmpKind::Ne) {
+        asm.test(l, l)?;
+    } else {
+        asm.cmp(l, imm)?;
+    }
+    if d == fv {
+        emit_cmovcc(asm, d, tv, kind)?;
+    } else if d == tv {
+        emit_inverse_cmovcc(asm, d, fv, kind)?;
+    } else {
+        asm.mov(d, fv)?;
+        emit_cmovcc(asm, d, tv, kind)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2134,7 +2235,10 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 | MInst::BsrOr { .. }
                 | MInst::Pext { .. }
                 | MInst::Pdep { .. } => bit_ops += 1,
-                MInst::Select { .. } | MInst::GuardedCmpSelect { .. } => select += 1,
+                MInst::Select { .. }
+                | MInst::CmpSelect { .. }
+                | MInst::CmpImmSelect { .. }
+                | MInst::GuardedCmpSelect { .. } => select += 1,
                 MInst::Branch { .. } => branch += 1,
                 MInst::Jump { .. } => jump += 1,
                 MInst::Return | MInst::ReturnError { .. } => ret += 1,
@@ -2208,7 +2312,10 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     | MInst::BsrOr { .. }
                     | MInst::Pext { .. }
                     | MInst::Pdep { .. } => bit_ops += 1,
-                    MInst::Select { .. } | MInst::GuardedCmpSelect { .. } => select += 1,
+                    MInst::Select { .. }
+                    | MInst::CmpSelect { .. }
+                    | MInst::CmpImmSelect { .. }
+                    | MInst::GuardedCmpSelect { .. } => select += 1,
                     MInst::Branch { .. }
                     | MInst::Jump { .. }
                     | MInst::Return
