@@ -16,6 +16,7 @@ struct Options {
     opt_level: OptLevel,
     backend: Backend,
     four_state: bool,
+    compile_only: bool,
     pass_overrides: Vec<(bool, SirPass)>,
 }
 
@@ -52,6 +53,24 @@ fn run() -> Result<(), Box<dyn Error>> {
             builder.disable_pass(pass)
         };
     }
+    if opts.compile_only {
+        match opts.backend {
+            Backend::Native => {
+                let _sim = builder.build_native()?;
+            }
+            Backend::Cranelift => {
+                let _sim = builder.build_cranelift()?;
+            }
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "CELOX_TEST_RESULT test={} status=compile-only elapsed_ns={}",
+            opts.test,
+            elapsed.as_nanos()
+        );
+        return Ok(());
+    }
+
     let result = match opts.backend {
         Backend::Native => builder.run_test()?,
         Backend::Cranelift => builder.run_test_cranelift()?,
@@ -85,6 +104,7 @@ fn parse_args() -> Result<Options, String> {
     let mut opt_level = OptLevel::O1;
     let mut backend = Backend::Native;
     let mut four_state = false;
+    let mut compile_only = false;
     let mut pass_overrides = Vec::new();
     let mut args = env::args().skip(1);
 
@@ -128,6 +148,7 @@ fn parse_args() -> Result<Options, String> {
                 pass_overrides.push(parse_pass_override(&value)?);
             }
             "--four-state" => four_state = true,
+            "--compile-only" => compile_only = true,
             other if project.is_none() => project = Some(PathBuf::from(other)),
             other if test.is_none() => test = Some(other.to_string()),
             other => return Err(format!("unexpected argument: {other}")),
@@ -141,6 +162,7 @@ fn parse_args() -> Result<Options, String> {
         opt_level,
         backend,
         four_state,
+        compile_only,
         pass_overrides,
     })
 }
@@ -175,7 +197,7 @@ fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O1] [--sir-pass +/-name ...] [--four-state]"
+    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O1] [--sir-pass +/-name ...] [--four-state] [--compile-only]"
 }
 
 fn load_sources(

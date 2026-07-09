@@ -15,6 +15,8 @@ HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cranelift veryl-cc celox}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O1}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/release/examples/run_veryl_project_test}"
+HELIODOR_CELOX_COMPILE_ONLY="${HELIODOR_CELOX_COMPILE_ONLY:-0}"
+HELIODOR_CELOX_COMPILE_TIMEOUT_SEC="${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-120}"
 HELIODOR_CELOX_TIMEOUT_MULTIPLIER="${HELIODOR_CELOX_TIMEOUT_MULTIPLIER:-2}"
 HELIODOR_INSTALL_TOOLS="${HELIODOR_INSTALL_TOOLS:-1}"
 HELIODOR_VERYL_VERSION="${HELIODOR_VERYL_VERSION:-0.20.2}"
@@ -40,6 +42,10 @@ Environment:
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
   CELOX_RUNNER_BIN     prebuilt Celox runner path
+  HELIODOR_CELOX_COMPILE_ONLY
+                       for Celox runners, build the simulator and exit without running the testbench
+  HELIODOR_CELOX_COMPILE_TIMEOUT_SEC
+                       safety timeout for Celox compile-only mode (default: 120)
   HELIODOR_INSTALL_TOOLS
                        install missing tools into HELIODOR_TOOLS_DIR (default: 1)
   HELIODOR_VERYL_VERSION
@@ -201,6 +207,10 @@ fallback_timeout_sec() {
 timeout_sec_for() {
     local runner="$1"
     local test="$2"
+    if [[ "$runner" == celox* && "$HELIODOR_CELOX_COMPILE_ONLY" == 1 ]]; then
+        printf '%s\n' "$HELIODOR_CELOX_COMPILE_TIMEOUT_SEC"
+        return
+    fi
     if [[ -n "${HELIODOR_TIMEOUT_SEC:-}" ]]; then
         printf '%s\n' "$HELIODOR_TIMEOUT_SEC"
         return
@@ -260,6 +270,9 @@ run_one() {
     for pass_override in $CELOX_SIR_PASS_OVERRIDES; do
         celox_args+=(--sir-pass "$pass_override")
     done
+    if [[ "$HELIODOR_CELOX_COMPILE_ONLY" == 1 ]]; then
+        celox_args+=(--compile-only)
+    fi
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     log="$HELIODOR_RESULTS_DIR/${stamp}_${runner}_${test}.log"
     timeout_sec="$(timeout_sec_for "$runner" "$test")"
@@ -268,7 +281,11 @@ run_one() {
         veryl-*) ignored_flag="$(veryl_ignored_flag)" ;;
     esac
 
-    echo "== $runner :: $test (timeout ${timeout_sec}s) =="
+    if [[ "$runner" == celox* && "$HELIODOR_CELOX_COMPILE_ONLY" == 1 ]]; then
+        echo "== $runner :: $test (compile-only, safety timeout ${timeout_sec}s) =="
+    else
+        echo "== $runner :: $test (timeout ${timeout_sec}s) =="
+    fi
     start="$(date +%s%N)"
     set +e
     case "$runner" in
