@@ -25,34 +25,35 @@ use super::spilling::{SpillSlotAllocator, make_reload, make_spill};
 
 #[derive(Clone)]
 struct RegFile {
-    preg_to_vreg: [Option<VReg>; 13],
+    preg_to_vreg: [Option<VReg>; 14],
     vreg_to_preg: HashMap<VReg, PhysReg>,
 }
 
 /// Map a PhysReg discriminant (which may have gaps, e.g. RSI=6) to a dense
-/// index in 0..13 for the preg_to_vreg array.
+/// index in 0..14 for the preg_to_vreg array.
 const fn preg_dense_index(preg: PhysReg) -> usize {
     match preg {
         PhysReg::RAX => 0,
         PhysReg::RCX => 1,
         PhysReg::RDX => 2,
         PhysReg::RBX => 3,
-        PhysReg::RSI => 4,
-        PhysReg::RDI => 5,
-        PhysReg::R8 => 6,
-        PhysReg::R9 => 7,
-        PhysReg::R10 => 8,
-        PhysReg::R11 => 9,
-        PhysReg::R12 => 10,
-        PhysReg::R13 => 11,
-        PhysReg::R14 => 12,
+        PhysReg::RBP => 4,
+        PhysReg::RSI => 5,
+        PhysReg::RDI => 6,
+        PhysReg::R8 => 7,
+        PhysReg::R9 => 8,
+        PhysReg::R10 => 9,
+        PhysReg::R11 => 10,
+        PhysReg::R12 => 11,
+        PhysReg::R13 => 12,
+        PhysReg::R14 => 13,
     }
 }
 
 impl RegFile {
     fn new() -> Self {
         Self {
-            preg_to_vreg: [None; 13],
+            preg_to_vreg: [None; 14],
             vreg_to_preg: HashMap::new(),
         }
     }

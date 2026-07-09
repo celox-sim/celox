@@ -24,6 +24,7 @@ fn preg_to_reg64(preg: PhysReg) -> AsmRegister64 {
         PhysReg::RCX => rcx,
         PhysReg::RDX => rdx,
         PhysReg::RBX => rbx,
+        PhysReg::RBP => rbp,
         PhysReg::RSI => rsi,
         PhysReg::RDI => rdi,
         PhysReg::R8 => r8,
@@ -42,6 +43,7 @@ fn preg_to_reg32(preg: PhysReg) -> AsmRegister32 {
         PhysReg::RCX => ecx,
         PhysReg::RDX => edx,
         PhysReg::RBX => ebx,
+        PhysReg::RBP => ebp,
         PhysReg::RSI => esi,
         PhysReg::RDI => edi,
         PhysReg::R8 => r8d,
@@ -60,6 +62,7 @@ fn preg_to_reg16(preg: PhysReg) -> AsmRegister16 {
         PhysReg::RCX => cx,
         PhysReg::RDX => dx,
         PhysReg::RBX => bx,
+        PhysReg::RBP => bp,
         PhysReg::RSI => si,
         PhysReg::RDI => di,
         PhysReg::R8 => r8w,
@@ -78,6 +81,7 @@ fn preg_to_reg8(preg: PhysReg) -> AsmRegister8 {
         PhysReg::RCX => cl,
         PhysReg::RDX => dl,
         PhysReg::RBX => bl,
+        PhysReg::RBP => bpl,
         PhysReg::RSI => sil,
         PhysReg::RDI => dil,
         PhysReg::R8 => r8b,
@@ -136,7 +140,13 @@ fn mem_operand_ptr_indexed(
 // Callee-saved register tracking
 // ────────────────────────────────────────────────────────────────
 
-const CALLEE_SAVED: &[PhysReg] = &[PhysReg::RBX, PhysReg::R12, PhysReg::R13, PhysReg::R14];
+const CALLEE_SAVED: &[PhysReg] = &[
+    PhysReg::RBX,
+    PhysReg::RBP,
+    PhysReg::R12,
+    PhysReg::R13,
+    PhysReg::R14,
+];
 
 fn used_callee_saved(assignment: &AssignmentMap) -> Vec<PhysReg> {
     let mut used = PhysRegSet::new();
@@ -1294,6 +1304,7 @@ fn emit_and_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result
             _ if d == rcx => ecx,
             _ if d == rdx => edx,
             _ if d == rbx => ebx,
+            _ if d == rbp => ebp,
             _ if d == rsi => esi,
             _ if d == rdi => edi,
             _ if d == r8 => r8d,

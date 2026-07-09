@@ -14,8 +14,11 @@ use super::mir::MFunction;
 pub use assignment::AssignmentMap;
 
 /// Number of available general-purpose registers for allocation.
-/// x86-64: 16 GPRs - RSP - RBP - SimState base = 13
-pub const NUM_REGS: usize = 13;
+/// x86-64: 16 GPRs - RSP - SimState base = 14.
+///
+/// RBP is callee-saved, but the native backend does not use it as a frame
+/// pointer; spill slots are addressed relative to RSP after the prologue.
+pub const NUM_REGS: usize = 14;
 
 /// Result of register allocation: assignment map + spill frame size.
 pub struct RegallocResult {
