@@ -73,10 +73,12 @@ from the small `linear_sec` kernels:
 - The hot Celox native unit is `eval_comb`, not `eval_apply`. A representative
   post-regalloc `eval_comb` has about 282k MIR instructions, including about
   42k stack loads and 21k stack stores.
-- The largest `eval_comb` blocks are dominated by decoder/case-shaped mux
-  chains. In block 432, the SIR dump after the current stable optimizations
-  still shows about 15k `Mux`, 8k `LogicAnd`, 8k equality checks, and 4k
-  `Concat` operations.
+- The largest `eval_comb` blocks are dominated by long mux chains. Some are
+  direct case/decode chains, but the hottest 172-arm chains in blocks 432 and
+  0 are accumulator-guarded priority encoders of the form
+  `acc = mux(guard && acc == default, value, acc)`. In block 432, the SIR dump
+  after the current stable optimizations still shows about 15k `Mux`, 8k
+  `LogicAnd`, 8k equality checks, and 4k `Concat` operations.
 
 Several instruction-count wins did not survive the Heliodor correctness/perf
 gate:
@@ -95,6 +97,10 @@ gate:
   tests but produced a divide exception during Heliodor.
 - Adding a final `ReschedulePass` to `eval_comb` passed tests but slowed the
   Heliodor timed run to roughly 66 us per combinational evaluation.
+- Rewriting accumulator-guarded priority encoders back to plain guard-only mux
+  chains reduced some equality/logic work, but the Heliodor run failed to reach
+  the first 300k-tick timing marker within a 70 s timeout. The long branchless
+  mux dependency chain itself remains the problem.
 
 The one accepted Heliodor-facing SIR change so far is conservative:
 
@@ -174,8 +180,9 @@ This transformation should be implemented before more local mux shrinking. It
 attacks the reason Heliodor spills so much: not the cost of an individual mux,
 but the fact that thousands of unselected arm values are simultaneously live.
 Use `CELOX_MUX_CHAIN_STATS=1` while building/running a project to print the
-largest optimized `eval_comb` mux chains and confirm that a candidate workload
-matches this case-like shape.
+largest optimized `eval_comb` mux chains. The output separates direct
+case/decode chains from accumulator-guarded priority chains; these need
+different lowering strategies.
 
 ## Goals
 

@@ -127,7 +127,8 @@ fn dump_mux_chain_stats(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
                 }
 
                 let mut len = 0usize;
-                let mut case_like = 0usize;
+                let mut direct_case = 0usize;
+                let mut acc_guarded_priority = 0usize;
                 let mut cursor = Some(*dst);
                 while let Some(reg) = cursor {
                     let Some(&idx) = defs.get(&reg) else {
@@ -137,8 +138,11 @@ fn dump_mux_chain_stats(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
                         break;
                     };
                     len += 1;
-                    if is_case_like_cond(*cond, &defs, &block.instructions) {
-                        case_like += 1;
+                    if is_direct_case_eq(*cond, &defs, &block.instructions) {
+                        direct_case += 1;
+                    }
+                    if is_acc_guarded_priority_cond(*cond, *else_val, &defs, &block.instructions) {
+                        acc_guarded_priority += 1;
                     }
                     cursor = match defs.get(else_val).map(|&i| &block.instructions[i]) {
                         Some(SIRInstruction::Mux(..)) => Some(*else_val),
@@ -147,75 +151,101 @@ fn dump_mux_chain_stats(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
                 }
 
                 if len >= 4 {
-                    rows.push((len, case_like, eu_idx, block.id, *dst));
+                    rows.push((
+                        len,
+                        direct_case,
+                        acc_guarded_priority,
+                        eu_idx,
+                        block.id,
+                        *dst,
+                    ));
                 }
             }
         }
     }
 
     rows.sort_by(|a, b| b.cmp(a));
-    for (rank, (len, case_like, eu_idx, block_id, root)) in rows.into_iter().take(20).enumerate() {
+    for (rank, (len, direct_case, acc_guarded_priority, eu_idx, block_id, root)) in
+        rows.into_iter().take(20).enumerate()
+    {
         eprintln!(
-            "[mux-chain-stats] rank={} eu={} block={} root=r{} len={} case_like={}",
+            "[mux-chain-stats] rank={} eu={} block={} root=r{} len={} direct_case={} acc_guarded_priority={}",
             rank + 1,
             eu_idx,
             block_id.0,
             root.0,
             len,
-            case_like
+            direct_case,
+            acc_guarded_priority
         );
     }
 }
 
-fn is_case_like_cond(
+fn is_direct_case_eq(
     cond: RegisterId,
     defs: &crate::HashMap<RegisterId, usize>,
     instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
 ) -> bool {
-    contains_case_eq(cond, defs, instructions, &mut crate::HashSet::default(), 0)
+    let Some(&idx) = defs.get(&cond) else {
+        return false;
+    };
+    match &instructions[idx] {
+        SIRInstruction::Binary(_, lhs, op, rhs)
+            if matches!(op, BinaryOp::Eq | BinaryOp::EqWildcard) =>
+        {
+            is_zero_mask_imm(*lhs, defs, instructions) || is_zero_mask_imm(*rhs, defs, instructions)
+        }
+        _ => false,
+    }
 }
 
-fn contains_case_eq(
-    reg: RegisterId,
+fn is_acc_guarded_priority_cond(
+    cond: RegisterId,
+    prev_acc: RegisterId,
     defs: &crate::HashMap<RegisterId, usize>,
     instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
-    seen: &mut crate::HashSet<RegisterId>,
-    depth: usize,
 ) -> bool {
-    if depth > 8 || !seen.insert(reg) {
+    let Some(&idx) = defs.get(&cond) else {
         return false;
+    };
+    match &instructions[idx] {
+        SIRInstruction::Binary(_, lhs, op, rhs) if matches!(op, BinaryOp::LogicAnd) => {
+            is_acc_eq_imm(*lhs, prev_acc, defs, instructions)
+                || is_acc_eq_imm(*rhs, prev_acc, defs, instructions)
+        }
+        _ => false,
     }
+}
 
+fn is_acc_eq_imm(
+    reg: RegisterId,
+    prev_acc: RegisterId,
+    defs: &crate::HashMap<RegisterId, usize>,
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+) -> bool {
     let Some(&idx) = defs.get(&reg) else {
         return false;
     };
-
     match &instructions[idx] {
-        SIRInstruction::Binary(_, _, op, rhs)
-            if matches!(op, BinaryOp::Eq | BinaryOp::EqWildcard) =>
-        {
-            defs.get(rhs).is_some_and(|&rhs_idx| {
-                matches!(
-                    &instructions[rhs_idx],
-                    SIRInstruction::Imm(_, value) if value.mask == num_bigint::BigUint::ZERO
-                )
-            })
+        SIRInstruction::Binary(_, lhs, BinaryOp::Eq, rhs) => {
+            (*lhs == prev_acc && is_zero_mask_imm(*rhs, defs, instructions))
+                || (*rhs == prev_acc && is_zero_mask_imm(*lhs, defs, instructions))
         }
-        SIRInstruction::Binary(_, lhs, op, rhs)
-            if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) =>
-        {
-            contains_case_eq(*lhs, defs, instructions, seen, depth + 1)
-                || contains_case_eq(*rhs, defs, instructions, seen, depth + 1)
-        }
-        SIRInstruction::Unary(_, UnaryOp::Ident, src)
-        | SIRInstruction::Unary(_, UnaryOp::LogicNot, src) => {
-            contains_case_eq(*src, defs, instructions, seen, depth + 1)
-        }
-        SIRInstruction::Concat(_, args) => args
-            .iter()
-            .any(|arg| contains_case_eq(*arg, defs, instructions, seen, depth + 1)),
         _ => false,
     }
+}
+
+fn is_zero_mask_imm(
+    reg: RegisterId,
+    defs: &crate::HashMap<RegisterId, usize>,
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+) -> bool {
+    defs.get(&reg).is_some_and(|&idx| {
+        matches!(
+            &instructions[idx],
+            SIRInstruction::Imm(_, value) if value.mask == num_bigint::BigUint::ZERO
+        )
+    })
 }
 
 fn optimize_with_options(
