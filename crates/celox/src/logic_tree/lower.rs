@@ -637,6 +637,16 @@ impl SLTToSIRLowerer {
         cache: &mut crate::HashMap<NodeId, RegisterId>,
     ) -> RegisterId {
         match arena.get(expr) {
+            SLTNode::Input {
+                variable,
+                index,
+                access: input_access,
+                ..
+            } if access.msb <= input_access.msb - input_access.lsb => {
+                let composed =
+                    BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb);
+                self.lower_input(builder, variable, index, &composed, arena, cache, None)
+            }
             SLTNode::Slice {
                 expr: inner,
                 access: inner_access,
@@ -644,6 +654,27 @@ impl SLTToSIRLowerer {
                 let composed =
                     BitAccess::new(inner_access.lsb + access.lsb, inner_access.lsb + access.msb);
                 self.lower_region_slice_inner(builder, *inner, &composed, arena, cache)
+            }
+            SLTNode::Binary(lhs, op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor), rhs)
+                if access.msb < self.get_width(*lhs, arena)
+                    && access.msb < self.get_width(*rhs, arena) =>
+            {
+                let lhs_val = self.lower_region_slice_inner(builder, *lhs, access, arena, cache);
+                let rhs_val = self.lower_region_slice_inner(builder, *rhs, access, arena, cache);
+                let result = builder.alloc_logic(access.msb - access.lsb + 1);
+                builder.emit(SIRInstruction::Binary(result, lhs_val, *op, rhs_val));
+                result
+            }
+            SLTNode::Binary(lhs, op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul), rhs)
+                if access.lsb == 0
+                    && access.msb < self.get_width(*lhs, arena)
+                    && access.msb < self.get_width(*rhs, arena) =>
+            {
+                let lhs_val = self.lower_region_slice_inner(builder, *lhs, access, arena, cache);
+                let rhs_val = self.lower_region_slice_inner(builder, *rhs, access, arena, cache);
+                let result = builder.alloc_logic(access.msb + 1);
+                builder.emit(SIRInstruction::Binary(result, lhs_val, *op, rhs_val));
+                result
             }
             SLTNode::Mux {
                 cond,
