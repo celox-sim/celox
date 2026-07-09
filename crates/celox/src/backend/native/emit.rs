@@ -268,6 +268,7 @@ pub fn emit(
     };
 
     let mut epilogue_label = asm.create_label();
+    let use_counts = count_vreg_uses(func);
 
     // ── Prologue ──
     {
@@ -332,7 +333,9 @@ pub fn emit(
             None
         };
 
-        for inst in block.insts.iter() {
+        let mut inst_idx = 0usize;
+        while inst_idx < block.insts.len() {
+            let inst = &block.insts[inst_idx];
             match inst {
                 MInst::Return => {
                     asm.xor(eax, eax)?;
@@ -434,12 +437,28 @@ pub fn emit(
                     // Skip Cmp/CmpImm if it's fused with the following Branch
                     if let Some(fc) = fused_cmp {
                         if inst.def() == Some(fc) {
+                            inst_idx += 1;
                             continue;
                         }
+                    }
+                    if inst_idx + 1 < block.insts.len()
+                        && fused_cmp.is_none_or(|fc| block.insts[inst_idx + 1].def() != Some(fc))
+                        && try_emit_stack_reload_fold(
+                            &mut asm,
+                            inst,
+                            &block.insts[inst_idx + 1],
+                            &use_counts,
+                            assignment,
+                            func,
+                        )?
+                    {
+                        inst_idx += 2;
+                        continue;
                     }
                     emit_inst(&mut asm, inst, assignment, func)?;
                 }
             }
+            inst_idx += 1;
         }
     }
 
@@ -456,6 +475,245 @@ pub fn emit(
 
     let code = asm.assemble(0x0)?;
     Ok(EmitResult { code, frame_size })
+}
+
+fn count_vreg_uses(func: &MFunction) -> HashMap<VReg, usize> {
+    let mut counts = HashMap::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for (_, src) in &phi.sources {
+                *counts.entry(*src).or_default() += 1;
+            }
+        }
+        for inst in &block.insts {
+            for vreg in inst.uses() {
+                *counts.entry(vreg).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn try_emit_stack_reload_fold(
+    asm: &mut CodeAssembler,
+    inst: &MInst,
+    next: &MInst,
+    use_counts: &HashMap<VReg, usize>,
+    assignment: &AssignmentMap,
+    func: &MFunction,
+) -> Result<bool, IcedError> {
+    let MInst::Load {
+        dst,
+        base: BaseReg::StackFrame,
+        offset,
+        size: OpSize::S64,
+    } = inst
+    else {
+        return Ok(false);
+    };
+    if use_counts.get(dst).copied().unwrap_or(0) != 1 || !next.uses().contains(dst) {
+        return Ok(false);
+    }
+    emit_inst_with_stack_mem(asm, next, *dst, *offset, assignment, func)
+}
+
+fn emit_inst_with_stack_mem(
+    asm: &mut CodeAssembler,
+    inst: &MInst,
+    stack_vreg: VReg,
+    stack_offset: i32,
+    assignment: &AssignmentMap,
+    func: &MFunction,
+) -> Result<bool, IcedError> {
+    match inst {
+        MInst::Mov { dst, src } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            Ok(true)
+        }
+        MInst::Add { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            func,
+            BinOp::Add,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Sub { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            func,
+            BinOp::Sub,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Mul { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            func,
+            BinOp::Mul,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::And { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            func,
+            BinOp::And,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Or { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            func,
+            BinOp::Or,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Xor { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            func,
+            BinOp::Xor,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::AndImm { dst, src, imm } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            emit_and_imm64(asm, d, *imm)?;
+            Ok(true)
+        }
+        MInst::OrImm { dst, src, imm } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            emit_or_imm64(asm, d, *imm)?;
+            Ok(true)
+        }
+        MInst::AddImm { dst, src, imm } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.add(d, *imm)?;
+            Ok(true)
+        }
+        MInst::SubImm { dst, src, imm } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.sub(d, *imm)?;
+            Ok(true)
+        }
+        MInst::ShrImm { dst, src, imm } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.shr(d, *imm as u32)?;
+            Ok(true)
+        }
+        MInst::ShlImm { dst, src, imm } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.shl(d, *imm as u32)?;
+            Ok(true)
+        }
+        MInst::SarImm { dst, src, imm } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.sar(d, *imm as u32)?;
+            Ok(true)
+        }
+        MInst::Cmp {
+            dst,
+            lhs,
+            rhs,
+            kind,
+        } if *lhs == stack_vreg || *rhs == stack_vreg => {
+            let mem = qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            if *lhs == stack_vreg {
+                let r = preg_to_reg64(resolve(assignment, *rhs));
+                asm.cmp(mem, r)?;
+            } else {
+                let l = preg_to_reg64(resolve(assignment, *lhs));
+                asm.cmp(l, mem)?;
+            }
+            let d8 = preg_to_reg8(resolve(assignment, *dst));
+            let d32 = preg_to_reg32(resolve(assignment, *dst));
+            emit_setcc(asm, d8, *kind)?;
+            asm.movzx(d32, d8)?;
+            Ok(true)
+        }
+        MInst::CmpImm {
+            dst,
+            lhs,
+            imm,
+            kind,
+        } if *lhs == stack_vreg => {
+            asm.cmp(
+                qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                *imm,
+            )?;
+            let d8 = preg_to_reg8(resolve(assignment, *dst));
+            let d32 = preg_to_reg32(resolve(assignment, *dst));
+            emit_setcc(asm, d8, *kind)?;
+            asm.movzx(d32, d8)?;
+            Ok(true)
+        }
+        MInst::BitNot { dst, src } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.not(d)?;
+            Ok(true)
+        }
+        MInst::Neg { dst, src } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.neg(d)?;
+            Ok(true)
+        }
+        MInst::Popcnt { dst, src } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.popcnt(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            Ok(true)
+        }
+        MInst::Bsr { dst, src } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.bsr(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            Ok(true)
+        }
+        MInst::Select {
+            dst,
+            cond,
+            true_val,
+            false_val,
+        } => emit_select_stack_mem(
+            asm,
+            assignment,
+            *dst,
+            *cond,
+            *true_val,
+            *false_val,
+            stack_vreg,
+            stack_offset,
+        ),
+        _ => Ok(false),
+    }
 }
 
 fn emit_inst(
@@ -1214,6 +1472,93 @@ fn emit_binop_rr(
     }
 }
 
+fn emit_binop_stack_mem(
+    asm: &mut CodeAssembler,
+    assignment: &AssignmentMap,
+    func: &MFunction,
+    op: BinOp,
+    dst: VReg,
+    lhs: VReg,
+    rhs: VReg,
+    stack_vreg: VReg,
+    stack_offset: i32,
+) -> Result<bool, IcedError> {
+    let narrow32 = func.is_narrow32(dst);
+    if rhs == stack_vreg {
+        let other = lhs;
+        if narrow32 {
+            let d = preg_to_reg32(resolve(assignment, dst));
+            let o = preg_to_reg32(resolve(assignment, other));
+            if d != o {
+                asm.mov(d, o)?;
+            }
+            let mem = dword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            match op {
+                BinOp::Add => asm.add(d, mem)?,
+                BinOp::Sub => asm.sub(d, mem)?,
+                BinOp::Mul => asm.imul_2(d, mem)?,
+                BinOp::And => asm.and(d, mem)?,
+                BinOp::Or => asm.or(d, mem)?,
+                BinOp::Xor => asm.xor(d, mem)?,
+            }
+        } else {
+            let d = preg_to_reg64(resolve(assignment, dst));
+            let o = preg_to_reg64(resolve(assignment, other));
+            if d != o {
+                asm.mov(d, o)?;
+            }
+            let mem = qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            match op {
+                BinOp::Add => asm.add(d, mem)?,
+                BinOp::Sub => asm.sub(d, mem)?,
+                BinOp::Mul => asm.imul_2(d, mem)?,
+                BinOp::And => asm.and(d, mem)?,
+                BinOp::Or => asm.or(d, mem)?,
+                BinOp::Xor => asm.xor(d, mem)?,
+            }
+        }
+        return Ok(true);
+    }
+
+    if lhs == stack_vreg && op.is_commutative() {
+        let other = rhs;
+        if narrow32 {
+            let d = preg_to_reg32(resolve(assignment, dst));
+            let o = preg_to_reg32(resolve(assignment, other));
+            if d != o {
+                asm.mov(d, o)?;
+            }
+            let mem = dword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            match op {
+                BinOp::Add => asm.add(d, mem)?,
+                BinOp::Mul => asm.imul_2(d, mem)?,
+                BinOp::And => asm.and(d, mem)?,
+                BinOp::Or => asm.or(d, mem)?,
+                BinOp::Xor => asm.xor(d, mem)?,
+                BinOp::Sub => unreachable!(),
+            }
+        } else {
+            let d = preg_to_reg64(resolve(assignment, dst));
+            let o = preg_to_reg64(resolve(assignment, other));
+            if d != o {
+                asm.mov(d, o)?;
+            }
+            let mem = qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            match op {
+                BinOp::Add => asm.add(d, mem)?,
+                BinOp::Mul => asm.imul_2(d, mem)?,
+                BinOp::And => asm.and(d, mem)?,
+                BinOp::Or => asm.or(d, mem)?,
+                BinOp::Xor => asm.xor(d, mem)?,
+                BinOp::Sub => unreachable!(),
+            }
+        }
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 fn emit_binop_rr_64(
     asm: &mut CodeAssembler,
     assignment: &AssignmentMap,
@@ -1294,6 +1639,54 @@ fn emit_binop_rr_32(
         BinOp::Xor => asm.xor(d, eff_r)?,
     }
     Ok(())
+}
+
+fn emit_select_stack_mem(
+    asm: &mut CodeAssembler,
+    assignment: &AssignmentMap,
+    dst: VReg,
+    cond: VReg,
+    true_val: VReg,
+    false_val: VReg,
+    stack_vreg: VReg,
+    stack_offset: i32,
+) -> Result<bool, IcedError> {
+    let d = preg_to_reg64(resolve(assignment, dst));
+    if cond == stack_vreg {
+        asm.cmp(qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)), 0)?;
+        let tv = preg_to_reg64(resolve(assignment, true_val));
+        let fv = preg_to_reg64(resolve(assignment, false_val));
+        if d == tv {
+            asm.cmove(d, fv)?;
+        } else {
+            if d != fv {
+                asm.mov(d, fv)?;
+            }
+            asm.cmovne(d, tv)?;
+        }
+        return Ok(true);
+    }
+
+    let c = preg_to_reg64(resolve(assignment, cond));
+    asm.test(c, c)?;
+    if true_val == stack_vreg {
+        let fv = preg_to_reg64(resolve(assignment, false_val));
+        if d != fv {
+            asm.mov(d, fv)?;
+        }
+        asm.cmovne(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+        return Ok(true);
+    }
+    if false_val == stack_vreg {
+        let tv = preg_to_reg64(resolve(assignment, true_val));
+        if d != tv {
+            asm.mov(d, tv)?;
+        }
+        asm.cmove(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 /// Emit AND with a potentially 64-bit immediate.
