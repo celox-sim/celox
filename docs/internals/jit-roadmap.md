@@ -51,6 +51,57 @@ target and the public scalar API path remains about 1.6x faster. Default non-DSE
 simulation still preserves more internal state than the Verilator harness and
 remains a separate target.
 
+### Heliodor Linux Boot Findings
+
+Heliodor is now the macro benchmark for comparing Celox against the Veryl
+native simulator. Veryl's public simulator benchmark describes a tiered design:
+start quickly with a Cranelift backend, then switch to a GCC-optimized backend
+when the compiled binary becomes available:
+<https://veryl-lang.org/blog/veryl-simulator-performance/>.
+
+Local Celox measurements on `test_soc_linux_boot` show a different bottleneck
+from the small `linear_sec` kernels:
+
+- Veryl `cc` baseline for the pinned Heliodor checkout completed the single
+  Linux boot in about 63.4 s.
+- Celox native currently reaches only about 300k ticks in a 45 s timed run.
+  The last stable run reported `avg_comb_us ~= 63.6` and
+  `avg_apply_us ~= 2.3`.
+- Celox Cranelift is not a viable replacement for the custom native backend on
+  this workload; its JIT/backend phase was substantially slower than native.
+- The hot Celox native unit is `eval_comb`, not `eval_apply`. A representative
+  post-regalloc `eval_comb` has about 363k MIR instructions, including about
+  44k stack loads and 22k stack stores.
+- The largest `eval_comb` blocks are dominated by byte read-modify-write
+  patterns for packed one-bit state and triggered-bit updates:
+  `load.i8 -> and -> load destination byte -> clear bit -> or -> store.i8`.
+
+Several instruction-count wins did not survive the Heliodor correctness/perf
+gate:
+
+- General narrow mux lowering to `else ^ ((then ^ else) & mask)` reduced MIR
+  size but produced an x86 divide exception during the Linux boot.
+- Replacing trigger `Select(cond, 1 << bit, 0)` with shift/setcc-style
+  specialized code also produced an x86 divide exception in Heliodor.
+- Making the existing div/rem emitter fully conservative by spilling the
+  divisor through memory, or by declaring RCX as a div/rem clobber, avoided the
+  crash but prevented the run from reaching the first 50k-tick timing marker
+  within a 45 s timeout.
+
+The important conclusion is that Heliodor is exposing a coupled
+codegen/regalloc problem, not a single missing peephole. The native emitter
+currently uses RCX as an internal div/rem scratch when the divisor is assigned
+to RAX/RDX, while regalloc models only RAX/RDX as div/rem clobbers. The fast
+but under-specified path happens to work for the current stable code shape; when
+nearby mux/trigger code changes alter allocation, the latent bug can surface as
+a hardware divide exception. The correct fix is not to globally make div/rem
+more conservative. It is to give div/rem a modeled scratch strategy that keeps
+register div fast without untracked clobbers.
+
+This changes the next implementation priority: before more trigger or mux
+shrinking is accepted, native regalloc/emit needs a correct and cheap scratch
+contract for instructions with implicit operands.
+
 ## Goals
 
 1. Make `NativeBackend` the clear x86-64 performance backend for both RTL-only
