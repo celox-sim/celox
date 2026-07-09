@@ -15,6 +15,7 @@ HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cranelift veryl-cc celox}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O1}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/release/examples/run_veryl_project_test}"
+HELIODOR_BUILD_CELOX_RUNNER="${HELIODOR_BUILD_CELOX_RUNNER:-1}"
 HELIODOR_CELOX_COMPILE_ONLY="${HELIODOR_CELOX_COMPILE_ONLY:-0}"
 HELIODOR_CELOX_COMPILE_TIMEOUT_SEC="${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-}"
 HELIODOR_CELOX_TIMEOUT_MULTIPLIER="${HELIODOR_CELOX_TIMEOUT_MULTIPLIER:-2}"
@@ -42,6 +43,8 @@ Environment:
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
   CELOX_RUNNER_BIN     prebuilt Celox runner path
+  HELIODOR_BUILD_CELOX_RUNNER
+                       build CELOX_RUNNER_BIN before Celox runs (default: 1)
   HELIODOR_CELOX_COMPILE_ONLY
                        for Celox runners, build the simulator and exit without running the testbench
   HELIODOR_CELOX_COMPILE_TIMEOUT_SEC
@@ -172,6 +175,14 @@ any_veryl_runner_enabled() {
 
 build_celox_runner() {
     local log="$HELIODOR_RESULTS_DIR/celox_runner_build.log"
+    if [[ "$HELIODOR_BUILD_CELOX_RUNNER" != 1 ]]; then
+        if [[ ! -x "$CELOX_RUNNER_BIN" ]]; then
+            echo "error: HELIODOR_BUILD_CELOX_RUNNER=0 but CELOX_RUNNER_BIN is not executable: $CELOX_RUNNER_BIN" >&2
+            return 127
+        fi
+        echo "Using prebuilt Celox runner: $CELOX_RUNNER_BIN"
+        return
+    fi
     echo "Building Celox runner: $CELOX_RUNNER_BIN"
     cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox \
         --example run_veryl_project_test --release >"$log" 2>&1
