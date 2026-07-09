@@ -110,7 +110,7 @@ fn compile_units(
         empty_func.push_block(block);
         let empty_result = emit::emit(&empty_func, &regalloc::AssignmentMap::default(), 0)
             .map_err(|e| codegen_err(format!("emit error: {e}")))?;
-        return jit_mem::JitCode::new(&empty_result.code)
+        return jit_mem::JitCode::new_named(&empty_result.code, label)
             .map_err(|e| codegen_err(format!("mmap error: {e}")));
     }
 
@@ -133,7 +133,8 @@ fn compile_units(
             start.elapsed()
         );
     }
-    jit_mem::JitCode::new(&chained_code).map_err(|e| codegen_err(format!("mmap error: {e}")))
+    jit_mem::JitCode::new_named(&chained_code, label)
+        .map_err(|e| codegen_err(format!("mmap error: {e}")))
 }
 
 fn fingerprint_ff_units(
