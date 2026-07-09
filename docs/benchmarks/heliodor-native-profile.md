@@ -71,6 +71,20 @@ instructions. The largest instruction classes were:
 This is why the gap should not be described as "just regalloc". The allocator
 amplifies an already oversized scalar boolean/bitfield program.
 
+A phase-timed 45 second sample confirms the same split:
+
+- `eval_comb` merge input: `145,104` SIR instructions
+- ISel output: `495,111` MIR instructions
+- MIR after optimization: `263,530` instructions
+- MIR after regalloc and peepholes: `347,580` instructions
+- emitted `eval_comb` machine code: `1,764,047` bytes
+- runtime at timeout: `avg_comb_us=64.016`, `avg_apply_us=2.637`
+
+The compile-time cost is visible too, especially `eval_comb` MIR optimization at
+about `4.63s`, but it is not the order-of-magnitude runtime gap. The runtime gap
+is already present in the per-tick hot code: `eval_comb` alone takes about ten
+times the Veryl cc per-cycle time.
+
 An opt-in priority-encoder lowering exists behind `CELOX_NATIVE_PRIORITY_ENCODE`,
 but it did not help this benchmark in a same-conditions 60 second sample:
 
@@ -236,6 +250,23 @@ Reason:
   addressing the large scalar `And`/`Mux`/`LogicAnd`/`Eq` workload.
 - Immediate folding should be revisited in the x86 emitter or ISel cost model,
   not as a blind regalloc rewrite.
+
+### GVN alias algebraic simplification
+
+GVN-time alias simplification for identities such as `x | 0`, `x ^ 0`,
+`x & all_ones`, and `mux(c, x, x)` was also rejected.
+
+Measured result:
+
+- baseline `eval_comb` after regalloc: about `347k` MIR instructions
+- with the simplification: about `354k` MIR instructions
+
+Reason:
+
+- Even width-safe aliasing can lengthen live ranges by deleting useful temporary
+  definitions.
+- On this workload, the allocator pays more for the longer live ranges than the
+  optimizer saves by removing local algebraic operations.
 
 ## Implications
 
