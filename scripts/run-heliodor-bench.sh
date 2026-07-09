@@ -12,7 +12,7 @@ HELIODOR_RESULTS_DIR="${HELIODOR_RESULTS_DIR:-$CELOX_ROOT/target/heliodor/result
 HELIODOR_TOOLS_DIR="${HELIODOR_TOOLS_DIR:-$CELOX_ROOT/target/heliodor/tools}"
 HELIODOR_TESTS="${HELIODOR_TESTS:-test_soc_linux_boot}"
 HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cranelift veryl-cc celox}"
-CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O1}"
+CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/release/examples/run_veryl_project_test}"
 HELIODOR_BUILD_CELOX_RUNNER="${HELIODOR_BUILD_CELOX_RUNNER:-1}"
@@ -39,7 +39,7 @@ Environment:
   HELIODOR_TIMEOUT_SEC absolute timeout for every runner/test
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
                        timeout Celox after N times the fastest successful Veryl baseline
-  CELOX_OPT_LEVEL      O0, O1, or O2 for the Celox runner
+  CELOX_OPT_LEVEL      O0, O1, or O2 for the Celox runner (default: O2)
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
   CELOX_RUNNER_BIN     prebuilt Celox runner path

@@ -26,6 +26,15 @@ enum Backend {
     Cranelift,
 }
 
+impl Backend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Backend::Native => "native",
+            Backend::Cranelift => "cranelift",
+        }
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("error: {e}");
@@ -40,6 +49,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|(source, path)| (source.as_str(), path.as_path()))
         .collect();
+    println!(
+        "CELOX_TEST_CONFIG test={} backend={} opt_level={} four_state={} compile_only={}",
+        opts.test,
+        opts.backend.as_str(),
+        opts.opt_level.as_str(),
+        opts.four_state,
+        opts.compile_only
+    );
 
     let start = Instant::now();
     let mut builder = Simulator::from_sources(source_refs, &opts.test)
@@ -101,7 +118,7 @@ fn parse_args() -> Result<Options, String> {
     let mut project = None;
     let mut test = None;
     let mut source_files = Vec::new();
-    let mut opt_level = OptLevel::O1;
+    let mut opt_level = OptLevel::O2;
     let mut backend = Backend::Native;
     let mut four_state = false;
     let mut compile_only = false;
@@ -197,7 +214,7 @@ fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O1] [--sir-pass +/-name ...] [--four-state] [--compile-only]"
+    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--four-state] [--compile-only]"
 }
 
 fn load_sources(
