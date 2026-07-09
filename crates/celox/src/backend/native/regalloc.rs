@@ -156,23 +156,79 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
 
 /// Run register allocation and optionally log per-block allocation deltas.
 pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocResult {
+    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
+        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let total_start = timing.then(crate::timing::now);
+    let stats_start = timing.then(crate::timing::now);
     let before_stats = std::env::var_os("CELOX_REGALLOC_STATS")
         .is_some()
         .then(|| collect_regalloc_block_stats(func));
+    if let Some(start) = stats_start {
+        eprintln!(
+            "[regalloc-timing] label={label} collect_before_stats elapsed={:?}",
+            start.elapsed()
+        );
+    }
 
     // Unified single-pass: simultaneous spilling + assignment.
     // No separate analysis → spill → re-analyze → assign pipeline.
     // No k-1 hack — uses k = NUM_REGS directly.
+    let analysis_start = timing.then(crate::timing::now);
     let analysis = analysis::analyze(func);
+    if let Some(start) = analysis_start {
+        eprintln!(
+            "[regalloc-timing] label={label} analysis blocks={} insts={} elapsed={:?}",
+            func.blocks.len(),
+            func.blocks
+                .iter()
+                .map(|block| block.insts.len())
+                .sum::<usize>(),
+            start.elapsed()
+        );
+    }
+    let alloc_start = timing.then(crate::timing::now);
     let (assignment, spill_frame_size) = unified::unified_alloc_with_label(func, &analysis, label);
+    if let Some(start) = alloc_start {
+        eprintln!(
+            "[regalloc-timing] label={label} unified_alloc blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
+            func.blocks.len(),
+            func.blocks
+                .iter()
+                .map(|block| block.insts.len())
+                .sum::<usize>(),
+            func.vregs.count(),
+            spill_frame_size,
+            start.elapsed()
+        );
+    }
 
     if cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some() {
+        let verify_start = timing.then(crate::timing::now);
         let analysis = analysis::analyze(func);
         verify_assignment(func, &analysis, &assignment);
+        if let Some(start) = verify_start {
+            eprintln!(
+                "[regalloc-timing] label={label} verify elapsed={:?}",
+                start.elapsed()
+            );
+        }
     }
 
     if let Some(before) = before_stats {
+        let stats_start = timing.then(crate::timing::now);
         log_regalloc_stats(label, func, &before, spill_frame_size);
+        if let Some(start) = stats_start {
+            eprintln!(
+                "[regalloc-timing] label={label} log_stats elapsed={:?}",
+                start.elapsed()
+            );
+        }
+    }
+    if let Some(start) = total_start {
+        eprintln!(
+            "[regalloc-timing] label={label} total elapsed={:?}",
+            start.elapsed()
+        );
     }
 
     RegallocResult {

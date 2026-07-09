@@ -6,6 +6,7 @@ use crate::ir::{
 };
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
+use std::collections::VecDeque;
 
 pub(super) struct BranchifyMuxPass;
 
@@ -36,98 +37,113 @@ impl ExecutionUnitPass for BranchifyMuxPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        while let Some(plan) = find_branchify_mux(eu) {
-            apply_branchify_mux(eu, plan);
+        let mut use_counts = count_uses(eu);
+        let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+        block_ids.sort_by_key(|id| id.0);
+        let mut worklist = VecDeque::from(block_ids);
+        let mut queued = HashSet::default();
+        queued.extend(worklist.iter().copied());
+
+        while let Some(block_id) = worklist.pop_front() {
+            queued.remove(&block_id);
+            if !eu.blocks.contains_key(&block_id) {
+                continue;
+            }
+            while let Some(plan) = find_branchify_mux_in_block(eu, block_id, &use_counts) {
+                let new_blocks = apply_branchify_mux(eu, plan, &mut use_counts);
+                for new_block in new_blocks {
+                    if queued.insert(new_block) {
+                        worklist.push_back(new_block);
+                    }
+                }
+            }
         }
     }
 }
 
-fn find_branchify_mux(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Option<BranchifyPlan> {
-    let use_counts = count_uses(eu);
-    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-    block_ids.sort_by_key(|id| id.0);
+fn find_branchify_mux_in_block(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    use_counts: &HashMap<RegisterId, usize>,
+) -> Option<BranchifyPlan> {
+    let block = eu.blocks.get(&block_id)?;
+    let mut def_pos = HashMap::default();
+    for (idx, inst) in block.instructions.iter().enumerate() {
+        if let Some(def) = def_reg(inst) {
+            def_pos.insert(def, idx);
+        }
+    }
 
-    for block_id in block_ids {
-        let block = &eu.blocks[&block_id];
-        let mut def_pos = HashMap::default();
-        for (idx, inst) in block.instructions.iter().enumerate() {
-            if let Some(def) = def_reg(inst) {
-                def_pos.insert(def, idx);
-            }
+    for (mux_idx, inst) in block.instructions.iter().enumerate() {
+        let SIRInstruction::Mux(dst, cond, true_val, false_val) = inst else {
+            continue;
+        };
+
+        let immediate_store = find_distributed_store(block, mux_idx, *dst, *true_val, *false_val);
+        let preserve_result =
+            immediate_store.is_none() || use_counts.get(dst).copied().unwrap_or(0) > 1;
+        let memory_barrier_idx = if preserve_result {
+            mux_idx
+        } else {
+            immediate_store
+                .as_ref()
+                .expect("single-use store mux should have a store")
+                .idx
+                + 1
+        };
+
+        let mut true_defs = HashSet::default();
+        let mut false_defs = HashSet::default();
+        collect_sinkable_defs(
+            block,
+            &def_pos,
+            use_counts,
+            mux_idx,
+            memory_barrier_idx,
+            *true_val,
+            &mut true_defs,
+        );
+        collect_sinkable_defs(
+            block,
+            &def_pos,
+            use_counts,
+            mux_idx,
+            memory_barrier_idx,
+            *false_val,
+            &mut false_defs,
+        );
+        if !true_defs.is_disjoint(&false_defs) {
+            continue;
+        }
+        if true_defs
+            .iter()
+            .chain(false_defs.iter())
+            .all(|idx| is_trivial_select_input(&block.instructions[*idx]))
+        {
+            continue;
         }
 
-        for (mux_idx, inst) in block.instructions.iter().enumerate() {
-            let SIRInstruction::Mux(dst, cond, true_val, false_val) = inst else {
-                continue;
-            };
+        let mut true_defs = true_defs.into_iter().collect::<Vec<_>>();
+        let mut false_defs = false_defs.into_iter().collect::<Vec<_>>();
+        true_defs.sort_unstable();
+        false_defs.sort_unstable();
 
-            let immediate_store =
-                find_distributed_store(block, mux_idx, *dst, *true_val, *false_val);
-            let preserve_result =
-                immediate_store.is_none() || use_counts.get(dst).copied().unwrap_or(0) > 1;
-            let memory_barrier_idx = if preserve_result {
-                mux_idx
+        return Some(BranchifyPlan {
+            block_id,
+            mux_idx,
+            dst: *dst,
+            cond: *cond,
+            true_val: *true_val,
+            false_val: *false_val,
+            true_defs,
+            false_defs,
+            distributed_store: if preserve_result {
+                None
             } else {
                 immediate_store
-                    .as_ref()
-                    .expect("single-use store mux should have a store")
-                    .idx
-                    + 1
-            };
-
-            let mut true_defs = HashSet::default();
-            let mut false_defs = HashSet::default();
-            collect_sinkable_defs(
-                block,
-                &def_pos,
-                &use_counts,
-                mux_idx,
-                memory_barrier_idx,
-                *true_val,
-                &mut true_defs,
-            );
-            collect_sinkable_defs(
-                block,
-                &def_pos,
-                &use_counts,
-                mux_idx,
-                memory_barrier_idx,
-                *false_val,
-                &mut false_defs,
-            );
-            if !true_defs.is_disjoint(&false_defs) {
-                continue;
-            }
-            if true_defs
-                .iter()
-                .chain(false_defs.iter())
-                .all(|idx| is_trivial_select_input(&block.instructions[*idx]))
-            {
-                continue;
-            }
-
-            let mut true_defs = true_defs.into_iter().collect::<Vec<_>>();
-            let mut false_defs = false_defs.into_iter().collect::<Vec<_>>();
-            true_defs.sort_unstable();
-            false_defs.sort_unstable();
-
-            return Some(BranchifyPlan {
-                block_id,
-                mux_idx,
-                dst: *dst,
-                cond: *cond,
-                true_val: *true_val,
-                false_val: *false_val,
-                true_defs,
-                false_defs,
-                distributed_store: if preserve_result {
-                    None
-                } else {
-                    immediate_store
-                },
-                preserve_result,
-            });
-        }
+            },
+            preserve_result,
+        });
     }
 
     None
@@ -299,7 +315,11 @@ fn mem_may_alias(a: MemAccess<'_>, b: MemAccess<'_>) -> bool {
     }
 }
 
-fn apply_branchify_mux(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: BranchifyPlan) {
+fn apply_branchify_mux(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: BranchifyPlan,
+    use_counts: &mut HashMap<RegisterId, usize>,
+) -> [BlockId; 3] {
     let next_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
     let true_id = BlockId(next_id);
     let false_id = BlockId(next_id + 1);
@@ -309,6 +329,7 @@ fn apply_branchify_mux(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Branc
         .blocks
         .remove(&plan.block_id)
         .expect("branchify target block must exist");
+    remove_block_uses(use_counts, &original);
     let mut remove_defs = plan
         .true_defs
         .iter()
@@ -399,25 +420,63 @@ fn apply_branchify_mux(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Branc
         terminator: original.terminator,
     };
 
+    add_block_uses(use_counts, &head);
+    add_block_uses(use_counts, &true_block);
+    add_block_uses(use_counts, &false_block);
+    add_block_uses(use_counts, &merge_block);
+
     eu.blocks.insert(plan.block_id, head);
     eu.blocks.insert(true_id, true_block);
     eu.blocks.insert(false_id, false_block);
     eu.blocks.insert(merge_id, merge_block);
+
+    [true_id, false_id, merge_id]
 }
 
 fn count_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, usize> {
     let mut counts = HashMap::default();
     for block in eu.blocks.values() {
-        for inst in &block.instructions {
-            for reg in inst_uses(inst) {
-                *counts.entry(reg).or_default() += 1;
-            }
-        }
-        for reg in terminator_uses(&block.terminator) {
+        add_block_uses(&mut counts, block);
+    }
+    counts
+}
+
+fn add_block_uses(
+    counts: &mut HashMap<RegisterId, usize>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+) {
+    for inst in &block.instructions {
+        for reg in inst_uses(inst) {
             *counts.entry(reg).or_default() += 1;
         }
     }
-    counts
+    for reg in terminator_uses(&block.terminator) {
+        *counts.entry(reg).or_default() += 1;
+    }
+}
+
+fn remove_block_uses(
+    counts: &mut HashMap<RegisterId, usize>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+) {
+    for inst in &block.instructions {
+        for reg in inst_uses(inst) {
+            decrement_use(counts, reg);
+        }
+    }
+    for reg in terminator_uses(&block.terminator) {
+        decrement_use(counts, reg);
+    }
+}
+
+fn decrement_use(counts: &mut HashMap<RegisterId, usize>, reg: RegisterId) {
+    let Some(count) = counts.get_mut(&reg) else {
+        return;
+    };
+    *count -= 1;
+    if *count == 0 {
+        counts.remove(&reg);
+    }
 }
 
 fn inst_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {

@@ -5,9 +5,10 @@
 //! which physical registers to assign. This eliminates the analysis
 //! divergence that required the k-1 hack.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 use crate::backend::native::mir::*;
+use crate::{HashMap, HashSet};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{
@@ -54,7 +55,7 @@ impl RegFile {
     fn new() -> Self {
         Self {
             preg_to_vreg: [None; 14],
-            vreg_to_preg: HashMap::new(),
+            vreg_to_preg: HashMap::default(),
         }
     }
 
@@ -390,7 +391,7 @@ pub fn unified_alloc_with_label(
     let mut trace = RegallocTrace::new_if_enabled(label, func);
 
     let mut regfile_exit: Vec<RegFile> = vec![RegFile::new(); num_blocks];
-    let mut s_exit: Vec<HashSet<VReg>> = vec![HashSet::new(); num_blocks];
+    let mut s_exit: Vec<HashSet<VReg>> = vec![HashSet::default(); num_blocks];
 
     for bi in 0..num_blocks {
         let (mut entry_rf, mut entry_s) =
@@ -456,7 +457,7 @@ fn compute_entry_regfile(
     let forward_preds: Vec<usize> = preds.iter().copied().filter(|&p| p < block_idx).collect();
 
     if preds.is_empty() {
-        return (rf, HashSet::new());
+        return (rf, HashSet::default());
     }
 
     if forward_preds.len() == 1 {
@@ -510,7 +511,6 @@ fn compute_entry_regfile(
 
     // Collect VRegs available in predecessor exits (in register or already spilled).
     let mut all: Option<HashSet<VReg>> = None;
-    let mut some: HashSet<VReg> = HashSet::new();
     let mut spilled_all: Option<HashSet<VReg>> = None;
 
     for &pred_idx in preds {
@@ -520,7 +520,6 @@ fn compute_entry_regfile(
         let pred_vregs: HashSet<VReg> = regfile_exit[pred_idx].vregs().collect();
         let pred_spilled = &s_exit[pred_idx];
         let pred_available: HashSet<VReg> = pred_vregs.union(pred_spilled).copied().collect();
-        some = some.union(&pred_available).copied().collect();
         all = Some(match all {
             None => pred_available,
             Some(a) => a.intersection(&pred_available).copied().collect(),
@@ -546,14 +545,6 @@ fn compute_entry_regfile(
         .iter()
         .copied()
         .filter(|v| analysis.entry_distances[block_idx].contains_key(v))
-        .filter(|v| {
-            regfile_exit.iter().enumerate().all(|(pred_idx, pred_rf)| {
-                if !preds.contains(&pred_idx) || pred_idx >= block_idx {
-                    return true;
-                }
-                pred_rf.contains(*v) || s_exit[pred_idx].contains(v)
-            })
-        })
         .collect();
     all_sorted.sort();
     for vreg in &all_sorted {
@@ -630,7 +621,7 @@ fn insert_coupling_code(
     mut trace: Option<&mut RegallocTrace>,
 ) {
     let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
-    let mut reload_set: HashSet<VReg> = HashSet::new();
+    let mut reload_set: HashSet<VReg> = HashSet::default();
     let mut live_in_set: HashSet<VReg> = entry_rf.vregs().collect();
     live_in_set.extend(entry_s.iter().copied());
     let mut live_ins: Vec<VReg> = live_in_set
@@ -726,12 +717,12 @@ fn process_block(
 ) -> (RegFile, HashSet<VReg>, Vec<MInst>) {
     let block = func.blocks[block_idx].clone();
     let mut new_insts: Vec<MInst> = Vec::with_capacity(block.insts.len());
-    let mut reload_alias: HashMap<VReg, VReg> = HashMap::new();
-    let mut alias_source: HashMap<VReg, VReg> = HashMap::new();
+    let mut reload_alias: HashMap<VReg, VReg> = HashMap::default();
+    let mut alias_source: HashMap<VReg, VReg> = HashMap::default();
 
     // Pre-compute next-use table: for each VReg, sorted list of use positions.
     // This replaces O(n) forward scans in next_use_at with O(log n) binary search.
-    let mut use_positions: HashMap<VReg, Vec<usize>> = HashMap::new();
+    let mut use_positions: HashMap<VReg, Vec<usize>> = HashMap::default();
     for (i, inst) in block.insts.iter().enumerate() {
         for vreg in inst.uses() {
             use_positions.entry(vreg).or_default().push(i);
@@ -751,7 +742,7 @@ fn process_block(
     let clobber_points = super::assignment::block_clobber_points_for(&block);
 
     // Pre-compute last-use positions for blocked set
-    let mut last_use_in_block: HashMap<VReg, usize> = HashMap::new();
+    let mut last_use_in_block: HashMap<VReg, usize> = HashMap::default();
     for (i, inst) in block.insts.iter().enumerate() {
         for vreg in inst.uses() {
             last_use_in_block.insert(vreg, i);
@@ -785,7 +776,7 @@ fn process_block(
         }
 
         // Step A+B: Ensure all uses are in registers
-        let mut pinned: HashSet<VReg> = HashSet::new();
+        let mut pinned: HashSet<VReg> = HashSet::default();
 
         for (&use_vreg, constraint) in uses.iter().zip(constraints.iter()) {
             if let RegConstraint::Fixed(required_preg) = constraint {

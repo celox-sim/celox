@@ -4,9 +4,10 @@
 //! instead of computing live-in/live-out sets, we compute next-use distance
 //! maps. The join operation takes the minimum distance per variable.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use crate::backend::native::mir::*;
+use crate::{HashMap, HashSet};
 
 /// Large constant used as edge length for loop-exit edges.
 /// Ensures that uses behind loops have larger distances than uses inside loops.
@@ -31,7 +32,7 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
 
     // Build block_order and block_index
     let block_order: Vec<BlockId> = func.blocks.iter().map(|b| b.id).collect();
-    let mut block_index = HashMap::new();
+    let mut block_index = HashMap::default();
     for (i, &bid) in block_order.iter().enumerate() {
         block_index.insert(bid, i);
     }
@@ -48,21 +49,25 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
         }
     }
     let backedge_successors = compute_backedge_successors(&successors);
+    let backedge_successor_edges =
+        compute_backedge_successor_edges(&successors, &backedge_successors);
+    let phi_edge_uses = compute_phi_edge_uses(func, &block_order, &successors);
+    let block_transfers = compute_block_transfers(func);
 
     // Initialize next-use distance maps
-    let mut entry_distances: Vec<HashMap<VReg, u32>> = vec![HashMap::new(); num_blocks];
-    let mut exit_distances: Vec<HashMap<VReg, u32>> = vec![HashMap::new(); num_blocks];
+    let mut entry_distances: Vec<HashMap<VReg, u32>> = vec![HashMap::default(); num_blocks];
+    let mut exit_distances: Vec<HashMap<VReg, u32>> = vec![HashMap::default(); num_blocks];
 
     let mut worklist: VecDeque<usize> = (0..num_blocks).rev().collect();
     let mut in_worklist = vec![true; num_blocks];
     while let Some(bi) = worklist.pop_front() {
         in_worklist[bi] = false;
         let (new_entry, new_exit) = compute_block_distances(
-            func,
             bi,
-            &block_order,
             &successors,
-            &backedge_successors,
+            &backedge_successor_edges,
+            &phi_edge_uses,
+            &block_transfers,
             &entry_distances,
         );
 
@@ -87,22 +92,29 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
 }
 
 fn compute_block_distances(
-    func: &MFunction,
     bi: usize,
-    block_order: &[BlockId],
     successors: &[Vec<usize>],
-    backedge_successors: &[Vec<usize>],
+    backedge_successor_edges: &[Vec<bool>],
+    phi_edge_uses: &[Vec<Vec<VReg>>],
+    block_transfers: &[BlockTransfer],
     entry_distances: &[HashMap<VReg, u32>],
 ) -> (HashMap<VReg, u32>, HashMap<VReg, u32>) {
-    let block = &func.blocks[bi];
-    let block_len = block.insts.len() as u32;
+    let transfer = &block_transfers[bi];
 
     // Join successor entry distances. Phi sources are edge uses from this
     // predecessor into the successor, so they are live at this block's exit.
-    let mut new_exit: HashMap<VReg, u32> = HashMap::new();
-    let my_block_id = block_order[bi];
-    for &succ_idx in &successors[bi] {
-        let edge_len = if backedge_successors[bi].contains(&succ_idx) {
+    let mut new_exit: HashMap<VReg, u32> = HashMap::default();
+    let exit_capacity = successors[bi]
+        .iter()
+        .map(|&succ_idx| entry_distances[succ_idx].len())
+        .sum::<usize>()
+        + phi_edge_uses[bi]
+            .iter()
+            .map(|sources| sources.len())
+            .sum::<usize>();
+    new_exit.reserve(exit_capacity);
+    for (edge_idx, &succ_idx) in successors[bi].iter().enumerate() {
+        let edge_len = if backedge_successor_edges[bi][edge_idx] {
             LOOP_EXIT_LENGTH
         } else {
             0
@@ -112,38 +124,107 @@ fn compute_block_distances(
             let entry = new_exit.entry(vreg).or_insert(u32::MAX);
             *entry = (*entry).min(new_dist);
         }
-        let succ_block = &func.blocks[succ_idx];
-        for phi in &succ_block.phis {
-            for (pred_id, src_vreg) in &phi.sources {
-                if *pred_id == my_block_id {
-                    let entry = new_exit.entry(*src_vreg).or_insert(u32::MAX);
-                    *entry = (*entry).min(edge_len);
+        for &src_vreg in &phi_edge_uses[bi][edge_idx] {
+            let entry = new_exit.entry(src_vreg).or_insert(u32::MAX);
+            *entry = (*entry).min(edge_len);
+        }
+    }
+
+    let mut new_entry: HashMap<VReg, u32> = HashMap::default();
+    new_entry.reserve(new_exit.len() + transfer.local_uses.len());
+    for (&vreg, &dist) in &new_exit {
+        if !transfer.defs.contains(&vreg) {
+            new_entry.insert(vreg, transfer.block_len.saturating_add(dist));
+        }
+    }
+    for &(vreg, pos) in &transfer.local_uses {
+        new_entry.insert(vreg, pos);
+    }
+
+    (new_entry, new_exit)
+}
+
+struct BlockTransfer {
+    block_len: u32,
+    defs: HashSet<VReg>,
+    local_uses: Vec<(VReg, u32)>,
+}
+
+fn compute_block_transfers(func: &MFunction) -> Vec<BlockTransfer> {
+    func.blocks
+        .iter()
+        .map(|block| {
+            let mut defs = HashSet::default();
+            defs.reserve(block.phis.len() + block.insts.len());
+            for phi in &block.phis {
+                defs.insert(phi.dst);
+            }
+
+            let mut local_uses: HashMap<VReg, u32> = HashMap::default();
+            for (inst_idx, inst) in block.insts.iter().enumerate() {
+                if let Some(def) = inst.def() {
+                    defs.insert(def);
+                }
+                let pos = inst_idx as u32;
+                for vreg in inst.uses() {
+                    if !defs.contains(&vreg) {
+                        local_uses.entry(vreg).or_insert(pos);
+                    }
+                }
+            }
+
+            let mut local_uses = local_uses.into_iter().collect::<Vec<_>>();
+            local_uses.sort_by_key(|(vreg, _)| *vreg);
+            BlockTransfer {
+                block_len: block.insts.len() as u32,
+                defs,
+                local_uses,
+            }
+        })
+        .collect()
+}
+
+fn compute_backedge_successor_edges(
+    successors: &[Vec<usize>],
+    backedge_successors: &[Vec<usize>],
+) -> Vec<Vec<bool>> {
+    successors
+        .iter()
+        .enumerate()
+        .map(|(idx, succs)| {
+            succs
+                .iter()
+                .map(|succ| backedge_successors[idx].contains(succ))
+                .collect()
+        })
+        .collect()
+}
+
+fn compute_phi_edge_uses(
+    func: &MFunction,
+    block_order: &[BlockId],
+    successors: &[Vec<usize>],
+) -> Vec<Vec<Vec<VReg>>> {
+    let mut phi_edge_uses = successors
+        .iter()
+        .map(|succs| vec![Vec::new(); succs.len()])
+        .collect::<Vec<_>>();
+
+    for (pred_idx, succs) in successors.iter().enumerate() {
+        let pred_id = block_order[pred_idx];
+        for (edge_idx, &succ_idx) in succs.iter().enumerate() {
+            let succ_block = &func.blocks[succ_idx];
+            for phi in &succ_block.phis {
+                for (source_pred, source) in &phi.sources {
+                    if *source_pred == pred_id {
+                        phi_edge_uses[pred_idx][edge_idx].push(*source);
+                    }
                 }
             }
         }
     }
 
-    // Transfer function (Braun & Hack Section 4.1):
-    // start with successor uses shifted by this block length, then override
-    // with the first in-block use seen while walking backward.
-    let mut new_entry: HashMap<VReg, u32> = HashMap::new();
-    for (&vreg, &dist) in &new_exit {
-        new_entry.insert(vreg, block_len.saturating_add(dist));
-    }
-    for (inst_idx, inst) in block.insts.iter().enumerate().rev() {
-        let pos = inst_idx as u32;
-        for vreg in inst.uses() {
-            new_entry.insert(vreg, pos);
-        }
-        if let Some(def) = inst.def() {
-            new_entry.remove(&def);
-        }
-    }
-    for phi in &block.phis {
-        new_entry.remove(&phi.dst);
-    }
-
-    (new_entry, new_exit)
+    phi_edge_uses
 }
 
 fn compute_backedge_successors(successors: &[Vec<usize>]) -> Vec<Vec<usize>> {
