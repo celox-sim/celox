@@ -190,33 +190,7 @@ fn compute_entry_regfile(
         let pred_rf = &regfile_exit[pred_idx];
         let mut s = s_exit[pred_idx].clone();
         s.retain(|v| analysis.entry_distances[block_idx].contains_key(v));
-
-        // Phi dsts are block-entry definitions and the edge-copy emitter needs
-        // a concrete destination register for every one of them. Assign them
-        // before carrying ordinary live-ins across the edge.
-        for phi in &func.blocks[block_idx].phis {
-            if rf.contains(phi.dst) {
-                continue;
-            }
-            let src = phi
-                .sources
-                .iter()
-                .find_map(|(pred_id, src)| (*pred_id == func.blocks[pred_idx].id).then_some(*src));
-            let preferred = src.and_then(|src_vreg| {
-                let preg = pred_rf.get_preg(src_vreg)?;
-                if analysis.entry_distances[block_idx].contains_key(&src_vreg)
-                    || rf.preg_occupied(preg)
-                {
-                    None
-                } else {
-                    Some(preg)
-                }
-            });
-            let preg = preferred
-                .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
-                .expect("no free register for phi dst");
-            rf.assign(phi.dst, preg);
-        }
+        let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
 
         let mut pred_live: Vec<VReg> = pred_rf
             .vregs()
@@ -232,6 +206,29 @@ fn compute_entry_regfile(
                     rf.assign(vreg, preg);
                 }
             }
+        }
+
+        for phi in &func.blocks[block_idx].phis {
+            if rf.contains(phi.dst) {
+                continue;
+            }
+            let src = phi
+                .sources
+                .iter()
+                .find_map(|(pred_id, src)| (*pred_id == func.blocks[pred_idx].id).then_some(*src));
+            let preferred = src.and_then(|src_vreg| {
+                let preg = rf.get_preg(src_vreg)?;
+                if analysis.entry_distances[block_idx].contains_key(&src_vreg) {
+                    None
+                } else {
+                    rf.evict(src_vreg);
+                    Some(preg)
+                }
+            });
+            let preg = preferred
+                .or_else(|| free_entry_reg_for_phi(&mut rf, &mut s, &phi_dsts))
+                .expect("no free register for phi dst");
+            rf.assign(phi.dst, preg);
         }
 
         return (rf, s);
@@ -263,32 +260,6 @@ fn compute_entry_regfile(
     let all = all.unwrap_or_default();
     let mut s = spilled_all.unwrap_or_default();
     s.retain(|v| analysis.entry_distances[block_idx].contains_key(v));
-
-    // Phi dsts are mandatory edge-copy destinations. Assign them before
-    // optional live-in carry-over so pressure cannot silently drop a phi.
-    for phi in &func.blocks[block_idx].phis {
-        if rf.contains(phi.dst) {
-            continue;
-        }
-        // Try to coalesce with a source that is not also live through the
-        // target block entry; otherwise the phi copy would clobber that live-in.
-        let mut preferred: Option<PhysReg> = None;
-        for (_pred_id, src_vreg) in &phi.sources {
-            if analysis.entry_distances[block_idx].contains_key(src_vreg) {
-                continue;
-            }
-            if let Some(preg) = result.get(*src_vreg) {
-                if !rf.preg_occupied(preg) {
-                    preferred = Some(preg);
-                    break;
-                }
-            }
-        }
-        let preg = preferred
-            .or_else(|| rf.find_free_excluding(&PhysRegSet::new()))
-            .expect("no free register for phi dst");
-        rf.assign(phi.dst, preg);
-    }
 
     // Start with intersection: VRegs in registers in ALL predecessors.
     // If the preferred PhysReg is already taken, skip — the VReg will be
@@ -325,7 +296,48 @@ fn compute_entry_regfile(
         }
     }
 
+    // Add phi defs after carrying live-ins. This preserves the original edge
+    // semantics for loop joins where the phi source register may also be a
+    // live-in on another incoming edge.
+    let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
+    for phi in &func.blocks[block_idx].phis {
+        if rf.contains(phi.dst) {
+            continue;
+        }
+        let mut preferred: Option<PhysReg> = None;
+        for (_pred_id, src_vreg) in &phi.sources {
+            if let Some(preg) = result.get(*src_vreg) {
+                if !rf.preg_occupied(preg) {
+                    preferred = Some(preg);
+                    break;
+                }
+            }
+        }
+        let preg = preferred
+            .or_else(|| free_entry_reg_for_phi(&mut rf, &mut s, &phi_dsts))
+            .expect("no free register for phi dst");
+        rf.assign(phi.dst, preg);
+    }
+
     (rf, s)
+}
+
+fn free_entry_reg_for_phi(
+    rf: &mut RegFile,
+    s: &mut HashSet<VReg>,
+    avoid: &HashSet<VReg>,
+) -> Option<PhysReg> {
+    if let Some(preg) = rf.find_free_excluding(&PhysRegSet::new()) {
+        return Some(preg);
+    }
+
+    let mut candidates: Vec<VReg> = rf.vregs().filter(|v| !avoid.contains(v)).collect();
+    candidates.sort();
+    let victim = *candidates.first()?;
+    let preg = rf.get_preg(victim)?;
+    rf.evict(victim);
+    s.insert(victim);
+    Some(preg)
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -344,15 +356,17 @@ fn insert_coupling_code(
 ) {
     let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
     let mut reload_set: HashSet<VReg> = HashSet::new();
-    let mut live_ins: Vec<VReg> = entry_rf
-        .vregs()
+    let mut live_in_set: HashSet<VReg> = entry_rf.vregs().collect();
+    live_in_set.extend(entry_s.iter().copied());
+    let mut live_ins: Vec<VReg> = live_in_set
+        .into_iter()
         .filter(|v| !phi_dsts.contains(v) && analysis.entry_distances[block_idx].contains_key(v))
         .collect();
     live_ins.sort();
 
     for &vreg in &live_ins {
         let mut resident_preds = Vec::new();
-        let mut needs_memory = false;
+        let mut needs_memory = entry_s.contains(&vreg);
 
         for &pred_idx in &analysis.predecessors[block_idx] {
             if pred_idx >= block_idx {

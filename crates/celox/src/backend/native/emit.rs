@@ -215,47 +215,14 @@ fn emit_phi_moves_for_target(
         return Ok(());
     }
 
-    // Sequentialize parallel copies, handling cycles with xchg.
-    let mut done = vec![false; copies.len()];
-    let mut progress = true;
-    while progress {
-        progress = false;
-        for i in 0..copies.len() {
-            if done[i] {
-                continue;
-            }
-            let (dst, _src) = copies[i];
-            let dst_is_src = copies
-                .iter()
-                .enumerate()
-                .any(|(j, (_, s))| j != i && !done[j] && *s == dst);
-            if !dst_is_src {
-                let (d, s) = copies[i];
-                asm.mov(preg_to_reg64(d), preg_to_reg64(s))?;
-                done[i] = true;
-                progress = true;
-            }
-        }
+    // Preserve true parallel-copy semantics even for cycles. Phi edges are
+    // cold compared with straight-line eval code, so prefer correctness and
+    // simple code over clever xchg scheduling.
+    for (_, src) in &copies {
+        asm.push(preg_to_reg64(*src))?;
     }
-
-    // Remaining undone copies form cycles; break with xchg
-    for i in 0..copies.len() {
-        if done[i] {
-            continue;
-        }
-        let (d, s) = copies[i];
-        asm.xchg(preg_to_reg64(d), preg_to_reg64(s))?;
-        done[i] = true;
-        for j in (i + 1)..copies.len() {
-            if done[j] {
-                continue;
-            }
-            if copies[j].1 == d {
-                copies[j].1 = s;
-            } else if copies[j].1 == s {
-                copies[j].1 = d;
-            }
-        }
+    for (dst, _) in copies.iter().rev() {
+        asm.pop(preg_to_reg64(*dst))?;
     }
     Ok(())
 }
@@ -1453,6 +1420,9 @@ pub fn emit_chained_eus(
     if mir_stats {
         log_mir_stats(label, "after_mir_opt", &mfunc);
     }
+    if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
+        log_mir_block_stats(label, "after_mir_opt", &mfunc);
+    }
     if verify_mir {
         if timing {
             eprintln!("[native-timing] emit_chained verify after_mir_opt label={label}");
@@ -1473,6 +1443,9 @@ pub fn emit_chained_eus(
     }
     if mir_stats {
         log_mir_stats(label, "after_regalloc", &mfunc);
+    }
+    if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
+        log_mir_block_stats(label, "after_regalloc", &mfunc);
     }
     let emit_start = timing.then(crate::timing::now);
     let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
@@ -1578,6 +1551,28 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
     eprintln!(
         "[native-mir-stats] label={label} stage={stage} phi={phi} mov={mov} imm={imm} load_sim={load_sim} load_stack={load_stack} load_ptr={load_ptr} store_sim={store_sim} store_stack={store_stack} store_ptr={store_ptr} indexed_load={indexed_load} indexed_store={indexed_store} memcopy={memcopy} alu={alu} alu_imm={alu_imm} cmp={cmp} div_rem={div_rem} bit_ops={bit_ops} select={select} branch={branch} jump={jump} ret={ret}"
     );
+}
+
+fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
+    let mut blocks = func
+        .blocks
+        .iter()
+        .map(|block| {
+            let insts = block.phis.len() + block.insts.len();
+            (insts, block.id.0, block.phis.len(), block.insts.len())
+        })
+        .collect::<Vec<_>>();
+    blocks.sort_unstable_by(|a, b| b.cmp(a));
+    for (rank, (total, block_id, phis, insts)) in blocks.into_iter().take(10).enumerate() {
+        eprintln!(
+            "[native-mir-block-stats] label={label} stage={stage} rank={} block={} total={} phis={} insts={}",
+            rank + 1,
+            block_id,
+            total,
+            phis,
+            insts
+        );
+    }
 }
 
 fn dump_native_block_context(
