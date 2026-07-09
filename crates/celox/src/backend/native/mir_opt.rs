@@ -122,28 +122,28 @@ fn fold_adjacent_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MIn
             lhs,
             rhs,
             kind,
-        } if *rhs == imm_vreg => signed_i32(value).map(|imm| MInst::CmpImm {
+        } if *rhs == imm_vreg => sign_extended_i32(value).map(|imm| MInst::CmpImm {
             dst: *dst,
             lhs: *lhs,
             imm,
             kind: *kind,
         }),
         MInst::Add { dst, lhs, rhs } if *rhs == imm_vreg => {
-            signed_i32(value).map(|imm| MInst::AddImm {
+            sign_extended_i32(value).map(|imm| MInst::AddImm {
                 dst: *dst,
                 src: *lhs,
                 imm,
             })
         }
         MInst::Add { dst, lhs, rhs } if *lhs == imm_vreg => {
-            signed_i32(value).map(|imm| MInst::AddImm {
+            sign_extended_i32(value).map(|imm| MInst::AddImm {
                 dst: *dst,
                 src: *rhs,
                 imm,
             })
         }
         MInst::Sub { dst, lhs, rhs } if *rhs == imm_vreg => {
-            signed_i32(value).map(|imm| MInst::SubImm {
+            sign_extended_i32(value).map(|imm| MInst::SubImm {
                 dst: *dst,
                 src: *lhs,
                 imm,
@@ -164,14 +164,14 @@ fn fold_adjacent_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MIn
             })
         }
         MInst::Or { dst, lhs, rhs } if *rhs == imm_vreg => {
-            signed_i32(value).map(|imm| MInst::OrImm {
+            sign_extended_i32(value).map(|imm| MInst::OrImm {
                 dst: *dst,
                 src: *lhs,
                 imm: imm as u64,
             })
         }
         MInst::Or { dst, lhs, rhs } if *lhs == imm_vreg => {
-            signed_i32(value).map(|imm| MInst::OrImm {
+            sign_extended_i32(value).map(|imm| MInst::OrImm {
                 dst: *dst,
                 src: *rhs,
                 imm: imm as u64,
@@ -196,13 +196,13 @@ fn fold_adjacent_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MIn
     }
 }
 
-fn signed_i32(value: u64) -> Option<i32> {
-    let signed = value as i64;
-    (signed >= i32::MIN as i64 && signed <= i32::MAX as i64).then_some(signed as i32)
+fn sign_extended_i32(value: u64) -> Option<i32> {
+    let imm = value as i32;
+    ((imm as i64 as u64) == value).then_some(imm)
 }
 
 fn and_imm_ok(value: u64) -> bool {
-    signed_i32(value).is_some() || value <= u32::MAX as u64
+    sign_extended_i32(value).is_some() || value <= u32::MAX as u64
 }
 
 #[inline]
@@ -1715,11 +1715,11 @@ fn lower_to_imm_forms(func: &mut MFunction) {
                     kind,
                 } => {
                     if let Some(&val) = consts.get(rhs) {
-                        if val as i64 >= i32::MIN as i64 && val as i64 <= i32::MAX as i64 {
+                        if let Some(imm) = sign_extended_i32(val) {
                             *inst = MInst::CmpImm {
                                 dst: *dst,
                                 lhs: *lhs,
-                                imm: val as i32,
+                                imm,
                                 kind: *kind,
                             };
                         }
@@ -1727,31 +1727,31 @@ fn lower_to_imm_forms(func: &mut MFunction) {
                 }
                 MInst::Add { dst, lhs, rhs } => {
                     if let Some(&val) = consts.get(rhs) {
-                        if val as i64 >= i32::MIN as i64 && val as i64 <= i32::MAX as i64 {
+                        if let Some(imm) = sign_extended_i32(val) {
                             *inst = MInst::AddImm {
                                 dst: *dst,
                                 src: *lhs,
-                                imm: val as i32,
+                                imm,
                             };
                         }
                     } else if let Some(&val) = consts.get(lhs) {
                         // Add is commutative
-                        if val as i64 >= i32::MIN as i64 && val as i64 <= i32::MAX as i64 {
+                        if let Some(imm) = sign_extended_i32(val) {
                             *inst = MInst::AddImm {
                                 dst: *dst,
                                 src: *rhs,
-                                imm: val as i32,
+                                imm,
                             };
                         }
                     }
                 }
                 MInst::Sub { dst, lhs, rhs } => {
                     if let Some(&val) = consts.get(rhs) {
-                        if val as i64 >= i32::MIN as i64 && val as i64 <= i32::MAX as i64 {
+                        if let Some(imm) = sign_extended_i32(val) {
                             *inst = MInst::SubImm {
                                 dst: *dst,
                                 src: *lhs,
-                                imm: val as i32,
+                                imm,
                             };
                         }
                     }
@@ -3301,6 +3301,113 @@ mod tests {
         assert!(matches!(func.blocks[0].insts[2], MInst::LoadImm { .. }));
         assert!(matches!(func.blocks[0].insts[3], MInst::Shl { .. }));
         assert_eq!(func.blocks[0].insts.len(), 5);
+    }
+
+    #[test]
+    fn post_regalloc_peephole_folds_sign_extended_immediates() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: u64::MAX - 1,
+                },
+                MInst::And {
+                    dst: VReg(1),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: u64::MAX,
+                },
+                MInst::Sub {
+                    dst: VReg(4),
+                    lhs: VReg(5),
+                    rhs: VReg(3),
+                },
+                MInst::LoadImm {
+                    dst: VReg(6),
+                    value: u64::MAX,
+                },
+                MInst::Cmp {
+                    dst: VReg(7),
+                    lhs: VReg(8),
+                    rhs: VReg(6),
+                    kind: CmpKind::Eq,
+                },
+                MInst::Return,
+            ],
+            9,
+        );
+
+        post_regalloc_peephole(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[0],
+            MInst::AndImm {
+                dst: VReg(1),
+                src: VReg(2),
+                imm: 0xffff_ffff_ffff_fffe,
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::SubImm {
+                dst: VReg(4),
+                src: VReg(5),
+                imm: -1,
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::CmpImm {
+                dst: VReg(7),
+                lhs: VReg(8),
+                imm: -1,
+                kind: CmpKind::Eq,
+            }
+        ));
+        assert_eq!(func.blocks[0].insts.len(), 4);
+    }
+
+    #[test]
+    fn lower_to_imm_forms_uses_sign_extended_immediates() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: u64::MAX,
+                },
+                MInst::Add {
+                    dst: VReg(1),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 0x8000_0000,
+                },
+                MInst::Sub {
+                    dst: VReg(4),
+                    lhs: VReg(5),
+                    rhs: VReg(3),
+                },
+                MInst::Return,
+            ],
+            6,
+        );
+
+        lower_to_imm_forms(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::AddImm {
+                dst: VReg(1),
+                src: VReg(2),
+                imm: -1,
+            }
+        ));
+        assert!(matches!(func.blocks[0].insts[3], MInst::Sub { .. }));
     }
 
     #[test]
