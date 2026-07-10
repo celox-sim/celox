@@ -28,6 +28,13 @@ pub struct AnalysisResult {
 
 /// Compute liveness and next-use distances for the entire MFunction.
 pub fn analyze(func: &MFunction) -> AnalysisResult {
+    analyze_ignoring_phi_sources(func, &HashSet::default())
+}
+
+pub(super) fn analyze_ignoring_phi_sources(
+    func: &MFunction,
+    ignored_phi_sources: &HashSet<VReg>,
+) -> AnalysisResult {
     let num_blocks = func.blocks.len();
 
     // Build block_order and block_index
@@ -51,7 +58,7 @@ pub fn analyze(func: &MFunction) -> AnalysisResult {
     let backedge_successors = compute_backedge_successors(&successors);
     let backedge_successor_edges =
         compute_backedge_successor_edges(&successors, &backedge_successors);
-    let phi_edge_uses = compute_phi_edge_uses(func, &block_order, &successors);
+    let phi_edge_uses = compute_phi_edge_uses(func, &block_order, &successors, ignored_phi_sources);
     let block_transfers = compute_block_transfers(func);
 
     // Initialize next-use distance maps
@@ -204,6 +211,7 @@ fn compute_phi_edge_uses(
     func: &MFunction,
     block_order: &[BlockId],
     successors: &[Vec<usize>],
+    ignored: &HashSet<VReg>,
 ) -> Vec<Vec<Vec<VReg>>> {
     let mut phi_edge_uses = successors
         .iter()
@@ -216,7 +224,7 @@ fn compute_phi_edge_uses(
             let succ_block = &func.blocks[succ_idx];
             for phi in &succ_block.phis {
                 for (source_pred, source) in &phi.sources {
-                    if *source_pred == pred_id {
+                    if *source_pred == pred_id && !ignored.contains(source) {
                         phi_edge_uses[pred_idx][edge_idx].push(*source);
                     }
                 }

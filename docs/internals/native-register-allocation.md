@@ -106,12 +106,15 @@ During migration, `CELOX_REGALLOC_IMPL` controls selection:
 
 - `auto` (default) uses SSA coloring and temporarily routes functions which
   require spill placement to the unified allocator;
-- `ssa` requires the new path and reports the first value requiring spill
-  placement instead of silently falling back; and
+- `ssa` requires the new path, including fresh-SSA spill splitting and
+  stack/immediate phi edge homes, and never silently falls back; and
 - `unified` selects the old implementation for differential diagnosis.
 
-SSA spill placement and final removal of the unified allocator remain migration
-work.  Until those land, passing the verifier means
+The first SSA spill-placement implementation is now present.  It rewrites each
+ordinary use to a fresh reload definition, assigns spilled phi sources and
+destinations edge-specific memory homes, and batches pressure-driven splits in
+one MIR traversal.  Final removal of the unified allocator remains migration
+work.  Until that lands, passing the verifier means
 the emitted allocation satisfies the current location model; it does not make
 the unified algorithm the intended long-term design.
 
@@ -120,3 +123,11 @@ slice colors `apply_ff` (5,395 MIR instructions) entirely on the new path with
 no spill frame.  The three larger evaluation functions currently report their
 first spill requirement and use the migration path.  This split is observable
 with `CELOX_REGALLOC_TIMING=1`; it is not inferred from compile success alone.
+
+The forced SSA path passes the native execution, combinational-observer, and
+32-way phi-pressure regressions.  On the large Heliodor `eval_comb` function it
+still exceeds the 120-second compile-only measurement window, so it is not the
+default for functions requiring spills.  The next performance step is a
+Braun--Hack-style block-state spill planner which avoids repeatedly rebuilding
+global liveness after each split batch; adding an iteration or CFG-size cap is
+not an acceptable substitute.

@@ -87,14 +87,22 @@ pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocRes
     let (assignment, spill_frame_size, implementation) = if requested == "unified" {
         let (assignment, frame_size) = unified::unified_alloc_with_label(func, &analysis, label);
         (assignment, frame_size, "unified-spill")
+    } else if requested == "ssa" {
+        match ssa::allocate(func) {
+            Ok(allocation) => (
+                allocation.assignment,
+                allocation.spill_frame_size,
+                "ssa-split-color",
+            ),
+            Err(failure) => panic!(
+                "SSA register allocation could not split a spill candidate at {} for {}",
+                failure.block, failure.value
+            ),
+        }
     } else {
         match ssa::try_color(func, &analysis) {
             Ok(assignment) => (assignment, 0, "ssa-color"),
-            Err(failure) if requested == "ssa" => panic!(
-                "SSA register allocation requires spill placement at {} for {}; the legacy allocator was not selected",
-                failure.block, failure.value
-            ),
-            Err(failure) if requested == "auto" => {
+            Err(failure) => {
                 if timing {
                     eprintln!(
                         "[regalloc-timing] label={label} ssa_color_fallback block={} value={}",
@@ -105,7 +113,6 @@ pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocRes
                     unified::unified_alloc_with_label(func, &analysis, label);
                 (assignment, frame_size, "unified-spill")
             }
-            Err(_) => unreachable!("register allocator implementation was validated"),
         }
     };
     if let Some(start) = alloc_start {
