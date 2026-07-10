@@ -5,10 +5,12 @@
 
 mod analysis;
 pub mod assignment;
+mod legalize;
 mod spilling;
 #[cfg(test)]
 mod tests;
 mod unified;
+mod verify;
 
 use super::mir::{BaseReg, MFunction, MInst};
 pub use assignment::AssignmentMap;
@@ -27,79 +29,12 @@ pub struct RegallocResult {
     pub spill_frame_size: u32,
 }
 
-/// Verify the final allocation's coverage and machine constraints.
-///
-/// Residency conflicts are verified against `RegFile` during allocation;
-/// `AssignmentMap` alone intentionally does not encode residency intervals.
 fn verify_assignment(
     func: &MFunction,
-    _analysis: &analysis::AnalysisResult,
+    analysis: &analysis::AnalysisResult,
     assignment: &assignment::AssignmentMap,
 ) {
-    use assignment::RegConstraint;
-
-    for block in &func.blocks {
-        for phi in &block.phis {
-            assert!(
-                assignment.get(phi.dst).is_some() || assignment.edge_spill_slot(phi.dst).is_some(),
-                "regalloc verify: phi dst {} has neither physical assignment nor edge spill slot at bb{}",
-                phi.dst,
-                block.id
-            );
-            for (pred, src) in &phi.sources {
-                assert!(
-                    assignment.edge_location(*pred, *src).is_some()
-                        || assignment.get(*src).is_some()
-                        || assignment.edge_spill_slot(*src).is_some(),
-                    "regalloc verify: phi source {src} has no edge location or fallback assignment at bb{} from bb{} to dst {}",
-                    block.id,
-                    pred,
-                    phi.dst
-                );
-            }
-        }
-
-        for (inst_idx, inst) in block.insts.iter().enumerate() {
-            let uses = inst.uses();
-            let constraints = assignment::use_constraints(inst);
-            assert_eq!(
-                uses.len(),
-                constraints.len(),
-                "regalloc verify: constraint arity mismatch at bb{} inst {}: {}",
-                block.id,
-                inst_idx,
-                inst
-            );
-            for (use_vreg, constraint) in uses.into_iter().zip(constraints) {
-                assert!(
-                    assignment.get(use_vreg).is_some(),
-                    "regalloc verify: use {use_vreg} has no physical assignment at bb{} inst {}: {}",
-                    block.id,
-                    inst_idx,
-                    inst
-                );
-                if let RegConstraint::Fixed(required) = constraint {
-                    assert_eq!(
-                        assignment.get(use_vreg),
-                        Some(required),
-                        "regalloc verify: use {use_vreg} must occupy {required} at bb{} inst {}: {}",
-                        block.id,
-                        inst_idx,
-                        inst
-                    );
-                }
-            }
-            if let Some(def) = inst.def() {
-                assert!(
-                    assignment.get(def).is_some(),
-                    "regalloc verify: def {def} has no physical assignment at bb{} inst {}: {}",
-                    block.id,
-                    inst_idx,
-                    inst
-                );
-            }
-        }
-    }
+    verify::verify(func, analysis, assignment).unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// Run the full register allocation pipeline on an MFunction.
@@ -111,6 +46,10 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
 /// Run register allocation and optionally log per-block allocation deltas.
 pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocResult {
     reorder_blocks_rpo(func);
+    legalize::isolate_fixed_uses(func);
+    if cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some() {
+        func.verify();
+    }
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let total_start = timing.then(crate::timing::now);

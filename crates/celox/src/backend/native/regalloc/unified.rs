@@ -464,7 +464,14 @@ pub fn unified_alloc_with_label(
 
         // Record entry assignments
         for (vreg, preg) in &entry_rf.vreg_to_preg {
-            result.set(*vreg, *preg);
+            if let Some(existing) = result.get(*vreg) {
+                assert_eq!(
+                    existing, *preg,
+                    "regalloc cannot change the global assignment of {vreg} from {existing} to {preg} at bb{bi}"
+                );
+            } else {
+                result.set(*vreg, *preg);
+            }
         }
 
         let (exit_rf, exit_s, new_insts) = process_block(
@@ -530,8 +537,15 @@ fn compute_entry_regfile(
                 continue;
             }
             if let Some(preg) = pred_rf.get_preg(vreg) {
-                if !rf.preg_occupied(preg) {
-                    rf.assign(vreg, preg);
+                let required = result.get(vreg).unwrap_or(preg);
+                if preg == required && !rf.preg_occupied(required) {
+                    rf.assign(vreg, required);
+                } else {
+                    // AssignmentMap is function-wide.  Crossing the edge in a
+                    // different register would silently rewrite the value's
+                    // earlier assignment, so couple through its memory home
+                    // and let the use get a fresh SSA reload instead.
+                    s.insert(vreg);
                 }
             }
         }
@@ -1389,7 +1403,12 @@ fn materialize_phi_edge_homes(
             let preg = rf
                 .get_preg(resident)
                 .expect("resident phi source has a physical register");
-            result.set_edge_location(pred_id, source, EdgeLocation::Register(preg));
+            result.set_edge_location_at(
+                pred_id,
+                source,
+                EdgeLocation::Register(preg),
+                new_insts.len(),
+            );
             continue;
         }
 
@@ -1455,7 +1474,7 @@ fn materialize_phi_edge_homes(
             src: edge_value,
             size: OpSize::S64,
         });
-        result.set_edge_location(pred_id, source, EdgeLocation::Stack(slot));
+        result.set_edge_location_at(pred_id, source, EdgeLocation::Stack(slot), new_insts.len());
         rf.evict(edge_value);
     }
 }

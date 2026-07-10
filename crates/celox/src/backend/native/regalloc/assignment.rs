@@ -163,6 +163,7 @@ pub struct AssignmentMap {
     pub map: HashMap<VReg, PhysReg>,
     pub edge_spill_slots: HashMap<VReg, i32>,
     pub edge_locations: HashMap<(BlockId, VReg), EdgeLocation>,
+    pub edge_location_points: HashMap<(BlockId, VReg), usize>,
 }
 
 impl AssignmentMap {
@@ -187,7 +188,29 @@ impl AssignmentMap {
     }
 
     pub fn set_edge_location(&mut self, pred: BlockId, vreg: VReg, location: EdgeLocation) {
+        self.set_edge_location_at(pred, vreg, location, 0);
+    }
+
+    pub fn set_edge_location_at(
+        &mut self,
+        pred: BlockId,
+        vreg: VReg,
+        location: EdgeLocation,
+        program_point: usize,
+    ) {
         self.edge_locations.insert((pred, vreg), location);
+        self.edge_location_points
+            .insert((pred, vreg), program_point);
+    }
+
+    pub fn edge_location_at(
+        &self,
+        pred: BlockId,
+        vreg: VReg,
+        program_point: usize,
+    ) -> Option<EdgeLocation> {
+        let valid_from = self.edge_location_points.get(&(pred, vreg)).copied()?;
+        (program_point >= valid_from).then(|| self.edge_locations[&(pred, vreg)])
     }
 
     /// Returns entries sorted by VReg for deterministic display.
