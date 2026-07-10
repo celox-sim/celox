@@ -294,7 +294,13 @@ impl JitBackend {
                     mir_opt::optimize(&mut mfunc);
                     mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}\n"));
-                    let ra = run_regalloc(&mut mfunc);
+                    let ra = match run_regalloc(&mut mfunc) {
+                        Ok(allocation) => allocation,
+                        Err(error) => {
+                            mir_output.push_str(&format!("  regalloc error: {error}\n\n"));
+                            continue;
+                        }
+                    };
                     mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
                     mir_output.push_str(&format!("{mfunc}"));
                     mir_output.push_str("  Register assignment:\n");
@@ -323,7 +329,13 @@ impl JitBackend {
                         mir_legalize::legalize(&mut mfunc);
                         mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
                         mir_output.push_str(&format!("{mfunc}\n"));
-                        let ra = run_regalloc(&mut mfunc);
+                        let ra = match run_regalloc(&mut mfunc) {
+                            Ok(allocation) => allocation,
+                            Err(error) => {
+                                mir_output.push_str(&format!("  regalloc error: {error}\n\n"));
+                                continue;
+                            }
+                        };
                         mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
                         mir_output.push_str(&format!("{mfunc}"));
                         mir_output.push_str("  Register assignment:\n");

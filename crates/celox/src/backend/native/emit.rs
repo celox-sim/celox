@@ -5,6 +5,7 @@
 //! Function signature: `fn(unified_mem: *mut u8) -> i64`
 
 use std::collections::HashMap;
+use std::fmt;
 
 use iced_x86::BlockEncoderOptions;
 use iced_x86::code_asm::*;
@@ -174,6 +175,45 @@ pub struct EmitResult {
     pub frame_size: u32,
     /// Machine-code offsets for MIR basic-block entry labels.
     pub block_offsets: Vec<(BlockId, u64)>,
+}
+
+/// Failure while compiling a merged MIR function through allocation and x86
+/// encoding.  Allocation diagnostics retain their phase/rule/location rather
+/// than being collapsed into a panic.
+#[derive(Debug)]
+pub enum ChainedEmitError {
+    Regalloc(crate::backend::native::regalloc::RegallocError),
+    Assembly(IcedError),
+}
+
+impl fmt::Display for ChainedEmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Regalloc(error) => error.fmt(f),
+            Self::Assembly(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ChainedEmitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Regalloc(error) => Some(error),
+            Self::Assembly(error) => Some(error),
+        }
+    }
+}
+
+impl From<crate::backend::native::regalloc::RegallocError> for ChainedEmitError {
+    fn from(error: crate::backend::native::regalloc::RegallocError) -> Self {
+        Self::Regalloc(error)
+    }
+}
+
+impl From<IcedError> for ChainedEmitError {
+    fn from(error: IcedError) -> Self {
+        Self::Assembly(error)
+    }
 }
 
 /// Disassemble the emitted code to a string (NASM syntax).
@@ -2107,7 +2147,7 @@ pub fn emit_chained_eus(
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     label: &str,
-) -> Result<EmitResult, IcedError> {
+) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
@@ -2207,7 +2247,7 @@ pub fn emit_chained_eus(
         mfunc.verify();
     }
     let regalloc_start = timing.then(crate::timing::now);
-    let ra = regalloc::run_regalloc_with_label(&mut mfunc, label);
+    let ra = regalloc::run_regalloc_with_label(&mut mfunc, label)?;
     if let Some(start) = regalloc_start {
         eprintln!(
             "[native-timing] emit_chained regalloc mir_blocks={} mir_insts={} vregs={} spill_frame={} elapsed={:?}",

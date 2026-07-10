@@ -43,6 +43,19 @@ impl NormalizedCfg {
             assert!(block < blocks);
             assert!(frontier.iter().all(|member| *member < blocks));
         }
+        for (block, successors) in self.successors.iter().enumerate() {
+            if successors.len() < 2 {
+                continue;
+            }
+            for &successor in successors {
+                assert_eq!(self.predecessors[successor], vec![block]);
+                assert!(func.blocks[successor].phis.is_empty());
+                assert!(matches!(
+                    func.blocks[successor].insts.as_slice(),
+                    [MInst::Jump { .. }]
+                ));
+            }
+        }
     }
 }
 
@@ -70,6 +83,16 @@ pub(super) fn normalize(func: &mut MFunction) -> NormalizedCfg {
 }
 
 fn split_critical_edges(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        if let Some(MInst::Branch {
+            true_bb, false_bb, ..
+        }) = block.insts.last()
+            && true_bb == false_bb
+        {
+            let target = *true_bb;
+            *block.insts.last_mut().unwrap() = MInst::Jump { target };
+        }
+    }
     let (block_index, predecessors, _) = graph(func);
     let mut edges = Vec::<(BlockId, BlockId)>::new();
     for predecessor in &func.blocks {
@@ -80,9 +103,18 @@ fn split_critical_edges(func: &mut MFunction) {
             continue;
         }
         for successor in successors {
-            if predecessors[block_index[&successor]].len() >= 2 {
-                edges.push((predecessor.id, successor));
+            // Every branch edge gets a dedicated insertion block.  Critical
+            // edge splitting alone is insufficient for edge-local spill and
+            // parallel-copy operations when the successor has one predecessor.
+            let successor_index = block_index[&successor];
+            let successor_block = &func.blocks[successor_index];
+            let already_edge_block = predecessors[successor_index].len() == 1
+                && successor_block.phis.is_empty()
+                && matches!(successor_block.insts.as_slice(), [MInst::Jump { .. }]);
+            if already_edge_block {
+                continue;
             }
+            edges.push((predecessor.id, successor));
         }
     }
     if edges.is_empty() {
@@ -102,11 +134,10 @@ fn split_critical_edges(func: &mut MFunction) {
         next_id = next_id
             .checked_add(1)
             .expect("MIR BlockId overflow while splitting critical edges");
-        let predecessor_index = func
-            .blocks
-            .iter()
-            .position(|block| block.id == predecessor)
-            .expect("critical-edge predecessor exists");
+        // New blocks are appended, so every original block keeps the index
+        // recorded by the graph built above.  Looking both endpoints up in that
+        // index avoids an O(blocks) scan for every split branch edge.
+        let predecessor_index = block_index[&predecessor];
         rewrite_target(
             func.blocks[predecessor_index]
                 .insts
@@ -115,11 +146,7 @@ fn split_critical_edges(func: &mut MFunction) {
             successor,
             edge,
         );
-        let successor_index = func
-            .blocks
-            .iter()
-            .position(|block| block.id == successor)
-            .expect("critical-edge successor exists");
+        let successor_index = block_index[&successor];
         for phi in &mut func.blocks[successor_index].phis {
             let source = phi
                 .sources
@@ -336,7 +363,7 @@ mod tests {
         func.blocks = vec![entry, other, critical_pred, join, exit];
 
         let cfg = normalize(&mut func);
-        assert_eq!(func.blocks.len(), 6);
+        assert_eq!(func.blocks.len(), 9);
         let join = &func.blocks[cfg.block_index[&BlockId(3)]];
         let split_predecessor = join.phis[0]
             .sources

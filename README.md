@@ -82,7 +82,7 @@ The native backend compiles SIR execution units into optimized machine code thro
 2. **SIRT passes** — Store-load forwarding, commit sinking, working memory elimination, coalesced store splitting
 3. **ISel** — SIR → MIR lowering with known-bits tracking, constant folding, Cmp+Branch fusion
 4. **MIR optimization** — Global value numbering (dominator-tree scoped), algebraic simplification, redundant mask elimination, if-conversion, CFG simplification
-5. **Register allocation** — Unified single-pass Braun & Hack MIN algorithm
+5. **Register allocation** — Verified SSA pipeline: Braun & Hack MIN spill planning, IDF reconstruction, late machine-constraint permutations, and streaming chordal coloring
 6. **x86-64 emit** — 32-bit register mode, branch fall-through optimization
 
 ## Workspace Structure

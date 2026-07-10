@@ -243,28 +243,30 @@ fn compute_backedge_successors(successors: &[Vec<usize>]) -> Vec<Vec<usize>> {
         Black,
     }
 
-    fn dfs(
-        node: usize,
-        successors: &[Vec<usize>],
-        colors: &mut [Color],
-        backedges: &mut [Vec<usize>],
-    ) {
-        colors[node] = Color::Gray;
-        for &succ in &successors[node] {
-            match colors[succ] {
-                Color::White => dfs(succ, successors, colors, backedges),
-                Color::Gray => backedges[node].push(succ),
-                Color::Black => {}
-            }
-        }
-        colors[node] = Color::Black;
-    }
-
     let mut colors = vec![Color::White; successors.len()];
     let mut backedges = vec![Vec::new(); successors.len()];
-    for node in 0..successors.len() {
-        if colors[node] == Color::White {
-            dfs(node, successors, &mut colors, &mut backedges);
+    for root in 0..successors.len() {
+        if colors[root] != Color::White {
+            continue;
+        }
+        colors[root] = Color::Gray;
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, next_successor)) = stack.last_mut() {
+            if *next_successor == successors[*node].len() {
+                colors[*node] = Color::Black;
+                stack.pop();
+                continue;
+            }
+            let successor = successors[*node][*next_successor];
+            *next_successor += 1;
+            match colors[successor] {
+                Color::White => {
+                    colors[successor] = Color::Gray;
+                    stack.push((successor, 0));
+                }
+                Color::Gray => backedges[*node].push(successor),
+                Color::Black => {}
+            }
         }
     }
     backedges

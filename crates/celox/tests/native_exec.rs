@@ -25,7 +25,7 @@ fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_coun
     func.blocks.push(block);
     func.verify();
 
-    let ra = regalloc::run_regalloc(&mut func);
+    let ra = regalloc::run_regalloc(&mut func).unwrap();
     let emit_result = emit::emit(&func, &ra.assignment, ra.spill_frame_size).expect("emit failed");
     let jit = jit_mem::JitCode::new(&emit_result.code).expect("mmap failed");
     let mut state = vec![0u8; 8];
@@ -65,7 +65,7 @@ fn compile_and_run_inner(
         eprintln!("=== MIR ===\n{mfunc}");
     }
 
-    let ra = regalloc::run_regalloc(&mut mfunc);
+    let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
 
     if debug {
         eprintln!("=== Assignment ===\n{:?}", ra.assignment);
@@ -466,7 +466,7 @@ fn test_debug_let_bitslice_write() {
     for (eu_idx, eu) in sir.eval_comb.iter().enumerate() {
         let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
         eprintln!("=== EU {eu_idx} MIR ===\n{mfunc}");
-        let ra = regalloc::run_regalloc(&mut mfunc);
+        let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
         eprintln!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);
         let emit_result =
             emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");

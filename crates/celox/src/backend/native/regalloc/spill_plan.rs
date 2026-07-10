@@ -1,0 +1,883 @@
+//! Braun--Hack sections 4.2 and 4.3: W/S states and coupling plan.
+
+use std::collections::{BTreeSet, HashMap};
+
+use crate::backend::native::mir::{BlockId, MFunction, VReg};
+
+use super::assignment::clobbers;
+use super::cfg::NormalizedCfg;
+use super::next_use::{NextUseAnalysis, NextUseDistance};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct LogicalValue(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct SpillHome(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointSide {
+    Before,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProgramPoint {
+    pub block: BlockId,
+    pub instruction: usize,
+    pub side: PointSide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlannedOp {
+    Spill {
+        value: LogicalValue,
+        home: SpillHome,
+    },
+    Reload {
+        value: LogicalValue,
+        home: SpillHome,
+    },
+    SpillPhi {
+        value: LogicalValue,
+        home: SpillHome,
+    },
+}
+
+#[derive(Debug)]
+pub(super) struct SpillPlan {
+    pub logical: LogicalValues,
+    pub homes: PhiCongruenceClasses,
+    pub point_ops: Vec<(ProgramPoint, PlannedOp)>,
+    pub edge_ops: HashMap<(usize, usize), Vec<PlannedOp>>,
+    pub w_entry: Vec<BTreeSet<LogicalValue>>,
+    pub w_exit: Vec<BTreeSet<LogicalValue>>,
+    pub s_entry: Vec<BTreeSet<LogicalValue>>,
+    pub s_exit: Vec<BTreeSet<LogicalValue>>,
+}
+
+#[derive(Debug)]
+pub(super) struct LogicalValues {
+    count: u32,
+}
+
+impl LogicalValues {
+    fn build(func: &MFunction) -> Self {
+        Self {
+            count: func.vregs.count(),
+        }
+    }
+
+    pub(super) fn of(&self, value: VReg) -> LogicalValue {
+        assert!(value.0 < self.count);
+        LogicalValue(value.0)
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct PhiCongruenceClasses {
+    home_for_vreg: Vec<SpillHome>,
+    nontrivial_members: HashMap<SpillHome, Vec<VReg>>,
+}
+
+impl PhiCongruenceClasses {
+    fn build(func: &MFunction) -> Self {
+        let count = func.vregs.count() as usize;
+        let mut classes = DisjointSets::new(count);
+        for block in &func.blocks {
+            for phi in &block.phis {
+                for &(_, source) in &phi.sources {
+                    classes.union(phi.dst.0, source.0);
+                }
+            }
+        }
+        let home_for_vreg = (0..count as u32)
+            .map(|value| SpillHome(classes.minimum(value)))
+            .collect::<Vec<_>>();
+        let mut counts = vec![0u32; count];
+        for &home in &home_for_vreg {
+            counts[home.0 as usize] += 1;
+        }
+        let mut nontrivial_members = HashMap::<SpillHome, Vec<VReg>>::new();
+        for (value, &home) in home_for_vreg.iter().enumerate() {
+            if counts[home.0 as usize] > 1 {
+                nontrivial_members
+                    .entry(home)
+                    .or_default()
+                    .push(VReg(value as u32));
+            }
+        }
+        Self {
+            home_for_vreg,
+            nontrivial_members,
+        }
+    }
+
+    pub(super) fn of_vreg(&self, value: VReg) -> SpillHome {
+        self.home_for_vreg[value.0 as usize]
+    }
+
+    pub(super) fn of_logical(&self, value: LogicalValue) -> SpillHome {
+        self.home_for_vreg[value.0 as usize]
+    }
+
+    pub(super) fn members(&self, home: SpillHome) -> impl Iterator<Item = VReg> + '_ {
+        self.nontrivial_members
+            .get(&home)
+            .into_iter()
+            .flatten()
+            .copied()
+            .chain((!self.nontrivial_members.contains_key(&home)).then_some(VReg(home.0)))
+    }
+}
+
+/// Iterative union--find whose balanced tree shape is independent from the
+/// externally visible (minimum-VReg) spill-home identifier.
+struct DisjointSets {
+    parent: Vec<u32>,
+    size: Vec<u32>,
+    minimum: Vec<u32>,
+}
+
+impl DisjointSets {
+    fn new(count: usize) -> Self {
+        Self {
+            parent: (0..count as u32).collect(),
+            size: vec![1; count],
+            minimum: (0..count as u32).collect(),
+        }
+    }
+
+    fn root(&mut self, value: u32) -> u32 {
+        let mut root = value;
+        while self.parent[root as usize] != root {
+            root = self.parent[root as usize];
+        }
+
+        let mut current = value;
+        while self.parent[current as usize] != current {
+            let next = self.parent[current as usize];
+            self.parent[current as usize] = root;
+            current = next;
+        }
+        root
+    }
+
+    fn union(&mut self, left: u32, right: u32) {
+        let mut left = self.root(left);
+        let mut right = self.root(right);
+        if left == right {
+            return;
+        }
+        if self.size[left as usize] < self.size[right as usize] {
+            std::mem::swap(&mut left, &mut right);
+        }
+        let combined_size = self.size[left as usize] + self.size[right as usize];
+        let combined_minimum = self.minimum[left as usize].min(self.minimum[right as usize]);
+        self.parent[right as usize] = left;
+        self.size[left as usize] = combined_size;
+        self.minimum[left as usize] = combined_minimum;
+    }
+
+    fn minimum(&mut self, value: u32) -> u32 {
+        let root = self.root(value);
+        self.minimum[root as usize]
+    }
+}
+
+#[derive(Default)]
+struct EdgeTranslation {
+    to_successor: HashMap<LogicalValue, LogicalValue>,
+    to_predecessor: HashMap<LogicalValue, LogicalValue>,
+}
+
+/// O(1) logical-value translation across normalized phi edges.
+///
+/// Building the two directions in one pass over phi operands avoids rescanning
+/// every phi (and its predecessor list) for every member of W/S.  Method-I CSSA
+/// gives each phi operand a fresh edge-local name, so both maps are one-to-one.
+struct EdgeTranslations {
+    by_edge: HashMap<(usize, usize), EdgeTranslation>,
+}
+
+impl EdgeTranslations {
+    fn build(func: &MFunction, cfg: &NormalizedCfg) -> Self {
+        let mut by_edge = HashMap::<(usize, usize), EdgeTranslation>::new();
+        for (successor, block) in func.blocks.iter().enumerate() {
+            for phi in &block.phis {
+                let destination = LogicalValue(phi.dst.0);
+                for &(predecessor_id, source) in &phi.sources {
+                    let predecessor = cfg.block_index[&predecessor_id];
+                    assert!(
+                        cfg.successors[predecessor].contains(&successor),
+                        "phi edge {predecessor_id} -> {} is absent from the normalized CFG",
+                        block.id
+                    );
+                    let source = LogicalValue(source.0);
+                    let translation = by_edge.entry((predecessor, successor)).or_default();
+                    assert!(
+                        translation
+                            .to_successor
+                            .insert(source, destination)
+                            .is_none(),
+                        "Method-I CSSA edge {predecessor_id} -> {} reuses phi source v{}",
+                        block.id,
+                        source.0
+                    );
+                    assert!(
+                        translation
+                            .to_predecessor
+                            .insert(destination, source)
+                            .is_none(),
+                        "phi destination v{} has duplicate source for {predecessor_id}",
+                        destination.0
+                    );
+                }
+            }
+        }
+        Self { by_edge }
+    }
+
+    fn to_successor(
+        &self,
+        predecessor: usize,
+        successor: usize,
+        value: LogicalValue,
+    ) -> LogicalValue {
+        self.by_edge
+            .get(&(predecessor, successor))
+            .and_then(|translation| translation.to_successor.get(&value))
+            .copied()
+            .unwrap_or(value)
+    }
+
+    fn to_predecessor(
+        &self,
+        predecessor: usize,
+        successor: usize,
+        value: LogicalValue,
+    ) -> LogicalValue {
+        self.by_edge
+            .get(&(predecessor, successor))
+            .and_then(|translation| translation.to_predecessor.get(&value))
+            .copied()
+            .unwrap_or(value)
+    }
+}
+
+pub(super) fn plan(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    next_use: &NextUseAnalysis,
+    registers: usize,
+) -> SpillPlan {
+    let logical = LogicalValues::build(func);
+    let homes = PhiCongruenceClasses::build(func);
+    let edge_translations = EdgeTranslations::build(func, cfg);
+    let mut result = SpillPlan {
+        logical,
+        homes,
+        point_ops: Vec::new(),
+        edge_ops: HashMap::new(),
+        w_entry: vec![BTreeSet::new(); func.blocks.len()],
+        w_exit: vec![BTreeSet::new(); func.blocks.len()],
+        s_entry: vec![BTreeSet::new(); func.blocks.len()],
+        s_exit: vec![BTreeSet::new(); func.blocks.len()],
+    };
+    for block in 0..func.blocks.len() {
+        let entry = if let Some(region) = next_use.region_at_entry(block) {
+            init_loop_region(func, next_use, &result, block, region, registers)
+        } else {
+            init_usual(cfg, next_use, &result, &edge_translations, block, registers)
+        };
+        result.w_entry[block] = entry;
+        let live_entry = next_use.entry[block]
+            .keys()
+            .copied()
+            .map(|value| result.logical.of(value))
+            .collect::<BTreeSet<_>>();
+        // S means that a valid home exists on every path.  Every live value
+        // omitted from W_entry therefore requires a home; edge coupling below
+        // materializes any missing predecessor store.  A resident value keeps
+        // an existing home only when every predecessor already has one.
+        let mut spilled = live_entry
+            .difference(&result.w_entry[block])
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !cfg.predecessors[block].is_empty() {
+            spilled.extend(result.w_entry[block].iter().copied().filter(|value| {
+                cfg.predecessors[block].iter().all(|predecessor| {
+                    let predecessor_value =
+                        edge_translations.to_predecessor(*predecessor, block, *value);
+                    result.s_exit[*predecessor].contains(&predecessor_value)
+                })
+            }));
+        }
+        result.s_entry[block] = spilled.clone();
+        let mut resident = result.w_entry[block].clone();
+
+        for phi in &func.blocks[block].phis {
+            let value = result.logical.of(phi.dst);
+            if !resident.contains(&value) {
+                result.point_ops.push((
+                    ProgramPoint {
+                        block: func.blocks[block].id,
+                        instruction: 0,
+                        side: PointSide::Before,
+                    },
+                    PlannedOp::SpillPhi {
+                        value,
+                        home: result.homes.of_logical(value),
+                    },
+                ));
+                spilled.insert(value);
+            }
+        }
+
+        for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
+            let uses = inst
+                .uses()
+                .into_iter()
+                .map(|value| result.logical.of(value))
+                .collect::<BTreeSet<_>>();
+            for &value in &uses {
+                if resident.insert(value) {
+                    result.point_ops.push((
+                        ProgramPoint {
+                            block: func.blocks[block].id,
+                            instruction,
+                            side: PointSide::Before,
+                        },
+                        PlannedOp::Reload {
+                            value,
+                            home: result.homes.of_logical(value),
+                        },
+                    ));
+                }
+            }
+            limit(
+                func,
+                next_use,
+                &mut result,
+                block,
+                instruction,
+                instruction,
+                registers,
+                &uses,
+                &mut resident,
+                &mut spilled,
+            );
+            let clobbered = clobbers(inst).len();
+            if clobbered != 0 {
+                limit_live_through_clobber(
+                    func,
+                    next_use,
+                    &mut result,
+                    block,
+                    instruction,
+                    registers.saturating_sub(clobbered),
+                    &mut resident,
+                    &mut spilled,
+                );
+            }
+            if let Some(definition) = inst.def() {
+                let definition = result.logical.of(definition);
+                if !resident.contains(&definition) && resident.len() == registers {
+                    limit(
+                        func,
+                        next_use,
+                        &mut result,
+                        block,
+                        instruction,
+                        instruction + 1,
+                        registers - 1,
+                        &uses,
+                        &mut resident,
+                        &mut spilled,
+                    );
+                }
+                resident.insert(definition);
+            }
+            resident.retain(|value| {
+                !logical_distance_at(
+                    func,
+                    next_use,
+                    &result.logical,
+                    block,
+                    instruction + 1,
+                    *value,
+                )
+                .is_dead()
+            });
+        }
+        result.w_exit[block] = resident;
+        result.s_exit[block] = spilled;
+    }
+
+    // Section 4.3.  Delaying this until every W/S exit is known is equivalent
+    // to the paper's deferred handling of not-yet-processed backedges.
+    for successor in 0..func.blocks.len() {
+        for &predecessor in &cfg.predecessors[successor] {
+            let mut operations = Vec::new();
+            let predecessor_w = result.w_exit[predecessor].clone();
+            let predecessor_s = result.s_exit[predecessor].clone();
+            for &successor_value in &result.w_entry[successor] {
+                let value =
+                    edge_translations.to_predecessor(predecessor, successor, successor_value);
+                if !predecessor_w.contains(&value) {
+                    operations.push(PlannedOp::Reload {
+                        value,
+                        home: result.homes.of_logical(successor_value),
+                    });
+                }
+            }
+            for &successor_value in &result.s_entry[successor] {
+                let value =
+                    edge_translations.to_predecessor(predecessor, successor, successor_value);
+                if !predecessor_s.contains(&value) && predecessor_w.contains(&value) {
+                    operations.push(PlannedOp::Spill {
+                        value,
+                        home: result.homes.of_logical(successor_value),
+                    });
+                }
+            }
+            if !operations.is_empty() {
+                result.edge_ops.insert((predecessor, successor), operations);
+            }
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn limit_live_through_clobber(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    plan: &mut SpillPlan,
+    block: usize,
+    instruction: usize,
+    capacity: usize,
+    resident: &mut BTreeSet<LogicalValue>,
+    spilled: &mut BTreeSet<LogicalValue>,
+) {
+    let mut live_through = resident
+        .iter()
+        .copied()
+        .filter(|value| {
+            !logical_distance_at(
+                func,
+                next_use,
+                &plan.logical,
+                block,
+                instruction + 1,
+                *value,
+            )
+            .is_dead()
+        })
+        .collect::<BTreeSet<_>>();
+    while live_through.len() > capacity {
+        let victim = live_through
+            .iter()
+            .copied()
+            .max_by_key(|value| {
+                logical_distance_at(
+                    func,
+                    next_use,
+                    &plan.logical,
+                    block,
+                    instruction + 1,
+                    *value,
+                )
+            })
+            .expect("non-empty clobber live-through set");
+        if spilled.insert(victim) {
+            plan.point_ops.push((
+                ProgramPoint {
+                    block: func.blocks[block].id,
+                    instruction,
+                    side: PointSide::Before,
+                },
+                PlannedOp::Spill {
+                    value: victim,
+                    home: plan.homes.of_logical(victim),
+                },
+            ));
+        }
+        live_through.remove(&victim);
+        resident.remove(&victim);
+    }
+}
+
+fn init_usual(
+    cfg: &NormalizedCfg,
+    next_use: &NextUseAnalysis,
+    plan: &SpillPlan,
+    edge_translations: &EdgeTranslations,
+    block: usize,
+    registers: usize,
+) -> BTreeSet<LogicalValue> {
+    let processed = cfg.predecessors[block]
+        .iter()
+        .copied()
+        .filter(|predecessor| *predecessor < block)
+        .collect::<Vec<_>>();
+    if processed.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut frequency = HashMap::<LogicalValue, usize>::new();
+    for predecessor in &processed {
+        for &value in &plan.w_exit[*predecessor] {
+            let value = edge_translations.to_successor(*predecessor, block, value);
+            *frequency.entry(value).or_default() += 1;
+        }
+    }
+    let mut take = frequency
+        .iter()
+        .filter_map(|(&value, &count)| (count == processed.len()).then_some(value))
+        .collect::<BTreeSet<_>>();
+    let mut candidates = frequency
+        .keys()
+        .copied()
+        .filter(|value| !take.contains(value))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|value| logical_entry_distance(next_use, &plan.logical, block, *value));
+    let room = registers.saturating_sub(take.len());
+    take.extend(candidates.into_iter().take(room));
+    take
+}
+
+fn init_loop_region(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    plan: &SpillPlan,
+    block: usize,
+    region: usize,
+    registers: usize,
+) -> BTreeSet<LogicalValue> {
+    let mut alive = next_use.entry[block]
+        .keys()
+        .copied()
+        .map(|value| plan.logical.of(value))
+        .collect::<BTreeSet<_>>();
+    alive.extend(
+        func.blocks[block]
+            .phis
+            .iter()
+            .map(|phi| plan.logical.of(phi.dst)),
+    );
+    let facts = &next_use.loop_regions[region];
+    let used = facts
+        .used
+        .iter()
+        .copied()
+        .map(|value| plan.logical.of(value))
+        .collect::<BTreeSet<_>>();
+    let mut candidates = alive.intersection(&used).copied().collect::<Vec<_>>();
+    let mut live_through = alive.difference(&used).copied().collect::<Vec<_>>();
+    candidates.sort_by_key(|value| logical_entry_distance(next_use, &plan.logical, block, *value));
+    if candidates.len() >= registers {
+        return candidates.into_iter().take(registers).collect();
+    }
+    let internal_pressure = facts.max_pressure.saturating_sub(live_through.len());
+    let free_loop = registers.saturating_sub(internal_pressure);
+    live_through
+        .sort_by_key(|value| logical_entry_distance(next_use, &plan.logical, block, *value));
+    candidates
+        .into_iter()
+        .chain(live_through.into_iter().take(free_loop))
+        .take(registers)
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn limit(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    plan: &mut SpillPlan,
+    block: usize,
+    point_instruction: usize,
+    distance_instruction: usize,
+    maximum: usize,
+    pinned: &BTreeSet<LogicalValue>,
+    resident: &mut BTreeSet<LogicalValue>,
+    spilled: &mut BTreeSet<LogicalValue>,
+) {
+    while resident.len() > maximum {
+        let victim = resident
+            .iter()
+            .copied()
+            .filter(|value| !pinned.contains(value))
+            .max_by_key(|value| {
+                logical_distance_at(
+                    func,
+                    next_use,
+                    &plan.logical,
+                    block,
+                    distance_instruction,
+                    *value,
+                )
+            })
+            .expect("instruction operands fit in the allocatable register set");
+        if spilled.insert(victim) {
+            plan.point_ops.push((
+                ProgramPoint {
+                    block: func.blocks[block].id,
+                    instruction: point_instruction,
+                    side: PointSide::Before,
+                },
+                PlannedOp::Spill {
+                    value: victim,
+                    home: plan.homes.of_logical(victim),
+                },
+            ));
+        }
+        resident.remove(&victim);
+    }
+}
+
+fn logical_entry_distance(
+    next_use: &NextUseAnalysis,
+    logical: &LogicalValues,
+    block: usize,
+    value: LogicalValue,
+) -> NextUseDistance {
+    let _ = logical;
+    next_use.entry[block]
+        .get(&VReg(value.0))
+        .copied()
+        .unwrap_or(NextUseDistance::Dead)
+}
+
+fn logical_distance_at(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    logical: &LogicalValues,
+    block: usize,
+    instruction: usize,
+    value: LogicalValue,
+) -> NextUseDistance {
+    let _ = logical;
+    next_use.distance_at(func, block, instruction, VReg(value.0))
+}
+
+impl SpillPlan {
+    pub(super) fn verify(&self, func: &MFunction, cfg: &NormalizedCfg, registers: usize) {
+        assert_eq!(self.w_entry.len(), func.blocks.len());
+        assert_eq!(self.w_exit.len(), func.blocks.len());
+        assert_eq!(self.s_entry.len(), func.blocks.len());
+        assert_eq!(self.s_exit.len(), func.blocks.len());
+        assert!(self.w_entry.iter().all(|state| state.len() <= registers));
+        assert!(self.w_exit.iter().all(|state| state.len() <= registers));
+        for (&(predecessor, successor), operations) in &self.edge_ops {
+            assert!(cfg.successors[predecessor].contains(&successor));
+            assert_eq!(
+                cfg.successors[predecessor].len(),
+                1,
+                "edge operation predecessor must be a dedicated insertion block"
+            );
+            assert!(!operations.is_empty());
+        }
+        for &(point, operation) in &self.point_ops {
+            assert!(cfg.block_index.contains_key(&point.block));
+            assert!(point.instruction <= func.blocks[cfg.block_index[&point.block]].insts.len());
+            match operation {
+                PlannedOp::Spill { value, .. }
+                | PlannedOp::Reload { value, .. }
+                | PlannedOp::SpillPhi { value, .. } => {
+                    assert!(value.0 < self.logical.count);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::native::mir::{MBlock, MInst, PhiNode, SpillDesc, VRegAllocator};
+
+    #[test]
+    fn descending_large_phi_web_builds_one_stable_home_without_recursion() {
+        const MEMBERS: u32 = 50_000;
+
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..MEMBERS {
+            vregs.alloc();
+        }
+        let mut func = MFunction::new(vregs, Vec::new());
+        let mut block = MBlock::new(BlockId(0));
+        for destination in (1..MEMBERS).rev() {
+            block.phis.push(PhiNode {
+                dst: VReg(destination),
+                sources: vec![(BlockId(0), VReg(destination - 1))],
+            });
+        }
+        func.blocks.push(block);
+
+        let homes = PhiCongruenceClasses::build(&func);
+
+        assert_eq!(homes.of_vreg(VReg(0)), SpillHome(0));
+        assert_eq!(homes.of_vreg(VReg(MEMBERS - 1)), SpillHome(0));
+        assert_eq!(homes.members(SpillHome(0)).count(), MEMBERS as usize);
+    }
+
+    #[test]
+    fn large_phi_join_is_indexed_once_in_both_directions() {
+        const PREDECESSORS: usize = 64;
+        const PHIS: usize = 512;
+        const INTERNAL_BLOCKS: usize = PREDECESSORS - 1;
+        const TREE_BLOCKS: usize = PREDECESSORS * 2 - 1;
+        let join_id = BlockId(TREE_BLOCKS as u32);
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let mut expected = Vec::with_capacity(PREDECESSORS * PHIS);
+        let mut phis = Vec::with_capacity(PHIS);
+        let mut leaf_definitions = vec![Vec::with_capacity(PHIS); PREDECESSORS];
+        for _ in 0..PHIS {
+            let mut sources = Vec::with_capacity(PREDECESSORS);
+            for predecessor in 0..PREDECESSORS {
+                let source = vregs.alloc();
+                let predecessor_id = BlockId((INTERNAL_BLOCKS + predecessor) as u32);
+                sources.push((predecessor_id, source));
+                leaf_definitions[predecessor].push(source);
+            }
+            let destination = vregs.alloc();
+            expected.extend(
+                sources
+                    .iter()
+                    .map(|&(predecessor, source)| (predecessor, source, destination)),
+            );
+            phis.push(PhiNode {
+                dst: destination,
+                sources,
+            });
+        }
+
+        let spill_descs = vec![SpillDesc::transient(); vregs.count() as usize];
+        let mut func = MFunction::new(vregs, spill_descs);
+        // A complete binary branch tree makes every one of the 64 eventual
+        // join predecessors reachable from the single MIR entry block.
+        for block_index in 0..INTERNAL_BLOCKS {
+            let mut block = MBlock::new(BlockId(block_index as u32));
+            if block_index == 0 {
+                block.push(MInst::LoadImm {
+                    dst: condition,
+                    value: 1,
+                });
+            }
+            block.push(MInst::Branch {
+                cond: condition,
+                true_bb: BlockId((block_index * 2 + 1) as u32),
+                false_bb: BlockId((block_index * 2 + 2) as u32),
+            });
+            func.blocks.push(block);
+        }
+        for predecessor in 0..PREDECESSORS {
+            let predecessor_id = BlockId((INTERNAL_BLOCKS + predecessor) as u32);
+            let mut block = MBlock::new(predecessor_id);
+            for &source in &leaf_definitions[predecessor] {
+                block.push(MInst::LoadImm {
+                    dst: source,
+                    value: source.0 as u64,
+                });
+            }
+            block.push(MInst::Jump { target: join_id });
+            func.blocks.push(block);
+        }
+        let mut join = MBlock::new(join_id);
+        join.phis = phis;
+        join.push(MInst::Return);
+        func.blocks.push(join);
+        func.verify();
+        let cfg = super::super::cfg::normalize(&mut func);
+        func.verify();
+
+        let translations = EdgeTranslations::build(&func, &cfg);
+
+        let join = cfg.block_index[&join_id];
+        for (predecessor_id, source, destination) in expected {
+            let predecessor = cfg.block_index[&predecessor_id];
+            assert_eq!(
+                translations.to_successor(predecessor, join, LogicalValue(source.0),),
+                LogicalValue(destination.0)
+            );
+            assert_eq!(
+                translations.to_predecessor(predecessor, join, LogicalValue(destination.0),),
+                LogicalValue(source.0)
+            );
+        }
+    }
+
+    #[test]
+    fn irreducible_scc_entries_prioritize_values_used_in_the_region() {
+        use crate::backend::native::mir::{BaseReg, OpSize, SpillDesc};
+        use crate::backend::native::regalloc::next_use::{self, LoopRegionKind};
+
+        let mut vregs = VRegAllocator::new();
+        let hot = vregs.alloc();
+        let live_through = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm { dst: hot, value: 1 });
+        entry.push(MInst::LoadImm {
+            dst: live_through,
+            value: 2,
+        });
+        entry.push(MInst::Branch {
+            cond: hot,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut left_entry = MBlock::new(BlockId(1));
+        left_entry.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: hot,
+            size: OpSize::S64,
+        });
+        left_entry.push(MInst::Branch {
+            cond: hot,
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+
+        let mut right_entry = MBlock::new(BlockId(2));
+        right_entry.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: hot,
+            size: OpSize::S64,
+        });
+        right_entry.push(MInst::Branch {
+            cond: hot,
+            true_bb: BlockId(1),
+            false_bb: BlockId(3),
+        });
+
+        let mut exit = MBlock::new(BlockId(3));
+        exit.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 16,
+            src: live_through,
+            size: OpSize::S64,
+        });
+        exit.push(MInst::Return);
+        func.blocks = vec![entry, left_entry, right_entry, exit];
+
+        let cfg = super::super::cfg::normalize(&mut func);
+        let next_use = next_use::analyze(&func, &cfg);
+        let plan = plan(&func, &cfg, &next_use, 1);
+        let left = cfg.block_index[&BlockId(1)];
+        let right = cfg.block_index[&BlockId(2)];
+        let region = next_use.region_at_entry(left).unwrap();
+        assert_eq!(next_use.region_at_entry(right), Some(region));
+        assert_eq!(
+            next_use.loop_regions[region].kind,
+            LoopRegionKind::IrreducibleScc
+        );
+        for entry in [left, right] {
+            assert_eq!(plan.w_entry[entry], BTreeSet::from([LogicalValue(hot.0)]));
+            assert!(!plan.w_entry[entry].contains(&LogicalValue(live_through.0)));
+        }
+    }
+}

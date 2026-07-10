@@ -368,33 +368,70 @@ the new allocator is a bug to diagnose and fix.
 
 ## Implementation status
 
-The branch contains the CFG edge normalization, indexed next-use analysis,
-Braun--Hack-style W/S plan, separate IDF reconstruction, dead-phi elimination,
-and independent strict-SSA/pressure checks.  These pieces are not yet the
-production allocator because the following design-required work remains:
+The frozen allocation pipeline is now the default `auto` implementation.  It
+contains:
 
-- move full-live Perm materialization after spill reconstruction and attach its
-  exact row/matching metadata;
-- add Method-I CSSA normalization and the congruence-interference proof before
-  forming spill homes;
-- replace home-existence checks with the all-path store-dominance proof;
-- replace program-point live-set cloning and explicit interference adjacency
-  with implicit streaming coloring;
-- make scheduling, loop-region analysis, and dead-reload elimination meet the
-  complexity contracts above; and
-- make `auto` select the verified new pipeline with no unified fallback or
-  expected panic path.
+- dedicated insertion blocks for every branch edge, RPO layout, iterative
+  dominator/loop/SCC construction, and no CFG-size or traversal-depth cap;
+- dependency-verified pressure scheduling with one backward liveness pass per
+  block and indexed ready buckets rather than suffix or ready-set rescans;
+- Method-I CSSA normalization and an independent semantic
+  congruence-interference verifier;
+- lexicographic next-use distance over natural-loop and irreducible-SCC regions,
+  with no fixed loop-distance constant, one block/instruction summary pass,
+  bottom-up nested-region aggregation, and the same entry priority at every
+  irreducible-region entry;
+- a Braun--Hack-style W/S spill plan and an independent sparse-SSA all-path,
+  same-home store/reload proof without a block-by-home state matrix;
+- separate pruned-IDF SSA reconstruction, stack-slot precomputation,
+  rematerialization, and dead reload/cyclic-phi removal;
+- post-reconstruction full-live Perm materialization, including pruned-IDF
+  merge phis when a Perm splits only one CFG path, exact allowed-color masks,
+  and local bipartite matching; and
+- dominance-order streaming chordal coloring without program-point live-set
+  tables, explicit interference adjacency, or a spill/color retry loop.
 
-`CELOX_REGALLOC_IMPL=ssa` is used while these phase verifiers and Heliodor gates
-are completed.  `unified` remains only an explicit differential-diagnosis mode;
-it is never a correctness recovery path.
+`CELOX_REGALLOC_IMPL=unified` remains only an explicitly selected differential
+diagnosis mode.  `auto` and `ssa` both use the new allocator, and a failure does
+not fall back to the old implementation.
 
 The previously rejected iterative splitter expanded Heliodor `eval_comb` from
 roughly 146,000 MIR instructions through 480,000, 1.1 million, 2.3 million, 4.7
-million, and 9.5 million instructions.  The current early full-live Perm also
+million, and 9.5 million instructions.  The rejected early full-live Perm also
 created about 2.3 million VReg identities from roughly 400,000 input VRegs.
 Both measurements motivate the frozen late-Perm architecture; neither is a
 reason to add an iteration, branchification, or CFG-size cap.
 
-A phase is enabled by default only after its verifier, focused CFG/loop tests,
-forced-SSA semantic tests, and Heliodor compile-time/spill-count gates pass.
+With SIR/MIR boundary verification and the new allocator's phase verifiers
+enabled, `test_soc_linux_boot` completes the compile-only Heliodor gate in
+37.58 seconds.
+The largest `eval_comb` allocation takes 2.02 seconds end to end: 0.42 seconds
+for spill planning and its home proof, 0.13 seconds for reconstruction, 0.27
+seconds for late Perm construction/verification, and 0.08 seconds for coloring.
+The reconstructed function has about 443,000 VRegs rather than the 2.3 million
+created by early Perm materialization.  The `native_exec` test suite, the
+complete library suite, and all non-ignored `comb_observer` cases pass.  The
+end-to-end Heliodor execution, per-pass MIR audit, and same-condition
+`veryl-cc` comparison gates remain open.
+
+The public allocator and chained native emitter now return structured errors,
+failed public allocations leave their input MIR unchanged, and
+completed-assignment verification is unconditional.  Remaining work is at the
+internal and final IR boundaries:
+
+- propagate structured `Result` errors through the remaining internal mutating
+  helpers and phase verifiers instead of asserting their preconditions;
+- replace materialized per-region value sets with persistent/difference
+  summaries so a deeply nested loop forest does not copy every inner value into
+  every ancestor;
+- construct natural-loop membership and the loop-parent forest from dominance
+  intervals/tree structure rather than per-edge dominator walks and all-pairs
+  set-containment tests;
+- make the enclosing SIR/MIR phase-boundary proofs unconditional in release
+  builds and propagate their diagnostics rather than panicking;
+- expose SSA destruction/parallel-copy resolution and its final proof as an
+  explicit verified phase rather than leaving it implicit in emission; and
+- use checked identifier allocation throughout the remaining internal helpers.
+
+The legacy allocator can be removed after the differential diagnosis window.
+None of this remaining work permits a retry, fallback, or size/iteration cap.

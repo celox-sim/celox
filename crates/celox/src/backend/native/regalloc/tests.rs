@@ -4,6 +4,20 @@ use super::*;
 use crate::backend::native::mir::*;
 use crate::backend::native::{emit, jit_mem};
 
+#[test]
+fn invalid_input_is_a_structured_error_not_a_panic() {
+    let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+
+    let error = match run_regalloc(&mut func) {
+        Ok(_) => panic!("empty MIR must be rejected"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.phase, "input MIR verification");
+    assert_eq!(error.rule, "CFG.NON_EMPTY");
+    assert_eq!(error.block, None);
+}
+
 /// Build a simple MFunction with one block, run regalloc, verify.
 fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> AssignmentMap {
     // Find the max VReg number used in instructions
@@ -31,11 +45,11 @@ fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> Assignm
     block.push(MInst::Return);
     func.push_block(block);
 
-    let result = run_regalloc(&mut func);
+    let result = run_regalloc(&mut func).unwrap();
 
     // Re-verify on final instructions
     let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment);
+    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
 
     result.assignment
 }
@@ -278,7 +292,7 @@ fn test_shift_with_pressure() {
 
     // Verify
     let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &assignment);
+    super::verify_assignment(&func, &analysis, &assignment).unwrap();
 }
 
 #[test]
@@ -424,74 +438,112 @@ fn test_phi_dst_gets_register_under_entry_pressure() {
     join.push(MInst::Return);
     func.push_block(join);
 
-    let result = run_regalloc(&mut func);
+    let result = run_regalloc(&mut func).unwrap();
     assert!(result.assignment.get(VReg(13)).is_some());
     let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment);
+    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
 }
 
 #[test]
 fn test_many_phi_edge_sources_are_materialized_without_pin_overflow() {
     const PHIS: u32 = 32;
     let mut vregs = VRegAllocator::new();
-    while vregs.count() < PHIS * 2 + 1 {
-        vregs.alloc();
+    let mut descs = Vec::new();
+    let mut left_values = Vec::new();
+    let mut right_values = Vec::new();
+    let mut merged_values = Vec::new();
+    for value in 0..PHIS {
+        left_values.push(vregs.alloc());
+        descs.push(SpillDesc::remat(value as u64 + 1));
     }
-    let mut descs = (0..PHIS)
-        .map(|value| SpillDesc::remat(value as u64 + 1))
-        .collect::<Vec<_>>();
-    descs.extend((0..=PHIS).map(|_| SpillDesc::transient()));
+    for value in 0..PHIS {
+        right_values.push(vregs.alloc());
+        descs.push(SpillDesc::remat(value as u64 + 101));
+    }
+    for _ in 0..PHIS {
+        merged_values.push(vregs.alloc());
+        descs.push(SpillDesc::transient());
+    }
+    let condition = vregs.alloc();
+    descs.push(SpillDesc::transient());
     let mut func = MFunction::new(vregs, descs);
 
     let mut entry = MBlock::new(BlockId(0));
-    for value in 0..PHIS {
+    for (value, &destination) in left_values.iter().enumerate() {
         entry.push(MInst::LoadImm {
-            dst: VReg(value),
+            dst: destination,
             value: value as u64 + 1,
         });
     }
-    entry.push(MInst::LoadImm {
-        dst: VReg(PHIS * 2),
-        value: 1,
+    for (value, &destination) in right_values.iter().enumerate() {
+        entry.push(MInst::LoadImm {
+            dst: destination,
+            value: value as u64 + 101,
+        });
+    }
+    entry.push(MInst::Load {
+        dst: condition,
+        base: BaseReg::SimState,
+        offset: 0,
+        size: OpSize::S64,
     });
     entry.push(MInst::Branch {
-        cond: VReg(PHIS * 2),
+        cond: condition,
         true_bb: BlockId(1),
-        false_bb: BlockId(1),
+        false_bb: BlockId(2),
     });
     func.push_block(entry);
 
-    let mut join = MBlock::new(BlockId(1));
-    for value in 0..PHIS {
+    let mut left = MBlock::new(BlockId(1));
+    left.push(MInst::Jump { target: BlockId(3) });
+    func.push_block(left);
+    let mut right = MBlock::new(BlockId(2));
+    right.push(MInst::Jump { target: BlockId(3) });
+    func.push_block(right);
+
+    let mut join = MBlock::new(BlockId(3));
+    for value in 0..PHIS as usize {
         join.phis.push(PhiNode {
-            dst: VReg(PHIS + value),
-            sources: vec![(BlockId(0), VReg(value))],
+            dst: merged_values[value],
+            sources: vec![
+                (BlockId(1), left_values[value]),
+                (BlockId(2), right_values[value]),
+            ],
         });
+    }
+    let mut sum = merged_values[0];
+    for &value in &merged_values[1..] {
+        let destination = func.vregs.alloc();
+        func.spill_descs.push(SpillDesc::transient());
+        join.push(MInst::Add {
+            dst: destination,
+            lhs: sum,
+            rhs: value,
+        });
+        sum = destination;
     }
     join.push(MInst::Store {
         base: BaseReg::SimState,
-        offset: 0,
-        src: VReg(PHIS),
+        offset: 8,
+        src: sum,
         size: OpSize::S64,
     });
     join.push(MInst::Return);
     func.push_block(join);
 
-    let result = run_regalloc(&mut func);
-    for source in 0..PHIS {
-        assert!(
-            result
-                .assignment
-                .edge_location(BlockId(0), VReg(source))
-                .is_some()
-        );
-    }
+    let result = run_regalloc(&mut func).unwrap();
     assert_eq!(func.verify_result(), Ok(()));
     let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment);
+    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
     let emitted = emit::emit(&func, &result.assignment, result.spill_frame_size).unwrap();
     let jit = jit_mem::JitCode::new(&emitted.code).unwrap();
-    let mut state = vec![0u8; 8];
+
+    let mut state = vec![0u8; 16];
+    state[..8].copy_from_slice(&1u64.to_le_bytes());
     assert_eq!(unsafe { jit.call(&mut state) }, 0);
-    assert_eq!(u64::from_le_bytes(state.try_into().unwrap()), 1);
+    assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), 528);
+
+    state[..8].copy_from_slice(&0u64.to_le_bytes());
+    assert_eq!(unsafe { jit.call(&mut state) }, 0);
+    assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), 3_728);
 }
