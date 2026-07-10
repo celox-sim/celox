@@ -29,6 +29,7 @@ pub(super) struct ScheduleStats {
 
 #[derive(Debug)]
 pub(super) struct ScheduleError {
+    pub rule: &'static str,
     pub block: BlockId,
     pub reason: &'static str,
 }
@@ -72,7 +73,28 @@ pub(super) fn schedule_for_pressure(
     constraints: &ConstraintModel,
     analysis: &AnalysisResult,
 ) -> Result<ScheduleStats, ScheduleError> {
-    assert_eq!(cfg.predecessors.len(), func.blocks.len());
+    let fallback_block = func.blocks.first().map_or(BlockId(0), |block| block.id);
+    if cfg.predecessors.len() != func.blocks.len()
+        || constraints.instructions.len() != func.blocks.len()
+        || analysis.exit_distances.len() != func.blocks.len()
+    {
+        return Err(ScheduleError {
+            rule: "SCHEDULE.MODEL_SHAPE",
+            block: fallback_block,
+            reason: "CFG, constraint, or liveness tables do not cover every MIR block",
+        });
+    }
+    if let Some((block, _)) =
+        func.blocks.iter().enumerate().find(|(block, mir_block)| {
+            constraints.instructions[*block].len() != mir_block.insts.len()
+        })
+    {
+        return Err(ScheduleError {
+            rule: "SCHEDULE.MODEL_SHAPE",
+            block: func.blocks[block].id,
+            reason: "instruction constraints do not cover every MIR instruction",
+        });
+    }
     let mut stats = ScheduleStats::default();
     for block_index in 0..func.blocks.len() {
         let original = func.blocks[block_index].insts.clone();
@@ -89,6 +111,7 @@ pub(super) fn schedule_for_pressure(
             &mut stats,
         )
         .map_err(|reason| ScheduleError {
+            rule: "SCHEDULE.DEPENDENCY_ORDER",
             block: func.blocks[block_index].id,
             reason,
         })?;
@@ -113,7 +136,9 @@ fn schedule_block(
     live_out: &BTreeSet<VReg>,
     stats: &mut ScheduleStats,
 ) -> Result<Vec<MInst>, &'static str> {
-    assert_eq!(instructions.len(), constraints.len());
+    if instructions.len() != constraints.len() {
+        return Err("instruction constraint model shape mismatch");
+    }
 
     enum ReverseChunk {
         Barrier(MInst),
@@ -543,8 +568,8 @@ mod tests {
         );
         func.blocks.push(block);
         func.verify();
-        let cfg = super::super::cfg::normalize(&mut func);
-        let constraints = ConstraintModel::build(&func, &cfg);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let constraints = ConstraintModel::build(&func, &cfg).unwrap();
         let analysis = super::super::analysis::analyze(&func);
 
         let stats = schedule_for_pressure(&mut func, &cfg, &constraints, &analysis).unwrap();
@@ -553,6 +578,23 @@ mod tests {
         assert_eq!(stats.backward_liveness_steps, instruction_count);
         assert!(stats.maximum_after <= stats.maximum_before);
         func.verify();
+    }
+
+    #[test]
+    fn stale_constraint_shape_is_a_structured_error() {
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Return);
+        func.blocks.push(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let mut constraints = ConstraintModel::build(&func, &cfg).unwrap();
+        constraints.instructions[0].pop();
+        let analysis = super::super::analysis::analyze(&func);
+
+        let error = schedule_for_pressure(&mut func, &cfg, &constraints, &analysis).unwrap_err();
+
+        assert_eq!(error.rule, "SCHEDULE.MODEL_SHAPE");
+        assert_eq!(error.block, BlockId(0));
     }
 
     #[test]

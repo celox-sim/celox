@@ -731,7 +731,7 @@ mod tests {
     use crate::backend::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
 
     fn analyze_and_color(func: &mut MFunction) -> Result<ColoringResult, ColorError> {
-        let cfg = super::super::cfg::normalize(func);
+        let cfg = super::super::cfg::normalize(func).unwrap();
         let analysis = super::super::analysis::analyze(func);
         color_ssa(
             func,
@@ -851,9 +851,9 @@ mod tests {
         block.push(MInst::Return);
         func.push_block(block);
 
-        let initial_cfg = super::super::cfg::normalize(&mut func);
+        let initial_cfg = super::super::cfg::normalize(&mut func).unwrap();
         let (cfg, perms) =
-            super::super::legalize::materialize_constraint_perms(&mut func, &initial_cfg);
+            super::super::legalize::materialize_constraint_perms(&mut func, &initial_cfg).unwrap();
         let analysis = super::super::analysis::analyze(&func);
         let colored = color_ssa(&func, &cfg, &analysis, &perms, super::super::NUM_REGS).unwrap();
         let boundary = &perms.boundaries[0];

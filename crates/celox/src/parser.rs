@@ -168,6 +168,15 @@ pub enum ParserError {
 
     #[error("Top module `{name}` is generic and cannot be used as a top-level module")]
     GenericTop { name: String },
+
+    #[error("SIR verification failed {phase} in {group} unit {unit}: {error}")]
+    SirVerify {
+        phase: &'static str,
+        group: &'static str,
+        unit: usize,
+        #[source]
+        error: crate::ir::verify::SirVerifyError,
+    },
 }
 
 impl ParserError {
@@ -231,6 +240,7 @@ impl miette::Diagnostic for ParserError {
             }
             ParserError::TopNotFound { .. } => Some(Box::new("top_not_found")),
             ParserError::GenericTop { .. } => Some(Box::new("generic_top")),
+            ParserError::SirVerify { .. } => Some(Box::new("sir_verify")),
         }
     }
 
@@ -1441,6 +1451,47 @@ fn expand(
     }
 }
 
+fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), ParserError> {
+    let units = program
+        .eval_comb
+        .iter()
+        .enumerate()
+        .map(|(unit, eu)| ("eval_comb", unit, eu))
+        .chain(
+            program
+                .eval_apply_ffs
+                .values()
+                .flatten()
+                .enumerate()
+                .map(|(unit, eu)| ("eval_apply_ffs", unit, eu)),
+        )
+        .chain(
+            program
+                .eval_only_ffs
+                .values()
+                .flatten()
+                .enumerate()
+                .map(|(unit, eu)| ("eval_only_ffs", unit, eu)),
+        )
+        .chain(
+            program
+                .apply_ffs
+                .values()
+                .flatten()
+                .enumerate()
+                .map(|(unit, eu)| ("apply_ffs", unit, eu)),
+        );
+    for (group, unit, eu) in units {
+        eu.verify_result().map_err(|error| ParserError::SirVerify {
+            phase,
+            group,
+            unit,
+            error,
+        })?;
+    }
+    Ok(())
+}
+
 pub fn parse(
     top: &StrId,
     ir: &veryl_analyzer::ir::Ir,
@@ -1502,12 +1553,21 @@ pub fn parse(
         t.pre_optimized_sir = Some(program.clone());
     }
 
+    timed_phase!(
+        "verify_sir_before_optimize",
+        verify_program_sir(&program, "before optimization")
+    )?;
+
     // Always run the optimizer — even at O0, individual passes (e.g. TailCallSplit)
     // may be enabled and need to execute.
     timed_phase!(
         "optimize",
         crate::optimizer::optimize(&mut program, four_state, optimize_options)
     );
+    timed_phase!(
+        "verify_sir_after_optimize",
+        verify_program_sir(&program, "after optimization")
+    )?;
 
     if let Some(t) = trace
         && trace_opts.post_optimized_sir

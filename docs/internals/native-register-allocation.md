@@ -54,6 +54,25 @@ canonical strict-SSA MIR
   -> final allocation proof
 ```
 
+The relationship between the techniques is deliberately one-way:
+
+| Technique | Problem it solves | Contract handed to the next phase |
+| --- | --- | --- |
+| CFG normalization | gives every branch edge a legal insertion point | edge-local copies and spills cannot execute on the wrong arm |
+| pressure scheduling | removes pressure caused only by a poor order of independent instructions | equivalent MIR with pressure no greater than the input order |
+| Method-I CSSA | makes phi-congruence members non-interfering | one sound spill home can represent each congruence class |
+| global next use and Braun--Hack MIN | selects residents and places stores/reloads without a color retry | a finite spill plan whose reconstructed pressure is at most `K` |
+| pruned-IDF reconstruction | restores strict SSA after the planned splits | fresh dominating representatives and no dead reload/phi web |
+| late full-live Perm | isolates fixed-register and clobber constraints from global coloring | at-most-`K` components with a proved local perfect matching |
+| chordal SSA coloring | assigns registers to the already spill-complete SSA graph | a total physical assignment; it never requests more spilling |
+| SSA destruction | lowers phi/Perm semantics after colors and homes are fixed | verified edge-local parallel copies ready for encoding |
+
+Scheduling and spilling are therefore complementary, not alternative
+allocators: scheduling removes avoidable pressure once, while MIN handles the
+remaining inherent pressure.  CSSA is a precondition of home formation, Perm
+is a post-spill construction for machine constraints, and coloring only assigns
+the graph proved feasible by those earlier phases.
+
 ### 1. CFG normalization
 
 All outgoing edges of a branch receive dedicated one-predecessor/one-successor
@@ -136,6 +155,16 @@ weight.  Per-block use occurrences are stored once in a flat index and queried
 by binary search or monotone cursor, never by suffix rescanning.  The same CFG
 analysis supplies a loop tree, loop uses, and maximum loop pressure without an
 edge-times-loop or nested-loop-times-instruction scan.
+
+Loop use sets are not copied into every ancestor region.  Each syntactic use is
+attached once to its innermost natural-loop or irreducible-SCC region.  An
+iterative Euler numbering makes every region subtree an interval, and one flat
+index stores the direct-region positions for each VReg.  At a region entry,
+`used(value, region)` is answered by a binary search for a position in that
+interval.  Only the scalar maximum pressure is propagated bottom-up.  Thus a
+nesting chain of depth `D` does not materialize `D` copies of every inner use:
+storage is linear in CFG regions, VRegs, and direct use-region occurrences, and
+hot/cold queries are performed only for values live at an actual region entry.
 
 ### 6. Braun--Hack spill placement
 
@@ -332,7 +361,11 @@ do not weaken the verifier merely to accept existing output.
 The register-allocation pipeline verifies all of the following:
 
 - MIR is reachable strict SSA before and after every splitting pass;
+- the normalized block index, predecessor/successor graph, dominator tree,
+  dominance frontiers, natural-loop membership, and loop forest agree with MIR;
 - every original phi congruence class is interference-free before homes form;
+- next-use operand positions exactly match MIR and every entry/exit map satisfies
+  the CFG, phi-edge, loop-exit, and block-transfer data-flow equations;
 - every reload has a fresh definition and a same-home store on every incoming
   path unless it is rematerialized;
 - phi sources are associated with their actual predecessor edge;
@@ -342,12 +375,15 @@ The register-allocation pipeline verifies all of the following:
 - fixed operands occupy their required register and values live across a
   clobber do not occupy a clobbered register;
 - simultaneously live values never share a physical register;
-- every MIR use and definition has an assigned location; and
-- edge parallel copies preserve simultaneous-copy semantics, including cycles.
+- every encoded MIR use and definition has a physical assignment;
+- the explicit SSA-destruction artifact contains exactly one correctly located
+  row for every phi on every incoming edge; and
+- edge parallel copies preserve simultaneous-copy semantics, including
+  register, stack, and immediate cycles.
 
 Phase-boundary verification is unconditional in debug and release builds.
-`CELOX_REGALLOC_VERIFY=1` enables additional expensive per-pass audits and
-dumps; it is not required for the contracts above.
+`CELOX_SIR_VERIFY_PASSES=1` and `CELOX_MIR_VERIFY_PASSES=1` enable additional
+per-optimizer-pass audits; neither is required for the boundaries above.
 
 ## Performance and migration gates
 
@@ -362,9 +398,10 @@ small unit tests.  The migration is complete only when:
 - the end-to-end Heliodor result is compared with `veryl-cc` under the same
   timeout and workload.
 
-The old unified allocator may remain temporarily as an explicitly selected
-diagnostic implementation, but it is not a correctness fallback: a failure in
-the new allocator is a bug to diagnose and fix.
+The old unified allocator is not a production selector or correctness
+fallback.  Its source remains compiled only by unit tests while the remaining
+differential fixture is migrated; a failure in the new allocator is a bug to
+diagnose and fix.
 
 ## Implementation status
 
@@ -372,28 +409,30 @@ The frozen allocation pipeline is now the default `auto` implementation.  It
 contains:
 
 - dedicated insertion blocks for every branch edge, RPO layout, iterative
-  dominator/loop/SCC construction, and no CFG-size or traversal-depth cap;
+  dominator/loop/SCC construction, a fully checked normalized-CFG model, and no
+  CFG-size or traversal-depth cap;
 - dependency-verified pressure scheduling with one backward liveness pass per
   block and indexed ready buckets rather than suffix or ready-set rescans;
 - Method-I CSSA normalization and an independent semantic
   congruence-interference verifier;
 - lexicographic next-use distance over natural-loop and irreducible-SCC regions,
   with no fixed loop-distance constant, one block/instruction summary pass,
-  bottom-up nested-region aggregation, and the same entry priority at every
-  irreducible-region entry;
+  Euler-interval/flat-index nested-region queries, a complete Bellman-equation
+  verifier, and the same priority at every irreducible-region entry;
 - a Braun--Hack-style W/S spill plan and an independent sparse-SSA all-path,
   same-home store/reload proof without a block-by-home state matrix;
 - separate pruned-IDF SSA reconstruction, stack-slot precomputation,
   rematerialization, and dead reload/cyclic-phi removal;
 - post-reconstruction full-live Perm materialization, including pruned-IDF
   merge phis when a Perm splits only one CFG path, exact allowed-color masks,
-  and local bipartite matching; and
+  and local bipartite matching;
 - dominance-order streaming chordal coloring without program-point live-set
-  tables, explicit interference adjacency, or a spill/color retry loop.
+  tables, explicit interference adjacency, or a spill/color retry loop; and
+- explicit, independently verified SSA-destruction plans plus a final
+  MIR/assignment/frame proof immediately before x86 encoding.
 
-`CELOX_REGALLOC_IMPL=unified` remains only an explicitly selected differential
-diagnosis mode.  `auto` and `ssa` both use the new allocator, and a failure does
-not fall back to the old implementation.
+`auto` and `ssa` both use this allocator.  `unified` is deliberately rejected
+by `CELOX_REGALLOC_IMPL`, and a failure never selects another implementation.
 
 The previously rejected iterative splitter expanded Heliodor `eval_comb` from
 roughly 146,000 MIR instructions through 480,000, 1.1 million, 2.3 million, 4.7
@@ -410,28 +449,15 @@ for spill planning and its home proof, 0.13 seconds for reconstruction, 0.27
 seconds for late Perm construction/verification, and 0.08 seconds for coloring.
 The reconstructed function has about 443,000 VRegs rather than the 2.3 million
 created by early Perm materialization.  The `native_exec` test suite, the
-complete library suite, and all non-ignored `comb_observer` cases pass.  The
-end-to-end Heliodor execution, per-pass MIR audit, and same-condition
-`veryl-cc` comparison gates remain open.
+212-test library suite, all 145 non-ignored `comb_observer` cases, and the
+16-test native suite with per-pass SIR/MIR auditing pass.  The end-to-end
+Heliodor execution and same-condition `veryl-cc` comparison gates remain open.
 
 The public allocator and chained native emitter now return structured errors,
 failed public allocations leave their input MIR unchanged, and
-completed-assignment verification is unconditional.  Remaining work is at the
-internal and final IR boundaries:
-
-- propagate structured `Result` errors through the remaining internal mutating
-  helpers and phase verifiers instead of asserting their preconditions;
-- replace materialized per-region value sets with persistent/difference
-  summaries so a deeply nested loop forest does not copy every inner value into
-  every ancestor;
-- construct natural-loop membership and the loop-parent forest from dominance
-  intervals/tree structure rather than per-edge dominator walks and all-pairs
-  set-containment tests;
-- make the enclosing SIR/MIR phase-boundary proofs unconditional in release
-  builds and propagate their diagnostics rather than panicking;
-- expose SSA destruction/parallel-copy resolution and its final proof as an
-  explicit verified phase rather than leaving it implicit in emission; and
-- use checked identifier allocation throughout the remaining internal helpers.
-
-The legacy allocator can be removed after the differential diagnosis window.
-None of this remaining work permits a retry, fallback, or size/iteration cap.
+completed-assignment verification is unconditional.  Internal default-SSA
+mutators and verifiers return structured errors, fresh VReg/BlockId allocation
+is checked, and the valid-input path contains no `panic!`, `assert!`, `expect`,
+or `unwrap`.  The only remaining migration item is deleting the test-only
+legacy source after its last differential fixture is expressed against the new
+allocator.  That cleanup cannot add a retry, fallback, or size/iteration cap.

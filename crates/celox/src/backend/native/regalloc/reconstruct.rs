@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crate::backend::native::mir::{
-    BaseReg, MFunction, MInst, OpSize, PhiNode, SpillDesc, SpillKind, VReg,
+    BaseReg, BlockId, MFunction, MInst, OpSize, PhiNode, SpillDesc, SpillKind, VReg,
 };
 
 use super::cfg::NormalizedCfg;
@@ -12,6 +12,33 @@ use super::spill_plan::{LogicalValue, PlannedOp, SpillHome, SpillPlan};
 
 pub(super) struct ReconstructionResult {
     pub frame_size: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReconstructError {
+    pub rule: &'static str,
+    pub block: Option<BlockId>,
+    pub instruction: Option<usize>,
+    pub values: Vec<VReg>,
+    pub message: String,
+}
+
+impl ReconstructError {
+    fn new(
+        rule: &'static str,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+        values: Vec<VReg>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            rule,
+            block,
+            instruction,
+            values,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -32,9 +59,9 @@ pub(super) fn reconstruct(
     cfg: &NormalizedCfg,
     plan: &SpillPlan,
     _next_use: &NextUseAnalysis,
-) -> ReconstructionResult {
-    let stack_offsets = stack_layout(func, plan);
-    verify_reload_homes(func, plan, &stack_offsets);
+) -> Result<ReconstructionResult, ReconstructError> {
+    let stack_offsets = stack_layout(func, plan)?;
+    verify_reload_homes(func, plan, &stack_offsets)?;
     let original_vregs = func.vregs.count() as usize;
     let mut logical_for_vreg = (0..original_vregs)
         .map(|index| plan.logical.of(VReg(index as u32)))
@@ -63,7 +90,15 @@ pub(super) fn reconstruct(
         for phi in removed {
             let home = plan.homes.of_vreg(phi.dst);
             for (predecessor, source) in phi.sources {
-                let predecessor = cfg.block_index[&predecessor];
+                let Some(&predecessor) = cfg.block_index.get(&predecessor) else {
+                    return Err(ReconstructError::new(
+                        "RECONSTRUCT.PHI_PREDECESSOR_EXISTS",
+                        Some(func.blocks[block].id),
+                        None,
+                        vec![phi.dst, source],
+                        "spilled phi names a predecessor outside normalized CFG",
+                    ));
+                };
                 let source = plan.logical.of(source);
                 if plan.s_exit[predecessor].contains(&source) {
                     continue;
@@ -83,7 +118,15 @@ pub(super) fn reconstruct(
         if matches!(operation, PlannedOp::SpillPhi { .. }) {
             continue;
         }
-        let block = cfg.block_index[&point.block];
+        let Some(&block) = cfg.block_index.get(&point.block) else {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.POINT_BLOCK_EXISTS",
+                Some(point.block),
+                Some(point.instruction),
+                vec![VReg(planned_value(operation).0)],
+                "spill-plan point names a block outside normalized CFG",
+            ));
+        };
         materialize_operation(
             func,
             plan,
@@ -94,10 +137,27 @@ pub(super) fn reconstruct(
             &mut insertions,
             &mut reload_blocks,
             &mut reload_definitions,
-        );
+        )?;
     }
     for (&(predecessor, _successor), operations) in &plan.edge_ops {
-        let instruction = func.blocks[predecessor].insts.len() - 1;
+        let Some(predecessor_block) = func.blocks.get(predecessor) else {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.EDGE_PREDECESSOR_EXISTS",
+                None,
+                None,
+                Vec::new(),
+                format!("edge operation predecessor index {predecessor} is outside function"),
+            ));
+        };
+        let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.EDGE_PREDECESSOR_TERMINATED",
+                Some(predecessor_block.id),
+                None,
+                Vec::new(),
+                "edge operation predecessor block is empty",
+            ));
+        };
         for &operation in operations {
             materialize_operation(
                 func,
@@ -109,7 +169,7 @@ pub(super) fn reconstruct(
                 &mut insertions,
                 &mut reload_blocks,
                 &mut reload_definitions,
-            );
+            )?;
         }
     }
 
@@ -118,7 +178,7 @@ pub(super) fn reconstruct(
     let mut existing_phi_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::new();
     for (block, mir_block) in func.blocks.iter().enumerate() {
         for phi in &mir_block.phis {
-            let logical = logical_for_vreg[phi.dst.0 as usize];
+            let logical = reconstruct_logical(&logical_for_vreg, phi.dst, mir_block.id)?;
             if affected.contains(&logical) {
                 definition_blocks.entry(logical).or_default().insert(block);
                 existing_phi_blocks
@@ -129,7 +189,7 @@ pub(super) fn reconstruct(
         }
         for inst in &mir_block.insts {
             if let Some(definition) = inst.def() {
-                let logical = logical_for_vreg[definition.0 as usize];
+                let logical = reconstruct_logical(&logical_for_vreg, definition, mir_block.id)?;
                 if affected.contains(&logical) {
                     definition_blocks.entry(logical).or_default().insert(block);
                 }
@@ -157,7 +217,7 @@ pub(super) fn reconstruct(
                 if !has_phi.insert(frontier) {
                     continue;
                 }
-                let fresh = alloc_fresh(func, &mut logical_for_vreg, logical);
+                let fresh = alloc_fresh(func, &mut logical_for_vreg, logical)?;
                 reconstruction_phis.insert((frontier, logical), fresh);
                 func.blocks[frontier].phis.push(PhiNode {
                     dst: fresh,
@@ -170,7 +230,16 @@ pub(super) fn reconstruct(
 
     let mut children = vec![Vec::new(); func.blocks.len()];
     for (block, &idom) in cfg.idom.iter().enumerate().skip(1) {
-        children[idom.expect("non-entry block has idom")].push(block);
+        let Some(idom) = idom else {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.DOMINATOR_TREE",
+                Some(func.blocks[block].id),
+                None,
+                Vec::new(),
+                "non-entry block has no immediate dominator",
+            ));
+        };
+        children[idom].push(block);
     }
     let mut stacks = HashMap::<LogicalValue, Vec<VReg>>::new();
     rename_block(
@@ -184,13 +253,23 @@ pub(super) fn reconstruct(
         &mut logical_for_vreg,
         &mut insertions,
         &mut stacks,
-    );
+    )?;
     eliminate_dead_phis(func);
     eliminate_dead_reloads(func, &reload_definitions);
 
-    ReconstructionResult {
-        frame_size: (stack_offsets.len() as u32) * 8,
-    }
+    let frame_size = u32::try_from(stack_offsets.len())
+        .ok()
+        .and_then(|homes| homes.checked_mul(8))
+        .ok_or_else(|| {
+            ReconstructError::new(
+                "RECONSTRUCT.FRAME_SIZE_RANGE",
+                None,
+                None,
+                Vec::new(),
+                "spill frame size exceeds u32",
+            )
+        })?;
+    Ok(ReconstructionResult { frame_size })
 }
 
 /// Remove phi webs which no longer reach an instruction after SSA renaming.
@@ -269,8 +348,12 @@ fn eliminate_dead_reloads(func: &mut MFunction, reloads: &BTreeSet<VReg>) -> usi
     removed
 }
 
-fn stack_layout(func: &MFunction, plan: &SpillPlan) -> HashMap<SpillHome, i32> {
-    plan.point_ops
+fn stack_layout(
+    func: &MFunction,
+    plan: &SpillPlan,
+) -> Result<HashMap<SpillHome, i32>, ReconstructError> {
+    let homes = plan
+        .point_ops
         .iter()
         .map(|(_, operation)| *operation)
         .chain(plan.edge_ops.values().flatten().copied())
@@ -281,27 +364,47 @@ fn stack_layout(func: &MFunction, plan: &SpillPlan) -> HashMap<SpillHome, i32> {
             PlannedOp::SpillPhi { home, .. } => Some(home),
             PlannedOp::Reload { .. } => None,
         })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .enumerate()
-        .map(|(index, home)| (home, index as i32 * 8))
-        .collect()
+        .collect::<BTreeSet<_>>();
+    let mut result = HashMap::with_capacity(homes.len());
+    for (index, home) in homes.into_iter().enumerate() {
+        let Some(offset) = index
+            .checked_mul(8)
+            .and_then(|value| i32::try_from(value).ok())
+        else {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.STACK_OFFSET_RANGE",
+                None,
+                None,
+                Vec::new(),
+                "spill frame exceeds signed 32-bit addressing range",
+            ));
+        };
+        result.insert(home, offset);
+    }
+    Ok(result)
 }
 
 fn verify_reload_homes(
     func: &MFunction,
     plan: &SpillPlan,
     stack_offsets: &HashMap<SpillHome, i32>,
-) {
+) -> Result<(), ReconstructError> {
     for &(point, operation) in &plan.point_ops {
         if let PlannedOp::Reload { value, home } = operation
             && rematerialized_logical_value(func, value).is_none()
         {
-            assert!(
-                stack_offsets.contains_key(&home),
-                "reload without spill home at {point:?}: logical={value:?} home={home:?}; {}",
-                describe_missing_home(func, plan, value, home)
-            );
+            if !stack_offsets.contains_key(&home) {
+                return Err(ReconstructError::new(
+                    "RECONSTRUCT.RELOAD_HOME_EXISTS",
+                    Some(point.block),
+                    Some(point.instruction),
+                    vec![VReg(value.0)],
+                    format!(
+                        "reload has no spill home {home:?}; {}",
+                        describe_missing_home(func, plan, value, home)
+                    ),
+                ));
+            }
         }
     }
     for (&edge, operations) in &plan.edge_ops {
@@ -309,14 +412,23 @@ fn verify_reload_homes(
             if let PlannedOp::Reload { value, home } = operation
                 && rematerialized_logical_value(func, value).is_none()
             {
-                assert!(
-                    stack_offsets.contains_key(&home),
-                    "edge reload without spill home at {edge:?}: logical={value:?} home={home:?}; {}",
-                    describe_missing_home(func, plan, value, home)
-                );
+                if !stack_offsets.contains_key(&home) {
+                    let block = func.blocks.get(edge.0).map(|block| block.id);
+                    return Err(ReconstructError::new(
+                        "RECONSTRUCT.RELOAD_HOME_EXISTS",
+                        block,
+                        None,
+                        vec![VReg(value.0)],
+                        format!(
+                            "edge reload has no spill home {home:?}; {}",
+                            describe_missing_home(func, plan, value, home)
+                        ),
+                    ));
+                }
             }
         }
     }
+    Ok(())
 }
 
 fn describe_missing_home(
@@ -391,13 +503,13 @@ fn materialize_operation(
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     reload_blocks: &mut HashMap<LogicalValue, BTreeSet<usize>>,
     reload_definitions: &mut BTreeSet<VReg>,
-) {
+) -> Result<(), ReconstructError> {
     let operation = match operation {
         PlannedOp::Spill { value, home } | PlannedOp::SpillPhi { value, home } => {
             MaterializedOp::Spill { value, home }
         }
         PlannedOp::Reload { value, home } => {
-            let fresh = alloc_fresh(func, logical_for_vreg, value);
+            let fresh = alloc_fresh(func, logical_for_vreg, value)?;
             reload_blocks.entry(value).or_default().insert(block);
             reload_definitions.insert(fresh);
             MaterializedOp::Reload { value, home, fresh }
@@ -408,6 +520,7 @@ fn materialize_operation(
         .entry((block, instruction))
         .or_default()
         .push(operation);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,7 +535,7 @@ fn rename_block(
     logical_for_vreg: &mut Vec<LogicalValue>,
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     stacks: &mut HashMap<LogicalValue, Vec<VReg>>,
-) {
+) -> Result<(), ReconstructError> {
     enum Event {
         Enter(usize),
         Exit(Vec<LogicalValue>),
@@ -432,13 +545,31 @@ fn rename_block(
         match event {
             Event::Exit(pushed) => {
                 for logical in pushed.into_iter().rev() {
-                    stacks.get_mut(&logical).unwrap().pop();
+                    let Some(stack) = stacks.get_mut(&logical) else {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.RENAME_STACK_BALANCED",
+                            None,
+                            None,
+                            vec![VReg(logical.0)],
+                            "representative stack disappeared before dominator exit",
+                        ));
+                    };
+                    if stack.pop().is_none() {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.RENAME_STACK_BALANCED",
+                            None,
+                            None,
+                            vec![VReg(logical.0)],
+                            "representative stack underflow at dominator exit",
+                        ));
+                    }
                 }
             }
             Event::Enter(block) => {
                 let mut pushed = Vec::<LogicalValue>::new();
+                let block_id = func.blocks[block].id;
                 for phi in &func.blocks[block].phis {
-                    let logical = logical_for_vreg[phi.dst.0 as usize];
+                    let logical = reconstruct_logical(logical_for_vreg, phi.dst, block_id)?;
                     stacks.entry(logical).or_default().push(phi.dst);
                     pushed.push(logical);
                 }
@@ -456,10 +587,11 @@ fn rename_block(
                         stacks,
                         &mut pushed,
                         &mut rewritten,
-                    );
+                    )?;
                     let uses = inst.uses().into_iter().collect::<BTreeSet<_>>();
                     for original_use in uses {
-                        let logical = logical_for_vreg[original_use.0 as usize];
+                        let logical =
+                            reconstruct_logical(logical_for_vreg, original_use, block_id)?;
                         if let Some(&representative) =
                             stacks.get(&logical).and_then(|stack| stack.last())
                         {
@@ -467,7 +599,7 @@ fn rename_block(
                         }
                     }
                     if let Some(definition) = inst.def() {
-                        let logical = logical_for_vreg[definition.0 as usize];
+                        let logical = reconstruct_logical(logical_for_vreg, definition, block_id)?;
                         stacks.entry(logical).or_default().push(definition);
                         pushed.push(logical);
                     }
@@ -479,16 +611,22 @@ fn rename_block(
                 for &successor in &cfg.successors[block] {
                     let successor_id = func.blocks[successor].id;
                     for phi in &mut func.blocks[successor].phis {
-                        let destination_logical = logical_for_vreg[phi.dst.0 as usize];
+                        let destination_logical =
+                            reconstruct_logical(logical_for_vreg, phi.dst, successor_id)?;
                         if reconstruction_phis.contains_key(&(successor, destination_logical)) {
                             let Some(&representative) = stacks
                                 .get(&destination_logical)
                                 .and_then(|stack| stack.last())
                             else {
-                                panic!(
-                                    "SSA reconstruction phi {} for {:?} at {} has no representative from {}",
-                                    phi.dst, destination_logical, successor_id, predecessor_id
-                                );
+                                return Err(ReconstructError::new(
+                                    "RECONSTRUCT.PHI_REPRESENTATIVE_EXISTS",
+                                    Some(successor_id),
+                                    None,
+                                    vec![phi.dst, VReg(destination_logical.0)],
+                                    format!(
+                                        "reconstruction phi has no representative from {predecessor_id}"
+                                    ),
+                                ));
                             };
                             phi.sources.push((predecessor_id, representative));
                         } else if let Some(source) = phi
@@ -496,7 +634,8 @@ fn rename_block(
                             .iter_mut()
                             .find(|(source_predecessor, _)| *source_predecessor == predecessor_id)
                         {
-                            let source_logical = logical_for_vreg[source.1.0 as usize];
+                            let source_logical =
+                                reconstruct_logical(logical_for_vreg, source.1, successor_id)?;
                             if let Some(&representative) =
                                 stacks.get(&source_logical).and_then(|stack| stack.last())
                             {
@@ -510,6 +649,7 @@ fn rename_block(
             }
         }
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -524,7 +664,7 @@ fn emit_insertions(
     stacks: &mut HashMap<LogicalValue, Vec<VReg>>,
     pushed: &mut Vec<LogicalValue>,
     output: &mut Vec<MInst>,
-) {
+) -> Result<(), ReconstructError> {
     let mut operations = insertions.remove(&(block, instruction)).unwrap_or_default();
     // A SpillPlan program point is parallel.  When materialized serially,
     // evictions must free their registers before operand reloads consume them.
@@ -541,12 +681,31 @@ fn emit_insertions(
                 if is_rematerializable(func, plan, home) {
                     continue;
                 }
-                let source = *stacks[&logical]
-                    .last()
-                    .expect("spill is dominated by a logical definition");
+                let Some(source) = stacks
+                    .get(&logical)
+                    .and_then(|representatives| representatives.last())
+                    .copied()
+                else {
+                    return Err(ReconstructError::new(
+                        "RECONSTRUCT.SPILL_REPRESENTATIVE_EXISTS",
+                        func.blocks.get(block).map(|block| block.id),
+                        Some(instruction),
+                        vec![VReg(logical.0)],
+                        "spill is not dominated by a logical definition",
+                    ));
+                };
+                let Some(&offset) = stack_offsets.get(&home) else {
+                    return Err(ReconstructError::new(
+                        "RECONSTRUCT.SPILL_HOME_EXISTS",
+                        func.blocks.get(block).map(|block| block.id),
+                        Some(instruction),
+                        vec![VReg(logical.0)],
+                        format!("spill home {home:?} has no frame offset"),
+                    ));
+                };
                 output.push(MInst::Store {
                     base: BaseReg::StackFrame,
-                    offset: stack_offsets[&home],
+                    offset,
                     src: source,
                     size: OpSize::S64,
                 });
@@ -559,10 +718,19 @@ fn emit_insertions(
                 let reload = if let Some(value) = rematerialized_logical_value(func, logical) {
                     MInst::LoadImm { dst: fresh, value }
                 } else {
+                    let Some(&offset) = stack_offsets.get(&home) else {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.RELOAD_HOME_EXISTS",
+                            func.blocks.get(block).map(|block| block.id),
+                            Some(instruction),
+                            vec![VReg(logical.0)],
+                            format!("reload home {home:?} has no frame offset"),
+                        ));
+                    };
                     MInst::Load {
                         dst: fresh,
                         base: BaseReg::StackFrame,
-                        offset: stack_offsets[&home],
+                        offset,
                         size: OpSize::S64,
                     }
                 };
@@ -573,23 +741,69 @@ fn emit_insertions(
         }
     }
     let _ = logical_for_vreg;
+    Ok(())
+}
+
+fn reconstruct_logical(
+    logical_for_vreg: &[LogicalValue],
+    value: VReg,
+    block: BlockId,
+) -> Result<LogicalValue, ReconstructError> {
+    logical_for_vreg
+        .get(value.0 as usize)
+        .copied()
+        .ok_or_else(|| {
+            ReconstructError::new(
+                "RECONSTRUCT.LOGICAL_SIDETABLE_COVERS_VREG",
+                Some(block),
+                None,
+                vec![value],
+                "logical-value side table does not cover VReg",
+            )
+        })
 }
 
 fn alloc_fresh(
     func: &mut MFunction,
     logical_for_vreg: &mut Vec<LogicalValue>,
     logical: LogicalValue,
-) -> VReg {
+) -> Result<VReg, ReconstructError> {
     let width = func.value_widths.get(logical.0 as usize).copied().flatten();
-    let fresh = func.vregs.alloc();
-    assert_eq!(fresh.0 as usize, func.spill_descs.len());
+    let fresh = func.vregs.try_alloc().map_err(|error| {
+        ReconstructError::new(
+            "RECONSTRUCT.VREG_EXHAUSTED",
+            None,
+            None,
+            vec![VReg(logical.0)],
+            error.to_string(),
+        )
+    })?;
+    if fresh.0 as usize != func.spill_descs.len()
+        || (!func.value_widths.is_empty() && fresh.0 as usize != func.value_widths.len())
+        || fresh.0 as usize != logical_for_vreg.len()
+    {
+        return Err(ReconstructError::new(
+            "RECONSTRUCT.SIDETABLE_APPEND_POSITION",
+            None,
+            None,
+            vec![fresh],
+            "fresh VReg does not append consistently to reconstruction side tables",
+        ));
+    }
     func.spill_descs.push(SpillDesc::transient());
     if !func.value_widths.is_empty() {
-        assert_eq!(fresh.0 as usize, func.value_widths.len());
         func.value_widths.push(width);
     }
     logical_for_vreg.push(logical);
-    fresh
+    Ok(fresh)
+}
+
+fn planned_value(operation: PlannedOp) -> LogicalValue {
+    match operation {
+        PlannedOp::Spill { value, .. }
+        | PlannedOp::Reload { value, .. }
+        | PlannedOp::SpillPhi { value, .. } => value,
+    }
 }
 
 fn is_rematerializable(func: &MFunction, plan: &SpillPlan, home: SpillHome) -> bool {
@@ -624,6 +838,19 @@ fn rematerialized_logical_value(func: &MFunction, logical: LogicalValue) -> Opti
 mod tests {
     use super::*;
     use crate::backend::native::mir::{BlockId, MBlock, VRegAllocator};
+
+    #[test]
+    fn reconstruction_reports_vreg_exhaustion() {
+        let mut vregs = VRegAllocator::new();
+        vregs.set_next_for_test(u32::MAX);
+        let mut func = MFunction::new(vregs, Vec::new());
+        let mut logical_for_vreg = Vec::new();
+
+        let error = alloc_fresh(&mut func, &mut logical_for_vreg, LogicalValue(0)).unwrap_err();
+
+        assert_eq!(error.rule, "RECONSTRUCT.VREG_EXHAUSTED");
+        assert_eq!(func.vregs.count(), u32::MAX);
+    }
 
     #[test]
     fn removes_dead_cyclic_phi_webs() {
@@ -702,9 +929,58 @@ mod tests {
         func.value_widths = vec![Some(17)];
         let mut logical_for_vreg = vec![LogicalValue(original.0)];
 
-        let fresh = alloc_fresh(&mut func, &mut logical_for_vreg, LogicalValue(original.0));
+        let fresh =
+            alloc_fresh(&mut func, &mut logical_for_vreg, LogicalValue(original.0)).unwrap();
 
         assert_eq!(func.value_widths[fresh.0 as usize], Some(17));
         assert_eq!(logical_for_vreg[fresh.0 as usize], LogicalValue(original.0));
+    }
+
+    #[test]
+    fn missing_phi_representative_is_a_structured_error() {
+        let mut vregs = VRegAllocator::new();
+        let original = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut successor = MBlock::new(BlockId(1));
+        successor.push(MInst::LoadImm {
+            dst: original,
+            value: 1,
+        });
+        successor.push(MInst::Return);
+        func.blocks = vec![entry, successor];
+        func.verify();
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let plan = super::super::spill_plan::plan(&func, &cfg, &next_use, 32).unwrap();
+        let mut logical_for_vreg = vec![LogicalValue(original.0)];
+        let fresh =
+            alloc_fresh(&mut func, &mut logical_for_vreg, LogicalValue(original.0)).unwrap();
+        let successor = cfg.block_index[&BlockId(1)];
+        func.blocks[successor].phis.push(PhiNode {
+            dst: fresh,
+            sources: Vec::new(),
+        });
+        let reconstruction_phis = HashMap::from([((successor, LogicalValue(original.0)), fresh)]);
+        let mut children = vec![Vec::new(); func.blocks.len()];
+        children[0].push(successor);
+
+        let error = rename_block(
+            0,
+            &mut func,
+            &cfg,
+            &plan,
+            &children,
+            &reconstruction_phis,
+            &HashMap::new(),
+            &mut logical_for_vreg,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.rule, "RECONSTRUCT.PHI_REPRESENTATIVE_EXISTS");
+        assert_eq!(error.block, Some(BlockId(1)));
     }
 }

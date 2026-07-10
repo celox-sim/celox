@@ -27,25 +27,66 @@ pub(super) struct PermModel {
     pub boundaries: Vec<PermBoundary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PermError {
+    pub rule: &'static str,
+    pub block: Option<BlockId>,
+    pub instruction: Option<usize>,
+    pub values: Vec<VReg>,
+    pub message: String,
+}
+
+impl PermError {
+    fn new(
+        rule: &'static str,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+        values: Vec<VReg>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            rule,
+            block,
+            instruction,
+            values,
+            message: message.into(),
+        }
+    }
+}
+
 /// Insert the complete post-spill register-live set as a one-input Perm before
 /// every constrained instruction.  Pressure has already been proved <= K, so
 /// each materialized boundary contains at most K rows.
 pub(super) fn materialize_constraint_perms(
     func: &mut MFunction,
     initial_cfg: &NormalizedCfg,
-) -> (NormalizedCfg, PermModel) {
-    assert_eq!(func.blocks.len(), initial_cfg.predecessors.len());
+) -> Result<(NormalizedCfg, PermModel), PermError> {
+    if func.blocks.len() != initial_cfg.predecessors.len() {
+        return Err(PermError::new(
+            "PERM.INPUT_CFG_SHAPE",
+            None,
+            None,
+            Vec::new(),
+            format!(
+                "function has {} blocks but input CFG has {}",
+                func.blocks.len(),
+                initial_cfg.predecessors.len()
+            ),
+        ));
+    }
     let analysis = super::analysis::analyze(func);
     let live = constraint_boundary_liveness(func, &analysis);
     let mut logical_for_vreg = (0..func.vregs.count()).map(VReg).collect::<Vec<_>>();
-    let boundary_blocks = split_constraint_blocks(func, &live, &mut logical_for_vreg);
-    let cfg = super::cfg::normalize(func);
+    let boundary_blocks = split_constraint_blocks(func, &live, &mut logical_for_vreg)?;
+    let cfg = super::cfg::normalize(func).map_err(|error| {
+        PermError::new(error.rule, error.block, None, Vec::new(), error.message)
+    })?;
     let merge_phis =
-        insert_permutation_merge_phis(func, &cfg, &boundary_blocks, &mut logical_for_vreg);
-    rename_permutation_representatives(func, &cfg, &logical_for_vreg, &merge_phis);
-    let model = PermModel::build(func, &cfg, &boundary_blocks);
-    model.verify(func, &cfg, super::NUM_REGS);
-    (cfg, model)
+        insert_permutation_merge_phis(func, &cfg, &boundary_blocks, &mut logical_for_vreg)?;
+    rename_permutation_representatives(func, &cfg, &logical_for_vreg, &merge_phis)?;
+    let model = PermModel::build(func, &cfg, &boundary_blocks)?;
+    model.verify(func, &cfg, super::NUM_REGS)?;
+    Ok((cfg, model))
 }
 
 impl PermRow {
@@ -84,18 +125,12 @@ impl PermBoundary {
                 return None;
             }
         }
-        Some(
-            self.rows
-                .iter()
-                .enumerate()
-                .map(|(row, facts)| {
-                    (
-                        facts.destination,
-                        ALLOCATABLE_REGS[assigned[row].expect("matched Perm row")],
-                    )
-                })
-                .collect(),
-        )
+        let mut result = HashMap::with_capacity(self.rows.len());
+        for (row, facts) in self.rows.iter().enumerate() {
+            let color = assigned[row]?;
+            result.insert(facts.destination, ALLOCATABLE_REGS[color]);
+        }
+        Some(result)
     }
 }
 
@@ -115,10 +150,12 @@ fn augment_row(
             .filter(|color| Some(*color) != preferred),
     );
     for color in colors {
-        let color_index = ALLOCATABLE_REGS
+        let Some(color_index) = ALLOCATABLE_REGS
             .iter()
             .position(|candidate| *candidate == color)
-            .expect("allocatable preferred color");
+        else {
+            continue;
+        };
         if visited[color_index] || !rows[row].allows(color) {
             continue;
         }
@@ -139,94 +176,195 @@ fn augment_row(
 }
 
 impl PermModel {
-    fn build(func: &MFunction, cfg: &NormalizedCfg, boundary_blocks: &[BlockId]) -> Self {
+    fn build(
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        boundary_blocks: &[BlockId],
+    ) -> Result<Self, PermError> {
         let analysis = super::analysis::analyze(func);
-        let boundaries = boundary_blocks
-            .iter()
-            .map(|&block_id| {
-                let block_index = cfg.block_index[&block_id];
-                let block = &func.blocks[block_index];
-                let predecessor_index = cfg.predecessors[block_index]
-                    .first()
-                    .copied()
-                    .expect("Perm block has one predecessor");
-                assert_eq!(cfg.predecessors[block_index].len(), 1);
-                let predecessor = func.blocks[predecessor_index].id;
-                let instruction = block.insts.first().expect("constraint instruction");
-                let live_after =
-                    live_after_first_instruction(block, &analysis.exit_distances[block_index]);
-                let mut fixed = HashMap::<VReg, PhysReg>::new();
-                for (value, constraint) in instruction
-                    .uses()
-                    .into_iter()
-                    .zip(use_constraints(instruction))
+        let mut boundaries = Vec::with_capacity(boundary_blocks.len());
+        for &block_id in boundary_blocks {
+            let Some(&block_index) = cfg.block_index.get(&block_id) else {
+                return Err(PermError::new(
+                    "PERM.BOUNDARY_BLOCK_EXISTS",
+                    Some(block_id),
+                    None,
+                    Vec::new(),
+                    "materialized boundary block is absent from normalized CFG",
+                ));
+            };
+            let block = &func.blocks[block_index];
+            if cfg.predecessors[block_index].len() != 1 {
+                return Err(PermError::new(
+                    "PERM.SINGLE_PREDECESSOR",
+                    Some(block_id),
+                    None,
+                    Vec::new(),
+                    format!(
+                        "Perm boundary has {} predecessors",
+                        cfg.predecessors[block_index].len()
+                    ),
+                ));
+            }
+            let predecessor_index = cfg.predecessors[block_index][0];
+            let predecessor = func.blocks[predecessor_index].id;
+            let Some(instruction) = block.insts.first() else {
+                return Err(PermError::new(
+                    "PERM.CONSTRAINT_INSTRUCTION_EXISTS",
+                    Some(block_id),
+                    None,
+                    Vec::new(),
+                    "Perm boundary has no constrained instruction",
+                ));
+            };
+            let live_after =
+                live_after_first_instruction(block, &analysis.exit_distances[block_index]);
+            let mut fixed = HashMap::<VReg, PhysReg>::new();
+            for (value, constraint) in instruction
+                .uses()
+                .into_iter()
+                .zip(use_constraints(instruction))
+            {
+                let RegConstraint::Fixed(required) = constraint else {
+                    continue;
+                };
+                if let Some(previous) = fixed.insert(value, required)
+                    && previous != required
                 {
-                    let RegConstraint::Fixed(required) = constraint else {
-                        continue;
-                    };
-                    if let Some(previous) = fixed.insert(value, required) {
-                        assert_eq!(
-                            previous, required,
-                            "one operand cannot require two physical registers"
-                        );
-                    }
+                    return Err(PermError::new(
+                        "PERM.FIXED_USE_CONSISTENT",
+                        Some(block_id),
+                        Some(0),
+                        vec![value],
+                        format!(
+                            "operand requires incompatible registers {previous:?} and {required:?}"
+                        ),
+                    ));
                 }
-                let clobbered = clobbers(instruction)
-                    .iter()
-                    .copied()
-                    .fold(0u16, |mask, color| mask | color_bit(color));
-                let rows = block
-                    .phis
-                    .iter()
-                    .map(|phi| {
-                        assert_eq!(phi.sources.len(), 1, "Perm row has one source");
-                        assert_eq!(phi.sources[0].0, predecessor);
-                        let mut allowed_colors = all_color_bits();
-                        if let Some(&required) = fixed.get(&phi.dst) {
-                            allowed_colors &= color_bit(required);
-                        }
-                        if live_after.contains(&phi.dst) {
-                            allowed_colors &= !clobbered;
-                        }
-                        PermRow {
-                            source: phi.sources[0].1,
-                            destination: phi.dst,
-                            allowed_colors,
-                        }
-                    })
-                    .collect();
-                PermBoundary {
-                    block: block_id,
-                    predecessor,
-                    rows,
+            }
+            let clobbered = clobbers(instruction)
+                .iter()
+                .copied()
+                .fold(0u16, |mask, color| mask | color_bit(color));
+            let mut rows = Vec::with_capacity(block.phis.len());
+            for phi in &block.phis {
+                if phi.sources.len() != 1 || phi.sources[0].0 != predecessor {
+                    return Err(PermError::new(
+                        "PERM.ROW_SOURCE_EDGE",
+                        Some(block_id),
+                        None,
+                        vec![phi.dst],
+                        "Perm row must have exactly one source from its predecessor",
+                    ));
                 }
-            })
-            .collect();
-        Self { boundaries }
+                let mut allowed_colors = all_color_bits();
+                if let Some(&required) = fixed.get(&phi.dst) {
+                    allowed_colors &= color_bit(required);
+                }
+                if live_after.contains(&phi.dst) {
+                    allowed_colors &= !clobbered;
+                }
+                rows.push(PermRow {
+                    source: phi.sources[0].1,
+                    destination: phi.dst,
+                    allowed_colors,
+                });
+            }
+            boundaries.push(PermBoundary {
+                block: block_id,
+                predecessor,
+                rows,
+            });
+        }
+        Ok(Self { boundaries })
     }
 
-    pub(super) fn verify(&self, func: &MFunction, cfg: &NormalizedCfg, registers: usize) {
+    pub(super) fn verify(
+        &self,
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        registers: usize,
+    ) -> Result<(), PermError> {
         let analysis = super::analysis::analyze(func);
         let mut seen = BTreeSet::new();
         for boundary in &self.boundaries {
-            assert!(seen.insert(boundary.block), "duplicate Perm boundary");
-            let block_index = cfg.block_index[&boundary.block];
+            if !seen.insert(boundary.block) {
+                return Err(PermError::new(
+                    "PERM.UNIQUE_BOUNDARY",
+                    Some(boundary.block),
+                    None,
+                    Vec::new(),
+                    "duplicate Perm boundary",
+                ));
+            }
+            let Some(&block_index) = cfg.block_index.get(&boundary.block) else {
+                return Err(PermError::new(
+                    "PERM.BOUNDARY_BLOCK_EXISTS",
+                    Some(boundary.block),
+                    None,
+                    Vec::new(),
+                    "Perm model names a missing block",
+                ));
+            };
             let block = &func.blocks[block_index];
-            assert_eq!(cfg.predecessors[block_index].len(), 1);
-            assert_eq!(
-                func.blocks[cfg.predecessors[block_index][0]].id,
-                boundary.predecessor
-            );
-            assert!(boundary.rows.len() <= registers);
-            assert_eq!(boundary.rows.len(), block.phis.len());
-            let instruction = block.insts.first().expect("Perm constraint instruction");
-            assert!(
-                !clobbers(instruction).is_empty()
-                    || use_constraints(instruction)
-                        .into_iter()
-                        .any(|constraint| matches!(constraint, RegConstraint::Fixed(_))),
-                "Perm boundary must immediately precede a constrained instruction"
-            );
+            if cfg.predecessors[block_index].len() != 1
+                || func.blocks[cfg.predecessors[block_index][0]].id != boundary.predecessor
+            {
+                return Err(PermError::new(
+                    "PERM.PREDECESSOR_MATCHES",
+                    Some(boundary.block),
+                    None,
+                    Vec::new(),
+                    "Perm model predecessor does not match the CFG edge",
+                ));
+            }
+            if boundary.rows.len() > registers {
+                return Err(PermError::new(
+                    "PERM.PRESSURE_BOUND",
+                    Some(boundary.block),
+                    None,
+                    boundary.rows.iter().map(|row| row.destination).collect(),
+                    format!(
+                        "Perm has {} rows but only {registers} registers",
+                        boundary.rows.len()
+                    ),
+                ));
+            }
+            if boundary.rows.len() != block.phis.len() {
+                return Err(PermError::new(
+                    "PERM.ROWS_MATCH_PHIS",
+                    Some(boundary.block),
+                    None,
+                    Vec::new(),
+                    format!(
+                        "model has {} rows but block has {} phis",
+                        boundary.rows.len(),
+                        block.phis.len()
+                    ),
+                ));
+            }
+            let Some(instruction) = block.insts.first() else {
+                return Err(PermError::new(
+                    "PERM.CONSTRAINT_INSTRUCTION_EXISTS",
+                    Some(boundary.block),
+                    None,
+                    Vec::new(),
+                    "Perm block is empty",
+                ));
+            };
+            if clobbers(instruction).is_empty()
+                && !use_constraints(instruction)
+                    .into_iter()
+                    .any(|constraint| matches!(constraint, RegConstraint::Fixed(_)))
+            {
+                return Err(PermError::new(
+                    "PERM.IMMEDIATELY_PRECEDES_CONSTRAINT",
+                    Some(boundary.block),
+                    Some(0),
+                    Vec::new(),
+                    "Perm boundary does not precede a constrained instruction",
+                ));
+            }
             let live_after =
                 live_after_first_instruction(block, &analysis.exit_distances[block_index]);
             let mut live_before = live_after;
@@ -239,11 +377,27 @@ impl PermModel {
                 .iter()
                 .map(|row| row.destination)
                 .collect::<BTreeSet<_>>();
-            assert_eq!(
-                destinations, live_before,
-                "Perm rows must equal the complete post-spill live set"
-            );
-            let predecessor_index = cfg.block_index[&boundary.predecessor];
+            if destinations != live_before {
+                return Err(PermError::new(
+                    "PERM.COMPLETE_LIVE_DESTINATIONS",
+                    Some(boundary.block),
+                    Some(0),
+                    destinations
+                        .symmetric_difference(&live_before)
+                        .copied()
+                        .collect(),
+                    "Perm destinations do not equal the complete live set",
+                ));
+            }
+            let Some(&predecessor_index) = cfg.block_index.get(&boundary.predecessor) else {
+                return Err(PermError::new(
+                    "PERM.PREDECESSOR_EXISTS",
+                    Some(boundary.block),
+                    None,
+                    Vec::new(),
+                    "Perm predecessor is absent from CFG",
+                ));
+            };
             let sources = boundary
                 .rows
                 .iter()
@@ -253,13 +407,35 @@ impl PermModel {
                 .keys()
                 .copied()
                 .collect::<BTreeSet<_>>();
-            assert_eq!(sources, edge_live, "Perm rows must cover the input edge");
-            assert!(boundary.rows.iter().all(|row| row.allowed_colors != 0));
-            assert!(
-                boundary.match_colors(|_| None).is_some(),
-                "constraint point has no local physical-color matching"
-            );
+            if sources != edge_live {
+                return Err(PermError::new(
+                    "PERM.COMPLETE_LIVE_SOURCES",
+                    Some(boundary.block),
+                    None,
+                    sources.symmetric_difference(&edge_live).copied().collect(),
+                    "Perm sources do not cover the complete input edge",
+                ));
+            }
+            if let Some(row) = boundary.rows.iter().find(|row| row.allowed_colors == 0) {
+                return Err(PermError::new(
+                    "PERM.NONEMPTY_ALLOWED_COLORS",
+                    Some(boundary.block),
+                    Some(0),
+                    vec![row.destination],
+                    "Perm row has no allowed physical color",
+                ));
+            }
+            if boundary.match_colors(|_| None).is_none() {
+                return Err(PermError::new(
+                    "PERM.PERFECT_MATCHING",
+                    Some(boundary.block),
+                    Some(0),
+                    boundary.rows.iter().map(|row| row.destination).collect(),
+                    "constraint point has no local physical-color matching",
+                ));
+            }
         }
+        Ok(())
     }
 }
 
@@ -293,20 +469,37 @@ fn alloc_copy(
     spill_descs: &mut Vec<SpillDesc>,
     value_widths: &mut Vec<Option<u8>>,
     source: VReg,
-) -> VReg {
+) -> Result<VReg, PermError> {
     let desc = spill_descs
         .get(source.0 as usize)
         .map(SpillDesc::copy_for_snapshot)
         .unwrap_or_else(SpillDesc::transient);
     let width = value_widths.get(source.0 as usize).copied().flatten();
-    let fresh = vregs.alloc();
-    assert_eq!(fresh.0 as usize, spill_descs.len());
+    let fresh = vregs.try_alloc().map_err(|error| {
+        PermError::new(
+            "PERM.VREG_EXHAUSTED",
+            None,
+            None,
+            vec![source],
+            error.to_string(),
+        )
+    })?;
+    if fresh.0 as usize != spill_descs.len()
+        || (!value_widths.is_empty() && fresh.0 as usize != value_widths.len())
+    {
+        return Err(PermError::new(
+            "PERM.SIDETABLE_APPEND_POSITION",
+            None,
+            None,
+            vec![fresh, source],
+            "fresh Perm VReg does not append consistently to MIR side tables",
+        ));
+    }
     spill_descs.push(desc);
     if !value_widths.is_empty() {
-        assert_eq!(fresh.0 as usize, value_widths.len());
         value_widths.push(width);
     }
-    fresh
+    Ok(fresh)
 }
 
 fn constraint_boundary_liveness(
@@ -359,15 +552,23 @@ fn split_constraint_blocks(
     func: &mut MFunction,
     live: &[HashMap<usize, BTreeSet<VReg>>],
     logical_for_vreg: &mut Vec<VReg>,
-) -> Vec<BlockId> {
+) -> Result<Vec<BlockId>, PermError> {
     let original = std::mem::take(&mut func.blocks);
-    let mut next_block = original
+    let Some(mut next_block) = original
         .iter()
         .map(|block| block.id.0)
         .max()
         .unwrap_or(0)
         .checked_add(1)
-        .expect("MIR BlockId overflow while inserting constraint boundaries");
+    else {
+        return Err(PermError::new(
+            "PERM.BLOCK_ID_RANGE",
+            None,
+            None,
+            Vec::new(),
+            "BlockId overflow while inserting constraint boundaries",
+        ));
+    };
     let mut rewritten = Vec::<(MBlock, bool)>::new();
     let mut final_block = HashMap::<BlockId, BlockId>::new();
     let mut boundary_blocks = Vec::new();
@@ -396,9 +597,16 @@ fn split_constraint_blocks(
                 original_id
             } else {
                 let id = BlockId(next_block);
-                next_block = next_block
-                    .checked_add(1)
-                    .expect("MIR BlockId overflow while inserting constraint boundaries");
+                let Some(next) = next_block.checked_add(1) else {
+                    return Err(PermError::new(
+                        "PERM.BLOCK_ID_RANGE",
+                        Some(original_id),
+                        None,
+                        Vec::new(),
+                        "BlockId overflow while inserting constraint boundaries",
+                    ));
+                };
+                next_block = next;
                 id
             };
             let mut next = MBlock::new(id);
@@ -406,14 +614,35 @@ fn split_constraint_blocks(
                 next.phis = original_phis.clone();
             } else {
                 boundary_blocks.push(id);
-                for &source in &live[block_index][&start] {
+                let Some(sources) = live
+                    .get(block_index)
+                    .and_then(|boundaries| boundaries.get(&start))
+                else {
+                    return Err(PermError::new(
+                        "PERM.BOUNDARY_LIVENESS_EXISTS",
+                        Some(original_id),
+                        Some(start),
+                        Vec::new(),
+                        "constraint boundary has no liveness fact",
+                    ));
+                };
+                for &source in sources {
                     let destination = alloc_copy(
                         &mut func.vregs,
                         &mut func.spill_descs,
                         &mut func.value_widths,
                         source,
-                    );
-                    logical_for_vreg.push(logical_for_vreg[source.0 as usize]);
+                    )?;
+                    let Some(&logical) = logical_for_vreg.get(source.0 as usize) else {
+                        return Err(PermError::new(
+                            "PERM.LOGICAL_SIDETABLE_COVERS_VREG",
+                            Some(original_id),
+                            Some(start),
+                            vec![source],
+                            "constraint source has no logical-value mapping",
+                        ));
+                    };
+                    logical_for_vreg.push(logical);
                     next.phis.push(PhiNode {
                         dst: destination,
                         sources: vec![(previous_id, source)],
@@ -445,7 +674,7 @@ fn split_constraint_blocks(
         }
     }
     func.blocks = rewritten.into_iter().map(|(block, _)| block).collect();
-    boundary_blocks
+    Ok(boundary_blocks)
 }
 
 /// Reconstruct SSA for the logical values split by late Perm definitions.
@@ -460,7 +689,7 @@ fn insert_permutation_merge_phis(
     cfg: &NormalizedCfg,
     boundary_blocks: &[BlockId],
     logical_for_vreg: &mut Vec<VReg>,
-) -> BTreeSet<VReg> {
+) -> Result<BTreeSet<VReg>, PermError> {
     let affected = boundary_blocks
         .iter()
         .flat_map(|block| {
@@ -471,7 +700,7 @@ fn insert_permutation_merge_phis(
         })
         .collect::<BTreeSet<_>>();
     if affected.is_empty() {
-        return BTreeSet::new();
+        return Ok(BTreeSet::new());
     }
 
     // Compute pruned liveness before adding empty-source reconstruction phis.
@@ -532,7 +761,7 @@ fn insert_permutation_merge_phis(
                     &mut func.spill_descs,
                     &mut func.value_widths,
                     logical,
-                );
+                )?;
                 logical_for_vreg.push(logical);
                 func.blocks[frontier].phis.push(PhiNode {
                     dst: fresh,
@@ -543,7 +772,7 @@ fn insert_permutation_merge_phis(
             }
         }
     }
-    merge_phis
+    Ok(merge_phis)
 }
 
 fn rename_permutation_representatives(
@@ -551,7 +780,7 @@ fn rename_permutation_representatives(
     cfg: &NormalizedCfg,
     logical_for_vreg: &[VReg],
     merge_phis: &BTreeSet<VReg>,
-) {
+) -> Result<(), PermError> {
     let mut children = vec![Vec::new(); func.blocks.len()];
     for (block, idom) in cfg.idom.iter().enumerate() {
         if let Some(idom) = idom {
@@ -568,19 +797,37 @@ fn rename_permutation_representatives(
         match event {
             Event::Exit(pushed) => {
                 for logical in pushed.into_iter().rev() {
-                    stacks.get_mut(&logical).unwrap().pop();
+                    let Some(stack) = stacks.get_mut(&logical) else {
+                        return Err(PermError::new(
+                            "PERM.RENAME_STACK_BALANCED",
+                            None,
+                            None,
+                            vec![logical],
+                            "rename stack disappeared before dominator exit",
+                        ));
+                    };
+                    if stack.pop().is_none() {
+                        return Err(PermError::new(
+                            "PERM.RENAME_STACK_BALANCED",
+                            None,
+                            None,
+                            vec![logical],
+                            "rename stack underflow at dominator exit",
+                        ));
+                    }
                 }
             }
             Event::Enter(block) => {
                 let mut pushed = Vec::new();
+                let block_id = func.blocks[block].id;
                 for phi in &func.blocks[block].phis {
-                    let logical = logical_for_vreg[phi.dst.0 as usize];
+                    let logical = perm_logical(logical_for_vreg, phi.dst, block_id)?;
                     stacks.entry(logical).or_default().push(phi.dst);
                     pushed.push(logical);
                 }
                 for inst in &mut func.blocks[block].insts {
                     for used in inst.uses() {
-                        let logical = logical_for_vreg[used.0 as usize];
+                        let logical = perm_logical(logical_for_vreg, used, block_id)?;
                         if let Some(&representative) =
                             stacks.get(&logical).and_then(|stack| stack.last())
                         {
@@ -588,33 +835,37 @@ fn rename_permutation_representatives(
                         }
                     }
                     if let Some(definition) = inst.def() {
-                        let logical = logical_for_vreg[definition.0 as usize];
+                        let logical = perm_logical(logical_for_vreg, definition, block_id)?;
                         stacks.entry(logical).or_default().push(definition);
                         pushed.push(logical);
                     }
                 }
                 let predecessor = func.blocks[block].id;
                 for &successor in &cfg.successors[block] {
+                    let successor_id = func.blocks[successor].id;
                     for phi in &mut func.blocks[successor].phis {
                         if merge_phis.contains(&phi.dst) {
-                            let logical = logical_for_vreg[phi.dst.0 as usize];
-                            let representative = stacks
-                                .get(&logical)
-                                .and_then(|stack| stack.last())
-                                .copied()
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "late Perm merge phi {} for logical {} has no representative from {}",
-                                        phi.dst, logical, predecessor
-                                    )
-                                });
+                            let logical = perm_logical(logical_for_vreg, phi.dst, successor_id)?;
+                            let Some(representative) =
+                                stacks.get(&logical).and_then(|stack| stack.last()).copied()
+                            else {
+                                return Err(PermError::new(
+                                    "PERM.MERGE_REPRESENTATIVE_EXISTS",
+                                    Some(successor_id),
+                                    None,
+                                    vec![phi.dst, logical],
+                                    format!(
+                                        "late Perm merge has no representative from {predecessor}"
+                                    ),
+                                ));
+                            };
                             phi.sources.push((predecessor, representative));
                         } else if let Some(source) = phi
                             .sources
                             .iter_mut()
                             .find(|(source_predecessor, _)| *source_predecessor == predecessor)
                         {
-                            let logical = logical_for_vreg[source.1.0 as usize];
+                            let logical = perm_logical(logical_for_vreg, source.1, successor_id)?;
                             if let Some(&representative) =
                                 stacks.get(&logical).and_then(|stack| stack.last())
                             {
@@ -628,12 +879,42 @@ fn rename_permutation_representatives(
             }
         }
     }
+    Ok(())
+}
+
+fn perm_logical(logical_for_vreg: &[VReg], value: VReg, block: BlockId) -> Result<VReg, PermError> {
+    logical_for_vreg
+        .get(value.0 as usize)
+        .copied()
+        .ok_or_else(|| {
+            PermError::new(
+                "PERM.LOGICAL_SIDETABLE_COVERS_VREG",
+                Some(block),
+                None,
+                vec![value],
+                "Perm logical-value side table does not cover VReg",
+            )
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::native::mir::{SpillDesc, VRegAllocator};
+
+    #[test]
+    fn perm_copy_reports_vreg_exhaustion() {
+        let mut vregs = VRegAllocator::new();
+        vregs.set_next_for_test(u32::MAX);
+        let mut spill_descs = Vec::new();
+        let mut value_widths = Vec::new();
+
+        let error =
+            alloc_copy(&mut vregs, &mut spill_descs, &mut value_widths, VReg(0)).unwrap_err();
+
+        assert_eq!(error.rule, "PERM.VREG_EXHAUSTED");
+        assert_eq!(vregs.count(), u32::MAX);
+    }
 
     #[test]
     fn fixed_shift_starts_a_single_predecessor_perm_component() {
@@ -656,8 +937,8 @@ mod tests {
         block.push(MInst::Return);
         func.push_block(block);
 
-        let initial = super::super::cfg::normalize(&mut func);
-        let (cfg, model) = materialize_constraint_perms(&mut func, &initial);
+        let initial = super::super::cfg::normalize(&mut func).unwrap();
+        let (cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
         func.verify();
         let constrained = func
             .blocks
@@ -673,6 +954,38 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(matching[&fixed], PhysReg::RCX);
+    }
+
+    #[test]
+    fn incomplete_perm_model_is_a_structured_error() {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let amount = vregs.alloc();
+        let result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 8 });
+        block.push(MInst::LoadImm {
+            dst: amount,
+            value: 1,
+        });
+        block.push(MInst::Shl {
+            dst: result,
+            lhs,
+            rhs: amount,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let initial = super::super::cfg::normalize(&mut func).unwrap();
+        let (cfg, mut model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        model.boundaries[0].rows.pop();
+
+        let error = model
+            .verify(&func, &cfg, super::super::NUM_REGS)
+            .unwrap_err();
+
+        assert_eq!(error.rule, "PERM.ROWS_MATCH_PHIS");
+        assert!(error.block.is_some());
     }
 
     #[test]
@@ -703,8 +1016,8 @@ mod tests {
         join.push(MInst::Return);
         func.blocks = vec![entry, left, other, join];
 
-        let initial = super::super::cfg::normalize(&mut func);
-        let (cfg, model) = materialize_constraint_perms(&mut func, &initial);
+        let initial = super::super::cfg::normalize(&mut func).unwrap();
+        let (cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
         let constrained = func
             .blocks
             .iter()
@@ -759,8 +1072,8 @@ mod tests {
         join.push(MInst::Return);
         func.blocks = vec![entry, constrained_arm, other_arm, join];
 
-        let initial = super::super::cfg::normalize(&mut func);
-        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial);
+        let initial = super::super::cfg::normalize(&mut func).unwrap();
+        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
         func.verify();
 
         let constrained = func
@@ -844,8 +1157,8 @@ mod tests {
         exit.push(MInst::Return);
         func.blocks = vec![entry, header, body, exit];
 
-        let initial = super::super::cfg::normalize(&mut func);
-        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial);
+        let initial = super::super::cfg::normalize(&mut func).unwrap();
+        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
         func.verify();
 
         let constrained = func

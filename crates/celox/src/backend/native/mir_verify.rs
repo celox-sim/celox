@@ -153,6 +153,16 @@ pub fn verify_function(func: &MFunction) -> Result<(), MirVerifyError> {
             preds.insert(block.id);
         }
     }
+    // The first block is the unique CFG/SSA root.  Allowing an edge back to
+    // it would require an entry phi/environment that MIR does not represent,
+    // and would leave the root without a well-defined immediate dominator.
+    if !predecessors[&entry].is_empty() {
+        return Err(MirVerifyError::block(
+            "CFG.ENTRY_HAS_NO_PREDECESSORS",
+            entry,
+            format!("entry block has predecessors {:?}", predecessors[&entry]),
+        ));
+    }
     let reachable = reachable_blocks(func, entry, &block_indices);
     if reachable.len() != func.blocks.len() {
         let unreachable = block_indices
@@ -604,6 +614,31 @@ mod tests {
                 .invariant,
             "SSA.PHI_COVERS_PREDECESSORS"
         );
+    }
+
+    #[test]
+    fn rejects_predecessors_of_the_entry_block() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Jump { target: BlockId(0) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Jump { target: BlockId(0) });
+
+        let error = function(1, vec![entry, left, right])
+            .verify_result()
+            .unwrap_err();
+
+        assert_eq!(error.invariant, "CFG.ENTRY_HAS_NO_PREDECESSORS");
+        assert_eq!(error.block, Some(BlockId(0)));
     }
 
     #[test]

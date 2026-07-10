@@ -19,10 +19,12 @@ mod pressure;
 mod reconstruct;
 mod schedule;
 mod spill_plan;
+#[cfg(test)]
 mod spilling;
 mod ssa;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
 mod unified;
 mod verify;
 
@@ -43,6 +45,8 @@ pub struct RegallocResult {
     pub assignment: AssignmentMap,
     /// Bytes of stack frame needed for spill slots.
     pub spill_frame_size: u32,
+    /// Complete, independently verified phi-edge parallel-copy plan.
+    pub(crate) ssa_destruction: super::ssa_destroy::SsaDestructionPlan,
 }
 
 /// Structured failure from a verified register-allocation phase.
@@ -122,6 +126,76 @@ fn verify_assignment(
     })
 }
 
+fn constraint_error(phase: &'static str, error: constraints::ConstraintError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
+
+fn cfg_error(phase: &'static str, error: cfg::CfgError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        None,
+        Vec::new(),
+        error.message,
+    )
+}
+
+fn next_use_error(phase: &'static str, error: next_use::NextUseError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
+
+fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
+
+fn ssa_destruction_error(
+    phase: &'static str,
+    error: super::ssa_destroy::SsaDestructionError,
+) -> RegallocError {
+    let mut values = Vec::with_capacity(2);
+    if let Some(destination) = error.phi_destination {
+        values.push(destination);
+    }
+    if let Some(source) = error.source_value {
+        values.push(source);
+    }
+    let edge = match (error.predecessor, error.successor) {
+        (Some(predecessor), Some(successor)) => format!(" on {predecessor} -> {successor}"),
+        (None, Some(successor)) => format!(" at {successor}"),
+        _ => String::new(),
+    };
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.successor.or(error.predecessor),
+        None,
+        values,
+        format!("{}{edge}", error.message),
+    )
+}
+
 /// Run the full register allocation pipeline on an MFunction.
 /// Returns the assignment map and required spill frame size.
 pub fn run_regalloc(func: &mut MFunction) -> Result<RegallocResult, RegallocError> {
@@ -134,21 +208,21 @@ pub fn run_regalloc_with_label(
     label: &str,
 ) -> Result<RegallocResult, RegallocError> {
     let requested = std::env::var("CELOX_REGALLOC_IMPL").unwrap_or_else(|_| "auto".into());
-    if !matches!(requested.as_str(), "auto" | "ssa" | "unified") {
+    if !matches!(requested.as_str(), "auto" | "ssa") {
         return Err(RegallocError::new(
             "configuration",
             "CONFIG.IMPLEMENTATION",
             None,
             None,
             Vec::new(),
-            format!("unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto, ssa, or unified"),
+            format!("unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto or ssa"),
         ));
     }
 
     // Build the complete result privately. A structured error cannot expose
     // CFG/scheduling/SSA mutations from a failed phase to the caller.
     let mut working = func.clone();
-    let allocation = run_regalloc_in_place(&mut working, label, &requested)?;
+    let allocation = run_regalloc_in_place(&mut working, label)?;
     *func = working;
     Ok(allocation)
 }
@@ -156,12 +230,14 @@ pub fn run_regalloc_with_label(
 fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
-    requested: &str,
 ) -> Result<RegallocResult, RegallocError> {
     func.verify_result()
         .map_err(|error| RegallocError::mir("input MIR verification", error))?;
-    let normalized_cfg = cfg::normalize(func);
-    normalized_cfg.verify(func);
+    let normalized_cfg =
+        cfg::normalize(func).map_err(|error| cfg_error("CFG normalization", error))?;
+    normalized_cfg
+        .verify(func)
+        .map_err(|error| cfg_error("CFG normalization verification", error))?;
     func.verify_result()
         .map_err(|error| RegallocError::mir("CFG normalization verification", error))?;
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
@@ -178,8 +254,11 @@ fn run_regalloc_in_place(
         );
     }
 
-    let scheduling_constraints = constraints::ConstraintModel::build(func, &normalized_cfg);
-    scheduling_constraints.verify(func);
+    let scheduling_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
+        .map_err(|error| constraint_error("scheduling constraint construction", error))?;
+    scheduling_constraints
+        .verify(func)
+        .map_err(|error| constraint_error("scheduling constraint verification", error))?;
     let schedule_analysis = analysis::analyze(func);
     let schedule_start = timing.then(crate::timing::now);
     let schedule_stats = schedule::schedule_for_pressure(
@@ -191,7 +270,7 @@ fn run_regalloc_in_place(
     .map_err(|error| {
         RegallocError::new(
             "pressure scheduling",
-            "SCHEDULE.DEPENDENCY_ORDER",
+            error.rule,
             Some(error.block),
             None,
             Vec::new(),
@@ -209,55 +288,29 @@ fn run_regalloc_in_place(
     }
     func.verify_result()
         .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
-    let cssa = cssa::normalize_to_cssa(func, &normalized_cfg);
-    cssa::verify_cssa(func, &normalized_cfg, &cssa).map_err(|error| {
-        RegallocError::new(
-            "CSSA verification",
-            error.invariant,
-            error.block,
-            error.instruction,
-            error
-                .values
-                .into_iter()
-                .flat_map(|pair| [pair.0, pair.1])
-                .collect(),
-            error.message,
-        )
-    })?;
+    let cssa = cssa::normalize_to_cssa(func, &normalized_cfg)
+        .map_err(|error| cssa_error("CSSA normalization", error))?;
+    cssa::verify_cssa(func, &normalized_cfg, &cssa)
+        .map_err(|error| cssa_error("CSSA verification", error))?;
     func.verify_result()
         .map_err(|error| RegallocError::mir("CSSA structural verification", error))?;
-    let constraints = constraints::ConstraintModel::build(func, &normalized_cfg);
-    constraints.verify(func);
-    let next_use = next_use::analyze(func, &normalized_cfg);
-    next_use.verify(func, &normalized_cfg);
+    let constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
+        .map_err(|error| constraint_error("allocation constraint construction", error))?;
+    constraints
+        .verify(func)
+        .map_err(|error| constraint_error("allocation constraint verification", error))?;
+    let next_use = next_use::analyze(func, &normalized_cfg)
+        .map_err(|error| next_use_error("next-use analysis", error))?;
+    next_use
+        .verify(func, &normalized_cfg)
+        .map_err(|error| next_use_error("next-use verification", error))?;
     let alloc_start = timing.then(crate::timing::now);
-    let (assignment, spill_frame_size, implementation) = if requested == "unified" {
-        let analysis_start = timing.then(crate::timing::now);
-        let analysis = analysis::analyze(func);
-        if let Some(start) = analysis_start {
-            eprintln!(
-                "[regalloc-timing] label={label} unified_analysis blocks={} insts={} elapsed={:?}",
-                func.blocks.len(),
-                func.blocks
-                    .iter()
-                    .map(|block| block.insts.len())
-                    .sum::<usize>(),
-                start.elapsed()
-            );
-        }
-        let (assignment, frame_size) = unified::unified_alloc_with_label(func, &analysis, label);
-        (assignment, frame_size, "unified-spill")
-    } else {
-        let allocation = ssa::allocate(func, &normalized_cfg, &next_use)?;
-        (
-            allocation.assignment,
-            allocation.spill_frame_size,
-            "ssa-split-color",
-        )
-    };
+    let allocation = ssa::allocate(func, &normalized_cfg, &next_use)?;
+    let assignment = allocation.assignment;
+    let spill_frame_size = allocation.spill_frame_size;
     if let Some(start) = alloc_start {
         eprintln!(
-            "[regalloc-timing] label={label} implementation={implementation} blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
+            "[regalloc-timing] label={label} implementation=ssa-split-color blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
             func.blocks.len(),
             func.blocks
                 .iter()
@@ -272,6 +325,11 @@ fn run_regalloc_in_place(
     let verify_start = timing.then(crate::timing::now);
     let analysis = analysis::analyze(func);
     verify_assignment(func, &analysis, &assignment)?;
+    let ssa_destruction = super::ssa_destroy::SsaDestructionPlan::build(func, &assignment)
+        .map_err(|error| ssa_destruction_error("SSA destruction planning", error))?;
+    ssa_destruction
+        .verify(func, &assignment, spill_frame_size)
+        .map_err(|error| ssa_destruction_error("SSA destruction verification", error))?;
     if let Some(start) = verify_start {
         eprintln!(
             "[regalloc-timing] label={label} verify elapsed={:?}",
@@ -299,6 +357,7 @@ fn run_regalloc_in_place(
     Ok(RegallocResult {
         assignment,
         spill_frame_size,
+        ssa_destruction,
     })
 }
 
@@ -306,12 +365,12 @@ fn run_regalloc_in_place(
 /// allocation walk. ISel may append CFG-lowering blocks after their logical
 /// successors (for example runtime-event blocks), so numeric/block-vector
 /// order is not a valid way to distinguish forward edges from backedges.
-fn reorder_blocks_rpo(func: &mut MFunction) {
+fn reorder_blocks_rpo(func: &mut MFunction) -> Result<(), String> {
     use super::mir::BlockId;
     use std::collections::{HashMap, HashSet};
 
     let Some(entry) = func.blocks.first().map(|block| block.id) else {
-        return;
+        return Ok(());
     };
     let successors = func
         .blocks
@@ -349,18 +408,22 @@ fn reorder_blocks_rpo(func: &mut MFunction) {
     remaining.sort();
     postorder.extend(remaining);
 
-    let mut blocks = std::mem::take(&mut func.blocks)
+    let positions = postorder
         .into_iter()
-        .map(|block| (block.id, block))
+        .enumerate()
+        .map(|(position, id)| (id, position))
         .collect::<HashMap<_, _>>();
-    func.blocks = postorder
-        .into_iter()
-        .map(|id| {
-            blocks
-                .remove(&id)
-                .expect("RPO contains every MIR block once")
-        })
-        .collect();
+    if positions.len() != func.blocks.len()
+        || func
+            .blocks
+            .iter()
+            .any(|block| !positions.contains_key(&block.id))
+    {
+        return Err("reverse-postorder layout is not a bijection over MIR blocks".into());
+    }
+    func.blocks
+        .sort_by_key(|block| positions.get(&block.id).copied().unwrap_or(usize::MAX));
+    Ok(())
 }
 
 #[derive(Clone, Copy, Default)]

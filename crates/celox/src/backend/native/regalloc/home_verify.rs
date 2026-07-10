@@ -854,8 +854,8 @@ mod tests {
     use super::super::{cfg, next_use, spill_plan};
 
     fn blank_plan(func: &MFunction, cfg: &NormalizedCfg) -> SpillPlan {
-        let next_use = next_use::analyze(func, cfg);
-        let mut plan = spill_plan::plan(func, cfg, &next_use, 32);
+        let next_use = next_use::analyze(func, cfg).unwrap();
+        let mut plan = spill_plan::plan(func, cfg, &next_use, 32).unwrap();
         plan.point_ops.clear();
         plan.edge_ops.clear();
         for state in plan
@@ -895,7 +895,7 @@ mod tests {
     #[test]
     fn same_point_store_precedes_reload() {
         let (mut func, value) = one_value_function(SpillDesc::transient());
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let logical = plan.logical.of(value);
         let home = plan.homes.of_vreg(value);
@@ -935,7 +935,7 @@ mod tests {
         });
         block.push(MInst::Return);
         func.push_block(block);
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let logical = plan.logical.of(value);
         let home = plan.homes.of_vreg(value);
@@ -989,7 +989,7 @@ mod tests {
     #[test]
     fn store_on_only_one_incoming_edge_does_not_dominate_join_reload() {
         let (mut func, value) = diamond();
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let logical = plan.logical.of(value);
         let home = plan.homes.of_vreg(value);
@@ -1016,7 +1016,7 @@ mod tests {
     #[test]
     fn stores_on_every_incoming_edge_establish_join_home() {
         let (mut func, value) = diamond();
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let logical = plan.logical.of(value);
         let home = plan.homes.of_vreg(value);
@@ -1049,7 +1049,7 @@ mod tests {
         let mut exit = MBlock::new(BlockId(1));
         exit.push(MInst::Return);
         func.push_block(exit);
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let logical = plan.logical.of(value);
         let home = plan.homes.of_vreg(value);
@@ -1074,7 +1074,7 @@ mod tests {
     #[test]
     fn rematerialized_reload_needs_no_store() {
         let (mut func, value) = one_value_function(SpillDesc::remat(7));
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let logical = plan.logical.of(value);
         let home = plan.homes.of_vreg(value);
@@ -1126,7 +1126,7 @@ mod tests {
         join.push(MInst::Return);
         func.blocks = vec![entry, left, right, join];
 
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let merged_logical = plan.logical.of(merged);
         let home = plan.homes.of_vreg(merged);
@@ -1177,7 +1177,7 @@ mod tests {
     #[test]
     fn backedge_store_does_not_hide_unstored_loop_entry_path() {
         let (mut func, value) = loop_function();
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let logical = plan.logical.of(value);
         let home = plan.homes.of_vreg(value);
@@ -1206,7 +1206,7 @@ mod tests {
     #[test]
     fn preheader_store_establishes_home_through_loop_fixed_point() {
         let (mut func, value) = loop_function();
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         let logical = plan.logical.of(value);
         let home = plan.homes.of_vreg(value);
@@ -1255,7 +1255,7 @@ mod tests {
         let mut exit = MBlock::new(BlockId((BLOCKS - 1) as u32));
         exit.push(MInst::Return);
         func.push_block(exit);
-        let cfg = cfg::normalize(&mut func);
+        let cfg = cfg::normalize(&mut func).unwrap();
         let mut plan = blank_plan(&func, &cfg);
         for &value in &values {
             let logical = plan.logical.of(value);

@@ -54,6 +54,33 @@ pub(super) struct SpillPlan {
     pub s_exit: Vec<BTreeSet<LogicalValue>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SpillPlanError {
+    pub rule: &'static str,
+    pub block: Option<BlockId>,
+    pub instruction: Option<usize>,
+    pub values: Vec<VReg>,
+    pub message: String,
+}
+
+impl SpillPlanError {
+    fn new(
+        rule: &'static str,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+        values: Vec<VReg>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            rule,
+            block,
+            instruction,
+            values,
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct LogicalValues {
     count: u32,
@@ -67,8 +94,28 @@ impl LogicalValues {
     }
 
     pub(super) fn of(&self, value: VReg) -> LogicalValue {
-        assert!(value.0 < self.count);
         LogicalValue(value.0)
+    }
+
+    fn checked_of(
+        &self,
+        value: VReg,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+    ) -> Result<LogicalValue, SpillPlanError> {
+        if value.0 >= self.count {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.VALUE_RANGE",
+                block,
+                instruction,
+                vec![value],
+                format!(
+                    "v{} is outside the spill plan's {} logical values",
+                    value.0, self.count
+                ),
+            ));
+        }
+        Ok(LogicalValue(value.0))
     }
 }
 
@@ -79,12 +126,36 @@ pub(super) struct PhiCongruenceClasses {
 }
 
 impl PhiCongruenceClasses {
-    fn build(func: &MFunction) -> Self {
+    fn build(func: &MFunction) -> Result<Self, SpillPlanError> {
         let count = func.vregs.count() as usize;
         let mut classes = DisjointSets::new(count);
         for block in &func.blocks {
             for phi in &block.phis {
+                if phi.dst.0 as usize >= count {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.VALUE_RANGE",
+                        Some(block.id),
+                        None,
+                        vec![phi.dst],
+                        format!(
+                            "phi destination v{} is outside the function's {count} virtual registers",
+                            phi.dst.0
+                        ),
+                    ));
+                }
                 for &(_, source) in &phi.sources {
+                    if source.0 as usize >= count {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.VALUE_RANGE",
+                            Some(block.id),
+                            None,
+                            vec![source],
+                            format!(
+                                "phi source v{} is outside the function's {count} virtual registers",
+                                source.0
+                            ),
+                        ));
+                    }
                     classes.union(phi.dst.0, source.0);
                 }
             }
@@ -105,10 +176,10 @@ impl PhiCongruenceClasses {
                     .push(VReg(value as u32));
             }
         }
-        Self {
+        Ok(Self {
             home_for_vreg,
             nontrivial_members,
-        }
+        })
     }
 
     pub(super) fn of_vreg(&self, value: VReg) -> SpillHome {
@@ -183,7 +254,7 @@ impl DisjointSets {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct EdgeTranslation {
     to_successor: HashMap<LogicalValue, LogicalValue>,
     to_predecessor: HashMap<LogicalValue, LogicalValue>,
@@ -194,46 +265,87 @@ struct EdgeTranslation {
 /// Building the two directions in one pass over phi operands avoids rescanning
 /// every phi (and its predecessor list) for every member of W/S.  Method-I CSSA
 /// gives each phi operand a fresh edge-local name, so both maps are one-to-one.
+#[derive(Debug)]
 struct EdgeTranslations {
     by_edge: HashMap<(usize, usize), EdgeTranslation>,
 }
 
 impl EdgeTranslations {
-    fn build(func: &MFunction, cfg: &NormalizedCfg) -> Self {
+    fn build(
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        logical: &LogicalValues,
+    ) -> Result<Self, SpillPlanError> {
         let mut by_edge = HashMap::<(usize, usize), EdgeTranslation>::new();
         for (successor, block) in func.blocks.iter().enumerate() {
             for phi in &block.phis {
-                let destination = LogicalValue(phi.dst.0);
+                let destination = logical.checked_of(phi.dst, Some(block.id), None)?;
                 for &(predecessor_id, source) in &phi.sources {
-                    let predecessor = cfg.block_index[&predecessor_id];
-                    assert!(
-                        cfg.successors[predecessor].contains(&successor),
-                        "phi edge {predecessor_id} -> {} is absent from the normalized CFG",
-                        block.id
-                    );
-                    let source = LogicalValue(source.0);
+                    let Some(&predecessor) = cfg.block_index.get(&predecessor_id) else {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.PHI_PREDECESSOR",
+                            Some(block.id),
+                            None,
+                            vec![source, phi.dst],
+                            format!(
+                                "phi source predecessor {predecessor_id} is absent from the normalized CFG"
+                            ),
+                        ));
+                    };
+                    if !cfg
+                        .successors
+                        .get(predecessor)
+                        .is_some_and(|successors| successors.contains(&successor))
+                    {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.EDGE_EXISTS",
+                            Some(predecessor_id),
+                            None,
+                            vec![source, phi.dst],
+                            format!(
+                                "phi edge {predecessor_id} -> {} is absent from the normalized CFG",
+                                block.id
+                            ),
+                        ));
+                    }
+                    let source = logical.checked_of(source, Some(predecessor_id), None)?;
                     let translation = by_edge.entry((predecessor, successor)).or_default();
-                    assert!(
-                        translation
-                            .to_successor
-                            .insert(source, destination)
-                            .is_none(),
-                        "Method-I CSSA edge {predecessor_id} -> {} reuses phi source v{}",
-                        block.id,
-                        source.0
-                    );
-                    assert!(
-                        translation
-                            .to_predecessor
-                            .insert(destination, source)
-                            .is_none(),
-                        "phi destination v{} has duplicate source for {predecessor_id}",
-                        destination.0
-                    );
+                    if translation
+                        .to_successor
+                        .insert(source, destination)
+                        .is_some()
+                    {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.PHI_SOURCE_UNIQUE",
+                            Some(predecessor_id),
+                            None,
+                            vec![VReg(source.0), VReg(destination.0)],
+                            format!(
+                                "Method-I CSSA edge {predecessor_id} -> {} reuses phi source v{}",
+                                block.id, source.0
+                            ),
+                        ));
+                    }
+                    if translation
+                        .to_predecessor
+                        .insert(destination, source)
+                        .is_some()
+                    {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.PHI_DESTINATION_UNIQUE",
+                            Some(predecessor_id),
+                            None,
+                            vec![VReg(source.0), VReg(destination.0)],
+                            format!(
+                                "phi destination v{} has duplicate source for {predecessor_id}",
+                                destination.0
+                            ),
+                        ));
+                    }
                 }
             }
         }
-        Self { by_edge }
+        Ok(Self { by_edge })
     }
 
     fn to_successor(
@@ -268,10 +380,10 @@ pub(super) fn plan(
     cfg: &NormalizedCfg,
     next_use: &NextUseAnalysis,
     registers: usize,
-) -> SpillPlan {
+) -> Result<SpillPlan, SpillPlanError> {
     let logical = LogicalValues::build(func);
-    let homes = PhiCongruenceClasses::build(func);
-    let edge_translations = EdgeTranslations::build(func, cfg);
+    let homes = PhiCongruenceClasses::build(func)?;
+    let edge_translations = EdgeTranslations::build(func, cfg, &logical)?;
     let mut result = SpillPlan {
         logical,
         homes,
@@ -284,7 +396,7 @@ pub(super) fn plan(
     };
     for block in 0..func.blocks.len() {
         let entry = if let Some(region) = next_use.region_at_entry(block) {
-            init_loop_region(func, next_use, &result, block, region, registers)
+            init_loop_region(func, next_use, &result, block, region, registers)?
         } else {
             init_usual(cfg, next_use, &result, &edge_translations, block, registers)
         };
@@ -292,8 +404,12 @@ pub(super) fn plan(
         let live_entry = next_use.entry[block]
             .keys()
             .copied()
-            .map(|value| result.logical.of(value))
-            .collect::<BTreeSet<_>>();
+            .map(|value| {
+                result
+                    .logical
+                    .checked_of(value, Some(func.blocks[block].id), Some(0))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
         // S means that a valid home exists on every path.  Every live value
         // omitted from W_entry therefore requires a home; edge coupling below
         // materializes any missing predecessor store.  A resident value keeps
@@ -315,7 +431,9 @@ pub(super) fn plan(
         let mut resident = result.w_entry[block].clone();
 
         for phi in &func.blocks[block].phis {
-            let value = result.logical.of(phi.dst);
+            let value = result
+                .logical
+                .checked_of(phi.dst, Some(func.blocks[block].id), Some(0))?;
             if !resident.contains(&value) {
                 result.point_ops.push((
                     ProgramPoint {
@@ -336,8 +454,12 @@ pub(super) fn plan(
             let uses = inst
                 .uses()
                 .into_iter()
-                .map(|value| result.logical.of(value))
-                .collect::<BTreeSet<_>>();
+                .map(|value| {
+                    result
+                        .logical
+                        .checked_of(value, Some(func.blocks[block].id), Some(instruction))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
             for &value in &uses {
                 if resident.insert(value) {
                     result.point_ops.push((
@@ -364,8 +486,19 @@ pub(super) fn plan(
                 &uses,
                 &mut resident,
                 &mut spilled,
-            );
+            )?;
             let clobbered = clobbers(inst).len();
+            if clobbered > registers {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.CLOBBER_CAPACITY",
+                    Some(func.blocks[block].id),
+                    Some(instruction),
+                    inst.uses().to_vec(),
+                    format!(
+                        "instruction clobbers {clobbered} registers but the allocator has only {registers}"
+                    ),
+                ));
+            }
             if clobbered != 0 {
                 limit_live_through_clobber(
                     func,
@@ -376,11 +509,24 @@ pub(super) fn plan(
                     registers.saturating_sub(clobbered),
                     &mut resident,
                     &mut spilled,
-                );
+                )?;
             }
             if let Some(definition) = inst.def() {
-                let definition = result.logical.of(definition);
+                let definition = result.logical.checked_of(
+                    definition,
+                    Some(func.blocks[block].id),
+                    Some(instruction),
+                )?;
                 if !resident.contains(&definition) && resident.len() == registers {
+                    let Some(maximum) = registers.checked_sub(1) else {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.OPERAND_PRESSURE",
+                            Some(func.blocks[block].id),
+                            Some(instruction),
+                            vec![VReg(definition.0)],
+                            "an instruction result requires a register but no registers are available",
+                        ));
+                    };
                     limit(
                         func,
                         next_use,
@@ -388,11 +534,11 @@ pub(super) fn plan(
                         block,
                         instruction,
                         instruction + 1,
-                        registers - 1,
+                        maximum,
                         &uses,
                         &mut resident,
                         &mut spilled,
-                    );
+                    )?;
                 }
                 resident.insert(definition);
             }
@@ -444,7 +590,7 @@ pub(super) fn plan(
             }
         }
     }
-    result
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,7 +603,7 @@ fn limit_live_through_clobber(
     capacity: usize,
     resident: &mut BTreeSet<LogicalValue>,
     spilled: &mut BTreeSet<LogicalValue>,
-) {
+) -> Result<(), SpillPlanError> {
     let mut live_through = resident
         .iter()
         .copied()
@@ -474,20 +620,24 @@ fn limit_live_through_clobber(
         })
         .collect::<BTreeSet<_>>();
     while live_through.len() > capacity {
-        let victim = live_through
-            .iter()
-            .copied()
-            .max_by_key(|value| {
-                logical_distance_at(
-                    func,
-                    next_use,
-                    &plan.logical,
-                    block,
-                    instruction + 1,
-                    *value,
-                )
-            })
-            .expect("non-empty clobber live-through set");
+        let Some(victim) = live_through.iter().copied().max_by_key(|value| {
+            logical_distance_at(
+                func,
+                next_use,
+                &plan.logical,
+                block,
+                instruction + 1,
+                *value,
+            )
+        }) else {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.MIN_VICTIM",
+                Some(func.blocks[block].id),
+                Some(instruction),
+                Vec::new(),
+                "clobber pressure exceeded capacity but MIN had no live-through victim",
+            ));
+        };
         if spilled.insert(victim) {
             plan.point_ops.push((
                 ProgramPoint {
@@ -504,6 +654,7 @@ fn limit_live_through_clobber(
         live_through.remove(&victim);
         resident.remove(&victim);
     }
+    Ok(())
 }
 
 fn init_usual(
@@ -551,40 +702,46 @@ fn init_loop_region(
     block: usize,
     region: usize,
     registers: usize,
-) -> BTreeSet<LogicalValue> {
+) -> Result<BTreeSet<LogicalValue>, SpillPlanError> {
     let mut alive = next_use.entry[block]
         .keys()
         .copied()
-        .map(|value| plan.logical.of(value))
-        .collect::<BTreeSet<_>>();
-    alive.extend(
-        func.blocks[block]
-            .phis
-            .iter()
-            .map(|phi| plan.logical.of(phi.dst)),
-    );
-    let facts = &next_use.loop_regions[region];
-    let used = facts
-        .used
-        .iter()
-        .copied()
-        .map(|value| plan.logical.of(value))
-        .collect::<BTreeSet<_>>();
-    let mut candidates = alive.intersection(&used).copied().collect::<Vec<_>>();
-    let mut live_through = alive.difference(&used).copied().collect::<Vec<_>>();
+        .map(|value| {
+            plan.logical
+                .checked_of(value, Some(func.blocks[block].id), Some(0))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    for phi in &func.blocks[block].phis {
+        alive.insert(
+            plan.logical
+                .checked_of(phi.dst, Some(func.blocks[block].id), Some(0))?,
+        );
+    }
+    let Some(facts) = next_use.loop_regions.get(region) else {
+        return Err(SpillPlanError::new(
+            "SPILL_PLAN.NEXT_USE_REGION",
+            Some(func.blocks[block].id),
+            Some(0),
+            Vec::new(),
+            format!("next-use analysis references absent loop region {region}"),
+        ));
+    };
+    let (mut candidates, mut live_through): (Vec<_>, Vec<_>) = alive
+        .into_iter()
+        .partition(|value| next_use.used_in_region(region, VReg(value.0)));
     candidates.sort_by_key(|value| logical_entry_distance(next_use, &plan.logical, block, *value));
     if candidates.len() >= registers {
-        return candidates.into_iter().take(registers).collect();
+        return Ok(candidates.into_iter().take(registers).collect());
     }
     let internal_pressure = facts.max_pressure.saturating_sub(live_through.len());
     let free_loop = registers.saturating_sub(internal_pressure);
     live_through
         .sort_by_key(|value| logical_entry_distance(next_use, &plan.logical, block, *value));
-    candidates
+    Ok(candidates
         .into_iter()
         .chain(live_through.into_iter().take(free_loop))
         .take(registers)
-        .collect()
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -599,9 +756,9 @@ fn limit(
     pinned: &BTreeSet<LogicalValue>,
     resident: &mut BTreeSet<LogicalValue>,
     spilled: &mut BTreeSet<LogicalValue>,
-) {
+) -> Result<(), SpillPlanError> {
     while resident.len() > maximum {
-        let victim = resident
+        let Some(victim) = resident
             .iter()
             .copied()
             .filter(|value| !pinned.contains(value))
@@ -615,7 +772,18 @@ fn limit(
                     *value,
                 )
             })
-            .expect("instruction operands fit in the allocatable register set");
+        else {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.OPERAND_PRESSURE",
+                Some(func.blocks[block].id),
+                Some(point_instruction),
+                pinned.iter().map(|value| VReg(value.0)).collect(),
+                format!(
+                    "{} simultaneously pinned operands exceed the {maximum}-register capacity",
+                    pinned.len()
+                ),
+            ));
+        };
         if spilled.insert(victim) {
             plan.point_ops.push((
                 ProgramPoint {
@@ -631,6 +799,7 @@ fn limit(
         }
         resident.remove(&victim);
     }
+    Ok(())
 }
 
 fn logical_entry_distance(
@@ -659,33 +828,240 @@ fn logical_distance_at(
 }
 
 impl SpillPlan {
-    pub(super) fn verify(&self, func: &MFunction, cfg: &NormalizedCfg, registers: usize) {
-        assert_eq!(self.w_entry.len(), func.blocks.len());
-        assert_eq!(self.w_exit.len(), func.blocks.len());
-        assert_eq!(self.s_entry.len(), func.blocks.len());
-        assert_eq!(self.s_exit.len(), func.blocks.len());
-        assert!(self.w_entry.iter().all(|state| state.len() <= registers));
-        assert!(self.w_exit.iter().all(|state| state.len() <= registers));
-        for (&(predecessor, successor), operations) in &self.edge_ops {
-            assert!(cfg.successors[predecessor].contains(&successor));
-            assert_eq!(
-                cfg.successors[predecessor].len(),
-                1,
-                "edge operation predecessor must be a dedicated insertion block"
-            );
-            assert!(!operations.is_empty());
+    pub(super) fn verify(
+        &self,
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        registers: usize,
+    ) -> Result<(), SpillPlanError> {
+        let block_count = func.blocks.len();
+        if self.w_entry.len() != block_count
+            || self.w_exit.len() != block_count
+            || self.s_entry.len() != block_count
+            || self.s_exit.len() != block_count
+        {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.STATE_SHAPE",
+                None,
+                None,
+                Vec::new(),
+                format!(
+                    "spill-plan state tables must all contain {block_count} rows (W_entry={}, W_exit={}, S_entry={}, S_exit={})",
+                    self.w_entry.len(),
+                    self.w_exit.len(),
+                    self.s_entry.len(),
+                    self.s_exit.len()
+                ),
+            ));
         }
-        for &(point, operation) in &self.point_ops {
-            assert!(cfg.block_index.contains_key(&point.block));
-            assert!(point.instruction <= func.blocks[cfg.block_index[&point.block]].insts.len());
-            match operation {
-                PlannedOp::Spill { value, .. }
-                | PlannedOp::Reload { value, .. }
-                | PlannedOp::SpillPhi { value, .. } => {
-                    assert!(value.0 < self.logical.count);
+        if self.logical.count != func.vregs.count()
+            || self.homes.home_for_vreg.len() != self.logical.count as usize
+        {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.STATE_SHAPE",
+                None,
+                None,
+                Vec::new(),
+                format!(
+                    "spill-plan value tables cover {} logical values and {} homes, but the function has {} virtual registers",
+                    self.logical.count,
+                    self.homes.home_for_vreg.len(),
+                    func.vregs.count()
+                ),
+            ));
+        }
+
+        for (block, state) in self.w_entry.iter().enumerate() {
+            if state.len() > registers {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.PRESSURE",
+                    Some(func.blocks[block].id),
+                    Some(0),
+                    state.iter().map(|value| VReg(value.0)).collect(),
+                    format!(
+                        "W_entry contains {} residents but only {registers} registers are available",
+                        state.len()
+                    ),
+                ));
+            }
+        }
+        for (block, state) in self.w_exit.iter().enumerate() {
+            if state.len() > registers {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.PRESSURE",
+                    Some(func.blocks[block].id),
+                    Some(func.blocks[block].insts.len()),
+                    state.iter().map(|value| VReg(value.0)).collect(),
+                    format!(
+                        "W_exit contains {} residents but only {registers} registers are available",
+                        state.len()
+                    ),
+                ));
+            }
+        }
+
+        for (block, states) in (0..block_count).map(|block| {
+            (
+                block,
+                [
+                    &self.w_entry[block],
+                    &self.w_exit[block],
+                    &self.s_entry[block],
+                    &self.s_exit[block],
+                ],
+            )
+        }) {
+            for state in states {
+                if let Some(value) = state.iter().find(|value| value.0 >= self.logical.count) {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.VALUE_RANGE",
+                        Some(func.blocks[block].id),
+                        None,
+                        vec![VReg(value.0)],
+                        format!(
+                            "spill-plan state references logical value {} but the plan contains {} values",
+                            value.0, self.logical.count
+                        ),
+                    ));
                 }
             }
         }
+
+        for (value, &home) in self.homes.home_for_vreg.iter().enumerate() {
+            if home.0 >= self.logical.count {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.VALUE_RANGE",
+                    None,
+                    None,
+                    vec![VReg(value as u32)],
+                    format!(
+                        "logical value {value} has out-of-range spill home {}",
+                        home.0
+                    ),
+                ));
+            }
+        }
+
+        for (&(predecessor, successor), operations) in &self.edge_ops {
+            let Some(predecessor_block) = func.blocks.get(predecessor) else {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.EDGE_EXISTS",
+                    None,
+                    None,
+                    Vec::new(),
+                    format!("edge operation predecessor index {predecessor} is out of range"),
+                ));
+            };
+            let Some(successor_block) = func.blocks.get(successor) else {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.EDGE_EXISTS",
+                    Some(predecessor_block.id),
+                    None,
+                    Vec::new(),
+                    format!("edge operation successor index {successor} is out of range"),
+                ));
+            };
+            if !cfg.successors[predecessor].contains(&successor) {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.EDGE_EXISTS",
+                    Some(predecessor_block.id),
+                    None,
+                    Vec::new(),
+                    format!(
+                        "planned edge operation targets {}, which is not a CFG successor",
+                        successor_block.id
+                    ),
+                ));
+            }
+            if cfg.successors[predecessor].len() != 1 {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.EDGE_ISOLATED",
+                    Some(predecessor_block.id),
+                    None,
+                    Vec::new(),
+                    "edge operation predecessor must be a dedicated insertion block",
+                ));
+            }
+            if operations.is_empty() {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.EDGE_EXISTS",
+                    Some(predecessor_block.id),
+                    None,
+                    Vec::new(),
+                    format!(
+                        "edge-operation list for {} -> {} is empty",
+                        predecessor_block.id, successor_block.id
+                    ),
+                ));
+            }
+            for &operation in operations {
+                self.verify_operation(operation, Some(predecessor_block.id), None)?;
+            }
+        }
+        for &(point, operation) in &self.point_ops {
+            let Some(&block) = cfg.block_index.get(&point.block) else {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.POINT_RANGE",
+                    Some(point.block),
+                    Some(point.instruction),
+                    Vec::new(),
+                    "planned operation references a block absent from the normalized CFG",
+                ));
+            };
+            if point.instruction > func.blocks[block].insts.len() {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.POINT_RANGE",
+                    Some(point.block),
+                    Some(point.instruction),
+                    Vec::new(),
+                    format!(
+                        "planned operation is outside the block's {} instructions",
+                        func.blocks[block].insts.len()
+                    ),
+                ));
+            }
+            self.verify_operation(operation, Some(point.block), Some(point.instruction))?;
+        }
+        Ok(())
+    }
+
+    fn verify_operation(
+        &self,
+        operation: PlannedOp,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+    ) -> Result<(), SpillPlanError> {
+        let (value, home) = match operation {
+            PlannedOp::Spill { value, home }
+            | PlannedOp::Reload { value, home }
+            | PlannedOp::SpillPhi { value, home } => (value, home),
+        };
+        if value.0 >= self.logical.count {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.VALUE_RANGE",
+                block,
+                instruction,
+                vec![VReg(value.0)],
+                format!(
+                    "planned operation references logical value {} but the plan contains {} values",
+                    value.0, self.logical.count
+                ),
+            ));
+        }
+        let expected = self.homes.of_logical(value);
+        if home != expected {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.HOME",
+                block,
+                instruction,
+                vec![VReg(value.0)],
+                format!(
+                    "planned operation uses spill home {} but logical value {} belongs to home {}",
+                    home.0, value.0, expected.0
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -693,6 +1069,121 @@ impl SpillPlan {
 mod tests {
     use super::*;
     use crate::backend::native::mir::{MBlock, MInst, PhiNode, SpillDesc, VRegAllocator};
+
+    #[test]
+    fn reused_cssa_edge_source_is_a_structured_error() {
+        let mut vregs = VRegAllocator::new();
+        let source = vregs.alloc();
+        let first = vregs.alloc();
+        let second = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        let mut predecessor = MBlock::new(BlockId(0));
+        predecessor.push(MInst::LoadImm {
+            dst: source,
+            value: 1,
+        });
+        predecessor.push(MInst::Jump { target: BlockId(1) });
+        let mut successor = MBlock::new(BlockId(1));
+        successor.phis = vec![
+            PhiNode {
+                dst: first,
+                sources: vec![(BlockId(0), source)],
+            },
+            PhiNode {
+                dst: second,
+                sources: vec![(BlockId(0), source)],
+            },
+        ];
+        successor.push(MInst::Return);
+        func.blocks = vec![predecessor, successor];
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let logical = LogicalValues::build(&func);
+
+        let error = EdgeTranslations::build(&func, &cfg, &logical).unwrap_err();
+
+        assert_eq!(error.rule, "SPILL_PLAN.PHI_SOURCE_UNIQUE");
+        assert_eq!(error.block, Some(BlockId(0)));
+        assert_eq!(error.values, vec![source, second]);
+    }
+
+    #[test]
+    fn excessive_operand_pressure_is_a_structured_error() {
+        let mut vregs = VRegAllocator::new();
+        let left = vregs.alloc();
+        let right = vregs.alloc();
+        let result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: left,
+            value: 1,
+        });
+        block.push(MInst::LoadImm {
+            dst: right,
+            value: 2,
+        });
+        block.push(MInst::Add {
+            dst: result,
+            lhs: left,
+            rhs: right,
+        });
+        block.push(MInst::Return);
+        func.blocks.push(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+
+        let error = plan(&func, &cfg, &next_use, 1).unwrap_err();
+
+        assert_eq!(error.rule, "SPILL_PLAN.OPERAND_PRESSURE");
+        assert_eq!(error.block, Some(BlockId(0)));
+        assert_eq!(error.instruction, Some(2));
+        assert_eq!(error.values, vec![left, right]);
+    }
+
+    #[test]
+    fn excessive_clobber_pressure_is_a_structured_error() {
+        let mut vregs = VRegAllocator::new();
+        let input = vregs.alloc();
+        let result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: input,
+            value: 1,
+        });
+        block.push(MInst::UDiv {
+            dst: result,
+            lhs: input,
+            rhs: input,
+        });
+        block.push(MInst::Return);
+        func.blocks.push(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+
+        let error = plan(&func, &cfg, &next_use, 1).unwrap_err();
+
+        assert_eq!(error.rule, "SPILL_PLAN.CLOBBER_CAPACITY");
+        assert_eq!(error.block, Some(BlockId(0)));
+        assert_eq!(error.instruction, Some(1));
+    }
+
+    #[test]
+    fn stale_state_table_is_a_structured_error() {
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Return);
+        func.blocks.push(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let mut plan = plan(&func, &cfg, &next_use, 1).unwrap();
+        plan.w_entry.pop();
+
+        let error = plan.verify(&func, &cfg, 1).unwrap_err();
+
+        assert_eq!(error.rule, "SPILL_PLAN.STATE_SHAPE");
+        assert_eq!(error.block, None);
+    }
 
     #[test]
     fn descending_large_phi_web_builds_one_stable_home_without_recursion() {
@@ -712,7 +1203,7 @@ mod tests {
         }
         func.blocks.push(block);
 
-        let homes = PhiCongruenceClasses::build(&func);
+        let homes = PhiCongruenceClasses::build(&func).unwrap();
 
         assert_eq!(homes.of_vreg(VReg(0)), SpillHome(0));
         assert_eq!(homes.of_vreg(VReg(MEMBERS - 1)), SpillHome(0));
@@ -787,10 +1278,11 @@ mod tests {
         join.push(MInst::Return);
         func.blocks.push(join);
         func.verify();
-        let cfg = super::super::cfg::normalize(&mut func);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
         func.verify();
 
-        let translations = EdgeTranslations::build(&func, &cfg);
+        let logical = LogicalValues::build(&func);
+        let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
 
         let join = cfg.block_index[&join_id];
         for (predecessor_id, source, destination) in expected {
@@ -864,9 +1356,9 @@ mod tests {
         exit.push(MInst::Return);
         func.blocks = vec![entry, left_entry, right_entry, exit];
 
-        let cfg = super::super::cfg::normalize(&mut func);
-        let next_use = next_use::analyze(&func, &cfg);
-        let plan = plan(&func, &cfg, &next_use, 1);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = next_use::analyze(&func, &cfg).unwrap();
+        let plan = plan(&func, &cfg, &next_use, 1).unwrap();
         let left = cfg.block_index[&BlockId(1)];
         let right = cfg.block_index[&BlockId(2)];
         let region = next_use.region_at_entry(left).unwrap();

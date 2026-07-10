@@ -11,9 +11,12 @@ use iced_x86::BlockEncoderOptions;
 use iced_x86::code_asm::*;
 
 use crate::backend::native::mir::*;
-use crate::backend::native::regalloc::assignment::{
-    AssignmentMap, EdgeLocation, PhysReg, PhysRegSet,
+use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet};
+use crate::backend::native::ssa_destroy::{
+    EdgeCopyPlan, ParallelCopyDestination, ParallelCopySource, SsaDestructionPlan,
 };
+
+pub use crate::backend::native::ssa_destroy::SsaDestructionError;
 
 /// Reserved register for simulation state base pointer.
 const SIM_BASE: AsmRegister64 = r15;
@@ -177,19 +180,128 @@ pub struct EmitResult {
     pub block_offsets: Vec<(BlockId, u64)>,
 }
 
+/// Failure of the final MIR/assignment contract required by x86 encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmitInputError {
+    pub rule: &'static str,
+    pub block: Option<BlockId>,
+    pub instruction: Option<usize>,
+    pub value: Option<VReg>,
+    pub message: String,
+}
+
+impl EmitInputError {
+    fn new(
+        rule: &'static str,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+        value: Option<VReg>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            rule,
+            block,
+            instruction,
+            value,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for EmitInputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "native emission input [{}]", self.rule)?;
+        if let Some(block) = self.block {
+            write!(formatter, " at {block}")?;
+        }
+        if let Some(instruction) = self.instruction {
+            write!(formatter, "/i{instruction}")?;
+        }
+        if let Some(value) = self.value {
+            write!(formatter, " value={value}")?;
+        }
+        write!(formatter, ": {}", self.message)
+    }
+}
+
+impl std::error::Error for EmitInputError {}
+
+/// Structured failure while validating SSA destruction or encoding x86-64.
+#[derive(Debug)]
+pub enum EmitError {
+    Mir(crate::backend::native::mir_verify::MirVerifyError),
+    Input(EmitInputError),
+    SsaDestruction(SsaDestructionError),
+    Assembly(IcedError),
+}
+
+impl fmt::Display for EmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mir(error) => error.fmt(f),
+            Self::Input(error) => error.fmt(f),
+            Self::SsaDestruction(error) => error.fmt(f),
+            Self::Assembly(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for EmitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Mir(error) => Some(error),
+            Self::Input(error) => Some(error),
+            Self::SsaDestruction(error) => Some(error),
+            Self::Assembly(error) => Some(error),
+        }
+    }
+}
+
+impl From<SsaDestructionError> for EmitError {
+    fn from(error: SsaDestructionError) -> Self {
+        Self::SsaDestruction(error)
+    }
+}
+
+impl From<EmitInputError> for EmitError {
+    fn from(error: EmitInputError) -> Self {
+        Self::Input(error)
+    }
+}
+
+impl From<IcedError> for EmitError {
+    fn from(error: IcedError) -> Self {
+        Self::Assembly(error)
+    }
+}
+
 /// Failure while compiling a merged MIR function through allocation and x86
 /// encoding.  Allocation diagnostics retain their phase/rule/location rather
 /// than being collapsed into a panic.
 #[derive(Debug)]
 pub enum ChainedEmitError {
+    Sir {
+        phase: &'static str,
+        error: crate::ir::verify::SirVerifyError,
+    },
+    Mir {
+        phase: &'static str,
+        error: crate::backend::native::mir_verify::MirVerifyError,
+    },
     Regalloc(crate::backend::native::regalloc::RegallocError),
+    Input(EmitInputError),
+    SsaDestruction(SsaDestructionError),
     Assembly(IcedError),
 }
 
 impl fmt::Display for ChainedEmitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Sir { phase, error } => write!(f, "{phase}: {error}"),
+            Self::Mir { phase, error } => write!(f, "{phase}: {error}"),
             Self::Regalloc(error) => error.fmt(f),
+            Self::Input(error) => error.fmt(f),
+            Self::SsaDestruction(error) => error.fmt(f),
             Self::Assembly(error) => error.fmt(f),
         }
     }
@@ -198,7 +310,11 @@ impl fmt::Display for ChainedEmitError {
 impl std::error::Error for ChainedEmitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Sir { error, .. } => Some(error),
+            Self::Mir { error, .. } => Some(error),
             Self::Regalloc(error) => Some(error),
+            Self::Input(error) => Some(error),
+            Self::SsaDestruction(error) => Some(error),
             Self::Assembly(error) => Some(error),
         }
     }
@@ -213,6 +329,20 @@ impl From<crate::backend::native::regalloc::RegallocError> for ChainedEmitError 
 impl From<IcedError> for ChainedEmitError {
     fn from(error: IcedError) -> Self {
         Self::Assembly(error)
+    }
+}
+
+impl From<EmitError> for ChainedEmitError {
+    fn from(error: EmitError) -> Self {
+        match error {
+            EmitError::Mir(error) => Self::Mir {
+                phase: "before x86 emission",
+                error,
+            },
+            EmitError::Input(error) => Self::Input(error),
+            EmitError::SsaDestruction(error) => Self::SsaDestruction(error),
+            EmitError::Assembly(error) => Self::Assembly(error),
+        }
     }
 }
 
@@ -233,140 +363,93 @@ pub fn disassemble(code: &[u8], base_addr: u64) -> String {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Phi resolution
+// Verified parallel-copy lowering
 // ────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy)]
-enum PhiCopyDestination {
-    Register(PhysReg),
-    Stack(i32),
-}
-
-#[derive(Clone, Copy)]
-enum PhiCopySource {
-    Register(PhysReg),
-    Stack(i32),
-    Immediate(u64),
-}
-
-/// Emit Mov instructions to resolve phi nodes when jumping to a target block.
-/// For each phi in the target block, if the source (from this predecessor) and
-/// the dst are assigned to different physical registers, emit `mov dst, src`.
-/// Emit phi moves for a single target block.
-fn emit_phi_moves_for_target(
+/// Lower a pre-validated edge plan. This function deliberately has no access
+/// to MIR phi nodes or the assignment map: all semantic decisions belong to
+/// SSA destruction planning and verification, before x86 encoding starts.
+fn emit_parallel_copy_plan(
     asm: &mut CodeAssembler,
-    pred_block_id: BlockId,
-    target_id: BlockId,
-    func: &MFunction,
-    assignment: &AssignmentMap,
+    edge: Option<&EdgeCopyPlan>,
 ) -> Result<(), IcedError> {
-    let target_block = func.blocks.iter().find(|b| b.id == target_id);
-    let Some(target_block) = target_block else {
+    let Some(edge) = edge else {
         return Ok(());
     };
+    let copies = edge
+        .rows
+        .iter()
+        .copied()
+        .filter(|row| !row.is_identity())
+        .collect::<Vec<_>>();
 
-    let mut copies = Vec::new();
-    for phi in &target_block.phis {
-        for (source_pred, source_vreg) in &phi.sources {
-            if *source_pred == pred_block_id {
-                let destination = assignment
-                    .edge_spill_slot(phi.dst)
-                    .map(PhiCopyDestination::Stack)
-                    .unwrap_or_else(|| PhiCopyDestination::Register(resolve(assignment, phi.dst)));
-                let source = if let Some(location) =
-                    assignment.edge_location(pred_block_id, *source_vreg)
-                {
-                    match location {
-                        EdgeLocation::Register(preg) => PhiCopySource::Register(preg),
-                        EdgeLocation::Stack(slot) => PhiCopySource::Stack(slot),
-                        EdgeLocation::Immediate(value) => PhiCopySource::Immediate(value),
-                    }
-                } else if let Some(slot) = assignment.edge_spill_slot(*source_vreg) {
-                    PhiCopySource::Stack(slot)
-                } else if let Some(preg) = assignment.get(*source_vreg) {
-                    PhiCopySource::Register(preg)
-                } else {
-                    panic!(
-                        "phi source {source_vreg} has neither physical assignment nor edge spill slot"
-                    );
-                };
-                if matches!((destination, source), (PhiCopyDestination::Register(dst), PhiCopySource::Register(src)) if dst == src)
-                    || matches!((destination, source), (PhiCopyDestination::Stack(dst), PhiCopySource::Stack(src)) if dst == src)
-                {
-                    continue;
-                }
-                copies.push((destination, source));
-            }
-        }
-    }
-
-    if let [(destination, source)] = copies.as_slice() {
-        emit_single_phi_copy(asm, *destination, *source)?;
+    if let [copy] = copies.as_slice() {
+        emit_single_parallel_copy(asm, copy.destination, copy.source)?;
         return Ok(());
     }
 
     // Save every source before writing any destination. This preserves true
     // parallel-copy semantics for register cycles, stack cycles, and mixtures
     // of both. RSP-relative frame operands compensate for the temporary pushes.
-    for (depth, (_, source)) in copies.iter().enumerate() {
-        match source {
-            PhiCopySource::Register(preg) => asm.push(preg_to_reg64(*preg))?,
-            PhiCopySource::Stack(slot) => asm.push(qword_ptr(mem_operand(
+    for (depth, copy) in copies.iter().enumerate() {
+        match copy.source {
+            ParallelCopySource::Register(preg) => asm.push(preg_to_reg64(preg))?,
+            ParallelCopySource::Stack(slot) => asm.push(qword_ptr(mem_operand(
                 BaseReg::StackFrame,
-                *slot + depth as i32 * 8,
+                slot + depth as i32 * 8,
             )))?,
-            PhiCopySource::Immediate(value) => {
+            ParallelCopySource::Immediate(value) => {
                 // Leave the immediate on the temporary copy stack while
                 // restoring the live RAX value used as an encoding scratch.
                 asm.push(rax)?;
-                asm.mov(rax, *value)?;
+                asm.mov(rax, value)?;
                 asm.xchg(qword_ptr(rsp), rax)?;
             }
         }
     }
-    for (depth, (destination, _)) in copies.iter().enumerate().rev() {
-        match destination {
-            PhiCopyDestination::Register(preg) => asm.pop(preg_to_reg64(*preg))?,
-            PhiCopyDestination::Stack(slot) => asm.pop(qword_ptr(mem_operand(
+    for (depth, copy) in copies.iter().enumerate().rev() {
+        match copy.destination {
+            ParallelCopyDestination::Register(preg) => asm.pop(preg_to_reg64(preg))?,
+            ParallelCopyDestination::Stack(slot) => asm.pop(qword_ptr(mem_operand(
                 BaseReg::StackFrame,
-                *slot + depth as i32 * 8,
+                slot + depth as i32 * 8,
             )))?,
         }
     }
     Ok(())
 }
 
-fn emit_single_phi_copy(
+fn emit_single_parallel_copy(
     asm: &mut CodeAssembler,
-    destination: PhiCopyDestination,
-    source: PhiCopySource,
+    destination: ParallelCopyDestination,
+    source: ParallelCopySource,
 ) -> Result<(), IcedError> {
     match (destination, source) {
-        (PhiCopyDestination::Register(dst), PhiCopySource::Register(src)) => {
+        (ParallelCopyDestination::Register(dst), ParallelCopySource::Register(src)) => {
             asm.mov(preg_to_reg64(dst), preg_to_reg64(src))?;
         }
-        (PhiCopyDestination::Register(dst), PhiCopySource::Stack(slot)) => {
+        (ParallelCopyDestination::Register(dst), ParallelCopySource::Stack(slot)) => {
             asm.mov(
                 preg_to_reg64(dst),
                 qword_ptr(mem_operand(BaseReg::StackFrame, slot)),
             )?;
         }
-        (PhiCopyDestination::Register(dst), PhiCopySource::Immediate(value)) => {
+        (ParallelCopyDestination::Register(dst), ParallelCopySource::Immediate(value)) => {
             asm.mov(preg_to_reg64(dst), value)?;
         }
-        (PhiCopyDestination::Stack(slot), PhiCopySource::Register(src)) => {
+        (ParallelCopyDestination::Stack(slot), ParallelCopySource::Register(src)) => {
             asm.mov(
                 qword_ptr(mem_operand(BaseReg::StackFrame, slot)),
                 preg_to_reg64(src),
             )?;
         }
-        (PhiCopyDestination::Stack(dst), PhiCopySource::Stack(src)) => {
+        (ParallelCopyDestination::Stack(dst), ParallelCopySource::Stack(src)) => {
             asm.push(rax)?;
             asm.mov(rax, qword_ptr(mem_operand(BaseReg::StackFrame, src + 8)))?;
             asm.mov(qword_ptr(mem_operand(BaseReg::StackFrame, dst + 8)), rax)?;
             asm.pop(rax)?;
         }
-        (PhiCopyDestination::Stack(slot), PhiCopySource::Immediate(value)) => {
+        (ParallelCopyDestination::Stack(slot), ParallelCopySource::Immediate(value)) => {
             asm.push(rax)?;
             asm.mov(rax, value)?;
             asm.mov(qword_ptr(mem_operand(BaseReg::StackFrame, slot + 8)), rax)?;
@@ -385,7 +468,136 @@ pub fn emit(
     func: &MFunction,
     assignment: &AssignmentMap,
     spill_frame_size: u32,
-) -> Result<EmitResult, IcedError> {
+) -> Result<EmitResult, EmitError> {
+    verify_emission_inputs(func, assignment, spill_frame_size)?;
+    let plan = SsaDestructionPlan::build(func, assignment)?;
+    plan.verify(func, assignment, spill_frame_size)?;
+    emit_planned(func, assignment, spill_frame_size, &plan)
+}
+
+/// Emit using the allocation phase's explicit SSA destruction artifact.
+/// Verification is intentionally repeated immediately before encoding so a
+/// stale or accidentally modified plan cannot reach the emitter.
+pub(crate) fn emit_with_plan(
+    func: &MFunction,
+    assignment: &AssignmentMap,
+    spill_frame_size: u32,
+    plan: &SsaDestructionPlan,
+) -> Result<EmitResult, EmitError> {
+    verify_emission_inputs(func, assignment, spill_frame_size)?;
+    plan.verify(func, assignment, spill_frame_size)?;
+    emit_planned(func, assignment, spill_frame_size, plan)
+}
+
+fn verify_emission_inputs(
+    func: &MFunction,
+    assignment: &AssignmentMap,
+    spill_frame_size: u32,
+) -> Result<(), EmitError> {
+    func.verify_result().map_err(EmitError::Mir)?;
+
+    for block in &func.blocks {
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            if let Some(value) = inst.def()
+                && assignment.get(value).is_none()
+            {
+                return Err(EmitInputError::new(
+                    "EMIT.ASSIGNMENT_COMPLETE",
+                    Some(block.id),
+                    Some(instruction),
+                    Some(value),
+                    "instruction definition has no physical register assignment",
+                )
+                .into());
+            }
+            for value in inst.uses() {
+                if assignment.get(value).is_none() {
+                    return Err(EmitInputError::new(
+                        "EMIT.ASSIGNMENT_COMPLETE",
+                        Some(block.id),
+                        Some(instruction),
+                        Some(value),
+                        "instruction operand has no physical register assignment",
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+
+    // x86-64's `sub rsp, imm32` encodes a signed immediate.  Include the
+    // alignment padding and callee-save pushes in the proof rather than
+    // allowing a large (but otherwise well-formed) frame to wrap at encoding.
+    checked_frame_size(spill_frame_size, used_callee_saved(assignment).len())?;
+    Ok(())
+}
+
+fn checked_frame_size(
+    spill_frame_size: u32,
+    callee_saved_count: usize,
+) -> Result<u32, EmitInputError> {
+    let callee_push_size = u32::try_from(callee_saved_count)
+        .ok()
+        .and_then(|count| count.checked_mul(8))
+        .ok_or_else(|| {
+            EmitInputError::new(
+                "EMIT.FRAME_SIZE_RANGE",
+                None,
+                None,
+                None,
+                "callee-save area exceeds the addressable native stack frame",
+            )
+        })?;
+    let total_push = callee_push_size.checked_add(8).ok_or_else(|| {
+        EmitInputError::new(
+            "EMIT.FRAME_SIZE_RANGE",
+            None,
+            None,
+            None,
+            "native prologue size overflow",
+        )
+    })?;
+    let misalignment = total_push.checked_add(spill_frame_size).ok_or_else(|| {
+        EmitInputError::new(
+            "EMIT.FRAME_SIZE_RANGE",
+            None,
+            None,
+            None,
+            "spill frame plus native prologue exceeds u32",
+        )
+    })? % 16;
+    let padding = if misalignment == 0 {
+        0
+    } else {
+        16 - misalignment
+    };
+    let frame_size = spill_frame_size.checked_add(padding).ok_or_else(|| {
+        EmitInputError::new(
+            "EMIT.FRAME_SIZE_RANGE",
+            None,
+            None,
+            None,
+            "aligned spill frame exceeds u32",
+        )
+    })?;
+    i32::try_from(frame_size).map_err(|_| {
+        EmitInputError::new(
+            "EMIT.FRAME_SIZE_RANGE",
+            None,
+            None,
+            None,
+            "aligned spill frame exceeds signed 32-bit x86 addressing",
+        )
+    })?;
+    Ok(frame_size)
+}
+
+fn emit_planned(
+    func: &MFunction,
+    assignment: &AssignmentMap,
+    spill_frame_size: u32,
+    plan: &SsaDestructionPlan,
+) -> Result<EmitResult, EmitError> {
     let mut asm = CodeAssembler::new(64)?;
 
     // Block labels
@@ -395,19 +607,10 @@ pub fn emit(
     }
 
     let callee_saved = used_callee_saved(assignment);
-    let callee_push_size = (callee_saved.len() as u32) * 8;
-    let total_push = callee_push_size + 8;
-    let frame_size = {
-        let misalign = (total_push + spill_frame_size) % 16;
-        if misalign == 0 {
-            spill_frame_size
-        } else {
-            spill_frame_size + (16 - misalign)
-        }
-    };
+    let frame_size = checked_frame_size(spill_frame_size, callee_saved.len())?;
 
     let mut epilogue_label = asm.create_label();
-    let use_counts = count_vreg_uses(func);
+    let use_counts = count_vreg_uses(func, plan);
 
     // ── Prologue ──
     {
@@ -453,10 +656,8 @@ pub fn emit(
                 let pre = &block.insts[block.insts.len() - 2];
                 let is_cmp = pre.def() == Some(*cond)
                     && matches!(pre, MInst::Cmp { .. } | MInst::CmpImm { .. });
-                let no_phi_targets = !func
-                    .blocks
-                    .iter()
-                    .any(|b| (b.id == *true_bb || b.id == *false_bb) && !b.phis.is_empty());
+                let no_phi_targets = plan.edge(block.id, *true_bb).is_none()
+                    && plan.edge(block.id, *false_bb).is_none();
                 if is_cmp && no_phi_targets {
                     let used_elsewhere = block.insts[..block.insts.len() - 2]
                         .iter()
@@ -485,7 +686,7 @@ pub fn emit(
                     asm.jmp(epilogue_label)?;
                 }
                 MInst::Jump { target } => {
-                    emit_phi_moves_for_target(&mut asm, block.id, *target, func, assignment)?;
+                    emit_parallel_copy_plan(&mut asm, plan.edge(block.id, *target))?;
                     if next_block_id == Some(*target) {
                         // Fall-through (nop for label spacing if block is otherwise empty)
                         asm.nop()?;
@@ -531,16 +732,8 @@ pub fn emit(
                     } else {
                         let c = preg_to_reg64(resolve(assignment, *cond));
                         asm.test(c, c)?;
-                        let true_has_phis = func
-                            .blocks
-                            .iter()
-                            .find(|b| b.id == *true_bb)
-                            .is_some_and(|b| !b.phis.is_empty());
-                        let false_has_phis = func
-                            .blocks
-                            .iter()
-                            .find(|b| b.id == *false_bb)
-                            .is_some_and(|b| !b.phis.is_empty());
+                        let true_has_phis = plan.edge(block.id, *true_bb).is_some();
+                        let false_has_phis = plan.edge(block.id, *false_bb).is_some();
 
                         if !true_has_phis && !false_has_phis {
                             let true_label = block_labels.get_mut(true_bb).unwrap();
@@ -552,15 +745,11 @@ pub fn emit(
                         } else {
                             let mut true_phi_label = asm.create_label();
                             asm.jne(true_phi_label)?;
-                            emit_phi_moves_for_target(
-                                &mut asm, block.id, *false_bb, func, assignment,
-                            )?;
+                            emit_parallel_copy_plan(&mut asm, plan.edge(block.id, *false_bb))?;
                             let false_label = block_labels.get_mut(false_bb).unwrap();
                             asm.jmp(*false_label)?;
                             asm.set_label(&mut true_phi_label)?;
-                            emit_phi_moves_for_target(
-                                &mut asm, block.id, *true_bb, func, assignment,
-                            )?;
+                            emit_parallel_copy_plan(&mut asm, plan.edge(block.id, *true_bb))?;
                             let true_label = block_labels.get_mut(true_bb).unwrap();
                             asm.jmp(*true_label)?;
                         }
@@ -628,14 +817,14 @@ pub fn emit(
     })
 }
 
-fn count_vreg_uses(func: &MFunction) -> HashMap<VReg, usize> {
+fn count_vreg_uses(func: &MFunction, plan: &SsaDestructionPlan) -> HashMap<VReg, usize> {
     let mut counts = HashMap::new();
-    for block in &func.blocks {
-        for phi in &block.phis {
-            for (_, src) in &phi.sources {
-                *counts.entry(*src).or_default() += 1;
-            }
+    for edge in plan.edges() {
+        for row in &edge.rows {
+            *counts.entry(row.source_value).or_default() += 1;
         }
+    }
+    for block in &func.blocks {
         for inst in &block.insts {
             for vreg in inst.uses() {
                 *counts.entry(vreg).or_default() += 1;
@@ -2151,7 +2340,6 @@ pub fn emit_chained_eus(
     use super::{isel, regalloc};
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
-    let verify_mir = cfg!(debug_assertions) || std::env::var_os("CELOX_MIR_VERIFY").is_some();
     let total_start = timing.then(crate::timing::now);
 
     // SIR-level EU merge: combine all EUs into one SIR EU
@@ -2168,6 +2356,12 @@ pub fn emit_chained_eus(
     } else {
         (units[0].clone(), vec![])
     };
+    sir_eu
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Sir {
+            phase: "after native SIR merge",
+            error,
+        })?;
     if let Some(start) = merge_start {
         let sir_insts: usize = sir_eu
             .blocks
@@ -2199,12 +2393,15 @@ pub fn emit_chained_eus(
         );
     }
     dump_native_block_context(label, "after_isel", &sir_eu, &mfunc);
-    if verify_mir {
-        if timing {
-            eprintln!("[native-timing] emit_chained verify after_isel label={label}");
-        }
-        mfunc.verify();
+    if timing {
+        eprintln!("[native-timing] emit_chained verify after_isel label={label}");
     }
+    mfunc
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Mir {
+            phase: "after native instruction selection",
+            error,
+        })?;
     let legalize_start = timing.then(crate::timing::now);
     super::mir_legalize::legalize(&mut mfunc);
     if let Some(start) = legalize_start {
@@ -2216,12 +2413,15 @@ pub fn emit_chained_eus(
             start.elapsed()
         );
     }
-    if verify_mir {
-        if timing {
-            eprintln!("[native-timing] emit_chained verify after_legalize label={label}");
-        }
-        mfunc.verify();
+    if timing {
+        eprintln!("[native-timing] emit_chained verify after_legalize label={label}");
     }
+    mfunc
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Mir {
+            phase: "after MIR legalization",
+            error,
+        })?;
     let opt_start = timing.then(crate::timing::now);
     super::mir_opt::optimize(&mut mfunc);
     if let Some(start) = opt_start {
@@ -2240,12 +2440,15 @@ pub fn emit_chained_eus(
         log_mir_block_stats(label, "after_mir_opt", &mfunc);
     }
     dump_native_block_context(label, "after_mir_opt", &sir_eu, &mfunc);
-    if verify_mir {
-        if timing {
-            eprintln!("[native-timing] emit_chained verify after_mir_opt label={label}");
-        }
-        mfunc.verify();
+    if timing {
+        eprintln!("[native-timing] emit_chained verify after_mir_opt label={label}");
     }
+    mfunc
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Mir {
+            phase: "after MIR optimization",
+            error,
+        })?;
     let regalloc_start = timing.then(crate::timing::now);
     let ra = regalloc::run_regalloc_with_label(&mut mfunc, label)?;
     if let Some(start) = regalloc_start {
@@ -2269,9 +2472,12 @@ pub fn emit_chained_eus(
             start.elapsed()
         );
     }
-    if verify_mir {
-        mfunc.verify();
-    }
+    mfunc
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Mir {
+            phase: "after post-allocation MIR peepholes",
+            error,
+        })?;
     if mir_stats {
         log_mir_stats(label, "after_regalloc", &mfunc);
     }
@@ -2280,7 +2486,12 @@ pub fn emit_chained_eus(
     }
     dump_native_block_context(label, "after_regalloc", &sir_eu, &mfunc);
     let emit_start = timing.then(crate::timing::now);
-    let result = emit(&mfunc, &ra.assignment, ra.spill_frame_size)?;
+    let result = emit_with_plan(
+        &mfunc,
+        &ra.assignment,
+        ra.spill_frame_size,
+        &ra.ssa_destruction,
+    )?;
     if let Some(start) = emit_start {
         eprintln!(
             "[native-timing] emit_chained emit bytes={} elapsed={:?}",

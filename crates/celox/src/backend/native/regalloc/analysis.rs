@@ -21,8 +21,10 @@ pub struct AnalysisResult {
     /// For each block, the next-use distances at block exit.
     pub exit_distances: Vec<HashMap<VReg, u32>>,
     /// Predecessor list for each block (by index).
+    #[cfg(test)]
     pub predecessors: Vec<Vec<usize>>,
     /// Successor indices that are real DFS backedges for each block.
+    #[cfg(test)]
     pub backedge_successors: Vec<Vec<usize>>,
 }
 
@@ -93,7 +95,9 @@ pub(super) fn analyze_ignoring_phi_sources(
     AnalysisResult {
         entry_distances,
         exit_distances,
+        #[cfg(test)]
         predecessors,
+        #[cfg(test)]
         backedge_successors,
     }
 }

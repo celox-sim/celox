@@ -130,6 +130,18 @@ pub struct VRegAllocator {
     next: u32,
 }
 
+/// Exhaustion of the dense `u32` VReg namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VRegAllocError;
+
+impl fmt::Display for VRegAllocError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VReg namespace exhausted")
+    }
+}
+
+impl std::error::Error for VRegAllocError {}
+
 impl Default for VRegAllocator {
     fn default() -> Self {
         Self::new()
@@ -142,14 +154,27 @@ impl VRegAllocator {
     }
 
     pub fn alloc(&mut self) -> VReg {
+        self.try_alloc().expect("VReg overflow")
+    }
+
+    /// Allocate one VReg without panicking or changing state on exhaustion.
+    pub fn try_alloc(&mut self) -> Result<VReg, VRegAllocError> {
+        let Some(next) = self.next.checked_add(1) else {
+            return Err(VRegAllocError);
+        };
         let id = self.next;
-        self.next = self.next.checked_add(1).expect("VReg overflow");
-        VReg(id)
+        self.next = next;
+        Ok(VReg(id))
     }
 
     /// Total number of allocated VRegs. Used for sizing per-vreg arrays.
     pub fn count(&self) -> u32 {
         self.next
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_next_for_test(&mut self, next: u32) {
+        self.next = next;
     }
 }
 
@@ -1237,7 +1262,8 @@ impl MBlock {
 /// Corresponds to one SIR execution unit.
 #[derive(Debug, Clone)]
 pub struct MFunction {
-    /// Basic blocks in layout order. blocks[0] is the entry block.
+    /// Basic blocks in layout order. `blocks[0]` is the unique CFG entry and
+    /// no block may branch back to it; loops therefore have a distinct header.
     pub blocks: Vec<MBlock>,
     /// Spill descriptors indexed by VReg number.
     pub spill_descs: Vec<SpillDesc>,
@@ -1296,6 +1322,15 @@ impl MFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_alloc_reports_exhaustion_without_changing_state() {
+        let mut allocator = VRegAllocator::new();
+        allocator.set_next_for_test(u32::MAX);
+
+        assert_eq!(allocator.try_alloc(), Err(VRegAllocError));
+        assert_eq!(allocator.count(), u32::MAX);
+    }
 
     struct UseCase {
         name: &'static str,

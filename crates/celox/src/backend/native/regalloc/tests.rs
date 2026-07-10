@@ -18,6 +18,28 @@ fn invalid_input_is_a_structured_error_not_a_panic() {
     assert_eq!(error.block, None);
 }
 
+#[test]
+fn cssa_error_mapping_preserves_structured_context() {
+    let source = VReg(7);
+    let error = super::cssa::CssaError {
+        rule: "CSSA.TEST_RULE",
+        block: Some(BlockId(3)),
+        instruction: Some(4),
+        class: None,
+        values: vec![source],
+        message: "test CSSA failure".into(),
+    };
+
+    let mapped = super::cssa_error("CSSA normalization", error);
+
+    assert_eq!(mapped.phase, "CSSA normalization");
+    assert_eq!(mapped.rule, "CSSA.TEST_RULE");
+    assert_eq!(mapped.block, Some(BlockId(3)));
+    assert_eq!(mapped.instruction, Some(4));
+    assert_eq!(mapped.values, vec![source]);
+    assert_eq!(mapped.message, "test CSSA failure");
+}
+
 /// Build a simple MFunction with one block, run regalloc, verify.
 fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> AssignmentMap {
     // Find the max VReg number used in instructions

@@ -36,22 +36,33 @@ impl CssaInfo {
     ///
     /// This does not claim that the partition is conventional; call
     /// [`verify_cssa`] to prove that property.
-    pub(super) fn from_function(func: &MFunction) -> Self {
+    pub(super) fn from_function(func: &MFunction) -> Result<Self, CssaError> {
         let count = func.vregs.count() as usize;
         let mut classes = DisjointSets::new(count);
 
         for block in &func.blocks {
             for phi in &block.phis {
-                assert!(
-                    phi.dst.0 < func.vregs.count(),
-                    "CSSA phi destination {} is not allocated",
-                    phi.dst
-                );
+                if phi.dst.0 >= func.vregs.count() {
+                    return Err(CssaError::new(
+                        "CSSA.VREG_RANGE",
+                        Some(block.id),
+                        None,
+                        None,
+                        vec![phi.dst],
+                        "phi destination is outside the allocated VReg range",
+                    ));
+                }
                 for &(_, source) in &phi.sources {
-                    assert!(
-                        source.0 < func.vregs.count(),
-                        "CSSA phi source {source} is not allocated"
-                    );
+                    if source.0 >= func.vregs.count() {
+                        return Err(CssaError::new(
+                            "CSSA.VREG_RANGE",
+                            Some(block.id),
+                            None,
+                            None,
+                            vec![source],
+                            "phi source is outside the allocated VReg range",
+                        ));
+                    }
                     classes.union(phi.dst.0, source.0);
                 }
             }
@@ -74,10 +85,10 @@ impl CssaInfo {
             }
         }
 
-        Self {
+        Ok(Self {
             class_for_vreg,
             nontrivial_members,
-        }
+        })
     }
 
     pub(super) fn class(&self, value: VReg) -> CssaClass {
@@ -161,27 +172,38 @@ impl DisjointSets {
     }
 }
 
-/// A semantic CSSA verification failure.
+/// A CSSA normalization or semantic-verification failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CssaVerifyError {
-    pub invariant: &'static str,
+pub(super) struct CssaError {
+    pub rule: &'static str,
     pub block: Option<BlockId>,
     pub instruction: Option<usize>,
     pub class: Option<CssaClass>,
-    pub values: Option<(VReg, VReg)>,
+    pub values: Vec<VReg>,
     pub message: String,
 }
 
-impl CssaVerifyError {
-    fn function(invariant: &'static str, message: impl Into<String>) -> Self {
+impl CssaError {
+    fn new(
+        rule: &'static str,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+        class: Option<CssaClass>,
+        values: Vec<VReg>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
-            invariant,
-            block: None,
-            instruction: None,
-            class: None,
-            values: None,
+            rule,
+            block,
+            instruction,
+            class,
+            values,
             message: message.into(),
         }
+    }
+
+    fn function(rule: &'static str, message: impl Into<String>) -> Self {
+        Self::new(rule, None, None, None, Vec::new(), message)
     }
 
     fn interference(
@@ -191,23 +213,23 @@ impl CssaVerifyError {
         left: VReg,
         right: VReg,
     ) -> Self {
-        Self {
-            invariant: "CSSA.CONGRUENCE_MEMBERS_DO_NOT_INTERFERE",
-            block: Some(block),
-            instruction: Some(instruction),
-            class: Some(class),
-            values: Some((left, right)),
-            message: format!(
+        Self::new(
+            "CSSA.CONGRUENCE_MEMBERS_DO_NOT_INTERFERE",
+            Some(block),
+            Some(instruction),
+            Some(class),
+            vec![left, right],
+            format!(
                 "{left} and {right} are distinct live members of phi congruence class {}",
                 class.0
             ),
-        }
+        )
     }
 }
 
-impl fmt::Display for CssaVerifyError {
+impl fmt::Display for CssaError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "CSSA verify [{}]", self.invariant)?;
+        write!(formatter, "CSSA [{}]", self.rule)?;
         if let Some(block) = self.block {
             write!(formatter, " at {block}")?;
         }
@@ -218,7 +240,7 @@ impl fmt::Display for CssaVerifyError {
     }
 }
 
-impl std::error::Error for CssaVerifyError {}
+impl std::error::Error for CssaError {}
 
 /// Rewrite every existing phi using Sreedhar Method I.
 ///
@@ -233,12 +255,23 @@ impl std::error::Error for CssaVerifyError {}
 /// CFG normalization guarantees that each incoming predecessor is specific to
 /// this edge. The transformation changes neither blocks nor edges, so `cfg`
 /// remains valid afterwards.
-pub(super) fn normalize_to_cssa(func: &mut MFunction, cfg: &NormalizedCfg) -> CssaInfo {
-    assert_eq!(func.blocks.len(), cfg.predecessors.len());
-    assert_eq!(func.blocks.len(), cfg.successors.len());
+pub(super) fn normalize_to_cssa(
+    func: &mut MFunction,
+    cfg: &NormalizedCfg,
+) -> Result<CssaInfo, CssaError> {
+    if func.blocks.len() != cfg.predecessors.len()
+        || func.blocks.len() != cfg.successors.len()
+        || func.blocks.len() != cfg.block_index.len()
+    {
+        return Err(CssaError::function(
+            "CSSA.CFG_MATCHES_FUNCTION",
+            "normalized CFG dimensions do not match the MIR function",
+        ));
+    }
 
     let mut edge_copies = vec![Vec::<MInst>::new(); func.blocks.len()];
     for block_index in 0..func.blocks.len() {
+        let block_id = func.blocks[block_index].id;
         let original_phis = std::mem::take(&mut func.blocks[block_index].phis);
         if original_phis.is_empty() {
             continue;
@@ -248,20 +281,33 @@ pub(super) fn normalize_to_cssa(func: &mut MFunction, cfg: &NormalizedCfg) -> Cs
         let mut entry_copies = Vec::with_capacity(original_phis.len());
         for phi in original_phis {
             let original_destination = phi.dst;
-            let fresh_destination = alloc_snapshot(func, original_destination);
+            let fresh_destination = alloc_snapshot(func, original_destination, block_id)?;
             let mut fresh_sources = Vec::with_capacity(phi.sources.len());
 
             for (predecessor_id, source) in phi.sources {
-                let &predecessor = cfg.block_index.get(&predecessor_id).unwrap_or_else(|| {
-                    panic!("CSSA phi names missing predecessor {predecessor_id}")
-                });
-                assert_eq!(
-                    cfg.successors[predecessor].as_slice(),
-                    [block_index],
-                    "CSSA source copy for edge {predecessor_id} -> {} is not edge-local",
-                    func.blocks[block_index].id
-                );
-                let fresh_source = alloc_snapshot(func, source);
+                let Some(&predecessor) = cfg.block_index.get(&predecessor_id) else {
+                    return Err(CssaError::new(
+                        "CSSA.PHI_PREDECESSOR_EXISTS",
+                        Some(block_id),
+                        None,
+                        None,
+                        vec![original_destination, source],
+                        format!("phi names missing predecessor {predecessor_id}"),
+                    ));
+                };
+                if cfg.successors.get(predecessor).map(Vec::as_slice) != Some(&[block_index]) {
+                    return Err(CssaError::new(
+                        "CSSA.EDGE_COPY_ISOLATED",
+                        Some(block_id),
+                        None,
+                        None,
+                        vec![original_destination, source],
+                        format!(
+                            "source copy edge {predecessor_id} -> {block_id} is not a dedicated edge block"
+                        ),
+                    ));
+                }
+                let fresh_source = alloc_snapshot(func, source, block_id)?;
                 edge_copies[predecessor].push(MInst::Mov {
                     dst: fresh_source,
                     src: source,
@@ -287,15 +333,26 @@ pub(super) fn normalize_to_cssa(func: &mut MFunction, cfg: &NormalizedCfg) -> Cs
         if copies.is_empty() {
             continue;
         }
-        let terminator = block
-            .insts
-            .pop()
-            .expect("CSSA edge-copy block has a terminator");
-        assert!(
-            terminator.is_terminator(),
-            "CSSA edge-copy block {} does not end in a terminator",
-            block.id
-        );
+        let Some(terminator) = block.insts.pop() else {
+            return Err(CssaError::new(
+                "CSSA.EDGE_BLOCK_TERMINATED",
+                Some(block.id),
+                None,
+                None,
+                Vec::new(),
+                "edge-copy block has no terminator",
+            ));
+        };
+        if !terminator.is_terminator() {
+            return Err(CssaError::new(
+                "CSSA.EDGE_BLOCK_TERMINATED",
+                Some(block.id),
+                None,
+                None,
+                Vec::new(),
+                "edge-copy block does not end in a terminator",
+            ));
+        }
         block.insts.extend(copies);
         block.insts.push(terminator);
     }
@@ -303,13 +360,13 @@ pub(super) fn normalize_to_cssa(func: &mut MFunction, cfg: &NormalizedCfg) -> Cs
     CssaInfo::from_function(func)
 }
 
-fn alloc_snapshot(func: &mut MFunction, source: VReg) -> VReg {
+fn alloc_snapshot(func: &mut MFunction, source: VReg, block: BlockId) -> Result<VReg, CssaError> {
     let (vregs, spill_descs, value_widths) = (
         &mut func.vregs,
         &mut func.spill_descs,
         &mut func.value_widths,
     );
-    alloc_snapshot_from_parts(vregs, spill_descs, value_widths, source)
+    alloc_snapshot_from_parts(vregs, spill_descs, value_widths, source, block)
 }
 
 fn alloc_snapshot_from_parts(
@@ -317,20 +374,40 @@ fn alloc_snapshot_from_parts(
     spill_descs: &mut Vec<SpillDesc>,
     value_widths: &mut Vec<Option<u8>>,
     source: VReg,
-) -> VReg {
+    block: BlockId,
+) -> Result<VReg, CssaError> {
     let descriptor = spill_descs
         .get(source.0 as usize)
         .map(SpillDesc::copy_for_snapshot)
         .unwrap_or_else(SpillDesc::transient);
     let width = value_widths.get(source.0 as usize).copied().flatten();
-    let fresh = vregs.alloc();
-    assert_eq!(fresh.0 as usize, spill_descs.len());
+    let fresh = vregs.try_alloc().map_err(|error| {
+        CssaError::new(
+            "CSSA.VREG_EXHAUSTED",
+            Some(block),
+            None,
+            None,
+            vec![source],
+            error.to_string(),
+        )
+    })?;
+    if fresh.0 as usize != spill_descs.len()
+        || (!value_widths.is_empty() && fresh.0 as usize != value_widths.len())
+    {
+        return Err(CssaError::new(
+            "CSSA.SIDETABLE_APPEND_POSITION",
+            Some(block),
+            None,
+            None,
+            vec![fresh, source],
+            "fresh CSSA VReg does not append consistently to MIR side tables",
+        ));
+    }
     spill_descs.push(descriptor);
     if !value_widths.is_empty() {
-        assert_eq!(fresh.0 as usize, value_widths.len());
         value_widths.push(width);
     }
-    fresh
+    Ok(fresh)
 }
 
 /// Prove that no distinct members of a phi-congruence class interfere.
@@ -344,19 +421,19 @@ pub(super) fn verify_cssa(
     func: &MFunction,
     cfg: &NormalizedCfg,
     info: &CssaInfo,
-) -> Result<(), CssaVerifyError> {
+) -> Result<(), CssaError> {
     verify_partition(func, info)?;
     if cfg.predecessors.len() != func.blocks.len()
         || cfg.successors.len() != func.blocks.len()
         || cfg.block_index.len() != func.blocks.len()
     {
-        return Err(CssaVerifyError::function(
+        return Err(CssaError::function(
             "CSSA.CFG_MATCHES_FUNCTION",
             "normalized CFG dimensions do not match the MIR function",
         ));
     }
 
-    let liveness = compute_boundary_liveness(func, cfg, info);
+    let liveness = compute_boundary_liveness(func, cfg, info)?;
     for (block_index, block) in func.blocks.iter().enumerate() {
         let mut live = LiveClasses::new(info);
         for &value in &liveness.live_out[block_index] {
@@ -378,14 +455,29 @@ pub(super) fn verify_cssa(
         for phi in &block.phis {
             live.remove(phi.dst);
         }
-        debug_assert_eq!(live.values, liveness.live_in[block_index]);
+        if live.values != liveness.live_in[block_index] {
+            let mut mismatched_values = live
+                .values
+                .symmetric_difference(&liveness.live_in[block_index])
+                .copied()
+                .collect::<Vec<_>>();
+            mismatched_values.sort_unstable();
+            return Err(CssaError::new(
+                "CSSA.LIVENESS_ENTRY_MATCH",
+                Some(block.id),
+                Some(0),
+                None,
+                mismatched_values,
+                "streaming instruction liveness disagrees with boundary liveness",
+            ));
+        }
     }
     Ok(())
 }
 
-fn verify_partition(func: &MFunction, info: &CssaInfo) -> Result<(), CssaVerifyError> {
+fn verify_partition(func: &MFunction, info: &CssaInfo) -> Result<(), CssaError> {
     if info.class_for_vreg.len() != func.vregs.count() as usize {
-        return Err(CssaVerifyError::function(
+        return Err(CssaError::function(
             "CSSA.PARTITION_COVERS_VREGS",
             format!(
                 "partition has {} VRegs but function allocated {}",
@@ -394,11 +486,11 @@ fn verify_partition(func: &MFunction, info: &CssaInfo) -> Result<(), CssaVerifyE
             ),
         ));
     }
-    let expected = CssaInfo::from_function(func);
+    let expected = CssaInfo::from_function(func)?;
     if info.class_for_vreg != expected.class_for_vreg
         || info.nontrivial_members != expected.nontrivial_members
     {
-        return Err(CssaVerifyError::function(
+        return Err(CssaError::function(
             "CSSA.PARTITION_MATCHES_PHIS",
             "congruence partition does not match current phi operands and results",
         ));
@@ -415,7 +507,7 @@ fn compute_boundary_liveness(
     func: &MFunction,
     cfg: &NormalizedCfg,
     info: &CssaInfo,
-) -> BoundaryLiveness {
+) -> Result<BoundaryLiveness, CssaError> {
     let blocks = func.blocks.len();
     let mut definitions = vec![HashSet::<VReg>::default(); blocks];
     let mut upward_uses = vec![HashSet::<VReg>::default(); blocks];
@@ -453,18 +545,22 @@ fn compute_boundary_liveness(
         let predecessor_id = func.blocks[predecessor].id;
         for (edge, &successor) in successors.iter().enumerate() {
             for phi in &func.blocks[successor].phis {
-                let source = phi
+                let Some(source) = phi
                     .sources
                     .iter()
                     .find_map(|&(source_predecessor, source)| {
                         (source_predecessor == predecessor_id).then_some(source)
                     })
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "CSSA liveness: phi {} in {} lacks predecessor {predecessor_id}",
-                            phi.dst, func.blocks[successor].id
-                        )
-                    });
+                else {
+                    return Err(CssaError::new(
+                        "CSSA.PHI_EDGE_COVERAGE",
+                        Some(func.blocks[successor].id),
+                        None,
+                        None,
+                        vec![phi.dst],
+                        format!("phi lacks source for predecessor {predecessor_id}"),
+                    ));
+                };
                 phi_edge_uses[predecessor][edge].insert(source);
             }
         }
@@ -502,7 +598,7 @@ fn compute_boundary_liveness(
         }
     }
 
-    BoundaryLiveness { live_in, live_out }
+    Ok(BoundaryLiveness { live_in, live_out })
 }
 
 struct LiveClasses<'a> {
@@ -520,12 +616,7 @@ impl<'a> LiveClasses<'a> {
         }
     }
 
-    fn add(
-        &mut self,
-        value: VReg,
-        block: BlockId,
-        instruction: usize,
-    ) -> Result<(), CssaVerifyError> {
+    fn add(&mut self, value: VReg, block: BlockId, instruction: usize) -> Result<(), CssaError> {
         let class = self.info.class(value);
         if !self.info.is_nontrivial(class) {
             return Ok(());
@@ -535,7 +626,7 @@ impl<'a> LiveClasses<'a> {
         }
         if let Some(&other) = self.member_for_class.get(&class) {
             if other != value {
-                return Err(CssaVerifyError::interference(
+                return Err(CssaError::interference(
                     block,
                     instruction,
                     class,
@@ -630,10 +721,10 @@ mod tests {
     #[test]
     fn method_i_inserts_fresh_edge_and_entry_copies() {
         let (mut func, left, right, original_destination) = diamond_with_phi(false);
-        let cfg = super::super::cfg::normalize(&mut func);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let old_count = func.vregs.count();
 
-        let info = normalize_to_cssa(&mut func, &cfg);
+        let info = normalize_to_cssa(&mut func, &cfg).unwrap();
 
         assert_eq!(func.vregs.count(), old_count + 3);
         let join = &func.blocks[cfg.block_index[&BlockId(3)]];
@@ -672,8 +763,8 @@ mod tests {
     #[test]
     fn verifier_accepts_disjoint_phi_edge_live_ranges() {
         let (mut func, _, _, _) = diamond_with_phi(false);
-        let cfg = super::super::cfg::normalize(&mut func);
-        let info = CssaInfo::from_function(&func);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let info = CssaInfo::from_function(&func).unwrap();
 
         verify_cssa(&func, &cfg, &info).unwrap();
     }
@@ -681,14 +772,17 @@ mod tests {
     #[test]
     fn verifier_rejects_actual_congruence_interference() {
         let (mut func, left, right, merged) = diamond_with_phi(true);
-        let cfg = super::super::cfg::normalize(&mut func);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
         func.verify();
-        let info = CssaInfo::from_function(&func);
+        let info = CssaInfo::from_function(&func).unwrap();
 
         let error = verify_cssa(&func, &cfg, &info).unwrap_err();
 
-        assert_eq!(error.invariant, "CSSA.CONGRUENCE_MEMBERS_DO_NOT_INTERFERE");
-        let (first, second) = error.values.unwrap();
+        assert_eq!(error.rule, "CSSA.CONGRUENCE_MEMBERS_DO_NOT_INTERFERE");
+        let [first, second] = error.values.as_slice() else {
+            panic!("interference error must identify two values")
+        };
+        let (first, second) = (*first, *second);
         assert_ne!(first, second);
         assert_eq!(info.class(first), info.class(second));
         assert!(first == left || second == left);
@@ -699,12 +793,75 @@ mod tests {
     #[test]
     fn method_i_repairs_interfering_phi_congruence() {
         let (mut func, _, _, _) = diamond_with_phi(true);
-        let cfg = super::super::cfg::normalize(&mut func);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
 
-        let info = normalize_to_cssa(&mut func, &cfg);
+        let info = normalize_to_cssa(&mut func, &cfg).unwrap();
 
         func.verify();
         verify_cssa(&func, &cfg, &info).unwrap();
+    }
+
+    #[test]
+    fn normalization_reports_vreg_exhaustion_without_panicking() {
+        let (mut func, _, _, _) = diamond_with_phi(false);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        func.vregs.set_next_for_test(u32::MAX);
+
+        let error = normalize_to_cssa(&mut func, &cfg).unwrap_err();
+
+        assert_eq!(error.rule, "CSSA.VREG_EXHAUSTED");
+        assert_eq!(func.vregs.count(), u32::MAX);
+    }
+
+    #[test]
+    fn normalization_reports_side_table_misalignment() {
+        let (mut func, _, _, _) = diamond_with_phi(false);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        func.spill_descs.pop();
+
+        let error = normalize_to_cssa(&mut func, &cfg).unwrap_err();
+
+        assert_eq!(error.rule, "CSSA.SIDETABLE_APPEND_POSITION");
+    }
+
+    #[test]
+    fn normalization_reports_missing_edge_block_terminator() {
+        let (mut func, _, _, _) = diamond_with_phi(false);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let join = cfg.block_index[&BlockId(3)];
+        let predecessor = cfg.block_index[&func.blocks[join].phis[0].sources[0].0];
+        func.blocks[predecessor].insts.clear();
+
+        let error = normalize_to_cssa(&mut func, &cfg).unwrap_err();
+
+        assert_eq!(error.rule, "CSSA.EDGE_BLOCK_TERMINATED");
+        assert_eq!(error.block, Some(func.blocks[predecessor].id));
+    }
+
+    #[test]
+    fn liveness_reports_phi_missing_predecessor_source() {
+        let (mut func, _, _, _) = diamond_with_phi(false);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let join = cfg.block_index[&BlockId(3)];
+        func.blocks[join].phis[0].sources.pop();
+        let info = CssaInfo::from_function(&func).unwrap();
+
+        let error = verify_cssa(&func, &cfg, &info).unwrap_err();
+
+        assert_eq!(error.rule, "CSSA.PHI_EDGE_COVERAGE");
+        assert_eq!(error.block, Some(BlockId(3)));
+    }
+
+    #[test]
+    fn partition_reports_out_of_range_phi_member() {
+        let (mut func, _, _, _) = diamond_with_phi(false);
+        let invalid = VReg(func.vregs.count());
+        func.blocks[3].phis[0].sources[0].1 = invalid;
+
+        let error = CssaInfo::from_function(&func).unwrap_err();
+
+        assert_eq!(error.rule, "CSSA.VREG_RANGE");
+        assert_eq!(error.values, vec![invalid]);
     }
 
     #[test]
@@ -728,7 +885,7 @@ mod tests {
         }
         func.blocks.push(block);
 
-        let info = CssaInfo::from_function(&func);
+        let info = CssaInfo::from_function(&func).unwrap();
 
         assert_eq!(info.class(VReg(0)), CssaClass(0));
         assert_eq!(info.class(VReg(MEMBERS - 1)), CssaClass(0));

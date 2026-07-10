@@ -21,8 +21,26 @@ pub(super) fn allocate(
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let phase = timing.then(crate::timing::now);
-    let plan = super::spill_plan::plan(func, cfg, next_use, super::NUM_REGS);
-    plan.verify(func, cfg, super::NUM_REGS);
+    let plan = super::spill_plan::plan(func, cfg, next_use, super::NUM_REGS).map_err(|error| {
+        super::RegallocError::new(
+            "spill planning",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
+    plan.verify(func, cfg, super::NUM_REGS).map_err(|error| {
+        super::RegallocError::new(
+            "spill-plan verification",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
     if let Err(error) = super::home_verify::verify(func, cfg, &plan) {
         let (block, instruction) = match error.location {
             Some(super::home_verify::HomeLocation::Point(point)) => {
@@ -50,7 +68,17 @@ pub(super) fn allocate(
     }
 
     let phase = timing.then(crate::timing::now);
-    let reconstruction = super::reconstruct::reconstruct(func, cfg, &plan, next_use);
+    let reconstruction =
+        super::reconstruct::reconstruct(func, cfg, &plan, next_use).map_err(|error| {
+            super::RegallocError::new(
+                "SSA reconstruction",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
     if let Some(start) = phase {
         eprintln!(
             "[regalloc-timing] ssa reconstruct vregs={} insts={} frame={} elapsed={:?}",
@@ -63,7 +91,9 @@ pub(super) fn allocate(
             start.elapsed()
         );
     }
-    func.verify();
+    func.verify_result().map_err(|error| {
+        super::RegallocError::mir("SSA reconstruction structural verification", error)
+    })?;
 
     // Prove the spill result itself fits the machine before Perm boundaries
     // introduce fresh representatives.  This keeps pressure correctness
@@ -89,8 +119,19 @@ pub(super) fn allocate(
     }
 
     let phase = timing.then(crate::timing::now);
-    let (color_cfg, perms) = super::legalize::materialize_constraint_perms(func, cfg);
-    func.verify();
+    let (color_cfg, perms) =
+        super::legalize::materialize_constraint_perms(func, cfg).map_err(|error| {
+            super::RegallocError::new(
+                "Perm materialization and verification",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
+    func.verify_result()
+        .map_err(|error| super::RegallocError::mir("Perm structural verification", error))?;
     if let Some(start) = phase {
         eprintln!(
             "[regalloc-timing] ssa constraint_perms boundaries={} vregs={} elapsed={:?}",
@@ -115,7 +156,16 @@ pub(super) fn allocate(
             )
         })?;
     for (&destination, &register) in &coloring.perm_matching {
-        debug_assert_eq!(coloring.assignment.get(destination), Some(register));
+        if coloring.assignment.get(destination) != Some(register) {
+            return Err(super::RegallocError::new(
+                "SSA coloring verification",
+                "COLOR.PERM_MATCHING_APPLIED",
+                None,
+                None,
+                vec![destination],
+                format!("Perm matching color {register:?} was not applied"),
+            ));
+        }
     }
     if let Some(start) = phase {
         eprintln!("[regalloc-timing] ssa color elapsed={:?}", start.elapsed());

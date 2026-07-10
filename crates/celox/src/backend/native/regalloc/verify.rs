@@ -35,10 +35,10 @@ pub(super) fn verify(
     assignment: &AssignmentMap,
 ) -> Result<(), AllocationError> {
     for (block_index, block) in func.blocks.iter().enumerate() {
-        // The transitional unified allocator represents a value coupled
-        // through memory by omitting all local references to its original
-        // VReg; a fresh reload is referenced instead.  Such a value remains
-        // dataflow-live but its stale global register is not resident here.
+        // The test-only legacy allocator can represent a value coupled through
+        // memory by omitting all local references to its original VReg; a fresh
+        // reload is referenced instead. Such a value remains dataflow-live but
+        // its stale global register is not resident here.
         let mut locally_resident = block
             .insts
             .iter()
