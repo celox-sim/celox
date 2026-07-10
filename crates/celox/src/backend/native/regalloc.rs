@@ -7,6 +7,7 @@ mod analysis;
 pub mod assignment;
 mod legalize;
 mod spilling;
+mod ssa;
 #[cfg(test)]
 mod tests;
 mod unified;
@@ -64,9 +65,6 @@ pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocRes
         );
     }
 
-    // Unified single-pass: simultaneous spilling + assignment.
-    // No separate analysis → spill → re-analyze → assign pipeline.
-    // No k-1 hack — uses k = NUM_REGS directly.
     let analysis_start = timing.then(crate::timing::now);
     let analysis = analysis::analyze(func);
     if let Some(start) = analysis_start {
@@ -81,10 +79,38 @@ pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocRes
         );
     }
     let alloc_start = timing.then(crate::timing::now);
-    let (assignment, spill_frame_size) = unified::unified_alloc_with_label(func, &analysis, label);
+    let requested = std::env::var("CELOX_REGALLOC_IMPL").unwrap_or_else(|_| "auto".into());
+    assert!(
+        matches!(requested.as_str(), "auto" | "ssa" | "unified"),
+        "unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto, ssa, or unified"
+    );
+    let (assignment, spill_frame_size, implementation) = if requested == "unified" {
+        let (assignment, frame_size) = unified::unified_alloc_with_label(func, &analysis, label);
+        (assignment, frame_size, "unified-spill")
+    } else {
+        match ssa::try_color(func, &analysis) {
+            Ok(assignment) => (assignment, 0, "ssa-color"),
+            Err(failure) if requested == "ssa" => panic!(
+                "SSA register allocation requires spill placement at {} for {}; the legacy allocator was not selected",
+                failure.block, failure.value
+            ),
+            Err(failure) if requested == "auto" => {
+                if timing {
+                    eprintln!(
+                        "[regalloc-timing] label={label} ssa_color_fallback block={} value={}",
+                        failure.block, failure.value
+                    );
+                }
+                let (assignment, frame_size) =
+                    unified::unified_alloc_with_label(func, &analysis, label);
+                (assignment, frame_size, "unified-spill")
+            }
+            Err(_) => unreachable!("register allocator implementation was validated"),
+        }
+    };
     if let Some(start) = alloc_start {
         eprintln!(
-            "[regalloc-timing] label={label} unified_alloc blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
+            "[regalloc-timing] label={label} implementation={implementation} blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
             func.blocks.len(),
             func.blocks
                 .iter()

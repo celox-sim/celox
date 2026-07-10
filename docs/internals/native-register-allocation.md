@@ -99,8 +99,24 @@ The following parts are in the tree now:
 - the unified allocator is forbidden from changing an existing function-wide
   VReg assignment at a block boundary; and
 - all identifiers remain `u32` or `usize` with checked allocation.
+- spill-free functions are colored by the new SSA allocator in a
+  dominance-compatible order without constructing an interference graph.
 
-SSA spill placement, chordal coloring, and final removal of the unified
-allocator remain migration work.  Until those land, passing the verifier means
+During migration, `CELOX_REGALLOC_IMPL` controls selection:
+
+- `auto` (default) uses SSA coloring and temporarily routes functions which
+  require spill placement to the unified allocator;
+- `ssa` requires the new path and reports the first value requiring spill
+  placement instead of silently falling back; and
+- `unified` selects the old implementation for differential diagnosis.
+
+SSA spill placement and final removal of the unified allocator remain migration
+work.  Until those land, passing the verifier means
 the emitted allocation satisfies the current location model; it does not make
 the unified algorithm the intended long-term design.
+
+On the pinned Heliodor `test_soc_linux_boot` input, the first implementation
+slice colors `apply_ff` (5,395 MIR instructions) entirely on the new path with
+no spill frame.  The three larger evaluation functions currently report their
+first spill requirement and use the migration path.  This split is observable
+with `CELOX_REGALLOC_TIMING=1`; it is not inferred from compile success alone.
