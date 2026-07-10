@@ -108,6 +108,7 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
 
 /// Run register allocation and optionally log per-block allocation deltas.
 pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocResult {
+    reorder_blocks_rpo(func);
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let total_start = timing.then(crate::timing::now);
@@ -187,6 +188,67 @@ pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocRes
         assignment,
         spill_frame_size,
     }
+}
+
+/// Normalize block layout to reverse postorder before the single forward
+/// allocation walk. ISel may append CFG-lowering blocks after their logical
+/// successors (for example runtime-event blocks), so numeric/block-vector
+/// order is not a valid way to distinguish forward edges from backedges.
+fn reorder_blocks_rpo(func: &mut MFunction) {
+    use super::mir::BlockId;
+    use std::collections::{HashMap, HashSet};
+
+    let Some(entry) = func.blocks.first().map(|block| block.id) else {
+        return;
+    };
+    let successors = func
+        .blocks
+        .iter()
+        .map(|block| (block.id, block.successors()))
+        .collect::<HashMap<_, _>>();
+    let mut visited = HashSet::new();
+    let mut postorder = Vec::with_capacity(func.blocks.len());
+    let mut stack: Vec<(BlockId, usize)> = vec![(entry, 0)];
+    visited.insert(entry);
+
+    while let Some((block, next_successor)) = stack.last_mut() {
+        let succs = &successors[block];
+        if *next_successor < succs.len() {
+            let successor = succs[*next_successor];
+            *next_successor += 1;
+            if visited.insert(successor) {
+                stack.push((successor, 0));
+            }
+        } else {
+            postorder.push(*block);
+            stack.pop();
+        }
+    }
+    postorder.reverse();
+
+    // MIR verification rejects unreachable blocks, but retain them
+    // deterministically here so this normalization is total on raw inputs.
+    let mut remaining = func
+        .blocks
+        .iter()
+        .map(|block| block.id)
+        .filter(|id| !visited.contains(id))
+        .collect::<Vec<_>>();
+    remaining.sort();
+    postorder.extend(remaining);
+
+    let mut blocks = std::mem::take(&mut func.blocks)
+        .into_iter()
+        .map(|block| (block.id, block))
+        .collect::<HashMap<_, _>>();
+    func.blocks = postorder
+        .into_iter()
+        .map(|id| {
+            blocks
+                .remove(&id)
+                .expect("RPO contains every MIR block once")
+        })
+        .collect();
 }
 
 #[derive(Clone, Copy, Default)]

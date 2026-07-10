@@ -471,15 +471,7 @@ fn verify_offset<A>(
     offset: &SIROffset,
 ) -> Result<(), SirVerifyError> {
     if let SIROffset::Dynamic(reg) = offset {
-        let ty = register_type(eu, block, Some(index), *reg)?;
-        if matches!(ty, RegisterType::Logic { .. }) {
-            return Err(SirVerifyError::instruction(
-                "TYPE.DYNAMIC_OFFSET_TWO_STATE",
-                block,
-                index,
-                format!("dynamic offset r{} is four-state logic", reg.0),
-            ));
-        }
+        register_type(eu, block, Some(index), *reg)?;
     }
     Ok(())
 }

@@ -597,9 +597,7 @@ fn compute_entry_regfile(
     let mut s = spilled_all.unwrap_or_default();
     s.retain(|v| analysis.entry_distances[block_idx].contains_key(v));
 
-    // Start with intersection: VRegs in registers in ALL predecessors.
-    // If the preferred PhysReg is already taken, skip — the VReg will be
-    // reloaded on demand by process_block when actually used.
+    // Start with intersection: VRegs available in ALL predecessors.
     // Sort for deterministic register assignment (HashSet iteration is unordered).
     // Only include VRegs that are actually live at this block's entry.
     // This prevents stale VRegs from predecessor exits (e.g. after EU merge)
@@ -611,16 +609,24 @@ fn compute_entry_regfile(
         .collect();
     all_sorted.sort();
     for vreg in &all_sorted {
-        if rf.occupancy() >= k {
-            break;
-        }
         if rf.contains(*vreg) {
             continue;
         }
-        if let Some(preg) = result.get(*vreg) {
-            if !rf.preg_occupied(preg) {
+        let assigned = if rf.occupancy() < k {
+            if let Some(preg) = result.get(*vreg).filter(|preg| !rf.preg_occupied(*preg)) {
                 rf.assign(*vreg, preg);
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if !assigned {
+            // A live-through value may have no direct use in this join block.
+            // Mark it for memory coupling rather than dropping it and hoping a
+            // later use can reload from a spill slot that was never initialized.
+            s.insert(*vreg);
         }
     }
 
@@ -844,6 +850,12 @@ fn process_block(
         let edge_sources = edge_phi_sources(func, block.id, inst);
         let def = inst.def();
         let mut constraints = use_constraints(inst);
+        for &source in &edge_sources {
+            if !uses.contains(&source) {
+                uses.push(source);
+                constraints.push(RegConstraint::Any);
+            }
+        }
         constraints.resize(uses.len(), RegConstraint::Any);
         for use_vreg in &mut uses {
             if let Some(&alias) = reload_alias.get(use_vreg) {
@@ -859,6 +871,7 @@ fn process_block(
 
         // Step A+B: Ensure all uses are in registers
         let mut pinned: HashSet<VReg> = HashSet::default();
+        let mut edge_rewrites = Vec::new();
 
         for (&use_vreg, constraint) in uses.iter().zip(constraints.iter()) {
             if let RegConstraint::Fixed(required_preg) = constraint {
@@ -1064,6 +1077,9 @@ fn process_block(
                     rf.assign(fresh, preg);
                     result.set(fresh, preg);
                     rewritten_inst.rewrite_use(use_vreg, fresh);
+                    if edge_sources.contains(&use_vreg) {
+                        edge_rewrites.push((use_vreg, fresh));
+                    }
                     if can_reload_without_new_store(use_vreg, &s, func) {
                         reload_alias.insert(use_vreg, fresh);
                         alias_source.insert(fresh, use_vreg);
@@ -1075,7 +1091,6 @@ fn process_block(
             }
         }
 
-        let mut edge_rewrites = Vec::new();
         for &source in &edge_sources {
             let resident = reload_alias
                 .get(&source)
@@ -1087,6 +1102,8 @@ fn process_block(
             }
         }
         if !edge_rewrites.is_empty() {
+            edge_rewrites.sort_unstable();
+            edge_rewrites.dedup();
             rewrite_edge_phi_sources(func, block.id, inst, &edge_rewrites);
         }
 
