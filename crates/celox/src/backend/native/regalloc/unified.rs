@@ -111,6 +111,50 @@ impl RegFile {
     fn vregs(&self) -> impl Iterator<Item = VReg> + '_ {
         self.vreg_to_preg.keys().copied()
     }
+
+    fn verify_instruction(&self, inst: &MInst, assignment: &AssignmentMap) {
+        for (&vreg, &preg) in &self.vreg_to_preg {
+            assert_eq!(
+                self.get_vreg(preg),
+                Some(vreg),
+                "regalloc verify: inconsistent RegFile reverse mapping for {vreg} -> {preg}"
+            );
+            assert_eq!(
+                assignment.get(vreg),
+                Some(preg),
+                "regalloc verify: RegFile and AssignmentMap disagree for {vreg}"
+            );
+        }
+
+        let uses = inst.uses();
+        let constraints = use_constraints(inst);
+        assert_eq!(
+            uses.len(),
+            constraints.len(),
+            "regalloc verify: constraint arity mismatch for {inst}"
+        );
+        for (vreg, constraint) in uses.into_iter().zip(constraints) {
+            let preg = self.get_preg(vreg).or_else(|| {
+                let def = inst.def()?;
+                let def_preg = self.get_preg(def)?;
+                (assignment.get(vreg) == Some(def_preg)).then_some(def_preg)
+            }).unwrap_or_else(|| {
+                panic!("regalloc verify: use {vreg} is neither resident nor coalesced with the dying def operand for {inst}")
+            });
+            if let RegConstraint::Fixed(required) = constraint {
+                assert_eq!(
+                    preg, required,
+                    "regalloc verify: use {vreg} occupies {preg}, expected {required} for {inst}"
+                );
+            }
+        }
+        if let Some(def) = inst.def() {
+            assert!(
+                self.contains(def),
+                "regalloc verify: def {def} has no resident assignment for {inst}"
+            );
+        }
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -1178,6 +1222,10 @@ fn process_block(
                     trace.as_deref_mut(),
                 );
             }
+        }
+
+        if cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some() {
+            rf.verify_instruction(&rewritten_inst, result);
         }
 
         // Emit instruction

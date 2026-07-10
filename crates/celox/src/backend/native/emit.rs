@@ -2178,6 +2178,9 @@ pub fn emit_chained_eus(
             start.elapsed()
         );
     }
+    if verify_mir {
+        mfunc.verify();
+    }
     if mir_stats {
         log_mir_stats(label, "after_regalloc", &mfunc);
     }

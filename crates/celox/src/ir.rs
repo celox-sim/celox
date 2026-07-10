@@ -504,6 +504,7 @@ where
 pub type VarAtom = VarAtomBase<VarId>;
 mod builder;
 pub(crate) use builder::SIRBuilder;
+pub(crate) mod verify;
 use veryl_parser::resource_table::StrId;
 /// Block identifier
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

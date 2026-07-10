@@ -9,6 +9,7 @@ pub mod jit_mem;
 pub mod mir;
 pub(crate) mod mir_legalize;
 pub(crate) mod mir_opt;
+pub mod mir_verify;
 pub mod regalloc;
 
 pub use backend::{NativeBackend, SharedNativeCode};

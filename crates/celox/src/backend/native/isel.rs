@@ -55,6 +55,11 @@ pub fn lower_execution_unit(
     layout: &MemoryLayout,
     four_state: bool,
 ) -> MFunction {
+    if cfg!(debug_assertions) || std::env::var_os("CELOX_SIR_VERIFY").is_some() {
+        if let Err(error) = eu.verify_result() {
+            panic!("before native ISel: {error}");
+        }
+    }
     let mut vregs = VRegAllocator::new();
     let mut spill_descs: Vec<SpillDesc> = Vec::new();
     let max_sir_regs = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0) + 1;

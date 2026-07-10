@@ -9,60 +9,100 @@ use super::mir::*;
 
 /// Run all MIR optimization passes.
 pub fn optimize(func: &mut MFunction) {
+    let verify = std::env::var_os("CELOX_MIR_VERIFY_PASSES").is_some();
+    macro_rules! pass {
+        ($name:literal, $call:expr) => {{
+            $call;
+            if verify {
+                if let Err(error) = func.verify_result() {
+                    panic!("after MIR pass {}: {error}", $name);
+                }
+            }
+        }};
+    }
     if func.vregs.count() > 40 {
         // High-pressure: full pipeline
         for _ in 0..2 {
-            constant_fold(func);
-            constant_dedup(func);
-            copy_propagate(func);
-            forward_local_store_loads(func);
-            eliminate_redundant_local_stores(func);
-            algebraic_simplify(func);
-            redundant_mask_eliminate(func);
-            fold_bit_toggle_insert(func);
-            global_gvn(func);
-            dead_code_eliminate(func);
+            pass!("constant_fold", constant_fold(func));
+            pass!("constant_dedup", constant_dedup(func));
+            pass!("copy_propagate", copy_propagate(func));
+            pass!("forward_local_store_loads", forward_local_store_loads(func));
+            pass!(
+                "eliminate_redundant_local_stores",
+                eliminate_redundant_local_stores(func)
+            );
+            pass!("algebraic_simplify", algebraic_simplify(func));
+            pass!("redundant_mask_eliminate", redundant_mask_eliminate(func));
+            pass!("fold_bit_toggle_insert", fold_bit_toggle_insert(func));
+            pass!("global_gvn", global_gvn(func));
+            pass!("dead_code_eliminate", dead_code_eliminate(func));
         }
-        lower_to_imm_forms(func);
-        dead_code_eliminate(func);
-        fuse_compare_selects(func);
-        dead_code_eliminate(func);
-        sink_loads(func);
-        split_live_ranges(func);
-        eliminate_redundant_or_terms(func);
-        dead_code_eliminate(func);
+        pass!("lower_to_imm_forms", lower_to_imm_forms(func));
+        pass!("dead_code_eliminate", dead_code_eliminate(func));
+        pass!("fuse_compare_selects", fuse_compare_selects(func));
+        pass!("dead_code_eliminate", dead_code_eliminate(func));
+        pass!("sink_loads", sink_loads(func));
+        pass!("split_live_ranges", split_live_ranges(func));
+        pass!(
+            "eliminate_redundant_or_terms",
+            eliminate_redundant_or_terms(func)
+        );
+        pass!("dead_code_eliminate", dead_code_eliminate(func));
         if bmi2_available() {
-            fold_deposit_chain_to_pdep(func);
-            fold_extract_chain_to_pext(func);
-            fold_xor_chain_to_pext(func);
+            pass!(
+                "fold_deposit_chain_to_pdep",
+                fold_deposit_chain_to_pdep(func)
+            );
+            pass!(
+                "fold_extract_chain_to_pext",
+                fold_extract_chain_to_pext(func)
+            );
+            pass!("fold_xor_chain_to_pext", fold_xor_chain_to_pext(func));
         }
-        fold_add_chain_to_popcnt(func);
-        dead_code_eliminate(func);
+        pass!("fold_add_chain_to_popcnt", fold_add_chain_to_popcnt(func));
+        pass!("dead_code_eliminate", dead_code_eliminate(func));
     } else {
         // Low-pressure: lightweight but complete pipeline
-        constant_fold(func);
-        constant_dedup(func);
-        copy_propagate(func);
-        forward_local_store_loads(func);
-        eliminate_redundant_local_stores(func);
-        algebraic_simplify(func);
-        redundant_mask_eliminate(func);
-        fold_bit_toggle_insert(func);
-        eliminate_redundant_or_terms(func);
+        pass!("constant_fold", constant_fold(func));
+        pass!("constant_dedup", constant_dedup(func));
+        pass!("copy_propagate", copy_propagate(func));
+        pass!("forward_local_store_loads", forward_local_store_loads(func));
+        pass!(
+            "eliminate_redundant_local_stores",
+            eliminate_redundant_local_stores(func)
+        );
+        pass!("algebraic_simplify", algebraic_simplify(func));
+        pass!("redundant_mask_eliminate", redundant_mask_eliminate(func));
+        pass!("fold_bit_toggle_insert", fold_bit_toggle_insert(func));
+        pass!(
+            "eliminate_redundant_or_terms",
+            eliminate_redundant_or_terms(func)
+        );
         if bmi2_available() {
-            fold_deposit_chain_to_pdep(func);
-            fold_extract_chain_to_pext(func);
-            fold_xor_chain_to_pext(func);
+            pass!(
+                "fold_deposit_chain_to_pdep",
+                fold_deposit_chain_to_pdep(func)
+            );
+            pass!(
+                "fold_extract_chain_to_pext",
+                fold_extract_chain_to_pext(func)
+            );
+            pass!("fold_xor_chain_to_pext", fold_xor_chain_to_pext(func));
         }
-        fold_add_chain_to_popcnt(func);
-        dead_code_eliminate(func);
-        lower_to_imm_forms(func);
-        dead_code_eliminate(func); // clean up dead LoadImm from imm lowering
-        fuse_compare_selects(func);
-        dead_code_eliminate(func);
+        pass!("fold_add_chain_to_popcnt", fold_add_chain_to_popcnt(func));
+        pass!("dead_code_eliminate", dead_code_eliminate(func));
+        pass!("lower_to_imm_forms", lower_to_imm_forms(func));
+        pass!("dead_code_eliminate", dead_code_eliminate(func));
+        pass!("fuse_compare_selects", fuse_compare_selects(func));
+        pass!("dead_code_eliminate", dead_code_eliminate(func));
     }
-    simplify_cfg(func);
-    compute_value_widths(func);
+    pass!("simplify_cfg", simplify_cfg(func));
+    pass!("compute_value_widths", compute_value_widths(func));
+    if cfg!(debug_assertions) || std::env::var_os("CELOX_MIR_VERIFY").is_some() {
+        if let Err(error) = func.verify_result() {
+            panic!("after MIR optimizer: {error}");
+        }
+    }
 }
 
 /// Run peepholes that are safe after register allocation.
@@ -1269,11 +1309,23 @@ fn try_simplify_mul(
 /// - Thread jumps through empty blocks (jmp-only blocks)
 /// - Fold branch targets through jump chains
 fn simplify_cfg(func: &mut MFunction) {
+    let entry = func.blocks.first().map(|block| block.id);
+    let phi_predecessors = func
+        .blocks
+        .iter()
+        .flat_map(|block| &block.phis)
+        .flat_map(|phi| phi.sources.iter().map(|(pred, _)| *pred))
+        .collect::<HashSet<_>>();
+
     // Build jump-through map: if a block contains only `jmp target`,
     // redirect all references to this block directly to `target`.
     let mut redirect: HashMap<BlockId, BlockId> = HashMap::new();
     for block in &func.blocks {
-        if block.phis.is_empty() && block.insts.len() == 1 {
+        if Some(block.id) != entry
+            && !phi_predecessors.contains(&block.id)
+            && block.phis.is_empty()
+            && block.insts.len() == 1
+        {
             if let MInst::Jump { target } = &block.insts[0] {
                 redirect.insert(block.id, *target);
             }
@@ -1322,18 +1374,9 @@ fn simplify_cfg(func: &mut MFunction) {
                 _ => {}
             }
         }
-        // Rewrite phi sources
-        for phi in &mut block.phis {
-            for (pred_id, _) in &mut phi.sources {
-                if let Some(&new_pred) = resolved.get(pred_id) {
-                    *pred_id = new_pred;
-                }
-            }
-        }
     }
 
     // Remove empty blocks that are now unreachable (keep entry block)
-    let entry = func.blocks.first().map(|b| b.id);
     func.blocks
         .retain(|block| Some(block.id) == entry || !resolved.contains_key(&block.id));
 }
@@ -1350,38 +1393,25 @@ fn simplify_cfg(func: &mut MFunction) {
 /// don't depend on intervening instructions.
 fn sink_loads(func: &mut MFunction) {
     for block in &mut func.blocks {
-        // Build first-use map: for each defined VReg, find the index of
-        // its first use within this block.
-        let mut first_use: HashMap<VReg, usize> = HashMap::new();
-        for (i, inst) in block.insts.iter().enumerate() {
-            for u in inst.uses() {
-                first_use.entry(u).or_insert(i);
-            }
-        }
-
-        // Identify sinkable instructions and their target positions.
-        // Process from the end to avoid invalidating indices.
-        let mut sinks: Vec<(usize, usize)> = Vec::new(); // (from, to)
-
-        for (i, inst) in block.insts.iter().enumerate() {
-            // Only sink LoadImm (always safe — no memory dependency)
-            if !matches!(inst, MInst::LoadImm { .. }) {
+        // Walk definitions backwards and find each target in the current
+        // instruction sequence. Pre-computing all target indices is incorrect:
+        // moving one definition changes the target index of another definition
+        // and can place it after its use.
+        for from in (0..block.insts.len()).rev() {
+            let MInst::LoadImm { dst, .. } = block.insts[from] else {
                 continue;
+            };
+            let Some(use_pos) = block.insts[from + 1..]
+                .iter()
+                .position(|inst| inst.uses().contains(&dst))
+                .map(|relative| from + 1 + relative)
+            else {
+                continue;
+            };
+            if use_pos > from + 4 {
+                let inst = block.insts.remove(from);
+                block.insts.insert(use_pos - 1, inst);
             }
-            let Some(def) = inst.def() else { continue };
-
-            if let Some(&use_pos) = first_use.get(&def) {
-                if use_pos > i + 4 {
-                    sinks.push((i, use_pos));
-                }
-            }
-        }
-
-        // Apply sinks in reverse order to preserve indices
-        for (from, to) in sinks.into_iter().rev() {
-            let inst = block.insts.remove(from);
-            // `to` needs adjustment since we removed an element before it
-            block.insts.insert(to - 1, inst);
         }
     }
 }
@@ -1495,10 +1525,9 @@ fn split_live_ranges(func: &mut MFunction) {
     // Apply splits
     for split in splits {
         let block = &mut func.blocks[split.block_idx];
-        let new_vreg = func.vregs.alloc();
-
-        let (reload_inst, spill_desc) = match split.kind {
+        let (reload_inst, spill_desc, new_vreg) = match split.kind {
             RematKind::SimLoad(offset, size) => {
+                let new_vreg = func.vregs.alloc();
                 let inst = MInst::Load {
                     dst: new_vreg,
                     base: BaseReg::SimState,
@@ -1508,7 +1537,7 @@ fn split_live_ranges(func: &mut MFunction) {
                 // Use transient SpillDesc — the regalloc will handle
                 // further spilling if needed. The key benefit is that
                 // the new VReg has a short live range.
-                (inst, SpillDesc::transient())
+                (inst, SpillDesc::transient(), new_vreg)
             }
             RematKind::StackSpill => {
                 // For transient values: allocate a stack slot in the MIR,
@@ -4491,5 +4520,92 @@ mod tests {
             )),
             "{insts:#?}"
         );
+    }
+
+    #[test]
+    fn sink_loads_keeps_each_definition_before_its_use() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 10,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 20,
+                },
+                MInst::LoadImm {
+                    dst: VReg(2),
+                    value: 30,
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 40,
+                },
+                MInst::LoadImm {
+                    dst: VReg(4),
+                    value: 50,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            5,
+        );
+
+        sink_loads(&mut func);
+
+        assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn simplify_cfg_does_not_collapse_distinct_phi_edges() {
+        let mut func = make_func(Vec::new(), 3);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 10,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(2),
+            value: 20,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.phis.push(PhiNode {
+            dst: VReg(3),
+            sources: vec![(BlockId(1), VReg(1)), (BlockId(2), VReg(2))],
+        });
+        merge.push(MInst::Return);
+        func.vregs.alloc();
+        func.spill_descs.push(SpillDesc::transient());
+        func.blocks = vec![entry, left, right, merge];
+
+        simplify_cfg(&mut func);
+
+        assert_eq!(func.verify_result(), Ok(()));
+        assert_eq!(func.blocks.len(), 4);
     }
 }

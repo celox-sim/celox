@@ -27,17 +27,18 @@ pub struct RegallocResult {
     pub spill_frame_size: u32,
 }
 
-/// Verify that no two simultaneously-live VRegs share a PhysReg.
+/// Verify the final allocation's coverage and machine constraints.
+///
+/// Residency conflicts are verified against `RegFile` during allocation;
+/// `AssignmentMap` alone intentionally does not encode residency intervals.
 fn verify_assignment(
     func: &MFunction,
-    analysis: &analysis::AnalysisResult,
+    _analysis: &analysis::AnalysisResult,
     assignment: &assignment::AssignmentMap,
 ) {
-    use super::mir::VReg;
-    use assignment::PhysReg;
-    use std::collections::HashMap;
+    use assignment::RegConstraint;
 
-    for (bi, block) in func.blocks.iter().enumerate() {
+    for block in &func.blocks {
         for phi in &block.phis {
             assert!(
                 assignment.get(phi.dst).is_some() || assignment.edge_spill_slot(phi.dst).is_some(),
@@ -56,37 +57,18 @@ fn verify_assignment(
             }
         }
 
-        // Track live VRegs and their PhysRegs at each program point
-        let mut live: HashMap<VReg, PhysReg> = HashMap::new();
-
-        // Pre-compute use positions for O(log n) dead check
-        let mut use_positions: HashMap<VReg, Vec<usize>> = HashMap::new();
-        for (i, inst) in block.insts.iter().enumerate() {
-            for vreg in inst.uses() {
-                use_positions.entry(vreg).or_default().push(i);
-            }
-        }
-
-        // Initialize from entry_distances.
-        // Only include VRegs that have assignments AND don't conflict.
-        // VRegs that were spilled in a predecessor may still appear in
-        // entry_distances (for cross-block liveness) but no longer
-        // occupy a register.
-        for &vreg in analysis.entry_distances[bi].keys() {
-            if !use_positions.contains_key(&vreg) {
-                continue;
-            }
-            if let Some(preg) = assignment.get(vreg) {
-                // Skip if this PhysReg is already claimed by another VReg
-                if live.values().any(|&p| p == preg) {
-                    continue;
-                }
-                live.insert(vreg, preg);
-            }
-        }
-
         for (inst_idx, inst) in block.insts.iter().enumerate() {
-            for use_vreg in inst.uses() {
+            let uses = inst.uses();
+            let constraints = assignment::use_constraints(inst);
+            assert_eq!(
+                uses.len(),
+                constraints.len(),
+                "regalloc verify: constraint arity mismatch at bb{} inst {}: {}",
+                block.id,
+                inst_idx,
+                inst
+            );
+            for (use_vreg, constraint) in uses.into_iter().zip(constraints) {
                 assert!(
                     assignment.get(use_vreg).is_some(),
                     "regalloc verify: use {use_vreg} has no physical assignment at bb{} inst {}: {}",
@@ -94,6 +76,16 @@ fn verify_assignment(
                     inst_idx,
                     inst
                 );
+                if let RegConstraint::Fixed(required) = constraint {
+                    assert_eq!(
+                        assignment.get(use_vreg),
+                        Some(required),
+                        "regalloc verify: use {use_vreg} must occupy {required} at bb{} inst {}: {}",
+                        block.id,
+                        inst_idx,
+                        inst
+                    );
+                }
             }
             if let Some(def) = inst.def() {
                 assert!(
@@ -103,46 +95,6 @@ fn verify_assignment(
                     inst_idx,
                     inst
                 );
-            }
-
-            // Remove dead VRegs (O(log n) per VReg via binary search)
-            let dead: Vec<VReg> = live
-                .keys()
-                .copied()
-                .filter(|&v| {
-                    let from = inst_idx + 1;
-                    let has_future_use = if let Some(positions) = use_positions.get(&v) {
-                        match positions.binary_search(&from) {
-                            Ok(_) => true,
-                            Err(idx) => idx < positions.len(),
-                        }
-                    } else {
-                        false
-                    };
-                    !has_future_use && !analysis.exit_distances[bi].contains_key(&v)
-                })
-                .collect();
-            for v in dead {
-                live.remove(&v);
-            }
-
-            // Add def
-            if let Some(def) = inst.def() {
-                if let Some(preg) = assignment.get(def) {
-                    // In the unified allocator, a spilled VReg may still
-                    // have a global assignment but no longer occupies the
-                    // register. If a new def claims the same PhysReg,
-                    // evict the stale entry from live.
-                    let stale: Vec<VReg> = live
-                        .iter()
-                        .filter(|(v, p)| **v != def && **p == preg)
-                        .map(|(v, _)| *v)
-                        .collect();
-                    for v in stale {
-                        live.remove(&v);
-                    }
-                    live.insert(def, preg);
-                }
             }
         }
     }

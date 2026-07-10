@@ -1,0 +1,878 @@
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
+
+use num_bigint::BigUint;
+use num_traits::Zero;
+
+use super::{
+    BasicBlock, BinaryOp, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction,
+    SIROffset, SIRTerminator, UnaryOp,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SirVerifyError {
+    pub invariant: &'static str,
+    pub block: Option<BlockId>,
+    pub instruction: Option<usize>,
+    pub message: String,
+}
+
+impl SirVerifyError {
+    fn function(invariant: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            invariant,
+            block: None,
+            instruction: None,
+            message: message.into(),
+        }
+    }
+
+    fn block(invariant: &'static str, block: BlockId, message: impl Into<String>) -> Self {
+        Self {
+            invariant,
+            block: Some(block),
+            instruction: None,
+            message: message.into(),
+        }
+    }
+
+    fn instruction(
+        invariant: &'static str,
+        block: BlockId,
+        instruction: usize,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            invariant,
+            block: Some(block),
+            instruction: Some(instruction),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for SirVerifyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SIR verify [{}]", self.invariant)?;
+        if let Some(block) = self.block {
+            write!(f, " at b{}", block.0)?;
+        }
+        if let Some(instruction) = self.instruction {
+            write!(f, "/i{instruction}")?;
+        }
+        write!(f, ": {}", self.message)
+    }
+}
+
+impl std::error::Error for SirVerifyError {}
+
+#[derive(Clone, Copy)]
+enum DefSite {
+    Param(BlockId),
+    Inst(BlockId, usize),
+}
+
+impl<A> ExecutionUnit<A> {
+    /// Verify the canonical SIR contract without modifying the IR.
+    pub fn verify_result(&self) -> Result<(), SirVerifyError> {
+        verify_execution_unit(self)
+    }
+
+    /// Verify the canonical SIR contract and panic with a structured diagnostic.
+    pub fn verify(&self) {
+        if let Err(error) = self.verify_result() {
+            panic!("{error}");
+        }
+    }
+}
+
+fn verify_execution_unit<A>(eu: &ExecutionUnit<A>) -> Result<(), SirVerifyError> {
+    if eu.blocks.is_empty() {
+        return Err(SirVerifyError::function(
+            "CFG.NON_EMPTY",
+            "execution unit has no blocks",
+        ));
+    }
+    if !eu.blocks.contains_key(&eu.entry_block_id) {
+        return Err(SirVerifyError::function(
+            "CFG.ENTRY_EXISTS",
+            format!("entry block b{} does not exist", eu.entry_block_id.0),
+        ));
+    }
+    for (&reg, ty) in &eu.register_map {
+        if ty.width() == 0 {
+            return Err(SirVerifyError::function(
+                "TYPE.NON_ZERO_WIDTH",
+                format!("r{} has zero width", reg.0),
+            ));
+        }
+    }
+
+    let mut predecessors: BTreeMap<BlockId, BTreeSet<BlockId>> = eu
+        .blocks
+        .keys()
+        .copied()
+        .map(|id| (id, BTreeSet::new()))
+        .collect();
+
+    for (&key, block) in &eu.blocks {
+        if key != block.id {
+            return Err(SirVerifyError::block(
+                "CFG.BLOCK_KEY_MATCHES_ID",
+                key,
+                format!("map key b{} contains block with id b{}", key.0, block.id.0),
+            ));
+        }
+        for target in successor_ids(&block.terminator) {
+            let Some(preds) = predecessors.get_mut(&target) else {
+                return Err(SirVerifyError::block(
+                    "CFG.TARGET_EXISTS",
+                    block.id,
+                    format!("terminator targets missing block b{}", target.0),
+                ));
+            };
+            preds.insert(block.id);
+        }
+        verify_edges(eu, block)?;
+    }
+
+    let reachable = reachable_blocks(eu);
+    if reachable.len() != eu.blocks.len() {
+        let unreachable = eu
+            .blocks
+            .keys()
+            .filter(|id| !reachable.contains(id))
+            .map(|id| format!("b{}", id.0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(SirVerifyError::function(
+            "CFG.ALL_BLOCKS_REACHABLE",
+            format!("unreachable blocks: {unreachable}"),
+        ));
+    }
+
+    let mut defs = BTreeMap::new();
+    for block in eu.blocks.values() {
+        let mut params = BTreeSet::new();
+        for &param in &block.params {
+            require_register(eu, block.id, None, param)?;
+            if !params.insert(param) {
+                return Err(SirVerifyError::block(
+                    "SSA.UNIQUE_BLOCK_PARAMS",
+                    block.id,
+                    format!("r{} occurs more than once in block parameters", param.0),
+                ));
+            }
+            insert_def(&mut defs, param, DefSite::Param(block.id), block.id, None)?;
+        }
+        for (index, inst) in block.instructions.iter().enumerate() {
+            verify_instruction_types(eu, block.id, index, inst)?;
+            if let Some(dst) = instruction_def(inst) {
+                require_register(eu, block.id, Some(index), dst)?;
+                insert_def(
+                    &mut defs,
+                    dst,
+                    DefSite::Inst(block.id, index),
+                    block.id,
+                    Some(index),
+                )?;
+            }
+        }
+    }
+
+    let dominators = compute_dominators(eu, &predecessors, &reachable);
+    for block in eu.blocks.values() {
+        for (index, inst) in block.instructions.iter().enumerate() {
+            for reg in instruction_uses(inst) {
+                verify_use(eu, &defs, &dominators, block.id, index, reg)?;
+            }
+        }
+        let term_index = block.instructions.len();
+        for reg in terminator_uses(&block.terminator) {
+            verify_use(eu, &defs, &dominators, block.id, term_index, reg)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_edges<A>(eu: &ExecutionUnit<A>, block: &BasicBlock<A>) -> Result<(), SirVerifyError> {
+    let edges: Vec<(BlockId, &[RegisterId])> = match &block.terminator {
+        SIRTerminator::Jump(target, args) => vec![(*target, args)],
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            register_type(eu, block.id, None, *cond)?;
+            vec![
+                (true_block.0, true_block.1.as_slice()),
+                (false_block.0, false_block.1.as_slice()),
+            ]
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+    };
+
+    for (target, args) in edges {
+        let Some(target_block) = eu.blocks.get(&target) else {
+            continue;
+        };
+        if args.len() != target_block.params.len() {
+            return Err(SirVerifyError::block(
+                "CFG.EDGE_ARITY",
+                block.id,
+                format!(
+                    "edge to b{} passes {} arguments, expected {}",
+                    target.0,
+                    args.len(),
+                    target_block.params.len()
+                ),
+            ));
+        }
+        for (position, (&arg, &param)) in args.iter().zip(&target_block.params).enumerate() {
+            let arg_ty = register_type(eu, block.id, None, arg)?;
+            let param_ty = register_type(eu, target, None, param)?;
+            if arg_ty.width() != param_ty.width() {
+                return Err(SirVerifyError::block(
+                    "TYPE.EDGE_ARGUMENT",
+                    block.id,
+                    format!(
+                        "edge argument {position} to b{} has width {}, parameter r{} has width {}",
+                        target.0,
+                        arg_ty.width(),
+                        param.0,
+                        param_ty.width()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_instruction_types<A>(
+    eu: &ExecutionUnit<A>,
+    block: BlockId,
+    index: usize,
+    inst: &SIRInstruction<A>,
+) -> Result<(), SirVerifyError> {
+    let ty = |reg| register_type(eu, block, Some(index), reg);
+    let same_width = |lhs: RegisterId, rhs: RegisterId, invariant| -> Result<(), SirVerifyError> {
+        let lhs_ty = ty(lhs)?;
+        let rhs_ty = ty(rhs)?;
+        if lhs_ty.width() != rhs_ty.width() {
+            return Err(SirVerifyError::instruction(
+                invariant,
+                block,
+                index,
+                format!(
+                    "r{} has width {}, but r{} has width {}",
+                    lhs.0,
+                    lhs_ty.width(),
+                    rhs.0,
+                    rhs_ty.width()
+                ),
+            ));
+        }
+        Ok(())
+    };
+
+    match inst {
+        SIRInstruction::Imm(dst, value) => {
+            let width = ty(*dst)?.width();
+            if !fits_width(&value.payload, width) || !fits_width(&value.mask, width) {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.IMMEDIATE_FITS_DESTINATION",
+                    block,
+                    index,
+                    format!("immediate does not fit r{} width {width}", dst.0),
+                ));
+            }
+        }
+        SIRInstruction::Binary(dst, lhs, op, rhs) => match op {
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::LtU
+            | BinaryOp::LtS
+            | BinaryOp::LeU
+            | BinaryOp::LeS
+            | BinaryOp::GtU
+            | BinaryOp::GtS
+            | BinaryOp::GeU
+            | BinaryOp::GeS
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard => {
+                ty(*dst)?;
+                ty(*lhs)?;
+                ty(*rhs)?;
+            }
+            BinaryOp::LogicAnd | BinaryOp::LogicOr => {
+                ty(*dst)?;
+                ty(*lhs)?;
+                ty(*rhs)?;
+            }
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
+                ty(*dst)?;
+                ty(*lhs)?;
+                ty(*rhs)?;
+            }
+            _ => {
+                ty(*dst)?;
+                ty(*lhs)?;
+                ty(*rhs)?;
+            }
+        },
+        SIRInstruction::Unary(dst, op, src) => match op {
+            UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => {
+                ty(*dst)?;
+                ty(*src)?;
+            }
+            UnaryOp::Ident | UnaryOp::Minus | UnaryOp::BitNot => {
+                ty(*dst)?;
+                ty(*src)?;
+            }
+        },
+        SIRInstruction::Load(dst, _, offset, bits) => {
+            non_zero_width(block, index, *bits, "TYPE.LOAD_NON_ZERO")?;
+            if ty(*dst)?.width() != *bits {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.LOAD_WIDTH",
+                    block,
+                    index,
+                    format!(
+                        "load width {bits} does not match r{} width {}",
+                        dst.0,
+                        ty(*dst)?.width()
+                    ),
+                ));
+            }
+            verify_offset(eu, block, index, offset)?;
+        }
+        SIRInstruction::Store(_, offset, 0, _, triggers, _) => {
+            if triggers.is_empty() || !matches!(offset, SIROffset::Static(_)) {
+                return Err(SirVerifyError::instruction(
+                    "STORE.TRIGGER_ONLY_FORM",
+                    block,
+                    index,
+                    "zero-width store requires triggers and a static offset",
+                ));
+            }
+        }
+        SIRInstruction::Store(_, offset, bits, src, _, _) => {
+            if ty(*src)?.width() < *bits {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.STORE_SOURCE_WIDTH",
+                    block,
+                    index,
+                    format!(
+                        "store width {bits} exceeds r{} width {}",
+                        src.0,
+                        ty(*src)?.width()
+                    ),
+                ));
+            }
+            verify_offset(eu, block, index, offset)?;
+        }
+        SIRInstruction::Commit(_, _, offset, bits, _) => {
+            non_zero_width(block, index, *bits, "TYPE.COMMIT_NON_ZERO")?;
+            verify_offset(eu, block, index, offset)?;
+        }
+        SIRInstruction::Concat(dst, args) => {
+            if args.is_empty() {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.CONCAT_NON_EMPTY",
+                    block,
+                    index,
+                    "concat has no operands",
+                ));
+            }
+            let mut width = 0usize;
+            for &arg in args {
+                width = width.checked_add(ty(arg)?.width()).ok_or_else(|| {
+                    SirVerifyError::instruction(
+                        "TYPE.WIDTH_OVERFLOW",
+                        block,
+                        index,
+                        "concat width overflows usize",
+                    )
+                })?;
+            }
+            if ty(*dst)?.width() != width {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.CONCAT_WIDTH",
+                    block,
+                    index,
+                    format!(
+                        "concat operands total {width} bits, r{} has width {}",
+                        dst.0,
+                        ty(*dst)?.width()
+                    ),
+                ));
+            }
+        }
+        SIRInstruction::Slice(dst, src, offset, width) => {
+            non_zero_width(block, index, *width, "TYPE.SLICE_NON_ZERO")?;
+            let end = offset.checked_add(*width).ok_or_else(|| {
+                SirVerifyError::instruction(
+                    "TYPE.WIDTH_OVERFLOW",
+                    block,
+                    index,
+                    "slice range overflows usize",
+                )
+            })?;
+            if end > ty(*src)?.width() {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.SLICE_BOUNDS",
+                    block,
+                    index,
+                    format!(
+                        "slice [{offset} +: {width}] exceeds r{} width {}",
+                        src.0,
+                        ty(*src)?.width()
+                    ),
+                ));
+            }
+            if ty(*dst)?.width() != *width {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.SLICE_RESULT_WIDTH",
+                    block,
+                    index,
+                    format!(
+                        "slice width {width} does not match r{} width {}",
+                        dst.0,
+                        ty(*dst)?.width()
+                    ),
+                ));
+            }
+        }
+        SIRInstruction::Mux(dst, cond, then_value, else_value) => {
+            ty(*dst)?;
+            ty(*cond)?;
+            ty(*then_value)?;
+            ty(*else_value)?;
+        }
+        SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => {
+            for &arg in args {
+                ty(arg)?;
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            same_width(*old, *new, "TYPE.CAPTURE_COMPARE_OPERANDS")?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_offset<A>(
+    eu: &ExecutionUnit<A>,
+    block: BlockId,
+    index: usize,
+    offset: &SIROffset,
+) -> Result<(), SirVerifyError> {
+    if let SIROffset::Dynamic(reg) = offset {
+        let ty = register_type(eu, block, Some(index), *reg)?;
+        if matches!(ty, RegisterType::Logic { .. }) {
+            return Err(SirVerifyError::instruction(
+                "TYPE.DYNAMIC_OFFSET_TWO_STATE",
+                block,
+                index,
+                format!("dynamic offset r{} is four-state logic", reg.0),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn non_zero_width(
+    block: BlockId,
+    index: usize,
+    width: usize,
+    invariant: &'static str,
+) -> Result<(), SirVerifyError> {
+    if width == 0 {
+        return Err(SirVerifyError::instruction(
+            invariant,
+            block,
+            index,
+            "width is zero",
+        ));
+    }
+    Ok(())
+}
+
+fn fits_width(value: &BigUint, width: usize) -> bool {
+    value.is_zero() || value.bits() <= width as u64
+}
+
+fn register_type<A>(
+    eu: &ExecutionUnit<A>,
+    block: BlockId,
+    instruction: Option<usize>,
+    reg: RegisterId,
+) -> Result<&RegisterType, SirVerifyError> {
+    eu.register_map.get(&reg).ok_or_else(|| match instruction {
+        Some(index) => SirVerifyError::instruction(
+            "REGISTER.DECLARED",
+            block,
+            index,
+            format!("r{} is not present in register_map", reg.0),
+        ),
+        None => SirVerifyError::block(
+            "REGISTER.DECLARED",
+            block,
+            format!("r{} is not present in register_map", reg.0),
+        ),
+    })
+}
+
+fn require_register<A>(
+    eu: &ExecutionUnit<A>,
+    block: BlockId,
+    instruction: Option<usize>,
+    reg: RegisterId,
+) -> Result<(), SirVerifyError> {
+    register_type(eu, block, instruction, reg).map(|_| ())
+}
+
+fn insert_def(
+    defs: &mut BTreeMap<RegisterId, DefSite>,
+    reg: RegisterId,
+    site: DefSite,
+    block: BlockId,
+    instruction: Option<usize>,
+) -> Result<(), SirVerifyError> {
+    if defs.insert(reg, site).is_some() {
+        return Err(match instruction {
+            Some(index) => SirVerifyError::instruction(
+                "SSA.SINGLE_DEFINITION",
+                block,
+                index,
+                format!("r{} is defined more than once", reg.0),
+            ),
+            None => SirVerifyError::block(
+                "SSA.SINGLE_DEFINITION",
+                block,
+                format!("r{} is defined more than once", reg.0),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn verify_use<A>(
+    eu: &ExecutionUnit<A>,
+    defs: &BTreeMap<RegisterId, DefSite>,
+    dominators: &Dominators,
+    block: BlockId,
+    instruction: usize,
+    reg: RegisterId,
+) -> Result<(), SirVerifyError> {
+    require_register(eu, block, Some(instruction), reg)?;
+    let Some(site) = defs.get(&reg).copied() else {
+        return Err(SirVerifyError::instruction(
+            "SSA.USE_HAS_DEFINITION",
+            block,
+            instruction,
+            format!("r{} is used but never defined", reg.0),
+        ));
+    };
+    let valid = match site {
+        DefSite::Param(def_block) => dominators.dominates(def_block, block),
+        DefSite::Inst(def_block, def_index) => {
+            (def_block == block && def_index < instruction)
+                || (def_block != block && dominators.dominates(def_block, block))
+        }
+    };
+    if !valid {
+        return Err(SirVerifyError::instruction(
+            "SSA.DEFINITION_DOMINATES_USE",
+            block,
+            instruction,
+            format!("definition of r{} does not dominate this use", reg.0),
+        ));
+    }
+    Ok(())
+}
+
+fn instruction_def<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
+    match inst {
+        SIRInstruction::Imm(dst, _)
+        | SIRInstruction::Binary(dst, _, _, _)
+        | SIRInstruction::Unary(dst, _, _)
+        | SIRInstruction::Load(dst, _, _, _)
+        | SIRInstruction::Concat(dst, _)
+        | SIRInstruction::Slice(dst, _, _, _)
+        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+        SIRInstruction::Store(..)
+        | SIRInstruction::Commit(..)
+        | SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+    }
+}
+
+fn instruction_uses<A>(inst: &SIRInstruction<A>) -> Vec<RegisterId> {
+    let mut uses = Vec::new();
+    match inst {
+        SIRInstruction::Imm(..) | SIRInstruction::Commit(..) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => uses.extend([*lhs, *rhs]),
+        SIRInstruction::Unary(_, _, src) => uses.push(*src),
+        SIRInstruction::Load(_, _, offset, _) => {
+            if let SIROffset::Dynamic(reg) = offset {
+                uses.push(*reg);
+            }
+        }
+        SIRInstruction::Store(_, offset, bits, src, _, _) => {
+            if *bits != 0 {
+                if let SIROffset::Dynamic(reg) = offset {
+                    uses.push(*reg);
+                }
+                uses.push(*src);
+            }
+        }
+        SIRInstruction::Concat(_, args)
+        | SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => uses.extend(args.iter().copied()),
+        SIRInstruction::Slice(_, src, _, _) => uses.push(*src),
+        SIRInstruction::Mux(_, cond, then_value, else_value) => {
+            uses.extend([*cond, *then_value, *else_value]);
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            uses.extend([*old, *new]);
+        }
+    }
+    uses
+}
+
+fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {
+    match term {
+        SIRTerminator::Jump(_, args) => args.clone(),
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            let mut uses = vec![*cond];
+            uses.extend(true_block.1.iter().copied());
+            uses.extend(false_block.1.iter().copied());
+            uses
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+    }
+}
+
+fn successor_ids(term: &SIRTerminator) -> Vec<BlockId> {
+    match term {
+        SIRTerminator::Jump(target, _) => vec![*target],
+        SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => vec![true_block.0, false_block.0],
+        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+    }
+}
+
+fn reachable_blocks<A>(eu: &ExecutionUnit<A>) -> BTreeSet<BlockId> {
+    let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::from([eu.entry_block_id]);
+    while let Some(block) = queue.pop_front() {
+        if !reachable.insert(block) {
+            continue;
+        }
+        for successor in successor_ids(&eu.blocks[&block].terminator) {
+            if eu.blocks.contains_key(&successor) {
+                queue.push_back(successor);
+            }
+        }
+    }
+    reachable
+}
+
+fn compute_dominators<A>(
+    eu: &ExecutionUnit<A>,
+    predecessors: &BTreeMap<BlockId, BTreeSet<BlockId>>,
+    reachable: &BTreeSet<BlockId>,
+) -> Dominators {
+    let ids = reachable.iter().copied().collect::<Vec<_>>();
+    let index = ids
+        .iter()
+        .enumerate()
+        .map(|(index, &id)| (id, index))
+        .collect::<BTreeMap<_, _>>();
+    let words = ids.len().div_ceil(64);
+    let mut all = vec![u64::MAX; words];
+    if let Some(last) = all.last_mut() {
+        *last &= u64::MAX >> (words * 64 - ids.len());
+    }
+    let mut bits = vec![all; ids.len()];
+    let entry_index = index[&eu.entry_block_id];
+    bits[entry_index].fill(0);
+    bits[entry_index][entry_index / 64] |= 1 << (entry_index % 64);
+    loop {
+        let mut changed = false;
+        for &block in &ids {
+            if block == eu.entry_block_id {
+                continue;
+            }
+            let block_index = index[&block];
+            let mut next = vec![u64::MAX; words];
+            for pred in &predecessors[&block] {
+                let pred_index = index[pred];
+                for (word, pred_word) in next.iter_mut().zip(&bits[pred_index]) {
+                    *word &= pred_word;
+                }
+            }
+            next[block_index / 64] |= 1 << (block_index % 64);
+            if next != bits[block_index] {
+                bits[block_index] = next;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Dominators { index, bits };
+        }
+    }
+}
+
+struct Dominators {
+    index: BTreeMap<BlockId, usize>,
+    bits: Vec<Vec<u64>>,
+}
+
+impl Dominators {
+    fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
+        let dominator = self.index[&dominator];
+        let block = self.index[&block];
+        self.bits[block][dominator / 64] & (1 << (dominator % 64)) != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::HashMap;
+    use crate::ir::{SIRInstruction, SIRValue};
+
+    use super::*;
+
+    fn bit(width: usize) -> RegisterType {
+        RegisterType::Bit {
+            width,
+            signed: false,
+        }
+    }
+
+    fn unit(
+        blocks: impl IntoIterator<Item = BasicBlock<usize>>,
+        registers: impl IntoIterator<Item = (RegisterId, RegisterType)>,
+    ) -> ExecutionUnit<usize> {
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: blocks.into_iter().map(|b| (b.id, b)).collect(),
+            register_map: registers.into_iter().collect::<HashMap<_, _>>(),
+        }
+    }
+
+    #[test]
+    fn accepts_well_formed_branch_and_block_parameter() {
+        let eu = unit(
+            [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                        SIRInstruction::Imm(RegisterId(1), SIRValue::new(7u8)),
+                    ],
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![RegisterId(1)]),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![RegisterId(2)],
+                    instructions: vec![SIRInstruction::Unary(
+                        RegisterId(3),
+                        UnaryOp::Ident,
+                        RegisterId(2),
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+                (RegisterId(3), bit(8)),
+            ],
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_use_not_dominated_by_definition() {
+        let eu = unit(
+            [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8))],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Imm(RegisterId(1), SIRValue::new(3u8))],
+                    terminator: SIRTerminator::Jump(BlockId(2), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Unary(
+                        RegisterId(2),
+                        UnaryOp::Ident,
+                        RegisterId(1),
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+            ],
+        );
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "SSA.DEFINITION_DOMINATES_USE"
+        );
+    }
+
+    #[test]
+    fn rejects_edge_type_mismatch() {
+        let eu = unit(
+            [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8))],
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![RegisterId(1)],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+            [(RegisterId(0), bit(1)), (RegisterId(1), bit(2))],
+        );
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "TYPE.EDGE_ARGUMENT"
+        );
+    }
+}
