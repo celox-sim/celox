@@ -5,6 +5,7 @@
 
 mod analysis;
 pub mod assignment;
+mod cfg;
 mod legalize;
 mod spilling;
 mod ssa;
@@ -46,7 +47,8 @@ pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
 
 /// Run register allocation and optionally log per-block allocation deltas.
 pub fn run_regalloc_with_label(func: &mut MFunction, label: &str) -> RegallocResult {
-    reorder_blocks_rpo(func);
+    let normalized_cfg = cfg::normalize(func);
+    normalized_cfg.verify(func);
     legalize::isolate_fixed_uses(func);
     if cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some() {
         func.verify();
