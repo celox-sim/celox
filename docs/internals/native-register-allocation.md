@@ -21,6 +21,7 @@ spill placement and SSA register allocation:
 
 - [Register Spilling and Live-Range Splitting for SSA-Form Programs](https://pp.ipd.kit.edu/publication.php?id=braun09cc)
 - [Register Allocation for Programs in SSA Form](https://compilers.cs.uni-saarland.de/projects/ssara/)
+- [Revisiting Out-of-SSA Translation for Correctness, Code Quality, and Efficiency](https://inria.hal.science/inria-00349925)
 
 Go's production allocator is also used as an implementation reference for
 machine constraints and edge shuffles, not as a source of compact identifiers:
@@ -32,150 +33,169 @@ and compact internal index constraints do not meet Celox's requirements.
 
 ## Complete allocator architecture
 
-The relevant techniques solve different problems.  They are composed in the
-following fixed order; they are not alternative allocators and they do not run
-in a retry loop:
+The techniques below solve different subproblems and run in one fixed order.
+They are not competing allocators and there is no spill/color retry loop.
 
 ```text
-canonical SSA MIR
-  -> critical-edge normalization
-  -> machine-constraint permutation boundaries
-  -> CFG/dominance renormalization
-  -> pressure-aware instruction scheduling
+canonical strict-SSA MIR
+  -> CFG and branch-edge normalization
+  -> constraint-marker construction
+  -> pressure-aware scheduling
+  -> conventional-SSA normalization for existing phis
   -> global next-use and loop analysis
   -> Braun--Hack spill placement (W/S states and edge coupling)
-  -> SSA reconstruction for inserted reload definitions
-  -> pressure verification (maximum <= K)
-  -> chordal SSA coloring
-  -> phi-aware color preference/coalescing
+  -> SSA reconstruction and dead-definition elimination
+  -> spill-home and pressure proofs (maximum <= K)
+  -> post-spill full-live Perm boundaries
+  -> CFG/dominance renormalization and Perm proof
+  -> implicit chordal SSA coloring
+  -> phi-aware color preference
   -> SSA destruction and parallel-copy resolution
-  -> final allocation verification
+  -> final allocation proof
 ```
 
 ### 1. CFG normalization
 
-All critical edges are split before any phase which may insert edge code.  Phi
-sources are rewritten to name the new edge block.  The result remains strict
-SSA and every CFG edge has an unambiguous insertion point.  Block and edge IDs
-use checked `u32` allocation; there is no compact-ID limit.
+All outgoing edges of a branch receive dedicated one-predecessor/one-successor
+edge blocks before any phase which may insert edge code.  This is stronger than
+critical-edge splitting: it prevents code for one branch arm from running on
+the other arm even when the successor originally had one predecessor.  Phi
+sources are rewritten to the edge block.  IDs use checked `u32`/`usize` values;
+there is no packed-index or CFG-size limit.
 
-### 2. Machine-constraint permutation boundaries
+### 2. Machine constraints and late Perm boundaries
 
-Fixed-register operands first become explicit, short-lived SSA copies.  That
-step alone is not sufficient: repeated precoloring with the same physical
-color is the precoloring-extension problem, and ordinary chordal greedy
-coloring is not guaranteed to solve it even when ordinary pressure is at most
-`K`.
+Repeated use of one physical color as a precoloring is the precoloring-extension
+problem.  Pressure `<= K` alone does not make ordinary greedy chordal coloring
+succeed.  A one-use fixed copy alone does not solve this problem either.
 
-The allocator therefore applies the construction in section 6 of *Towards
-Register Allocation for Programs in SSA-form*.  Immediately before every
-instruction with a fixed operand or a physical clobber, it splits the block and
-inserts a single-predecessor, multi-row phi/Perm boundary for every value live
-across that boundary.  Each destination is a fresh SSA representative and all
-dominated uses are renamed.  This disconnects the interference graph on the
-two sides while retaining color preferences as an edge parallel copy.
+Before scheduling, fixed operands/results and physical clobbers are recorded as
+immovable markers.  MIN pins instruction operands and reserves
+`K - |clobbers|` for values live through a clobber.  It does not reserve a
+register globally and does not insert fixed-use copies.
 
-Within each resulting component:
+After spill reconstruction proves pressure `<= K`, the allocator applies the
+full-live construction from Section 6 of *Towards Register Allocation for
+Programs in SSA-form*.  Immediately before every marker it inserts a
+single-predecessor multi-row phi/Perm containing every value register-live at
+that point.  Dominated uses, including the constrained instruction, use fresh
+Perm results; the appropriate results are precolored.  The boundary completely
+disconnects the interference graph on both sides.
 
-- a fixed operand has a fresh one-use representative precolored to its required
-  register;
-- each physical color is precolored at most once;
-- values live through a clobber exclude the clobbered colors; and
-- exact pressure at the instruction is checked against `K - |clobbers|`.
+Materializing Perm after spilling preserves the proof while bounding its size:
+a memory-resident value has no register live range across the marker and its
+later reload/rematerialization is already a fresh definition.  Thus the full
+post-spill set has at most `K` rows, instead of cloning an arbitrarily large
+pre-spill live set.  The verifier proves row completeness, one-to-one
+source/result coverage, renaming dominance, unique precolors per component,
+and clobber exclusions.  CFG, dominators, frontiers, and loops are recomputed
+after materialization.
 
-Thus constraint handling is a proved input transformation for chordal coloring,
-not a global `K-1`/`K-2` reservation and not a coloring retry.  The CFG,
-dominators, dominance frontiers, and loops are recomputed after all boundaries
-are inserted.  The verifier requires strict SSA, one predecessor per Perm
-block, complete rows for its live-in set, and adjacency of the fixed copy and
-its constrained instruction.
+At a Perm, its at-most-`K` results are assigned together by a local bipartite
+matching between rows and physical colors.  Fixed operands/results remove all
+but their required color; a value live through the constrained instruction
+excludes every clobbered color; other rows admit the whole register class.
+Already-colored sources provide only matching costs/preferences.  This local
+matching is the constructive proof that the new component can start; arbitrary
+global precolor-first greedy coloring is not used.  A missing perfect matching
+is a constraint-pressure verifier failure.
 
 ### 3. Pressure-aware scheduling
 
-Scheduling removes pressure caused only by a poor instruction order; it cannot
-remove pressure inherent in the program.  Within a scheduling region, a
-def-use and memory-dependence DAG is scheduled with incremental top/bottom
-pressure tracking.  Stores, release operations, control flow, and unknown
-memory effects are ordering constraints rather than movable instructions.
+Scheduling removes pressure caused by instruction order, not inherent
+pressure.  Pure regions are def-use DAGs; stores, releases, control flow,
+unknown memory effects, and constraint markers are barriers.  A priority queue
+and incremental ready/dependency counts avoid rescanning the whole ready set or
+block suffix.  A schedule is accepted only when dependency verification passes
+and exact high-water pressure does not increase.  It runs once before spilling,
+with no schedule/spill feedback loop.
 
-The scheduler is accepted only if it preserves dependencies and does not raise
-the exact high-water pressure of its region.  It runs once before spilling.
-There is no schedule/spill feedback loop.  This corresponds to production
-machine schedulers such as LLVM's pressure-tracking `ScheduleDAGMILive`.
+### 4. Conventional SSA before spill-home formation
 
-### 4. Global next-use and loop analysis
+Braun--Hack Section 4.4 assigns one spill home to a whole phi-congruence class
+and explicitly requires conventional SSA (CSSA): no two members of a class may
+interfere.  Strict SSA alone does not imply this after copy propagation or code
+motion.
 
-The Braun--Hack analysis maps every live variable to its closest CFG-global
-next-use distance.  Joins take the minimum distance.  Loop-exit edges receive a
-large weight so uses inside a loop are preferred over uses after the loop.
+The correctness baseline is Sreedhar Method I.  Each existing
+`d = phi(s1, ..., sn)` is rewritten so fresh edge copies `s'i = si` feed a
+fresh result `d'`, followed by an entry copy `d = d'`.  The already-normalized
+edge blocks make the source copies edge-local.  A streaming liveness verifier
+then proves the semantic condition for every congruence class; it does not trust
+only the syntactic shape.  Method-III-style copy virtualization is a later
+optimization and is legal only when the same verifier still passes.
 
-The same pass builds the loop tree, identifies loop headers, records values
-used in each loop, and computes each loop's maximum pressure.  Critical-edge
-normalization is a precondition of this analysis.
+Reload-reconstruction phis are created after spill homes have been fixed and
+cannot merge two existing homes.  They are versions of one logical value.
 
-### 5. Braun--Hack spill placement
+### 5. Global next-use and loop analysis
 
-Spill placement operates on logical variables before SSA reconstruction.  For
-each block in reverse postorder it performs exactly the three steps from the
-paper:
+The Braun--Hack analysis maps each live logical value to its closest CFG-global
+next-use distance; joins take the minimum and loop-exit edges receive a large
+weight.  Per-block use occurrences are stored once in a flat index and queried
+by binary search or monotone cursor, never by suffix rescanning.  The same CFG
+analysis supplies a loop tree, loop uses, and maximum loop pressure without an
+edge-times-loop or nested-loop-times-instruction scan.
 
-1. Compute `W_entry`, the variables required in registers at block entry.
-   Normal blocks use the intersection/union of predecessor `W_exit` states and
-   next-use order.  Loop headers use `usedInLoop` and loop maximum pressure as
-   specified by `initLoopHeader`.
-2. Insert edge coupling.  For predecessor `P` of `B`, reload
-   `W_entry[B] - W_exit[P]` and spill
-   `(S_entry[B] - S_exit[P]) intersect W_exit[P]`.  Unprocessed backedges are
-   recorded and coupled when their predecessor is processed.
-3. Run MIN through the block, evicting the unpinned variable with the furthest
-   global next use until `|W| <= K`.
+### 6. Braun--Hack spill placement
 
-`S` obeys the paper's invariant: a variable is in `S` at a program point iff a
-valid spill home exists on every path from the CFG root to that point.  Spill
-slots are assigned per phi-congruence class so a spilled phi does not introduce
-memory-to-memory copies.
+Spill placement operates on logical values without mutating MIR.  In reverse
+postorder it computes `W_entry`, inserts deferred edge coupling, and runs MIN,
+evicting the unpinned value with furthest global next use until `|W| <= K`.
+For an edge `P -> B`, coupling reloads `W_entry[B] - W_exit[P]` and spills
+`(S_entry[B] - S_exit[P]) intersect W_exit[P]`; backedges are coupled after
+their predecessor state becomes available.
 
-This phase is one enhanced-liveness pass plus one CFG sweep.  Coloring failure
-must never trigger more spilling.
+`S` means that one valid home exists on every root-to-point path.  A resident
+value inherits a home only from the intersection of predecessor `S_exit`
+states.  CSSA permits one home per original phi-congruence class without a
+memory-to-memory phi copy.  Home creation, edge translation, and reload
+dominance are explicit verifier obligations.  Coloring failure never requests
+additional spilling.
 
-### 6. SSA reconstruction
+### 7. SSA reconstruction
 
-Spill placement temporarily creates additional definitions of a logical
-variable at reloads.  A separate reconstruction phase restores strict SSA:
+Each planned reload gets a fresh VReg.  Uses are renamed to the nearest
+dominating definition and pruned iterated dominance frontiers receive the
+needed phis.  This is a separate Sastry--Ju-style reconstruction phase, not an
+opportunistic part of MIN.  A backwards use mark removes dead reloads, dead
+Perm rows, and cyclic dead phi webs before the next phase.
 
-- every reload receives a fresh VReg;
-- uses are renamed to the closest dominating definition;
-- iterated dominance frontiers receive only the required new phi nodes; and
-- dead reload definitions are discarded.
+### 8. Pressure and home verification
 
-This is the reconstruction described by Braun--Hack using the Sastry--Ju
-approach.  Trying to perform this renaming opportunistically inside MIN or edge
-coupling is explicitly forbidden.
+An independent forward/backward proof recomputes edge-sensitive liveness and
+checks general pressure, pinned operands, fixed-color multiplicity, and
+live-through clobber capacity at every point.  Each non-rematerialized reload
+must be dominated on every path by a store to the same home.  Failure identifies
+a producer bug and never triggers a retry, cap, fallback allocator, or expected
+panic path.
 
-### 7. Pressure verification
+### 9. Implicit chordal coloring
 
-After reconstruction, an independent verifier recomputes liveness and proves
-that maximum pressure is at most the available register count at every program
-point and edge.  It also checks that every reload is dominated by a valid spill
-home.  Failure is a spiller bug; it does not cause another spill iteration.
+Once pressure is at most `K`, the SSA interference graph is `K`-colorable.  The
+allocator uses the dominance-derived perfect elimination order from the SSA
+coloring algorithm.  It scans blocks in dominance order, tracks only colors
+currently live, releases last local uses which are not live-out, and uses a
+dense physical-color forbidden mask per active VReg.  It does not retain a live
+set per instruction and does not build an explicit interference graph.
 
-### 8. Chordal SSA coloring
+Perm destinations receive the local matching selected at their boundary before
+the component's ordinary definitions are colored.  This is distinct from
+precoloring every constrained node in the whole function up front, which would
+reintroduce the precoloring-extension problem.
 
-Once pressure is at most `K`, the SSA interference graph is `K`-colorable.  A
-postorder walk of the dominance tree provides a perfect elimination order.
-Coloring uses this order and implicit live sets, without building the full
-interference graph and without spilling.  Fixed registers and clobbers restrict
-the available color set.
+Phi colors are preferences, not graph-node merging.  A separate verifier checks
+the perfect-elimination property and the completed assignment's liveness,
+fixed-register, and clobber constraints.
 
-### 9. Coalescing and SSA destruction
+### 10. SSA destruction
 
-Phi coalescing is a color preference, not graph-node merging: sources and
-destinations prefer the same color when legal, preserving chordality.  Finally,
-phi nodes become edge-local parallel copies.  Copy resolution supports
-register, stack, and immediate sources and is cycle-safe.
+Phi/Perm rows become edge-local parallel copies.  Resolution handles register,
+stack, and immediate sources, preserves simultaneous-copy semantics, and breaks
+cycles with a scratch location.  Dead rows are absent before resolution.
 
-These are phase boundaries, not suggestions.  Each boundary has a concrete IR
-contract and verifier; no phase defensively repairs another phase's output.
+These are phase boundaries, not suggestions.  Each has a verifier for the
+intended IR; no phase weakens a contract merely to accept an existing producer.
 
 ## Phase data model and APIs
 
@@ -192,8 +212,15 @@ NormalizedCfg
 ConstraintModel
   fixed_uses: ProgramPoint -> [(operand, PhysReg)]
   clobbers:   ProgramPoint -> PhysRegSet
-  perm_boundaries: BlockId -> [(source VReg, destination VReg)]
-  component_constraints: fixed colors and clobber exclusions
+
+CssaInfo
+  congruence_home: VReg -> SpillHome
+  nontrivial_members: SpillHome -> [VReg]
+
+PermModel
+  boundaries: BlockId -> [PermRow]
+  rows: source VReg, destination VReg, allowed-color mask
+  local_matching: destination VReg -> PhysReg
 
 NextUseAnalysis
   entry / exit: BlockId -> (LogicalValue -> distance)
@@ -226,6 +253,11 @@ value; it is not a new value eligible for an independent spill decision.
 Keeping these identities separate prevents the exponential reload-respilling
 behavior of the rejected implementation.
 
+Logical values use the original dense VReg number directly; the implementation
+must not allocate a singleton `Vec` or hash entry per logical value.  Frame
+layout is computed once as `SpillHome -> offset` before reconstruction.  Every
+store/load performs a constant-time lookup rather than rescanning the plan.
+
 `ProgramPoint` refers to the normalized input MIR using `(BlockId,
 instruction-index, side)` and remains stable while a `SpillPlan` is built.  The
 planner never mutates MIR.  Plan materialization and SSA reconstruction consume
@@ -236,37 +268,56 @@ The intended phase APIs are:
 
 ```text
 normalize_cfg(&mut MFunction) -> NormalizedCfg
-legalize_constraints(&mut MFunction, &NormalizedCfg) -> ConstraintModel
-normalize_cfg(&mut MFunction) -> NormalizedCfg
+build_constraint_markers(&MFunction) -> ConstraintModel
 schedule_for_pressure(&mut MFunction, &NormalizedCfg, &ConstraintModel)
+normalize_to_cssa(&mut MFunction, &NormalizedCfg) -> CssaInfo
+verify_cssa(&MFunction, &NormalizedCfg, &CssaInfo)
 analyze_next_use(&MFunction, &NormalizedCfg) -> NextUseAnalysis
 plan_spills(&MFunction, &NormalizedCfg, &NextUseAnalysis,
-            &ConstraintModel, K) -> SpillPlan
+            &ConstraintModel, &CssaInfo, K) -> SpillPlan
+verify_spill_plan_and_home_paths(&MFunction, &NormalizedCfg, &SpillPlan)
 reconstruct_ssa(&MFunction, &NormalizedCfg, SpillPlan)
     -> ReconstructionResult
 verify_pressure(&ReconstructionResult, &ConstraintModel, K)
-color_ssa(&ReconstructionResult, &ConstraintModel, K) -> ColoringResult
+materialize_perms(&mut ReconstructionResult, &ConstraintModel)
+    -> (NormalizedCfg, PermModel)
+verify_perms(&ReconstructionResult, &NormalizedCfg, &PermModel)
+color_ssa(&ReconstructionResult, &NormalizedCfg, &PermModel, K)
+    -> ColoringResult
+verify_assignment(&ReconstructionResult, &ColoringResult)
 destroy_ssa(&ReconstructionResult, ColoringResult) -> AllocatedFunction
+verify_allocated(&AllocatedFunction)
 ```
+
+Every mutating phase and verifier is exposed to the compilation driver as a
+`Result`, even where the pseudocode omits it for readability.  Errors carry the
+phase, stable rule identifier, block/edge, instruction, and involved values or
+homes.  Invalid producer output, unsatisfiable machine constraints, and checked
+identifier exhaustion become compilation diagnostics; they are not handled by
+`panic!`, `unwrap`, a retry, or the old allocator.  A failed mutation is built
+off to the side or rolled back so no partially invalid MIR escapes its phase.
 
 ### Constraint accounting
 
-Machine constraints are not handled by a `K-1` or `K-2` workaround.  Perm
-boundaries split every live range at a constraint point before spill planning.
-The pressure model then treats a fixed one-use value as pinned and checks
-live-through pressure at a clobber against the remaining physical colors.  MIN
-may evict ordinary values but may never evict a pinned operand.  Because a
-component contains at most one precolored node of each color, the chordal
-coloring precondition is restored; coloring failure is a verifier or allocator
-bug, not a request for another spill iteration.
+Machine constraints are not handled by a global `K-1` or `K-2` workaround.
+Before spilling, the pressure model pins actual instruction operands and checks
+live-through pressure at a clobber against the remaining colors.  After
+spilling, full-live Perm boundaries split components and local matching assigns
+their initial colors.  MIN may evict ordinary values but never a pinned operand.
+Coloring failure is a verifier or allocator bug, not a request for another
+spill iteration.
 
 ### Termination and complexity
 
 There is no spill/color retry loop.  The only data-flow fixed point is global
-next-use analysis on a finite-height lattice.  Spill placement is one RPO CFG
-sweep, with deferred coupling for not-yet-processed backedges.  SSA
-reconstruction is driven by definitions, uses, and iterated dominance
-frontiers.  Coloring is one dominance-derived elimination/coloring pass.
+next-use analysis on a finite-height lattice.  Distances are lexicographic
+`(loop-region exits, instruction distance)` values, so no fixed magic weight can
+be exceeded by a large function.  Reducible loops use their natural header;
+multi-entry irreducible SCCs are explicit loop regions whose entry blocks use
+the same region-use prioritization.  Spill placement is one RPO CFG sweep with
+deferred backedge coupling.  Reconstruction is driven by definitions, uses,
+and iterated dominance frontiers.  Coloring is one dominance-derived pass plus
+an at-most-`K` matching at each Perm.
 
 The target complexity is linear or near-linear in MIR size plus def-use/CFG
 edges.  No step may clone a full live set for every instruction, rescan a whole
@@ -280,18 +331,23 @@ do not weaken the verifier merely to accept existing output.
 
 The register-allocation pipeline verifies all of the following:
 
-- MIR is strict SSA before and after every splitting pass.
-- every reload has a fresh definition and a valid home;
+- MIR is reachable strict SSA before and after every splitting pass;
+- every original phi congruence class is interference-free before homes form;
+- every reload has a fresh definition and a same-home store on every incoming
+  path unless it is rematerialized;
 - phi sources are associated with their actual predecessor edge;
 - register pressure after spilling is within the allocatable set;
+- every Perm contains exactly the complete post-spill register-live set and its
+  local color matching is total;
 - fixed operands occupy their required register and values live across a
   clobber do not occupy a clobbered register;
 - simultaneously live values never share a physical register;
 - every MIR use and definition has an assigned location; and
 - edge parallel copies preserve simultaneous-copy semantics, including cycles.
 
-Verification is enabled in debug builds and can be forced in release builds
-with `CELOX_REGALLOC_VERIFY=1`.
+Phase-boundary verification is unconditional in debug and release builds.
+`CELOX_REGALLOC_VERIFY=1` enables additional expensive per-pass audits and
+dumps; it is not required for the contracts above.
 
 ## Performance and migration gates
 
@@ -312,46 +368,33 @@ the new allocator is a bug to diagnose and fix.
 
 ## Implementation status
 
-The following parts are in the tree now:
+The branch contains the CFG edge normalization, indexed next-use analysis,
+Braun--Hack-style W/S plan, separate IDF reconstruction, dead-phi elimination,
+and independent strict-SSA/pressure checks.  These pieces are not yet the
+production allocator because the following design-required work remains:
 
-- fixed-register uses are isolated behind fresh, one-use SSA copies before
-  allocation;
-- the final verifier independently recomputes liveness and checks local
-  residency, fixed-register uses, clobbers, and edge-copy locations;
-- edge homes record the exact program point from which their location is valid;
-- the unified allocator is forbidden from changing an existing function-wide
-  VReg assignment at a block boundary; and
-- all identifiers remain `u32` or `usize` with checked allocation.
-- spill-free functions are colored by the new SSA allocator in a
-  dominance-compatible order without constructing an interference graph.
+- move full-live Perm materialization after spill reconstruction and attach its
+  exact row/matching metadata;
+- add Method-I CSSA normalization and the congruence-interference proof before
+  forming spill homes;
+- replace home-existence checks with the all-path store-dominance proof;
+- replace program-point live-set cloning and explicit interference adjacency
+  with implicit streaming coloring;
+- make scheduling, loop-region analysis, and dead-reload elimination meet the
+  complexity contracts above; and
+- make `auto` select the verified new pipeline with no unified fallback or
+  expected panic path.
 
-During migration, `CELOX_REGALLOC_IMPL` controls selection:
+`CELOX_REGALLOC_IMPL=ssa` is used while these phase verifiers and Heliodor gates
+are completed.  `unified` remains only an explicit differential-diagnosis mode;
+it is never a correctness recovery path.
 
-- `auto` (default) uses SSA coloring and temporarily routes functions which
-  require spill placement to the unified allocator;
-- `ssa` requires the new path, including fresh-SSA spill splitting and
-  stack/immediate phi edge homes, and never silently falls back; and
-- `unified` selects the old implementation for differential diagnosis.
+The previously rejected iterative splitter expanded Heliodor `eval_comb` from
+roughly 146,000 MIR instructions through 480,000, 1.1 million, 2.3 million, 4.7
+million, and 9.5 million instructions.  The current early full-live Perm also
+created about 2.3 million VReg identities from roughly 400,000 input VRegs.
+Both measurements motivate the frozen late-Perm architecture; neither is a
+reason to add an iteration, branchification, or CFG-size cap.
 
-The current forced-SSA spill path is an experimental whole-live-range splitter,
-not the Braun--Hack algorithm above.  It is rejected as the production design
-because its reloads become spill candidates in later iterations and large
-functions grow superlinearly.  It will be removed when the `W/S` spiller and
-SSA reconstruction phases land.  Until then, passing the verifier only means
-the emitted allocation satisfies the current location model.
-
-On the pinned Heliodor `test_soc_linux_boot` input, the first implementation
-slice colors `apply_ff` (5,395 MIR instructions) entirely on the new path with
-no spill frame.  The three larger evaluation functions currently report their
-first spill requirement and use the migration path.  This split is observable
-with `CELOX_REGALLOC_TIMING=1`; it is not inferred from compile success alone.
-
-The rejected path passes small correctness regressions but, on Heliodor
-`eval_comb`, repeatedly expands approximately 146,000 MIR instructions through
-480,000, 1.1 million, 2.3 million, 4.7 million, and 9.5 million instructions.
-This is evidence against its architecture, not a reason to add an iteration or
-CFG-size cap.
-
-Implementation of the replacement must follow the numbered phases above.  A
-phase is not enabled by default until its verifier, focused CFG/loop tests, and
-Heliodor compile-time and spill-count gates pass.
+A phase is enabled by default only after its verifier, focused CFG/loop tests,
+forced-SSA semantic tests, and Heliodor compile-time/spill-count gates pass.
