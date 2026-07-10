@@ -10,7 +10,9 @@ use iced_x86::BlockEncoderOptions;
 use iced_x86::code_asm::*;
 
 use crate::backend::native::mir::*;
-use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet};
+use crate::backend::native::regalloc::assignment::{
+    AssignmentMap, EdgeLocation, PhysReg, PhysRegSet,
+};
 
 /// Reserved register for simulation state base pointer.
 const SIM_BASE: AsmRegister64 = r15;
@@ -194,6 +196,19 @@ pub fn disassemble(code: &[u8], base_addr: u64) -> String {
 // Phi resolution
 // ────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
+enum PhiCopyDestination {
+    Register(PhysReg),
+    Stack(i32),
+}
+
+#[derive(Clone, Copy)]
+enum PhiCopySource {
+    Register(PhysReg),
+    Stack(i32),
+    Immediate(u64),
+}
+
 /// Emit Mov instructions to resolve phi nodes when jumping to a target block.
 /// For each phi in the target block, if the source (from this predecessor) and
 /// the dst are assigned to different physical registers, emit `mov dst, src`.
@@ -210,78 +225,114 @@ fn emit_phi_moves_for_target(
         return Ok(());
     };
 
-    // Collect parallel copies: (dst_preg, src_preg)
-    let mut copies: Vec<(PhysReg, PhysReg)> = Vec::new();
-    let mut spill_loads: Vec<(PhysReg, i32)> = Vec::new();
+    let mut copies = Vec::new();
     for phi in &target_block.phis {
         for (source_pred, source_vreg) in &phi.sources {
             if *source_pred == pred_block_id {
-                if let Some(dst_slot) = assignment.edge_spill_slot(phi.dst) {
-                    emit_phi_edge_spill_store(asm, assignment, *source_vreg, dst_slot)?;
-                    continue;
-                }
-                let dst_preg = resolve(assignment, phi.dst);
-                if let Some(src_preg) = assignment.get(*source_vreg) {
-                    if src_preg != dst_preg {
-                        copies.push((dst_preg, src_preg));
+                let destination = assignment
+                    .edge_spill_slot(phi.dst)
+                    .map(PhiCopyDestination::Stack)
+                    .unwrap_or_else(|| PhiCopyDestination::Register(resolve(assignment, phi.dst)));
+                let source = if let Some(location) =
+                    assignment.edge_location(pred_block_id, *source_vreg)
+                {
+                    match location {
+                        EdgeLocation::Register(preg) => PhiCopySource::Register(preg),
+                        EdgeLocation::Stack(slot) => PhiCopySource::Stack(slot),
+                        EdgeLocation::Immediate(value) => PhiCopySource::Immediate(value),
                     }
-                } else if let Some(src_slot) = assignment.edge_spill_slot(*source_vreg) {
-                    spill_loads.push((dst_preg, src_slot));
+                } else if let Some(slot) = assignment.edge_spill_slot(*source_vreg) {
+                    PhiCopySource::Stack(slot)
+                } else if let Some(preg) = assignment.get(*source_vreg) {
+                    PhiCopySource::Register(preg)
                 } else {
                     panic!(
                         "phi source {source_vreg} has neither physical assignment nor edge spill slot"
                     );
+                };
+                if matches!((destination, source), (PhiCopyDestination::Register(dst), PhiCopySource::Register(src)) if dst == src)
+                    || matches!((destination, source), (PhiCopyDestination::Stack(dst), PhiCopySource::Stack(src)) if dst == src)
+                {
+                    continue;
                 }
+                copies.push((destination, source));
             }
         }
     }
 
-    // Preserve true parallel-copy semantics even for cycles. Phi edges are
-    // cold compared with straight-line eval code, so prefer correctness and
-    // simple code over clever xchg scheduling.
-    for (_, src) in &copies {
-        asm.push(preg_to_reg64(*src))?;
+    if let [(destination, source)] = copies.as_slice() {
+        emit_single_phi_copy(asm, *destination, *source)?;
+        return Ok(());
     }
-    for (dst, _) in copies.iter().rev() {
-        asm.pop(preg_to_reg64(*dst))?;
+
+    // Save every source before writing any destination. This preserves true
+    // parallel-copy semantics for register cycles, stack cycles, and mixtures
+    // of both. RSP-relative frame operands compensate for the temporary pushes.
+    for (depth, (_, source)) in copies.iter().enumerate() {
+        match source {
+            PhiCopySource::Register(preg) => asm.push(preg_to_reg64(*preg))?,
+            PhiCopySource::Stack(slot) => asm.push(qword_ptr(mem_operand(
+                BaseReg::StackFrame,
+                *slot + depth as i32 * 8,
+            )))?,
+            PhiCopySource::Immediate(value) => {
+                // Leave the immediate on the temporary copy stack while
+                // restoring the live RAX value used as an encoding scratch.
+                asm.push(rax)?;
+                asm.mov(rax, *value)?;
+                asm.xchg(qword_ptr(rsp), rax)?;
+            }
+        }
     }
-    for (dst, src_slot) in spill_loads {
-        asm.mov(
-            preg_to_reg64(dst),
-            qword_ptr(mem_operand(BaseReg::StackFrame, src_slot)),
-        )?;
+    for (depth, (destination, _)) in copies.iter().enumerate().rev() {
+        match destination {
+            PhiCopyDestination::Register(preg) => asm.pop(preg_to_reg64(*preg))?,
+            PhiCopyDestination::Stack(slot) => asm.pop(qword_ptr(mem_operand(
+                BaseReg::StackFrame,
+                *slot + depth as i32 * 8,
+            )))?,
+        }
     }
     Ok(())
 }
 
-fn emit_phi_edge_spill_store(
+fn emit_single_phi_copy(
     asm: &mut CodeAssembler,
-    assignment: &AssignmentMap,
-    source_vreg: VReg,
-    dst_slot: i32,
+    destination: PhiCopyDestination,
+    source: PhiCopySource,
 ) -> Result<(), IcedError> {
-    if let Some(src_preg) = assignment.get(source_vreg) {
-        asm.mov(
-            qword_ptr(mem_operand(BaseReg::StackFrame, dst_slot)),
-            preg_to_reg64(src_preg),
-        )?;
-        return Ok(());
+    match (destination, source) {
+        (PhiCopyDestination::Register(dst), PhiCopySource::Register(src)) => {
+            asm.mov(preg_to_reg64(dst), preg_to_reg64(src))?;
+        }
+        (PhiCopyDestination::Register(dst), PhiCopySource::Stack(slot)) => {
+            asm.mov(
+                preg_to_reg64(dst),
+                qword_ptr(mem_operand(BaseReg::StackFrame, slot)),
+            )?;
+        }
+        (PhiCopyDestination::Register(dst), PhiCopySource::Immediate(value)) => {
+            asm.mov(preg_to_reg64(dst), value)?;
+        }
+        (PhiCopyDestination::Stack(slot), PhiCopySource::Register(src)) => {
+            asm.mov(
+                qword_ptr(mem_operand(BaseReg::StackFrame, slot)),
+                preg_to_reg64(src),
+            )?;
+        }
+        (PhiCopyDestination::Stack(dst), PhiCopySource::Stack(src)) => {
+            asm.push(rax)?;
+            asm.mov(rax, qword_ptr(mem_operand(BaseReg::StackFrame, src + 8)))?;
+            asm.mov(qword_ptr(mem_operand(BaseReg::StackFrame, dst + 8)), rax)?;
+            asm.pop(rax)?;
+        }
+        (PhiCopyDestination::Stack(slot), PhiCopySource::Immediate(value)) => {
+            asm.push(rax)?;
+            asm.mov(rax, value)?;
+            asm.mov(qword_ptr(mem_operand(BaseReg::StackFrame, slot + 8)), rax)?;
+            asm.pop(rax)?;
+        }
     }
-
-    let Some(src_slot) = assignment.edge_spill_slot(source_vreg) else {
-        panic!("phi source {source_vreg} has neither physical assignment nor edge spill slot");
-    };
-
-    asm.push(rax)?;
-    asm.mov(
-        rax,
-        qword_ptr(mem_operand(BaseReg::StackFrame, src_slot + 8)),
-    )?;
-    asm.mov(
-        qword_ptr(mem_operand(BaseReg::StackFrame, dst_slot + 8)),
-        rax,
-    )?;
-    asm.pop(rax)?;
     Ok(())
 }
 

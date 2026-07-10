@@ -12,8 +12,8 @@ use crate::{HashMap, HashSet};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{
-    ALLOCATABLE_REGS, AssignmentMap, PhysReg, PhysRegSet, RegConstraint, clobbers, is_reg_shift,
-    use_constraints,
+    ALLOCATABLE_REGS, AssignmentMap, EdgeLocation, PhysReg, PhysRegSet, RegConstraint, clobbers,
+    is_reg_shift, use_constraints,
 };
 
 // Re-use spill slot allocator and spill/reload generation from spilling.rs
@@ -850,12 +850,6 @@ fn process_block(
         let edge_sources = edge_phi_sources(func, block.id, inst);
         let def = inst.def();
         let mut constraints = use_constraints(inst);
-        for &source in &edge_sources {
-            if !uses.contains(&source) {
-                uses.push(source);
-                constraints.push(RegConstraint::Any);
-            }
-        }
         constraints.resize(uses.len(), RegConstraint::Any);
         for use_vreg in &mut uses {
             if let Some(&alias) = reload_alias.get(use_vreg) {
@@ -871,8 +865,6 @@ fn process_block(
 
         // Step A+B: Ensure all uses are in registers
         let mut pinned: HashSet<VReg> = HashSet::default();
-        let mut edge_rewrites = Vec::new();
-
         for (&use_vreg, constraint) in uses.iter().zip(constraints.iter()) {
             if let RegConstraint::Fixed(required_preg) = constraint {
                 // Fixed constraint: need use_vreg in required_preg
@@ -1077,9 +1069,6 @@ fn process_block(
                     rf.assign(fresh, preg);
                     result.set(fresh, preg);
                     rewritten_inst.rewrite_use(use_vreg, fresh);
-                    if edge_sources.contains(&use_vreg) {
-                        edge_rewrites.push((use_vreg, fresh));
-                    }
                     if can_reload_without_new_store(use_vreg, &s, func) {
                         reload_alias.insert(use_vreg, fresh);
                         alias_source.insert(fresh, use_vreg);
@@ -1091,21 +1080,25 @@ fn process_block(
             }
         }
 
-        for &source in &edge_sources {
-            let resident = reload_alias
-                .get(&source)
-                .copied()
-                .filter(|alias| rf.contains(*alias))
-                .unwrap_or(source);
-            if resident != source {
-                edge_rewrites.push((source, resident));
-            }
-        }
-        if !edge_rewrites.is_empty() {
-            edge_rewrites.sort_unstable();
-            edge_rewrites.dedup();
-            rewrite_edge_phi_sources(func, block.id, inst, &edge_rewrites);
-        }
+        materialize_phi_edge_homes(
+            block.id,
+            &edge_sources,
+            &mut rf,
+            &mut s,
+            &mut new_insts,
+            func,
+            analysis,
+            block_idx,
+            inst_idx,
+            block.insts.len(),
+            &use_positions,
+            slots,
+            &pinned,
+            &mut reload_alias,
+            &mut alias_source,
+            result,
+            trace.as_deref_mut(),
+        );
 
         // Step C: Evict to pressure ≤ k
         while rf.occupancy() > k {
@@ -1366,44 +1359,104 @@ fn collect_edge_phi_sources(
     }
 }
 
-fn rewrite_edge_phi_sources(
-    func: &mut MFunction,
+#[allow(clippy::too_many_arguments)]
+fn materialize_phi_edge_homes(
     pred_id: BlockId,
-    inst: &MInst,
-    rewrites: &[(VReg, VReg)],
+    sources: &[VReg],
+    rf: &mut RegFile,
+    s: &mut HashSet<VReg>,
+    new_insts: &mut Vec<MInst>,
+    func: &mut MFunction,
+    analysis: &AnalysisResult,
+    block_idx: usize,
+    inst_idx: usize,
+    block_len: usize,
+    use_positions: &HashMap<VReg, Vec<usize>>,
+    slots: &mut SpillSlotAllocator,
+    pinned: &HashSet<VReg>,
+    reload_alias: &mut HashMap<VReg, VReg>,
+    alias_source: &mut HashMap<VReg, VReg>,
+    result: &mut AssignmentMap,
+    mut trace: Option<&mut RegallocTrace>,
 ) {
-    match inst {
-        MInst::Branch {
-            true_bb, false_bb, ..
-        } => {
-            rewrite_edge_phi_sources_for_target(func, pred_id, *true_bb, rewrites);
-            rewrite_edge_phi_sources_for_target(func, pred_id, *false_bb, rewrites);
+    for &source in sources {
+        let resident = reload_alias
+            .get(&source)
+            .copied()
+            .filter(|alias| rf.contains(*alias))
+            .or_else(|| rf.contains(source).then_some(source));
+        if let Some(resident) = resident {
+            let preg = rf
+                .get_preg(resident)
+                .expect("resident phi source has a physical register");
+            result.set_edge_location(pred_id, source, EdgeLocation::Register(preg));
+            continue;
         }
-        MInst::Jump { target } => {
-            rewrite_edge_phi_sources_for_target(func, pred_id, *target, rewrites);
-        }
-        _ => {}
-    }
-}
 
-fn rewrite_edge_phi_sources_for_target(
-    func: &mut MFunction,
-    pred_id: BlockId,
-    target: BlockId,
-    rewrites: &[(VReg, VReg)],
-) {
-    let Some(block) = func.blocks.iter_mut().find(|block| block.id == target) else {
-        return;
-    };
-    for phi in &mut block.phis {
-        for (source_pred, source) in &mut phi.sources {
-            if *source_pred != pred_id {
-                continue;
-            }
-            if let Some((_, new_source)) = rewrites.iter().find(|(old, _)| old == source) {
-                *source = *new_source;
-            }
+        let has_stack_value = s.contains(&source)
+            && func.spill_desc(source).is_none_or(|desc| match desc.kind {
+                SpillKind::Stack => true,
+                SpillKind::SimState { .. } | SpillKind::SimStateAlias { .. } => {
+                    desc.spill_cost != 0
+                }
+                SpillKind::Remat { .. } => false,
+            });
+        if has_stack_value {
+            let slot = slots.slot_for(source);
+            result.set_edge_location(pred_id, source, EdgeLocation::Stack(slot));
+            continue;
         }
+
+        if let Some(SpillDesc {
+            kind: SpillKind::Remat { value },
+            ..
+        }) = func.spill_desc(source)
+        {
+            result.set_edge_location(pred_id, source, EdgeLocation::Immediate(*value));
+            continue;
+        }
+
+        // Rematerialized and store-back-only values have no initialized stack
+        // home. Reload only those values, one at a time, and record the edge
+        // slot without pinning unrelated phi sources.
+        let edge_value = func.vregs.alloc();
+        func.spill_descs.push(SpillDesc::transient());
+        copy_value_width(func, edge_value, source);
+        let preg = find_or_evict_free(
+            rf,
+            s,
+            new_insts,
+            func,
+            analysis,
+            block_idx,
+            inst_idx,
+            block_len,
+            use_positions,
+            slots,
+            pinned,
+            &PhysRegSet::new(),
+            reload_alias,
+            alias_source,
+            result,
+            trace.as_deref_mut(),
+        );
+        let mut reload = make_reload(source, func, slots);
+        match &mut reload {
+            MInst::LoadImm { dst, .. } | MInst::Load { dst, .. } => *dst = edge_value,
+            _ => {}
+        }
+        new_insts.push(reload);
+        rf.assign(edge_value, preg);
+        result.set(edge_value, preg);
+        let slot = slots.slot_for(edge_value);
+        new_insts.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: slot,
+            src: edge_value,
+            size: OpSize::S64,
+        });
+        result.set_edge_location(pred_id, source, EdgeLocation::Stack(slot));
+        rf.evict(edge_value);
     }
 }
 

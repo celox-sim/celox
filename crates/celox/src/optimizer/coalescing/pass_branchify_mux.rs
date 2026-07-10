@@ -44,12 +44,13 @@ impl ExecutionUnitPass for BranchifyMuxPass {
             .and_then(|value| value.parse::<usize>().ok())
             .map(RegisterId);
         let mut use_counts = count_uses(eu);
+        let mut def_blocks = instruction_def_blocks(eu);
+        let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
         let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
         block_ids.sort_by_key(|id| id.0);
         let mut worklist = VecDeque::from(block_ids);
         let mut queued = HashSet::default();
         queued.extend(worklist.iter().copied());
-        let mut repair_roots = Vec::new();
         let mut applied = 0usize;
 
         while let Some(block_id) = worklist.pop_front() {
@@ -58,7 +59,14 @@ impl ExecutionUnitPass for BranchifyMuxPass {
                 continue;
             }
             while let Some(plan) = find_branchify_mux_in_block(eu, block_id, &use_counts) {
-                let new_blocks = apply_branchify_mux(eu, plan, &mut use_counts, trace_reg);
+                let new_blocks = apply_branchify_mux(
+                    eu,
+                    plan,
+                    &mut use_counts,
+                    &mut def_blocks,
+                    &mut next_block_id,
+                    trace_reg,
+                );
                 applied += 1;
                 if stats && applied % 1000 == 0 {
                     let insts = eu
@@ -74,7 +82,6 @@ impl ExecutionUnitPass for BranchifyMuxPass {
                         stats_start.unwrap().elapsed()
                     );
                 }
-                repair_roots.extend(new_blocks);
                 for new_block in new_blocks {
                     if queued.insert(new_block) {
                         worklist.push_back(new_block);
@@ -90,26 +97,6 @@ impl ExecutionUnitPass for BranchifyMuxPass {
             );
         }
         inline_param_only_jump_blocks(eu);
-        if stats {
-            let mut unique_repair_roots = repair_roots.clone();
-            unique_repair_roots.sort();
-            unique_repair_roots.dedup();
-            eprintln!(
-                "[branchify-stats] before_repair applied={applied} blocks={} repair_roots={} unique_repair_roots={} elapsed={:?}",
-                eu.blocks.len(),
-                repair_roots.len(),
-                unique_repair_roots.len(),
-                stats_start.unwrap().elapsed()
-            );
-        }
-        repair_param_origin_live_ins(eu, repair_roots);
-        if stats {
-            eprintln!(
-                "[branchify-stats] before_post_repair_inline applied={applied} blocks={} elapsed={:?}",
-                eu.blocks.len(),
-                stats_start.unwrap().elapsed()
-            );
-        }
         inline_param_only_jump_blocks(eu);
         if stats {
             let insts = eu
@@ -201,6 +188,9 @@ fn find_branchify_mux_in_block(
         let mut false_defs = false_defs.into_iter().collect::<Vec<_>>();
         true_defs.sort_unstable();
         false_defs.sort_unstable();
+        if !branch_is_profitable(block, &true_defs, &false_defs) {
+            continue;
+        }
         return Some(BranchifyPlan {
             block_id,
             mux_idx,
@@ -220,6 +210,43 @@ fn find_branchify_mux_in_block(
     }
 
     None
+}
+
+// A conditional branch plus its merge costs several front-end operations and
+// is harder to predict than a select. Only move work behind the branch when
+// the work skipped on one arm pays for that cost. This is a local code-cost
+// decision, not a global transformation budget.
+fn branch_is_profitable(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    true_defs: &[usize],
+    false_defs: &[usize],
+) -> bool {
+    let arm_cost = |defs: &[usize]| {
+        defs.iter()
+            .map(|&idx| branchified_instruction_cost(&block.instructions[idx]))
+            .sum::<usize>()
+    };
+    arm_cost(true_defs) + arm_cost(false_defs) >= 16
+}
+
+fn branchified_instruction_cost(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> usize {
+    match inst {
+        SIRInstruction::Imm(..) => 0,
+        SIRInstruction::Binary(_, _, op, _) => match op {
+            crate::ir::BinaryOp::Mul => 16,
+            crate::ir::BinaryOp::Div | crate::ir::BinaryOp::Rem => 32,
+            _ => 1,
+        },
+        SIRInstruction::Load(..) => 3,
+        SIRInstruction::Concat(_, args) => args.len().div_ceil(2).max(1),
+        SIRInstruction::Mux(..) => 2,
+        SIRInstruction::Unary(..) | SIRInstruction::Slice(..) => 1,
+        SIRInstruction::Store(..)
+        | SIRInstruction::Commit(..)
+        | SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => 0,
+    }
 }
 
 fn find_distributed_store(
@@ -392,13 +419,14 @@ fn apply_branchify_mux(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     plan: BranchifyPlan,
     use_counts: &mut HashMap<RegisterId, usize>,
+    def_blocks: &mut HashMap<RegisterId, BlockId>,
+    next_block_id: &mut usize,
     trace_reg: Option<RegisterId>,
 ) -> [BlockId; 3] {
-    let def_blocks = instruction_def_blocks(eu);
-    let next_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
-    let true_id = BlockId(next_id);
-    let false_id = BlockId(next_id + 1);
-    let merge_id = BlockId(next_id + 2);
+    let true_id = BlockId(*next_block_id);
+    let false_id = BlockId(*next_block_id + 1);
+    let merge_id = BlockId(*next_block_id + 2);
+    *next_block_id += 3;
 
     let original = eu
         .blocks
@@ -418,7 +446,7 @@ fn apply_branchify_mux(
     if let Some(store) = &plan.distributed_store {
         remove_defs.insert(store.idx);
     }
-    let restore_defs = head_restore_defs(&original, &plan, &remove_defs, &def_blocks);
+    let restore_defs = head_restore_defs(&original, &plan, &remove_defs, def_blocks);
     for idx in restore_defs {
         remove_defs.remove(&idx);
     }
@@ -432,8 +460,6 @@ fn apply_branchify_mux(
             head_insts.push(inst.clone());
         }
     }
-    let head_defs = instruction_defs_in(&head_insts);
-
     let mut suffix = Vec::new();
     for (idx, inst) in original
         .instructions
@@ -462,8 +488,6 @@ fn apply_branchify_mux(
         true_insts.push(store.true_inst.clone());
         false_insts.push(store.false_inst.clone());
     }
-    let mut next_reg_id = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0) + 1;
-
     let true_args = if plan.preserve_result {
         vec![plan.true_val]
     } else {
@@ -474,50 +498,13 @@ fn apply_branchify_mux(
     } else {
         Vec::new()
     };
-    let mut merge_params = if plan.preserve_result {
+    let merge_params = if plan.preserve_result {
         vec![plan.dst]
     } else {
         Vec::new()
     };
 
-    let mut merge_terminator = original.terminator;
-    let merge_terminator_uses = terminator_uses(&merge_terminator);
-    let mut merge_live_ins = block_live_ins(&suffix, &merge_terminator_uses);
-    if plan.preserve_result {
-        merge_live_ins.retain(|reg| *reg != plan.dst);
-    }
-    merge_live_ins.retain(|reg| {
-        !head_defs.contains(reg)
-            && def_blocks
-                .get(reg)
-                .is_none_or(|def_block| *def_block >= plan.block_id)
-    });
-    let merge_param_map = create_live_in_params(eu, &merge_live_ins, &mut next_reg_id);
-    replace_inst_uses(&mut suffix, &merge_param_map);
-    replace_terminator_uses(&mut merge_terminator, &merge_param_map);
-    merge_params.extend(merge_live_ins.iter().map(|reg| merge_param_map[reg]));
-
-    let mut true_args = true_args;
-    true_args.extend(merge_live_ins.iter().copied());
-    let mut false_args = false_args;
-    false_args.extend(merge_live_ins.iter().copied());
-
-    let true_live_ins = block_live_ins(&true_insts, &true_args);
-    let false_live_ins = block_live_ins(&false_insts, &false_args);
-    let true_params = create_live_in_params(eu, &true_live_ins, &mut next_reg_id);
-    let false_params = create_live_in_params(eu, &false_live_ins, &mut next_reg_id);
-    replace_inst_uses(&mut true_insts, &true_params);
-    replace_inst_uses(&mut false_insts, &false_params);
-    let true_args = replace_regs_in_args(&true_args, &true_params);
-    let false_args = replace_regs_in_args(&false_args, &false_params);
-    let true_param_regs = true_live_ins
-        .iter()
-        .map(|reg| true_params[reg])
-        .collect::<Vec<_>>();
-    let false_param_regs = false_live_ins
-        .iter()
-        .map(|reg| false_params[reg])
-        .collect::<Vec<_>>();
+    let merge_terminator = original.terminator;
 
     let head = BasicBlock {
         id: plan.block_id,
@@ -525,19 +512,19 @@ fn apply_branchify_mux(
         instructions: head_insts,
         terminator: SIRTerminator::Branch {
             cond: plan.cond,
-            true_block: (true_id, true_live_ins.clone()),
-            false_block: (false_id, false_live_ins.clone()),
+            true_block: (true_id, Vec::new()),
+            false_block: (false_id, Vec::new()),
         },
     };
     let true_block = BasicBlock {
         id: true_id,
-        params: true_param_regs,
+        params: Vec::new(),
         instructions: true_insts,
         terminator: SIRTerminator::Jump(merge_id, true_args),
     };
     let false_block = BasicBlock {
         id: false_id,
-        params: false_param_regs,
+        params: Vec::new(),
         instructions: false_insts,
         terminator: SIRTerminator::Jump(merge_id, false_args),
     };
@@ -557,6 +544,14 @@ fn apply_branchify_mux(
     eu.blocks.insert(true_id, true_block);
     eu.blocks.insert(false_id, false_block);
     eu.blocks.insert(merge_id, merge_block);
+
+    for block_id in [plan.block_id, true_id, false_id, merge_id] {
+        for inst in &eu.blocks[&block_id].instructions {
+            if let Some(def) = def_reg(inst) {
+                def_blocks.insert(def, block_id);
+            }
+        }
+    }
 
     if let Some(reg) = trace_reg {
         for block_id in [plan.block_id, true_id, false_id, merge_id] {
@@ -852,223 +847,6 @@ fn block_live_ins(
     live_ins
 }
 
-fn create_live_in_params(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    live_ins: &[RegisterId],
-    next_reg_id: &mut usize,
-) -> HashMap<RegisterId, RegisterId> {
-    let mut params = HashMap::default();
-    for &live_in in live_ins {
-        let param = RegisterId(*next_reg_id);
-        *next_reg_id += 1;
-        let ty = eu
-            .register_map
-            .get(&live_in)
-            .unwrap_or_else(|| panic!("missing register type for live-in r{}", live_in.0))
-            .clone();
-        eu.register_map.insert(param, ty);
-        params.insert(live_in, param);
-    }
-    params
-}
-
-fn replace_inst_uses(
-    instructions: &mut [SIRInstruction<RegionedAbsoluteAddr>],
-    replacements: &HashMap<RegisterId, RegisterId>,
-) {
-    for inst in instructions {
-        replace_inst_use(inst, replacements);
-    }
-}
-
-fn repair_param_origin_live_ins(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, roots: Vec<BlockId>) {
-    let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
-    let stats_start = stats.then(crate::timing::now);
-    let inst_defs = eu
-        .blocks
-        .values()
-        .flat_map(|block| block.instructions.iter().filter_map(def_reg))
-        .collect::<HashSet<_>>();
-    let mut next_reg_id = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0) + 1;
-    let mut roots = roots.into_iter().collect::<Vec<_>>();
-    roots.sort();
-    roots.dedup();
-    let mut queue = VecDeque::from(roots);
-    let mut queued = queue.iter().copied().collect::<HashSet<_>>();
-    let pred_map = predecessor_blocks(eu);
-    let mut processed = 0usize;
-    let mut repaired = 0usize;
-    let mut added_params = 0usize;
-    let mut repaired_live_ins = HashSet::default();
-
-    while let Some(block_id) = queue.pop_front() {
-        processed += 1;
-        if stats && processed % 10000 == 0 {
-            eprintln!(
-                "[branchify-stats] repair processed={processed} repaired={repaired} added_params={added_params} queue={} elapsed={:?}",
-                queue.len(),
-                stats_start.unwrap().elapsed()
-            );
-        }
-        queued.remove(&block_id);
-        if !eu.blocks.contains_key(&block_id) {
-            continue;
-        }
-        let missing = {
-            let block = &eu.blocks[&block_id];
-            missing_param_origin_live_ins(block, &inst_defs)
-        };
-        if missing.is_empty() {
-            continue;
-        }
-        repaired += 1;
-
-        let mut replacements = HashMap::default();
-        for live_in in missing {
-            if !repaired_live_ins.insert((block_id, live_in)) {
-                continue;
-            }
-            added_params += 1;
-            let param = RegisterId(next_reg_id);
-            next_reg_id += 1;
-            let ty = eu
-                .register_map
-                .get(&live_in)
-                .unwrap_or_else(|| panic!("missing register type for live-in r{}", live_in.0))
-                .clone();
-            eu.register_map.insert(param, ty);
-            replacements.insert(live_in, param);
-            for pred in append_arg_to_predecessors(eu, &pred_map, block_id, live_in) {
-                if queued.insert(pred) {
-                    queue.push_back(pred);
-                }
-            }
-        }
-
-        let block = eu.blocks.get_mut(&block_id).unwrap();
-        block.params.extend(replacements.values().copied());
-        replace_inst_uses(&mut block.instructions, &replacements);
-        replace_terminator_uses(&mut block.terminator, &replacements);
-    }
-}
-
-fn missing_param_origin_live_ins(
-    block: &BasicBlock<RegionedAbsoluteAddr>,
-    inst_defs: &HashSet<RegisterId>,
-) -> Vec<RegisterId> {
-    let mut local_defs = block.params.iter().copied().collect::<HashSet<_>>();
-    let mut missing = Vec::new();
-    let mut seen = HashSet::default();
-    for inst in &block.instructions {
-        for reg in inst_uses(inst) {
-            if !local_defs.contains(&reg) && !inst_defs.contains(&reg) && seen.insert(reg) {
-                missing.push(reg);
-            }
-        }
-        if let Some(def) = def_reg(inst) {
-            local_defs.insert(def);
-        }
-    }
-    missing
-}
-
-fn append_arg_to_predecessors(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    pred_map: &HashMap<BlockId, Vec<BlockId>>,
-    target: BlockId,
-    arg: RegisterId,
-) -> Vec<BlockId> {
-    let mut preds = Vec::new();
-    let Some(pred_ids) = pred_map.get(&target) else {
-        return preds;
-    };
-    for &pred_id in pred_ids {
-        let Some(block) = eu.blocks.get_mut(&pred_id) else {
-            continue;
-        };
-        match &mut block.terminator {
-            SIRTerminator::Jump(dst, args) if *dst == target => {
-                args.push(arg);
-                preds.push(block.id);
-            }
-            SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } => {
-                if true_block.0 == target {
-                    true_block.1.push(arg);
-                    preds.push(block.id);
-                }
-                if false_block.0 == target {
-                    false_block.1.push(arg);
-                    preds.push(block.id);
-                }
-            }
-            _ => {}
-        }
-    }
-    preds
-}
-
-fn predecessor_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<BlockId, Vec<BlockId>> {
-    let mut preds: HashMap<BlockId, Vec<BlockId>> = HashMap::default();
-    for block in eu.blocks.values() {
-        match &block.terminator {
-            SIRTerminator::Jump(target, _) => {
-                preds.entry(*target).or_default().push(block.id);
-            }
-            SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } => {
-                preds.entry(true_block.0).or_default().push(block.id);
-                if false_block.0 != true_block.0 {
-                    preds.entry(false_block.0).or_default().push(block.id);
-                }
-            }
-            SIRTerminator::Return | SIRTerminator::Error(_) => {}
-        }
-    }
-    for pred_list in preds.values_mut() {
-        pred_list.sort();
-    }
-    preds
-}
-
-fn replace_terminator_uses(
-    term: &mut SIRTerminator,
-    replacements: &HashMap<RegisterId, RegisterId>,
-) {
-    let replace = |reg: &mut RegisterId| {
-        if let Some(&replacement) = replacements.get(reg) {
-            *reg = replacement;
-        }
-    };
-    match term {
-        SIRTerminator::Jump(_, args) => {
-            for arg in args {
-                replace(arg);
-            }
-        }
-        SIRTerminator::Branch {
-            cond,
-            true_block,
-            false_block,
-        } => {
-            replace(cond);
-            for arg in &mut true_block.1 {
-                replace(arg);
-            }
-            for arg in &mut false_block.1 {
-                replace(arg);
-            }
-        }
-        SIRTerminator::Return | SIRTerminator::Error(_) => {}
-    }
-}
-
 fn inline_param_only_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     loop {
         let (pred_counts, jump_preds) = predecessor_info(eu);
@@ -1190,64 +968,6 @@ fn substitute_terminator(
         SIRTerminator::Return => SIRTerminator::Return,
         SIRTerminator::Error(code) => SIRTerminator::Error(*code),
     }
-}
-
-fn replace_inst_use(
-    inst: &mut SIRInstruction<RegionedAbsoluteAddr>,
-    replacements: &HashMap<RegisterId, RegisterId>,
-) {
-    let replace = |reg: &mut RegisterId| {
-        if let Some(&replacement) = replacements.get(reg) {
-            *reg = replacement;
-        }
-    };
-    match inst {
-        SIRInstruction::Imm(_, _) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            replace(lhs);
-            replace(rhs);
-        }
-        SIRInstruction::Unary(_, _, src) => replace(src),
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(offset), _) => replace(offset),
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(offset), _, src, _, _) => {
-            replace(offset);
-            replace(src);
-        }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => replace(src),
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(offset), _, _) => replace(offset),
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
-        SIRInstruction::Concat(_, args) => {
-            for arg in args {
-                replace(arg);
-            }
-        }
-        SIRInstruction::Slice(_, src, _, _) => replace(src),
-        SIRInstruction::Mux(_, cond, true_val, false_val) => {
-            replace(cond);
-            replace(true_val);
-            replace(false_val);
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for arg in args {
-                replace(arg);
-            }
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            replace(old);
-            replace(new);
-        }
-    }
-}
-
-fn replace_regs_in_args(
-    args: &[RegisterId],
-    replacements: &HashMap<RegisterId, RegisterId>,
-) -> Vec<RegisterId> {
-    args.iter()
-        .map(|reg| replacements.get(reg).copied().unwrap_or(*reg))
-        .collect()
 }
 
 fn verify_all_uses_have_defs(eu: &ExecutionUnit<RegionedAbsoluteAddr>) {
@@ -1517,6 +1237,25 @@ mod tests {
     }
 
     #[test]
+    fn keeps_cheap_select_as_mux() {
+        let mut eu = unit(vec![
+            imm(1, 3),
+            SIRInstruction::Unary(RegisterId(2), crate::ir::UnaryOp::BitNot, RegisterId(1)),
+            SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
+        ]);
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.blocks.len(), 1);
+        assert!(eu.blocks[&BlockId(0)].instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4))
+            )
+        }));
+    }
+
+    #[test]
     fn branchifies_non_store_mux_with_arm_work() {
         let mut eu = unit(vec![
             imm(1, 3),
@@ -1656,14 +1395,14 @@ mod tests {
     }
 
     #[test]
-    fn passes_live_ins_to_sunk_arm_blocks() {
+    fn sunk_arm_uses_dominating_live_in_directly() {
         let mut eu = unit(vec![
             imm(1, 3),
             imm(4, 5),
             SIRInstruction::Binary(
                 RegisterId(2),
                 RegisterId(7),
-                crate::ir::BinaryOp::And,
+                crate::ir::BinaryOp::Mul,
                 RegisterId(1),
             ),
             SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
@@ -1691,16 +1430,15 @@ mod tests {
         };
         let true_block = &eu.blocks[&true_edge.0];
         let false_block = &eu.blocks[&false_edge.0];
-        assert_eq!(true_edge.1, vec![RegisterId(7)]);
+        assert!(true_edge.1.is_empty());
         assert!(false_edge.1.is_empty());
-        assert_eq!(true_block.params.len(), 1);
+        assert!(true_block.params.is_empty());
         assert!(false_block.params.is_empty());
-        assert_ne!(true_block.params[0], RegisterId(7));
         assert!(true_block.instructions.iter().any(|inst| {
             matches!(
                 inst,
-                SIRInstruction::Binary(dst, lhs, crate::ir::BinaryOp::And, _)
-                    if *dst == RegisterId(2) && *lhs == true_block.params[0]
+                SIRInstruction::Binary(dst, lhs, crate::ir::BinaryOp::Mul, _)
+                    if *dst == RegisterId(2) && *lhs == RegisterId(7)
             )
         }));
     }
@@ -1744,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn passes_param_origin_suffix_live_ins_through_merge() {
+    fn merge_uses_dominating_param_directly() {
         let mut eu = unit(vec![
             imm(1, 3),
             SIRInstruction::Binary(
@@ -1775,20 +1513,19 @@ mod tests {
                     .is_some_and(|param| *param == RegisterId(3))
             })
             .expect("expected merge block with mux result param");
-        assert_eq!(merge.params.len(), 2);
-        assert_ne!(merge.params[1], RegisterId(7));
+        assert_eq!(merge.params, vec![RegisterId(3)]);
         assert!(merge.instructions.iter().any(|inst| {
             matches!(
                 inst,
                 SIRInstruction::Binary(RegisterId(5), lhs, crate::ir::BinaryOp::Add, RegisterId(3))
-                    if *lhs == merge.params[1]
+                    if *lhs == RegisterId(7)
             )
         }));
         assert!(eu.blocks.values().any(|block| {
             matches!(
                 &block.terminator,
                 SIRTerminator::Jump(target, args)
-                    if *target == merge.id && args.len() == 2 && args[1] != RegisterId(7)
+                    if *target == merge.id && args.len() == 1
             )
         }));
     }
@@ -1866,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn branchifies_mux_feeding_jump_args_for_param_only_inlining() {
+    fn keeps_cheap_mux_feeding_jump_args() {
         let mut register_map = HashMap::default();
         for reg in 0..8 {
             register_map.insert(
@@ -1921,7 +1658,7 @@ mod tests {
 
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
 
-        assert!(!eu.blocks.values().any(|block| {
+        assert!(eu.blocks.values().any(|block| {
             block
                 .instructions
                 .iter()

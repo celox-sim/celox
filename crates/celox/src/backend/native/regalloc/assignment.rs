@@ -102,6 +102,14 @@ pub enum RegConstraint {
     Fixed(PhysReg),
 }
 
+/// Physical location of a phi source at one predecessor edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeLocation {
+    Register(PhysReg),
+    Stack(i32),
+    Immediate(u64),
+}
+
 pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
     match inst {
         // x86 variable shifts require shift amount in CL (low byte of RCX).
@@ -154,6 +162,7 @@ pub fn block_clobber_points_for(
 pub struct AssignmentMap {
     pub map: HashMap<VReg, PhysReg>,
     pub edge_spill_slots: HashMap<VReg, i32>,
+    pub edge_locations: HashMap<(BlockId, VReg), EdgeLocation>,
 }
 
 impl AssignmentMap {
@@ -171,6 +180,14 @@ impl AssignmentMap {
 
     pub fn set_edge_spill_slot(&mut self, vreg: VReg, offset: i32) {
         self.edge_spill_slots.insert(vreg, offset);
+    }
+
+    pub fn edge_location(&self, pred: BlockId, vreg: VReg) -> Option<EdgeLocation> {
+        self.edge_locations.get(&(pred, vreg)).copied()
+    }
+
+    pub fn set_edge_location(&mut self, pred: BlockId, vreg: VReg, location: EdgeLocation) {
+        self.edge_locations.insert((pred, vreg), location);
     }
 
     /// Returns entries sorted by VReg for deterministic display.

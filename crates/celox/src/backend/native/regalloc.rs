@@ -48,8 +48,10 @@ fn verify_assignment(
             );
             for (pred, src) in &phi.sources {
                 assert!(
-                    assignment.get(*src).is_some() || assignment.edge_spill_slot(*src).is_some(),
-                    "regalloc verify: phi source {src} has neither physical assignment nor edge spill slot at bb{} from bb{} to dst {}",
+                    assignment.edge_location(*pred, *src).is_some()
+                        || assignment.get(*src).is_some()
+                        || assignment.edge_spill_slot(*src).is_some(),
+                    "regalloc verify: phi source {src} has no edge location or fallback assignment at bb{} from bb{} to dst {}",
                     block.id,
                     pred,
                     phi.dst

@@ -429,3 +429,69 @@ fn test_phi_dst_gets_register_under_entry_pressure() {
     let analysis = analysis::analyze(&func);
     super::verify_assignment(&func, &analysis, &result.assignment);
 }
+
+#[test]
+fn test_many_phi_edge_sources_are_materialized_without_pin_overflow() {
+    const PHIS: u32 = 32;
+    let mut vregs = VRegAllocator::new();
+    while vregs.count() < PHIS * 2 + 1 {
+        vregs.alloc();
+    }
+    let mut descs = (0..PHIS)
+        .map(|value| SpillDesc::remat(value as u64 + 1))
+        .collect::<Vec<_>>();
+    descs.extend((0..=PHIS).map(|_| SpillDesc::transient()));
+    let mut func = MFunction::new(vregs, descs);
+
+    let mut entry = MBlock::new(BlockId(0));
+    for value in 0..PHIS {
+        entry.push(MInst::LoadImm {
+            dst: VReg(value),
+            value: value as u64 + 1,
+        });
+    }
+    entry.push(MInst::LoadImm {
+        dst: VReg(PHIS * 2),
+        value: 1,
+    });
+    entry.push(MInst::Branch {
+        cond: VReg(PHIS * 2),
+        true_bb: BlockId(1),
+        false_bb: BlockId(1),
+    });
+    func.push_block(entry);
+
+    let mut join = MBlock::new(BlockId(1));
+    for value in 0..PHIS {
+        join.phis.push(PhiNode {
+            dst: VReg(PHIS + value),
+            sources: vec![(BlockId(0), VReg(value))],
+        });
+    }
+    join.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 0,
+        src: VReg(PHIS),
+        size: OpSize::S64,
+    });
+    join.push(MInst::Return);
+    func.push_block(join);
+
+    let result = run_regalloc(&mut func);
+    for source in 0..PHIS {
+        assert!(
+            result
+                .assignment
+                .edge_location(BlockId(0), VReg(source))
+                .is_some()
+        );
+    }
+    assert_eq!(func.verify_result(), Ok(()));
+    let analysis = analysis::analyze(&func);
+    super::verify_assignment(&func, &analysis, &result.assignment);
+    let emitted = emit::emit(&func, &result.assignment, result.spill_frame_size).unwrap();
+    let jit = jit_mem::JitCode::new(&emitted.code).unwrap();
+    let mut state = vec![0u8; 8];
+    assert_eq!(unsafe { jit.call(&mut state) }, 0);
+    assert_eq!(u64::from_le_bytes(state.try_into().unwrap()), 1);
+}
