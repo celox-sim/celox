@@ -39,7 +39,8 @@ in a retry loop:
 ```text
 canonical SSA MIR
   -> critical-edge normalization
-  -> machine-constraint legalization
+  -> machine-constraint permutation boundaries
+  -> CFG/dominance renormalization
   -> pressure-aware instruction scheduling
   -> global next-use and loop analysis
   -> Braun--Hack spill placement (W/S states and edge coupling)
@@ -58,12 +59,36 @@ sources are rewritten to name the new edge block.  The result remains strict
 SSA and every CFG edge has an unambiguous insertion point.  Block and edge IDs
 use checked `u32` allocation; there is no compact-ID limit.
 
-### 2. Machine-constraint legalization
+### 2. Machine-constraint permutation boundaries
 
-Fixed-register operands and two-address requirements become explicit,
-short-lived SSA copies.  Instruction clobbers remain explicit target facts.
-No later phase may change the physical register of a VReg over only part of its
-live range.  Legalization is verified as ordinary strict SSA MIR.
+Fixed-register operands first become explicit, short-lived SSA copies.  That
+step alone is not sufficient: repeated precoloring with the same physical
+color is the precoloring-extension problem, and ordinary chordal greedy
+coloring is not guaranteed to solve it even when ordinary pressure is at most
+`K`.
+
+The allocator therefore applies the construction in section 6 of *Towards
+Register Allocation for Programs in SSA-form*.  Immediately before every
+instruction with a fixed operand or a physical clobber, it splits the block and
+inserts a single-predecessor, multi-row phi/Perm boundary for every value live
+across that boundary.  Each destination is a fresh SSA representative and all
+dominated uses are renamed.  This disconnects the interference graph on the
+two sides while retaining color preferences as an edge parallel copy.
+
+Within each resulting component:
+
+- a fixed operand has a fresh one-use representative precolored to its required
+  register;
+- each physical color is precolored at most once;
+- values live through a clobber exclude the clobbered colors; and
+- exact pressure at the instruction is checked against `K - |clobbers|`.
+
+Thus constraint handling is a proved input transformation for chordal coloring,
+not a global `K-1`/`K-2` reservation and not a coloring retry.  The CFG,
+dominators, dominance frontiers, and loops are recomputed after all boundaries
+are inserted.  The verifier requires strict SSA, one predecessor per Perm
+block, complete rows for its live-in set, and adjacency of the fixed copy and
+its constrained instruction.
 
 ### 3. Pressure-aware scheduling
 
@@ -167,7 +192,8 @@ NormalizedCfg
 ConstraintModel
   fixed_uses: ProgramPoint -> [(operand, PhysReg)]
   clobbers:   ProgramPoint -> PhysRegSet
-  reservations: short-lived, pinned precolored values
+  perm_boundaries: BlockId -> [(source VReg, destination VReg)]
+  component_constraints: fixed colors and clobber exclusions
 
 NextUseAnalysis
   entry / exit: BlockId -> (LogicalValue -> distance)
@@ -211,6 +237,7 @@ The intended phase APIs are:
 ```text
 normalize_cfg(&mut MFunction) -> NormalizedCfg
 legalize_constraints(&mut MFunction, &NormalizedCfg) -> ConstraintModel
+normalize_cfg(&mut MFunction) -> NormalizedCfg
 schedule_for_pressure(&mut MFunction, &NormalizedCfg, &ConstraintModel)
 analyze_next_use(&MFunction, &NormalizedCfg) -> NextUseAnalysis
 plan_spills(&MFunction, &NormalizedCfg, &NextUseAnalysis,
@@ -224,12 +251,14 @@ destroy_ssa(&ReconstructionResult, ColoringResult) -> AllocatedFunction
 
 ### Constraint accounting
 
-Machine constraints are not handled by a `K-1` or `K-2` workaround.  Fixed
-register copies and clobber reservations are pinned, precolored values in the
-pressure model.  MIN may evict ordinary values around them but may never evict
-a reservation.  The pressure verifier checks both total GPR pressure and the
-availability of each required physical register.  Consequently coloring is
-not expected to discover a constraint failure after spilling.
+Machine constraints are not handled by a `K-1` or `K-2` workaround.  Perm
+boundaries split every live range at a constraint point before spill planning.
+The pressure model then treats a fixed one-use value as pinned and checks
+live-through pressure at a clobber against the remaining physical colors.  MIN
+may evict ordinary values but may never evict a pinned operand.  Because a
+component contains at most one precolored node of each color, the chordal
+coloring precondition is restored; coloring failure is a verifier or allocator
+bug, not a request for another spill iteration.
 
 ### Termination and complexity
 
