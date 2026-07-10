@@ -394,8 +394,16 @@ pub fn unified_alloc_with_label(
     let mut s_exit: Vec<HashSet<VReg>> = vec![HashSet::default(); num_blocks];
 
     for bi in 0..num_blocks {
-        let (mut entry_rf, mut entry_s) =
-            compute_entry_regfile(func, analysis, bi, k, &regfile_exit, &s_exit, &result);
+        let (mut entry_rf, mut entry_s) = compute_entry_regfile(
+            func,
+            analysis,
+            bi,
+            k,
+            &regfile_exit,
+            &s_exit,
+            &mut result,
+            &mut slots,
+        );
 
         // Insert coupling code
         insert_coupling_code(
@@ -450,7 +458,8 @@ fn compute_entry_regfile(
     k: usize,
     regfile_exit: &[RegFile],
     s_exit: &[HashSet<VReg>],
-    result: &AssignmentMap,
+    result: &mut AssignmentMap,
+    slots: &mut SpillSlotAllocator,
 ) -> (RegFile, HashSet<VReg>) {
     let preds = &analysis.predecessors[block_idx];
     let mut rf = RegFile::new();
@@ -483,7 +492,14 @@ fn compute_entry_regfile(
             }
         }
 
-        for phi in &func.blocks[block_idx].phis {
+        let mut phis = func.blocks[block_idx].phis.iter().collect::<Vec<_>>();
+        phis.sort_by_key(|phi| {
+            analysis.entry_distances[block_idx]
+                .get(&phi.dst)
+                .copied()
+                .unwrap_or(u32::MAX)
+        });
+        for phi in phis {
             if rf.contains(phi.dst) {
                 continue;
             }
@@ -500,10 +516,13 @@ fn compute_entry_regfile(
                     Some(preg)
                 }
             });
-            let preg = preferred
-                .or_else(|| free_entry_reg_for_phi(&mut rf, &mut s, &phi_dsts))
-                .expect("no free register for phi dst");
-            rf.assign(phi.dst, preg);
+            if let Some(preg) =
+                preferred.or_else(|| free_entry_reg_for_phi(&mut rf, &mut s, &phi_dsts))
+            {
+                rf.assign(phi.dst, preg);
+            } else {
+                edge_spill_phi_dst(result, slots, &mut s, phi.dst);
+            }
         }
 
         return (rf, s);
@@ -565,7 +584,14 @@ fn compute_entry_regfile(
     // semantics for loop joins where the phi source register may also be a
     // live-in on another incoming edge.
     let phi_dsts: HashSet<VReg> = func.blocks[block_idx].phis.iter().map(|p| p.dst).collect();
-    for phi in &func.blocks[block_idx].phis {
+    let mut phis = func.blocks[block_idx].phis.iter().collect::<Vec<_>>();
+    phis.sort_by_key(|phi| {
+        analysis.entry_distances[block_idx]
+            .get(&phi.dst)
+            .copied()
+            .unwrap_or(u32::MAX)
+    });
+    for phi in phis {
         if rf.contains(phi.dst) {
             continue;
         }
@@ -578,13 +604,26 @@ fn compute_entry_regfile(
                 }
             }
         }
-        let preg = preferred
-            .or_else(|| free_entry_reg_for_phi(&mut rf, &mut s, &phi_dsts))
-            .expect("no free register for phi dst");
-        rf.assign(phi.dst, preg);
+        if let Some(preg) = preferred.or_else(|| free_entry_reg_for_phi(&mut rf, &mut s, &phi_dsts))
+        {
+            rf.assign(phi.dst, preg);
+        } else {
+            edge_spill_phi_dst(result, slots, &mut s, phi.dst);
+        }
     }
 
     (rf, s)
+}
+
+fn edge_spill_phi_dst(
+    result: &mut AssignmentMap,
+    slots: &mut SpillSlotAllocator,
+    s: &mut HashSet<VReg>,
+    dst: VReg,
+) {
+    let slot = slots.slot_for(dst);
+    result.set_edge_spill_slot(dst, slot);
+    s.insert(dst);
 }
 
 fn free_entry_reg_for_phi(
@@ -759,7 +798,6 @@ fn process_block(
         let mut rewritten_inst = inst.clone();
         let mut uses: Vec<VReg> = inst.uses().into_iter().collect();
         let edge_sources = edge_phi_sources(func, block.id, inst);
-        uses.extend(edge_sources.iter().copied());
         let def = inst.def();
         let mut constraints = use_constraints(inst);
         constraints.resize(uses.len(), RegConstraint::Any);

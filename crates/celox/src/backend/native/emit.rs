@@ -212,20 +212,28 @@ fn emit_phi_moves_for_target(
 
     // Collect parallel copies: (dst_preg, src_preg)
     let mut copies: Vec<(PhysReg, PhysReg)> = Vec::new();
+    let mut spill_loads: Vec<(PhysReg, i32)> = Vec::new();
     for phi in &target_block.phis {
         for (source_pred, source_vreg) in &phi.sources {
             if *source_pred == pred_block_id {
-                let src_preg = resolve(assignment, *source_vreg);
+                if let Some(dst_slot) = assignment.edge_spill_slot(phi.dst) {
+                    emit_phi_edge_spill_store(asm, assignment, *source_vreg, dst_slot)?;
+                    continue;
+                }
                 let dst_preg = resolve(assignment, phi.dst);
-                if src_preg != dst_preg {
-                    copies.push((dst_preg, src_preg));
+                if let Some(src_preg) = assignment.get(*source_vreg) {
+                    if src_preg != dst_preg {
+                        copies.push((dst_preg, src_preg));
+                    }
+                } else if let Some(src_slot) = assignment.edge_spill_slot(*source_vreg) {
+                    spill_loads.push((dst_preg, src_slot));
+                } else {
+                    panic!(
+                        "phi source {source_vreg} has neither physical assignment nor edge spill slot"
+                    );
                 }
             }
         }
-    }
-
-    if copies.is_empty() {
-        return Ok(());
     }
 
     // Preserve true parallel-copy semantics even for cycles. Phi edges are
@@ -237,6 +245,43 @@ fn emit_phi_moves_for_target(
     for (dst, _) in copies.iter().rev() {
         asm.pop(preg_to_reg64(*dst))?;
     }
+    for (dst, src_slot) in spill_loads {
+        asm.mov(
+            preg_to_reg64(dst),
+            qword_ptr(mem_operand(BaseReg::StackFrame, src_slot)),
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_phi_edge_spill_store(
+    asm: &mut CodeAssembler,
+    assignment: &AssignmentMap,
+    source_vreg: VReg,
+    dst_slot: i32,
+) -> Result<(), IcedError> {
+    if let Some(src_preg) = assignment.get(source_vreg) {
+        asm.mov(
+            qword_ptr(mem_operand(BaseReg::StackFrame, dst_slot)),
+            preg_to_reg64(src_preg),
+        )?;
+        return Ok(());
+    }
+
+    let Some(src_slot) = assignment.edge_spill_slot(source_vreg) else {
+        panic!("phi source {source_vreg} has neither physical assignment nor edge spill slot");
+    };
+
+    asm.push(rax)?;
+    asm.mov(
+        rax,
+        qword_ptr(mem_operand(BaseReg::StackFrame, src_slot + 8)),
+    )?;
+    asm.mov(
+        qword_ptr(mem_operand(BaseReg::StackFrame, dst_slot + 8)),
+        rax,
+    )?;
+    asm.pop(rax)?;
     Ok(())
 }
 

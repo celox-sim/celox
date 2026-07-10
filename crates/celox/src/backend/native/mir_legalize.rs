@@ -11,7 +11,7 @@ fn eliminate_trivial_phis(func: &mut MFunction) {
 
     for block in &func.blocks {
         for phi in &block.phis {
-            if phi.sources.len() <= 1 {
+            if phi.sources.is_empty() {
                 continue;
             }
             let mut unique_src = None;
@@ -87,6 +87,37 @@ fn rewrite_uses(inst: &mut MInst, aliases: &HashMap<VReg, VReg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eliminates_single_source_phi() {
+        let mut vregs = VRegAllocator::new();
+        let src = vregs.alloc();
+        let dst = vregs.alloc();
+        let out = vregs.alloc();
+        let spill_descs = vec![
+            SpillDesc::transient(),
+            SpillDesc::transient(),
+            SpillDesc::transient(),
+        ];
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut block = MBlock::new(BlockId(0));
+        block.phis.push(PhiNode {
+            dst,
+            sources: vec![(BlockId(1), src)],
+        });
+        block.push(MInst::Mov { dst: out, src: dst });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        legalize(&mut func);
+
+        assert!(func.blocks[0].phis.is_empty());
+        assert!(matches!(
+            func.blocks[0].insts[0],
+            MInst::Mov { dst: d, src: s } if d == out && s == src
+        ));
+    }
 
     #[test]
     fn leaves_trivial_phi_cycles_intact() {

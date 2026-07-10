@@ -1322,8 +1322,8 @@ impl MFunction {
                     if !global_defs.contains(src) {
                         panic!(
                             "MIR verify: VReg v{} used in phi but never defined.\n  \
-                             block {bi}, phi dst=v{}",
-                            src.0, phi.dst.0
+                             block {bi} (bb{}), phi dst=v{}",
+                            src.0, block.id.0, phi.dst.0
                         );
                     }
                 }
@@ -1334,8 +1334,8 @@ impl MFunction {
                     if !global_defs.contains(u) {
                         panic!(
                             "MIR verify: VReg v{} used but never defined.\n  \
-                             block {bi}, inst {ii}: {inst}",
-                            u.0
+                             block {bi} (bb{}), inst {ii}: {inst}",
+                            u.0, block.id.0
                         );
                     }
                 }

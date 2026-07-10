@@ -40,15 +40,15 @@ fn verify_assignment(
     for (bi, block) in func.blocks.iter().enumerate() {
         for phi in &block.phis {
             assert!(
-                assignment.get(phi.dst).is_some(),
-                "regalloc verify: phi dst {} has no physical assignment at bb{}",
+                assignment.get(phi.dst).is_some() || assignment.edge_spill_slot(phi.dst).is_some(),
+                "regalloc verify: phi dst {} has neither physical assignment nor edge spill slot at bb{}",
                 phi.dst,
                 block.id
             );
             for (pred, src) in &phi.sources {
                 assert!(
-                    assignment.get(*src).is_some(),
-                    "regalloc verify: phi source {src} has no physical assignment at bb{} from bb{} to dst {}",
+                    assignment.get(*src).is_some() || assignment.edge_spill_slot(*src).is_some(),
+                    "regalloc verify: phi source {src} has neither physical assignment nor edge spill slot at bb{} from bb{} to dst {}",
                     block.id,
                     pred,
                     phi.dst

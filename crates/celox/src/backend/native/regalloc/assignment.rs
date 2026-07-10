@@ -153,6 +153,7 @@ pub fn block_clobber_points_for(
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: HashMap<VReg, PhysReg>,
+    pub edge_spill_slots: HashMap<VReg, i32>,
 }
 
 impl AssignmentMap {
@@ -162,6 +163,14 @@ impl AssignmentMap {
 
     pub fn set(&mut self, vreg: VReg, preg: PhysReg) {
         self.map.insert(vreg, preg);
+    }
+
+    pub fn edge_spill_slot(&self, vreg: VReg) -> Option<i32> {
+        self.edge_spill_slots.get(&vreg).copied()
+    }
+
+    pub fn set_edge_spill_slot(&mut self, vreg: VReg, offset: i32) {
+        self.edge_spill_slots.insert(vreg, offset);
     }
 
     /// Returns entries sorted by VReg for deterministic display.

@@ -34,6 +34,19 @@ impl RegMap {
     }
 }
 
+fn parse_trace_sir_regs() -> HashSet<RegisterId> {
+    std::env::var_os("CELOX_ISEL_TRACE_REGS")
+        .or_else(|| std::env::var_os("CELOX_ISEL_TRACE_REG"))
+        .map(|raw| {
+            raw.to_string_lossy()
+                .split(',')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .map(RegisterId)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Lower a single SIR execution unit to a MIR function.
 ///
 /// Only handles 2-state values ≤64 bits for now.
@@ -46,11 +59,15 @@ pub fn lower_execution_unit(
     let mut spill_descs: Vec<SpillDesc> = Vec::new();
     let max_sir_regs = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0) + 1;
     let mut reg_map = RegMap::new(max_sir_regs);
+    let trace_regs = parse_trace_sir_regs();
 
     // Pre-allocate a VReg for each SIR register
     for sir_reg_id in eu.register_map.keys() {
         let vreg = vregs.alloc();
         reg_map.set(*sir_reg_id, vreg);
+        if trace_regs.contains(sir_reg_id) {
+            eprintln!("[isel-trace] prealloc r{} -> {}", sir_reg_id.0, vreg);
+        }
         // Spill desc will be filled during instruction lowering.
         // For now, default to transient.
         spill_descs.push(SpillDesc::transient());
@@ -58,18 +75,7 @@ pub fn lower_execution_unit(
 
     let mut func = MFunction::new(vregs.clone(), spill_descs);
 
-    // Walk blocks in SIR order (entry first, then others).
-    // Collect block IDs in a deterministic order.
-    let entry_id = eu.entry_block_id;
-    let mut block_ids: Vec<crate::ir::BlockId> = Vec::new();
-    block_ids.push(entry_id);
-    let mut sorted_ids: Vec<_> = eu.blocks.keys().copied().collect();
-    sorted_ids.sort();
-    for bid in sorted_ids {
-        if bid != entry_id {
-            block_ids.push(bid);
-        }
-    }
+    let block_ids = ordered_sir_blocks(eu);
     let mut next_extra_block_id = block_ids.iter().map(|bid| bid.0).max().unwrap_or(0) + 1;
     let mut sir_exit_mir_blocks: std::collections::HashMap<crate::ir::BlockId, BlockId> =
         std::collections::HashMap::new();
@@ -99,6 +105,7 @@ pub fn lower_execution_unit(
         known_bits: crate::HashMap::default(),
         wide_masks: WideRegMap::default(),
         trigger_only_seen: HashSet::default(),
+        trace_regs,
     };
     let native_priority_encode = !four_state
         && std::env::var_os("CELOX_NATIVE_PRIORITY_ENCODE").is_none_or(|value| value != "0");
@@ -176,9 +183,33 @@ pub fn lower_execution_unit(
 
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            if let Some(dst) = sir_def_reg(inst)
+                && ctx.trace_regs.contains(&dst)
+            {
+                eprintln!(
+                    "[isel-trace] b{} inst {} lowering r{}: {}",
+                    sir_block.id.0, inst_idx, dst.0, inst
+                );
+            }
             if priority_plans.skip_indices.contains(&inst_idx) {
                 if let Some(plan) = priority_plans.roots.get(&inst_idx) {
+                    if ctx.trace_regs.contains(&plan.dst) {
+                        eprintln!(
+                            "[isel-trace] b{} inst {} priority-encode root r{} -> {}",
+                            sir_block.id.0,
+                            inst_idx,
+                            plan.dst.0,
+                            ctx.reg_map.get(plan.dst)
+                        );
+                    }
                     emit_priority_encode(&mut ctx, &mut mblock, plan);
+                } else if let Some(dst) = sir_def_reg(inst)
+                    && ctx.trace_regs.contains(&dst)
+                {
+                    eprintln!(
+                        "[isel-trace] b{} inst {} skipped r{} without root",
+                        sir_block.id.0, inst_idx, dst.0
+                    );
                 }
                 continue;
             }
@@ -265,6 +296,12 @@ pub fn lower_execution_unit(
                 if w <= 64 {
                     let vreg = ctx.reg_map.get(dr);
                     ctx.known_bits.insert(vreg, w);
+                    if ctx.trace_regs.contains(&dr) {
+                        eprintln!(
+                            "[isel-trace] b{} inst {} after r{} -> {} known_bits={}",
+                            sir_block.id.0, inst_idx, dr.0, vreg, w
+                        );
+                    }
                 }
             }
         }
@@ -467,6 +504,64 @@ pub fn lower_execution_unit(
     func
 }
 
+fn ordered_sir_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<crate::ir::BlockId> {
+    fn successors(term: &SIRTerminator) -> Vec<crate::ir::BlockId> {
+        match term {
+            SIRTerminator::Jump(target, _) => vec![*target],
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => vec![true_block.0, false_block.0],
+            SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+        }
+    }
+
+    fn visit_from(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        start: crate::ir::BlockId,
+        visited: &mut HashSet<crate::ir::BlockId>,
+        postorder: &mut Vec<crate::ir::BlockId>,
+    ) {
+        let mut stack = vec![(start, false)];
+        while let Some((block_id, expanded)) = stack.pop() {
+            if !eu.blocks.contains_key(&block_id) {
+                continue;
+            }
+            if expanded {
+                postorder.push(block_id);
+                continue;
+            }
+            if !visited.insert(block_id) {
+                continue;
+            }
+            stack.push((block_id, true));
+            let mut succs = successors(&eu.blocks[&block_id].terminator);
+            succs.reverse();
+            for succ in succs {
+                if !visited.contains(&succ) {
+                    stack.push((succ, false));
+                }
+            }
+        }
+    }
+
+    let mut visited = HashSet::default();
+    let mut postorder = Vec::new();
+    visit_from(eu, eu.entry_block_id, &mut visited, &mut postorder);
+
+    let mut sorted_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    sorted_ids.sort();
+    for block_id in sorted_ids {
+        if !visited.contains(&block_id) {
+            visit_from(eu, block_id, &mut visited, &mut postorder);
+        }
+    }
+
+    postorder.reverse();
+    postorder
+}
+
 /// Compute a bitmask of `width` bits (e.g., width=8 → 0xFF).
 /// Returns u64::MAX for width >= 64 to avoid shift overflow.
 #[inline]
@@ -516,6 +611,7 @@ struct ISelContext<'a> {
     /// rechecking the same physical byte for the same trigger id is redundant
     /// until a real Store/Commit may change memory.
     trigger_only_seen: HashSet<(i32, usize)>,
+    trace_regs: HashSet<RegisterId>,
 }
 
 impl<'a> ISelContext<'a> {
@@ -2401,6 +2497,43 @@ fn lower_instruction(
                         src: offset_vreg,
                         imm: 3,
                     });
+                    if *width_bits > 64 {
+                        let chunks = lower_dynamic_wide_load_chunks(
+                            ctx,
+                            block,
+                            base_off,
+                            byte_off,
+                            offset_vreg,
+                            *offset_reg,
+                            *width_bits,
+                        );
+                        ctx.set_wide_chunks(*dst, chunks);
+
+                        if ctx.is_4state_var(addr) {
+                            let mask_base_off = ctx.mask_byte_offset(addr, 0);
+                            let mask_chunks = lower_dynamic_wide_load_chunks(
+                                ctx,
+                                block,
+                                mask_base_off,
+                                byte_off,
+                                offset_vreg,
+                                *offset_reg,
+                                *width_bits,
+                            );
+                            if let Some(&(mask0, _)) = mask_chunks.first() {
+                                ctx.set_mask(*dst, mask0);
+                            }
+                            ctx.wide_masks.insert(*dst, mask_chunks);
+                        } else if ctx.four_state {
+                            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                            block.push(MInst::LoadImm {
+                                dst: zero,
+                                value: 0,
+                            });
+                            ctx.set_mask(*dst, zero);
+                        }
+                        return;
+                    }
                     if low_zero_bits_reg(ctx, *offset_reg) >= 3 {
                         let load_size = ISelContext::op_size_for_width(*width_bits);
                         let raw = ctx.alloc_vreg(SpillDesc::transient());
@@ -4553,7 +4686,7 @@ fn lower_instruction(
                     _bit_pos += chunk_width;
                 }
 
-                ctx.wide_regs.insert(*dst, dst_chunks);
+                ctx.set_wide_chunks(*dst, dst_chunks);
 
                 // 4-state: repack mask chunks the same way
                 if ctx.four_state {
@@ -6768,7 +6901,13 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
             true_block,
             false_block,
         } => {
-            let cond_vreg = ctx.reg_map.get(*cond);
+            let cond_vreg = lower_branch_condition(ctx, block, *cond);
+            if ctx.trace_regs.contains(cond) {
+                eprintln!(
+                    "[isel-trace] terminator branch cond r{} -> {}",
+                    cond.0, cond_vreg
+                );
+            }
             block.push(MInst::Branch {
                 cond: cond_vreg,
                 true_bb: BlockId(true_block.0.0 as u32),
@@ -6782,6 +6921,179 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
             block.push(MInst::ReturnError { code: *code });
         }
     }
+}
+
+fn lower_branch_condition(ctx: &mut ISelContext, block: &mut MBlock, cond: RegisterId) -> VReg {
+    let Some(chunks) = ctx.wide_regs.get(&cond).cloned() else {
+        return ctx.reg_map.get(cond);
+    };
+
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
+    });
+
+    let mut any_set: Option<VReg> = None;
+    for (chunk, width) in chunks {
+        let value = if width < 64 {
+            let masked = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, masked, chunk, mask_for_width(width));
+            masked
+        } else {
+            chunk
+        };
+        let nonzero = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Cmp {
+            dst: nonzero,
+            lhs: value,
+            rhs: zero,
+            kind: CmpKind::Ne,
+        });
+        ctx.known_bits.insert(nonzero, 1);
+
+        any_set = Some(match any_set {
+            Some(prev) => {
+                let merged = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or {
+                    dst: merged,
+                    lhs: prev,
+                    rhs: nonzero,
+                });
+                ctx.known_bits.insert(merged, 1);
+                merged
+            }
+            None => nonzero,
+        });
+    }
+
+    any_set.unwrap_or(zero)
+}
+
+fn lower_dynamic_wide_load_chunks(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    base_off: i32,
+    byte_off: VReg,
+    offset_vreg: VReg,
+    offset_reg: RegisterId,
+    width_bits: usize,
+) -> Vec<(VReg, usize)> {
+    let n_chunks = ISelContext::num_chunks(width_bits);
+    let mut chunks = Vec::with_capacity(n_chunks);
+
+    if low_zero_bits_reg(ctx, offset_reg) >= 3 {
+        let mut remaining = width_bits;
+        let mut bit_pos = 0usize;
+        while remaining > 0 {
+            let chunk_bits = remaining.min(64);
+            let chunk = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::LoadIndexed {
+                dst: chunk,
+                base: BaseReg::SimState,
+                offset: base_off + (bit_pos / 8) as i32,
+                index: byte_off,
+                size: ISelContext::op_size_for_width(chunk_bits),
+            });
+            chunks.push((chunk, chunk_bits));
+            bit_pos += chunk_bits;
+            remaining -= chunk_bits;
+        }
+        return chunks;
+    }
+
+    let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
+    ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
+
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
+    });
+    let sixty_four = ctx.alloc_vreg(SpillDesc::remat(64));
+    block.push(MInst::LoadImm {
+        dst: sixty_four,
+        value: 64,
+    });
+    let inv_shift = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Sub {
+        dst: inv_shift,
+        lhs: sixty_four,
+        rhs: bit_shift,
+    });
+    let inv_shift_mod = ctx.alloc_vreg(SpillDesc::transient());
+    ctx.emit_and_imm(block, inv_shift_mod, inv_shift, 63);
+    let has_shift = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Cmp {
+        dst: has_shift,
+        lhs: bit_shift,
+        rhs: zero,
+        kind: CmpKind::Ne,
+    });
+    ctx.known_bits.insert(has_shift, 1);
+
+    let mut remaining = width_bits;
+    let mut bit_pos = 0usize;
+    while remaining > 0 {
+        let chunk_bits = remaining.min(64);
+        let byte_delta = (bit_pos / 8) as i32;
+        let lo = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: lo,
+            base: BaseReg::SimState,
+            offset: base_off + byte_delta,
+            index: byte_off,
+            size: OpSize::S64,
+        });
+        let lo_shifted = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Shr {
+            dst: lo_shifted,
+            lhs: lo,
+            rhs: bit_shift,
+        });
+
+        let hi = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: hi,
+            base: BaseReg::SimState,
+            offset: base_off + byte_delta + 8,
+            index: byte_off,
+            size: OpSize::S8,
+        });
+        let hi_shifted_raw = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Shl {
+            dst: hi_shifted_raw,
+            lhs: hi,
+            rhs: inv_shift_mod,
+        });
+        let hi_shifted = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Select {
+            dst: hi_shifted,
+            cond: has_shift,
+            true_val: hi_shifted_raw,
+            false_val: zero,
+        });
+
+        let combined = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or {
+            dst: combined,
+            lhs: lo_shifted,
+            rhs: hi_shifted,
+        });
+        let chunk = if chunk_bits < 64 {
+            let masked = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, masked, combined, mask_for_width(chunk_bits));
+            masked
+        } else {
+            combined
+        };
+        chunks.push((chunk, chunk_bits));
+
+        bit_pos += chunk_bits;
+        remaining -= chunk_bits;
+    }
+
+    chunks
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -7424,12 +7736,7 @@ fn normalize_wide_value(ctx: &mut ISelContext, block: &mut MBlock, dst: Register
                 new_chunks.push((vc, width));
             }
         }
-        // Update reg_map scalar slot to point to normalized chunk 0,
-        // so narrow readers (e.g. Store) see the normalized value.
-        if let Some(&(normed_c0, _)) = new_chunks.first() {
-            ctx.reg_map.set(dst, normed_c0);
-        }
-        ctx.wide_regs.insert(dst, new_chunks);
+        ctx.set_wide_chunks(dst, new_chunks);
     }
 }
 

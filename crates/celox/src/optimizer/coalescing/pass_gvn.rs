@@ -8,7 +8,7 @@
 //! requires dominator tree analysis, which can be added later.
 
 use super::pass_manager::ExecutionUnitPass;
-use super::shared::{collect_all_used_registers, def_reg, resolve_transitive_aliases};
+use super::shared::def_reg;
 use crate::HashMap;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
@@ -21,8 +21,6 @@ impl ExecutionUnitPass for GvnPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        let mut aliases: HashMap<RegisterId, RegisterId> = HashMap::default();
-
         // Identify blocks that are part of loops (have back edges).
         // A block is a loop target if any Jump/Branch from a later block targets it.
         let block_ids: Vec<BlockId> = eu.blocks.keys().copied().collect();
@@ -54,70 +52,267 @@ impl ExecutionUnitPass for GvnPass {
             }
         }
 
-        let register_map = &eu.register_map;
-        for block in eu.blocks.values_mut() {
-            // Skip loop blocks — expressions may evaluate differently across iterations
-            if loop_blocks.contains(&block.id) {
+        let cfg = GvnCfg::new(eu);
+        let register_map = eu.register_map.clone();
+        let mut value_table: HashMap<ValueKey, RegisterId> = HashMap::default();
+        let mut canonical: HashMap<RegisterId, RegisterId> = HashMap::default();
+        let mut loop_dependent: crate::HashSet<RegisterId> = crate::HashSet::default();
+        let mut imm_constants: HashMap<RegisterId, u64> = HashMap::default();
+        let mut changed = false;
+
+        for &root in &cfg.roots {
+            gvn_dom_dfs(
+                root,
+                eu,
+                &cfg,
+                &register_map,
+                &loop_blocks,
+                &mut value_table,
+                &mut canonical,
+                &mut loop_dependent,
+                &mut imm_constants,
+                &mut changed,
+            );
+        }
+
+        let _ = changed;
+    }
+}
+
+struct GvnCfg {
+    block_ids: Vec<BlockId>,
+    dom_children: Vec<Vec<usize>>,
+    roots: Vec<usize>,
+}
+
+impl GvnCfg {
+    fn new(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Self {
+        let block_ids = rpo_blocks(eu);
+        let index: HashMap<BlockId, usize> = block_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, block)| (block, idx))
+            .collect();
+        let mut preds = vec![Vec::new(); block_ids.len()];
+        for (idx, block_id) in block_ids.iter().copied().enumerate() {
+            let Some(block) = eu.blocks.get(&block_id) else {
+                continue;
+            };
+            for succ in terminator_successors(&block.terminator) {
+                if let Some(&succ_idx) = index.get(&succ) {
+                    preds[succ_idx].push(idx);
+                }
+            }
+        }
+
+        let mut idom: Vec<Option<usize>> = vec![None; block_ids.len()];
+        let roots = block_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(idx, block)| {
+                (block == eu.entry_block_id || preds[idx].is_empty()).then_some(idx)
+            })
+            .collect::<Vec<_>>();
+        for &root in &roots {
+            idom[root] = Some(root);
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for idx in 0..block_ids.len() {
+                if roots.contains(&idx) {
+                    continue;
+                }
+                let mut defined_preds = preds[idx]
+                    .iter()
+                    .copied()
+                    .filter(|pred| idom[*pred].is_some());
+                let Some(mut new_idom) = defined_preds.next() else {
+                    continue;
+                };
+                for pred in defined_preds {
+                    new_idom = intersect_idom(pred, new_idom, &idom);
+                }
+                if idom[idx] != Some(new_idom) {
+                    idom[idx] = Some(new_idom);
+                    changed = true;
+                }
+            }
+        }
+
+        let mut dom_children = vec![Vec::new(); block_ids.len()];
+        for (idx, parent) in idom.iter().copied().enumerate() {
+            if let Some(parent) = parent
+                && parent != idx
+            {
+                dom_children[parent].push(idx);
+            }
+        }
+        for children in &mut dom_children {
+            children.sort_unstable();
+        }
+
+        Self {
+            block_ids,
+            dom_children,
+            roots,
+        }
+    }
+}
+
+fn intersect_idom(mut a: usize, mut b: usize, idom: &[Option<usize>]) -> usize {
+    while a != b {
+        while a > b {
+            a = idom[a].expect("idom must be known for intersect");
+        }
+        while b > a {
+            b = idom[b].expect("idom must be known for intersect");
+        }
+    }
+    a
+}
+
+fn rpo_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<BlockId> {
+    fn visit(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        start: BlockId,
+        seen: &mut crate::HashSet<BlockId>,
+        out: &mut Vec<BlockId>,
+    ) {
+        let mut stack = vec![(start, false)];
+        while let Some((block_id, expanded)) = stack.pop() {
+            if !eu.blocks.contains_key(&block_id) {
                 continue;
             }
-            gvn_block(&mut block.instructions, &mut aliases, register_map, &[]);
+            if expanded {
+                out.push(block_id);
+                continue;
+            }
+            if !seen.insert(block_id) {
+                continue;
+            }
+            stack.push((block_id, true));
+            let mut succs = terminator_successors(&eu.blocks[&block_id].terminator);
+            succs.sort_unstable();
+            succs.reverse();
+            for succ in succs {
+                if !seen.contains(&succ) {
+                    stack.push((succ, false));
+                }
+            }
         }
+    }
 
-        if aliases.is_empty() {
-            return;
+    let mut seen = crate::HashSet::default();
+    let mut postorder = Vec::new();
+    visit(eu, eu.entry_block_id, &mut seen, &mut postorder);
+    let mut rest = eu.blocks.keys().copied().collect::<Vec<_>>();
+    rest.sort_unstable();
+    for block_id in rest {
+        if !seen.contains(&block_id) {
+            visit(eu, block_id, &mut seen, &mut postorder);
         }
+    }
+    postorder.reverse();
+    postorder
+}
 
-        // Resolve transitive aliases (A→B, B→C → A→C)
-        let aliases = resolve_transitive_aliases(&aliases);
+fn terminator_successors(term: &SIRTerminator) -> Vec<BlockId> {
+    match term {
+        SIRTerminator::Jump(target, _) => vec![*target],
+        SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => vec![true_block.0, false_block.0],
+        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+    }
+}
 
-        // Apply aliases to all instructions, block params, and terminators
-        for block in eu.blocks.values_mut() {
+#[allow(clippy::too_many_arguments)]
+fn gvn_dom_dfs(
+    node: usize,
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &GvnCfg,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    loop_blocks: &crate::HashSet<BlockId>,
+    value_table: &mut HashMap<ValueKey, RegisterId>,
+    canonical: &mut HashMap<RegisterId, RegisterId>,
+    loop_dependent: &mut crate::HashSet<RegisterId>,
+    imm_constants: &mut HashMap<RegisterId, u64>,
+    changed: &mut bool,
+) {
+    let block_id = cfg.block_ids[node];
+    let mut added_values = Vec::new();
+    let mut canonical_changes = Vec::new();
+    let mut added_loop_deps = Vec::new();
+    let mut imm_changes = Vec::new();
+
+    if let Some(block) = eu.blocks.get_mut(&block_id) {
+        let mut aliases: HashMap<RegisterId, RegisterId> = HashMap::default();
+        if !loop_blocks.contains(&block_id) {
+            gvn_block(
+                &mut block.instructions,
+                &mut aliases,
+                register_map,
+                &block.params,
+                value_table,
+                canonical,
+                loop_dependent,
+                imm_constants,
+                &mut added_values,
+                &mut canonical_changes,
+                &mut added_loop_deps,
+                &mut imm_changes,
+            );
+            if !aliases.is_empty() {
+                *changed = true;
+            }
+        }
+        if !canonical.is_empty() {
             for inst in &mut block.instructions {
-                apply_aliases(inst, &aliases);
+                apply_aliases(inst, canonical);
             }
-            match &mut block.terminator {
-                SIRTerminator::Branch {
-                    cond,
-                    true_block,
-                    false_block,
-                } => {
-                    if let Some(&a) = aliases.get(cond) {
-                        *cond = a;
-                    }
-                    for arg in &mut true_block.1 {
-                        if let Some(&a) = aliases.get(arg) {
-                            *arg = a;
-                        }
-                    }
-                    for arg in &mut false_block.1 {
-                        if let Some(&a) = aliases.get(arg) {
-                            *arg = a;
-                        }
-                    }
-                }
-                SIRTerminator::Jump(_, args) => {
-                    for arg in args {
-                        if let Some(&a) = aliases.get(arg) {
-                            *arg = a;
-                        }
-                    }
-                }
-                _ => {}
-            }
+            apply_aliases_to_terminator(&mut block.terminator, canonical);
         }
+    }
 
-        // DCE: remove instructions whose defs are no longer used
-        let used = collect_all_used_registers(eu);
-        for block in eu.blocks.values_mut() {
-            block.instructions.retain(|inst| {
-                if let Some(d) = def_reg(inst) {
-                    // Keep if the register is used, or if the instruction has side effects
-                    used.contains(&d)
-                        || matches!(inst, SIRInstruction::Store(..) | SIRInstruction::Commit(..))
-                } else {
-                    true // Keep side-effecting instructions (Store, Commit)
-                }
-            });
+    for &child in &cfg.dom_children[node] {
+        gvn_dom_dfs(
+            child,
+            eu,
+            cfg,
+            register_map,
+            loop_blocks,
+            value_table,
+            canonical,
+            loop_dependent,
+            imm_constants,
+            changed,
+        );
+    }
+
+    for key in added_values.into_iter().rev() {
+        value_table.remove(&key);
+    }
+    for (reg, old) in canonical_changes.into_iter().rev() {
+        if let Some(old) = old {
+            canonical.insert(reg, old);
+        } else {
+            canonical.remove(&reg);
+        }
+    }
+    for reg in added_loop_deps.into_iter().rev() {
+        loop_dependent.remove(&reg);
+    }
+    for (reg, old) in imm_changes.into_iter().rev() {
+        if let Some(old) = old {
+            imm_constants.insert(reg, old);
+        } else {
+            imm_constants.remove(&reg);
         }
     }
 }
@@ -145,16 +340,20 @@ fn gvn_block(
     aliases: &mut HashMap<RegisterId, RegisterId>,
     register_map: &HashMap<RegisterId, RegisterType>,
     block_params: &[RegisterId],
+    value_table: &mut HashMap<ValueKey, RegisterId>,
+    canonical: &mut HashMap<RegisterId, RegisterId>,
+    loop_dependent: &mut crate::HashSet<RegisterId>,
+    imm_constants: &mut HashMap<RegisterId, u64>,
+    added_values: &mut Vec<ValueKey>,
+    canonical_changes: &mut Vec<(RegisterId, Option<RegisterId>)>,
+    added_loop_deps: &mut Vec<RegisterId>,
+    imm_changes: &mut Vec<(RegisterId, Option<u64>)>,
 ) {
-    // Map from ValueKey → canonical RegisterId (first occurrence)
-    let mut value_table: HashMap<ValueKey, RegisterId> = HashMap::default();
-    // Map from RegisterId → canonical RegisterId (for looking up operands)
-    let mut canonical: HashMap<RegisterId, RegisterId> = HashMap::default();
-    // Registers that transitively depend on block params (loop variables).
-    // Expressions depending on these must not be GVN'd.
-    let mut loop_dependent: crate::HashSet<RegisterId> = block_params.iter().copied().collect();
-    // Track known constant values for Mux constant folding
-    let mut imm_constants: HashMap<RegisterId, u64> = HashMap::default();
+    for &param in block_params {
+        if loop_dependent.insert(param) {
+            added_loop_deps.push(param);
+        }
+    }
 
     let resolve = |r: RegisterId, canonical: &HashMap<RegisterId, RegisterId>| -> RegisterId {
         canonical.get(&r).copied().unwrap_or(r)
@@ -165,6 +364,7 @@ fn gvn_block(
             SIRInstruction::Imm(dst, val) => {
                 // Track constant for Mux folding
                 if let Some(v) = crate::optimizer::coalescing::shared::sir_value_to_u64(val) {
+                    imm_changes.push((*dst, imm_constants.get(dst).copied()));
                     imm_constants.insert(*dst, v);
                 }
                 // Include mask in key for 4-state correctness:
@@ -208,7 +408,7 @@ fn gvn_block(
                 if let Some(cond_val) = imm_constants.get(&c) {
                     let selected = if *cond_val != 0 { t } else { e };
                     aliases.insert(*dst, selected);
-                    canonical.insert(*dst, selected);
+                    set_canonical(canonical, canonical_changes, *dst, selected);
                     continue;
                 }
                 let w = register_map.get(dst).map(|t| t.width()).unwrap_or(0);
@@ -235,40 +435,88 @@ fn gvn_block(
             // Check if any operand depends on a loop variable
             let uses_loop_var = match inst {
                 SIRInstruction::Binary(_, lhs, _, rhs) => {
-                    loop_dependent.contains(&resolve(*lhs, &canonical))
-                        || loop_dependent.contains(&resolve(*rhs, &canonical))
+                    loop_dependent.contains(&resolve(*lhs, canonical))
+                        || loop_dependent.contains(&resolve(*rhs, canonical))
                 }
                 SIRInstruction::Unary(_, _, src) => {
-                    loop_dependent.contains(&resolve(*src, &canonical))
+                    loop_dependent.contains(&resolve(*src, canonical))
                 }
                 SIRInstruction::Concat(_, args) => args
                     .iter()
-                    .any(|a| loop_dependent.contains(&resolve(*a, &canonical))),
+                    .any(|a| loop_dependent.contains(&resolve(*a, canonical))),
                 SIRInstruction::Slice(_, src, _, _) => {
-                    loop_dependent.contains(&resolve(*src, &canonical))
+                    loop_dependent.contains(&resolve(*src, canonical))
                 }
                 SIRInstruction::Mux(_, cond, then_val, else_val) => {
-                    loop_dependent.contains(&resolve(*cond, &canonical))
-                        || loop_dependent.contains(&resolve(*then_val, &canonical))
-                        || loop_dependent.contains(&resolve(*else_val, &canonical))
+                    loop_dependent.contains(&resolve(*cond, canonical))
+                        || loop_dependent.contains(&resolve(*then_val, canonical))
+                        || loop_dependent.contains(&resolve(*else_val, canonical))
                 }
                 _ => false,
             };
 
             if uses_loop_var {
                 // Mark result as loop-dependent; don't GVN
-                loop_dependent.insert(dst);
-                canonical.insert(dst, dst);
+                if loop_dependent.insert(dst) {
+                    added_loop_deps.push(dst);
+                }
+                set_canonical(canonical, canonical_changes, dst, dst);
             } else if let Some(&existing) = value_table.get(&key) {
                 // Redundant: alias dst to existing
                 aliases.insert(dst, existing);
-                canonical.insert(dst, existing);
+                set_canonical(canonical, canonical_changes, dst, existing);
             } else {
                 // First occurrence: record as canonical
-                value_table.insert(key, dst);
-                canonical.insert(dst, dst);
+                value_table.insert(key.clone(), dst);
+                added_values.push(key);
+                set_canonical(canonical, canonical_changes, dst, dst);
             }
         }
+    }
+}
+
+fn set_canonical(
+    canonical: &mut HashMap<RegisterId, RegisterId>,
+    changes: &mut Vec<(RegisterId, Option<RegisterId>)>,
+    reg: RegisterId,
+    value: RegisterId,
+) {
+    changes.push((reg, canonical.get(&reg).copied()));
+    canonical.insert(reg, value);
+}
+
+fn apply_aliases_to_terminator(
+    term: &mut SIRTerminator,
+    aliases: &HashMap<RegisterId, RegisterId>,
+) {
+    match term {
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            if let Some(&a) = aliases.get(cond) {
+                *cond = a;
+            }
+            for arg in &mut true_block.1 {
+                if let Some(&a) = aliases.get(arg) {
+                    *arg = a;
+                }
+            }
+            for arg in &mut false_block.1 {
+                if let Some(&a) = aliases.get(arg) {
+                    *arg = a;
+                }
+            }
+        }
+        SIRTerminator::Jump(_, args) => {
+            for arg in args {
+                if let Some(&a) = aliases.get(arg) {
+                    *arg = a;
+                }
+            }
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
 
