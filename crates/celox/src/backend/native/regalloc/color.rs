@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, VReg};
+use crate::backend::native::mir::{BlockId, MFunction, MInst, VReg};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{
@@ -271,6 +271,7 @@ pub(super) fn color_ssa(
                     registers,
                     &required,
                     &forbidden,
+                    [None, None],
                     &preferences,
                     &colors,
                     &active,
@@ -348,6 +349,7 @@ pub(super) fn color_ssa(
                     registers,
                     &required,
                     &forbidden,
+                    definition_preferences(inst),
                     &preferences,
                     &colors,
                     &active,
@@ -511,6 +513,57 @@ fn phi_preferences(func: &MFunction) -> HashMap<VReg, Vec<VReg>> {
     preferences
 }
 
+/// x86 two-address affinity for a definition whose operand dies at the same
+/// instruction.  These are preferences only: `choose_color` still requires
+/// the color to satisfy every interference, fixed-register, and clobber rule.
+fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
+    match inst {
+        MInst::Mov { src, .. }
+        | MInst::AndImm { src, .. }
+        | MInst::OrImm { src, .. }
+        | MInst::ShrImm { src, .. }
+        | MInst::ShlImm { src, .. }
+        | MInst::SarImm { src, .. }
+        | MInst::AddImm { src, .. }
+        | MInst::SubImm { src, .. }
+        | MInst::BitNot { src, .. }
+        | MInst::Neg { src, .. }
+        | MInst::Popcnt { src, .. }
+        | MInst::Bsr { src, .. }
+        | MInst::BsrOr { src, .. } => [Some(*src), None],
+        MInst::Add { lhs, rhs, .. }
+        | MInst::Mul { lhs, rhs, .. }
+        | MInst::And { lhs, rhs, .. }
+        | MInst::Or { lhs, rhs, .. }
+        | MInst::Xor { lhs, rhs, .. } => [Some(*lhs), Some(*rhs)],
+        MInst::Sub { lhs, .. }
+        | MInst::Shr { lhs, .. }
+        | MInst::Shl { lhs, .. }
+        | MInst::Sar { lhs, .. } => [Some(*lhs), None],
+        MInst::Select {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpSelect {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpImmSelect {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::GuardedCmpSelect {
+            true_val,
+            false_val,
+            ..
+        } => [Some(*false_val), Some(*true_val)],
+        _ => [None, None],
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn choose_color(
     block: BlockId,
@@ -519,6 +572,7 @@ fn choose_color(
     registers: &[PhysReg],
     required: &[Option<PhysReg>],
     forbidden: &[ColorMask],
+    instruction_preferences: [Option<VReg>; 2],
     preferences: &HashMap<VReg, Vec<VReg>>,
     colors: &[Option<PhysReg>],
     active: &ActiveColors,
@@ -549,12 +603,21 @@ fn choose_color(
         if available(required) {
             return Ok(required);
         }
-    } else if let Some(preferences) = preferences.get(&value) {
-        for &preference in preferences {
+    } else {
+        for preference in instruction_preferences.into_iter().flatten() {
             if let Some(register) = color_of(colors, preference)
                 && available(register)
             {
                 return Ok(register);
+            }
+        }
+        if let Some(preferences) = preferences.get(&value) {
+            for &preference in preferences {
+                if let Some(register) = color_of(colors, preference)
+                    && available(register)
+                {
+                    return Ok(register);
+                }
             }
         }
     }
@@ -782,6 +845,32 @@ mod tests {
         assert_eq!(colored.assignment.get(sum), colored.assignment.get(left));
         assert_ne!(colored.assignment.get(sum), colored.assignment.get(later));
         assert_eq!(colored.assignment.get(result), colored.assignment.get(sum));
+    }
+
+    #[test]
+    fn instruction_affinity_beats_the_first_free_color() {
+        let source = VReg(0);
+        let destination = VReg(1);
+        let required = vec![None; 2];
+        let forbidden = vec![ColorMask::empty(); 2];
+        let preferences = HashMap::new();
+        let colors = vec![Some(PhysReg::R14), None];
+
+        let color = choose_color(
+            BlockId(0),
+            Some(0),
+            destination,
+            &ALLOCATABLE_REGS,
+            &required,
+            &forbidden,
+            [Some(source), None],
+            &preferences,
+            &colors,
+            &ActiveColors::default(),
+        )
+        .unwrap();
+
+        assert_eq!(color, PhysReg::R14);
     }
 
     #[test]

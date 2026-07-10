@@ -4,6 +4,7 @@ use crate::ir::{
 };
 use crate::logic_tree::{NodeId, SLTLoopBound, SLTNode, SLTNodeArena, comb::SLTStepOp};
 use num_bigint::BigUint;
+use std::cell::RefCell;
 use std::hash::Hash;
 
 /// Try to evaluate an SLT node as a compile-time constant.
@@ -69,15 +70,118 @@ fn try_const_eval<A: Hash + Eq + Clone>(
     }
 }
 
-pub struct SLTToSIRLowerer;
+#[derive(Default)]
+struct LoweringCostCache {
+    tree_costs: Vec<Option<u128>>,
+    contains_div_rem: Vec<Option<bool>>,
+    fanout: Vec<usize>,
+    initially_materialized: Vec<bool>,
+    owned_costs: Vec<Option<u128>>,
+    owned_slice_lower_costs: Vec<Option<u128>>,
+    contains_shared_nontrivial: Vec<Option<bool>>,
+    is_speculatable_pure: Vec<Option<bool>>,
+    #[cfg(test)]
+    analysis_node_visits: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StaticBranchProbability {
+    true_weight: u128,
+    total_weight: u128,
+}
+
+impl StaticBranchProbability {
+    const EVEN: Self = Self {
+        true_weight: 1,
+        total_weight: 2,
+    };
+
+    fn inverted(self) -> Self {
+        Self {
+            true_weight: self.total_weight - self.true_weight,
+            total_weight: self.total_weight,
+        }
+    }
+}
+
+struct MuxCfgPlan {
+    /// Nodes used by both arms which were not already materialized.  They must
+    /// be evaluated once in the dominator before the control-flow split.
+    shared_nodes: Vec<NodeId>,
+}
+
+#[derive(Default)]
+struct MuxLowerStats {
+    normal_seen: usize,
+    slice_seen: usize,
+    constant_folded: usize,
+    cfg_cost: usize,
+    cfg_div_rem: usize,
+    cfg_slice_cost: usize,
+    cfg_slice_div_rem: usize,
+    shared_nodes_hoisted: usize,
+    kept_four_state: usize,
+    kept_impure: usize,
+    kept_dynamic_env: usize,
+    kept_unprofitable: usize,
+    kept_deep_shared: usize,
+    biased_conditions: usize,
+    owned_cost_sum: u128,
+    owned_cost_max: u128,
+    unprofitable_cost_buckets: [usize; 7],
+}
+
+impl MuxLowerStats {
+    fn record_cost(&mut self, then_cost: u128, else_cost: u128) {
+        let total = then_cost.saturating_add(else_cost);
+        self.owned_cost_sum = self.owned_cost_sum.saturating_add(total);
+        self.owned_cost_max = self.owned_cost_max.max(total);
+    }
+
+    fn record_unprofitable(&mut self, then_cost: u128, else_cost: u128) {
+        self.kept_unprofitable += 1;
+        let total = then_cost.saturating_add(else_cost);
+        let bucket = match total {
+            0..=7 => 0,
+            8..=15 => 1,
+            16..=31 => 2,
+            32..=63 => 3,
+            64..=127 => 4,
+            128..=255 => 5,
+            _ => 6,
+        };
+        self.unprofitable_cost_buckets[bucket] += 1;
+    }
+}
+
+pub struct SLTToSIRLowerer {
+    four_state: bool,
+    cost_cache: RefCell<LoweringCostCache>,
+    cache_insert_log: RefCell<Vec<NodeId>>,
+    mux_stats: Option<RefCell<MuxLowerStats>>,
+}
 
 struct LowerEnv<A: Hash + Eq + Clone> {
     inputs: crate::HashMap<VarAtomBase<A>, RegisterId>,
 }
 
 impl SLTToSIRLowerer {
-    pub fn new(_four_state: bool) -> Self {
-        Self
+    pub fn new(four_state: bool) -> Self {
+        Self {
+            four_state,
+            cost_cache: RefCell::new(LoweringCostCache::default()),
+            cache_insert_log: RefCell::new(Vec::new()),
+            mux_stats: std::env::var_os("CELOX_MUX_LOWER_STATS")
+                .is_some()
+                .then(|| RefCell::new(MuxLowerStats::default())),
+        }
+    }
+
+    #[inline(always)]
+    fn with_mux_stats(&self, update: impl FnOnce(&mut MuxLowerStats)) {
+        if let Some(stats) = &self.mux_stats {
+            update(&mut stats.borrow_mut());
+        }
     }
 
     /// Recursively expand SLT nodes into SIR instructions
@@ -88,6 +192,7 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
     ) -> RegisterId {
+        self.reset_cost_cache(node, arena, cache, true);
         self.lower_inner(builder, node, arena, cache, None, true)
     }
 
@@ -99,6 +204,7 @@ impl SLTToSIRLowerer {
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         inputs: crate::HashMap<VarAtomBase<A>, RegisterId>,
     ) -> RegisterId {
+        self.reset_cost_cache(node, arena, cache, false);
         let env = LowerEnv { inputs };
         self.lower_inner(builder, node, arena, cache, Some(&env), false)
     }
@@ -111,6 +217,7 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
     ) -> RegisterId {
+        self.reset_cost_cache(node, arena, cache, true);
         let node_width = self.get_width(node, arena);
         if access.lsb == 0 && access.msb + 1 == node_width {
             return self.lower(builder, node, arena, cache);
@@ -229,7 +336,9 @@ impl SLTToSIRLowerer {
         };
 
         if allow_cache {
-            cache.insert(node, reg);
+            let previous = cache.insert(node, reg);
+            debug_assert!(previous.is_none());
+            self.cache_insert_log.borrow_mut().push(node);
         }
         reg
     }
@@ -636,6 +745,13 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
     ) -> RegisterId {
+        if let Some(&full_value) = cache.get(&expr) {
+            if access.lsb == 0 && access.msb + 1 == self.get_width(expr, arena) {
+                return full_value;
+            }
+            return self.slice_reg(builder, full_value, access);
+        }
+
         match arena.get(expr) {
             SLTNode::Input {
                 variable,
@@ -680,19 +796,12 @@ impl SLTToSIRLowerer {
                 cond,
                 then_expr,
                 else_expr,
-            } if !Self::is_div_rem_value(*then_expr, arena)
-                && !Self::is_div_rem_value(*else_expr, arena)
-                && access.msb < self.get_width(*then_expr, arena)
+            } if access.msb < self.get_width(*then_expr, arena)
                 && access.msb < self.get_width(*else_expr, arena) =>
             {
-                let cond_reg = self.lower_inner(builder, *cond, arena, cache, None, true);
-                let then_val =
-                    self.lower_region_slice_inner(builder, *then_expr, access, arena, cache);
-                let else_val =
-                    self.lower_region_slice_inner(builder, *else_expr, access, arena, cache);
-                let result = builder.alloc_logic(access.msb - access.lsb + 1);
-                builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
-                result
+                self.lower_region_slice_mux_inner(
+                    builder, *cond, *then_expr, *else_expr, access, arena, cache,
+                )
             }
             _ => self.lower_slice_inner(builder, expr, access, arena, cache, None, true),
         }
@@ -767,23 +876,697 @@ impl SLTToSIRLowerer {
         Some(reg)
     }
 
-    fn is_div_rem_value<A: Hash + Eq + Clone + std::fmt::Debug>(
-        node: NodeId,
+    fn reset_cost_cache<A: Hash + Eq + Clone>(
+        &self,
+        root: NodeId,
         arena: &SLTNodeArena<A>,
-    ) -> bool {
-        match arena.get(node) {
-            SLTNode::Binary(_, BinaryOp::Div | BinaryOp::Rem, _) => true,
-            SLTNode::Unary(UnaryOp::Ident, inner) => Self::is_div_rem_value(*inner, arena),
-            SLTNode::Slice { expr, .. } => Self::is_div_rem_value(*expr, arena),
-            _ => false,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+        honor_materialized: bool,
+    ) {
+        let node_count = arena.nodes.len();
+        let mut fanout = vec![0usize; node_count];
+        let mut initially_materialized = vec![false; node_count];
+        let mut visited = crate::HashSet::default();
+        let mut work = vec![root];
+        while let Some(node) = work.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            if honor_materialized && materialized.contains_key(&node) {
+                initially_materialized[node.0] = true;
+                continue;
+            }
+            for child in Self::node_children(node, arena) {
+                fanout[child.0] = fanout[child.0].saturating_add(1);
+                work.push(child);
+            }
+        }
+        *self.cost_cache.borrow_mut() = LoweringCostCache {
+            tree_costs: vec![None; node_count],
+            contains_div_rem: vec![None; node_count],
+            fanout,
+            initially_materialized,
+            owned_costs: vec![None; node_count],
+            owned_slice_lower_costs: vec![None; node_count],
+            contains_shared_nontrivial: vec![None; node_count],
+            is_speculatable_pure: vec![None; node_count],
+            #[cfg(test)]
+            analysis_node_visits: visited.len(),
+        };
+        self.cache_insert_log.borrow_mut().clear();
+    }
+
+    fn cache_transaction(&self) -> usize {
+        self.cache_insert_log.borrow().len()
+    }
+
+    #[cfg(test)]
+    fn note_analysis_visits(&self, visits: usize) {
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.analysis_node_visits = cache.analysis_node_visits.saturating_add(visits);
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn note_analysis_visits(&self, _visits: usize) {}
+
+    #[cfg(test)]
+    fn analysis_node_visits(&self) -> usize {
+        self.cost_cache.borrow().analysis_node_visits
+    }
+
+    fn rollback_cache(&self, cache: &mut crate::HashMap<NodeId, RegisterId>, transaction: usize) {
+        let mut log = self.cache_insert_log.borrow_mut();
+        for node in log.drain(transaction..) {
+            cache.remove(&node);
         }
     }
 
-    /// Select-based mux lowering for pure expressions.
+    fn prepare_cost_cache<A: Hash + Eq + Clone>(&self, arena: &SLTNodeArena<A>) {
+        let mut cache = self.cost_cache.borrow_mut();
+        if cache.tree_costs.len() < arena.nodes.len() {
+            cache.tree_costs.resize(arena.nodes.len(), None);
+            cache.contains_div_rem.resize(arena.nodes.len(), None);
+            cache.fanout.resize(arena.nodes.len(), 0);
+            cache
+                .initially_materialized
+                .resize(arena.nodes.len(), false);
+            cache.owned_costs.resize(arena.nodes.len(), None);
+            cache
+                .owned_slice_lower_costs
+                .resize(arena.nodes.len(), None);
+            cache
+                .contains_shared_nontrivial
+                .resize(arena.nodes.len(), None);
+            cache.is_speculatable_pure.resize(arena.nodes.len(), None);
+        }
+    }
+
+    fn node_children<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> Vec<NodeId> {
+        match arena.get(node) {
+            SLTNode::Input { index, .. } => index.iter().map(|entry| entry.node).collect(),
+            SLTNode::Constant(..) => Vec::new(),
+            SLTNode::Binary(lhs, _, rhs) => vec![*lhs, *rhs],
+            SLTNode::Unary(_, inner) => vec![*inner],
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => vec![*cond, *then_expr, *else_expr],
+            SLTNode::Concat(parts) => parts.iter().map(|(part, _)| *part).collect(),
+            SLTNode::Slice { expr, .. } => vec![*expr],
+            SLTNode::ForFold {
+                start,
+                end,
+                initials,
+                updates,
+                effects,
+                continue_cond,
+                ..
+            } => {
+                let mut children = Vec::new();
+                if let SLTLoopBound::Expr(node) = start {
+                    children.push(*node);
+                }
+                if let SLTLoopBound::Expr(node) = end {
+                    children.push(*node);
+                }
+                children.extend(initials.iter().map(|update| update.expr));
+                children.extend(updates.iter().map(|update| update.expr));
+                for effect in effects {
+                    children.extend(effect.guard);
+                    children.extend(effect.args.iter().copied());
+                }
+                children.push(*continue_cond);
+                children
+            }
+        }
+    }
+
+    fn chunks(width: usize) -> u128 {
+        width.div_ceil(64).max(1) as u128
+    }
+
+    fn binary_operation_cost(op: BinaryOp, width: usize) -> u128 {
+        let chunks = Self::chunks(width);
+        match op {
+            BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Xor
+            | BinaryOp::LogicAnd
+            | BinaryOp::LogicOr => chunks,
+            BinaryOp::Add | BinaryOp::Sub => 3 * chunks,
+            BinaryOp::Mul => 5 * chunks.saturating_mul(chunks),
+            BinaryOp::Div | BinaryOp::Rem => 12 * chunks.saturating_mul(chunks),
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 4 * chunks,
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard
+            | BinaryOp::LtU
+            | BinaryOp::LtS
+            | BinaryOp::LeU
+            | BinaryOp::LeS
+            | BinaryOp::GtU
+            | BinaryOp::GtS
+            | BinaryOp::GeU
+            | BinaryOp::GeS => 3 * chunks,
+        }
+    }
+
+    /// Runtime work introduced by this node itself.  Child work is accounted
+    /// separately so hash-consed descendants can be counted exactly once.
+    fn intrinsic_node_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> u128 {
+        match arena.get(node) {
+            SLTNode::Input { access, index, .. } => {
+                let chunks = Self::chunks(access.msb - access.lsb + 1);
+                3 * chunks + u128::from(!index.is_empty()) * 3
+            }
+            SLTNode::Constant(_, _, width, _) => Self::chunks(*width),
+            SLTNode::Binary(lhs, op, rhs) => {
+                let width = self.get_width(*lhs, arena).max(self.get_width(*rhs, arena));
+                Self::binary_operation_cost(*op, width)
+            }
+            SLTNode::Unary(_, inner) => 2 * Self::chunks(self.get_width(*inner, arena)),
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => Self::chunks(
+                self.get_width(*then_expr, arena)
+                    .max(self.get_width(*else_expr, arena)),
+            ),
+            SLTNode::Concat(parts) => {
+                let width = parts.iter().map(|(_, width)| *width).sum();
+                Self::chunks(width) + parts.len() as u128
+            }
+            SLTNode::Slice { access, .. } => 2 * Self::chunks(access.msb - access.lsb + 1),
+            // A fold contains at least a loop test, a backedge, loop-carried
+            // values, and an exit edge.  Its child DAG is still counted below;
+            // this fixed cost represents the control operation itself rather
+            // than an input-size or iteration cap.
+            SLTNode::ForFold { updates, .. } => 8 + 2 * updates.len() as u128,
+        }
+    }
+
+    /// Cheap, memoized upper bound used only to avoid building reachability
+    /// sets for muxes that cannot possibly pay for a branch.  It may count a
+    /// shared descendant more than once; the final decision below never does.
+    fn estimated_tree_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> u128 {
+        self.prepare_cost_cache(arena);
+        if let Some(cost) = self.cost_cache.borrow().tree_costs[node.0] {
+            return cost;
+        }
+        self.note_analysis_visits(1);
+        let mut cost = self.intrinsic_node_cost(node, arena);
+        for child in Self::node_children(node, arena) {
+            cost = cost.saturating_add(self.estimated_tree_cost(child, arena));
+        }
+        self.cost_cache.borrow_mut().tree_costs[node.0] = Some(cost);
+        cost
+    }
+
+    fn is_nontrivial_node<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> bool {
+        !matches!(
+            arena.get(node),
+            SLTNode::Input { .. } | SLTNode::Constant(..)
+        )
+    }
+
+    /// Cost which is provably owned by this node in the current top-level DAG.
+    /// A node with more than one incoming DAG edge is excluded together with
+    /// its descendants: charging it to either mux arm could mistake shared CSE
+    /// work for conditionally skippable work.  The memo makes all nested mux
+    /// queries constant-time after one traversal of the top-level DAG.
+    fn owned_tree_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> u128 {
+        self.prepare_cost_cache(arena);
+        if let Some(cost) = self.cost_cache.borrow().owned_costs[node.0] {
+            return cost;
+        }
+        self.note_analysis_visits(1);
+        let excluded = {
+            let cache = self.cost_cache.borrow();
+            cache.initially_materialized[node.0] || cache.fanout[node.0] > 1
+        };
+        let mut cost = if excluded {
+            0
+        } else {
+            self.intrinsic_node_cost(node, arena)
+        };
+        if !excluded {
+            for child in Self::node_children(node, arena) {
+                cost = cost.saturating_add(self.owned_tree_cost(child, arena));
+            }
+        }
+        self.cost_cache.borrow_mut().owned_costs[node.0] = Some(cost);
+        cost
+    }
+
+    /// Width-independent lower bound for region-slice lowering.  A Slice node
+    /// may compose into its child without emitting an instruction, while every
+    /// other non-materialized node emits at least its one-chunk operation.
+    fn owned_slice_lower_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> u128 {
+        self.prepare_cost_cache(arena);
+        if let Some(cost) = self.cost_cache.borrow().owned_slice_lower_costs[node.0] {
+            return cost;
+        }
+        self.note_analysis_visits(1);
+        let excluded = {
+            let cache = self.cost_cache.borrow();
+            cache.initially_materialized[node.0] || cache.fanout[node.0] > 1
+        };
+        let mut cost = if excluded {
+            0
+        } else {
+            match arena.get(node) {
+                SLTNode::Slice { .. } => 0,
+                SLTNode::Binary(_, op, _) => Self::binary_operation_cost(*op, 1),
+                SLTNode::Unary(..) => 1,
+                SLTNode::ForFold { updates, .. } => 8 + 2 * updates.len() as u128,
+                SLTNode::Input { .. }
+                | SLTNode::Constant(..)
+                | SLTNode::Mux { .. }
+                | SLTNode::Concat(..) => 1,
+            }
+        };
+        if !excluded {
+            for child in Self::node_children(node, arena) {
+                cost = cost.saturating_add(self.owned_slice_lower_cost(child, arena));
+            }
+        }
+        self.cost_cache.borrow_mut().owned_slice_lower_costs[node.0] = Some(cost);
+        cost
+    }
+
+    fn contains_shared_nontrivial<A: Hash + Eq + Clone>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        self.prepare_cost_cache(arena);
+        if let Some(result) = self.cost_cache.borrow().contains_shared_nontrivial[node.0] {
+            return result;
+        }
+        self.note_analysis_visits(1);
+        let (materialized, fanout) = {
+            let cache = self.cost_cache.borrow();
+            (cache.initially_materialized[node.0], cache.fanout[node.0])
+        };
+        let result = !materialized
+            && ((fanout > 1 && Self::is_nontrivial_node(node, arena))
+                || Self::node_children(node, arena)
+                    .into_iter()
+                    .any(|child| self.contains_shared_nontrivial(child, arena)));
+        self.cost_cache.borrow_mut().contains_shared_nontrivial[node.0] = Some(result);
+        result
+    }
+
+    fn direct_shared_candidates<A: Hash + Eq + Clone>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+    ) -> crate::HashSet<NodeId> {
+        let candidates = std::iter::once(node)
+            .chain(Self::node_children(node, arena))
+            .collect::<Vec<_>>();
+        self.note_analysis_visits(candidates.len());
+        candidates
+            .into_iter()
+            .filter(|candidate| {
+                !materialized.contains_key(candidate)
+                    && self.cost_cache.borrow().fanout[candidate.0] > 1
+                    && Self::is_nontrivial_node(*candidate, arena)
+            })
+            .collect()
+    }
+
+    fn arm_has_only_direct_shared<A: Hash + Eq + Clone>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+        allowed_shared: &crate::HashSet<NodeId>,
+    ) -> bool {
+        if materialized.contains_key(&node) || allowed_shared.contains(&node) {
+            return true;
+        }
+        let node_is_shared =
+            self.cost_cache.borrow().fanout[node.0] > 1 && Self::is_nontrivial_node(node, arena);
+        if node_is_shared {
+            return false;
+        }
+        let children = Self::node_children(node, arena);
+        self.note_analysis_visits(children.len().max(1));
+        children.into_iter().all(|child| {
+            materialized.contains_key(&child)
+                || allowed_shared.contains(&child)
+                || !self.contains_shared_nontrivial(child, arena)
+        })
+    }
+
+    /// Find shared expressions without walking either entire arm.  Only a
+    /// common root or direct operand is hoisted.  If a deeper shared expression
+    /// exists, the mux remains a Select; this conservative rule preserves CSE
+    /// and keeps analysis linear for long nested priority-mux chains.
+    fn shared_mux_nodes<A: Hash + Eq + Clone>(
+        &self,
+        then_expr: NodeId,
+        else_expr: NodeId,
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+    ) -> Option<Vec<NodeId>> {
+        let then_candidates = self.direct_shared_candidates(then_expr, arena, materialized);
+        let else_candidates = self.direct_shared_candidates(else_expr, arena, materialized);
+        let shared = then_candidates
+            .intersection(&else_candidates)
+            .copied()
+            .collect::<crate::HashSet<_>>();
+        if !self.arm_has_only_direct_shared(then_expr, arena, materialized, &shared)
+            || !self.arm_has_only_direct_shared(else_expr, arena, materialized, &shared)
+        {
+            return None;
+        }
+        let mut shared = shared.into_iter().collect::<Vec<_>>();
+        shared.sort_unstable_by_key(|node| std::cmp::Reverse(node.0));
+        Some(shared)
+    }
+
+    fn is_speculatable_pure<A: Hash + Eq + Clone>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        self.prepare_cost_cache(arena);
+        if let Some(result) = self.cost_cache.borrow().is_speculatable_pure[node.0] {
+            return result;
+        }
+        self.note_analysis_visits(1);
+        // ForFold lowers to runtime loop control, can emit capture effects, and
+        // contains Error exits for non-progress.  It is therefore not a pure
+        // expression for reverse if-conversion even when its effects vector is
+        // empty.  All other SLT nodes lower to read-only/value instructions.
+        let result = !matches!(arena.get(node), SLTNode::ForFold { .. })
+            && Self::node_children(node, arena)
+                .into_iter()
+                .all(|child| self.is_speculatable_pure(child, arena));
+        self.cost_cache.borrow_mut().is_speculatable_pure[node.0] = Some(result);
+        result
+    }
+
+    fn contains_div_rem<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        self.prepare_cost_cache(arena);
+        if let Some(result) = self.cost_cache.borrow().contains_div_rem[node.0] {
+            return result;
+        }
+        self.note_analysis_visits(1);
+        let excluded = {
+            let cache = self.cost_cache.borrow();
+            cache.initially_materialized[node.0] || cache.fanout[node.0] > 1
+        };
+        let result = !excluded
+            && (matches!(
+                arena.get(node),
+                SLTNode::Binary(_, BinaryOp::Div | BinaryOp::Rem, _)
+            ) || Self::node_children(node, arena)
+                .into_iter()
+                .any(|child| self.contains_div_rem(child, arena)));
+        self.cost_cache.borrow_mut().contains_div_rem[node.0] = Some(result);
+        result
+    }
+
+    fn static_true_probability<A: Hash + Eq + Clone>(
+        cond: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> StaticBranchProbability {
+        match arena.get(cond) {
+            SLTNode::Unary(UnaryOp::LogicNot, inner) => {
+                Self::static_true_probability(*inner, arena).inverted()
+            }
+            SLTNode::Unary(UnaryOp::Ident, inner) => Self::static_true_probability(*inner, arena),
+            SLTNode::Binary(
+                lhs,
+                op @ (BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard),
+                rhs,
+            ) if try_const_eval(*lhs, arena).is_some() || try_const_eval(*rhs, arena).is_some() => {
+                // Ball and Larus, "Branch Prediction for Free" (PLDI 1993),
+                // predict equality-to-constant tests false.  Their complete
+                // static heuristic reports a 20% average miss rate; use that
+                // measured uncertainty as the 20/80 local prior.  This affects
+                // expected executed cost, never whether analysis is allowed to
+                // stop or how large a CFG may become.
+                let equality = StaticBranchProbability {
+                    true_weight: 1,
+                    total_weight: 5,
+                };
+                if matches!(*op, BinaryOp::Eq | BinaryOp::EqWildcard) {
+                    equality
+                } else {
+                    equality.inverted()
+                }
+            }
+            _ => StaticBranchProbability::EVEN,
+        }
+    }
+
+    fn mux_cfg_is_profitable(
+        then_cost: u128,
+        else_cost: u128,
+        result_width: usize,
+        probability: StaticBranchProbability,
+    ) -> bool {
+        Self::mux_cfg_is_profitable_with_extra_cost(
+            then_cost,
+            else_cost,
+            result_width,
+            probability,
+            0,
+        )
+    }
+
+    fn mux_cfg_is_profitable_with_extra_cost(
+        then_cost: u128,
+        else_cost: u128,
+        result_width: usize,
+        probability: StaticBranchProbability,
+        extra_always_executed_cost: u128,
+    ) -> bool {
+        // Native and Cranelift both pay for a conditional transfer, the taken
+        // arm's merge transfer, and a result phi copy.  With no dynamic profile,
+        // predict the more likely edge and charge a 16-cycle x86 branch miss on
+        // the less likely edge.  All terms are scaled by total_weight, so this
+        // remains exact integer expected-cost arithmetic.
+        const CONTROL_COST: u128 = 3;
+        const MISPREDICT_COST: u128 = 16;
+        const PHI_COPY_COST_PER_CHUNK: u128 = 2;
+
+        let false_weight = probability.total_weight - probability.true_weight;
+        let select_cost = Self::chunks(result_width);
+        let skipped_cost = false_weight
+            .saturating_mul(then_cost)
+            .saturating_add(probability.true_weight.saturating_mul(else_cost))
+            .saturating_add(probability.total_weight.saturating_mul(select_cost));
+        let predictable_misses = probability.true_weight.min(false_weight);
+        let introduced_cost = probability
+            .total_weight
+            .saturating_mul(
+                CONTROL_COST
+                    .saturating_add(
+                        PHI_COPY_COST_PER_CHUNK.saturating_mul(Self::chunks(result_width)),
+                    )
+                    .saturating_add(extra_always_executed_cost),
+            )
+            .saturating_add(predictable_misses.saturating_mul(MISPREDICT_COST));
+        skipped_cost > introduced_cost
+    }
+
+    fn mux_cfg_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        cond: NodeId,
+        then_expr: NodeId,
+        else_expr: NodeId,
+        result_width: usize,
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+        allow_cache: bool,
+    ) -> Option<MuxCfgPlan> {
+        let empty_materialized = crate::HashMap::default();
+        let materialized = if allow_cache {
+            materialized
+        } else {
+            &empty_materialized
+        };
+        // Branch observes only the value plane, while a four-state Mux merges
+        // value and mask planes for X/Z conditions.  No expression shape may
+        // bypass this semantic policy.
+        if self.four_state {
+            self.with_mux_stats(|stats| stats.kept_four_state += 1);
+            return None;
+        }
+        if !self.is_speculatable_pure(then_expr, arena)
+            || !self.is_speculatable_pure(else_expr, arena)
+        {
+            self.with_mux_stats(|stats| stats.kept_impure += 1);
+            return None;
+        }
+        let forced =
+            self.contains_div_rem(then_expr, arena) || self.contains_div_rem(else_expr, arena);
+        if !forced && !allow_cache {
+            self.with_mux_stats(|stats| stats.kept_dynamic_env += 1);
+            return None;
+        }
+
+        let probability = Self::static_true_probability(cond, arena);
+        let then_cost = self.owned_tree_cost(then_expr, arena);
+        let else_cost = self.owned_tree_cost(else_expr, arena);
+        self.with_mux_stats(|stats| {
+            stats.record_cost(then_cost, else_cost);
+            stats.biased_conditions += usize::from(probability != StaticBranchProbability::EVEN);
+        });
+        if !forced && !Self::mux_cfg_is_profitable(then_cost, else_cost, result_width, probability)
+        {
+            self.with_mux_stats(|stats| stats.record_unprofitable(then_cost, else_cost));
+            return None;
+        }
+
+        let shared_nodes = match self.shared_mux_nodes(then_expr, else_expr, arena, materialized) {
+            Some(shared) => shared,
+            None if forced => Vec::new(),
+            None => {
+                self.with_mux_stats(|stats| stats.kept_deep_shared += 1);
+                return None;
+            }
+        };
+        self.with_mux_stats(|stats| {
+            if forced {
+                stats.cfg_div_rem += 1;
+            } else {
+                stats.cfg_cost += 1;
+            }
+        });
+        Some(MuxCfgPlan { shared_nodes })
+    }
+
+    fn mux_slice_cfg_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        cond: NodeId,
+        then_expr: NodeId,
+        else_expr: NodeId,
+        access: &BitAccess,
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+    ) -> Option<MuxCfgPlan> {
+        if self.four_state {
+            self.with_mux_stats(|stats| stats.kept_four_state += 1);
+            return None;
+        }
+        if !self.is_speculatable_pure(then_expr, arena)
+            || !self.is_speculatable_pure(else_expr, arena)
+        {
+            self.with_mux_stats(|stats| stats.kept_impure += 1);
+            return None;
+        }
+        let forced =
+            self.contains_div_rem(then_expr, arena) || self.contains_div_rem(else_expr, arena);
+        let shared_nodes = match self.shared_mux_nodes(then_expr, else_expr, arena, materialized) {
+            Some(shared) => shared,
+            None if forced => Vec::new(),
+            None => {
+                self.with_mux_stats(|stats| stats.kept_deep_shared += 1);
+                return None;
+            }
+        };
+        if !forced {
+            let then_cost = self.owned_slice_lower_cost(then_expr, arena);
+            let else_cost = self.owned_slice_lower_cost(else_expr, arena);
+            let probability = Self::static_true_probability(cond, arena);
+            self.with_mux_stats(|stats| {
+                stats.record_cost(then_cost, else_cost);
+                stats.biased_conditions +=
+                    usize::from(probability != StaticBranchProbability::EVEN);
+            });
+            // Slice lowering can be cheaper than computing the corresponding
+            // full shared node.  Charge the entire full hoist as additional
+            // always-executed work; this deliberately underestimates the
+            // transformation's benefit and prevents optimistic branchification.
+            let shared_hoist_cost = shared_nodes
+                .iter()
+                .map(|node| self.estimated_tree_cost(*node, arena))
+                .fold(0u128, u128::saturating_add);
+            if !Self::mux_cfg_is_profitable_with_extra_cost(
+                then_cost,
+                else_cost,
+                access.msb - access.lsb + 1,
+                probability,
+                shared_hoist_cost,
+            ) {
+                self.with_mux_stats(|stats| stats.record_unprofitable(then_cost, else_cost));
+                return None;
+            }
+        }
+        self.with_mux_stats(|stats| {
+            if forced {
+                stats.cfg_slice_div_rem += 1;
+            } else {
+                stats.cfg_slice_cost += 1;
+            }
+        });
+        Some(MuxCfgPlan { shared_nodes })
+    }
+
+    fn constant_condition<A: Hash + Eq + Clone>(
+        cond: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> Option<bool> {
+        let (value, mask) = try_const_eval(cond, arena)?;
+        (mask == BigUint::from(0u8)).then(|| value != BigUint::from(0u8))
+    }
+
+    fn hoist_shared_mux_nodes<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        plan: &MuxCfgPlan,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: Option<&LowerEnv<A>>,
+        allow_cache: bool,
+    ) {
+        if !allow_cache {
+            return;
+        }
+        self.with_mux_stats(|stats| stats.shared_nodes_hoisted += plan.shared_nodes.len());
+        for &node in &plan.shared_nodes {
+            self.lower_inner(builder, node, arena, cache, env, true);
+        }
+    }
+
+    /// Cost-directed reverse if-conversion for symbolic expression DAGs.
     ///
-    /// If either branch contains division/remainder, lower to CFG so the
-    /// unselected branch is not evaluated. Heliodor's ALU relies on this shape:
-    /// `b == 0 ? fallback : a / b` must not execute the division when b is zero.
+    /// Cheap pure muxes remain `SIRInstruction::Mux`.  When the expected work
+    /// skipped by preserving control exceeds branch, prediction, and phi-copy
+    /// costs, the arms are lowered into separate CFG blocks.  Division and
+    /// remainder remain a correctness case: an unselected zero divisor must
+    /// never reach a native divide instruction.
     fn lower_mux_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -795,18 +1578,128 @@ impl SLTToSIRLowerer {
         env: Option<&LowerEnv<A>>,
         allow_cache: bool,
     ) -> RegisterId {
+        self.with_mux_stats(|stats| stats.normal_seen += 1);
         let then_width = self.get_width(then_expr, arena);
         let else_width = self.get_width(else_expr, arena);
         let res_width = then_width.max(else_width);
 
-        if (Self::is_div_rem_value(then_expr, arena) || Self::is_div_rem_value(else_expr, arena))
-            && then_width == else_width
+        if let Some(take_then) = Self::constant_condition(cond, arena) {
+            self.with_mux_stats(|stats| stats.constant_folded += 1);
+            let selected = if take_then { then_expr } else { else_expr };
+            let value = self.lower_inner(builder, selected, arena, cache, env, allow_cache);
+            return self.cast_reg_width(builder, value, res_width);
+        }
+
+        let cond_reg = self.lower_inner(builder, cond, arena, cache, env, allow_cache);
+        if let Some(plan) = self.mux_cfg_plan(
+            cond,
+            then_expr,
+            else_expr,
+            res_width,
+            arena,
+            cache,
+            allow_cache,
+        ) {
+            self.hoist_shared_mux_nodes(builder, &plan, arena, cache, env, allow_cache);
+            return self.lower_mux_cfg(
+                builder,
+                cond_reg,
+                then_expr,
+                else_expr,
+                res_width,
+                arena,
+                cache,
+                env,
+                allow_cache,
+            );
+        }
+
+        let then_val = self.lower_inner(builder, then_expr, arena, cache, env, allow_cache);
+        let else_val = self.lower_inner(builder, else_expr, arena, cache, env, allow_cache);
+
+        // Use Mux instruction: preserves Z in 4-state, branchless select in 2-state.
+        // Backends handle value and mask selection independently.
+        let result = builder.alloc_logic(res_width);
+        builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
+
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_mux_cfg<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        cond_reg: RegisterId,
+        then_expr: NodeId,
+        else_expr: NodeId,
+        result_width: usize,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: Option<&LowerEnv<A>>,
+        allow_cache: bool,
+    ) -> RegisterId {
+        let result = builder.alloc_logic(result_width);
+        let then_block = builder.new_block();
+        let else_block = builder.new_block();
+        let merge_block = builder.new_block_with(vec![result]);
+
+        builder.seal_block(SIRTerminator::Branch {
+            cond: cond_reg,
+            true_block: (then_block, vec![]),
+            false_block: (else_block, vec![]),
+        });
+
+        let then_transaction = self.cache_transaction();
+        builder.switch_to_block(then_block);
+        let then_val = self.lower_inner(builder, then_expr, arena, cache, env, allow_cache);
+        let then_val = self.cast_reg_width(builder, then_val, result_width);
+        builder.seal_block(SIRTerminator::Jump(merge_block, vec![then_val]));
+        if allow_cache {
+            self.rollback_cache(cache, then_transaction);
+        }
+
+        let else_transaction = self.cache_transaction();
+        builder.switch_to_block(else_block);
+        let else_val = self.lower_inner(builder, else_expr, arena, cache, env, allow_cache);
+        let else_val = self.cast_reg_width(builder, else_val, result_width);
+        builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_val]));
+        if allow_cache {
+            self.rollback_cache(cache, else_transaction);
+        }
+
+        builder.switch_to_block(merge_block);
+        result
+    }
+
+    fn lower_region_slice_mux_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        cond: NodeId,
+        then_expr: NodeId,
+        else_expr: NodeId,
+        access: &BitAccess,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+    ) -> RegisterId {
+        self.with_mux_stats(|stats| stats.slice_seen += 1);
+        let result_width = access.msb - access.lsb + 1;
+        if let Some(take_then) = Self::constant_condition(cond, arena) {
+            self.with_mux_stats(|stats| stats.constant_folded += 1);
+            return self.lower_region_slice_inner(
+                builder,
+                if take_then { then_expr } else { else_expr },
+                access,
+                arena,
+                cache,
+            );
+        }
+
+        let cond_reg = self.lower_inner(builder, cond, arena, cache, None, true);
+        if let Some(plan) =
+            self.mux_slice_cfg_plan(cond, then_expr, else_expr, access, arena, cache)
         {
-            cache.clear();
-            let mut cond_cache = crate::HashMap::default();
-            let cond_reg =
-                self.lower_inner(builder, cond, arena, &mut cond_cache, env, allow_cache);
-            let result = builder.alloc_logic(res_width);
+            self.hoist_shared_mux_nodes(builder, &plan, arena, cache, None, true);
+            let result = builder.alloc_logic(result_width);
             let then_block = builder.new_block();
             let else_block = builder.new_block();
             let merge_block = builder.new_block_with(vec![result]);
@@ -817,32 +1710,30 @@ impl SLTToSIRLowerer {
                 false_block: (else_block, vec![]),
             });
 
-            let mut then_cache = crate::HashMap::default();
+            let then_transaction = self.cache_transaction();
             builder.switch_to_block(then_block);
-            let then_val =
-                self.lower_inner(builder, then_expr, arena, &mut then_cache, env, allow_cache);
-            builder.seal_block(SIRTerminator::Jump(merge_block, vec![then_val]));
+            let then_value =
+                self.lower_region_slice_inner(builder, then_expr, access, arena, cache);
+            builder.seal_block(SIRTerminator::Jump(merge_block, vec![then_value]));
+            self.rollback_cache(cache, then_transaction);
 
-            let mut else_cache = crate::HashMap::default();
+            let else_transaction = self.cache_transaction();
             builder.switch_to_block(else_block);
-            let else_val =
-                self.lower_inner(builder, else_expr, arena, &mut else_cache, env, allow_cache);
-            builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_val]));
+            let else_value =
+                self.lower_region_slice_inner(builder, else_expr, access, arena, cache);
+            builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_value]));
+            self.rollback_cache(cache, else_transaction);
 
             builder.switch_to_block(merge_block);
-            cache.clear();
             return result;
         }
 
-        let cond_reg = self.lower_inner(builder, cond, arena, cache, env, allow_cache);
-        let then_val = self.lower_inner(builder, then_expr, arena, cache, env, allow_cache);
-        let else_val = self.lower_inner(builder, else_expr, arena, cache, env, allow_cache);
-
-        // Use Mux instruction: preserves Z in 4-state, branchless select in 2-state.
-        // Backends handle value and mask selection independently.
-        let result = builder.alloc_logic(res_width);
-        builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
-
+        let then_value = self.lower_region_slice_inner(builder, then_expr, access, arena, cache);
+        let else_value = self.lower_region_slice_inner(builder, else_expr, access, arena, cache);
+        let result = builder.alloc_logic(result_width);
+        builder.emit(SIRInstruction::Mux(
+            result, cond_reg, then_value, else_value,
+        ));
         result
     }
 
@@ -1534,11 +2425,469 @@ impl SLTToSIRLowerer {
     }
 }
 
+impl Drop for SLTToSIRLowerer {
+    fn drop(&mut self) {
+        let Some(stats) = &self.mux_stats else {
+            return;
+        };
+        let stats = stats.borrow();
+        eprintln!(
+            "[mux-lower-stats] normal_seen={} slice_seen={} constant_folded={} cfg_cost={} cfg_div_rem={} cfg_slice_cost={} cfg_slice_div_rem={} shared_nodes_hoisted={} kept_four_state={} kept_impure={} kept_dynamic_env={} kept_unprofitable={} kept_deep_shared={} biased_conditions={} owned_cost_sum={} owned_cost_max={} unprofitable_buckets_0_7_15_31_63_127_255_inf={:?}",
+            stats.normal_seen,
+            stats.slice_seen,
+            stats.constant_folded,
+            stats.cfg_cost,
+            stats.cfg_div_rem,
+            stats.cfg_slice_cost,
+            stats.cfg_slice_div_rem,
+            stats.shared_nodes_hoisted,
+            stats.kept_four_state,
+            stats.kept_impure,
+            stats.kept_dynamic_env,
+            stats.kept_unprofitable,
+            stats.kept_deep_shared,
+            stats.biased_conditions,
+            stats.owned_cost_sum,
+            stats.owned_cost_max,
+            stats.unprofitable_cost_buckets,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::BitAccess;
+    use crate::ir::{BitAccess, BlockId, ExecutionUnit};
     use crate::logic_tree::comb::SLTNodeArena;
+
+    fn input(arena: &mut SLTNodeArena<u32>, variable: u32, width: usize) -> NodeId {
+        arena.alloc(SLTNode::Input {
+            variable,
+            signed: false,
+            index: vec![],
+            access: BitAccess::new(0, width - 1),
+        })
+    }
+
+    fn constant(arena: &mut SLTNodeArena<u32>, value: u64, width: usize) -> NodeId {
+        arena.alloc(SLTNode::Constant(value.into(), 0u8.into(), width, false))
+    }
+
+    fn operation_chain(
+        arena: &mut SLTNodeArena<u32>,
+        mut value: NodeId,
+        op: BinaryOp,
+        operations: usize,
+        constant_base: u64,
+        width: usize,
+    ) -> NodeId {
+        for index in 0..operations {
+            let rhs = constant(arena, constant_base + index as u64, width);
+            value = arena.alloc(SLTNode::Binary(value, op, rhs));
+        }
+        value
+    }
+
+    fn finish_lowering(mut builder: SIRBuilder<u32>) -> ExecutionUnit<u32> {
+        builder.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = builder.drain();
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+        eu
+    }
+
+    fn instruction_count(
+        eu: &ExecutionUnit<u32>,
+        predicate: impl Fn(&SIRInstruction<u32>) -> bool,
+    ) -> usize {
+        eu.blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| predicate(instruction))
+            .count()
+    }
+
+    fn branch_count(eu: &ExecutionUnit<u32>) -> usize {
+        eu.blocks
+            .values()
+            .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
+            .count()
+    }
+
+    #[test]
+    fn cheap_mux_stays_branchless() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let then_expr = input(&mut arena, 1, 8);
+        let else_expr = input(&mut arena, 2, 8);
+        let mux = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        });
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            mux,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 0);
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
+            1
+        );
+    }
+
+    #[test]
+    fn expected_cost_uses_static_equality_probability() {
+        let even = StaticBranchProbability::EVEN;
+        let equality = StaticBranchProbability {
+            true_weight: 1,
+            total_weight: 5,
+        };
+
+        // With a 50/50 prior, ten units in the true arm cannot repay the
+        // expected branch miss.  When equality is predicted false, 80% of that
+        // arm is skipped and the same transformation is profitable.
+        assert!(!SLTToSIRLowerer::mux_cfg_is_profitable(10, 0, 64, even));
+        assert!(SLTToSIRLowerer::mux_cfg_is_profitable(10, 0, 64, equality));
+        assert!(!SLTToSIRLowerer::mux_cfg_is_profitable(
+            10,
+            0,
+            64,
+            equality.inverted(),
+        ));
+    }
+
+    #[test]
+    fn wildcard_equality_uses_the_decoder_bias() {
+        let mut arena = SLTNodeArena::new();
+        let selector = input(&mut arena, 0, 8);
+        let opcode = constant(&mut arena, 0x13, 8);
+        let eq = arena.alloc(SLTNode::Binary(selector, BinaryOp::EqWildcard, opcode));
+        let ne = arena.alloc(SLTNode::Binary(selector, BinaryOp::NeWildcard, opcode));
+
+        let eq_probability = SLTToSIRLowerer::static_true_probability(eq, &arena);
+        let ne_probability = SLTToSIRLowerer::static_true_probability(ne, &arena);
+        assert_eq!(
+            (eq_probability.true_weight, eq_probability.total_weight),
+            (1, 5)
+        );
+        assert_eq!(
+            (ne_probability.true_weight, ne_probability.total_weight),
+            (4, 5)
+        );
+    }
+
+    #[test]
+    fn expensive_mux_preserves_control_flow_and_verifies() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let then_input = input(&mut arena, 1, 64);
+        let else_input = input(&mut arena, 2, 64);
+        let then_expr = operation_chain(&mut arena, then_input, BinaryOp::Add, 8, 10, 64);
+        let else_expr = operation_chain(&mut arena, else_input, BinaryOp::Xor, 12, 100, 64);
+        let mux = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        });
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            mux,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 1);
+        assert_eq!(eu.blocks.len(), 4);
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
+            0
+        );
+    }
+
+    #[test]
+    fn shared_arm_dag_is_hoisted_once() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let source = input(&mut arena, 1, 64);
+        let shared = operation_chain(&mut arena, source, BinaryOp::Mul, 3, 3, 64);
+        let then_source = input(&mut arena, 2, 64);
+        let else_source = input(&mut arena, 3, 64);
+        let then_unique = operation_chain(&mut arena, then_source, BinaryOp::Add, 5, 20, 64);
+        let else_unique = operation_chain(&mut arena, else_source, BinaryOp::Sub, 5, 40, 64);
+        let then_expr = arena.alloc(SLTNode::Binary(shared, BinaryOp::Add, then_unique));
+        let else_expr = arena.alloc(SLTNode::Binary(shared, BinaryOp::Sub, else_unique));
+        let mux = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        });
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            mux,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 1);
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(
+                inst,
+                SIRInstruction::Binary(_, _, BinaryOp::Mul, _)
+            )),
+            3,
+        );
+        let entry = &eu.blocks[&BlockId(0)];
+        assert_eq!(
+            entry
+                .instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Mul, _)))
+                .count(),
+            3,
+        );
+    }
+
+    #[test]
+    fn nested_cost_directed_muxes_form_valid_ssa() {
+        let mut arena = SLTNodeArena::new();
+        let outer_cond = input(&mut arena, 0, 1);
+        let inner_cond = input(&mut arena, 1, 1);
+        let a = input(&mut arena, 2, 64);
+        let b = input(&mut arena, 3, 64);
+        let c = input(&mut arena, 4, 64);
+        let inner_then = operation_chain(&mut arena, a, BinaryOp::Add, 8, 10, 64);
+        let inner_else = operation_chain(&mut arena, b, BinaryOp::Sub, 8, 30, 64);
+        let inner = arena.alloc(SLTNode::Mux {
+            cond: inner_cond,
+            then_expr: inner_then,
+            else_expr: inner_else,
+        });
+        let outer_else = operation_chain(&mut arena, c, BinaryOp::Xor, 16, 70, 64);
+        let outer = arena.alloc(SLTNode::Mux {
+            cond: outer_cond,
+            then_expr: inner,
+            else_expr: outer_else,
+        });
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            outer,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 2);
+    }
+
+    #[test]
+    fn deep_division_forces_cfg_and_casts_merge_width() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let narrow = input(&mut arena, 1, 8);
+        let numerator = input(&mut arena, 2, 16);
+        let denominator = input(&mut arena, 3, 16);
+        let quotient = arena.alloc(SLTNode::Binary(numerator, BinaryOp::Div, denominator));
+        let one = constant(&mut arena, 1, 16);
+        let deep_division = arena.alloc(SLTNode::Binary(quotient, BinaryOp::Add, one));
+        let mux = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr: narrow,
+            else_expr: deep_division,
+        });
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            mux,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 1);
+        let merge = eu
+            .blocks
+            .values()
+            .find(|block| !block.params.is_empty())
+            .unwrap();
+        assert_eq!(eu.register_map[&merge.params[0]].width(), 16);
+    }
+
+    #[test]
+    fn four_state_expensive_mux_keeps_xz_select_semantics() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let then_input = input(&mut arena, 1, 64);
+        let else_input = input(&mut arena, 2, 64);
+        let then_expr = operation_chain(&mut arena, then_input, BinaryOp::Add, 10, 10, 64);
+        let else_expr = operation_chain(&mut arena, else_input, BinaryOp::Sub, 10, 30, 64);
+        let mux = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        });
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(true).lower(&mut builder, mux, &arena, &mut crate::HashMap::default());
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 0);
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
+            1
+        );
+    }
+
+    #[test]
+    fn for_fold_is_not_a_pure_mux_arm() {
+        let mut arena = SLTNodeArena::new();
+        let initial = input(&mut arena, 0, 8);
+        let update = input(&mut arena, 1, 8);
+        let continue_cond = constant(&mut arena, 1, 1);
+        let target = VarAtomBase::new(2, 0, 7);
+        let fold = arena.alloc(SLTNode::ForFold {
+            loop_var: 3,
+            loop_width: 8,
+            loop_signed: false,
+            start: SLTLoopBound::Const(0),
+            end: SLTLoopBound::Const(2),
+            inclusive: false,
+            step: 1,
+            step_op: SLTStepOp::Add,
+            reverse: false,
+            result: target.clone(),
+            initials: vec![crate::logic_tree::comb::SLTForUpdate {
+                target: target.clone(),
+                expr: initial,
+            }],
+            updates: vec![crate::logic_tree::comb::SLTForUpdate {
+                target,
+                expr: update,
+            }],
+            effects: vec![crate::logic_tree::comb::SLTForEffect {
+                site_id: 1,
+                guard: None,
+                emit_on_true: true,
+                args: vec![update],
+                fatal_error_code: None,
+            }],
+            continue_cond,
+        });
+
+        assert!(!SLTToSIRLowerer::new(false).is_speculatable_pure(fold, &arena));
+    }
+
+    #[test]
+    fn region_slice_uses_slice_aware_cfg_cost_and_verifies() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let then_input = input(&mut arena, 1, 256);
+        let else_input = input(&mut arena, 2, 256);
+        let then_expr = operation_chain(&mut arena, then_input, BinaryOp::And, 12, 10, 256);
+        let else_expr = operation_chain(&mut arena, else_input, BinaryOp::Xor, 12, 100, 256);
+        let mux = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        });
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower_region_slice(
+            &mut builder,
+            mux,
+            BitAccess::new(0, 63),
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 1);
+    }
+
+    #[test]
+    fn nested_mux_analysis_is_linear_in_dag_size() {
+        let mut arena = SLTNodeArena::new();
+        let mut value = input(&mut arena, 0, 64);
+        for depth in 0..256u32 {
+            let cond = input(&mut arena, 1 + depth * 2, 1);
+            let arm_input = input(&mut arena, 2 + depth * 2, 64);
+            let arm = operation_chain(
+                &mut arena,
+                arm_input,
+                BinaryOp::Add,
+                4,
+                1_000 + u64::from(depth) * 8,
+                64,
+            );
+            value = arena.alloc(SLTNode::Mux {
+                cond,
+                then_expr: arm,
+                else_expr: value,
+            });
+        }
+
+        let lowerer = SLTToSIRLowerer::new(false);
+        let mut builder = SIRBuilder::new();
+        lowerer.lower(&mut builder, value, &arena, &mut crate::HashMap::default());
+        let visits = lowerer.analysis_node_visits();
+        let node_count = arena.nodes.len();
+        finish_lowering(builder);
+
+        assert!(
+            visits <= node_count * 20,
+            "analysis revisited {visits} nodes for a {node_count}-node nested mux DAG",
+        );
+    }
+
+    #[test]
+    fn unrelated_global_cache_does_not_enter_mux_analysis() {
+        let mut arena = SLTNodeArena::new();
+        let cond = input(&mut arena, 0, 1);
+        let then_input = input(&mut arena, 1, 64);
+        let else_input = input(&mut arena, 2, 64);
+        let then_expr = operation_chain(&mut arena, then_input, BinaryOp::Add, 8, 10, 64);
+        let else_expr = operation_chain(&mut arena, else_input, BinaryOp::Sub, 8, 100, 64);
+        let mux = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        });
+
+        let empty_lowerer = SLTToSIRLowerer::new(false);
+        let mut empty_builder = SIRBuilder::new();
+        empty_lowerer.lower(
+            &mut empty_builder,
+            mux,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let empty_visits = empty_lowerer.analysis_node_visits();
+        finish_lowering(empty_builder);
+
+        let mut large_cache = crate::HashMap::default();
+        for index in 0..20_000usize {
+            large_cache.insert(NodeId(arena.nodes.len() + index), RegisterId(index));
+        }
+        let cached_lowerer = SLTToSIRLowerer::new(false);
+        let mut cached_builder = SIRBuilder::new();
+        cached_lowerer.lower(&mut cached_builder, mux, &arena, &mut large_cache);
+        let cached_visits = cached_lowerer.analysis_node_visits();
+        finish_lowering(cached_builder);
+
+        assert_eq!(cached_visits, empty_visits);
+    }
 
     #[test]
     fn signed_inputs_report_signedness() {

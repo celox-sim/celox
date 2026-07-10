@@ -1,6 +1,6 @@
 //! Verified destruction of MIR SSA phi nodes into edge-local parallel copies.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use super::mir::{BlockId, MFunction, VReg};
@@ -45,16 +45,61 @@ impl ParallelCopy {
     }
 }
 
+/// A dependency-ordered lowering step for one edge's parallel assignment.
+///
+/// `SaveTemporary`/`RestoreTemporary` delimit one cycle at a time.  While the
+/// temporary is live, it occupies one qword below the ordinary stack frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParallelCopyOperation {
+    Move {
+        destination: ParallelCopyDestination,
+        source: ParallelCopySource,
+    },
+    SaveTemporary(ParallelCopyDestination),
+    RestoreTemporary(ParallelCopyDestination),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ParallelCopyWork {
+    pub effective_copies: usize,
+    pub direct_moves: usize,
+    pub cycle_breaks: usize,
+    pub ready_queue_pops: usize,
+    pub dependency_releases: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeCopyPlan {
     pub predecessor: BlockId,
     pub successor: BlockId,
     pub rows: Vec<ParallelCopy>,
+    pub operations: Vec<ParallelCopyOperation>,
+    pub work: ParallelCopyWork,
+}
+
+impl EdgeCopyPlan {
+    pub(crate) fn has_effective_copies(&self) -> bool {
+        self.work.effective_copies != 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SsaDestructionPlan {
     edges: BTreeMap<(BlockId, BlockId), EdgeCopyPlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SsaDestructionStats {
+    pub edges: usize,
+    pub rows: usize,
+    pub identity_rows: usize,
+    pub effective_copies: usize,
+    pub identity_only_edges: usize,
+    pub direct_moves: usize,
+    pub cycle_breaks: usize,
+    pub ready_queue_pops: usize,
+    pub dependency_releases: usize,
+    pub max_effective_copies_per_edge: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,12 +208,15 @@ impl SsaDestructionPlan {
                         )?,
                     });
                 }
+                let (operations, work) = resolve_parallel_copies(predecessor, successor.id, &rows)?;
                 edges.insert(
                     (predecessor, successor.id),
                     EdgeCopyPlan {
                         predecessor,
                         successor: successor.id,
                         rows,
+                        operations,
+                        work,
                     },
                 );
             }
@@ -312,6 +360,15 @@ impl SsaDestructionPlan {
                     }
                 }
 
+                let (expected_operations, expected_work) =
+                    resolve_parallel_copies(predecessor, successor.id, &edge.rows)?;
+                if edge.operations != expected_operations || edge.work != expected_work {
+                    return Err(SsaDestructionError::new(
+                        "SSA_DEST.RESOLUTION_MISMATCH",
+                        "parallel-copy resolver output is stale or inconsistent with its rows",
+                    )
+                    .edge(predecessor, successor.id));
+                }
                 verify_stack_assumptions(edge, spill_frame_size)?;
             }
         }
@@ -336,6 +393,27 @@ impl SsaDestructionPlan {
 
     pub(crate) fn edges(&self) -> impl Iterator<Item = &EdgeCopyPlan> {
         self.edges.values()
+    }
+
+    pub(crate) fn stats(&self) -> SsaDestructionStats {
+        let mut stats = SsaDestructionStats {
+            edges: self.edges.len(),
+            ..SsaDestructionStats::default()
+        };
+        for edge in self.edges.values() {
+            stats.rows += edge.rows.len();
+            stats.effective_copies += edge.work.effective_copies;
+            stats.identity_rows += edge.rows.len() - edge.work.effective_copies;
+            stats.identity_only_edges += usize::from(!edge.has_effective_copies());
+            stats.direct_moves += edge.work.direct_moves;
+            stats.cycle_breaks += edge.work.cycle_breaks;
+            stats.ready_queue_pops += edge.work.ready_queue_pops;
+            stats.dependency_releases += edge.work.dependency_releases;
+            stats.max_effective_copies_per_edge = stats
+                .max_effective_copies_per_edge
+                .max(edge.work.effective_copies);
+        }
+        stats
     }
 }
 
@@ -443,17 +521,250 @@ fn source_location(
     .values(destination, Some(source)))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingSource {
+    Value(ParallelCopySource),
+    Temporary,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingCopy {
+    phi_destination: VReg,
+    source_value: VReg,
+    destination: ParallelCopyDestination,
+    source: PendingSource,
+    pending: bool,
+}
+
+fn source_as_destination(source: ParallelCopySource) -> Option<ParallelCopyDestination> {
+    match source {
+        ParallelCopySource::Register(register) => Some(ParallelCopyDestination::Register(register)),
+        ParallelCopySource::Stack(slot) => Some(ParallelCopyDestination::Stack(slot)),
+        ParallelCopySource::Immediate(_) => None,
+    }
+}
+
+/// Schedule one parallel assignment without snapshotting acyclic rows.
+///
+/// A row is ready once overwriting its destination cannot destroy a source of
+/// another pending row.  If no row is ready, unique destinations imply that
+/// the remaining dependency graph contains a cycle.  Saving one destination
+/// breaks that cycle; all other rows continue to use direct moves.
+fn resolve_parallel_copies(
+    predecessor: BlockId,
+    successor: BlockId,
+    rows: &[ParallelCopy],
+) -> Result<(Vec<ParallelCopyOperation>, ParallelCopyWork), SsaDestructionError> {
+    let mut destination_owner = BTreeMap::<ParallelCopyDestination, &ParallelCopy>::new();
+    for row in rows {
+        if let Some(other) = destination_owner.insert(row.destination, row) {
+            return Err(SsaDestructionError::new(
+                "SSA_DEST.NON_UNIQUE_DESTINATION",
+                format!(
+                    "phi destinations {} and {} both write {:?}",
+                    other.phi_destination, row.phi_destination, row.destination
+                ),
+            )
+            .edge(predecessor, successor)
+            .values(row.phi_destination, Some(row.source_value)));
+        }
+    }
+
+    let mut copies = rows
+        .iter()
+        .copied()
+        .filter(|row| !row.is_identity())
+        .map(|row| PendingCopy {
+            phi_destination: row.phi_destination,
+            source_value: row.source_value,
+            destination: row.destination,
+            source: PendingSource::Value(row.source),
+            pending: true,
+        })
+        .collect::<Vec<_>>();
+    let mut work = ParallelCopyWork {
+        effective_copies: copies.len(),
+        ..ParallelCopyWork::default()
+    };
+    if copies.is_empty() {
+        return Ok((Vec::new(), work));
+    }
+
+    let destination_index = copies
+        .iter()
+        .enumerate()
+        .map(|(index, copy)| (copy.destination, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut readers = BTreeMap::<ParallelCopyDestination, BTreeSet<usize>>::new();
+    for (index, copy) in copies.iter().enumerate() {
+        let PendingSource::Value(source) = copy.source else {
+            continue;
+        };
+        if let Some(location) = source_as_destination(source) {
+            readers.entry(location).or_default().insert(index);
+        }
+    }
+
+    let mut ready = VecDeque::new();
+    let mut queued = vec![false; copies.len()];
+    for (index, copy) in copies.iter().enumerate() {
+        if !readers.contains_key(&copy.destination) {
+            ready.push_back(index);
+            queued[index] = true;
+        }
+    }
+
+    let mut operations = Vec::with_capacity(copies.len());
+    let mut remaining = copies.len();
+    let mut temporary_live = false;
+    // Each completed cycle contains the lowest still-pending row selected
+    // below. Resume after it so disjoint cycles do not repeatedly rescan an
+    // already completed prefix.
+    let mut cycle_search_start = 0usize;
+    while remaining != 0 {
+        while let Some(index) = ready.pop_front() {
+            queued[index] = false;
+            if !copies[index].pending {
+                continue;
+            }
+            work.ready_queue_pops += 1;
+            match copies[index].source {
+                PendingSource::Value(source) => {
+                    operations.push(ParallelCopyOperation::Move {
+                        destination: copies[index].destination,
+                        source,
+                    });
+                    work.direct_moves += 1;
+                    if let Some(location) = source_as_destination(source) {
+                        let released = if let Some(location_readers) = readers.get_mut(&location) {
+                            location_readers.remove(&index);
+                            location_readers.is_empty()
+                        } else {
+                            false
+                        };
+                        if released {
+                            readers.remove(&location);
+                            work.dependency_releases += 1;
+                            if let Some(&writer) = destination_index.get(&location)
+                                && copies[writer].pending
+                                && !queued[writer]
+                            {
+                                ready.push_back(writer);
+                                queued[writer] = true;
+                            }
+                        }
+                    }
+                }
+                PendingSource::Temporary => {
+                    if !temporary_live {
+                        return Err(SsaDestructionError::new(
+                            "SSA_DEST.RESOLVER_TEMPORARY_STATE",
+                            "parallel-copy resolver attempted to restore an inactive temporary",
+                        )
+                        .edge(predecessor, successor)
+                        .values(
+                            copies[index].phi_destination,
+                            Some(copies[index].source_value),
+                        ));
+                    }
+                    operations.push(ParallelCopyOperation::RestoreTemporary(
+                        copies[index].destination,
+                    ));
+                    temporary_live = false;
+                }
+            }
+            copies[index].pending = false;
+            remaining -= 1;
+        }
+
+        if remaining == 0 {
+            break;
+        }
+        if temporary_live {
+            let Some(copy) = copies.iter().find(|copy| copy.pending).copied() else {
+                return Err(SsaDestructionError::new(
+                    "SSA_DEST.RESOLVER_TEMPORARY_STATE",
+                    "parallel-copy resolver lost its pending temporary consumer",
+                )
+                .edge(predecessor, successor));
+            };
+            return Err(SsaDestructionError::new(
+                "SSA_DEST.RESOLVER_TEMPORARY_STATE",
+                "parallel-copy resolver stalled while a temporary was live",
+            )
+            .edge(predecessor, successor)
+            .values(copy.phi_destination, Some(copy.source_value)));
+        }
+
+        let Some(cycle) = copies
+            .iter()
+            .enumerate()
+            .skip(cycle_search_start)
+            .find_map(|(index, copy)| copy.pending.then_some(index))
+        else {
+            return Err(SsaDestructionError::new(
+                "SSA_DEST.RESOLVER_STATE",
+                "parallel-copy resolver has a nonzero pending count without a pending row",
+            )
+            .edge(predecessor, successor));
+        };
+        cycle_search_start = cycle + 1;
+        let saved = copies[cycle].destination;
+        let saved_readers = readers.remove(&saved).unwrap_or_default();
+        if saved_readers.len() != 1 {
+            return Err(SsaDestructionError::new(
+                "SSA_DEST.RESOLVER_CYCLE_SHAPE",
+                format!(
+                    "stalled parallel-copy graph has {} readers of cycle location {:?}",
+                    saved_readers.len(),
+                    saved
+                ),
+            )
+            .edge(predecessor, successor)
+            .values(
+                copies[cycle].phi_destination,
+                Some(copies[cycle].source_value),
+            ));
+        }
+        let Some(&reader) = saved_readers.iter().next() else {
+            return Err(SsaDestructionError::new(
+                "SSA_DEST.RESOLVER_CYCLE_SHAPE",
+                "stalled parallel-copy cycle has no reader",
+            )
+            .edge(predecessor, successor)
+            .values(
+                copies[cycle].phi_destination,
+                Some(copies[cycle].source_value),
+            ));
+        };
+        copies[reader].source = PendingSource::Temporary;
+        operations.push(ParallelCopyOperation::SaveTemporary(saved));
+        work.cycle_breaks += 1;
+        work.dependency_releases += 1;
+        temporary_live = true;
+        if !queued[cycle] {
+            ready.push_back(cycle);
+            queued[cycle] = true;
+        }
+    }
+
+    if temporary_live {
+        return Err(SsaDestructionError::new(
+            "SSA_DEST.RESOLVER_TEMPORARY_STATE",
+            "parallel-copy resolver left its temporary live",
+        )
+        .edge(predecessor, successor));
+    }
+    Ok((operations, work))
+}
+
 fn verify_stack_assumptions(
     edge: &EdgeCopyPlan,
     spill_frame_size: u32,
 ) -> Result<(), SsaDestructionError> {
-    let effective = edge
-        .rows
-        .iter()
-        .copied()
-        .filter(|row| !row.is_identity())
-        .collect::<Vec<_>>();
-    for row in &effective {
+    // Validate semantic locations even for identity rows.  Eliding a machine
+    // move must not make an out-of-frame assignment appear well formed.
+    for row in &edge.rows {
         if let ParallelCopyDestination::Stack(slot) = row.destination {
             verify_stack_slot(edge, row, slot, spill_frame_size)?;
         }
@@ -462,37 +773,61 @@ fn verify_stack_assumptions(
         }
     }
 
-    if let [row] = effective.as_slice() {
-        match (row.destination, row.source) {
-            (ParallelCopyDestination::Stack(destination), ParallelCopySource::Stack(source)) => {
-                checked_temporary_offset(edge, row, source, 8)?;
-                checked_temporary_offset(edge, row, destination, 8)?;
-            }
-            (ParallelCopyDestination::Stack(destination), ParallelCopySource::Immediate(_)) => {
-                checked_temporary_offset(edge, row, destination, 8)?
-            }
-            _ => {}
-        }
-    } else {
-        for (depth, row) in effective.iter().enumerate() {
-            let adjustment = i32::try_from(depth)
-                .ok()
-                .and_then(|depth| depth.checked_mul(8))
-                .ok_or_else(|| {
-                    SsaDestructionError::new(
-                        "SSA_DEST.TEMPORARY_STACK_DEPTH",
-                        "parallel-copy temporary stack depth exceeds i32 addressing",
+    let mut temporary_live = false;
+    for operation in &edge.operations {
+        match *operation {
+            ParallelCopyOperation::SaveTemporary(location) => {
+                if temporary_live {
+                    return Err(SsaDestructionError::new(
+                        "SSA_DEST.TEMPORARY_NESTING",
+                        "parallel-copy schedule nests temporary saves",
                     )
-                    .edge(edge.predecessor, edge.successor)
-                    .values(row.phi_destination, Some(row.source_value))
-                })?;
-            if let ParallelCopySource::Stack(slot) = row.source {
-                checked_temporary_offset(edge, row, slot, adjustment)?;
+                    .edge(edge.predecessor, edge.successor));
+                }
+                if let ParallelCopyDestination::Stack(slot) = location {
+                    checked_operation_offset(edge, slot, 0)?;
+                }
+                temporary_live = true;
             }
-            if let ParallelCopyDestination::Stack(slot) = row.destination {
-                checked_temporary_offset(edge, row, slot, adjustment)?;
+            ParallelCopyOperation::Move {
+                destination,
+                source,
+            } => {
+                let temporary_adjustment = if temporary_live { 8 } else { 0 };
+                if let ParallelCopySource::Stack(slot) = source {
+                    checked_operation_offset(edge, slot, temporary_adjustment)?;
+                }
+                if let ParallelCopyDestination::Stack(slot) = destination {
+                    checked_operation_offset(edge, slot, temporary_adjustment)?;
+                    if matches!(source, ParallelCopySource::Immediate(_)) {
+                        checked_operation_offset(edge, slot, temporary_adjustment + 4)?;
+                    }
+                }
+            }
+            ParallelCopyOperation::RestoreTemporary(location) => {
+                if !temporary_live {
+                    return Err(SsaDestructionError::new(
+                        "SSA_DEST.TEMPORARY_NESTING",
+                        "parallel-copy schedule restores an inactive temporary",
+                    )
+                    .edge(edge.predecessor, edge.successor));
+                }
+                if let ParallelCopyDestination::Stack(slot) = location {
+                    // POP computes an RSP-based memory destination after
+                    // incrementing RSP, so the encoded displacement is the
+                    // ordinary frame slot with no +8 adjustment.
+                    checked_operation_offset(edge, slot, 0)?;
+                }
+                temporary_live = false;
             }
         }
+    }
+    if temporary_live {
+        return Err(SsaDestructionError::new(
+            "SSA_DEST.TEMPORARY_NESTING",
+            "parallel-copy schedule leaves a temporary live",
+        )
+        .edge(edge.predecessor, edge.successor));
     }
     Ok(())
 }
@@ -520,9 +855,8 @@ fn verify_stack_slot(
     .values(row.phi_destination, Some(row.source_value)))
 }
 
-fn checked_temporary_offset(
+fn checked_operation_offset(
     edge: &EdgeCopyPlan,
-    row: &ParallelCopy,
     slot: i32,
     adjustment: i32,
 ) -> Result<(), SsaDestructionError> {
@@ -533,8 +867,7 @@ fn checked_temporary_offset(
         "SSA_DEST.TEMPORARY_STACK_OFFSET",
         format!("stack slot {slot} overflows after temporary adjustment {adjustment}"),
     )
-    .edge(edge.predecessor, edge.successor)
-    .values(row.phi_destination, Some(row.source_value)))
+    .edge(edge.predecessor, edge.successor))
 }
 
 #[cfg(test)]
@@ -544,6 +877,108 @@ mod tests {
     use crate::backend::native::mir::{
         BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
     };
+
+    fn register_copy(
+        destination_value: u32,
+        source_value: u32,
+        destination: PhysReg,
+        source: PhysReg,
+    ) -> ParallelCopy {
+        ParallelCopy {
+            phi_destination: VReg(destination_value),
+            source_value: VReg(source_value),
+            destination: ParallelCopyDestination::Register(destination),
+            source: ParallelCopySource::Register(source),
+        }
+    }
+
+    #[test]
+    fn resolver_emits_acyclic_chain_in_safe_reverse_order_without_temporary() {
+        let rows = vec![
+            register_copy(2, 0, PhysReg::RAX, PhysReg::RDX),
+            register_copy(3, 1, PhysReg::RSI, PhysReg::RAX),
+        ];
+
+        let (operations, work) = resolve_parallel_copies(BlockId(0), BlockId(1), &rows).unwrap();
+
+        assert_eq!(
+            operations,
+            vec![
+                ParallelCopyOperation::Move {
+                    destination: ParallelCopyDestination::Register(PhysReg::RSI),
+                    source: ParallelCopySource::Register(PhysReg::RAX),
+                },
+                ParallelCopyOperation::Move {
+                    destination: ParallelCopyDestination::Register(PhysReg::RAX),
+                    source: ParallelCopySource::Register(PhysReg::RDX),
+                },
+            ]
+        );
+        assert_eq!(work.effective_copies, 2);
+        assert_eq!(work.direct_moves, 2);
+        assert_eq!(work.cycle_breaks, 0);
+    }
+
+    #[test]
+    fn resolver_breaks_two_and_three_cycles_once() {
+        for rows in [
+            vec![
+                register_copy(2, 0, PhysReg::RAX, PhysReg::RDX),
+                register_copy(3, 1, PhysReg::RDX, PhysReg::RAX),
+            ],
+            vec![
+                register_copy(3, 0, PhysReg::RAX, PhysReg::RDX),
+                register_copy(4, 1, PhysReg::RDX, PhysReg::RSI),
+                register_copy(5, 2, PhysReg::RSI, PhysReg::RAX),
+            ],
+        ] {
+            let (operations, work) =
+                resolve_parallel_copies(BlockId(0), BlockId(1), &rows).unwrap();
+            assert_eq!(work.cycle_breaks, 1, "{operations:?}");
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|operation| matches!(
+                        operation,
+                        ParallelCopyOperation::SaveTemporary(_)
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|operation| matches!(
+                        operation,
+                        ParallelCopyOperation::RestoreTemporary(_)
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(operations.len(), rows.len() + 1);
+        }
+    }
+
+    #[test]
+    fn resolver_drains_cycle_fanout_before_saving_one_temporary() {
+        let rows = vec![
+            register_copy(3, 0, PhysReg::RAX, PhysReg::RDX),
+            register_copy(4, 1, PhysReg::RDX, PhysReg::RAX),
+            register_copy(5, 2, PhysReg::RSI, PhysReg::RAX),
+        ];
+
+        let (operations, work) = resolve_parallel_copies(BlockId(0), BlockId(1), &rows).unwrap();
+
+        assert_eq!(
+            operations.first(),
+            Some(&ParallelCopyOperation::Move {
+                destination: ParallelCopyDestination::Register(PhysReg::RSI),
+                source: ParallelCopySource::Register(PhysReg::RAX),
+            })
+        );
+        assert_eq!(work.cycle_breaks, 1);
+        assert_eq!(work.effective_copies, 3);
+    }
 
     fn one_edge_function(phi_sources: &[(VReg, VReg)]) -> MFunction {
         let max_vreg = phi_sources
@@ -590,6 +1025,45 @@ mod tests {
     }
 
     #[test]
+    fn identity_rows_are_counted_but_emit_no_effective_copy() {
+        let function = one_edge_function(&[(VReg(1), VReg(0))]);
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::RAX);
+        assignment.set(VReg(1), PhysReg::RAX);
+
+        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        plan.verify(&function, &assignment, 0).unwrap();
+        let stats = plan.stats();
+
+        assert_eq!(stats.edges, 1);
+        assert_eq!(stats.rows, 1);
+        assert_eq!(stats.identity_rows, 1);
+        assert_eq!(stats.effective_copies, 0);
+        assert_eq!(stats.identity_only_edges, 1);
+        assert!(
+            !plan
+                .edge(BlockId(0), BlockId(1))
+                .unwrap()
+                .has_effective_copies()
+        );
+    }
+
+    #[test]
+    fn identity_stack_row_still_requires_a_valid_frame_slot() {
+        let function = one_edge_function(&[(VReg(1), VReg(0))]);
+        let mut assignment = AssignmentMap::default();
+        assignment.set_edge_location(BlockId(0), VReg(0), EdgeLocation::Stack(1));
+        assignment.set_edge_spill_slot(VReg(1), 1);
+
+        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        let error = plan.verify(&function, &assignment, 16).unwrap_err();
+
+        assert_eq!(error.rule, "SSA_DEST.STACK_SLOT");
+        assert_eq!(error.predecessor, Some(BlockId(0)));
+        assert_eq!(error.successor, Some(BlockId(1)));
+    }
+
+    #[test]
     fn missing_instruction_assignment_is_rejected_before_encoding() {
         let mut vregs = VRegAllocator::new();
         let value = vregs.alloc();
@@ -617,6 +1091,37 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_stack_access_must_be_aligned_and_inside_the_spill_frame() {
+        for offset in [-8, 4, 16] {
+            let mut vregs = VRegAllocator::new();
+            let value = vregs.alloc();
+            let mut function = MFunction::new(vregs, vec![SpillDesc::transient()]);
+            let mut entry = MBlock::new(BlockId(0));
+            entry.push(MInst::Load {
+                dst: value,
+                base: BaseReg::StackFrame,
+                offset,
+                size: OpSize::S64,
+            });
+            entry.push(MInst::Return);
+            function.push_block(entry);
+            let mut assignment = AssignmentMap::default();
+            assignment.set(value, PhysReg::RAX);
+
+            let error = match emit::emit(&function, &assignment, 16) {
+                Ok(_) => panic!("invalid stack-frame access must be rejected"),
+                Err(error) => error,
+            };
+            let EmitError::Input(error) = error else {
+                panic!("expected stack-frame input error, got {error}");
+            };
+            assert_eq!(error.rule, "EMIT.STACK_FRAME_ACCESS");
+            assert_eq!(error.block, Some(BlockId(0)));
+            assert_eq!(error.instruction, Some(0));
+        }
+    }
+
+    #[test]
     fn unencodable_frame_size_is_rejected_before_encoding() {
         let mut function = MFunction::new(VRegAllocator::new(), Vec::new());
         let mut entry = MBlock::new(BlockId(0));
@@ -634,6 +1139,570 @@ mod tests {
         assert_eq!(error.rule, "EMIT.FRAME_SIZE_RANGE");
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn execute_single_stack_destination(source: EdgeLocation, expected: u64) -> u64 {
+        use crate::backend::native::jit_mem::JitCode;
+
+        let mut vregs = VRegAllocator::new();
+        let source_value = vregs.alloc();
+        let destination = vregs.alloc();
+        let observed = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        let mut predecessor = MBlock::new(BlockId(0));
+        predecessor.push(MInst::LoadImm {
+            dst: source_value,
+            value: expected,
+        });
+        if matches!(source, EdgeLocation::Stack(_)) {
+            predecessor.push(MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 0,
+                src: source_value,
+                size: OpSize::S64,
+            });
+        }
+        predecessor.push(MInst::Jump { target: BlockId(1) });
+        let mut successor = MBlock::new(BlockId(1));
+        successor.phis.push(PhiNode {
+            dst: destination,
+            sources: vec![(BlockId(0), source_value)],
+        });
+        successor.push(MInst::Load {
+            dst: observed,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        successor.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: observed,
+            size: OpSize::S64,
+        });
+        successor.push(MInst::Return);
+        function.blocks = vec![predecessor, successor];
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(source_value, PhysReg::RAX);
+        assignment.set(observed, PhysReg::RDX);
+        assignment.set_edge_location(BlockId(0), source_value, source);
+        assignment.set_edge_spill_slot(destination, 8);
+        let emitted = emit::emit(&function, &assignment, 16).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0_u8; 8];
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        u64::from_le_bytes(state)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn single_stack_to_stack_copy_uses_the_original_frame_offsets() {
+        assert_eq!(
+            execute_single_stack_destination(EdgeLocation::Stack(0), 0x1122_3344_5566_7788),
+            0x1122_3344_5566_7788
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn single_immediate_to_stack_copy_preserves_all_64_bits() {
+        assert_eq!(
+            execute_single_stack_destination(
+                EdgeLocation::Immediate(0x8877_6655_4433_2211),
+                0x8877_6655_4433_2211,
+            ),
+            0x8877_6655_4433_2211
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn execute_register_parallel_copy(
+        first_destination: PhysReg,
+        second_destination: PhysReg,
+    ) -> (Vec<iced_x86::Mnemonic>, ParallelCopyWork, [u64; 2]) {
+        use crate::backend::native::jit_mem::JitCode;
+        use iced_x86::{Decoder, DecoderOptions};
+
+        let mut vregs = VRegAllocator::new();
+        let first_source = vregs.alloc();
+        let second_source = vregs.alloc();
+        let first_result = vregs.alloc();
+        let second_result = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+        let mut predecessor = MBlock::new(BlockId(0));
+        predecessor.push(MInst::LoadImm {
+            dst: first_source,
+            value: 11,
+        });
+        predecessor.push(MInst::LoadImm {
+            dst: second_source,
+            value: 22,
+        });
+        predecessor.push(MInst::Jump { target: BlockId(1) });
+        let mut successor = MBlock::new(BlockId(1));
+        successor.phis = vec![
+            PhiNode {
+                dst: first_result,
+                sources: vec![(BlockId(0), first_source)],
+            },
+            PhiNode {
+                dst: second_result,
+                sources: vec![(BlockId(0), second_source)],
+            },
+        ];
+        successor.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: first_result,
+            size: OpSize::S64,
+        });
+        successor.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: second_result,
+            size: OpSize::S64,
+        });
+        successor.push(MInst::Return);
+        function.blocks = vec![predecessor, successor];
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(first_source, PhysReg::RDX);
+        assignment.set(second_source, PhysReg::RAX);
+        assignment.set(first_result, first_destination);
+        assignment.set(second_result, second_destination);
+        assignment.set_edge_location(
+            BlockId(0),
+            first_source,
+            EdgeLocation::Register(PhysReg::RDX),
+        );
+        assignment.set_edge_location(
+            BlockId(0),
+            second_source,
+            EdgeLocation::Register(PhysReg::RAX),
+        );
+
+        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        plan.verify(&function, &assignment, 0).unwrap();
+        let work = plan.edge(BlockId(0), BlockId(1)).unwrap().work;
+        let emitted = emit::emit(&function, &assignment, 0).unwrap();
+        let start = emitted
+            .block_offsets
+            .iter()
+            .find(|(block, _)| *block == BlockId(0))
+            .unwrap()
+            .1 as usize;
+        let end = emitted
+            .block_offsets
+            .iter()
+            .find(|(block, _)| *block == BlockId(1))
+            .unwrap()
+            .1 as usize;
+        let mut decoder = Decoder::with_ip(
+            64,
+            &emitted.code[start..end],
+            start as u64,
+            DecoderOptions::NONE,
+        );
+        let mut mnemonics = Vec::new();
+        while decoder.can_decode() {
+            mnemonics.push(decoder.decode().mnemonic());
+        }
+
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0_u8; 16];
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        let values = [
+            u64::from_le_bytes(state[..8].try_into().unwrap()),
+            u64::from_le_bytes(state[8..].try_into().unwrap()),
+        ];
+        (mnemonics, work, values)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn acyclic_register_copies_execute_without_stack_temporary() {
+        use iced_x86::Mnemonic;
+
+        let (mnemonics, work, values) = execute_register_parallel_copy(PhysReg::RAX, PhysReg::RSI);
+
+        assert_eq!(values, [11, 22]);
+        assert_eq!(work.cycle_breaks, 0);
+        assert_eq!(work.direct_moves, 2);
+        assert!(!mnemonics.contains(&Mnemonic::Push), "{mnemonics:?}");
+        assert!(!mnemonics.contains(&Mnemonic::Pop), "{mnemonics:?}");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn register_cycle_executes_with_exactly_one_temporary() {
+        use iced_x86::Mnemonic;
+
+        let (mnemonics, work, values) = execute_register_parallel_copy(PhysReg::RAX, PhysReg::RDX);
+
+        assert_eq!(values, [11, 22]);
+        assert_eq!(work.cycle_breaks, 1);
+        assert_eq!(
+            mnemonics
+                .iter()
+                .filter(|mnemonic| **mnemonic == Mnemonic::Push)
+                .count(),
+            1,
+            "{mnemonics:?}"
+        );
+        assert_eq!(
+            mnemonics
+                .iter()
+                .filter(|mnemonic| **mnemonic == Mnemonic::Pop)
+                .count(),
+            1,
+            "{mnemonics:?}"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn identity_only_branch_edges_keep_cmp_fusion_and_false_fallthrough() {
+        use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let rhs = vregs.alloc();
+        let value = vregs.alloc();
+        let condition = vregs.alloc();
+        let false_value = vregs.alloc();
+        let true_value = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 6]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm { dst: lhs, value: 1 });
+        entry.push(MInst::LoadImm { dst: rhs, value: 1 });
+        entry.push(MInst::LoadImm {
+            dst: value,
+            value: 99,
+        });
+        entry.push(MInst::Cmp {
+            dst: condition,
+            lhs,
+            rhs,
+            kind: crate::backend::native::mir::CmpKind::Eq,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(1),
+        });
+        let mut false_block = MBlock::new(BlockId(1));
+        false_block.phis.push(PhiNode {
+            dst: false_value,
+            sources: vec![(BlockId(0), value)],
+        });
+        false_block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: false_value,
+            size: OpSize::S64,
+        });
+        false_block.push(MInst::Return);
+        let mut true_block = MBlock::new(BlockId(2));
+        true_block.phis.push(PhiNode {
+            dst: true_value,
+            sources: vec![(BlockId(0), value)],
+        });
+        true_block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: true_value,
+            size: OpSize::S64,
+        });
+        true_block.push(MInst::Return);
+        function.blocks = vec![entry, false_block, true_block];
+
+        let mut assignment = AssignmentMap::default();
+        for (vreg, register) in [
+            (lhs, PhysReg::RAX),
+            (rhs, PhysReg::RDX),
+            (value, PhysReg::RSI),
+            (condition, PhysReg::RDI),
+            (false_value, PhysReg::RSI),
+            (true_value, PhysReg::RSI),
+        ] {
+            assignment.set(vreg, register);
+        }
+        assignment.set_edge_location(BlockId(0), value, EdgeLocation::Register(PhysReg::RSI));
+
+        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        assert_eq!(plan.stats().effective_copies, 0);
+        let emitted = emit::emit(&function, &assignment, 0).unwrap();
+        let start = emitted.block_offsets[0].1 as usize;
+        let end = emitted.block_offsets[1].1 as usize;
+        let mut decoder = Decoder::with_ip(
+            64,
+            &emitted.code[start..end],
+            start as u64,
+            DecoderOptions::NONE,
+        );
+        let mut mnemonics = Vec::new();
+        while decoder.can_decode() {
+            mnemonics.push(decoder.decode().mnemonic());
+        }
+        assert!(mnemonics.contains(&Mnemonic::Cmp), "{mnemonics:?}");
+        assert_eq!(
+            mnemonics
+                .iter()
+                .filter(|mnemonic| matches!(mnemonic, Mnemonic::Je | Mnemonic::Jne))
+                .count(),
+            1,
+            "{mnemonics:?}"
+        );
+        assert!(!mnemonics.contains(&Mnemonic::Jmp), "{mnemonics:?}");
+        assert!(
+            !mnemonics
+                .iter()
+                .any(|mnemonic| matches!(mnemonic, Mnemonic::Sete | Mnemonic::Setne))
+        );
+    }
+
+    #[test]
+    fn consecutive_empty_fallthrough_blocks_alias_the_next_instruction() {
+        use crate::backend::native::jit_mem::JitCode;
+        use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+        use std::collections::HashMap;
+
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let true_value = vregs.alloc();
+        let false_value = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: condition,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(4),
+        });
+
+        let mut first_empty = MBlock::new(BlockId(1));
+        first_empty.push(MInst::Jump { target: BlockId(2) });
+        let mut second_empty = MBlock::new(BlockId(2));
+        second_empty.push(MInst::Jump { target: BlockId(3) });
+
+        let mut true_block = MBlock::new(BlockId(3));
+        true_block.push(MInst::LoadImm {
+            dst: true_value,
+            value: 11,
+        });
+        true_block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: true_value,
+            size: OpSize::S64,
+        });
+        true_block.push(MInst::Return);
+
+        let mut false_block = MBlock::new(BlockId(4));
+        false_block.push(MInst::LoadImm {
+            dst: false_value,
+            value: 22,
+        });
+        false_block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: false_value,
+            size: OpSize::S64,
+        });
+        false_block.push(MInst::Return);
+
+        function.blocks = vec![entry, first_empty, second_empty, true_block, false_block];
+        let mut assignment = AssignmentMap::default();
+        assignment.set(condition, PhysReg::RAX);
+        assignment.set(true_value, PhysReg::RDX);
+        assignment.set(false_value, PhysReg::RDX);
+
+        let emitted = emit::emit(&function, &assignment, 0).unwrap();
+        let offsets = emitted
+            .block_offsets
+            .iter()
+            .copied()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(offsets[&BlockId(1)], offsets[&BlockId(2)]);
+        assert_eq!(offsets[&BlockId(2)], offsets[&BlockId(3)]);
+
+        let mut decoder = Decoder::with_ip(64, &emitted.code, 0, DecoderOptions::NONE);
+        while decoder.can_decode() {
+            assert_ne!(decoder.decode().mnemonic(), Mnemonic::Nop);
+        }
+
+        let jit = JitCode::new(&emitted.code).unwrap();
+        for (condition, expected) in [(0_u64, 22_u64), (1, 11)] {
+            let mut state = [0_u8; 16];
+            state[..8].copy_from_slice(&condition.to_le_bytes());
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), expected);
+        }
+    }
+
+    #[test]
+    fn trailing_continuation_label_aliases_an_empty_fallthrough_chain() {
+        use crate::backend::native::jit_mem::JitCode;
+        use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+        use std::collections::HashMap;
+
+        let mut vregs = VRegAllocator::new();
+        let source = vregs.alloc();
+        let result = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: source,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::BsrOr {
+            dst: result,
+            src: source,
+            zero_value: 63,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+
+        let mut first_empty = MBlock::new(BlockId(1));
+        first_empty.push(MInst::Jump { target: BlockId(2) });
+        let mut second_empty = MBlock::new(BlockId(2));
+        second_empty.push(MInst::Jump { target: BlockId(3) });
+        let mut exit = MBlock::new(BlockId(3));
+        exit.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: result,
+            size: OpSize::S64,
+        });
+        exit.push(MInst::Return);
+        function.blocks = vec![entry, first_empty, second_empty, exit];
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(source, PhysReg::RAX);
+        assignment.set(result, PhysReg::RDX);
+
+        let emitted = emit::emit(&function, &assignment, 0).unwrap();
+        let offsets = emitted
+            .block_offsets
+            .iter()
+            .copied()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(offsets[&BlockId(1)], offsets[&BlockId(2)]);
+        assert_eq!(offsets[&BlockId(2)], offsets[&BlockId(3)]);
+
+        let mut decoder = Decoder::with_ip(64, &emitted.code, 0, DecoderOptions::NONE);
+        while decoder.can_decode() {
+            assert_ne!(decoder.decode().mnemonic(), Mnemonic::Nop);
+        }
+
+        let jit = JitCode::new(&emitted.code).unwrap();
+        for (source, expected) in [(0_u64, 63_u64), (8, 3)] {
+            let mut state = [0_u8; 16];
+            state[..8].copy_from_slice(&source.to_le_bytes());
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), expected);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn branch_executes_only_the_selected_edge_copy_plan() {
+        use crate::backend::native::jit_mem::JitCode;
+
+        let mut vregs = VRegAllocator::new();
+        let true_source = vregs.alloc();
+        let false_source = vregs.alloc();
+        let condition = vregs.alloc();
+        let false_value = vregs.alloc();
+        let true_value = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: true_source,
+            value: 11,
+        });
+        entry.push(MInst::LoadImm {
+            dst: false_source,
+            value: 22,
+        });
+        entry.push(MInst::Load {
+            dst: condition,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(1),
+        });
+        let mut false_block = MBlock::new(BlockId(1));
+        false_block.phis.push(PhiNode {
+            dst: false_value,
+            sources: vec![(BlockId(0), false_source)],
+        });
+        false_block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: false_value,
+            size: OpSize::S64,
+        });
+        false_block.push(MInst::Return);
+        let mut true_block = MBlock::new(BlockId(2));
+        true_block.phis.push(PhiNode {
+            dst: true_value,
+            sources: vec![(BlockId(0), true_source)],
+        });
+        true_block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: true_value,
+            size: OpSize::S64,
+        });
+        true_block.push(MInst::Return);
+        function.blocks = vec![entry, false_block, true_block];
+
+        let mut assignment = AssignmentMap::default();
+        for (vreg, register) in [
+            (true_source, PhysReg::RAX),
+            (false_source, PhysReg::RDX),
+            (condition, PhysReg::R8),
+            (false_value, PhysReg::RDI),
+            (true_value, PhysReg::RSI),
+        ] {
+            assignment.set(vreg, register);
+        }
+        assignment.set_edge_location(
+            BlockId(0),
+            true_source,
+            EdgeLocation::Register(PhysReg::RAX),
+        );
+        assignment.set_edge_location(
+            BlockId(0),
+            false_source,
+            EdgeLocation::Register(PhysReg::RDX),
+        );
+        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        assert_eq!(plan.stats().effective_copies, 2);
+        let emitted = emit::emit(&function, &assignment, 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        for (condition, expected) in [(0_u64, 22_u64), (1, 11)] {
+            let mut state = [0_u8; 16];
+            state[..8].copy_from_slice(&condition.to_le_bytes());
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), expected);
+        }
+    }
+
     #[test]
     fn verifier_rejects_two_phi_rows_with_one_physical_destination() {
         let function = one_edge_function(&[(VReg(2), VReg(0)), (VReg(3), VReg(1))]);
@@ -641,9 +1710,11 @@ mod tests {
         assignment.set(VReg(0), PhysReg::RAX);
         assignment.set(VReg(1), PhysReg::RDX);
         assignment.set(VReg(2), PhysReg::RSI);
-        assignment.set(VReg(3), PhysReg::RSI);
+        assignment.set(VReg(3), PhysReg::RDI);
 
-        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        let mut plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        let edge = plan.edges.get_mut(&(BlockId(0), BlockId(1))).unwrap();
+        edge.rows[1].destination = edge.rows[0].destination;
         let error = plan.verify(&function, &assignment, 0).unwrap_err();
         assert_eq!(error.rule, "SSA_DEST.NON_UNIQUE_DESTINATION");
         assert_eq!(error.predecessor, Some(BlockId(0)));

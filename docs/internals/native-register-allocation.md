@@ -122,12 +122,15 @@ is a constraint-pressure verifier failure.
 ### 3. Pressure-aware scheduling
 
 Scheduling removes pressure caused by instruction order, not inherent
-pressure.  Pure regions are def-use DAGs; stores, releases, control flow,
-unknown memory effects, and constraint markers are barriers.  A priority queue
-and incremental ready/dependency counts avoid rescanning the whole ready set or
-block suffix.  A schedule is accepted only when dependency verification passes
-and exact high-water pressure does not increase.  It runs once before spilling,
-with no schedule/spill feedback loop.
+pressure.  Pure regions are def-use DAGs. Constant-address loads and stores
+participate in the same DAG: byte-granular RAW, WAR, and WAW chains preserve
+the order of overlapping accesses, while disjoint accesses may move nearer to
+their uses. Dynamic/pointer accesses, releases, memory copies, control flow,
+unknown memory effects, and constraint markers remain barriers. A priority
+queue and incremental ready/dependency counts avoid rescanning the whole ready
+set or block suffix. A schedule is accepted only when dependency verification
+passes and exact high-water pressure does not increase. It runs once before
+spilling, with no schedule/spill feedback loop.
 
 ### 4. Conventional SSA before spill-home formation
 
@@ -217,11 +220,22 @@ Phi colors are preferences, not graph-node merging.  A separate verifier checks
 the perfect-elimination property and the completed assignment's liveness,
 fixed-register, and clobber constraints.
 
+Definitions also carry ordinary x86 two-address affinities. A destination
+prefers a dying source color for moves, unary operations, immediate forms, and
+the appropriate operand of arithmetic/select instructions, but only after the
+active-color, fixed-register, and clobber proofs say that color is available.
+This reduces avoidable moves without changing coloring feasibility.
+
 ### 10. SSA destruction
 
-Phi/Perm rows become edge-local parallel copies.  Resolution handles register,
-stack, and immediate sources, preserves simultaneous-copy semantics, and breaks
-cycles with a scratch location.  Dead rows are absent before resolution.
+Phi/Perm rows become edge-local parallel copies. Identity rows emit no code;
+acyclic rows are drained in dependency order, and each cycle is broken with one
+temporary while preserving fanout. Resolution handles register, stack, and
+64-bit immediate sources, including stack-to-stack copies, and preserves
+simultaneous-copy semantics. The emitter runs a copy plan only on the selected
+branch edge. Copy-free fallthrough block chains share a machine-code label
+instead of receiving padding instructions. Dead rows are absent before
+resolution.
 
 These are phase boundaries, not suggestions.  Each has a verifier for the
 intended IR; no phase weakens a contract merely to accept an existing producer.
@@ -442,16 +456,21 @@ Both measurements motivate the frozen late-Perm architecture; neither is a
 reason to add an iteration, branchification, or CFG-size cap.
 
 With SIR/MIR boundary verification and the new allocator's phase verifiers
-enabled, `test_soc_linux_boot` completes the compile-only Heliodor gate in
-37.58 seconds.
-The largest `eval_comb` allocation takes 2.02 seconds end to end: 0.42 seconds
-for spill planning and its home proof, 0.13 seconds for reconstruction, 0.27
-seconds for late Perm construction/verification, and 0.08 seconds for coloring.
-The reconstructed function has about 443,000 VRegs rather than the 2.3 million
-created by early Perm materialization.  The `native_exec` test suite, the
-212-test library suite, all 145 non-ignored `comb_observer` cases, and the
-16-test native suite with per-pass SIR/MIR auditing pass.  The end-to-end
-Heliodor execution and same-condition `veryl-cc` comparison gates remain open.
+enabled, the current `test_soc_linux_boot` compile-only run completes in about
+30.6 seconds. The cost-directed CFG currently presented to `eval_comb` has
+7,738 SIR/MIR blocks and 152,086 post-MIR-optimization instructions. Scheduling
+reduces its measured maximum straight-region pressure from 2,229 to 2,024;
+allocation then produces a 79,216-byte spill frame. SSA destruction sees
+33,697 rows, of which 23,587 are identities and 10,110 require code (including
+1,442 cycle breaks). These figures are diagnostics, not a performance pass.
+
+The 252-test library suite, all 145 non-ignored `comb_observer` cases, the
+16-test native suite with per-pass SIR/MIR auditing, and the native
+control-preserving mux integration test pass. End-to-end Heliodor execution and
+the same-condition `veryl-cc` comparison gate remain open. Celox has not had a
+fast successful full Linux-boot run on this gate: prior status-0 Celox entries
+were compile-only, and current 60-second executions are intentionally partial
+diagnostic windows.
 
 The public allocator and chained native emitter now return structured errors,
 failed public allocations leave their input MIR unchanged, and

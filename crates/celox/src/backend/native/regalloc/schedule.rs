@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, MInst, VReg};
+use crate::backend::native::mir::{BaseReg, BlockId, MFunction, MInst, VReg};
 
 use super::analysis::AnalysisResult;
 use super::cfg::NormalizedCfg;
@@ -243,8 +243,26 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
         for &used in uses {
             use_candidates.entry(used).or_default().push(user);
             if let Some(&definition) = definitions.get(&used) {
-                dependencies[user].push(definition);
-                users[definition] += 1;
+                add_dependency(&mut dependencies, &mut users, user, definition);
+            }
+        }
+    }
+
+    // Preserve the original order of overlapping constant-address accesses,
+    // while allowing independent load/compute/store chains to move together.
+    // Chaining the most recent access for each byte is conservative for
+    // load-load pairs, but gives an O(total accessed bytes) dependence graph
+    // and exactly preserves RAW, WAR, and WAW order for overlapping ranges.
+    // Dynamic/pointer/release accesses and MemCopy remain region barriers.
+    let mut last_memory_access = HashMap::<(BaseReg, i64), usize>::new();
+    for (instruction, inst) in region.iter().enumerate() {
+        let Some((base, start, bytes)) = constant_memory_range(inst) else {
+            continue;
+        };
+        for byte in 0..i64::from(bytes) {
+            let address = (base, start + byte);
+            if let Some(previous) = last_memory_access.insert(address, instruction) {
+                add_dependency(&mut dependencies, &mut users, instruction, previous);
             }
         }
     }
@@ -316,6 +334,30 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
         dependency_verified,
         live_before: dependency_verified.then_some(live),
         work,
+    }
+}
+
+fn add_dependency(
+    dependencies: &mut [Vec<usize>],
+    users: &mut [usize],
+    instruction: usize,
+    dependency: usize,
+) {
+    if instruction != dependency && !dependencies[instruction].contains(&dependency) {
+        dependencies[instruction].push(dependency);
+        users[dependency] += 1;
+    }
+}
+
+fn constant_memory_range(inst: &MInst) -> Option<(BaseReg, i64, u32)> {
+    match inst {
+        MInst::Load {
+            base, offset, size, ..
+        }
+        | MInst::Store {
+            base, offset, size, ..
+        } => Some((*base, i64::from(*offset), size.bytes())),
+        _ => None,
     }
 }
 
@@ -476,6 +518,8 @@ fn is_schedulable_at(
             inst,
             MInst::Mov { .. }
                 | MInst::LoadImm { .. }
+                | MInst::Load { .. }
+                | MInst::Store { .. }
                 | MInst::Add { .. }
                 | MInst::Sub { .. }
                 | MInst::Mul { .. }
@@ -511,7 +555,7 @@ fn is_schedulable_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{BaseReg, BlockId, MBlock, OpSize, SpillDesc, VRegAllocator};
+    use crate::backend::native::mir::{BlockId, MBlock, OpSize, SpillDesc, VRegAllocator};
     #[test]
     fn indexed_buckets_do_not_scan_a_long_ready_set() {
         const INSTRUCTIONS: usize = 4096;
@@ -541,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn fragmented_block_uses_one_backward_liveness_pass() {
+    fn memory_dependent_block_uses_one_backward_liveness_pass() {
         const REGIONS: usize = 512;
         let mut vregs = VRegAllocator::new();
         let mut instructions = Vec::with_capacity(REGIONS * 2 + 1);
@@ -574,10 +618,118 @@ mod tests {
 
         let stats = schedule_for_pressure(&mut func, &cfg, &constraints, &analysis).unwrap();
 
-        assert_eq!(stats.regions_considered, REGIONS);
+        assert_eq!(stats.regions_considered, 1);
         assert_eq!(stats.backward_liveness_steps, instruction_count);
         assert!(stats.maximum_after <= stats.maximum_before);
         func.verify();
+    }
+
+    #[test]
+    fn disjoint_memory_chains_are_scheduled_near_their_uses() {
+        let first = VReg(0);
+        let second = VReg(1);
+        let first_result = VReg(2);
+        let second_result = VReg(3);
+        let region = vec![
+            MInst::Load {
+                dst: first,
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            },
+            MInst::Load {
+                dst: second,
+                base: BaseReg::SimState,
+                offset: 8,
+                size: OpSize::S64,
+            },
+            MInst::AddImm {
+                dst: first_result,
+                src: first,
+                imm: 1,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: first_result,
+                size: OpSize::S64,
+            },
+            MInst::AddImm {
+                dst: second_result,
+                src: second,
+                imm: 1,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: second_result,
+                size: OpSize::S64,
+            },
+        ];
+
+        let scheduled = schedule_region(&region, BTreeSet::new());
+
+        assert!(scheduled.dependency_verified);
+        assert!(
+            max_pressure(&scheduled.instructions, &BTreeSet::new())
+                < max_pressure(&region, &BTreeSet::new())
+        );
+        for chain in [
+            [region[0].clone(), region[2].clone(), region[3].clone()],
+            [region[1].clone(), region[4].clone(), region[5].clone()],
+        ] {
+            let positions = chain.map(|instruction| {
+                scheduled
+                    .instructions
+                    .iter()
+                    .position(|candidate| candidate == &instruction)
+                    .unwrap()
+            });
+            assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+        }
+    }
+
+    #[test]
+    fn overlapping_memory_access_order_is_preserved() {
+        let before = VReg(0);
+        let stored = VReg(1);
+        let after = VReg(2);
+        let region = vec![
+            MInst::Load {
+                dst: before,
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: stored,
+                value: 7,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 4,
+                src: stored,
+                size: OpSize::S32,
+            },
+            MInst::Load {
+                dst: after,
+                base: BaseReg::SimState,
+                offset: 7,
+                size: OpSize::S8,
+            },
+        ];
+
+        let scheduled = schedule_region(&region, BTreeSet::from([before, after]));
+        let positions = [0, 2, 3].map(|original| {
+            scheduled
+                .instructions
+                .iter()
+                .position(|candidate| candidate == &region[original])
+                .unwrap()
+        });
+
+        assert!(scheduled.dependency_verified);
+        assert!(positions[0] < positions[1] && positions[1] < positions[2]);
     }
 
     #[test]

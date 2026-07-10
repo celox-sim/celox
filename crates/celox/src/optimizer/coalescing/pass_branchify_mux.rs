@@ -36,7 +36,13 @@ impl ExecutionUnitPass for BranchifyMuxPass {
         "branchify_mux"
     }
 
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
+    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
+        // A four-state Mux maps an X/Z condition to an all-X result. SIR Branch
+        // currently tests only the value bits, so replacing that Mux with
+        // control flow would not preserve its semantics.
+        if options.four_state {
+            return;
+        }
         let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
         let stats_start = stats.then(crate::timing::now);
         let trace_reg = std::env::var("CELOX_BRANCHIFY_TRACE_REG")
@@ -58,7 +64,9 @@ impl ExecutionUnitPass for BranchifyMuxPass {
             if !eu.blocks.contains_key(&block_id) {
                 continue;
             }
-            while let Some(plan) = find_branchify_mux_in_block(eu, block_id, &use_counts) {
+            while let Some(plan) =
+                find_branchify_mux_in_block(eu, block_id, &use_counts, &def_blocks)
+            {
                 let new_blocks = apply_branchify_mux(
                     eu,
                     plan,
@@ -121,6 +129,7 @@ fn find_branchify_mux_in_block(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     block_id: BlockId,
     use_counts: &HashMap<RegisterId, usize>,
+    def_blocks: &HashMap<RegisterId, BlockId>,
 ) -> Option<BranchifyPlan> {
     let block = eu.blocks.get(&block_id)?;
     let mut def_pos = HashMap::default();
@@ -188,10 +197,7 @@ fn find_branchify_mux_in_block(
         let mut false_defs = false_defs.into_iter().collect::<Vec<_>>();
         true_defs.sort_unstable();
         false_defs.sort_unstable();
-        if !branch_is_profitable(block, &true_defs, &false_defs) {
-            continue;
-        }
-        return Some(BranchifyPlan {
+        let plan = BranchifyPlan {
             block_id,
             mux_idx,
             dst: *dst,
@@ -206,41 +212,307 @@ fn find_branchify_mux_in_block(
                 immediate_store
             },
             preserve_result,
-        });
+        };
+        if !branch_is_profitable(eu, block, &plan, def_blocks, &def_pos) {
+            continue;
+        }
+        return Some(plan);
     }
 
     None
 }
 
-// A conditional branch plus its merge costs several front-end operations and
-// is harder to predict than a select. Only move work behind the branch when
-// the work skipped on one arm pays for that cost. This is a local code-cost
-// decision, not a global transformation budget.
-fn branch_is_profitable(
-    block: &BasicBlock<RegionedAbsoluteAddr>,
-    true_defs: &[usize],
-    false_defs: &[usize],
-) -> bool {
-    let arm_cost = |defs: &[usize]| {
-        defs.iter()
-            .map(|&idx| branchified_instruction_cost(&block.instructions[idx]))
-            .sum::<usize>()
-    };
-    arm_cost(true_defs) + arm_cost(false_defs) >= 16
+// Native and Cranelift both eventually turn a SIR branch into a conditional
+// transfer, an executed arm-to-merge transfer, and (when the mux result is
+// preserved) phi copies. With no profile, equality-to-constant decoder tests
+// use the same 20/80 prior as cost-directed SLT lowering and other conditions
+// use 50/50. A modern x86 misprediction is roughly 16 cycles.
+//
+// This is a local proof of expected benefit, not an iteration or function-size
+// budget: the work expected to be skipped must strictly exceed every modeled
+// downstream cost introduced by this particular transformation.
+const BRANCH_CONTROL_COST: u128 = 3;
+const MISPREDICT_COST: u128 = 16;
+const PHI_COPY_COST_PER_CHUNK: u128 = 2;
+const LIVE_THROUGH_COST_PER_CHUNK: u128 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StaticBranchProbability {
+    true_weight: u128,
+    total_weight: u128,
 }
 
-fn branchified_instruction_cost(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> usize {
+impl StaticBranchProbability {
+    const EVEN: Self = Self {
+        true_weight: 1,
+        total_weight: 2,
+    };
+
+    const EQUALITY_TO_CONSTANT: Self = Self {
+        true_weight: 1,
+        total_weight: 5,
+    };
+
+    fn inverted(self) -> Self {
+        Self {
+            true_weight: self.total_weight - self.true_weight,
+            total_weight: self.total_weight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BranchProfitability {
+    true_arm_cost: u128,
+    false_arm_cost: u128,
+    removed_mux_cost: u128,
+    probability: StaticBranchProbability,
+    control_cost: u128,
+    phi_copy_cost: u128,
+    live_through_cost: u128,
+}
+
+impl BranchProfitability {
+    fn expected_saved_scaled(self) -> u128 {
+        let false_weight = self.probability.total_weight - self.probability.true_weight;
+        false_weight
+            .saturating_mul(self.true_arm_cost)
+            .saturating_add(
+                self.probability
+                    .true_weight
+                    .saturating_mul(self.false_arm_cost),
+            )
+            .saturating_add(
+                self.probability
+                    .total_weight
+                    .saturating_mul(self.removed_mux_cost),
+            )
+    }
+
+    fn introduced_cost_scaled(self) -> u128 {
+        let false_weight = self.probability.total_weight - self.probability.true_weight;
+        self.probability
+            .total_weight
+            .saturating_mul(
+                self.control_cost
+                    .saturating_add(self.phi_copy_cost)
+                    .saturating_add(self.live_through_cost),
+            )
+            .saturating_add(
+                self.probability
+                    .true_weight
+                    .min(false_weight)
+                    .saturating_mul(MISPREDICT_COST),
+            )
+    }
+
+    fn proves_expected_benefit(self) -> bool {
+        self.expected_saved_scaled() > self.introduced_cost_scaled()
+    }
+}
+
+fn branch_is_profitable(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    plan: &BranchifyPlan,
+    def_blocks: &HashMap<RegisterId, BlockId>,
+    def_pos: &HashMap<RegisterId, usize>,
+) -> bool {
+    branch_profitability(eu, block, plan, def_blocks, def_pos).proves_expected_benefit()
+}
+
+fn branch_profitability(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    plan: &BranchifyPlan,
+    def_blocks: &HashMap<RegisterId, BlockId>,
+    def_pos: &HashMap<RegisterId, usize>,
+) -> BranchProfitability {
+    let remove_defs = removable_defs_after_head_restore(block, plan, def_blocks);
+    let arm_cost = |defs: &[usize]| {
+        defs.iter()
+            .filter(|idx| remove_defs.contains(idx))
+            .map(|&idx| branchified_instruction_cost(&block.instructions[idx], &eu.register_map))
+            .sum::<u128>()
+    };
+    let suffix = block
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(plan.mux_idx + 1)
+        .filter(|(idx, _)| !remove_defs.contains(idx))
+        .map(|(_, inst)| inst.clone())
+        .collect::<Vec<_>>();
+    let mut live_through = block_live_ins(&suffix, &terminator_uses(&block.terminator));
+    live_through.retain(|value| *value != plan.dst);
+    live_through.sort_unstable();
+    live_through.dedup();
+
+    let chunks_for = |value: RegisterId| {
+        eu.register_map
+            .get(&value)
+            .map(|register| register.width().div_ceil(64).max(1))
+            .unwrap_or(1) as u128
+    };
+    let result_chunks = plan
+        .preserve_result
+        .then(|| chunks_for(plan.dst))
+        .unwrap_or(0);
+    let live_through_chunks = live_through.into_iter().map(chunks_for).sum::<u128>();
+
+    BranchProfitability {
+        true_arm_cost: arm_cost(&plan.true_defs),
+        false_arm_cost: arm_cost(&plan.false_defs),
+        removed_mux_cost: branchified_instruction_cost(
+            &block.instructions[plan.mux_idx],
+            &eu.register_map,
+        ),
+        probability: static_true_probability(block, def_pos, plan.cond),
+        control_cost: BRANCH_CONTROL_COST,
+        phi_copy_cost: result_chunks.saturating_mul(PHI_COPY_COST_PER_CHUNK),
+        live_through_cost: live_through_chunks.saturating_mul(LIVE_THROUGH_COST_PER_CHUNK),
+    }
+}
+
+fn static_true_probability(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    def_pos: &HashMap<RegisterId, usize>,
+    cond: RegisterId,
+) -> StaticBranchProbability {
+    let mut current = cond;
+    let mut inverted = false;
+    let mut seen = HashSet::default();
+
+    while seen.insert(current) {
+        let Some(&idx) = def_pos.get(&current) else {
+            break;
+        };
+        match &block.instructions[idx] {
+            SIRInstruction::Unary(_, crate::ir::UnaryOp::LogicNot, inner) => {
+                inverted = !inverted;
+                current = *inner;
+            }
+            SIRInstruction::Unary(_, crate::ir::UnaryOp::Ident, inner) => {
+                current = *inner;
+            }
+            SIRInstruction::Binary(
+                _,
+                lhs,
+                op @ (crate::ir::BinaryOp::Eq
+                | crate::ir::BinaryOp::Ne
+                | crate::ir::BinaryOp::EqWildcard
+                | crate::ir::BinaryOp::NeWildcard),
+                rhs,
+            ) if register_is_immediate(block, def_pos, *lhs)
+                || register_is_immediate(block, def_pos, *rhs) =>
+            {
+                let equality = matches!(
+                    op,
+                    crate::ir::BinaryOp::Eq | crate::ir::BinaryOp::EqWildcard
+                );
+                let probability = if equality == !inverted {
+                    StaticBranchProbability::EQUALITY_TO_CONSTANT
+                } else {
+                    StaticBranchProbability::EQUALITY_TO_CONSTANT.inverted()
+                };
+                return probability;
+            }
+            _ => break,
+        }
+    }
+
+    if inverted {
+        StaticBranchProbability::EVEN.inverted()
+    } else {
+        StaticBranchProbability::EVEN
+    }
+}
+
+fn register_is_immediate(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    def_pos: &HashMap<RegisterId, usize>,
+    register: RegisterId,
+) -> bool {
+    let mut current = register;
+    let mut seen = HashSet::default();
+    while seen.insert(current) {
+        let Some(&idx) = def_pos.get(&current) else {
+            return false;
+        };
+        match &block.instructions[idx] {
+            SIRInstruction::Imm(..) => return true,
+            SIRInstruction::Unary(_, crate::ir::UnaryOp::Ident, inner) => current = *inner,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Estimated dynamic target work for an instruction that can be moved into a
+/// branch arm.  This deliberately follows the same width/chunk model as
+/// cost-directed SLT mux lowering instead of the CLIF-size estimator: the
+/// decision is about runtime work skipped, not compiler IR expansion.
+fn branchified_instruction_cost(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    register_map: &HashMap<RegisterId, crate::ir::RegisterType>,
+) -> u128 {
+    let register_width = |register: RegisterId| {
+        register_map
+            .get(&register)
+            .map(crate::ir::RegisterType::width)
+            .unwrap_or(64)
+    };
+    let chunks = |width: usize| width.div_ceil(64).max(1) as u128;
+
     match inst {
-        SIRInstruction::Imm(..) => 0,
-        SIRInstruction::Binary(_, _, op, _) => match op {
-            crate::ir::BinaryOp::Mul => 16,
-            crate::ir::BinaryOp::Div | crate::ir::BinaryOp::Rem => 32,
-            _ => 1,
-        },
-        SIRInstruction::Load(..) => 3,
-        SIRInstruction::Concat(_, args) => args.len().div_ceil(2).max(1),
-        SIRInstruction::Mux(..) => 2,
-        SIRInstruction::Unary(..) | SIRInstruction::Slice(..) => 1,
+        SIRInstruction::Imm(dst, _) => chunks(register_width(*dst)),
+        SIRInstruction::Binary(dst, lhs, op, rhs) => {
+            let operand_chunks = chunks(
+                register_width(*dst)
+                    .max(register_width(*lhs))
+                    .max(register_width(*rhs)),
+            );
+            match op {
+                crate::ir::BinaryOp::And
+                | crate::ir::BinaryOp::Or
+                | crate::ir::BinaryOp::Xor
+                | crate::ir::BinaryOp::LogicAnd
+                | crate::ir::BinaryOp::LogicOr => operand_chunks,
+                crate::ir::BinaryOp::Add | crate::ir::BinaryOp::Sub => 3 * operand_chunks,
+                crate::ir::BinaryOp::Mul => 5 * operand_chunks.saturating_mul(operand_chunks),
+                crate::ir::BinaryOp::Div | crate::ir::BinaryOp::Rem => {
+                    12 * operand_chunks.saturating_mul(operand_chunks)
+                }
+                crate::ir::BinaryOp::Shl | crate::ir::BinaryOp::Shr | crate::ir::BinaryOp::Sar => {
+                    4 * operand_chunks
+                }
+                crate::ir::BinaryOp::Eq
+                | crate::ir::BinaryOp::Ne
+                | crate::ir::BinaryOp::EqWildcard
+                | crate::ir::BinaryOp::NeWildcard
+                | crate::ir::BinaryOp::LtU
+                | crate::ir::BinaryOp::LtS
+                | crate::ir::BinaryOp::LeU
+                | crate::ir::BinaryOp::LeS
+                | crate::ir::BinaryOp::GtU
+                | crate::ir::BinaryOp::GtS
+                | crate::ir::BinaryOp::GeU
+                | crate::ir::BinaryOp::GeS => 3 * operand_chunks,
+            }
+        }
+        SIRInstruction::Unary(dst, _, src) => {
+            2 * chunks(register_width(*dst).max(register_width(*src)))
+        }
+        SIRInstruction::Load(_, _, offset, width) => {
+            3 * chunks(*width) + 3 * u128::from(matches!(offset, SIROffset::Dynamic(_)))
+        }
+        SIRInstruction::Concat(dst, args) => chunks(register_width(*dst)) + args.len() as u128,
+        SIRInstruction::Slice(dst, _, _, _) => 2 * chunks(register_width(*dst)),
+        SIRInstruction::Mux(dst, _, true_value, false_value) => chunks(
+            register_width(*dst)
+                .max(register_width(*true_value))
+                .max(register_width(*false_value)),
+        ),
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }
@@ -436,20 +708,7 @@ fn apply_branchify_mux(
         trace_reg_in_original(&original, &plan, reg);
     }
     remove_block_uses(use_counts, &original);
-    let mut remove_defs = plan
-        .true_defs
-        .iter()
-        .chain(plan.false_defs.iter())
-        .copied()
-        .collect::<HashSet<_>>();
-    remove_defs.insert(plan.mux_idx);
-    if let Some(store) = &plan.distributed_store {
-        remove_defs.insert(store.idx);
-    }
-    let restore_defs = head_restore_defs(&original, &plan, &remove_defs, def_blocks);
-    for idx in restore_defs {
-        remove_defs.remove(&idx);
-    }
+    let remove_defs = removable_defs_after_head_restore(&original, &plan, def_blocks);
     if let Some(reg) = trace_reg {
         trace_reg_branchify_plan(&original, &plan, &remove_defs, reg);
     }
@@ -562,6 +821,28 @@ fn apply_branchify_mux(
     }
 
     [true_id, false_id, merge_id]
+}
+
+fn removable_defs_after_head_restore(
+    original: &BasicBlock<RegionedAbsoluteAddr>,
+    plan: &BranchifyPlan,
+    def_blocks: &HashMap<RegisterId, BlockId>,
+) -> HashSet<usize> {
+    let mut remove_defs = plan
+        .true_defs
+        .iter()
+        .chain(plan.false_defs.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    remove_defs.insert(plan.mux_idx);
+    if let Some(store) = &plan.distributed_store {
+        remove_defs.insert(store.idx);
+    }
+    let restore_defs = head_restore_defs(original, plan, &remove_defs, def_blocks);
+    for idx in restore_defs {
+        remove_defs.remove(&idx);
+    }
+    remove_defs
 }
 
 fn trace_reg_in_original(
@@ -1183,14 +1464,203 @@ mod tests {
         SIRInstruction::Imm(RegisterId(dst), SIRValue::new(BigUint::from(value)))
     }
 
+    fn append_mul_chain(
+        instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+        initial: usize,
+        factor: usize,
+        outputs: &[usize],
+    ) {
+        let mut lhs = RegisterId(initial);
+        for &output in outputs {
+            instructions.push(SIRInstruction::Binary(
+                RegisterId(output),
+                lhs,
+                crate::ir::BinaryOp::Mul,
+                RegisterId(factor),
+            ));
+            lhs = RegisterId(output);
+        }
+    }
+
+    fn profitability(
+        true_arm_cost: u128,
+        false_arm_cost: u128,
+        phi_copy_cost: u128,
+        live_through_cost: u128,
+    ) -> BranchProfitability {
+        profitability_with_probability(
+            true_arm_cost,
+            false_arm_cost,
+            phi_copy_cost,
+            live_through_cost,
+            StaticBranchProbability::EVEN,
+        )
+    }
+
+    fn profitability_with_probability(
+        true_arm_cost: u128,
+        false_arm_cost: u128,
+        phi_copy_cost: u128,
+        live_through_cost: u128,
+        probability: StaticBranchProbability,
+    ) -> BranchProfitability {
+        BranchProfitability {
+            true_arm_cost,
+            false_arm_cost,
+            removed_mux_cost: 1,
+            probability,
+            control_cost: BRANCH_CONTROL_COST,
+            phi_copy_cost,
+            live_through_cost,
+        }
+    }
+
     #[test]
-    fn branchifies_single_use_mux_arm_work() {
+    fn one_expensive_arm_must_pay_for_its_unselected_half() {
+        // Expected savings: 24 / 2 + 1 = 13. Introduced cost: 11 + 2 = 13.
+        // Equality is deliberately rejected because it does not prove a win.
+        assert!(!profitability(24, 0, 2, 0).proves_expected_benefit());
+    }
+
+    #[test]
+    fn work_on_both_arms_can_prove_expected_benefit() {
+        // Expected savings: (20 + 20) / 2 + 1 = 21. Introduced cost: 13.
+        assert!(profitability(20, 20, 2, 0).proves_expected_benefit());
+    }
+
+    #[test]
+    fn live_through_cost_can_turn_a_candidate_into_a_rejection() {
+        assert!(profitability(20, 10, 2, 0).proves_expected_benefit());
+        // Expected savings and introduced cost are now both 16.
+        assert!(!profitability(20, 10, 2, 3).proves_expected_benefit());
+    }
+
+    #[test]
+    fn decoder_probability_can_prove_a_local_expected_win() {
+        assert!(!profitability(10, 0, 0, 0).proves_expected_benefit());
+        assert!(
+            profitability_with_probability(
+                10,
+                0,
+                0,
+                0,
+                StaticBranchProbability::EQUALITY_TO_CONSTANT,
+            )
+            .proves_expected_benefit()
+        );
+    }
+
+    #[test]
+    fn static_probability_tracks_constant_equality_and_inversion() {
+        let eu = unit(vec![
+            imm(1, 7),
+            SIRInstruction::Unary(RegisterId(5), crate::ir::UnaryOp::Ident, RegisterId(1)),
+            SIRInstruction::Binary(
+                RegisterId(2),
+                RegisterId(0),
+                crate::ir::BinaryOp::EqWildcard,
+                RegisterId(5),
+            ),
+            SIRInstruction::Unary(RegisterId(3), crate::ir::UnaryOp::LogicNot, RegisterId(2)),
+            SIRInstruction::Binary(
+                RegisterId(4),
+                RegisterId(0),
+                crate::ir::BinaryOp::Ne,
+                RegisterId(1),
+            ),
+        ]);
+        let block = &eu.blocks[&BlockId(0)];
+        let def_pos = block
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, inst)| def_reg(inst).map(|register| (register, idx)))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            static_true_probability(block, &def_pos, RegisterId(2)),
+            StaticBranchProbability::EQUALITY_TO_CONSTANT,
+        );
+        assert_eq!(
+            static_true_probability(block, &def_pos, RegisterId(3)),
+            StaticBranchProbability::EQUALITY_TO_CONSTANT.inverted(),
+        );
+        assert_eq!(
+            static_true_probability(block, &def_pos, RegisterId(4)),
+            StaticBranchProbability::EQUALITY_TO_CONSTANT.inverted(),
+        );
+        assert_eq!(
+            static_true_probability(block, &def_pos, RegisterId(0)),
+            StaticBranchProbability::EVEN,
+        );
+    }
+
+    #[test]
+    fn runtime_work_cost_scales_with_width_and_operation() {
+        let mut register_map = HashMap::default();
+        for register in [RegisterId(1), RegisterId(2)] {
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+        }
+        let mul = SIRInstruction::Binary(
+            RegisterId(2),
+            RegisterId(1),
+            crate::ir::BinaryOp::Mul,
+            RegisterId(1),
+        );
+        let div = SIRInstruction::Binary(
+            RegisterId(2),
+            RegisterId(1),
+            crate::ir::BinaryOp::Div,
+            RegisterId(1),
+        );
+        assert_eq!(branchified_instruction_cost(&mul, &register_map), 5);
+        assert_eq!(branchified_instruction_cost(&div, &register_map), 12);
+
+        for register in [RegisterId(1), RegisterId(2)] {
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width: 128,
+                    signed: false,
+                },
+            );
+        }
+        assert_eq!(branchified_instruction_cost(&mul, &register_map), 20);
+        assert_eq!(branchified_instruction_cost(&div, &register_map), 48);
+    }
+
+    #[test]
+    fn branchifies_single_use_mux_arm_work_when_expected_savings_pay_cost() {
         let mut eu = unit(vec![
             imm(1, 3),
             imm(4, 5),
             SIRInstruction::Binary(
-                RegisterId(2),
+                RegisterId(5),
                 RegisterId(1),
+                crate::ir::BinaryOp::Mul,
+                RegisterId(1),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(6),
+                RegisterId(5),
+                crate::ir::BinaryOp::Mul,
+                RegisterId(1),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(7),
+                RegisterId(6),
+                crate::ir::BinaryOp::Mul,
+                RegisterId(1),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(2),
+                RegisterId(7),
                 crate::ir::BinaryOp::Mul,
                 RegisterId(1),
             ),
@@ -1245,6 +1715,107 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_single_cheap_mul_arm_as_a_mux() {
+        let mut eu = unit(vec![
+            imm(1, 3),
+            imm(4, 5),
+            SIRInstruction::Binary(
+                RegisterId(2),
+                RegisterId(1),
+                crate::ir::BinaryOp::Mul,
+                RegisterId(1),
+            ),
+            SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
+            SIRInstruction::Store(
+                addr(0),
+                SIROffset::Static(0),
+                64,
+                RegisterId(3),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ]);
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.blocks.len(), 1);
+        assert!(eu.blocks[&BlockId(0)].instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4))
+            )
+        }));
+    }
+
+    #[test]
+    fn branchifies_a_decoder_biased_arm_with_expected_benefit() {
+        let mut instructions = vec![
+            imm(1, 3),
+            imm(4, 5),
+            imm(13, 7),
+            SIRInstruction::Binary(
+                RegisterId(14),
+                RegisterId(0),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(13),
+            ),
+        ];
+        append_mul_chain(&mut instructions, 1, 1, &[5, 2]);
+        instructions.extend([
+            SIRInstruction::Mux(RegisterId(3), RegisterId(14), RegisterId(2), RegisterId(4)),
+            SIRInstruction::Store(
+                addr(0),
+                SIROffset::Static(0),
+                64,
+                RegisterId(3),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ]);
+        let mut eu = unit(instructions);
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(14),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn keeps_muxes_in_four_state_mode() {
+        let mut instructions = vec![imm(1, 3), imm(4, 5)];
+        append_mul_chain(&mut instructions, 1, 1, &[5, 6, 7, 2]);
+        instructions.extend([
+            SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
+            SIRInstruction::Store(
+                addr(0),
+                SIROffset::Static(0),
+                64,
+                RegisterId(3),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ]);
+        let mut eu = unit(instructions);
+        let mut options = PassOptions::default();
+        options.four_state = true;
+
+        BranchifyMuxPass.run(&mut eu, &options);
+
+        assert_eq!(eu.blocks.len(), 1);
+        assert!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Mux(RegisterId(3), _, _, _)))
+        );
+    }
+
+    #[test]
     fn keeps_shared_mux_input_hoisted() {
         let mut eu = unit(vec![
             imm(1, 3),
@@ -1283,23 +1854,14 @@ mod tests {
 
     #[test]
     fn branchifies_non_store_mux_with_arm_work() {
-        let mut eu = unit(vec![
-            imm(1, 3),
-            SIRInstruction::Binary(
-                RegisterId(2),
-                RegisterId(1),
-                crate::ir::BinaryOp::Mul,
-                RegisterId(1),
-            ),
-            SIRInstruction::Binary(
-                RegisterId(4),
-                RegisterId(1),
-                crate::ir::BinaryOp::Add,
-                RegisterId(1),
-            ),
+        let mut instructions = vec![imm(1, 3)];
+        append_mul_chain(&mut instructions, 1, 1, &[8, 10, 2]);
+        append_mul_chain(&mut instructions, 1, 1, &[9, 4]);
+        instructions.extend([
             SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
             SIRInstruction::Unary(RegisterId(5), crate::ir::UnaryOp::BitNot, RegisterId(3)),
         ]);
+        let mut eu = unit(instructions);
 
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
 
@@ -1327,7 +1889,7 @@ mod tests {
             block.instructions.iter().any(|inst| {
                 matches!(
                     inst,
-                    SIRInstruction::Binary(RegisterId(4), _, crate::ir::BinaryOp::Add, _)
+                    SIRInstruction::Binary(RegisterId(4), _, crate::ir::BinaryOp::Mul, _)
                 )
             })
         }));
@@ -1374,8 +1936,9 @@ mod tests {
 
     #[test]
     fn does_not_sink_load_across_aliasing_store() {
-        let mut eu = unit(vec![
+        let mut instructions = vec![
             SIRInstruction::Load(RegisterId(1), addr(0), SIROffset::Static(0), 64),
+            imm(9, 3),
             SIRInstruction::Store(
                 addr(0),
                 SIROffset::Static(0),
@@ -1384,12 +1947,9 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             ),
-            SIRInstruction::Binary(
-                RegisterId(2),
-                RegisterId(1),
-                crate::ir::BinaryOp::Mul,
-                RegisterId(1),
-            ),
+        ];
+        append_mul_chain(&mut instructions, 1, 9, &[6, 7, 8, 10, 2]);
+        instructions.extend([
             SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(5)),
             SIRInstruction::Store(
                 addr(1),
@@ -1400,6 +1960,7 @@ mod tests {
                 Vec::new(),
             ),
         ]);
+        let mut eu = unit(instructions);
 
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
 
@@ -1422,15 +1983,9 @@ mod tests {
 
     #[test]
     fn sunk_arm_uses_dominating_live_in_directly() {
-        let mut eu = unit(vec![
-            imm(1, 3),
-            imm(4, 5),
-            SIRInstruction::Binary(
-                RegisterId(2),
-                RegisterId(7),
-                crate::ir::BinaryOp::Mul,
-                RegisterId(1),
-            ),
+        let mut instructions = vec![imm(1, 3), imm(4, 5)];
+        append_mul_chain(&mut instructions, 7, 1, &[5, 6, 8, 2]);
+        instructions.extend([
             SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
             SIRInstruction::Store(
                 addr(0),
@@ -1441,6 +1996,7 @@ mod tests {
                 Vec::new(),
             ),
         ]);
+        let mut eu = unit(instructions);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(7)];
 
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
@@ -1464,22 +2020,16 @@ mod tests {
             matches!(
                 inst,
                 SIRInstruction::Binary(dst, lhs, crate::ir::BinaryOp::Mul, _)
-                    if *dst == RegisterId(2) && *lhs == RegisterId(7)
+                    if *dst == RegisterId(5) && *lhs == RegisterId(7)
             )
         }));
     }
 
     #[test]
     fn branchifies_when_suffix_uses_dominating_live_in() {
-        let mut eu = unit(vec![
-            imm(1, 3),
-            imm(6, 11),
-            SIRInstruction::Binary(
-                RegisterId(2),
-                RegisterId(1),
-                crate::ir::BinaryOp::Mul,
-                RegisterId(1),
-            ),
+        let mut instructions = vec![imm(1, 3), imm(6, 11)];
+        append_mul_chain(&mut instructions, 1, 1, &[7, 8, 9, 10, 11, 2]);
+        instructions.extend([
             SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
             SIRInstruction::Binary(
                 RegisterId(5),
@@ -1488,6 +2038,7 @@ mod tests {
                 RegisterId(3),
             ),
         ]);
+        let mut eu = unit(instructions);
 
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
 
@@ -1509,14 +2060,9 @@ mod tests {
 
     #[test]
     fn merge_uses_dominating_param_directly() {
-        let mut eu = unit(vec![
-            imm(1, 3),
-            SIRInstruction::Binary(
-                RegisterId(2),
-                RegisterId(1),
-                crate::ir::BinaryOp::Mul,
-                RegisterId(1),
-            ),
+        let mut instructions = vec![imm(1, 3)];
+        append_mul_chain(&mut instructions, 1, 1, &[8, 9, 10, 11, 12, 2]);
+        instructions.extend([
             SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
             SIRInstruction::Binary(
                 RegisterId(5),
@@ -1525,6 +2071,7 @@ mod tests {
                 RegisterId(3),
             ),
         ]);
+        let mut eu = unit(instructions);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(7)];
 
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
@@ -1763,14 +2310,9 @@ mod tests {
 
     #[test]
     fn preserves_mux_result_through_merge_when_used_after_store() {
-        let mut eu = unit(vec![
-            imm(1, 3),
-            SIRInstruction::Binary(
-                RegisterId(2),
-                RegisterId(1),
-                crate::ir::BinaryOp::Mul,
-                RegisterId(1),
-            ),
+        let mut instructions = vec![imm(1, 3)];
+        append_mul_chain(&mut instructions, 1, 1, &[5, 6, 7, 8, 2]);
+        instructions.extend([
             SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(2), RegisterId(4)),
             SIRInstruction::Store(
                 addr(0),
@@ -1789,6 +2331,7 @@ mod tests {
                 Vec::new(),
             ),
         ]);
+        let mut eu = unit(instructions);
 
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
 

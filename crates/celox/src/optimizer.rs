@@ -104,11 +104,14 @@ pub enum OptLevel {
     /// No SIR optimizations except [`SirPass::TailCallSplit`].
     /// Cranelift: `fast_compile()`. DSE: Off.
     O0,
-    /// All SIR optimizations enabled.
+    /// Production-default SIR optimizations enabled. Experimental passes such
+    /// as [`SirPass::BranchifyMux`] require an explicit override.
     /// Cranelift: Speed / Backtracking. DSE: Off.
     #[default]
     O1,
-    /// All SIR optimizations + DSE(`PreserveTopPorts`).
+    /// Production-default SIR optimizations + DSE(`PreserveTopPorts`).
+    /// Experimental passes such as [`SirPass::BranchifyMux`] require an
+    /// explicit override.
     /// Cranelift: Speed / Backtracking.
     O2,
 }
@@ -118,7 +121,7 @@ impl OptLevel {
     pub fn default_enabled(self, pass: SirPass) -> bool {
         match self {
             OptLevel::O0 => matches!(pass, SirPass::TailCallSplit),
-            OptLevel::O1 | OptLevel::O2 => true,
+            OptLevel::O1 | OptLevel::O2 => !matches!(pass, SirPass::BranchifyMux),
         }
     }
 
@@ -260,9 +263,14 @@ impl SirPass {
 /// ```
 /// use celox::{OptLevel, SirPass, OptimizeOptions};
 ///
-/// // All passes enabled (default)
+/// // Production defaults enabled
 /// let opts = OptimizeOptions::default();
 /// assert!(opts.is_enabled(SirPass::Gvn));
+/// assert!(!opts.is_enabled(SirPass::BranchifyMux));
+///
+/// // Experimental passes are explicit opt-ins.
+/// let opts = opts.enable(SirPass::BranchifyMux);
+/// assert!(opts.is_enabled(SirPass::BranchifyMux));
 ///
 /// // O0 with one pass selectively enabled
 /// let opts = OptimizeOptions::new(OptLevel::O0)
@@ -293,7 +301,8 @@ impl OptimizeOptions {
         }
     }
 
-    /// All passes enabled (equivalent to `OptLevel::O1`).
+    /// All production-default passes enabled (equivalent to `OptLevel::O1`).
+    /// Experimental passes still require [`Self::enable`].
     pub fn all() -> Self {
         Self::new(OptLevel::O1)
     }
@@ -399,4 +408,22 @@ pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &Opti
             ..PassOptions::default()
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OptLevel, OptimizeOptions, SirPass};
+
+    #[test]
+    fn branchify_is_not_enabled_by_optimization_presets() {
+        assert!(!OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::BranchifyMux));
+        assert!(!OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::BranchifyMux));
+        assert!(!OptimizeOptions::all().is_enabled(SirPass::BranchifyMux));
+    }
+
+    #[test]
+    fn branchify_remains_an_explicit_opt_in() {
+        let options = OptimizeOptions::new(OptLevel::O2).enable(SirPass::BranchifyMux);
+        assert!(options.is_enabled(SirPass::BranchifyMux));
+    }
 }

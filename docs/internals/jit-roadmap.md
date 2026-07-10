@@ -62,17 +62,20 @@ when the compiled binary becomes available:
 Local Celox measurements on `test_soc_linux_boot` show a different bottleneck
 from the small `linear_sec` kernels:
 
-- Veryl `cc` baseline for the pinned Heliodor checkout completed the single
-  Linux boot in about 65.7 s.
-- Celox native currently reaches about 600k ticks in a 70 s timed run. The
-  last stable run reported `avg_comb_us ~= 64.1` and `avg_apply_us ~= 2.35`.
-  Projected to Heliodor's observed boot cycle count, this is still on the
-  order of 10x slower than the Veryl `cc` baseline.
+- Veryl `cc` baseline for the pinned Heliodor checkout completes the single
+  Linux boot in roughly 66--70 s.
+- Celox has never completed this full gate quickly. Earlier successful Celox
+  records were compile-only, not Linux-boot completions. Before control-aware
+  lowering, a representative partial run measured about 48 us per
+  `eval_comb`. The current verified binary-CFG lowering measures about 36.3 us
+  in a same-build 60-second window, but still reaches only about 700k of the
+  observed 10.15M ticks. It therefore remains several times too slow and is
+  not an accepted end-to-end result.
 - Celox Cranelift is not a viable replacement for the custom native backend on
   this workload; its JIT/backend phase was substantially slower than native.
-- The hot Celox native unit is `eval_comb`, not `eval_apply`. A representative
-  post-regalloc `eval_comb` has about 282k MIR instructions, including about
-  42k stack loads and 21k stack stores.
+- The hot Celox native unit is `eval_comb`, not `eval_apply`. With the current
+  binary-CFG lowering, a representative allocated `eval_comb` has about 202k
+  MIR instructions, including about 21.5k stack loads and 10.5k stack stores.
 - The largest `eval_comb` blocks are dominated by long mux chains. Some are
   direct case/decode chains, but the hottest 172-arm chains in blocks 432 and
   0 are accumulator-guarded priority encoders of the form
@@ -112,19 +115,14 @@ The one accepted Heliodor-facing SIR change so far is conservative:
   pair. This reduced MIR counts but only improved the timed Heliodor run
   slightly.
 
-The important conclusion is that Heliodor is exposing a coupled
-codegen/regalloc problem, not a single missing peephole. The native emitter
-currently uses RCX as an internal div/rem scratch when the divisor is assigned
-to RAX/RDX, while regalloc models only RAX/RDX as div/rem clobbers. The fast
-but under-specified path happens to work for the current stable code shape; when
-nearby mux/trigger code changes alter allocation, the latent bug can surface as
-a hardware divide exception. The correct fix is not to globally make div/rem
-more conservative. It is to give div/rem a modeled scratch strategy that keeps
-register div fast without untracked clobbers.
-
-This changes the next implementation priority: before more trigger or mux
-shrinking is accepted, native regalloc/emit needs a correct and cheap scratch
-contract for instructions with implicit operands.
+Those rejected experiments exposed a coupled codegen/regalloc correctness bug,
+not evidence that the peepholes themselves were sufficient. The replacement
+allocator now models implicit RAX/RDX constraints and live-through clobbers,
+and the emitter uses a proved stack copy when a divisor aliases RAX/RDX rather
+than an untracked RCX scratch. Per-pass MIR verification and dedicated division
+tests cover that boundary. With the scratch contract fixed, the measured
+bottleneck is the remaining decision-region shape and its resulting pressure,
+not a reason to revive the unsafe fast path.
 
 ### Branchy Case Lowering
 
@@ -144,8 +142,7 @@ chain, inflates regalloc pressure, and executes arms that the current opcode
 cannot observe. A plain reschedule pass cannot fix this because it must still
 emit a linear program where all operands of each mux are already available.
 
-The next high-leverage optimization is a SIR-to-SIR control-flow conversion for
-large pure mux chains:
+The first implemented stage is cost-directed control preservation:
 
 ```text
 entry:
@@ -160,29 +157,51 @@ join(result):
   use result
 ```
 
-Start with a deliberately narrow but useful pattern:
+The primary transform happens while lowering the SLT expression DAG, before
+both arms have been eagerly materialized. Shared descendants are computed once
+in the dominator and only exclusive arm work enters the diamond. A later
+`BranchifyMux` SIR pass can recover opportunities exposed by simplification,
+but it is a cleanup complement rather than the primary decoder lowering.
 
-- 2-state mode only. 4-state mux semantics for X/Z conditions must remain on
-  the existing dataflow lowering until branch semantics can preserve mask
-  behavior exactly.
-- The mux result must feed ordinary pure computation or stores after the join;
-  the moved arm slice itself must contain no `Store`, `Commit`,
-  `RuntimeEvent`, `CombCaptureEvent`, or component call.
-- Conditions must be pure and cheap, initially `Eq`/`EqWildcard` against
-  immediates from the same selector register.
-- Arm expressions may be moved only when all definitions in the arm slice are
-  exclusively used by that arm and dominated by the test block. Shared loads or
-  common subexpressions stay before the branch.
-- Require a profitability threshold such as at least 8 arms or at least 200
-  movable SIR instructions. Small muxes should stay branchless.
+Both stages make a strict local expected-cost decision. Expected skipped arm
+work and the removed select must exceed branch control, static expected
+misprediction, merge copies, and (for the SIR cleanup) values kept live through
+the new diamond. Equality-to-constant decoder conditions receive a static
+not-taken bias; other conditions use an even prior. There is no arm-count,
+iteration-count, function-size, or CFG-size cap. Small cheap muxes remain
+branchless because their local cost is unfavorable, not because a global
+budget was exhausted.
 
-This transformation should be implemented before more local mux shrinking. It
-attacks the reason Heliodor spills so much: not the cost of an individual mux,
-but the fact that thousands of unselected arm values are simultaneously live.
-Use `CELOX_MUX_CHAIN_STATS=1` while building/running a project to print the
-largest optimized `eval_comb` mux chains. The output separates direct
-case/decode chains from accumulator-guarded priority chains; these need
-different lowering strategies.
+Four-state muxes stay as dataflow muxes because their X/Z condition semantics
+cannot currently be represented by SIR `Branch`. Pure/shared-definition and
+memory-alias legality rules remain mandatory. The full relationship and cost
+equation are documented in
+[Branch-aware mux lowering](./branch-aware-mux-lowering.md).
+
+The binary stage is not the completed Heliodor solution. Current lowering sees
+22,344 muxes: 2,579 become verified CFG diamonds, 16,509 remain branchless
+because their local expected cost is unfavorable, and 3,227 pass the cost test
+but are conservatively retained because they contain deeper shared DAG nodes.
+Only one shared node is currently hoisted. Those 3,227 cases require
+dominance-aware expression placement: each node must be placed once in the
+nearest common control region of its uses, rather than cloning the global
+cache per arm or eagerly hoisting all shared work.
+
+There is also a distinct multiway problem. Veryl's AOT path still invokes all
+31 combinational chunks every tick, so its advantage is not event-driven
+evaluation. GCC recognizes the generated equality/priority chains as decision
+regions and emits 159 indirect jump-table dispatches, along with balanced and
+partially if-converted tails. Celox must likewise recover a verified
+same-selector decision region and choose among a value table, dense jump table,
+sparse comparison tree, ordered wildcard chain, and small branchless tail by
+target cost. This is a region transform above binary mux lowering, not another
+`BranchifyMux` threshold.
+
+A same-build A/B of the cleanup pass confirms the distinction. Explicitly
+enabling `BranchifyMux` applied 464 additional diamonds, increased the spill
+frame from about 79.2 to 84.3 KiB and effective edge copies from 10,110 to
+14,206, while leaving `avg_comb_us` at roughly 36.1--36.4. It therefore remains
+disabled in the O1/O2 presets.
 
 ## Goals
 

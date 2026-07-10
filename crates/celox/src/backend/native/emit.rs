@@ -13,7 +13,8 @@ use iced_x86::code_asm::*;
 use crate::backend::native::mir::*;
 use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet};
 use crate::backend::native::ssa_destroy::{
-    EdgeCopyPlan, ParallelCopyDestination, ParallelCopySource, SsaDestructionPlan,
+    EdgeCopyPlan, ParallelCopyDestination, ParallelCopyOperation, ParallelCopySource,
+    SsaDestructionPlan,
 };
 
 pub use crate::backend::native::ssa_destroy::SsaDestructionError;
@@ -372,49 +373,66 @@ pub fn disassemble(code: &[u8], base_addr: u64) -> String {
 fn emit_parallel_copy_plan(
     asm: &mut CodeAssembler,
     edge: Option<&EdgeCopyPlan>,
-) -> Result<(), IcedError> {
+) -> Result<(), EmitError> {
     let Some(edge) = edge else {
         return Ok(());
     };
-    let copies = edge
-        .rows
-        .iter()
-        .copied()
-        .filter(|row| !row.is_identity())
-        .collect::<Vec<_>>();
 
-    if let [copy] = copies.as_slice() {
-        emit_single_parallel_copy(asm, copy.destination, copy.source)?;
-        return Ok(());
-    }
-
-    // Save every source before writing any destination. This preserves true
-    // parallel-copy semantics for register cycles, stack cycles, and mixtures
-    // of both. RSP-relative frame operands compensate for the temporary pushes.
-    for (depth, copy) in copies.iter().enumerate() {
-        match copy.source {
-            ParallelCopySource::Register(preg) => asm.push(preg_to_reg64(preg))?,
-            ParallelCopySource::Stack(slot) => asm.push(qword_ptr(mem_operand(
-                BaseReg::StackFrame,
-                slot + depth as i32 * 8,
-            )))?,
-            ParallelCopySource::Immediate(value) => {
-                // Leave the immediate on the temporary copy stack while
-                // restoring the live RAX value used as an encoding scratch.
-                asm.push(rax)?;
-                asm.mov(rax, value)?;
-                asm.xchg(qword_ptr(rsp), rax)?;
+    let mut temporary_live = false;
+    for operation in &edge.operations {
+        match *operation {
+            ParallelCopyOperation::Move {
+                destination,
+                source,
+            } => {
+                let stack_adjustment = if temporary_live { 8 } else { 0 };
+                emit_single_parallel_copy(asm, destination, source, stack_adjustment)?;
+            }
+            ParallelCopyOperation::SaveTemporary(location) => {
+                if temporary_live {
+                    return Err(parallel_copy_input_error(
+                        "EMIT.PARALLEL_COPY_TEMPORARY",
+                        "parallel-copy schedule nests temporary saves",
+                    ));
+                }
+                match location {
+                    ParallelCopyDestination::Register(register) => {
+                        asm.push(preg_to_reg64(register))?
+                    }
+                    ParallelCopyDestination::Stack(slot) => {
+                        let offset = checked_parallel_copy_offset(slot, 0)?;
+                        asm.push(qword_ptr(mem_operand(BaseReg::StackFrame, offset)))?;
+                    }
+                }
+                temporary_live = true;
+            }
+            ParallelCopyOperation::RestoreTemporary(location) => {
+                if !temporary_live {
+                    return Err(parallel_copy_input_error(
+                        "EMIT.PARALLEL_COPY_TEMPORARY",
+                        "parallel-copy schedule restores an inactive temporary",
+                    ));
+                }
+                match location {
+                    ParallelCopyDestination::Register(register) => {
+                        asm.pop(preg_to_reg64(register))?
+                    }
+                    ParallelCopyDestination::Stack(slot) => {
+                        // POP computes an RSP-based destination after advancing
+                        // RSP, so this uses the unadjusted frame displacement.
+                        let offset = checked_parallel_copy_offset(slot, 0)?;
+                        asm.pop(qword_ptr(mem_operand(BaseReg::StackFrame, offset)))?;
+                    }
+                }
+                temporary_live = false;
             }
         }
     }
-    for (depth, copy) in copies.iter().enumerate().rev() {
-        match copy.destination {
-            ParallelCopyDestination::Register(preg) => asm.pop(preg_to_reg64(preg))?,
-            ParallelCopyDestination::Stack(slot) => asm.pop(qword_ptr(mem_operand(
-                BaseReg::StackFrame,
-                slot + depth as i32 * 8,
-            )))?,
-        }
+    if temporary_live {
+        return Err(parallel_copy_input_error(
+            "EMIT.PARALLEL_COPY_TEMPORARY",
+            "parallel-copy schedule leaves a temporary live",
+        ));
     }
     Ok(())
 }
@@ -423,37 +441,337 @@ fn emit_single_parallel_copy(
     asm: &mut CodeAssembler,
     destination: ParallelCopyDestination,
     source: ParallelCopySource,
-) -> Result<(), IcedError> {
+    stack_adjustment: i32,
+) -> Result<(), EmitError> {
     match (destination, source) {
         (ParallelCopyDestination::Register(dst), ParallelCopySource::Register(src)) => {
             asm.mov(preg_to_reg64(dst), preg_to_reg64(src))?;
         }
         (ParallelCopyDestination::Register(dst), ParallelCopySource::Stack(slot)) => {
+            let offset = checked_parallel_copy_offset(slot, stack_adjustment)?;
             asm.mov(
                 preg_to_reg64(dst),
-                qword_ptr(mem_operand(BaseReg::StackFrame, slot)),
+                qword_ptr(mem_operand(BaseReg::StackFrame, offset)),
             )?;
         }
         (ParallelCopyDestination::Register(dst), ParallelCopySource::Immediate(value)) => {
             asm.mov(preg_to_reg64(dst), value)?;
         }
         (ParallelCopyDestination::Stack(slot), ParallelCopySource::Register(src)) => {
+            let offset = checked_parallel_copy_offset(slot, stack_adjustment)?;
             asm.mov(
-                qword_ptr(mem_operand(BaseReg::StackFrame, slot)),
+                qword_ptr(mem_operand(BaseReg::StackFrame, offset)),
                 preg_to_reg64(src),
             )?;
         }
         (ParallelCopyDestination::Stack(dst), ParallelCopySource::Stack(src)) => {
-            asm.push(rax)?;
-            asm.mov(rax, qword_ptr(mem_operand(BaseReg::StackFrame, src + 8)))?;
-            asm.mov(qword_ptr(mem_operand(BaseReg::StackFrame, dst + 8)), rax)?;
-            asm.pop(rax)?;
+            // XMM0 is not part of the GPR allocator and SSE2 is baseline on
+            // x86-64, so it is a safe non-stack scratch for a qword memcopy.
+            let source_offset = checked_parallel_copy_offset(src, stack_adjustment)?;
+            let destination_offset = checked_parallel_copy_offset(dst, stack_adjustment)?;
+            asm.movq(
+                xmm0,
+                qword_ptr(mem_operand(BaseReg::StackFrame, source_offset)),
+            )?;
+            asm.movq(
+                qword_ptr(mem_operand(BaseReg::StackFrame, destination_offset)),
+                xmm0,
+            )?;
         }
         (ParallelCopyDestination::Stack(slot), ParallelCopySource::Immediate(value)) => {
-            asm.push(rax)?;
-            asm.mov(rax, value)?;
-            asm.mov(qword_ptr(mem_operand(BaseReg::StackFrame, slot + 8)), rax)?;
-            asm.pop(rax)?;
+            // x86 has no arbitrary imm64-to-memory encoding.  Two independent
+            // dword stores avoid borrowing an allocatable GPR or stack scratch.
+            let low_offset = checked_parallel_copy_offset(slot, stack_adjustment)?;
+            let high_adjustment = stack_adjustment.checked_add(4).ok_or_else(|| {
+                parallel_copy_input_error(
+                    "EMIT.PARALLEL_COPY_OFFSET",
+                    "parallel-copy immediate high-word adjustment exceeds i32",
+                )
+            })?;
+            let high_offset = checked_parallel_copy_offset(slot, high_adjustment)?;
+            asm.mov(
+                dword_ptr(mem_operand(BaseReg::StackFrame, low_offset)),
+                value as u32,
+            )?;
+            asm.mov(
+                dword_ptr(mem_operand(BaseReg::StackFrame, high_offset)),
+                (value >> 32) as u32,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn checked_parallel_copy_offset(slot: i32, adjustment: i32) -> Result<i32, EmitError> {
+    slot.checked_add(adjustment).ok_or_else(|| {
+        parallel_copy_input_error(
+            "EMIT.PARALLEL_COPY_OFFSET",
+            format!("stack slot {slot} overflows after temporary adjustment {adjustment}"),
+        )
+    })
+}
+
+fn parallel_copy_input_error(rule: &'static str, message: impl Into<String>) -> EmitError {
+    EmitInputError::new(rule, None, None, None, message).into()
+}
+
+#[derive(Clone, Copy)]
+enum EmittedBranchCondition {
+    NonZero,
+    Compare(CmpKind),
+}
+
+fn emit_condition_jump(
+    asm: &mut CodeAssembler,
+    label: CodeLabel,
+    condition: EmittedBranchCondition,
+    jump_when_true: bool,
+) -> Result<(), IcedError> {
+    match (condition, jump_when_true) {
+        (EmittedBranchCondition::NonZero, true) => asm.jne(label),
+        (EmittedBranchCondition::NonZero, false) => asm.je(label),
+        (EmittedBranchCondition::Compare(kind), true) => emit_jcc(asm, label, kind),
+        (EmittedBranchCondition::Compare(kind), false) => emit_inverse_jcc(asm, label, kind),
+    }
+}
+
+struct BlockLabels {
+    labels: Vec<CodeLabel>,
+    canonical: HashMap<BlockId, usize>,
+    bound: Vec<bool>,
+}
+
+impl BlockLabels {
+    fn new(
+        asm: &mut CodeAssembler,
+        func: &MFunction,
+        assignment: &AssignmentMap,
+        plan: &SsaDestructionPlan,
+    ) -> Self {
+        let mut labels = Vec::new();
+        let mut canonical = HashMap::new();
+
+        for (index, block) in func.blocks.iter().enumerate().rev() {
+            let next = func.blocks.get(index + 1).map(|next| next.id);
+            let canonical_index = next
+                .filter(|&next| block_is_empty_fallthrough(block, next, assignment, plan))
+                .and_then(|next| canonical.get(&next).copied())
+                .unwrap_or_else(|| {
+                    let index = labels.len();
+                    labels.push(asm.create_label());
+                    index
+                });
+            canonical.insert(block.id, canonical_index);
+        }
+
+        let bound = vec![false; labels.len()];
+        Self {
+            labels,
+            canonical,
+            bound,
+        }
+    }
+
+    fn index(&self, block: BlockId) -> Result<usize, EmitError> {
+        self.canonical.get(&block).copied().ok_or_else(|| {
+            EmitInputError::new(
+                "EMIT.BRANCH_TARGET",
+                None,
+                None,
+                None,
+                format!("branch targets missing block {block}"),
+            )
+            .into()
+        })
+    }
+
+    fn label(&self, block: BlockId) -> Result<CodeLabel, EmitError> {
+        Ok(self.labels[self.index(block)?])
+    }
+
+    fn label_mut(&mut self, index: usize) -> &mut CodeLabel {
+        &mut self.labels[index]
+    }
+
+    fn bind(
+        &mut self,
+        asm: &mut CodeAssembler,
+        block: BlockId,
+        index: usize,
+    ) -> Result<(), EmitError> {
+        if self.bound[index] {
+            return Ok(());
+        }
+        asm.set_label(&mut self.labels[index]).map_err(|error| {
+            EmitInputError::new(
+                "EMIT.BLOCK_LABEL",
+                Some(block),
+                None,
+                None,
+                format!("failed to bind native block label: {error}"),
+            )
+        })?;
+        self.bound[index] = true;
+        Ok(())
+    }
+
+    fn mark_bound(&mut self, index: usize) {
+        self.bound[index] = true;
+    }
+}
+
+fn instruction_emits_no_code(inst: &MInst, assignment: &AssignmentMap) -> bool {
+    match inst {
+        MInst::Mov { dst, src } => {
+            matches!((assignment.get(*dst), assignment.get(*src)), (Some(dst), Some(src)) if dst == src)
+        }
+        MInst::AndImm {
+            dst,
+            src,
+            imm: u64::MAX,
+        }
+        | MInst::OrImm { dst, src, imm: 0 } => {
+            matches!((assignment.get(*dst), assignment.get(*src)), (Some(dst), Some(src)) if dst == src)
+        }
+        MInst::CmpSelect {
+            dst,
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpImmSelect {
+            dst,
+            true_val,
+            false_val,
+            ..
+        } => matches!(
+            (
+                assignment.get(*dst),
+                assignment.get(*true_val),
+                assignment.get(*false_val),
+            ),
+            (Some(dst), Some(true_val), Some(false_val))
+                if dst == true_val && dst == false_val
+        ),
+        MInst::GuardedCmpSelect {
+            dst,
+            guard,
+            lhs,
+            rhs,
+            true_val,
+            false_val,
+            ..
+        } => matches!(
+            (
+                assignment.get(*dst),
+                assignment.get(*guard),
+                assignment.get(*lhs),
+                assignment.get(*rhs),
+                assignment.get(*true_val),
+                assignment.get(*false_val),
+            ),
+            (Some(dst), Some(guard), Some(lhs), Some(rhs), Some(true_val), Some(false_val))
+                if dst != guard
+                    && dst != lhs
+                    && dst != rhs
+                    && dst == true_val
+                    && dst == false_val
+        ),
+        MInst::MemCopy { byte_len: 0, .. } => true,
+        _ => false,
+    }
+}
+
+fn block_is_empty_fallthrough(
+    block: &MBlock,
+    next: BlockId,
+    assignment: &AssignmentMap,
+    plan: &SsaDestructionPlan,
+) -> bool {
+    matches!(block.terminator(), Some(MInst::Jump { target }) if *target == next)
+        && !plan
+            .edge(block.id, next)
+            .is_some_and(|edge| edge.has_effective_copies())
+        && block.insts[..block.insts.len() - 1]
+            .iter()
+            .all(|inst| instruction_emits_no_code(inst, assignment))
+}
+
+fn branch_label(labels: &BlockLabels, block: BlockId) -> Result<CodeLabel, EmitError> {
+    labels.label(block).map_err(|_| {
+        EmitInputError::new(
+            "EMIT.BRANCH_TARGET",
+            None,
+            None,
+            None,
+            format!("branch targets missing block {block}"),
+        )
+        .into()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_branch_with_edge_copies(
+    asm: &mut CodeAssembler,
+    labels: &BlockLabels,
+    plan: &SsaDestructionPlan,
+    predecessor: BlockId,
+    true_block: BlockId,
+    false_block: BlockId,
+    next_block: Option<BlockId>,
+    condition: EmittedBranchCondition,
+) -> Result<(), EmitError> {
+    let true_edge = plan
+        .edge(predecessor, true_block)
+        .filter(|edge| edge.has_effective_copies());
+    let false_edge = plan
+        .edge(predecessor, false_block)
+        .filter(|edge| edge.has_effective_copies());
+    let true_label = branch_label(labels, true_block)?;
+    let false_label = branch_label(labels, false_block)?;
+
+    match (true_edge, false_edge) {
+        (None, None) => {
+            emit_condition_jump(asm, true_label, condition, true)?;
+            if next_block != Some(false_block) {
+                asm.jmp(false_label)?;
+            }
+        }
+        (Some(true_edge), None) => {
+            // The false edge can jump directly to its target.  The true edge
+            // falls through its copy sequence, avoiding an extra local stub.
+            emit_condition_jump(asm, false_label, condition, false)?;
+            emit_parallel_copy_plan(asm, Some(true_edge))?;
+            if next_block != Some(true_block) {
+                asm.jmp(true_label)?;
+            }
+        }
+        (None, Some(false_edge)) => {
+            emit_condition_jump(asm, true_label, condition, true)?;
+            emit_parallel_copy_plan(asm, Some(false_edge))?;
+            if next_block != Some(false_block) {
+                asm.jmp(false_label)?;
+            }
+        }
+        (Some(true_edge), Some(false_edge)) if next_block == Some(false_block) => {
+            // Place the layout-successor copy last so it can fall through.
+            let mut false_copy_label = asm.create_label();
+            emit_condition_jump(asm, false_copy_label, condition, false)?;
+            emit_parallel_copy_plan(asm, Some(true_edge))?;
+            asm.jmp(true_label)?;
+            asm.set_label(&mut false_copy_label)?;
+            emit_parallel_copy_plan(asm, Some(false_edge))?;
+        }
+        (Some(true_edge), Some(false_edge)) => {
+            let mut true_copy_label = asm.create_label();
+            emit_condition_jump(asm, true_copy_label, condition, true)?;
+            emit_parallel_copy_plan(asm, Some(false_edge))?;
+            asm.jmp(false_label)?;
+            asm.set_label(&mut true_copy_label)?;
+            emit_parallel_copy_plan(asm, Some(true_edge))?;
+            if next_block != Some(true_block) {
+                asm.jmp(true_label)?;
+            }
         }
     }
     Ok(())
@@ -522,6 +840,44 @@ fn verify_emission_inputs(
                     .into());
                 }
             }
+            match inst {
+                MInst::Load {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size,
+                    ..
+                }
+                | MInst::Store {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size,
+                    ..
+                } => verify_stack_frame_access(
+                    block.id,
+                    instruction,
+                    *offset,
+                    *size,
+                    spill_frame_size,
+                )?,
+                MInst::LoadIndexed {
+                    base: BaseReg::StackFrame,
+                    ..
+                }
+                | MInst::StoreIndexed {
+                    base: BaseReg::StackFrame,
+                    ..
+                } => {
+                    return Err(EmitInputError::new(
+                        "EMIT.STACK_FRAME_INDEXED",
+                        Some(block.id),
+                        Some(instruction),
+                        None,
+                        "indexed stack-frame access has no statically provable frame bound",
+                    )
+                    .into());
+                }
+                _ => {}
+            }
         }
     }
 
@@ -530,6 +886,36 @@ fn verify_emission_inputs(
     // allowing a large (but otherwise well-formed) frame to wrap at encoding.
     checked_frame_size(spill_frame_size, used_callee_saved(assignment).len())?;
     Ok(())
+}
+
+fn verify_stack_frame_access(
+    block: BlockId,
+    instruction: usize,
+    offset: i32,
+    size: OpSize,
+    spill_frame_size: u32,
+) -> Result<(), EmitError> {
+    let bytes = size.bytes();
+    let valid = offset >= 0
+        && u32::try_from(offset)
+            .ok()
+            .filter(|offset| offset % bytes == 0)
+            .and_then(|offset| offset.checked_add(bytes))
+            .is_some_and(|end| end <= spill_frame_size);
+    if valid {
+        return Ok(());
+    }
+    Err(EmitInputError::new(
+        "EMIT.STACK_FRAME_ACCESS",
+        Some(block),
+        Some(instruction),
+        None,
+        format!(
+            "{}-byte stack access at offset {offset} is not naturally aligned inside {spill_frame_size} bytes",
+            bytes
+        ),
+    )
+    .into())
 }
 
 fn checked_frame_size(
@@ -600,11 +986,11 @@ fn emit_planned(
 ) -> Result<EmitResult, EmitError> {
     let mut asm = CodeAssembler::new(64)?;
 
-    // Block labels
-    let mut block_labels: HashMap<BlockId, CodeLabel> = HashMap::new();
-    for block in &func.blocks {
-        block_labels.insert(block.id, asm.create_label());
-    }
+    // Empty layout fallthrough chains share the label of the next block that
+    // emits code. iced permits only one label on an instruction, so distinct
+    // BlockIds at the same machine-code IP must be aliases here rather than
+    // zero-length pseudo instructions in the assembler stream.
+    let mut block_labels = BlockLabels::new(&mut asm, func, assignment, plan);
 
     let callee_saved = used_callee_saved(assignment);
     let frame_size = checked_frame_size(spill_frame_size, callee_saved.len())?;
@@ -626,39 +1012,29 @@ fn emit_planned(
 
     // ── Blocks ──
     let block_order: Vec<usize> = (0..func.blocks.len()).collect();
-    let mut fell_through = false; // track if previous block fell through (needs label spacing)
+    let mut previous_canonical_label = None;
     for (order_idx, &bi) in block_order.iter().enumerate() {
         let block = &func.blocks[bi];
         let next_block_id = block_order
             .get(order_idx + 1)
             .map(|&next_bi| func.blocks[next_bi].id);
 
-        if fell_through {
-            // Previous block fell through — this label follows directly.
-            // No nop needed because the fall-through IS the label position.
-            fell_through = false;
+        let canonical_label = block_labels.index(block.id)?;
+        if previous_canonical_label != Some(canonical_label) {
+            block_labels.bind(&mut asm, block.id, canonical_label)?;
         }
-
-        let label = block_labels.get_mut(&block.id).unwrap();
-        asm.set_label(label)?;
+        previous_canonical_label = Some(canonical_label);
 
         // Pre-scan: detect Cmp+Branch fusion opportunity.
         // If the instruction immediately before Branch is Cmp/CmpImm,
         // and the cmp result is only used by the Branch, we can fuse
         // into cmp + jcc (skipping setcc + movzx + test).
         let fused_cmp: Option<VReg> = if block.insts.len() >= 2 {
-            if let Some(MInst::Branch {
-                cond,
-                true_bb,
-                false_bb,
-            }) = block.terminator()
-            {
+            if let Some(MInst::Branch { cond, .. }) = block.terminator() {
                 let pre = &block.insts[block.insts.len() - 2];
                 let is_cmp = pre.def() == Some(*cond)
                     && matches!(pre, MInst::Cmp { .. } | MInst::CmpImm { .. });
-                let no_phi_targets = plan.edge(block.id, *true_bb).is_none()
-                    && plan.edge(block.id, *false_bb).is_none();
-                if is_cmp && no_phi_targets {
+                if is_cmp {
                     let used_elsewhere = block.insts[..block.insts.len() - 2]
                         .iter()
                         .any(|i| i.uses().contains(cond));
@@ -673,6 +1049,22 @@ fn emit_planned(
             None
         };
 
+        let fallthrough_continuation = next_block_id
+            .filter(|&next| {
+                matches!(block.terminator(), Some(MInst::Jump { target }) if *target == next)
+                    && !plan
+                        .edge(block.id, next)
+                        .is_some_and(|edge| edge.has_effective_copies())
+            })
+            .and_then(|next| {
+                block.insts[..block.insts.len() - 1]
+                    .iter()
+                    .rposition(|inst| !instruction_emits_no_code(inst, assignment))
+                    .map(|instruction| (instruction, next))
+            })
+            .map(|(instruction, next)| block_labels.index(next).map(|label| (instruction, label)))
+            .transpose()?;
+
         let mut inst_idx = 0usize;
         while inst_idx < block.insts.len() {
             let inst = &block.insts[inst_idx];
@@ -686,13 +1078,12 @@ fn emit_planned(
                     asm.jmp(epilogue_label)?;
                 }
                 MInst::Jump { target } => {
-                    emit_parallel_copy_plan(&mut asm, plan.edge(block.id, *target))?;
-                    if next_block_id == Some(*target) {
-                        // Fall-through (nop for label spacing if block is otherwise empty)
-                        asm.nop()?;
-                    } else {
-                        let label = block_labels.get_mut(target).unwrap();
-                        asm.jmp(*label)?;
+                    let edge = plan
+                        .edge(block.id, *target)
+                        .filter(|edge| edge.has_effective_copies());
+                    emit_parallel_copy_plan(&mut asm, edge)?;
+                    if next_block_id != Some(*target) {
+                        asm.jmp(branch_label(&block_labels, *target)?)?;
                     }
                 }
                 MInst::Branch {
@@ -721,38 +1112,29 @@ fn emit_planned(
                             }
                             _ => unreachable!(),
                         };
-                        let true_label = block_labels.get_mut(true_bb).unwrap();
-                        emit_jcc(&mut asm, *true_label, kind)?;
-                        if next_block_id == Some(*false_bb) {
-                            // Fall-through: jcc handles true path, false falls through
-                        } else {
-                            let false_label = block_labels.get_mut(false_bb).unwrap();
-                            asm.jmp(*false_label)?;
-                        }
+                        emit_branch_with_edge_copies(
+                            &mut asm,
+                            &block_labels,
+                            plan,
+                            block.id,
+                            *true_bb,
+                            *false_bb,
+                            next_block_id,
+                            EmittedBranchCondition::Compare(kind),
+                        )?;
                     } else {
                         let c = preg_to_reg64(resolve(assignment, *cond));
                         asm.test(c, c)?;
-                        let true_has_phis = plan.edge(block.id, *true_bb).is_some();
-                        let false_has_phis = plan.edge(block.id, *false_bb).is_some();
-
-                        if !true_has_phis && !false_has_phis {
-                            let true_label = block_labels.get_mut(true_bb).unwrap();
-                            asm.jne(*true_label)?;
-                            if next_block_id != Some(*false_bb) {
-                                let false_label = block_labels.get_mut(false_bb).unwrap();
-                                asm.jmp(*false_label)?;
-                            }
-                        } else {
-                            let mut true_phi_label = asm.create_label();
-                            asm.jne(true_phi_label)?;
-                            emit_parallel_copy_plan(&mut asm, plan.edge(block.id, *false_bb))?;
-                            let false_label = block_labels.get_mut(false_bb).unwrap();
-                            asm.jmp(*false_label)?;
-                            asm.set_label(&mut true_phi_label)?;
-                            emit_parallel_copy_plan(&mut asm, plan.edge(block.id, *true_bb))?;
-                            let true_label = block_labels.get_mut(true_bb).unwrap();
-                            asm.jmp(*true_label)?;
-                        }
+                        emit_branch_with_edge_copies(
+                            &mut asm,
+                            &block_labels,
+                            plan,
+                            block.id,
+                            *true_bb,
+                            *false_bb,
+                            next_block_id,
+                            EmittedBranchCondition::NonZero,
+                        )?;
                     } // end else (non-fused branch)
                 }
                 MInst::UDiv { dst, lhs, rhs } => {
@@ -783,7 +1165,23 @@ fn emit_planned(
                         inst_idx += 2;
                         continue;
                     }
-                    emit_inst(&mut asm, inst, assignment, func)?;
+                    let continuation_label = fallthrough_continuation
+                        .filter(|(instruction, _)| *instruction == inst_idx)
+                        .map(|(_, label)| label);
+                    let bound_continuation = if let Some(index) = continuation_label {
+                        emit_inst(
+                            &mut asm,
+                            inst,
+                            assignment,
+                            func,
+                            Some(block_labels.label_mut(index)),
+                        )?
+                    } else {
+                        emit_inst(&mut asm, inst, assignment, func, None)?
+                    };
+                    if let (true, Some(index)) = (bound_continuation, continuation_label) {
+                        block_labels.mark_bound(index);
+                    }
                 }
             }
             inst_idx += 1;
@@ -802,14 +1200,20 @@ fn emit_planned(
     asm.ret()?;
 
     let result = asm.assemble_options(0x0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
-    let block_offsets = func
-        .blocks
-        .iter()
-        .filter_map(|block| {
-            let label = block_labels.get(&block.id)?;
-            result.label_ip(label).ok().map(|ip| (block.id, ip))
-        })
-        .collect();
+    let mut block_offsets = Vec::with_capacity(func.blocks.len());
+    for block in &func.blocks {
+        let label = block_labels.label(block.id)?;
+        let ip = result.label_ip(&label).map_err(|error| {
+            EmitInputError::new(
+                "EMIT.BLOCK_LABEL_IP",
+                Some(block.id),
+                None,
+                None,
+                format!("failed to resolve native block label: {error}"),
+            )
+        })?;
+        block_offsets.push((block.id, ip));
+    }
     Ok(EmitResult {
         code: result.inner.code_buffer,
         frame_size,
@@ -1061,7 +1465,9 @@ fn emit_inst(
     inst: &MInst,
     assignment: &AssignmentMap,
     func: &MFunction,
-) -> Result<(), IcedError> {
+    continuation_label: Option<&mut CodeLabel>,
+) -> Result<bool, IcedError> {
+    let mut bound_continuation = false;
     match inst {
         MInst::Mov { dst, src } => {
             let d_preg = resolve(assignment, *dst);
@@ -1148,7 +1554,7 @@ fn emit_inst(
             byte_len,
         } => {
             if *byte_len == 0 {
-                return Ok(());
+                return Ok(false);
             }
             asm.push(rax)?;
             asm.push(rcx)?;
@@ -1590,11 +1996,19 @@ fn emit_inst(
         } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let s = preg_to_reg64(resolve(assignment, *src));
-            let mut done = asm.create_label();
-            asm.bsr(d, s)?;
-            asm.jne(done)?;
-            asm.mov(d, *zero_value as i64)?;
-            asm.set_label(&mut done)?;
+            if let Some(done) = continuation_label {
+                asm.bsr(d, s)?;
+                asm.jne(*done)?;
+                asm.mov(d, *zero_value as i64)?;
+                asm.set_label(done)?;
+                bound_continuation = true;
+            } else {
+                let mut done = asm.create_label();
+                asm.bsr(d, s)?;
+                asm.jne(done)?;
+                asm.mov(d, *zero_value as i64)?;
+                asm.set_label(&mut done)?;
+            }
         }
 
         MInst::Pext { dst, src, mask } => {
@@ -1668,8 +2082,17 @@ fn emit_inst(
             true_val,
             false_val,
         } => {
-            emit_guarded_cmp_select(
-                asm, assignment, *dst, *guard, *lhs, *rhs, *kind, *true_val, *false_val,
+            bound_continuation = emit_guarded_cmp_select(
+                asm,
+                assignment,
+                *dst,
+                *guard,
+                *lhs,
+                *rhs,
+                *kind,
+                *true_val,
+                *false_val,
+                continuation_label,
             )?;
         }
 
@@ -1690,7 +2113,7 @@ fn emit_inst(
             unreachable!("Return/ReturnError should be handled by the main emit loop");
         }
     }
-    Ok(())
+    Ok(bound_continuation)
 }
 
 /// Emit setcc instruction for a comparison kind.
@@ -1706,6 +2129,25 @@ fn emit_jcc(asm: &mut CodeAssembler, label: CodeLabel, kind: CmpKind) -> Result<
         CmpKind::GtS => asm.jg(label),
         CmpKind::GeU => asm.jae(label),
         CmpKind::GeS => asm.jge(label),
+    }
+}
+
+fn emit_inverse_jcc(
+    asm: &mut CodeAssembler,
+    label: CodeLabel,
+    kind: CmpKind,
+) -> Result<(), IcedError> {
+    match kind {
+        CmpKind::Eq => asm.jne(label),
+        CmpKind::Ne => asm.je(label),
+        CmpKind::LtU => asm.jae(label),
+        CmpKind::LtS => asm.jge(label),
+        CmpKind::LeU => asm.ja(label),
+        CmpKind::LeS => asm.jg(label),
+        CmpKind::GtU => asm.jbe(label),
+        CmpKind::GtS => asm.jle(label),
+        CmpKind::GeU => asm.jb(label),
+        CmpKind::GeS => asm.jl(label),
     }
 }
 
@@ -1835,7 +2277,8 @@ fn emit_guarded_cmp_select(
     kind: CmpKind,
     true_val: VReg,
     false_val: VReg,
-) -> Result<(), IcedError> {
+    continuation_label: Option<&mut CodeLabel>,
+) -> Result<bool, IcedError> {
     let d = preg_to_reg64(resolve(assignment, dst));
     let g = preg_to_reg64(resolve(assignment, guard));
     let l = preg_to_reg64(resolve(assignment, lhs));
@@ -1844,8 +2287,7 @@ fn emit_guarded_cmp_select(
     let fv = preg_to_reg64(resolve(assignment, false_val));
 
     if d == g || d == l || d == r {
-        emit_guarded_cmp_select_branchy(asm, d, g, l, r, kind, tv, fv)?;
-        return Ok(());
+        return emit_guarded_cmp_select_branchy(asm, d, g, l, r, kind, tv, fv, continuation_label);
     }
 
     if tv == fv {
@@ -1853,12 +2295,21 @@ fn emit_guarded_cmp_select(
             asm.mov(d, tv)?;
         }
     } else if d == fv {
-        let mut done = asm.create_label();
-        asm.test(g, g)?;
-        asm.je(done)?;
-        asm.cmp(l, r)?;
-        emit_cmovcc(asm, d, tv, kind)?;
-        asm.set_label(&mut done)?;
+        if let Some(done) = continuation_label {
+            asm.test(g, g)?;
+            asm.je(*done)?;
+            asm.cmp(l, r)?;
+            emit_cmovcc(asm, d, tv, kind)?;
+            asm.set_label(done)?;
+            return Ok(true);
+        } else {
+            let mut done = asm.create_label();
+            asm.test(g, g)?;
+            asm.je(done)?;
+            asm.cmp(l, r)?;
+            emit_cmovcc(asm, d, tv, kind)?;
+            asm.set_label(&mut done)?;
+        }
     } else if d == tv {
         asm.cmp(l, r)?;
         emit_inverse_cmovcc(asm, d, fv, kind)?;
@@ -1871,7 +2322,7 @@ fn emit_guarded_cmp_select(
         asm.test(g, g)?;
         asm.cmove(d, fv)?;
     }
-    Ok(())
+    Ok(false)
 }
 
 fn emit_guarded_cmp_select_branchy(
@@ -1883,27 +2334,48 @@ fn emit_guarded_cmp_select_branchy(
     kind: CmpKind,
     true_val: AsmRegister64,
     false_val: AsmRegister64,
-) -> Result<(), IcedError> {
+    continuation_label: Option<&mut CodeLabel>,
+) -> Result<bool, IcedError> {
     let mut false_label = asm.create_label();
     let mut true_label = asm.create_label();
-    let mut done = asm.create_label();
-    asm.test(guard, guard)?;
-    asm.je(false_label)?;
-    asm.cmp(lhs, rhs)?;
-    emit_jcc(asm, true_label, kind)?;
-    asm.set_label(&mut false_label)?;
-    if dst != false_val {
-        asm.mov(dst, false_val)?;
-    }
-    asm.jmp(done)?;
-    asm.set_label(&mut true_label)?;
-    if dst != true_val {
-        asm.mov(dst, true_val)?;
+    if let Some(done) = continuation_label {
+        asm.test(guard, guard)?;
+        asm.je(false_label)?;
+        asm.cmp(lhs, rhs)?;
+        emit_jcc(asm, true_label, kind)?;
+        asm.set_label(&mut false_label)?;
+        if dst != false_val {
+            asm.mov(dst, false_val)?;
+        }
+        asm.jmp(*done)?;
+        asm.set_label(&mut true_label)?;
+        if dst != true_val {
+            asm.mov(dst, true_val)?;
+        } else {
+            asm.nop()?;
+        }
+        asm.set_label(done)?;
+        Ok(true)
     } else {
-        asm.nop()?;
+        let mut done = asm.create_label();
+        asm.test(guard, guard)?;
+        asm.je(false_label)?;
+        asm.cmp(lhs, rhs)?;
+        emit_jcc(asm, true_label, kind)?;
+        asm.set_label(&mut false_label)?;
+        if dst != false_val {
+            asm.mov(dst, false_val)?;
+        }
+        asm.jmp(done)?;
+        asm.set_label(&mut true_label)?;
+        if dst != true_val {
+            asm.mov(dst, true_val)?;
+        } else {
+            asm.nop()?;
+        }
+        asm.set_label(&mut done)?;
+        Ok(false)
     }
-    asm.set_label(&mut done)?;
-    Ok(())
 }
 
 fn emit_setcc(asm: &mut CodeAssembler, d8: AsmRegister8, kind: CmpKind) -> Result<(), IcedError> {
@@ -2340,6 +2812,10 @@ pub fn emit_chained_eus(
     use super::{isel, regalloc};
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
+    let copy_stats = timing
+        || mir_stats
+        || std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
+        || std::env::var_os("CELOX_REGALLOC_STATS").is_some();
     let total_start = timing.then(crate::timing::now);
 
     // SIR-level EU merge: combine all EUs into one SIR EU
@@ -2459,6 +2935,22 @@ pub fn emit_chained_eus(
             mfunc.vregs.count(),
             ra.spill_frame_size,
             start.elapsed()
+        );
+    }
+    if copy_stats {
+        let stats = ra.ssa_destruction.stats();
+        eprintln!(
+            "[native-edge-copy-stats] label={label} edges={} rows={} identity_rows={} effective_copies={} identity_only_edges={} direct_moves={} cycle_breaks={} ready_pops={} dependency_releases={} max_effective_per_edge={}",
+            stats.edges,
+            stats.rows,
+            stats.identity_rows,
+            stats.effective_copies,
+            stats.identity_only_edges,
+            stats.direct_moves,
+            stats.cycle_breaks,
+            stats.ready_queue_pops,
+            stats.dependency_releases,
+            stats.max_effective_copies_per_edge,
         );
     }
     let post_regalloc_start = timing.then(crate::timing::now);

@@ -57,7 +57,17 @@ Partial store-load forwarding in combinational blocks. When a store covers part 
 ### 2.13 Identity Store Bypass
 Detects identity copies (Store→Load roundtrips where the value is unchanged) and registers the source and destination as address aliases in `Program::address_aliases`. Aliased variables share physical memory, eliminating redundant copies. Controlled by `SirPass::IdentityStoreBypass`.
 
-### 2.14 Tail-Call Splitting
+### 2.14 Branch-Aware Mux Lowering
+
+In 2-state mode, Celox may preserve an expensive mux as control flow so that
+the unselected expression is not evaluated. Cost-directed SLT lowering is the
+primary transform; `SirPass::BranchifyMux` is a cleanup pass for opportunities
+that remain after SIR simplification. Both use a strict local expected-cost
+test rather than a transformation-count or CFG-size cap. See
+[Branch-aware mux lowering](./branch-aware-mux-lowering.md) for the relationship,
+cost equation, legality rules, and runtime acceptance gate.
+
+### 2.15 Tail-Call Splitting
 Cranelift uses a 24-bit instruction index internally, limiting a single function to approximately 16M CLIF instructions. Large combinational designs (e.g., wide-bus arithmetic, many coalesced execution units) can exceed this limit.
 
 When the estimated CLIF instruction count for `eval_comb` exceeds the threshold (currently 8M, a 50% safety margin), the optimizer splits it into a chain of smaller functions connected by Cranelift's `return_call` (tail-call) instruction, which avoids stack growth.
@@ -72,7 +82,7 @@ This pass runs even when all SIR passes are disabled (`OptimizeOptions::none()`)
 
 ## Per-Pass Control
 
-Each SIR optimization pass can be individually enabled or disabled via the `SirPass` enum and `OptimizeOptions`. `OptLevel::O0` enables only `TailCallSplit`; `OptLevel::O1` (default) and `O2` enable all 18 passes.
+Each SIR optimization pass can be individually enabled or disabled via the `SirPass` enum and `OptimizeOptions`. `OptLevel::O0` enables only `TailCallSplit`; `OptLevel::O1` (default) and `O2` enable the 18 production-default passes. `BranchifyMux` remains available as an explicit 2-state opt-in while its end-to-end runtime gate is evaluated.
 
 | `SirPass` variant | Pass(es) |
 |---|---|
@@ -93,7 +103,8 @@ Each SIR optimization pass can be individually enabled or disabled via the `SirP
 | `SplitCoalescedStores` | Split Coalesced Stores (2.11) |
 | `PartialForward` | Partial Forward (2.12) |
 | `IdentityStoreBypass` | Identity Store Bypass (2.13) |
-| `TailCallSplit` | Tail-Call Splitting (2.14) — enabled even at O0 |
+| `BranchifyMux` | Post-lowering branch-aware mux cleanup (2.14); explicit opt-in |
+| `TailCallSplit` | Tail-Call Splitting (2.15) — enabled even at O0 |
 
 ## 3. Machine Layer (MIR) Optimizations — Native Backend
 
