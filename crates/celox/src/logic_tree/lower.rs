@@ -720,7 +720,10 @@ impl SLTToSIRLowerer {
         let total_width: usize = parts.iter().map(|(_, w)| w).sum();
         let part_regs: Vec<RegisterId> = parts
             .iter()
-            .map(|(node, _)| self.lower_inner(builder, *node, arena, cache, env, allow_cache))
+            .map(|(node, width)| {
+                let reg = self.lower_inner(builder, *node, arena, cache, env, allow_cache);
+                self.cast_reg_width(builder, reg, *width)
+            })
             .collect();
         let result = builder.alloc_logic(total_width);
         builder.emit(SIRInstruction::Concat(result, part_regs));

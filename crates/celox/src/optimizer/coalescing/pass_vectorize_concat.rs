@@ -685,6 +685,7 @@ fn vectorize_concats(
         );
         reg
     };
+    let immediate_width = |value: usize| (usize::BITS - value.leading_zeros()).max(1) as usize;
 
     // Apply in reverse to preserve indices
     for repl in replacements.into_iter().rev() {
@@ -771,7 +772,8 @@ fn vectorize_concats(
                     let extracted = if src_start == 0 {
                         source
                     } else {
-                        let shift_reg = alloc_reg(next_reg, register_map, width);
+                        let shift_reg =
+                            alloc_reg(next_reg, register_map, immediate_width(src_start));
                         let shifted_reg = alloc_reg(next_reg, register_map, width);
                         new_insts.push(SIRInstruction::Imm(
                             shift_reg,
@@ -806,7 +808,8 @@ fn vectorize_concats(
                     let placed = if dest_start == 0 {
                         masked
                     } else {
-                        let shift_reg = alloc_reg(next_reg, register_map, width);
+                        let shift_reg =
+                            alloc_reg(next_reg, register_map, immediate_width(dest_start));
                         let placed_reg = alloc_reg(next_reg, register_map, width);
                         new_insts.push(SIRInstruction::Imm(
                             shift_reg,
@@ -845,7 +848,7 @@ fn vectorize_concats(
                 width,
                 prefix_width,
             } => {
-                let shift_reg = alloc_reg(next_reg, register_map, width);
+                let shift_reg = alloc_reg(next_reg, register_map, immediate_width(prefix_width));
                 let shifted_reg = alloc_reg(next_reg, register_map, width);
                 instructions.splice(
                     inst_idx..=inst_idx,
@@ -914,6 +917,65 @@ mod tests {
             blocks,
             register_map,
         }
+    }
+
+    #[test]
+    fn grouped_high_bit_extract_uses_wide_enough_shift_amount() {
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
+        for reg in 1..=5 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+        }
+        register_map.insert(
+            RegisterId(6),
+            RegisterType::Bit {
+                width: 5,
+                signed: false,
+            },
+        );
+        let mut eu = make_eu(
+            vec![
+                SIRInstruction::Slice(RegisterId(1), RegisterId(0), 42, 1),
+                SIRInstruction::Slice(RegisterId(2), RegisterId(0), 41, 1),
+                SIRInstruction::Slice(RegisterId(3), RegisterId(0), 40, 1),
+                SIRInstruction::Slice(RegisterId(4), RegisterId(0), 43, 1),
+                SIRInstruction::Imm(RegisterId(5), SIRValue::new(0u8)),
+                SIRInstruction::Concat(
+                    RegisterId(6),
+                    vec![
+                        RegisterId(4),
+                        RegisterId(1),
+                        RegisterId(2),
+                        RegisterId(3),
+                        RegisterId(5),
+                    ],
+                ),
+            ],
+            register_map,
+        );
+        eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
+
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert!(eu.blocks[&BlockId(0)].instructions.iter().any(|inst| {
+            let SIRInstruction::Imm(dst, value) = inst else {
+                return false;
+            };
+            value.payload == BigUint::from(40u8) && eu.register_map[dst].width() >= 6
+        }));
     }
 
     #[test]

@@ -687,57 +687,113 @@ fn compute_dominators<A>(
     predecessors: &BTreeMap<BlockId, BTreeSet<BlockId>>,
     reachable: &BTreeSet<BlockId>,
 ) -> Dominators {
-    let ids = reachable.iter().copied().collect::<Vec<_>>();
-    let index = ids
+    let mut successors = reachable
+        .iter()
+        .copied()
+        .map(|block| (block, Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    for (&block, block_predecessors) in predecessors {
+        if !reachable.contains(&block) {
+            continue;
+        }
+        for &predecessor in block_predecessors {
+            if reachable.contains(&predecessor) {
+                successors.get_mut(&predecessor).unwrap().push(block);
+            }
+        }
+    }
+    let entry = eu.entry_block_id;
+    let mut visited = BTreeSet::new();
+    let mut postorder = Vec::with_capacity(reachable.len());
+    visited.insert(entry);
+    let mut stack = vec![(entry, 0usize)];
+    while let Some((block, next)) = stack.last_mut() {
+        if *next == successors[block].len() {
+            postorder.push(*block);
+            stack.pop();
+            continue;
+        }
+        let successor = successors[block][*next];
+        *next += 1;
+        if visited.insert(successor) {
+            stack.push((successor, 0));
+        }
+    }
+    postorder.reverse();
+    let index = postorder
         .iter()
         .enumerate()
         .map(|(index, &id)| (id, index))
         .collect::<BTreeMap<_, _>>();
-    let words = ids.len().div_ceil(64);
-    let mut all = vec![u64::MAX; words];
-    if let Some(last) = all.last_mut() {
-        *last &= u64::MAX >> (words * 64 - ids.len());
-    }
-    let mut bits = vec![all; ids.len()];
-    let entry_index = index[&eu.entry_block_id];
-    bits[entry_index].fill(0);
-    bits[entry_index][entry_index / 64] |= 1 << (entry_index % 64);
+    let mut idom = vec![None; postorder.len()];
+    idom[0] = Some(0);
+    let intersect = |mut left: usize, mut right: usize, idom: &[Option<usize>]| {
+        while left != right {
+            while left > right {
+                left = idom[left].expect("processed dominator");
+            }
+            while right > left {
+                right = idom[right].expect("processed dominator");
+            }
+        }
+        left
+    };
     loop {
         let mut changed = false;
-        for &block in &ids {
-            if block == eu.entry_block_id {
+        for block_index in 1..postorder.len() {
+            let block = postorder[block_index];
+            let mut processed = predecessors[&block]
+                .iter()
+                .map(|predecessor| index[predecessor])
+                .filter(|predecessor| idom[*predecessor].is_some());
+            let Some(first) = processed.next() else {
                 continue;
-            }
-            let block_index = index[&block];
-            let mut next = vec![u64::MAX; words];
-            for pred in &predecessors[&block] {
-                let pred_index = index[pred];
-                for (word, pred_word) in next.iter_mut().zip(&bits[pred_index]) {
-                    *word &= pred_word;
-                }
-            }
-            next[block_index / 64] |= 1 << (block_index % 64);
-            if next != bits[block_index] {
-                bits[block_index] = next;
+            };
+            let next = processed.fold(first, |current, predecessor| {
+                intersect(current, predecessor, &idom)
+            });
+            if idom[block_index] != Some(next) {
+                idom[block_index] = Some(next);
                 changed = true;
             }
         }
         if !changed {
-            return Dominators { index, bits };
+            break;
         }
     }
+    let mut children = vec![Vec::new(); postorder.len()];
+    for (block, parent) in idom.iter().enumerate().skip(1) {
+        children[parent.expect("reachable block has idom")].push(block);
+    }
+    let mut enter = vec![0usize; postorder.len()];
+    let mut exit = vec![0usize; postorder.len()];
+    let mut time = 0usize;
+    let mut events = vec![(0usize, false)];
+    while let Some((block, leaving)) = events.pop() {
+        if leaving {
+            exit[block] = time;
+            time += 1;
+        } else {
+            enter[block] = time;
+            time += 1;
+            events.push((block, true));
+            events.extend(children[block].iter().rev().map(|child| (*child, false)));
+        }
+    }
+    Dominators { index, enter, exit }
 }
 
 struct Dominators {
     index: BTreeMap<BlockId, usize>,
-    bits: Vec<Vec<u64>>,
+    enter: Vec<usize>,
+    exit: Vec<usize>,
 }
 
 impl Dominators {
     fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
         let dominator = self.index[&dominator];
         let block = self.index[&block];
-        self.bits[block][dominator / 64] & (1 << (dominator % 64)) != 0
+        self.enter[dominator] <= self.enter[block] && self.exit[block] <= self.exit[dominator]
     }
 }
 

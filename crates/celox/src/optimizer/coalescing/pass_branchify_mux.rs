@@ -850,12 +850,13 @@ fn block_live_ins(
 fn inline_param_only_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     loop {
         let (pred_counts, jump_preds) = predecessor_info(eu);
+        let use_blocks = register_use_blocks(eu);
         let mut eligible = eu
             .blocks
             .keys()
             .copied()
             .filter(|&block_id| block_id != eu.entry_block_id)
-            .filter(|block_id| param_only_replacement(eu, *block_id).is_some())
+            .filter(|block_id| param_only_replacement(eu, *block_id, &use_blocks).is_some())
             .filter(|block_id| {
                 let jump_count = jump_preds.get(block_id).map_or(0, Vec::len);
                 jump_count > 0 && pred_counts.get(block_id).copied().unwrap_or(0) == jump_count
@@ -871,7 +872,7 @@ fn inline_param_only_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             if !eu.blocks.contains_key(&block_id) {
                 continue;
             }
-            let Some(replacement) = param_only_replacement(eu, block_id) else {
+            let Some(replacement) = param_only_replacement(eu, block_id, &use_blocks) else {
                 continue;
             };
             let Some(preds) = jump_preds.get(&block_id) else {
@@ -902,15 +903,40 @@ fn inline_param_only_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
 fn param_only_replacement(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     block_id: BlockId,
+    use_blocks: &HashMap<RegisterId, HashSet<BlockId>>,
 ) -> Option<SIRTerminator> {
     let block = eu.blocks.get(&block_id)?;
     if !block.instructions.is_empty() || block.params.is_empty() {
+        return None;
+    }
+    if block.params.iter().any(|param| {
+        use_blocks
+            .get(param)
+            .is_some_and(|uses| uses.iter().any(|use_block| *use_block != block_id))
+    }) {
         return None;
     }
     match &block.terminator {
         SIRTerminator::Jump(_, _) | SIRTerminator::Branch { .. } => Some(block.terminator.clone()),
         SIRTerminator::Return | SIRTerminator::Error(_) => None,
     }
+}
+
+fn register_use_blocks(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, HashSet<BlockId>> {
+    let mut result = HashMap::<RegisterId, HashSet<BlockId>>::default();
+    for block in eu.blocks.values() {
+        for inst in &block.instructions {
+            for value in inst_uses(inst) {
+                result.entry(value).or_default().insert(block.id);
+            }
+        }
+        for value in terminator_uses(&block.terminator) {
+            result.entry(value).or_default().insert(block.id);
+        }
+    }
+    result
 }
 
 fn predecessor_info(
@@ -1600,6 +1626,75 @@ mod tests {
                 ..
             } if true_block.1 == vec![RegisterId(1)] && false_block.1 == vec![RegisterId(1)]
         ));
+    }
+
+    #[test]
+    fn keeps_param_only_branch_when_descendant_uses_parameter_directly() {
+        let mut register_map = HashMap::default();
+        for reg in 0..6 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+        }
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: vec![imm(1, 3)],
+                terminator: SIRTerminator::Jump(BlockId(1), vec![RegisterId(1)]),
+            },
+        );
+        blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: vec![RegisterId(2)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Branch {
+                    cond: RegisterId(1),
+                    true_block: (BlockId(2), Vec::new()),
+                    false_block: (BlockId(3), Vec::new()),
+                },
+            },
+        );
+        blocks.insert(
+            BlockId(2),
+            BasicBlock {
+                id: BlockId(2),
+                params: Vec::new(),
+                instructions: vec![SIRInstruction::Unary(
+                    RegisterId(4),
+                    crate::ir::UnaryOp::BitNot,
+                    RegisterId(2),
+                )],
+                terminator: SIRTerminator::Return,
+            },
+        );
+        blocks.insert(
+            BlockId(3),
+            BasicBlock {
+                id: BlockId(3),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+
+        inline_param_only_jump_blocks(&mut eu);
+
+        assert!(eu.blocks.contains_key(&BlockId(1)));
+        eu.verify();
     }
 
     #[test]
