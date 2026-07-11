@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, fmt, hash::Hash};
+use std::{fmt, hash::Hash};
 
 use crate::ir::{BinaryOp, BitAccess, UnaryOp};
 
@@ -12,7 +12,7 @@ use super::node::{NodeId, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp};
 pub struct SLTNodeFacts<'arena, A: Hash + Eq + Clone> {
     arena: &'arena SLTNodeArena<A>,
     widths: Vec<usize>,
-    lowerability_blockers: Vec<Option<NodeId>>,
+    lowerable: Vec<bool>,
 }
 
 impl<A: Hash + Eq + Clone> fmt::Debug for SLTNodeFacts<'_, A> {
@@ -21,7 +21,7 @@ impl<A: Hash + Eq + Clone> fmt::Debug for SLTNodeFacts<'_, A> {
             .debug_struct("SLTNodeFacts")
             .field("node_count", &self.widths.len())
             .field("widths", &self.widths)
-            .field("lowerability_blockers", &self.lowerability_blockers)
+            .field("lowerable", &self.lowerable)
             .finish()
     }
 }
@@ -33,16 +33,14 @@ where
     /// Verify `arena` and compute one width for every node.
     pub fn verify(arena: &'arena SLTNodeArena<A>) -> Result<Self, SLTNodeFactsError> {
         let node_count = arena.nodes.len();
-        let mut dependency_counts = vec![0usize; node_count];
-        let mut user_counts = vec![0usize; node_count];
 
-        // Do not inspect any child node until every referenced NodeId has been
-        // checked.  Besides making diagnostics deterministic, this keeps all
-        // subsequent table accesses independent of untrusted arena IDs.
+        // An arena is a canonical append-only DAG: a node can only reference
+        // operands that were already allocated.  Check every untrusted ID
+        // without dereferencing it before building any fact table.
         for (node_index, node) in arena.nodes.iter().enumerate() {
             let owner = NodeId(node_index);
             try_for_each_child(node, |child| {
-                let Some(child_user_count) = user_counts.get_mut(child.0) else {
+                if child.0 >= node_count {
                     return Err(SLTNodeFactsError::new(
                         "GRAPH.CHILD_EXISTS",
                         owner,
@@ -51,234 +49,68 @@ where
                             owner.0, child.0
                         ),
                     ));
-                };
-                *child_user_count = child_user_count.checked_add(1).ok_or_else(|| {
-                    SLTNodeFactsError::new(
-                        "GRAPH.USER_COUNT_REPRESENTABLE",
-                        owner,
-                        format!("child n{} has more users than usize can represent", child.0),
-                    )
-                })?;
-
-                let Some(count) = dependency_counts.get_mut(node_index) else {
+                }
+                if child.0 >= owner.0 {
                     return Err(SLTNodeFactsError::new(
-                        "GRAPH.DEPENDENCY_COUNT_REPRESENTABLE",
+                        "GRAPH.CHILD_PRECEDES_OWNER",
                         owner,
-                        "node dependency table is incomplete",
+                        format!(
+                            "node n{} references child n{}, which does not precede its owner",
+                            owner.0, child.0
+                        ),
                     ));
-                };
-                let Some(next) = count.checked_add(1) else {
-                    return Err(SLTNodeFactsError::new(
-                        "GRAPH.DEPENDENCY_COUNT_REPRESENTABLE",
-                        owner,
-                        "node has more dependencies than usize can represent",
-                    ));
-                };
-                *count = next;
+                }
                 Ok(())
             })?;
         }
 
-        // Store reverse edges as one CSR allocation.  A Vec per node costs
-        // hundreds of megabytes in headers alone for Heliodor-sized arenas and
-        // causes allocator churn even when most nodes have one or zero users.
-        let offset_count = node_count.checked_add(1).ok_or_else(|| {
+        // Child facts are available by construction in NodeId order.  This
+        // avoids reverse-edge storage, a Kahn worklist, and Option-sized fact
+        // slots. Vec<bool> keeps the persistent lowerability fact packed.
+        let allocation_node = NodeId(node_count.saturating_sub(1));
+        let mut widths = Vec::new();
+        widths.try_reserve_exact(node_count).map_err(|error| {
             SLTNodeFactsError::new(
-                "GRAPH.OFFSET_COUNT_REPRESENTABLE",
-                NodeId(node_count.saturating_sub(1)),
-                "reverse-edge offset count overflows usize",
+                "FACTS.STORAGE_AVAILABLE",
+                allocation_node,
+                format!("cannot reserve widths for {node_count} nodes: {error}"),
             )
         })?;
-        let mut user_offsets = Vec::with_capacity(offset_count);
-        user_offsets.push(0usize);
-        for (node_index, &count) in user_counts.iter().enumerate() {
-            let next = user_offsets
-                .last()
-                .copied()
-                .and_then(|offset| offset.checked_add(count))
-                .ok_or_else(|| {
-                    SLTNodeFactsError::new(
-                        "GRAPH.EDGE_COUNT_REPRESENTABLE",
-                        NodeId(node_index),
-                        "reverse-edge count overflows usize",
-                    )
-                })?;
-            user_offsets.push(next);
-        }
-        let edge_count = user_offsets.last().copied().unwrap_or(0);
-        let mut users = vec![NodeId(0); edge_count];
-        let mut next_user = user_offsets[..node_count].to_vec();
+        let mut lowerable = Vec::new();
+        lowerable.try_reserve_exact(node_count).map_err(|error| {
+            SLTNodeFactsError::new(
+                "FACTS.STORAGE_AVAILABLE",
+                allocation_node,
+                format!("cannot reserve lowerability for {node_count} nodes: {error}"),
+            )
+        })?;
         for (node_index, node) in arena.nodes.iter().enumerate() {
-            let owner = NodeId(node_index);
+            let node_id = NodeId(node_index);
+            let width = compute_width(node_id, node, &widths)?;
+            let mut node_lowerable = width != 0
+                && !matches!(node, SLTNode::Concat(parts) if parts.iter().any(|(_, width)| *width == 0));
             try_for_each_child(node, |child| {
-                let Some(cursor) = next_user.get_mut(child.0) else {
+                let Some(&child_lowerable) = lowerable.get(child.0) else {
                     return Err(SLTNodeFactsError::new(
-                        "GRAPH.CHILD_EXISTS",
-                        owner,
-                        format!("node n{} references missing child n{}", owner.0, child.0),
-                    ));
-                };
-                let Some(slot) = users.get_mut(*cursor) else {
-                    return Err(SLTNodeFactsError::new(
-                        "GRAPH.REVERSE_EDGE_TABLE_COMPLETE",
-                        owner,
-                        format!("reverse edge for child n{} has no allocated slot", child.0),
-                    ));
-                };
-                *slot = owner;
-                *cursor = cursor.checked_add(1).ok_or_else(|| {
-                    SLTNodeFactsError::new(
-                        "GRAPH.EDGE_COUNT_REPRESENTABLE",
-                        owner,
-                        "reverse-edge cursor overflows usize",
-                    )
-                })?;
-                Ok(())
-            })?;
-        }
-
-        // Kahn's algorithm gives both an explicit cycle check and the order in
-        // which widths can be computed.  Duplicate operands are retained as
-        // duplicate edges, matching their contribution to dependency_counts.
-        let mut ready = VecDeque::new();
-        for (node_index, &count) in dependency_counts.iter().enumerate() {
-            if count == 0 {
-                ready.push_back(NodeId(node_index));
-            }
-        }
-
-        let mut topological_order = Vec::with_capacity(node_count);
-        while let Some(node) = ready.pop_front() {
-            topological_order.push(node);
-            let Some(&begin) = user_offsets.get(node.0) else {
-                return Err(SLTNodeFactsError::new(
-                    "GRAPH.TOPOLOGY_TABLE_COMPLETE",
-                    node,
-                    "node is absent from the reverse-edge offset table",
-                ));
-            };
-            let Some(closing_offset) = node.0.checked_add(1) else {
-                return Err(SLTNodeFactsError::new(
-                    "GRAPH.TOPOLOGY_TABLE_COMPLETE",
-                    node,
-                    "node index has no representable closing offset",
-                ));
-            };
-            let Some(&end) = user_offsets.get(closing_offset) else {
-                return Err(SLTNodeFactsError::new(
-                    "GRAPH.TOPOLOGY_TABLE_COMPLETE",
-                    node,
-                    "node has no closing reverse-edge offset",
-                ));
-            };
-            let Some(node_users) = users.get(begin..end) else {
-                return Err(SLTNodeFactsError::new(
-                    "GRAPH.TOPOLOGY_TABLE_COMPLETE",
-                    node,
-                    "node reverse-edge range is outside the edge table",
-                ));
-            };
-            for &user in node_users {
-                let Some(count) = dependency_counts.get_mut(user.0) else {
-                    return Err(SLTNodeFactsError::new(
-                        "GRAPH.TOPOLOGY_TABLE_COMPLETE",
-                        user,
-                        "node is absent from the dependency-count table",
-                    ));
-                };
-                let Some(next) = count.checked_sub(1) else {
-                    return Err(SLTNodeFactsError::new(
-                        "GRAPH.TOPOLOGY_ACCOUNTING",
-                        user,
+                        "FACTS.CHILD_LOWERABILITY_AVAILABLE",
+                        node_id,
                         format!(
-                            "dependency count for n{} was decremented below zero",
-                            user.0
+                            "lowerability of child n{} was not available while evaluating n{}",
+                            child.0, node_id.0
                         ),
                     ));
                 };
-                *count = next;
-                if next == 0 {
-                    ready.push_back(user);
-                }
-            }
-        }
-
-        if topological_order.len() != node_count {
-            let cyclic = dependency_counts
-                .iter()
-                .position(|&count| count != 0)
-                .map(NodeId)
-                .unwrap_or(NodeId(0));
-            return Err(SLTNodeFactsError::new(
-                "GRAPH.ACYCLIC",
-                cyclic,
-                format!(
-                    "dependency graph contains a cycle involving n{}; only {} of {node_count} nodes were ordered",
-                    cyclic.0,
-                    topological_order.len()
-                ),
-            ));
-        }
-
-        let mut widths = vec![None; node_count];
-        for &node_id in &topological_order {
-            let Some(node) = arena.nodes.get(node_id.0) else {
-                return Err(SLTNodeFactsError::new(
-                    "GRAPH.NODE_EXISTS",
-                    node_id,
-                    "topological order references a missing node",
-                ));
-            };
-            let width = compute_width(node_id, node, &widths)?;
-            let Some(slot) = widths.get_mut(node_id.0) else {
-                return Err(SLTNodeFactsError::new(
-                    "FACTS.WIDTH_TABLE_COMPLETE",
-                    node_id,
-                    "node is absent from the width table",
-                ));
-            };
-            *slot = Some(width);
-        }
-
-        let widths = widths
-            .into_iter()
-            .enumerate()
-            .map(|(node_index, width)| {
-                width.ok_or_else(|| {
-                    SLTNodeFactsError::new(
-                        "FACTS.WIDTH_COMPUTED",
-                        NodeId(node_index),
-                        "topological evaluation did not compute a width",
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut lowerability_blockers = vec![None; node_count];
-        for &node_id in &topological_order {
-            let node = &arena.nodes[node_id.0];
-            let own_blocker = if widths[node_id.0] == 0
-                || matches!(node, SLTNode::Concat(parts) if parts.iter().any(|(_, width)| *width == 0))
-            {
-                Some(node_id)
-            } else {
-                None
-            };
-            let mut blocker = own_blocker;
-            try_for_each_child(node, |child| {
-                if blocker.is_none() {
-                    blocker = lowerability_blockers[child.0];
-                }
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .unwrap_or_else(|never| match never {});
-            lowerability_blockers[node_id.0] = blocker;
+                node_lowerable &= child_lowerable;
+                Ok(())
+            })?;
+            widths.push(width);
+            lowerable.push(node_lowerable);
         }
 
         Ok(Self {
             arena,
             widths,
-            lowerability_blockers,
+            lowerable,
         })
     }
 
@@ -313,7 +145,8 @@ where
         role: &'static str,
     ) -> Result<usize, SLTNodeFactsError> {
         let width = self.require_width(node, role)?;
-        if let Some(blocker) = self.lowerability_blockers[node.0] {
+        if !self.lowerable[node.0] {
+            let blocker = self.lowerability_blocker(node);
             return Err(SLTNodeFactsError::new(
                 "ROOT.LOWERABLE_NON_ZERO",
                 blocker,
@@ -324,6 +157,38 @@ where
             ));
         }
         Ok(width)
+    }
+
+    /// Find the first direct zero-width cause on the first non-lowerable child
+    /// path. This runs only for a rejected root and allocates no traversal
+    /// storage; canonical child IDs strictly decrease at every step.
+    fn lowerability_blocker(&self, mut node_id: NodeId) -> NodeId {
+        loop {
+            let Some(node) = self.arena.nodes.get(node_id.0) else {
+                return node_id;
+            };
+            let direct_blocker = self.widths.get(node_id.0).copied() == Some(0)
+                || matches!(node, SLTNode::Concat(parts) if parts.iter().any(|(_, width)| *width == 0));
+            if direct_blocker {
+                return node_id;
+            }
+
+            let mut next = None;
+            try_for_each_child(node, |child| {
+                if next.is_none() && self.lowerable.get(child.0).copied() == Some(false) {
+                    next = Some(child);
+                }
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .unwrap_or_else(|never| match never {});
+            let Some(child) = next else {
+                // The table is private and built atomically, so this can only
+                // describe an internal inconsistency. Keep the public failure
+                // fallible and attribute it to the last verified node.
+                return node_id;
+            };
+            node_id = child;
+        }
     }
 
     /// Return all widths in `NodeId` order.
@@ -366,13 +231,13 @@ impl std::error::Error for SLTNodeFactsError {}
 fn compute_width<A>(
     node_id: NodeId,
     node: &SLTNode<A>,
-    widths: &[Option<usize>],
+    widths: &[usize],
 ) -> Result<usize, SLTNodeFactsError>
 where
     A: Hash + Eq + Clone,
 {
     let child_width = |child: NodeId| {
-        widths.get(child.0).copied().flatten().ok_or_else(|| {
+        widths.get(child.0).copied().ok_or_else(|| {
             SLTNodeFactsError::new(
                 "FACTS.CHILD_WIDTH_AVAILABLE",
                 node_id,
@@ -812,13 +677,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_dependency_cycle() {
+    fn rejects_dependency_cycle_as_noncanonical_forward_edge() {
         let arena = arena(vec![
             SLTNode::Unary(UnaryOp::Ident, NodeId(1)),
             SLTNode::Unary(UnaryOp::Ident, NodeId(0)),
         ]);
         let error = SLTNodeFacts::verify(&arena).expect_err("cycle must fail");
-        assert_eq!(error.invariant, "GRAPH.ACYCLIC");
+        assert_eq!(error.invariant, "GRAPH.CHILD_PRECEDES_OWNER");
+        assert_eq!(error.node, NodeId(0));
+    }
+
+    #[test]
+    fn rejects_acyclic_forward_reference() {
+        let arena = arena(vec![SLTNode::Unary(UnaryOp::Ident, NodeId(1)), constant(8)]);
+        let error = SLTNodeFacts::verify(&arena).expect_err("forward edge must fail");
+        assert_eq!(error.invariant, "GRAPH.CHILD_PRECEDES_OWNER");
+        assert_eq!(error.node, NodeId(0));
+        assert!(error.message.contains("child n1"));
+    }
+
+    #[test]
+    fn rejects_self_reference() {
+        let arena = arena(vec![SLTNode::Unary(UnaryOp::Ident, NodeId(0))]);
+        let error = SLTNodeFacts::verify(&arena).expect_err("self edge must fail");
+        assert_eq!(error.invariant, "GRAPH.CHILD_PRECEDES_OWNER");
+        assert_eq!(error.node, NodeId(0));
     }
 
     #[test]
@@ -972,8 +855,8 @@ mod tests {
         let SLTNode::ForFold { continue_cond, .. } = &mut node else {
             unreachable!()
         };
-        *continue_cond = NodeId(3);
-        let zero_continue_arena = arena(vec![constant(8), constant(1), node, constant(0)]);
+        *continue_cond = NodeId(2);
+        let zero_continue_arena = arena(vec![constant(8), constant(1), constant(0), node]);
         assert_eq!(
             SLTNodeFacts::verify(&zero_continue_arena)
                 .unwrap_err()
@@ -987,12 +870,12 @@ mod tests {
         };
         effects.push(SLTForEffect {
             site_id: 0,
-            guard: Some(NodeId(3)),
+            guard: Some(NodeId(2)),
             emit_on_true: true,
             args: Vec::new(),
             fatal_error_code: None,
         });
-        let zero_guard_arena = arena(vec![constant(8), constant(1), node, constant(0)]);
+        let zero_guard_arena = arena(vec![constant(8), constant(1), constant(0), node]);
         assert_eq!(
             SLTNodeFacts::verify(&zero_guard_arena)
                 .unwrap_err()
@@ -1094,6 +977,21 @@ mod tests {
         let arena = arena(vec![constant(0), SLTNode::Concat(Vec::new())]);
         let facts = SLTNodeFacts::verify(&arena).expect("zero-width facts are representable");
         assert_eq!(facts.widths(), &[0, 0]);
+    }
+
+    #[test]
+    fn reports_the_first_reachable_lowerability_blocker() {
+        let arena = arena(vec![
+            constant(0),
+            SLTNode::Unary(UnaryOp::LogicNot, NodeId(0)),
+        ]);
+        let facts = SLTNodeFacts::verify(&arena).expect("zero-width facts are representable");
+        let error = facts
+            .require_lowerable(NodeId(1), "test result")
+            .expect_err("a reachable zero-width node must reject the root");
+        assert_eq!(error.invariant, "ROOT.LOWERABLE_NON_ZERO");
+        assert_eq!(error.node, NodeId(0));
+        assert!(error.message.contains("root n1 reaches n0"));
     }
 
     #[test]
