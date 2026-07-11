@@ -34,11 +34,22 @@ of those properties.
 ## Fixed phase order
 
 ```text
-symbolic evaluation with source control provenance
-  -> checked SLTNodeFacts, SLTVersionTable, and ControlProvenance verification
+module symbolic evaluation with SourceControlProvenance and SourceRootId
+  -> checked source SLTNodeFacts and source-root/provenance verification
+  -> deterministic whole-unit hierarchy mapping into a temporary draft
+  -> atomization, then artifact-global ExternalRootId assignment
+  -> constant-rewrite verification
+  -> observer-occurrence materialization
+  -> checked final SLTNodeFacts, frozen arena, and frozen root/action
+     identity/ownership registries
+  -> occurrence-valued GlobalActionOrderSkeleton verification
+  -> artifact-global control CFG and SSA memory/environment/effect token verification
+  -> versioned InstValue resolution and final ControlProvenance verification
+  -> GlobalScheduledActionGraph data/token-edge verification
+  -> frozen final control/value artifact with construction caches dropped
   -> ExecutionSafetyAnalysis and ControlEligibilityPlan verification
   -> maximal ControlSkeleton legality verification
-  -> ScheduleEarly / ScheduleLate DAG placement
+  -> ScheduleEarly / ScheduleLate legality envelopes and state-specific use maps
   -> bottom-up gate/decision selection
   -> rejected-region contraction
   -> one final DAG placement
@@ -51,8 +62,9 @@ symbolic evaluation with source control provenance
   -> predicate-aware SLP/store combining
   -> semantic pressure-frontier block splitting and CFG verification
   -> pressure-aware MIR scheduling
-  -> MIRMemoryVersionAnalysis, CSSA, next-use, and loop analysis
-  -> PressureRegion and spill planning together
+  -> MIRMemoryTokenAnalysis, CSSA, next-use, and loop analysis
+  -> PressureRegion cut selection
+  -> one cut-constrained Braun--Hack spill plan
   -> SSA reconstruction, pressure/home/Perm verification
   -> final phi-congruence classification and affinity coloring
   -> SSA destruction
@@ -72,6 +84,36 @@ The techniques solve different problems:
 | Component affinity | reduce copies after feasibility is proved | force an unavailable common color |
 | Block layout | choose fallthroughs after copies are known | change CFG edges or SSA semantics |
 
+These are not alternative allocators or interchangeable optimizations. Their
+dependency is:
+
+```text
+source meaning
+  -> root/action/value-occurrence identity
+  -> value-unresolved global control/order skeleton
+  -> SSA state/effect tokens
+  -> versioned values, resolved action uses, and legal placement envelopes
+  -> gate/decision profitability and final placement
+  -> canonical SIR/MIR control
+  -> pressure-aware dependency scheduling
+  -> pressure-region cuts and one spill plan
+  -> reconstruction, coloring, edge copies, layout
+```
+
+Provenance answers *which occurrence executes*. The value-unresolved action
+skeleton answers *which operations and control paths occur* without pretending
+that their state-dependent values are already known. Token SSA then answers
+*which state version each occurrence observes*, after which occurrence uses
+can be resolved to structurally versioned `InstValue`s. ScheduleEarly/
+ScheduleLate answers *where a pure value may execute once*; Decision formation/
+lowering chooses control shape only after those answers are fixed. MIR
+scheduling then reorders only within the verified dependency/effect graph to
+shorten live ranges and avoid spills. It is the first spill-avoidance
+mechanism, not a semantic rewrite: it cannot cross a token, predicate,
+fixed-register, or bundle boundary. Pressure cuts and the single constrained
+spill plan handle the residual pressure; coloring and edge copies come only
+after feasibility is proved. No later phase repairs an earlier missing proof.
+
 ## 1. Source control provenance
 
 Recovering predicates from an arbitrary hash-consed mux DAG is not the primary
@@ -80,32 +122,116 @@ expanding those contexts or repeatedly recomputing their LCA can be nonlinear.
 Symbolic evaluation must instead retain the source control tree when it creates
 the muxes.
 
-The SLT arena gains a serialized `ControlProvenance` side table. An arena may
-hold several combinational declarations and, after flattening, several module
-instances, so provenance is a forest of isolated control units rather than one
-arena-wide tree:
+The source and flattened forms are deliberately different artifacts. Symbolic
+evaluation cannot name token-dependent `InstValue`s which do not exist yet. It
+therefore emits module-local `SourceControlProvenance` in terms of source value
+occurrences. Flattening maps that to an occurrence-valued
+`ControlOccurrencePlan`; token SSA later resolves every occurrence use to a
+final `InstValue` and produces `ControlProvenance`. A verifier checks each
+relation rather than letting one phase mutate the meaning of an ID in place.
+An arena may hold several combinational declarations and, after flattening,
+several module instances, so each form is a forest of isolated control units
+rather than one arena-wide tree:
 
 ```text
-ControlUnitId, ExternalRootId, GateId, DecisionId, GatedMuxId,
-DecisionResultMergeId, PredicateRegionId, ControlPointId, InstValueId:
+SourceRootId, SourceControlUnitId, SourcePredicateRegionId,
+SourceControlPointId, SourceControlEdgeId, SourceGateId, SourceDecisionId,
+SourceValueOccurrenceId, ValueOccurrenceId, RootExpansionId,
+ControlUnitId, ExternalRootId, ObserverId,
+ObserverOccurrenceId, ControlActionId, GateId, DecisionId, GatedMuxId,
+DecisionResultMergeId, PredicateRegionId, ControlPointId, ControlEdgeId,
+GlobalControlPointId, GlobalControlEdgeId, InstValueId, DynamicAddressPlanId,
+MemoryTokenId, EnvironmentTokenId, EffectTokenId, ForFoldTemplateId:
 checked u32 IDs
+
+SourceControlProvenance
+  source units / regions / points / roots / gates / decisions
+  source_value_occurrences
+
+SourceValueOccurrence
+  semantic_node: NodeId
+  source_site: SourceControlUseSite
+  ordered_operands: [SourceValueOccurrenceId]
+
+SourceControlSite = (SourceControlPointId, slot: usize)
+SourceControlUseSite = Slot(SourceControlSite) | Edge(SourceControlEdgeId)
+
+ControlOccurrencePlan
+  units / regions / points / edges / roots / occurrence_actions
+  gates / decisions / gated_muxes / decision_result_merges
+  value_occurrences / root-order barriers
+
+ValueOccurrence
+  unit: ControlUnitId
+  origin: Slt(NodeId) | RuntimeState(RuntimeStateOrigin)
+  source_relation: optional SourceValueOccurrenceId
+  definition_origin
+  ordered_operands: [ValueOccurrenceId]
+
+OccurrenceUse
+  role
+  occurrence: ValueOccurrenceId
+  site: ControlUseSite
+
+OccurrenceDef
+  occurrence: ValueOccurrenceId
+  site: ControlSite
+
+OccurrenceAction
+  id: ControlActionId
+  unit / owner
+  ordered_operands: [OccurrenceUse]
+  results: [OccurrenceDef]
+  semantic_accesses: exact read/write/bind/effect summary
+  kind: occurrence-valued ControlActionKind
+
+ControlRootRef
+  unit: ControlUnitId
+  root: ExternalRootId
 
 ControlProvenance
   units / regions / points / gates / decisions
-  gated_muxes / decision_result_merges / inst_values
-  nonserialized canonical caches
+  resolved_roots / gated_muxes / decision_result_merges / inst_values /
+  resolved_actions
+  occurrence_to_inst_value relation
+  construction-only canonical caches (absent after freeze)
 
 ControlUnit
   root_region: PredicateRegionId
   entry / exit: ControlPointId
-  scheduled_roots: [ControlRoot]
+  roots: [ControlRootRef]
 
-ControlRoot
-  external_root: ExternalRootId
-  kind: LogicPath | Observer | RuntimeEvent
-  ordered operands: [(RootOperandRole, InstValueId)]
-  effect_action: optional (ControlPointId, action_index: usize)
-  use_site: ControlSite
+ControlRootIdentity
+  reference: ControlRootRef
+  origin: SourceExpansion(source_root: SourceRootId, atom_ordinal: usize)
+        | ObserverMetadataOrigin(observer: ObserverId)
+        | ObserverOccurrenceOrigin(observer: ObserverId,
+                                   occurrence: ObserverOccurrenceId)
+  kind: LogicPath(source_root: SourceRootId, atom_ordinal: usize)
+      | ObserverMetadata(observer: ObserverId)
+      | RuntimeEventOccurrence(observer: ObserverId,
+                               occurrence: ObserverOccurrenceId)
+  disposition: Scheduled(action: ControlActionId) | MetadataOnly
+
+OccurrenceRoot
+  identity: ControlRootIdentity
+  ordered_operands: [OccurrenceUse]
+
+ResolvedControlRoot
+  identity: same ControlRootIdentity
+  ordered_operands: [InstUse]
+
+ControlSite = (ControlPointId, slot: usize)
+ControlUseSite = Slot(ControlSite) | Edge(ControlEdgeId)
+
+InstUse
+  role: InstUseRole
+  value: InstValueId
+  site: ControlUseSite
+
+InstDef
+  value: InstValueId
+  site: ControlSite
 
 PredicateRegion
   unit: ControlUnitId
@@ -122,10 +248,58 @@ ControlPoint
   ordered actions
   predecessor / successor ControlPointIds
 
+ControlEdge
+  unit: ControlUnitId
+  predecessor / successor: ControlPointId
+  kind: Ordinary | GateArm | DecisionArm | DecisionDefault | UnitBoundary
+
+ResolvedControlAction
+  id: ControlActionId
+  unit: ControlUnitId
+  owner: (ControlPointId, action_index: usize)
+  ordered_operands: [InstUse]
+  results: [InstDef]
+  memory_flow: [MemoryTokenFlow]
+  environment_flow: [EnvironmentTokenFlow]
+  effect_flow: [EffectTokenFlow]
+  kind: ControlActionKind
+
+MemoryTokenFlow
+  domain: WriteDomainId
+  incoming: MemoryTokenId
+  outgoing: optional MemoryTokenId
+
+EnvironmentTokenFlow
+  binding: BindingId
+  incoming: EnvironmentTokenId
+  outgoing: optional EnvironmentTokenId
+
+EffectTokenFlow
+  stream: EffectStreamId
+  incoming: EffectTokenId
+  outgoing: optional EffectTokenId
+
+ControlActionKind
+  ReadInput { result, semantic_node, resolution }
+  CaptureValue { result, purpose }
+  BindEnvironment { binding, source }
+  EvaluatePinned { result, reason }
+  StoreRoot { root, target: StaticTarget | DynamicTarget(DynamicAddressPlanId),
+              value_operand, observed_old_operand: optional,
+              capture_enable_sites, triggers }
+  RuntimeEvent { root, observer, site_id, predicate_operand,
+                 argument_operands, enabled_value_operand: optional,
+                 consume_enabled, termination }
+  ForFold { root: optional ControlRootRef,
+            result, plan: ForFoldTemplateId }
+
+InputResolution = Memory | Environment | StaticComposite |
+                  DynamicOverlay(DynamicAddressPlanId)
+
 Gate
   unit: ControlUnitId
   parent_region
-  condition: InstValueId
+  condition: InstUse
   header / true_region / false_region / join / continuation
   origin: If | Ternary | SyntheticVerified
   condition_semantics
@@ -133,7 +307,7 @@ Gate
 Decision
   unit: ControlUnitId
   parent_region
-  selector: InstValueId
+  selector: InstUse
   dispatch_header / join / continuation: ControlPointId
   ordered arms: SourceDecisionArm
   default_region
@@ -141,21 +315,21 @@ Decision
 
 SourceDecisionArm
   ordered patterns: [SourcePattern]
-  predicate: InstValueId
+  predicate: InstUse
   region: PredicateRegionId
 
 SourcePattern
   EqWildcard(pattern: TypedPatternOperand,
              coercion: SourceCoercion,
-             predicate: InstValueId)
+             predicate: InstUse)
   Range(lower / upper: TypedPatternOperand,
         lower_comparison: SourceComparison,
         upper_comparison: SourceComparison,
         upper_inclusive,
-        predicate: InstValueId)
+        predicate: InstUse)
 
 TypedPatternOperand
-  value: InstValueId
+  value: InstUse
   source domain: Bit | Logic
   width / signedness
   optional exact constant (value_bits, mask_xz)
@@ -169,17 +343,79 @@ SourceComparison
 GatedMux
   unit: ControlUnitId
   semantic_node: NodeId
-  result / condition / then_value / else_value: InstValueId
+  result: InstDef
+  condition / then_value / else_value: InstUse
   merge_site: ControlSite
   owner: Gate(GateId) | DecisionStep(DecisionResultMergeId, source_arm)
 
 DecisionResultMerge
   unit / decision / merge_site
-  result / default_value: InstValueId
-  selected_arm_values: [InstValueId]  // one per source arm
-  ordered steps: [(source_arm, arm_value: InstValueId,
+  result: InstDef
+  default_value: InstUse
+  selected_arm_values: [InstUse]  // one edge-specific use per source arm
+  ordered steps: [(source_arm, arm_value: InstUse,
                    mux: optional GatedMuxId)]
 ```
+
+Before token SSA, every field shown above as `InstUse`/`InstDef` has the same
+shape but contains `OccurrenceUse`/an occurrence definition. No source or
+flattening producer may allocate an `InstValueId`. Resolution substitutes the
+exact reaching tokens and emits a total occurrence-to-instance relation; the
+final verifier reconstructs that substitution from the token analysis.
+`OccurrenceAction` carries its exact semantic read/write/bind/effect summary
+but no token-flow fields. `ResolvedControlAction` preserves the same checked
+ID, owner, kind, operand/result arity, and semantic relation while replacing
+occurrences with instances and adding the flows produced by
+`SLTStateTokenAnalysis`; the final verifier checks both sides bidirectionally.
+`ResolvedControlRoot` similarly preserves the complete frozen
+`ControlRootIdentity` and resolves only its ordered operand occurrences.
+
+A root has no single execution use. Dynamic read-modify-write has distinct
+address, old-value, and RHS occurrences; an event has separate predicate and
+ordered argument occurrences; a loop has outer bounds/initials and nested body
+occurrences. Every executable operand therefore carries its own
+`ControlUseSite`. Slot uses occur immediately before their owning action.
+Gamma, phi, gated-mux arm, and decision-arm inputs use the explicit incoming
+`ControlEdgeId`, because no point slot can identify which predecessor supplied
+them. Action results are defined at slot `action_index + 1`; pure-value
+definitions use their selected placement slot. Kept/contracted
+state-specific use maps retain these same `InstUse` records rather than moving
+a root-wide site.
+
+Actions are the only owners of scheduled-root execution and token flow; pure
+`InstValue` evaluation is owned separately by the verified placement plan.
+Version advance and publication are never standalone actions that can be
+separated from the operation they describe: a `StoreRoot`, `BindEnvironment`,
+`RuntimeEvent`, or `ForFold` publishes its result and output tokens atomically.
+`ReadInput` records whether a load came from memory, a loop/function
+environment, a statically assembled value, or a dynamic overlay; later passes
+do not infer that distinction from a raw `SLTNode::Input`. `EvaluatePinned` is
+reserved for proved non-movable computations, not a generic escape hatch for
+a failed placement proof.
+
+For a scheduled root, the root-facing projection of its action operands must
+equal `ResolvedControlRoot.ordered_operands` role-for-role, value-for-value, and
+site-for-site. Its action kind must carry that same root reference. Conversely,
+each root-bearing `StoreRoot`, `RuntimeEvent`, or outer `ForFold` action is
+named by exactly one scheduled root; helper read/capture/bind/pinned actions
+are rootless. Definition/publication sites come only from the action result
+records; there is no root-wide use or publication site.
+
+Each action has at most one token flow for a given domain, binding, or effect
+stream. An absent `outgoing` is a use only. A present `outgoing` must be the
+unique `MayDef`, `Bind`, or `Action` token definition owned by that same action
+and must name `incoming` as its predecessor. The action-kind verifier derives
+the exact read/write/effect set from the semantic operation and rejects both a
+missing flow and a conservative-looking extra flow; alias uncertainty is
+represented by the verified global domain, not by inventing unrelated token
+edges.
+
+`ExternalRootId` is dense and append-only over the complete flattened artifact,
+not module-local. `ControlActionId` and all three token-ID namespaces are
+likewise artifact-global because global token and ordering edges name them
+directly. The `unit` in every `ControlRootRef` and action must agree with its
+record. Unit-local control/value IDs may not cross units; cross-unit execution
+order is represented only by the global action graph defined in section 2.
 
 Each control unit belongs to one expanded combinational execution instance;
 flattening appends a unit with checked ID remapping rather than merging its
@@ -187,8 +423,73 @@ root into another unit. Cross-unit region, point, value, gate, decision, or mux
 references are invalid. Every emitted `LogicPath`, observer root, and runtime
 event root carries its `ControlUnitId` and `ExternalRootId`; membership is never
 reconstructed later from a shared arena or artificial ordering between
-declarations. Roles distinguish result, local/pre-lower input, guard, ordered
-argument, loop runner, position input, and effect enable/action operands.
+declarations. Roles distinguish result, RHS, old value, dynamic address,
+local/pre-lower input, guard, ordered argument, loop runner, position input,
+and effect enable/action operands.
+
+### Root identity and flattening lifecycle
+
+Source modules and flattened artifacts use different namespaces:
+
+```text
+SourceRootRef = (source module, SourceRootId)
+
+SourceControlProvenance
+  module-local source roots in source order
+
+ControlOccurrencePlan / ControlProvenance
+  flattened artifact-global ControlRootRefs and ControlActionIds
+
+RootExpansion
+  source: SourceRootRef
+  emitted: nonempty [ControlRootRef]
+
+RootOrderBarrier
+  before: RootExpansionId or singleton derived root
+  after: RootExpansionId or singleton derived root
+```
+
+The lifecycle is fixed:
+
+1. After logic-path extraction, assign module-local `SourceRootId`s in source
+   order. Assign observer-definition IDs in their separate table and verify the
+   complete source artifact; observer definitions are not source roots.
+2. Traverse hierarchy in canonical `InstancePath` order. Map one entire unit
+   into a temporary occurrence-valued draft; ordinary semantic-node and
+   source-occurrence gated-node caches are distinct.
+3. Atomize the draft before assigning final roots. One source `LogicPath` may
+   expand to several final paths, recorded by `RootExpansion`.
+4. Atomically commit the unit's nodes, value occurrences, control objects,
+   roots, and actions. Allocate fresh artifact-global `ExternalRootId`s and
+   `ControlActionId`s in deterministic `(instance path, source root ordinal,
+   atom lsb, local action ordinal)` order. A failed draft commits none of
+   these registries.
+5. Represent a durable source ordering edge `A -> B` by one checked
+   `RootOrderBarrier`. In the global graph it becomes a virtual barrier node
+   with every action in `expansion(A)` entering it and every action in
+   `expansion(B)` leaving it. This proves the Cartesian ordering relation in
+   `O(|A| + |B|)` edges rather than materializing `O(|A| * |B|)` pairs.
+6. Constant inlining/rewrite preserves every `ControlRootRef`. A pass that
+   changes root cardinality creates a new artifact plus a verified rewrite
+   relation; it never renumbers an existing registry in place.
+7. Materialize observer metadata and occurrences as derived roots with
+   `ObserverMetadataOrigin`/`ObserverOccurrenceOrigin`, append their actions,
+   and verify every observer relation. They are not entries in
+   `RootExpansion`, which is reserved for source roots.
+8. Verify the final mapped SLT arena after every node-producing mapper,
+   rewrite, glue unit, and observer action has completed. Then freeze the arena
+   and the root/action identity, ownership, and occurrence registries together.
+   Later token resolution may only attach a verified resolved record to the
+   same action ID; no later pass allocates a node, reuses an action identity,
+   or renumbers an external ID.
+
+Parent/child port glue is a synthetic checked control unit per concrete port
+connection, not an unowned path. `LogicPathId` and vector position are
+temporary construction coordinates and never durable identity or serialized
+ordering. Hash-map iteration is not an ordering source anywhere in this
+lifecycle. Dense root/action ID order is a reproducibility property, not
+semantic execution order; only control edges and `RootOrderBarrier`s carry
+ordering semantics.
 
 The predicate regions are SESE ownership regions; scheduling and dominance use
 the explicit control-point CFG and its dominator tree. `GateHeader`, `Join`,
@@ -206,12 +507,15 @@ continuation` shape. These are the SESE facts on which arm
 exclusivity and laminar contraction rely; reachability or entry dominance alone
 is not accepted.
 
-Gated mux allocation has a separate cache keyed by versioned `(condition,
-then_value, else_value, owner, merge_site)` instance IDs. It does not silently
-reuse an identical raw mux owned by an unrelated source gate, nor two
-same-shaped muxes whose reads/bindings came from different versions. Ordinary
-pure SLT nodes retain semantic hash-consing. All IDs use checked allocation;
-exhaustion is a structured producer error.
+Gated mux allocation has two phase-local caches. Symbolic evaluation keys its
+source cache by `(source condition/arm occurrences, source owner, source merge
+site)`; it cannot mention tokens or `InstValueId`. After token resolution, a
+different final cache is rebuilt from versioned `(condition, then_value,
+else_value, owner, merge_site)` instance IDs. Neither cache silently reuses an
+identical raw mux owned by an unrelated source gate, nor two same-shaped muxes
+whose reads/bindings resolve to different tokens. Ordinary pure SLT nodes
+retain semantic hash-consing. All IDs use checked allocation; exhaustion is a
+structured producer error.
 
 Raw ID fields are private `u32`s. Builders use `u32::try_from(length)` and
 return `IdExhausted { kind, attempted_length }`; widths and counts otherwise
@@ -219,14 +523,15 @@ remain `usize` and acquire no artificial 32-bit limit. Forward references use
 fallible `reserve`/`define` slots, and `finish` rejects every undefined or
 doubly defined slot before exposing the artifact.
 
-The symbolic evaluator passes an explicit `(PredicateRegionId, ControlSite)`
-through statement and expression evaluation. It does not keep
-an implicit mutable "current gate" stack in the arena. `GateId` identifies one
-execution instance after module expansion and unrolling; an optional source
-key is diagnostic only. All output muxes created by one symbolic merge share
-that instance ID, while another module instance or unrolled execution gets a
-different ID. A source `case` creates one `Decision`, not a binary chain that
-later has to guess selector identity. One source arm retains its ordered
+The symbolic evaluator passes an explicit source region/site through statement
+and expression evaluation. It does not keep an implicit mutable "current
+gate" stack in the arena. Flattening maps each verified source gate/decision
+identity to a fresh `GateId`/`DecisionId` for one module-expanded or unrolled
+execution instance; an optional source key is diagnostic only. All output
+muxes created by one symbolic merge share the source identity and then the one
+mapped final identity, while another module instance or unrolled execution gets
+a different final ID. A source `case` creates one source decision, not a binary
+chain that later has to guess selector identity. One source arm retains its ordered
 nonempty list of equality/wildcard or half-open/inclusive range patterns; the
 arm predicate is their disjunction, and source arms retain first-match order.
 Provenance keeps the language's source matching semantics and the exact
@@ -239,14 +544,48 @@ same planner, pinned to dataflow-select semantics unless a separate recognizer
 produces and verifies `SyntheticVerified` provenance; there is no second old
 lowering path.
 
-The provenance verifier is written before any producer uses the table. It
-checks:
+Observer definition and scheduled capture occurrence are different objects.
+`CombObserver` becomes one `ObserverMetadata` root with `MetadataOnly`
+disposition. Each generated `LogicPathTarget::CombCaptureEvent` is an
+independent scheduled `RuntimeEventOccurrence` root:
+
+```text
+ObserverOccurrence
+  observer: ObserverId
+  kind: Primary |
+        Trigger { triggering_root: ControlRootRef,
+                  activation_group, occurrence_ordinal }
+```
+
+Every observer has exactly one primary occurrence. For every distinct
+`(activation_group, triggering root)` and every member of that group there is
+exactly one trigger occurrence in canonical ordinal order. Guard, arguments,
+loop runner, consume-enabled behavior, fatal behavior, and site ID must agree
+with the observer and `RuntimeEventSite` definition. A `RuntimeEventSite` is a
+definition-table row, not a root. An `SLTForEffect` is an action inside the
+owning `ForFold` template, not a top-level root.
+
+The three verifiers are written before their corresponding producers. The
+source verifier checks only source IDs, semantic nodes, source sites, and
+source structure. The occurrence-plan verifier checks flattened IDs, actions,
+roots, sites, and semantic read/write sets without reading token or
+`InstValue` tables. The final verifier additionally checks token flows and the
+occurrence-to-instance resolution. Between them they check:
 
 - every control unit has one rooted region tree and every non-root region has
   one owner, with no cross-unit references;
 - control points form the recorded CFG, action order is total within each
   point, every unit is a finite single-entry/single-exit DAG, and computed
   dominance/post-dominance agrees with every SESE region;
+- every scheduled root names exactly one action in the same unit, every
+  metadata root names none, every action owner/slot is exact, and every root
+  and action operand has its own valid role-specific use site; each
+  root-bearing action has exactly one matching root, the root operand
+  projection is exact, and helper actions are rootless;
+- in the final artifact, each action's semantic read/write/effect set agrees
+  exactly with its per-domain token flows, every outgoing action token is
+  defined by that action, and no `(action, domain/binding/stream)` flow is
+  duplicated;
 - gate/decision children name that owner and have the declared parent;
 - each gate/decision header, join, and continuation belongs directly to its
   parent region, while every arm/default entry and exit belongs directly to
@@ -263,50 +602,137 @@ checks:
 - all control entries are reachable from their unit entry and all instantiated
   values/actions are backward-reachable from that unit's scheduled roots or
   recorded control semantics;
-- side-table roots and actual logic paths/observers/runtime events are in exact
-  one-to-one correspondence by external ID, kind, role-tagged operand order,
-  action, and unit, with no missing, duplicate, or extra root; and
-- serialization/deserialization rebuilds caches without changing IDs.
+- every source root has one nonempty verified `RootExpansion`; the final root
+  registry is dense, deterministic, and in exact one-to-one correspondence
+  with atomized logic paths, observer metadata records, and scheduled observer
+  occurrences by external ID, kind, disposition, role-tagged operand order,
+  action, and unit, with no missing, duplicate, or extra root;
+- source-expanded roots and observer-derived roots have disjoint, exact origins;
+  roots and actions commit/freeze together, and every root-order barrier names
+  complete existing expansion/singleton sets without a Cartesian edge table;
+- each observer/site/group has exactly the primary and trigger occurrences
+  specified above, and no metadata-only observer enters the scheduled graph;
+- every occurrence use resolves to the exact structurally versioned value for
+  its semantic node, ordered operands, use site, and reaching tokens, with no
+  unresolved, multiply resolved, or extra instance; and
+- serialization/deserialization validates canonical caches without changing
+  IDs or retaining a cache in a frozen arena.
 
 Unit-CFG acyclicity is checked with a worklist/topological count, without a
 depth or iteration cap. Source loops have already been statically expanded;
-runtime `ForFold` remains one pinned action/value and never introduces a
-control-point backedge.
+runtime `ForFold` remains one pinned outer action/value and never introduces a
+control-point backedge. Its internal loop is nevertheless explicit in a
+separately verified nested template:
+
+```text
+ForFoldActionPlan
+  template: ForFoldTemplateId
+  counter: { binding, width, signed, start_use, end_use,
+             inclusive, step, step_op, reverse }
+  states: [ForFoldStatePlan]
+  body: ForFoldBodyTemplate
+  result_state: state_index
+  exact_read_domains / exact_write_domains
+  exact_environment_reads / exact_environment_writes
+  exact_effect_streams
+
+ForFoldStatePlan
+  target
+  initial_use
+  header_environment_phi
+  update_use
+  backedge_token
+
+ForFoldBodyTemplate
+  loop_binding / state_bindings
+  ordered_actions / ordered_effects
+  entry_tokens / header_phis / backedge_tokens / exit_tokens
+  parallel_updates
+  continue_use
+  exit / backedge
+```
+
+Start, end, and initials execute once at outer-action operand sites. At each
+iteration entry the template binds counter and state values; effects execute
+in source order; every update and the continue condition reads the same
+iteration-entry bindings; updates are parallel; a false continue exits with
+the already computed next states, while true alone advances counter and sends
+next states to the backedge. The template owns a private site/token namespace.
+Every loop-carried binding/domain has exactly one header phi with the outer
+entry token and the unique backedge token as its two inputs; exit tokens are
+the false-edge tokens. Only its outer operands, exact may-read/may-write and
+environment summaries, summarized effect flow, and result may cross into the
+enclosing control unit. The verifier matches all nested read, write, binding,
+and effect summaries bidirectionally to the outer `ForFold` action, including
+the incoming tokens for reads. A body read can therefore never be moved across
+an outer write merely because the body itself does not write that domain.
 
 `SLTNodeFacts` is a prerequisite artifact shared by this verifier and existing
-lowering; it is not the current recursive `get_width`. An explicit worklist
-first checks every node/operand ID and rejects cycles, then computes widths with
-checked arithmetic and checked slices. Equality, relational, logical, wildcard
-equality, and wildcard inequality produce width one; `Mux` applies the declared
-arm coercion and produces their maximum width; concat uses checked addition.
-Selector/condition sites additionally require nonzero width. This same fact
-table becomes the sole width API so verifier and lowering cannot disagree or
-panic on malformed IDs, underflow, overflow, or a deep/cyclic graph.
+lowering; it is not the current recursive `get_width`. `SLTNodeArena` is a
+canonical append-only DAG: every child ID must be strictly smaller than its
+owner ID. Producers allocate completed operands before their users; forward
+references, self references, and cycles are noncanonical IR and fail
+`GRAPH.CHILD_PRECEDES_OWNER`. This is a representation invariant, not a graph
+size cutoff.
+
+Verification first scans all edges without dereferencing an unchecked ID, then
+computes width and lowerability in arena order with checked arithmetic. It
+needs no reverse-edge CSR, Kahn queue, recursion, or `Option<usize>` table, so
+its persistent facts are one `usize` width per node plus a packed lowerability
+bitset. Equality, relational, logical, wildcard equality, and wildcard
+inequality produce width one; `Mux` applies the declared arm coercion and
+produces their maximum width; concat uses checked addition. Selector/condition
+sites additionally require nonzero width. This same fact table becomes the
+sole width API so verifier and lowering cannot disagree or panic on malformed
+IDs, underflow, overflow, or a deep graph.
 Two-state facts for input leaves come from an explicit verified
 `InputSemanticFacts` context built from the declaration/flattened variable type
 table; `SLTNode::Input` alone does not encode `Bit` versus `Logic`. Derived
 zero-mask facts are recomputed over the checked node DAG. A serialized boolean
 or producer-supplied tag is never accepted as the proof.
 
-Deserialization invokes one centralized `SLTNodeArena::rebuild_caches` routine.
-Among ordinary, non-gated duplicate semantic nodes, the lowest `NodeId` is
-canonical and all parser/flattening paths use that rule. Every
-`GatedMux.semantic_node` is excluded from the ordinary cache even when its raw
-`SLTNode` equals an ordinary or differently owned mux. The gated cache is
-rebuilt independently from the complete versioned owner/merge-site key and
-must reproduce that record's own ID. Control/value caches are checked
-analogously, while serialized IDs and unit isolation remain unchanged.
+Construction uses a distinct `MutableSLTNodeArena`. Its only allocation API is
+fallible `try_alloc(node)`: it validates that every child already exists,
+computes the new width from the previously checked width prefix with the same
+rule implementation used by `SLTNodeFacts`, and appends node and width
+atomically. Cache hits return the existing node/fact pair. There is no public
+node vector, infallible `alloc`, or recursive `get_width`. At freeze, the
+verifier consumes the builder, scans every edge, and replays width checks in
+arena order against/into that same width allocation; already replayed prefix
+entries are the only child facts it reads. It then builds the packed derived
+fact bitsets and moves them into `FrozenSLTNodeArena`, avoiding a second
+`usize * node_count` peak. Deserialization constructs either a checked mutable
+builder or a checked frozen arena through the same replay, never raw public
+fields.
 
-During step 1 the arena field is `Option<ControlProvenance>` solely for reading
-legacy serialized arenas: `None` means metadata absent, while `Some` must pass
-the full verifier and `Some(empty)` is invalid. New-planner entry points call
-`require_verified_control`, for which `None` is an error; there is no
-verify-or-ignore API. The old single-root `map_addr` rejects metadata-present
-arenas because it cannot freshen unit/owner IDs safely. Step 2 replaces it at
-that boundary with an atomic unit mapper that maps all roots with one node map,
-freshens every control/value ID per module instance, appends the completed unit,
-then verifies it. Provenance can neither disappear nor alias between two
-flattened instances.
+After the final root/action materialization that can allocate nodes, the arena
+is frozen by consuming the mutable builder. Freezing verifies append order,
+seals allocation structurally, and takes/drops the semantic interning map (not
+`clear`, which retains bucket capacity), which otherwise retains another copy
+of large node keys. A later semantic rewrite builds a new mutable arena and a
+verified old-to-new relation; it cannot mutate a frozen arena or silently
+rebuild a cache during lowering.
+
+Deserializing a mutable draft invokes one centralized cache rebuild routine.
+Deserializing a frozen arena instead builds the same maps transiently, verifies
+canonicality, and drops them before returning the frozen type. Among ordinary,
+non-gated duplicate semantic nodes, the lowest `NodeId` is canonical and all
+parser/flattening paths use that rule. Every `GatedMux.semantic_node` is
+excluded from the ordinary cache even when its raw `SLTNode` equals an ordinary
+or differently owned mux. Source-gated and final versioned caches are checked
+independently with their respective complete keys. Serialized IDs and unit
+isolation remain unchanged; lowering never recreates a persistent cache.
+
+During migration the source arena field is
+`Option<SourceControlProvenance>` solely for reading legacy serialized arenas:
+`None` means metadata absent, while `Some` must pass the source verifier and
+`Some(empty)` is invalid. Flattened occurrence/final provenance lives in its
+own artifact and cannot be confused with that source table. New-planner entry
+points call `require_verified_source_control`, for which `None` is an error;
+there is no verify-or-ignore API. The old single-root `map_addr` rejects
+metadata-present arenas because it cannot implement the root lifecycle above.
+The whole-unit draft mapper is the only provenance-aware mapping boundary.
+Provenance can neither disappear nor alias between flattened instances.
 
 Metadata failure is a producer error. It never causes an unverified attempt to
 reconstruct a decision from the mux chain.
@@ -351,18 +777,90 @@ formation is never allowed to discover semantic ineligibility after the DP.
 The first skeleton contains every source gate/decision proved eligible by that
 artifact. Eligibility is separate from profitability.
 
-Scheduling keys are not bare `NodeId`s. The source-DAG artifact uses distinct
-names from the later machine-memory analysis:
+Construction here is deliberately staged so token-dependent values are not
+used to build the graph that defines their tokens. First, the frozen
+occurrence plan produces a value-unresolved order skeleton:
+
+```text
+GlobalActionOrderSkeleton
+  actions: [ControlActionId]
+  scheduled_roots: [ControlRootRef]
+  barriers: [RootOrderBarrier]
+  occurrence_edges: [OccurrenceActionEdge]
+  semantic_accesses: ControlActionId -> exact read/write/bind/effect summary
+
+OccurrenceActionEdge
+  before / after: ActionOrBarrier
+  reason: LocalControl | OccurrenceDataSource | AddressSource |
+          PreviousValue | ExplicitRootOrder | ObserverTrigger
+
+ArtifactControlGraph
+  entry / exit: GlobalControlPointId
+  points / edges: GlobalControlPointId / GlobalControlEdgeId
+  local_point_embedding: (ControlUnitId, ControlPointId) -> GlobalControlPointId
+  local_edge_embedding: (ControlUnitId, ControlEdgeId) -> GlobalControlEdgeId
+  action_owner: ControlActionId -> (GlobalControlPointId, slot)
+```
+
+The skeleton is built from occurrence IDs and action semantic summaries only.
+It contains every action exactly once, no metadata-only root, and every virtual
+root-order barrier exactly once. Its edge union is acyclic. The
+`ArtifactControlGraph` composes complete verified unit CFG fragments, glue
+units, root barriers, and observer-trigger paths into one finite
+single-entry/single-exit DAG. It preserves each local path and edge identity;
+synthetic cross-unit edges connect complete unit exits/entries in the
+canonical root schedule rather than sharing unit-local points. Every local
+action/site has exactly one global embedding. This super-CFG, not a guessed
+linear action order or a cross-unit `InstValue`, is the domain on which state
+SSA is constructed.
+
+Token identity is SSA identity, never an integer counter:
+
+```text
+MemoryTokenDef
+  Entry { domain }
+  MayDef { domain, action, incoming }
+  Phi { domain, point: GlobalControlPointId,
+        incoming: [(GlobalControlEdgeId, token)] }
+
+EnvironmentTokenDef
+  Entry { binding }
+  Bind { binding, action, incoming }
+  Phi { binding, point: GlobalControlPointId,
+        incoming: [(GlobalControlEdgeId, token)] }
+
+EffectTokenDef
+  Entry { stream }
+  Action { stream, action, incoming }
+  Phi { stream, point: GlobalControlPointId,
+        incoming: [(GlobalControlEdgeId, token)] }
+```
+
+Each domain, binding, or effect stream has exactly one `Entry`. Every token has
+one definition. Action definitions agree bidirectionally with the semantic
+summary and owning action's token flow, and every phi has exactly one incoming
+token per global CFG predecessor edge. A trivial phi whose incoming tokens are
+all identical is not created; all uses name the common token. A merge of
+distinct tokens creates a fresh phi token: a read of an incoming token cannot
+be reissued after the merge. The token verifier independently replays the
+global CFG in deterministic order and rejects an omitted/extra def, phi input,
+or action flow.
+
+Only after that proof are scheduling keys instantiated. They are not bare
+`NodeId`s:
 
 ```text
 ValueKey = InstValueId
 
 InstValue
   unit: ControlUnitId
-  semantic_node: NodeId
+  origin: Slt(NodeId) | RuntimeState(RuntimeStateOrigin)
+  placement_class: Ordinary |
+                   ActionResult(ControlActionId) |
+                   ForFoldTemplate(ForFoldTemplateId)
   ordered_operands: [InstValueId]
-  direct_memory_reads: [(WriteDomainId, version)]
-  direct_environment_reads: [(BindingId, version)]
+  direct_memory_reads: [(WriteDomainId, MemoryTokenId)]
+  direct_environment_reads: [(BindingId, EnvironmentTokenId)]
   memory_dependencies: SLTMemoryDependencyId
   environment_dependencies: SLTEnvDependencyId
   execution_safety: Total(SpeculationProof) |
@@ -372,34 +870,132 @@ InstValue
 `InstValueId` is a checked ID into a hash-consed, structurally versioned value
 table. The owning unit and ordered operand instance IDs are part of identity,
 so values are never shared across independently scheduled control units and
-noncommutative
-`old_x - current_x` and `current_x - old_x` cannot collide even though their
-raw `NodeId` and transitive version sets are equal. A leaf input records, at
-its ordered read action, the current version of every write domain that may
-alias it. Loop/function-local bindings similarly record their exact
-iteration/environment version. Thus the same semantic `NodeId` is instantiated
-as different values across a relevant store or environment change without
-invalidating it for unrelated changes.
+noncommutative `old_x - current_x` and `current_x - old_x` cannot collide even
+though their raw `NodeId` and transitive token sets are equal. A leaf input
+records, at its ordered read action/site, the reaching token of every write
+domain that may alias it. Loop/function-local bindings similarly record their
+exact iteration/environment token. Thus the same semantic `NodeId` is
+instantiated as different values across a relevant store or environment change
+without invalidating it for unrelated changes.
 
 `SLTMemoryDependencyId` is a checked ID into an interned immutable sorted set
-of the exact `(WriteDomainId, version)` facts on which an instance transitively
-depends; the set may contain two versions of one write domain. The analogous
-`SLTEnvDependencyId` summarizes binding/iteration facts. These sets support
-alias, placement, and move-legality proofs, but are not value identity because
-they deliberately discard ordered operand association.
+of the exact `(WriteDomainId, MemoryTokenId)` facts on which an instance
+transitively depends; the set may contain two tokens of one write domain. The
+analogous `SLTEnvDependencyId` summarizes binding/iteration facts. These sets
+support alias, placement, and move-legality proofs, but are not value identity
+because they deliberately discard ordered operand association. `InstValue`
+hash-consing includes the exact ordered operand association and token IDs.
+
+Resolution then produces the final scheduling artifact:
+
+```text
+GlobalScheduledActionGraph
+  control_graph: ArtifactControlGraph
+  actions / roots / barriers copied from the verified skeleton
+  edges: [ScheduledActionEdge]
+  memory_tokens / environment_tokens / effect_tokens
+
+ScheduledActionEdge
+  before / after: ControlActionId
+  reason: LocalControl | DataSource | AddressSource | PreviousValue |
+          ObserverTrigger | MemoryToken | EffectToken
+```
+
+The final verifier recomputes every occurrence-to-`InstValue` substitution,
+then derives the exact data and token edges and compares their complete set to
+the graph. Unit-local regions, points, gates, decisions, and values remain
+isolated; cross-unit dataflow is a store/read action plus global token edge,
+never a shared `InstValueId`. Source, address, and old-value occurrences remain
+separate uses and edges even when they name the same state atom. This prevents
+a read-modify-write address at one token and an old-value read at another token
+from collapsing into contradictory set-based edges. The union of control,
+barrier, data, and token dependencies must be acyclic, and canonical order is
+derived from lifecycle coordinates rather than hash iteration.
+After this verification, the final control/value builder is consumed and all
+source-occurrence, `InstValue`, dependency-set, and gated-instance interning
+maps are taken and dropped. The frozen artifact retains only dense records,
+compact facts, and verified relations required by later passes. Frozen
+deserialization validates canonicality with transient maps and drops them just
+as the frozen SLT arena does.
+
+`WriteDomain` distinguishes at least state partitions, capture-enable state,
+observer-trigger state, event streams, and a global unknown domain.
 
 Purity does not imply speculatability. `ExecutionSafetyAnalysis` classifies an
 instance as `Total` only with an operation-specific, independently recomputed
 proof that eager execution cannot trap, fault, publish an effect, or change X/Z
 semantics. Division/remainder additionally require divisor-nonzero and signed
 overflow safety (or a proved total lowering); dynamic memory reads require
-address/fault and version proofs. Otherwise the value is
+address/fault and reaching-token proofs. Otherwise the value is
 `DomainRestricted` to the exact predicate region in which the source occurrence
 executes. That region is part of `InstValue` identity. Two identical
 non-speculatable expressions originating in disjoint arms therefore remain two
 instances; total values canonicalize to the unit root and may share. This is
 linear in recorded source occurrences and does not create combinations of path
 contexts.
+
+Dynamic access is represented once and shared by combinational reads,
+read-modify-write, module glue, and FF/testbench lowering:
+
+```text
+DynamicAddressPlan
+  owner_action: ControlActionId
+  object / semantic variable type / object_width
+  ordered_indices: [DynamicIndexUse]
+  dimensions: [(extent, stride)]
+  aggregate_dimension_count
+  part: None | Colon { lsb, elements, stride } |
+        PlusColon { anchor_index, elements, stride } |
+        MinusColon { anchor_index, elements, stride } |
+        Step { anchor_index, elements, stride }
+  offset: InstUse
+  selected_width
+  in_bounds: InstUse
+  access_semantics: CheckedRead | CheckedOverlayWrite
+
+DynamicIndexUse
+  operand: InstUse
+  source_domain: Bit | Logic
+  source_width / signedness / exact normalization coercion
+  extent / stride
+```
+
+The verifier derives each typed index use from the source variable/select and
+requires its action operand role/site to match. For regular aggregate indices,
+`aggregate = sum(normalize(index_i) * stride_i)`. A static `:` contributes
+`lsb * stride`; `+:` contributes `anchor * stride`; `-:` contributes
+`(anchor - (elements - 1)) * stride`; and `step` contributes
+`(anchor * elements) * stride`. `selected_width = elements * stride` for a
+part select and is the remaining aggregate stride otherwise. Every addition,
+subtraction, and multiplication in this normalization is checked.
+
+`in_bounds` is exactly the conjunction of `index_i < extent_i` for every
+aggregate index, `anchor + elements <= extent` for `+:`,
+`anchor < extent && anchor + 1 >= elements` for `-:`,
+`anchor * elements + elements <= extent` for `step`, and
+`offset + selected_width <= object_width`; static `:` bounds are verified when
+the plan is created. Comparisons occur in the original normalized arbitrary-
+width domain before conversion to `usize` or a machine pointer, so wrapping a
+large runtime index cannot pass the guard. The verifier also proves a
+bidirectional owner relation: a plan belongs to exactly one `ReadInput` with
+`DynamicOverlay(plan)` or one dynamic `StoreRoot` target, and every such action
+has exactly one plan.
+
+Every dynamic access remains a checked `ControlAction`, including a statically
+proved in-bounds one; the proof merely permits its backend implementation to
+use an ordinary direct load/store. A non-static `CheckedRead` is
+non-speculatable, and `CheckedOverlayWrite` is one atomic old-value/address/RHS
+action. A backend may lower the checked action to a branch, mask, or
+indivisible checked-load bundle, but may not omit the source action. An eager
+mux containing an unchecked load does not count as a guard.
+
+Runtime semantics are per selected bit lane. With a known two-state address,
+in-range lanes read/write the object, out-of-range read lanes produce the
+source domain's default (`X` for four-state `Logic`, zero for `Bit`) and
+out-of-range write lanes are ignored. If any address bit is X/Z, a `Logic` read
+is all-X, a `Bit` read is zero, and a write is a no-op. Backends may use masked
+or branched implementations, but the output verifier checks this exact lane
+relation and proves that no machine memory access occurs outside the object.
 
 Alias analysis declares a finite set of write domains and the sparse
 `may_write_domain(read_class)` relation. A static nonaliasing store advances
@@ -410,19 +1006,23 @@ therefore present in every read signature and is advanced by a completely
 unknown write. The verifier checks that the relation conservatively covers
 every may-alias pair; uncertainty maps to global rather than omitting a fact.
 
-Stores, version advances, releases, runtime events, and captures are ordered
-actions connected by memory/effect tokens. `SLTVersionTable` verification
-independently walks those actions, recomputes counters, ordered operand-instance
-hash-consing, dependency summaries, and every `ValueKey`. A planning unit is
-the maximal scheduler layer segment whose action graph and version tokens are
-explicitly present; no value moves across an unrepresented effect boundary.
+Stores, releases, runtime events, captures, bindings, and folds are ordered
+actions connected by the SSA tokens above. `SLTStateTokenAnalysis`
+independently walks `ArtifactControlGraph`, reconstructs every
+Entry/MayDef/Phi relation, ordered occurrence-to-instance resolution,
+dependency summary, and `ValueKey`. It never recomputes a numeric version
+counter. A placement planning unit is a verified segment of
+`GlobalScheduledActionGraph` whose global entry/exit token interface is
+explicit; no value moves across an unrepresented effect or cross-unit boundary.
 
 Every direct memory/environment read also receives a path-sensitive
-version-validity set. `SLTVersionTable` computes reaching version tokens at
-every `ControlSite`; a site is valid for the read only when every path reaching
-it has the exact recorded token for every may-write domain/binding. At a merge,
-`{v0, v1}` is not proof of `v0`. Equivalently, each path's first version kill
-forms a frontier, but there is no assumed single linear "next action".
+token-validity set. `SLTStateTokenAnalysis` computes reaching tokens at every
+`ControlUseSite`: a slot uses the tokens reaching that exact action boundary,
+while an edge use sees the token carried by that one global predecessor edge.
+A site is valid for the read only when the exact recorded token reaches it for
+every may-write domain/binding. At a merge, incoming `{v0, v1}` is represented
+by fresh `vphi` and is not proof of `v0`. Equivalently, each path's first token
+kill forms a frontier, but there is no assumed single linear "next action".
 ScheduleLate selects only from valid sites on the earliest-to-latest dominance
 path, and the verifier independently recomputes that membership. This prevents
 moving `read x@v0` after a write that creates `v1` while still allowing it in a
@@ -434,12 +1034,15 @@ Placement is expressed at action boundaries, not merely by predicate region:
 
 ```text
 ControlSite = (ControlPointId, slot: usize)
+ControlUseSite = Slot(ControlSite) | Edge(ControlEdgeId)
 ```
 
 For a point with `N` ordered actions, slots `0..=N` are the positions before,
 between, and after them. An action at index `i` executes between slots `i` and
 `i + 1`; a CFG edge leaves the predecessor's final slot and enters successor
-slot zero. Point dominance plus slot order defines site dominance. This
+slot zero. Point dominance plus slot order defines slot-site dominance. An
+edge use maps to the predecessor's final slot for availability/LCA purposes
+but retains its edge identity for token and gamma semantics. This
 distinguishes a gate header, join, and continuation within one parent region
 and prevents a value from moving across an effect merely because both actions
 have the same region owner.
@@ -447,13 +1050,16 @@ have the same region owner.
 The placement algorithm follows the ScheduleEarly/ScheduleLate structure used
 for sea-of-nodes global code motion:
 
-1. Build direct def-use and user lists once from all ordered roots and
-   memory/effect actions in one planning unit.
+1. Build direct def-use and user lists once from every resolved `InstUse` in
+   roots, actions, gates, decisions, patterns, muxes, and result merges in one
+   planning unit. Root/action fixed uses are ordinary LCA inputs rather than a
+   special post-placement check.
 2. In topological order, compute each `InstValue`'s earliest legal `ControlSite` from
-   its operands, version facts, pinned memory/effect constraints, and required
+   its operands, token facts, pinned memory/effect constraints, and required
    execution domain.
 3. In reverse topological order, compute its latest `ControlSite` as the LCA of
-   all already placed ordinary users in the expanded site-dominance tree.
+   every fixed root/action/gate/decision `InstUse` site plus the selected sites
+   of all already placed ordinary users in the expanded site-dominance tree.
    Gamma/merge operands use the final site of their actual arm predecessor as
    the use site. A gate-owned mux contributes fixed operand-use sites: its
    condition at the gate header immediately before dispatch, and each arm only
@@ -565,7 +1171,7 @@ each assignment site lies between its earliest and latest legal sites, the
 within-site order is def-before-use, gated arm nodes cannot execute on another
 arm, every restricted value stays in its required execution domain, pinned
 effects did not move, and every root receives a dominating value of the
-declared width and memory/environment version.
+declared width and memory/environment tokens.
 
 ## 3. Canonical DecisionRegion
 
@@ -851,8 +1457,8 @@ that analysis. Compare/branch, machine-constraint, release/event, `MemCopy`,
 and SLP bundles cannot be split. Fixed instruction counts and maximum region
 counts are not candidates or guards.
 
-`MIRMemoryVersionAnalysis` is an explicit post-scheduling artifact, separate
-from `SLTVersionTable`. It recomputes reaching versions from actual MIR
+`MIRMemoryTokenAnalysis` is an explicit post-scheduling artifact, separate
+from `SLTStateTokenAnalysis`. It recomputes reaching tokens from actual MIR
 memory/effect order using the same `WriteDomainId` and conservative
 read-class-to-domain relation. If lowering must refine domains, it records an
 explicit conservative mapping back to every SLT domain; equality of unrelated
@@ -861,17 +1467,20 @@ where they exist, and a cross-artifact verifier checks the same state object,
 read class, and complete mapped write-domain set. Absence of such a link only
 disables state reload for that value.
 
-The unchanged-version fact alone is not a reload recipe. Every proposed state
+An unchanged-token fact alone is not a reload recipe. Every proposed state
 reload carries a `StateReloadRecipe` identifying the state object/address,
 value and mask lanes where applicable, byte/bit slice, load widths, endianness,
 concatenation order, and zero/sign/no-extension operations needed to reproduce
 the exact logical value. Its verifier symbolically checks the recipe against
 the value's defining origin and proves that every referenced byte has the same
-reaching MIR version at the reload. Only that semantic equality proof permits
-the versioned-state option.
+reaching MIR token at the reload. Only that semantic equality proof permits
+the token-equivalent state option.
 
 PressureRegion selection precedes, but does not iterate with, the one
-Braun--Hack spill plan. A composable `PressureCostSummary` uses an additive
+Braun--Hack spill plan. Here `MIN` is Braun--Hack's resident-set operation: at
+each program point it keeps pinned/current operands and evicts the unpinned
+logical value with farthest verified global next use until the register set is
+at most `K`. A composable `PressureCostSummary` uses an additive
 target proxy:
 
 ```text
@@ -906,9 +1515,17 @@ partition. The acyclic graph uses finite
 integer `ReachWeight`s from profile counts or normalized static edge weights;
 an opaque residual/loop's internal work is identical in both boundary
 alternatives.
-After selection, forced cut facts and ordinary MIN decisions are combined in
-one final `SpillPlan`. It is materialized once; coloring failure never requests
-another cut.
+
+After selection, each full-cut edge has empty ordinary-register `W_exit` and
+`W_entry` sets by construction. Its exact constant/state/boundary-home recipes
+are owned solely by `CutPlan`; Braun--Hack edge coupling is forbidden across
+that edge. MIN runs once inside each maximal final pressure region, with the
+region entry/exit conditions fixed by the cuts. The regional results and cut
+recipes are then combined into one `SpillPlan`, followed by one global pruned-
+IDF SSA reconstruction. Thus a cross-cut value cannot be independently spilled
+again by MIN, while values internal to a region use the ordinary proven
+Braun--Hack algorithm. The plan is materialized once; coloring failure never
+requests another cut.
 
 The frame contains a boundary-home area and one reusable regional spill arena.
 Boundary homes initially receive unique identities with size/alignment
@@ -920,7 +1537,7 @@ regional requirement rather than the sum of regional frames.
 
 Input `CutPlan` verification proves region partitioning, legal edges, exact
 edge-sensitive planned cross-value sets, one valid materialization kind per
-value, MIR memory-version/reload-recipe facts, and boundary-home identity plus
+value, MIR memory-token/reload-recipe facts, and boundary-home identity plus
 size/alignment. It does not assign final offsets or claim that
 pre-materialization liveness is already empty. The final `SpillPlan` verifier
 proves concrete boundary and regional-home offsets, arena maximum reuse, frame
@@ -982,9 +1599,15 @@ valid alignment/relocations; all code and table labels must resolve.
 All trees and graphs use explicit worklists; deeply nested source control and
 phi webs must not recurse on the host stack.
 
-- node/provenance/control verification: linear in SLT nodes/edges, control
-  points, gates, decision arms/patterns, and merge steps, plus documented
-  dominator work;
+- canonical SLT verification: `O(nodes + child edges)` time, one width per node
+  plus packed fact bitsets, and no reverse-edge graph proportional to child
+  edges after the structural scan;
+- source/root/provenance/control verification: linear in source/final roots,
+  emitted atom expansions, explicit ordering edges, control points, gates,
+  decision arms/patterns, and merge steps, plus documented dominator work;
+- global action/token verification: linear in actions, explicit action edges,
+  root-order-barrier endpoints, token definitions, phi operands, and sparse
+  alias-domain relations; no atom-expansion Cartesian product is stored;
 - def-use plus placement: `O((values + uses) log control_sites)`;
 - gate and laminar pressure DPs: linear in their region trees;
 - exact-key clustering: `O(cases log cases)`; disjoint pattern verification:
@@ -993,8 +1616,8 @@ phi webs must not recurse on the host stack.
   pairwise overlap relation;
 - CFG/SCC/SESE analysis: `O(blocks + edges)` (or documented near-linear
   dominator cost);
-- SLT and MIR version analyses: proportional to their memory actions, alias
-  edges, dependency sets, and sparse reaching-version facts;
+- SLT and MIR token analyses: proportional to their memory actions, alias
+  edges, dependency sets, and sparse reaching-token facts;
 - pressure summaries: linear in owned live-range events plus the region tree;
 - cut materialization: proportional to actual cross-region values;
 - final congruence classification: linear in MIR/phi edges plus sparse liveness,
@@ -1007,50 +1630,69 @@ input-dependent traversal limit, CFG cap, or legacy correctness fallback.
 
 ## 9. Verifier-first implementation sequence
 
-1. Add checked `ControlUnit`/control-point/site types, iterative
-   `SLTNodeFacts`, structurally versioned `InstValueId`/`SLTVersionTable`, and
-   the complete provenance foundation verifiers plus serialization/cache tests.
-   These artifacts are verified in dependency order; do not change lowering
-   output yet.
-2. Make symbolic evaluation produce those artifacts for every declaration and
-   flatten-remapped instance. In diagnostic mode, build and verify
+1. Complete the producer boundary: canonical append-order `SLTNodeFacts`,
+   fallible width/coercion and `RangeStore`, one verified
+   `DynamicAddressPlan`, checked IDs, concrete source-occurrence,
+   root/action/ForFold-template records, mutable/frozen arena types, and
+   malformed-input tests. Measure standalone verifier RSS/time on 100k, 1M,
+   and the pinned Heliodor artifact. Do not change lowering output or pretend a
+   mutable construction arena is already frozen.
+2. Make symbolic evaluation emit module-local source roots and complete
+   `SourceControlProvenance`. Verify them, then implement only the deterministic
+   whole-unit occurrence draft mapper, atomization-to-`RootExpansion`, atomic
+   global root/action assignment, compressed root-order barriers, constant
+   rewrite relation, and observer occurrence materialization. Glue receives
+   synthetic units. Recompute final `SLTNodeFacts`, then freeze the arena and
+   root/action identity/ownership/occurrence registries together and drop
+   interning caches. Verify every
+   boundary; no vector-position root identity remains.
+3. Build and verify the occurrence-valued `GlobalActionOrderSkeleton`, compose
+   and verify `ArtifactControlGraph`, construct SSA memory/environment/effect
+   tokens, resolve versioned `InstValue` and all per-operand slot/edge uses,
+   then derive and verify the final `GlobalScheduledActionGraph` and freeze the
+   dense final artifact after dropping construction interning maps. Build the
+   exact read/write/token summaries and nested loop SSA of
+   `ForFoldActionPlan`. In diagnostic mode, build and verify
    `ExecutionSafetyAnalysis`, `ControlEligibilityPlan`, the maximal
-   `ControlSkeleton`, state-specific use
-   maps and legality envelopes, `RegionStateSummary`, the one bottom-up DP and
-   `CostWitness`, contraction, the one final `PlacementPlan`, and
+   `ControlSkeleton`, state-specific use maps and legality envelopes,
+   `RegionStateSummary`, the one bottom-up DP and `CostWitness`, contraction,
+   the one final `PlacementPlan`, and
    `GateFormationPlan`/`DecisionFormationPlan`; report the 3,227 currently
-   rejected cases. This step remains diagnostic and does not switch lowering,
-   because canonical Decision SIR is not available yet.
-3. Centralize SIR terminator use/edge/renumber APIs, then add canonical
+   rejected cases. This step does not switch lowering because canonical
+   Decision SIR is not available yet.
+4. Centralize SIR terminator use/edge/renumber APIs, then add canonical
    `Decision` SIR plus malformed-input verifier tests. Teach all backends the
    semantics through explicit trampolines/legal lowering before any native
-   jump-table optimization. Re-run the complete step-2 pipeline, formation
+   jump-table optimization. Re-run the complete step-3 pipeline, formation
    output relations, optimizer decision-origin checks, and backend semantic
    tests; only then make it the sole source-DAG lowering path.
-4. Add explicit multi-successor native `MDecision` verification and verify
+5. Add explicit multi-successor native `MDecision` verification and verify
    `DecisionLoweringPlan` plus its `LoweredDecisionWitness` output relation,
    starting with
    sparse balanced trees and dense jump tables; accept each with semantic and
    same-build runtime tests.
-5. Add same-block `VectorMemPack` through verified `SLPPlan`. Its output then
+6. Add same-block `VectorMemPack` through verified `SLPPlan`. Its output then
    flows through newly rebuilt frontier splitting, scheduling, liveness, and
    every later MIR analysis; no pre-SLP fact is reused.
-6. Add verified semantic-frontier block splitting,
-   `MIRMemoryVersionAnalysis` plus `StateReloadRecipe`, input `CutPlan`, final
-   `SpillPlan` frame-layout verification, and output `CutResult` verification;
-   then constrain the single spill plan with selected PressureRegions.
-7. After reconstruction, add final phi-congruence classification and
+7. Add verified semantic-frontier block splitting,
+   `MIRMemoryTokenAnalysis` plus `StateReloadRecipe`, input `CutPlan`, final
+   `SpillPlan` frame-layout verification, and output `CutResult` verification.
+   Select PressureRegions first, fix empty-register full-cut interfaces, then
+   run the single cut-constrained Braun--Hack plan inside the final regions.
+8. After reconstruction, add final phi-congruence classification and
    component-wide soft affinity only for components proved conventional. Then
    add typed code/data fragments and copy/probability-aware
    `BlockLayoutPlan`/`DataLayoutPlan`, only after their input and
    output-relation verifiers exist.
 
 Each step lands as a valid phase boundary. Existing binary lowering remains the
-current implementation until step 3 replaces it after the complete verified
+current implementation until step 4 replaces it after the complete verified
 pipeline is available; it is never selected because a new plan failed
-verification. The final acceptance gate is a successful
-same-condition full Heliodor run compared with `veryl-cc`, not compile-only
-status, projected time, IR size, or a partial timing window.
+verification. The final acceptance gate requires both runners to report a
+same-input full Heliodor `status=pass`, Celox to report
+`compile_only=false`, and Celox wall time to be no greater than the
+corresponding `veryl-cc` wall time. Compile-only status, projected time, IR
+size, and a partial timing window are never accepted as performance results.
 
 ## References and implementation comparisons
 
@@ -1060,6 +1702,31 @@ status, projected time, IR size, or a partial timing window.
 - Jens Knoop, Oliver Rüthing, and Bernhard Steffen, [*Lazy Code
   Motion*](https://doi.org/10.1145/143103.143136), PLDI 1992: safe/economical
   placement without unnecessary register pressure.
+- Matthias Braun, Sebastian Buchwald, Sebastian Hack, Roland Leißa, Christoph
+  Mallon, and Andreas Zwinkau, [*Simple and Efficient Construction of Static
+  Single Assignment Form*](https://c9x.me/compile/bib/braun13cc.pdf), CC 2013:
+  sealed SSA construction and trivial-phi elimination for environment/state
+  tokens.
+- LLVM, [*MemorySSA*](https://llvm.org/docs/MemorySSA.html): the concrete
+  `liveOnEntry`/MemoryDef/MemoryUse/MemoryPhi model against which Celox's
+  Entry/MayDef/Phi memory-token design is compared. Celox retains verified
+  partitions and effect streams rather than copying LLVM's one-memory-domain
+  precision choice.
+- Sebastian Hack, Daniel Grund, and Gerhard Goos, [*Register Allocation for
+  Programs in SSA-Form*](https://doi.org/10.1007/11688839_20), CC 2006, and
+  Sebastian Hack and Gerhard Goos, [*Optimal Register Allocation for SSA-form
+  Programs in Polynomial Time*](https://doi.org/10.1016/j.ipl.2006.01.008),
+  IPL 2006: chordal SSA interference, and the separation of spilling,
+  coalescing, and coloring used by the allocator architecture.
+- Matthias Braun and Sebastian Hack, [*Register Spilling and Live-Range
+  Splitting for SSA-Form
+  Programs*](https://doi.org/10.1007/978-3-642-00722-4_13), CC 2009: the
+  `W`/`S` dataflow, global-next-use `MIN`, edge coupling, and SSA reconstruction
+  which Celox runs once inside the selected full-cut regions.
+- Benoit Boissinot, Alain Darte, Fabrice Rastello, Benoît Dupont de Dinechin,
+  and Christophe Guillon, [*Revisiting Out-of-SSA Translation for Correctness,
+  Code Quality, and Efficiency*](https://doi.org/10.1109/CGO.2009.19), CGO
+  2009: correctness-first CSSA/out-of-SSA interference and coalescing.
 - [LLVM `SwitchLoweringUtils`](https://www.llvm.org/doxygen/SwitchLoweringUtils_8h_source.html):
   jump-table, bit-test, and probability-weighted search-tree clustering.
 - [GCC tree switch conversion](https://gnu.googlesource.com/gcc/+/refs/heads/master/gcc/tree-switch-conversion.h):
