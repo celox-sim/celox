@@ -8,7 +8,9 @@ use crate::ir::{
     AbsoluteAddr, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
     RelocationModule, SimModule, VarAtomBase,
 };
-use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, get_width};
+use crate::logic_tree::{
+    LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError, get_width,
+};
 
 pub fn flatting(
     module: &SimModule,
@@ -18,7 +20,7 @@ pub fn flatting(
     arena: &mut SLTNodeArena<AbsoluteAddr>,
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
-) -> RelocationModule {
+) -> Result<RelocationModule, SLTNodeFactsError> {
     let instance_id = instance_ids[path];
     let cv = &|id: &VarId| AbsoluteAddr {
         instance_id,
@@ -30,7 +32,7 @@ pub fn flatting(
         .comb_blocks
         .iter()
         .map(|e| convert_logic_path(e, &module.arena, arena, &mut comb_cache, &cv))
-        .collect();
+        .collect::<Result<_, _>>()?;
     let mut observer_cache = HashMap::default();
     let comb_observers: Vec<_> = module
         .comb_observers
@@ -38,7 +40,7 @@ pub fn flatting(
         .map(|observer| {
             convert_comb_observer(observer, &module.arena, arena, &mut observer_cache, &cv)
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     for (child_instance_name, gbs) in &module.glue_blocks {
         for (idx, gb) in gbs.iter().enumerate() {
             let mut glue_cache = HashMap::default();
@@ -52,7 +54,7 @@ pub fn flatting(
                 &gb.arena,
                 arena,
                 &mut glue_cache,
-            ));
+            )?);
         }
     }
     if let Some(t) = trace.as_deref_mut()
@@ -66,7 +68,7 @@ pub fn flatting(
     }
 
     // Atomize logic paths
-    let atomized_comb_blocks = atomize_logic_paths(&comb_blocks, global_boundaries, arena);
+    let atomized_comb_blocks = atomize_logic_paths(&comb_blocks, global_boundaries, arena)?;
 
     if let Some(t) = trace
         && trace_opts.atomized_comb_blocks
@@ -78,7 +80,7 @@ pub fn flatting(
         }
     }
 
-    RelocationModule {
+    Ok(RelocationModule {
         #[cfg(test)]
         variables: module.variables.clone(),
         eval_apply_ff_blocks: HashMap::default(),
@@ -86,7 +88,7 @@ pub fn flatting(
         apply_ff_blocks: HashMap::default(),
         comb_blocks: atomized_comb_blocks,
         comb_observers,
-    }
+    })
 }
 
 /// Atomizes the given logic paths based on the provided boundary map.
@@ -94,7 +96,7 @@ fn atomize_logic_paths(
     paths: &Vec<LogicPath<AbsoluteAddr>>,
     boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
-) -> Vec<LogicPath<AbsoluteAddr>> {
+) -> Result<Vec<LogicPath<AbsoluteAddr>>, SLTNodeFactsError> {
     let mut atomized_paths = Vec::new();
 
     for path in paths {
@@ -124,7 +126,7 @@ fn atomize_logic_paths(
                 let new_expr = arena.alloc(SLTNode::Slice {
                     expr: path.expr,
                     access: relative_atom_access,
-                });
+                })?;
                 let mut expr_inputs = crate::HashSet::default();
                 collect_inputs(new_expr, arena, &mut expr_inputs);
                 let filtered_sources: crate::HashSet<_> = expr_inputs
@@ -163,7 +165,7 @@ fn atomize_logic_paths(
                     arena.alloc(SLTNode::Slice {
                         expr: path.expr,
                         access: relative_access,
-                    })
+                    })?
                 };
 
                 // Collect the actual bit-level sources for the merged range.
@@ -212,7 +214,7 @@ fn atomize_logic_paths(
             atomized_paths.push(path.clone());
         }
     }
-    atomized_paths
+    Ok(atomized_paths)
 }
 
 pub fn collect_inputs<A: Hash + Eq + Clone + Debug>(
@@ -383,7 +385,7 @@ fn convert_logic_path<
     target_arena: &mut SLTNodeArena<B>,
     cache: &mut HashMap<NodeId, NodeId>,
     f: &impl Fn(&A) -> B,
-) -> LogicPath<B> {
+) -> Result<LogicPath<B>, SLTNodeFactsError> {
     lp.map_addr(arena, target_arena, cache, f)
 }
 
@@ -396,18 +398,23 @@ fn convert_comb_observer<
     target_arena: &mut SLTNodeArena<B>,
     cache: &mut HashMap<NodeId, NodeId>,
     f: &impl Fn(&A) -> B,
-) -> CombObserver<B> {
+) -> Result<CombObserver<B>, SLTNodeFactsError> {
     let mut map_node = |node| {
         arena
             .get(node)
             .map_addr(node, arena, target_arena, cache, f)
     };
-    CombObserver {
+    Ok(CombObserver {
         site_id: observer.site_id,
         activation_group: observer.activation_group,
-        guard: observer.guard.map(&mut map_node),
-        args: observer.args.iter().copied().map(&mut map_node).collect(),
-        loop_runner: observer.loop_runner.map(&mut map_node),
+        guard: observer.guard.map(&mut map_node).transpose()?,
+        args: observer
+            .args
+            .iter()
+            .copied()
+            .map(&mut map_node)
+            .collect::<Result<_, _>>()?,
+        loop_runner: observer.loop_runner.map(&mut map_node).transpose()?,
         sensitivity: observer
             .sensitivity
             .iter()
@@ -417,14 +424,14 @@ fn convert_comb_observer<
             .local_inputs
             .iter()
             .map(|(id, node)| {
-                (
+                Ok((
                     f(id),
                     arena
                         .get(*node)
-                        .map_addr(*node, arena, target_arena, cache, f),
-                )
+                        .map_addr(*node, arena, target_arena, cache, f)?,
+                ))
             })
-            .collect(),
+            .collect::<Result<_, SLTNodeFactsError>>()?,
         observed_inputs: observer
             .observed_inputs
             .iter()
@@ -452,7 +459,7 @@ fn convert_comb_observer<
             .collect(),
         written_inputs: observer.written_inputs.iter().map(f).collect(),
         captured_in_loop: observer.captured_in_loop,
-    }
+    })
 }
 
 fn convert_glue_block(
@@ -462,7 +469,7 @@ fn convert_glue_block(
     arena: &SLTNodeArena<GlueAddr>,
     target_arena: &mut SLTNodeArena<AbsoluteAddr>,
     cache: &mut HashMap<NodeId, NodeId>,
-) -> Vec<LogicPath<AbsoluteAddr>> {
+) -> Result<Vec<LogicPath<AbsoluteAddr>>, SLTNodeFactsError> {
     let GlueBlock {
         module_id: _,
         input_ports,
@@ -482,12 +489,12 @@ fn convert_glue_block(
     let mut res = Vec::new();
 
     for (_ports, abb) in input_ports {
-        res.push(convert_logic_path(abb, arena, target_arena, cache, cv));
+        res.push(convert_logic_path(abb, arena, target_arena, cache, cv)?);
     }
     for (_ports, abb) in output_ports {
-        res.push(convert_logic_path(abb, arena, target_arena, cache, cv));
+        res.push(convert_logic_path(abb, arena, target_arena, cache, cv)?);
     }
-    res
+    Ok(res)
 }
 
 #[cfg(test)]
@@ -661,7 +668,8 @@ mod tests {
             &mut arena,
             &crate::debug::TraceOptions::default(),
             None,
-        );
+        )
+        .unwrap();
 
         // Expected logic paths:
         // 1. i_c = i; (in top)

@@ -12,7 +12,7 @@ use std::hash::Hash;
 use num_bigint::BigUint;
 
 use crate::ir::BitAccess;
-use crate::logic_tree::comb::{LogicPath, NodeId, SLTNode, SLTNodeArena};
+use crate::logic_tree::comb::{LogicPath, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError};
 use crate::{HashMap, HashSet};
 
 /// Check if an SLT expression tree is purely constant (no Input references).
@@ -121,7 +121,7 @@ struct ConstVar {
 pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     paths: &mut [LogicPath<A>],
     arena: &mut SLTNodeArena<A>,
-) -> bool {
+) -> Result<bool, SLTNodeFactsError> {
     // 1. Identify constant variables.
     //    A variable is "fully constant" if every LogicPath targeting it has a
     //    Constant expression and no dynamic index.
@@ -161,7 +161,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     }
 
     if const_candidates.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     // 2. Build the combined constant value for each constant variable.
@@ -196,7 +196,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     }
 
     if const_vars.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     // 3. Rewrite expression trees (see rewrite_expr below): for each remaining LogicPath, recursively
@@ -206,7 +206,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     let mut rewrite_cache: HashMap<NodeId, NodeId> = HashMap::default();
     for path in paths.iter_mut() {
         if path.sources.iter().any(|s| const_vars.contains_key(&s.id)) {
-            path.expr = rewrite_expr(path.expr, arena, &const_vars, &mut rewrite_cache);
+            path.expr = rewrite_expr(path.expr, arena, &const_vars, &mut rewrite_cache)?;
             path.sources.retain(|src| !const_vars.contains_key(&src.id));
             path.previous_sources
                 .retain(|src| !const_vars.contains_key(&src.id));
@@ -219,7 +219,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     // Their Stores must persist so that other EUs (FF evaluation) reading from
     // working memory see the correct values.
 
-    true
+    Ok(true)
 }
 
 /// Recursively rewrite an expression tree, replacing Input nodes that reference
@@ -229,9 +229,9 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
     arena: &mut SLTNodeArena<A>,
     const_vars: &HashMap<A, ConstVar>,
     cache: &mut HashMap<NodeId, NodeId>,
-) -> NodeId {
+) -> Result<NodeId, SLTNodeFactsError> {
     if let Some(&cached) = cache.get(&node) {
-        return cached;
+        return Ok(cached);
     }
 
     let result = match arena.get(node).clone() {
@@ -246,48 +246,48 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
                 let bit_mask = (BigUint::from(1u32) << width) - 1u32;
                 let val = (&cv.payload >> access.lsb) & &bit_mask;
                 let msk = (&cv.mask >> access.lsb) & &bit_mask;
-                arena.alloc(SLTNode::Constant(val, msk, width, false))
+                arena.alloc(SLTNode::Constant(val, msk, width, false))?
             } else {
                 node
             }
         }
         SLTNode::Slice { expr, access } => {
-            let new_expr = rewrite_expr(expr, arena, const_vars, cache);
+            let new_expr = rewrite_expr(expr, arena, const_vars, cache)?;
             if new_expr == expr {
                 node
             } else {
                 arena.alloc(SLTNode::Slice {
                     expr: new_expr,
                     access,
-                })
+                })?
             }
         }
         SLTNode::Binary(l, op, r) => {
-            let new_l = rewrite_expr(l, arena, const_vars, cache);
-            let new_r = rewrite_expr(r, arena, const_vars, cache);
+            let new_l = rewrite_expr(l, arena, const_vars, cache)?;
+            let new_r = rewrite_expr(r, arena, const_vars, cache)?;
             if new_l == l && new_r == r {
                 node
             } else {
-                arena.alloc(SLTNode::Binary(new_l, op, new_r))
+                arena.alloc(SLTNode::Binary(new_l, op, new_r))?
             }
         }
         SLTNode::Unary(op, inner) => {
-            let new_inner = rewrite_expr(inner, arena, const_vars, cache);
+            let new_inner = rewrite_expr(inner, arena, const_vars, cache)?;
             if new_inner == inner {
                 node
             } else {
-                arena.alloc(SLTNode::Unary(op, new_inner))
+                arena.alloc(SLTNode::Unary(op, new_inner))?
             }
         }
         SLTNode::Concat(parts) => {
             let new_parts: Vec<_> = parts
                 .iter()
-                .map(|&(id, w)| (rewrite_expr(id, arena, const_vars, cache), w))
-                .collect();
+                .map(|&(id, w)| Ok((rewrite_expr(id, arena, const_vars, cache)?, w)))
+                .collect::<Result<_, SLTNodeFactsError>>()?;
             if new_parts.iter().zip(parts.iter()).all(|(a, b)| a.0 == b.0) {
                 node
             } else {
-                arena.alloc(SLTNode::Concat(new_parts))
+                arena.alloc(SLTNode::Concat(new_parts))?
             }
         }
         SLTNode::Mux {
@@ -295,9 +295,9 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
             then_expr,
             else_expr,
         } => {
-            let new_cond = rewrite_expr(cond, arena, const_vars, cache);
-            let new_then = rewrite_expr(then_expr, arena, const_vars, cache);
-            let new_else = rewrite_expr(else_expr, arena, const_vars, cache);
+            let new_cond = rewrite_expr(cond, arena, const_vars, cache)?;
+            let new_then = rewrite_expr(then_expr, arena, const_vars, cache)?;
+            let new_else = rewrite_expr(else_expr, arena, const_vars, cache)?;
             if new_cond == cond && new_then == then_expr && new_else == else_expr {
                 node
             } else {
@@ -305,12 +305,12 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
                     cond: new_cond,
                     then_expr: new_then,
                     else_expr: new_else,
-                })
+                })?
             }
         }
         _ => node,
     };
 
     cache.insert(node, result);
-    result
+    Ok(result)
 }

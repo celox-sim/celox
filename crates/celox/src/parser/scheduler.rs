@@ -9,7 +9,7 @@ use crate::ir::SIRTerminator;
 use crate::ir::SIRValue;
 use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo};
 use crate::logic_tree::NodeId;
-use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeArena};
+use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SLTNodeFactsError};
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -598,25 +598,25 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
         arena: &SLTNodeArena<A>,
         target_arena: &mut SLTNodeArena<B>,
         f: &F,
-    ) -> SchedulerError<B>
+    ) -> Result<SchedulerError<B>, SLTNodeFactsError>
     where
         F: Fn(&A) -> B,
     {
         let mut cache = HashMap::default();
-        match self {
+        Ok(match self {
             SchedulerError::CombinationalLoop { blocks } => SchedulerError::CombinationalLoop {
                 blocks: blocks
                     .into_iter()
                     .map(|b| b.map_addr(arena, target_arena, &mut cache, f))
-                    .collect(),
+                    .collect::<Result<Vec<_>, _>>()?,
             },
             SchedulerError::MultipleDriver { blocks } => SchedulerError::MultipleDriver {
                 blocks: blocks
                     .into_iter()
                     .map(|b| b.map_addr(arena, target_arena, &mut cache, f))
-                    .collect(),
+                    .collect::<Result<Vec<_>, _>>()?,
             },
-        }
+        })
     }
 }
 

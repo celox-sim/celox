@@ -75,17 +75,25 @@ pub(super) fn binary_width(
     lhs_width: usize,
     rhs_width: usize,
 ) -> Result<usize, NodeRuleError> {
+    if matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) && lhs_width != rhs_width {
+        return Err(NodeRuleError::new(
+            "WIDTH.WILDCARD_OPERANDS_MATCH",
+            format!("wildcard comparison operands have widths {lhs_width} and {rhs_width}"),
+        ));
+    }
+    Ok(binary_result_width(op, lhs_width, rhs_width))
+}
+
+/// Derive only the result width of a binary node.
+///
+/// Construction uses this after validating child IDs. Operand relations such
+/// as wildcard-width equality remain the responsibility of the independent
+/// full verifier.
+pub(super) fn binary_result_width(op: BinaryOp, lhs_width: usize, rhs_width: usize) -> usize {
     match op {
-        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
-            if lhs_width != rhs_width {
-                return Err(NodeRuleError::new(
-                    "WIDTH.WILDCARD_OPERANDS_MATCH",
-                    format!("wildcard comparison operands have widths {lhs_width} and {rhs_width}"),
-                ));
-            }
-            Ok(1)
-        }
-        BinaryOp::Eq
+        BinaryOp::EqWildcard
+        | BinaryOp::NeWildcard
+        | BinaryOp::Eq
         | BinaryOp::Ne
         | BinaryOp::LtU
         | BinaryOp::LtS
@@ -96,8 +104,8 @@ pub(super) fn binary_width(
         | BinaryOp::GeU
         | BinaryOp::GeS
         | BinaryOp::LogicAnd
-        | BinaryOp::LogicOr => Ok(1),
-        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => Ok(lhs_width),
+        | BinaryOp::LogicOr => 1,
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => lhs_width,
         BinaryOp::Add
         | BinaryOp::Sub
         | BinaryOp::Mul
@@ -105,7 +113,7 @@ pub(super) fn binary_width(
         | BinaryOp::Rem
         | BinaryOp::And
         | BinaryOp::Or
-        | BinaryOp::Xor => Ok(lhs_width.max(rhs_width)),
+        | BinaryOp::Xor => lhs_width.max(rhs_width),
     }
 }
 
@@ -125,17 +133,23 @@ pub(super) fn concat_width(
 ) -> Result<usize, NodeRuleError> {
     let mut total = 0usize;
     for part_width in widths {
-        let Some(next) = total.checked_add(part_width) else {
-            return Err(NodeRuleError::new(
-                "WIDTH.CONCAT_REPRESENTABLE",
-                format!(
-                    "declared concat widths overflow usize while adding {part_width} to {total}"
-                ),
-            ));
-        };
-        total = next;
+        total = concat_width_add(total, part_width)?;
     }
     Ok(total)
+}
+
+pub(super) fn concat_width_add(
+    accumulated: usize,
+    part_width: usize,
+) -> Result<usize, NodeRuleError> {
+    accumulated.checked_add(part_width).ok_or_else(|| {
+        NodeRuleError::new(
+            "WIDTH.CONCAT_REPRESENTABLE",
+            format!(
+                "declared concat widths overflow usize while adding {part_width} to {accumulated}"
+            ),
+        )
+    })
 }
 
 pub(super) fn slice_width(

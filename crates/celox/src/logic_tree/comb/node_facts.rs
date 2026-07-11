@@ -33,87 +33,31 @@ where
 {
     /// Verify `arena` and compute one width for every node.
     pub fn verify(arena: &'arena SLTNodeArena<A>) -> Result<Self, SLTNodeFactsError> {
-        let node_count = arena.len();
-
-        // An arena is a canonical append-only DAG: a node can only reference
-        // operands that were already allocated.  Check every untrusted ID
-        // without dereferencing it before building any fact table.
-        for (node_index, node) in arena.iter().enumerate() {
-            let owner = NodeId(node_index);
-            try_for_each_child(node, |child| {
-                if child.0 >= node_count {
-                    return Err(SLTNodeFactsError::new(
-                        "GRAPH.CHILD_EXISTS",
-                        owner,
-                        format!(
-                            "node n{} references missing child n{}; arena contains {node_count} nodes",
-                            owner.0, child.0
-                        ),
-                    ));
-                }
-                if child.0 >= owner.0 {
-                    return Err(SLTNodeFactsError::new(
-                        "GRAPH.CHILD_PRECEDES_OWNER",
-                        owner,
-                        format!(
-                            "node n{} references child n{}, which does not precede its owner",
-                            owner.0, child.0
-                        ),
-                    ));
-                }
-                Ok(())
-            })?;
-        }
-
-        // Child facts are available by construction in NodeId order.  This
-        // avoids reverse-edge storage, a Kahn worklist, and Option-sized fact
-        // slots. Vec<bool> keeps the persistent lowerability fact packed.
-        let allocation_node = NodeId(node_count.saturating_sub(1));
-        let mut widths = Vec::new();
-        widths.try_reserve_exact(node_count).map_err(|error| {
-            SLTNodeFactsError::new(
-                "FACTS.STORAGE_AVAILABLE",
-                allocation_node,
-                format!("cannot reserve widths for {node_count} nodes: {error}"),
-            )
-        })?;
-        let mut lowerable = Vec::new();
-        lowerable.try_reserve_exact(node_count).map_err(|error| {
-            SLTNodeFactsError::new(
-                "FACTS.STORAGE_AVAILABLE",
-                allocation_node,
-                format!("cannot reserve lowerability for {node_count} nodes: {error}"),
-            )
-        })?;
-        for (node_index, node) in arena.iter().enumerate() {
-            let node_id = NodeId(node_index);
-            let width = compute_width(node_id, node, &widths)?;
-            let mut node_lowerable = node_rules::direct_lowerable(
-                width,
-                matches!(node, SLTNode::Concat(parts) if parts.iter().any(|(_, width)| *width == 0)),
-            );
-            try_for_each_child(node, |child| {
-                let Some(&child_lowerable) = lowerable.get(child.0) else {
-                    return Err(SLTNodeFactsError::new(
-                        "FACTS.CHILD_LOWERABILITY_AVAILABLE",
-                        node_id,
-                        format!(
-                            "lowerability of child n{} was not available while evaluating n{}",
-                            child.0, node_id.0
-                        ),
-                    ));
-                };
-                node_lowerable &= child_lowerable;
-                Ok(())
-            })?;
-            widths.push(width);
-            lowerable.push(node_lowerable);
+        let verified = verify_nodes(arena.nodes())?;
+        let cached = arena.cached_widths();
+        if cached != verified.widths {
+            let mismatch = cached
+                .iter()
+                .zip(&verified.widths)
+                .position(|(cached, verified)| cached != verified)
+                .unwrap_or_else(|| cached.len().min(verified.widths.len()));
+            return Err(SLTNodeFactsError::new(
+                "FACTS.CACHED_WIDTH_MATCHES",
+                NodeId(mismatch),
+                format!(
+                    "construction width cache differs from independently verified widths at n{mismatch} (cached={:?}, verified={:?}; cache entries={}, nodes={})",
+                    cached.get(mismatch),
+                    verified.widths.get(mismatch),
+                    cached.len(),
+                    verified.widths.len(),
+                ),
+            ));
         }
 
         Ok(Self {
             arena,
-            widths,
-            lowerable,
+            widths: verified.widths,
+            lowerable: verified.lowerable,
         })
     }
 
@@ -199,6 +143,186 @@ where
     pub fn widths(&self) -> &[usize] {
         &self.widths
     }
+}
+
+struct VerifiedNodeFacts {
+    widths: Vec<usize>,
+    lowerable: Vec<bool>,
+}
+
+/// Verify an untrusted serialized node list without first constructing an
+/// operational arena. The returned widths were recomputed from the node graph
+/// and can therefore initialize the arena cache directly.
+pub(super) fn verify_raw_nodes<A>(nodes: &[SLTNode<A>]) -> Result<Vec<usize>, SLTNodeFactsError>
+where
+    A: Hash + Eq + Clone,
+{
+    Ok(verify_nodes(nodes)?.widths)
+}
+
+/// Validate the local safety conditions required to append `node` and derive
+/// its construction-time width. Full semantic relations are intentionally
+/// checked only by [`verify_nodes`].
+pub(super) fn verify_append<A>(
+    node: &SLTNode<A>,
+    widths: &[usize],
+) -> Result<usize, SLTNodeFactsError>
+where
+    A: Hash + Eq + Clone,
+{
+    let node_id = NodeId(widths.len());
+    let child_width = |child: NodeId| {
+        widths.get(child.0).copied().ok_or_else(|| {
+            SLTNodeFactsError::new(
+                "GRAPH.CHILD_EXISTS",
+                node_id,
+                format!(
+                    "node n{} references missing child n{}; arena contains {} nodes",
+                    node_id.0,
+                    child.0,
+                    widths.len()
+                ),
+            )
+        })
+    };
+
+    match node {
+        SLTNode::Input { index, access, .. } => {
+            for entry in index {
+                child_width(entry.node)?;
+            }
+            checked_access_width(node_id, *access, "input")
+        }
+        SLTNode::Constant(_, _, width, _) => Ok(*width),
+        SLTNode::Binary(lhs, op, rhs) => Ok(node_rules::binary_result_width(
+            *op,
+            child_width(*lhs)?,
+            child_width(*rhs)?,
+        )),
+        SLTNode::Unary(op, inner) => Ok(node_rules::unary_width(*op, child_width(*inner)?)),
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            child_width(*cond)?;
+            Ok(node_rules::mux_width(
+                child_width(*then_expr)?,
+                child_width(*else_expr)?,
+            ))
+        }
+        SLTNode::ForFold { result, .. } => {
+            try_for_each_child(node, |child| child_width(child).map(|_| ()))?;
+            checked_access_width(node_id, result.access, "ForFold result")
+        }
+        SLTNode::Concat(parts) => {
+            let mut total = 0usize;
+            for &(child, part_width) in parts {
+                child_width(child)?;
+                total = node_rules::concat_width_add(total, part_width)
+                    .map_err(|error| rule_error(node_id, error))?;
+            }
+            Ok(total)
+        }
+        SLTNode::Slice { expr, access } => {
+            child_width(*expr)?;
+            checked_access_width(node_id, *access, "slice")
+        }
+    }
+}
+
+fn verify_nodes<A>(nodes: &[SLTNode<A>]) -> Result<VerifiedNodeFacts, SLTNodeFactsError>
+where
+    A: Hash + Eq + Clone,
+{
+    let node_count = nodes.len();
+
+    // An arena is a canonical append-only DAG: a node can only reference
+    // operands that were already allocated. Check every untrusted ID without
+    // dereferencing it before building any fact table.
+    for (node_index, node) in nodes.iter().enumerate() {
+        verify_child_ids(NodeId(node_index), node, node_count)?;
+    }
+
+    // Child facts are available by construction in NodeId order. This avoids
+    // reverse-edge storage, a Kahn worklist, and Option-sized fact slots.
+    // Vec<bool> keeps the persistent lowerability fact packed.
+    let allocation_node = NodeId(node_count.saturating_sub(1));
+    let mut widths = Vec::new();
+    widths.try_reserve_exact(node_count).map_err(|error| {
+        SLTNodeFactsError::new(
+            "FACTS.STORAGE_AVAILABLE",
+            allocation_node,
+            format!("cannot reserve widths for {node_count} nodes: {error}"),
+        )
+    })?;
+    let mut lowerable = Vec::new();
+    lowerable.try_reserve_exact(node_count).map_err(|error| {
+        SLTNodeFactsError::new(
+            "FACTS.STORAGE_AVAILABLE",
+            allocation_node,
+            format!("cannot reserve lowerability for {node_count} nodes: {error}"),
+        )
+    })?;
+    for (node_index, node) in nodes.iter().enumerate() {
+        let node_id = NodeId(node_index);
+        let width = compute_width(node_id, node, &widths)?;
+        let mut node_lowerable = node_rules::direct_lowerable(
+            width,
+            matches!(node, SLTNode::Concat(parts) if parts.iter().any(|(_, width)| *width == 0)),
+        );
+        try_for_each_child(node, |child| {
+            let Some(&child_lowerable) = lowerable.get(child.0) else {
+                return Err(SLTNodeFactsError::new(
+                    "FACTS.CHILD_LOWERABILITY_AVAILABLE",
+                    node_id,
+                    format!(
+                        "lowerability of child n{} was not available while evaluating n{}",
+                        child.0, node_id.0
+                    ),
+                ));
+            };
+            node_lowerable &= child_lowerable;
+            Ok(())
+        })?;
+        widths.push(width);
+        lowerable.push(node_lowerable);
+    }
+
+    Ok(VerifiedNodeFacts { widths, lowerable })
+}
+
+fn verify_child_ids<A>(
+    owner: NodeId,
+    node: &SLTNode<A>,
+    node_count: usize,
+) -> Result<(), SLTNodeFactsError>
+where
+    A: Hash + Eq + Clone,
+{
+    try_for_each_child(node, |child| {
+        if child.0 >= node_count {
+            return Err(SLTNodeFactsError::new(
+                "GRAPH.CHILD_EXISTS",
+                owner,
+                format!(
+                    "node n{} references missing child n{}; arena contains {node_count} nodes",
+                    owner.0, child.0
+                ),
+            ));
+        }
+        if child.0 >= owner.0 {
+            return Err(SLTNodeFactsError::new(
+                "GRAPH.CHILD_PRECEDES_OWNER",
+                owner,
+                format!(
+                    "node n{} references child n{}, which does not precede its owner",
+                    owner.0, child.0
+                ),
+            ));
+        }
+        Ok(())
+    })
 }
 
 /// A structured failure produced while verifying an SLT node graph.
@@ -505,7 +629,11 @@ mod tests {
     use crate::logic_tree::comb::node::{SLTForEffect, SLTForUpdate, SLTStepOp};
 
     fn arena(nodes: Vec<SLTNode<u32>>) -> SLTNodeArena<u32> {
-        SLTNodeArena::from_nodes_unchecked(nodes)
+        SLTNodeArena::try_from_nodes(nodes).expect("test node graph must verify")
+    }
+
+    fn raw_error(nodes: Vec<SLTNode<u32>>) -> SLTNodeFactsError {
+        SLTNodeArena::try_from_nodes(nodes).expect_err("raw node graph must fail verification")
     }
 
     fn constant(width: usize) -> SLTNode<u32> {
@@ -539,8 +667,7 @@ mod tests {
     }
 
     fn verify_for_fold(node: SLTNode<u32>) -> Result<(), SLTNodeFactsError> {
-        let arena = arena(vec![constant(8), constant(1), node]);
-        SLTNodeFacts::verify(&arena).map(|_| ())
+        SLTNodeArena::try_from_nodes(vec![constant(8), constant(1), node]).map(|_| ())
     }
 
     #[test]
@@ -573,8 +700,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_child_before_graph_traversal() {
-        let arena = arena(vec![SLTNode::Unary(UnaryOp::Ident, NodeId(7))]);
-        let error = SLTNodeFacts::verify(&arena).expect_err("missing child must fail");
+        let error = raw_error(vec![SLTNode::Unary(UnaryOp::Ident, NodeId(7))]);
         assert_eq!(error.invariant, "GRAPH.CHILD_EXISTS");
         assert_eq!(error.node, NodeId(0));
         assert!(error.message.contains("n7"));
@@ -582,19 +708,17 @@ mod tests {
 
     #[test]
     fn rejects_dependency_cycle_as_noncanonical_forward_edge() {
-        let arena = arena(vec![
+        let error = raw_error(vec![
             SLTNode::Unary(UnaryOp::Ident, NodeId(1)),
             SLTNode::Unary(UnaryOp::Ident, NodeId(0)),
         ]);
-        let error = SLTNodeFacts::verify(&arena).expect_err("cycle must fail");
         assert_eq!(error.invariant, "GRAPH.CHILD_PRECEDES_OWNER");
         assert_eq!(error.node, NodeId(0));
     }
 
     #[test]
     fn rejects_acyclic_forward_reference() {
-        let arena = arena(vec![SLTNode::Unary(UnaryOp::Ident, NodeId(1)), constant(8)]);
-        let error = SLTNodeFacts::verify(&arena).expect_err("forward edge must fail");
+        let error = raw_error(vec![SLTNode::Unary(UnaryOp::Ident, NodeId(1)), constant(8)]);
         assert_eq!(error.invariant, "GRAPH.CHILD_PRECEDES_OWNER");
         assert_eq!(error.node, NodeId(0));
         assert!(error.message.contains("child n1"));
@@ -602,24 +726,22 @@ mod tests {
 
     #[test]
     fn rejects_self_reference() {
-        let arena = arena(vec![SLTNode::Unary(UnaryOp::Ident, NodeId(0))]);
-        let error = SLTNodeFacts::verify(&arena).expect_err("self edge must fail");
+        let error = raw_error(vec![SLTNode::Unary(UnaryOp::Ident, NodeId(0))]);
         assert_eq!(error.invariant, "GRAPH.CHILD_PRECEDES_OWNER");
         assert_eq!(error.node, NodeId(0));
     }
 
     #[test]
     fn rejects_malformed_and_overflowing_accesses() {
-        let malformed = arena(vec![SLTNode::Input {
+        let error = raw_error(vec![SLTNode::Input {
             variable: 1,
             signed: false,
             index: Vec::new(),
             access: BitAccess { lsb: 5, msb: 4 },
         }]);
-        let error = SLTNodeFacts::verify(&malformed).expect_err("reversed access must fail");
         assert_eq!(error.invariant, "WIDTH.ACCESS_ORDERED");
 
-        let overflowing = arena(vec![SLTNode::Input {
+        let error = raw_error(vec![SLTNode::Input {
             variable: 1,
             signed: false,
             index: Vec::new(),
@@ -628,73 +750,59 @@ mod tests {
                 msb: usize::MAX,
             },
         }]);
-        let error = SLTNodeFacts::verify(&overflowing).expect_err("overflowing access must fail");
         assert_eq!(error.invariant, "WIDTH.ACCESS_REPRESENTABLE");
     }
 
     #[test]
     fn rejects_slice_outside_child_width() {
-        let arena = arena(vec![
+        let error = raw_error(vec![
             constant(4),
             SLTNode::Slice {
                 expr: NodeId(0),
                 access: BitAccess { lsb: 1, msb: 4 },
             },
         ]);
-        let error = SLTNodeFacts::verify(&arena).expect_err("out-of-range slice must fail");
         assert_eq!(error.invariant, "WIDTH.SLICE_IN_BOUNDS");
     }
 
     #[test]
     fn rejects_concat_width_overflow() {
-        let arena = arena(vec![
+        let error = raw_error(vec![
             constant(0),
             SLTNode::Concat(vec![(NodeId(0), usize::MAX), (NodeId(0), 1)]),
         ]);
-        let error = SLTNodeFacts::verify(&arena).expect_err("concat overflow must fail");
         assert_eq!(error.invariant, "WIDTH.CONCAT_REPRESENTABLE");
     }
 
     #[test]
     fn rejects_mismatched_wildcard_operand_widths() {
         for op in [BinaryOp::EqWildcard, BinaryOp::NeWildcard] {
-            let arena = arena(vec![
+            let error = raw_error(vec![
                 constant(4),
                 constant(8),
                 SLTNode::Binary(NodeId(0), op, NodeId(1)),
             ]);
-            let error = SLTNodeFacts::verify(&arena).expect_err("wildcard widths must agree");
             assert_eq!(error.invariant, "WIDTH.WILDCARD_OPERANDS_MATCH");
         }
     }
 
     #[test]
     fn rejects_constant_payload_and_mask_outside_declared_width() {
-        let payload = arena(vec![SLTNode::Constant(
+        let payload_error = raw_error(vec![SLTNode::Constant(
             BigUint::from(0x10u8),
             BigUint::from(0u8),
             4,
             false,
         )]);
-        assert_eq!(
-            SLTNodeFacts::verify(&payload)
-                .expect_err("payload must fit")
-                .invariant,
-            "CONSTANT.VALUE_FITS_WIDTH"
-        );
+        assert_eq!(payload_error.invariant, "CONSTANT.VALUE_FITS_WIDTH");
 
-        let mask = arena(vec![SLTNode::Constant(
+        let mask_error = raw_error(vec![SLTNode::Constant(
             BigUint::from(0u8),
             BigUint::from(0x10u8),
             4,
             false,
         )]);
-        assert_eq!(
-            SLTNodeFacts::verify(&mask)
-                .expect_err("mask must fit")
-                .invariant,
-            "CONSTANT.MASK_FITS_WIDTH"
-        );
+        assert_eq!(mask_error.invariant, "CONSTANT.MASK_FITS_WIDTH");
     }
 
     #[test]
@@ -760,13 +868,8 @@ mod tests {
             unreachable!()
         };
         *continue_cond = NodeId(2);
-        let zero_continue_arena = arena(vec![constant(8), constant(1), constant(0), node]);
-        assert_eq!(
-            SLTNodeFacts::verify(&zero_continue_arena)
-                .unwrap_err()
-                .invariant,
-            "FOR_FOLD.OPERAND_NON_ZERO"
-        );
+        let error = raw_error(vec![constant(8), constant(1), constant(0), node]);
+        assert_eq!(error.invariant, "FOR_FOLD.OPERAND_NON_ZERO");
 
         let mut node = valid_for_fold();
         let SLTNode::ForFold { effects, .. } = &mut node else {
@@ -779,13 +882,8 @@ mod tests {
             args: Vec::new(),
             fatal_error_code: None,
         });
-        let zero_guard_arena = arena(vec![constant(8), constant(1), constant(0), node]);
-        assert_eq!(
-            SLTNodeFacts::verify(&zero_guard_arena)
-                .unwrap_err()
-                .invariant,
-            "FOR_FOLD.OPERAND_NON_ZERO"
-        );
+        let error = raw_error(vec![constant(8), constant(1), constant(0), node]);
+        assert_eq!(error.invariant, "FOR_FOLD.OPERAND_NON_ZERO");
     }
 
     #[test]
@@ -837,16 +935,13 @@ mod tests {
             effects: Vec::new(),
             continue_cond: NodeId(1),
         };
-        let arena = arena(vec![constant(usize::MAX), constant(1), node]);
-        assert_eq!(
-            SLTNodeFacts::verify(&arena).unwrap_err().invariant,
-            "FOR_FOLD.INCLUSIVE_WIDTH_REPRESENTABLE"
-        );
+        let error = raw_error(vec![constant(usize::MAX), constant(1), node]);
+        assert_eq!(error.invariant, "FOR_FOLD.INCLUSIVE_WIDTH_REPRESENTABLE");
     }
 
     #[test]
     fn checks_for_fold_result_access() {
-        let arena = arena(vec![
+        let error = raw_error(vec![
             constant(1),
             SLTNode::ForFold {
                 loop_var: 1,
@@ -871,7 +966,6 @@ mod tests {
                 continue_cond: NodeId(0),
             },
         ]);
-        let error = SLTNodeFacts::verify(&arena).expect_err("malformed result must fail");
         assert_eq!(error.invariant, "WIDTH.ACCESS_ORDERED");
         assert_eq!(error.node, NodeId(1));
     }

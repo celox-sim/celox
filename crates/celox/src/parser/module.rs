@@ -74,7 +74,7 @@ fn build_dynamic_output_glue(
         BigUint::from(0u8),
         64,
         false,
-    ));
+    ))?;
 
     let mut sources = collect_glue_sources(rhs, glue_arena);
     let mut address_sources = HashSet::default();
@@ -87,12 +87,13 @@ fn build_dynamic_output_glue(
         let ((index, _), _) =
             eval_expression(module, parent_store, index_expr, parent_arena, None)?;
         let mut cache = HashMap::default();
-        let mapped =
-            parent_arena
-                .get(index)
-                .map_addr(index, parent_arena, glue_arena, &mut cache, &|id| {
-                    GlueAddr::Parent(*id)
-                });
+        let mapped = parent_arena.get(index).map_addr(
+            index,
+            parent_arena,
+            glue_arena,
+            &mut cache,
+            &|id| GlueAddr::Parent(*id),
+        )?;
         let mapped_sources = collect_glue_sources(mapped, glue_arena);
         sources.extend(mapped_sources.iter().copied());
         address_sources.extend(mapped_sources);
@@ -111,9 +112,9 @@ fn build_dynamic_output_glue(
             BigUint::from(0u8),
             64,
             false,
-        ));
-        let term = glue_arena.alloc(SLTNode::Binary(mapped, BinaryOp::Mul, stride));
-        offset = glue_arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, term));
+        ))?;
+        let term = glue_arena.alloc(SLTNode::Binary(mapped, BinaryOp::Mul, stride))?;
+        offset = glue_arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, term))?;
     }
 
     if let Some(part) = geometry.part {
@@ -148,7 +149,7 @@ fn build_dynamic_output_glue(
                     BigUint::from(0u8),
                     64,
                     false,
-                ))
+                ))?
             }
             PartSelectGeometry::PlusColon { .. }
             | PartSelectGeometry::MinusColon { .. }
@@ -162,7 +163,7 @@ fn build_dynamic_output_glue(
                     glue_arena,
                     &mut cache,
                     &|id| GlueAddr::Parent(*id),
-                );
+                )?;
                 let mapped_sources = collect_glue_sources(anchor, glue_arena);
                 sources.extend(mapped_sources.iter().copied());
                 address_sources.extend(mapped_sources);
@@ -182,8 +183,8 @@ fn build_dynamic_output_glue(
                             BigUint::from(0u8),
                             64,
                             false,
-                        ));
-                        glue_arena.alloc(SLTNode::Binary(anchor, BinaryOp::Sub, decrement))
+                        ))?;
+                        glue_arena.alloc(SLTNode::Binary(anchor, BinaryOp::Sub, decrement))?
                     }
                     PartSelectGeometry::Step { elements } => {
                         let elements = glue_arena.alloc(SLTNode::Constant(
@@ -191,8 +192,8 @@ fn build_dynamic_output_glue(
                             BigUint::from(0u8),
                             64,
                             false,
-                        ));
-                        glue_arena.alloc(SLTNode::Binary(anchor, BinaryOp::Mul, elements))
+                        ))?;
+                        glue_arena.alloc(SLTNode::Binary(anchor, BinaryOp::Mul, elements))?
                     }
                     PartSelectGeometry::Colon { .. } => {
                         return Err(ParserError::illegal_context(
@@ -210,12 +211,12 @@ fn build_dynamic_output_glue(
                         BigUint::from(0u8),
                         64,
                         false,
-                    ));
-                    glue_arena.alloc(SLTNode::Binary(element_offset, BinaryOp::Mul, weight))
+                    ))?;
+                    glue_arena.alloc(SLTNode::Binary(element_offset, BinaryOp::Mul, weight))?
                 }
             }
         };
-        offset = glue_arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, part_offset));
+        offset = glue_arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, part_offset))?;
     }
 
     let access_width = get_access_width(module, dst.id, &dst.index, &dst.select)?;
@@ -234,7 +235,7 @@ fn build_dynamic_output_glue(
         signed: variable.r#type.signed,
         index: Vec::new(),
         access: full_access,
-    });
+    })?;
 
     let low_mask = (BigUint::from(1u8) << access_width) - BigUint::from(1u8);
     let low_mask = glue_arena.alloc(SLTNode::Constant(
@@ -242,14 +243,14 @@ fn build_dynamic_output_glue(
         BigUint::from(0u8),
         variable_width,
         false,
-    ));
-    let shifted_mask = glue_arena.alloc(SLTNode::Binary(low_mask, BinaryOp::Shl, offset));
-    let keep_mask = glue_arena.alloc(SLTNode::Unary(UnaryOp::BitNot, shifted_mask));
+    ))?;
+    let shifted_mask = glue_arena.alloc(SLTNode::Binary(low_mask, BinaryOp::Shl, offset))?;
+    let keep_mask = glue_arena.alloc(SLTNode::Unary(UnaryOp::BitNot, shifted_mask))?;
 
     // First apply assignment coercion to the selected destination width.  Only
     // after truncation/sign-extension is complete may the value be embedded in
     // the full variable; otherwise high RHS bits can corrupt adjacent fields.
-    let rhs = coerce_node_width(glue_arena, rhs, Some(access_width), rhs_signed);
+    let rhs = coerce_node_width(glue_arena, rhs, Some(access_width), rhs_signed)?;
     let rhs = if access_width < variable_width {
         let padding_width = variable_width - access_width;
         let padding = glue_arena.alloc(SLTNode::Constant(
@@ -257,18 +258,19 @@ fn build_dynamic_output_glue(
             BigUint::from(0u8),
             padding_width,
             false,
-        ));
+        ))?;
         glue_arena.alloc(SLTNode::Concat(vec![
             (padding, padding_width),
             (rhs, access_width),
-        ]))
+        ]))?
     } else {
         rhs
     };
-    let shifted_rhs = glue_arena.alloc(SLTNode::Binary(rhs, BinaryOp::Shl, offset));
-    let shifted_rhs = glue_arena.alloc(SLTNode::Binary(shifted_rhs, BinaryOp::And, shifted_mask));
-    let kept_value = glue_arena.alloc(SLTNode::Binary(old_value, BinaryOp::And, keep_mask));
-    let updated_value = glue_arena.alloc(SLTNode::Binary(kept_value, BinaryOp::Or, shifted_rhs));
+    let shifted_rhs = glue_arena.alloc(SLTNode::Binary(rhs, BinaryOp::Shl, offset))?;
+    let shifted_rhs =
+        glue_arena.alloc(SLTNode::Binary(shifted_rhs, BinaryOp::And, shifted_mask))?;
+    let kept_value = glue_arena.alloc(SLTNode::Binary(old_value, BinaryOp::And, keep_mask))?;
+    let updated_value = glue_arena.alloc(SLTNode::Binary(kept_value, BinaryOp::Or, shifted_rhs))?;
 
     let prefix = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
     let result = if prefix == full_access {
@@ -277,7 +279,7 @@ fn build_dynamic_output_glue(
         glue_arena.alloc(SLTNode::Slice {
             expr: updated_value,
             access: prefix,
-        })
+        })?
     };
     let previous_sources = std::iter::once(VarAtomBase::new(
         GlueAddr::Parent(dst.id),
@@ -511,7 +513,7 @@ impl<'a> ModuleParser<'a> {
                 signed: var.r#type.signed,
                 index: vec![],
                 access: BitAccess::new(0, width - 1),
-            });
+            })?;
             let mut sources = HashSet::default();
             sources.insert(VarAtomBase::new(*id, 0, width - 1));
             parent_store.insert(*id, RangeStore::new(Some((initial_node, sources)), width));
@@ -544,7 +546,7 @@ impl<'a> ModuleParser<'a> {
                 &mut glue_arena,
                 &mut cache,
                 &|id| GlueAddr::Parent(*id),
-            );
+            )?;
 
             let path = LogicPath {
                 target: LogicPathTarget::Var(VarAtomBase::new(
@@ -598,7 +600,7 @@ impl<'a> ModuleParser<'a> {
                 signed: child_port.r#type.signed,
                 index: vec![],
                 access: BitAccess::new(0, width - 1),
-            });
+            })?;
 
             // LHS: output.dst (AssignDestination).
             let mut current_offset = 0usize;
@@ -637,7 +639,7 @@ impl<'a> ModuleParser<'a> {
                     glue_arena.alloc(SLTNode::Slice {
                         expr: rhs_node,
                         access: slice_access,
-                    })
+                    })?
                 };
 
                 let (expr, access, sources, previous_sources, address_sources) =

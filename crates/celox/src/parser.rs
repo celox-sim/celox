@@ -435,6 +435,9 @@ pub enum ParserError {
         #[source]
         error: crate::logic_tree::SLTNodeFactsError,
     },
+
+    #[error("SLT construction failed: {0}")]
+    SltConstruction(#[from] crate::logic_tree::SLTNodeFactsError),
 }
 
 impl ParserError {
@@ -499,7 +502,9 @@ impl miette::Diagnostic for ParserError {
             ParserError::TopNotFound { .. } => Some(Box::new("top_not_found")),
             ParserError::GenericTop { .. } => Some(Box::new("generic_top")),
             ParserError::SirVerify { .. } => Some(Box::new("sir_verify")),
-            ParserError::SltVerify { .. } => Some(Box::new("slt_verify")),
+            ParserError::SltVerify { .. } | ParserError::SltConstruction(_) => {
+                Some(Box::new("slt_verify"))
+            }
         }
     }
 
@@ -993,7 +998,10 @@ pub(crate) fn flatten(
     // is a constant, then replace all Input references with Constant nodes.
     // This eliminates Store→Load roundtrips for compile-time constants
     // (e.g. genvar-expanded parity-check matrices).
-    crate::logic_tree::const_inline::inline_constant_variables(&mut comb_blocks, &mut global_arena);
+    crate::logic_tree::const_inline::inline_constant_variables(
+        &mut comb_blocks,
+        &mut global_arena,
+    )?;
     apply_always_comb_previous_source_ordering(&mut comb_blocks);
 
     let var_widths: HashMap<AbsoluteAddr, usize> = instance_modules
@@ -1019,7 +1027,7 @@ pub(crate) fn flatten(
         &mut comb_observers,
         &runtime_event_sites,
         &mut global_arena,
-    );
+    )?;
     for (site_id, site) in runtime_event_sites.iter().enumerate() {
         if !matches!(site.kind, crate::ir::RuntimeEventKind::AssertFatal) {
             continue;
@@ -1044,7 +1052,7 @@ pub(crate) fn flatten(
     )?;
 
     let sched_start = flatten_timing.then(crate::timing::now);
-    let schedule = scheduler::sort(
+    let schedule = match scheduler::sort(
         comb_blocks,
         &global_arena,
         &ignored_loops,
@@ -1052,49 +1060,51 @@ pub(crate) fn flatten(
         four_state,
         &var_widths,
         next_runtime_error_code,
-    )
-    .map_err(|e| {
-        let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
-        let program = Program {
-            eval_apply_ffs: HashMap::default(),
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
-            eval_comb: Vec::new(),
-            runtime_errors: HashMap::default(),
-            runtime_event_sites: Vec::new(),
-            comb_observers: Vec::new(),
-            eval_comb_plan: None,
-            instance_ids: expanded.clone(),
-            instance_module: instance_modules.clone(),
-            module_variables: err_vars,
-            module_var_path_index: err_path_idx,
-            module_names: module_names.clone(),
-            clock_domains: HashMap::default(),
-            topological_clocks: Vec::new(),
-            cascaded_clocks: BTreeSet::new(),
-            arena: SLTNodeArena::new(),
-            num_events: 0,
-            reset_clock_map: HashMap::default(),
-            address_aliases: HashMap::default(),
-            layout: None,
-            initial_memory_values: Vec::new(),
-            initial_statements: None,
-            tb_functions: fxhash::FxHashMap::default(),
-        };
-        let source_locations = scheduler_source_locations(&e, module_ir, &instance_modules);
-        let mut target_arena = SLTNodeArena::new();
-        let error = e.map_addr(&global_arena, &mut target_arena, &|addr| {
-            program.get_path(addr)
-        });
-        if source_locations.is_empty() {
-            ParserError::Scheduler(error)
-        } else {
-            ParserError::SchedulerWithLocation {
-                error,
-                source_locations,
-            }
+    ) {
+        Ok(schedule) => schedule,
+        Err(error) => {
+            let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
+            let program = Program {
+                eval_apply_ffs: HashMap::default(),
+                eval_only_ffs: HashMap::default(),
+                apply_ffs: HashMap::default(),
+                eval_comb: Vec::new(),
+                runtime_errors: HashMap::default(),
+                runtime_event_sites: Vec::new(),
+                comb_observers: Vec::new(),
+                eval_comb_plan: None,
+                instance_ids: expanded.clone(),
+                instance_module: instance_modules.clone(),
+                module_variables: err_vars,
+                module_var_path_index: err_path_idx,
+                module_names: module_names.clone(),
+                clock_domains: HashMap::default(),
+                topological_clocks: Vec::new(),
+                cascaded_clocks: BTreeSet::new(),
+                arena: SLTNodeArena::new(),
+                num_events: 0,
+                reset_clock_map: HashMap::default(),
+                address_aliases: HashMap::default(),
+                layout: None,
+                initial_memory_values: Vec::new(),
+                initial_statements: None,
+                tb_functions: fxhash::FxHashMap::default(),
+            };
+            let source_locations = scheduler_source_locations(&error, module_ir, &instance_modules);
+            let mut target_arena = SLTNodeArena::new();
+            let error = error.map_addr(&global_arena, &mut target_arena, &|addr| {
+                program.get_path(addr)
+            })?;
+            return Err(if source_locations.is_empty() {
+                ParserError::Scheduler(error)
+            } else {
+                ParserError::SchedulerWithLocation {
+                    error,
+                    source_locations,
+                }
+            });
         }
-    })?;
+    };
     if let Some(s) = sched_start {
         eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
@@ -2115,7 +2125,7 @@ fn relocate_units(
             &mut global_arena,
             trace_opts,
             trace.as_deref_mut(),
-        );
+        )?;
         remap_for_fold_runtime_event_sites(
             &mut global_arena,
             arena_start,
@@ -2286,9 +2296,9 @@ fn build_comb_observer_capture_paths(
     observers: &mut [crate::ir::CombObserver<AbsoluteAddr>],
     sites: &[crate::ir::RuntimeEventSite],
     arena: &mut SLTNodeArena<AbsoluteAddr>,
-) {
+) -> Result<(), ParserError> {
     if observers.is_empty() {
-        return;
+        return Ok(());
     }
 
     annotate_comb_capture_enable_sites(comb_blocks, observers);
@@ -2410,17 +2420,15 @@ fn build_comb_observer_capture_paths(
                     }),
             );
         }
-        let expr = observer
-            .guard
-            .or_else(|| observer.args.first().copied())
-            .unwrap_or_else(|| {
-                arena.alloc(crate::logic_tree::SLTNode::Constant(
-                    num_bigint::BigUint::from(1u8),
-                    num_bigint::BigUint::from(0u8),
-                    1,
-                    false,
-                ))
-            });
+        let expr = match observer.guard.or_else(|| observer.args.first().copied()) {
+            Some(expr) => expr,
+            None => arena.alloc(crate::logic_tree::SLTNode::Constant(
+                num_bigint::BigUint::from(1u8),
+                num_bigint::BigUint::from(0u8),
+                1,
+                false,
+            ))?,
+        };
         let emit_on_true = matches!(
             sites[observer.site_id as usize].kind,
             crate::ir::RuntimeEventKind::Display
@@ -2481,18 +2489,19 @@ fn build_comb_observer_capture_paths(
                     crate::ir::RuntimeEventKind::AssertFatal
                 )
                 .then_some(member.site_id as i64);
-                let member_expr = member
+                let member_expr = match member
                     .loop_runner
                     .or(member.guard)
                     .or_else(|| member.args.first().copied())
-                    .unwrap_or_else(|| {
-                        arena.alloc(crate::logic_tree::SLTNode::Constant(
-                            num_bigint::BigUint::from(1u8),
-                            num_bigint::BigUint::from(0u8),
-                            1,
-                            false,
-                        ))
-                    });
+                {
+                    Some(expr) => expr,
+                    None => arena.alloc(crate::logic_tree::SLTNode::Constant(
+                        num_bigint::BigUint::from(1u8),
+                        num_bigint::BigUint::from(0u8),
+                        1,
+                        false,
+                    ))?,
+                };
                 let path_id = LogicPathId(comb_blocks.len());
                 if let Some(prev) = previous_trigger_capture_path {
                     comb_blocks[prev.0].order_before.insert(path_id);
@@ -2521,6 +2530,7 @@ fn build_comb_observer_capture_paths(
             }
         }
     }
+    Ok(())
 }
 
 fn apply_always_comb_previous_source_ordering(comb_blocks: &mut [LogicPath<AbsoluteAddr>]) {

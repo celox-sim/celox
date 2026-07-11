@@ -2455,16 +2455,20 @@ mod tests {
     use crate::logic_tree::comb::SLTNodeArena;
 
     fn input(arena: &mut SLTNodeArena<u32>, variable: u32, width: usize) -> NodeId {
-        arena.alloc(SLTNode::Input {
-            variable,
-            signed: false,
-            index: vec![],
-            access: BitAccess::new(0, width - 1),
-        })
+        arena
+            .alloc(SLTNode::Input {
+                variable,
+                signed: false,
+                index: vec![],
+                access: BitAccess::new(0, width - 1),
+            })
+            .unwrap()
     }
 
     fn constant(arena: &mut SLTNodeArena<u32>, value: u64, width: usize) -> NodeId {
-        arena.alloc(SLTNode::Constant(value.into(), 0u8.into(), width, false))
+        arena
+            .alloc(SLTNode::Constant(value.into(), 0u8.into(), width, false))
+            .unwrap()
     }
 
     fn operation_chain(
@@ -2477,7 +2481,7 @@ mod tests {
     ) -> NodeId {
         for index in 0..operations {
             let rhs = constant(arena, constant_base + index as u64, width);
-            value = arena.alloc(SLTNode::Binary(value, op, rhs));
+            value = arena.alloc(SLTNode::Binary(value, op, rhs)).unwrap();
         }
         value
     }
@@ -2518,11 +2522,13 @@ mod tests {
         let cond = input(&mut arena, 0, 1);
         let then_expr = input(&mut arena, 1, 8);
         let else_expr = input(&mut arena, 2, 8);
-        let mux = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        });
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            })
+            .unwrap();
         let mut builder = SIRBuilder::new();
         SLTToSIRLowerer::new(false).lower(
             &mut builder,
@@ -2565,8 +2571,12 @@ mod tests {
         let mut arena = SLTNodeArena::new();
         let selector = input(&mut arena, 0, 8);
         let opcode = constant(&mut arena, 0x13, 8);
-        let eq = arena.alloc(SLTNode::Binary(selector, BinaryOp::EqWildcard, opcode));
-        let ne = arena.alloc(SLTNode::Binary(selector, BinaryOp::NeWildcard, opcode));
+        let eq = arena
+            .alloc(SLTNode::Binary(selector, BinaryOp::EqWildcard, opcode))
+            .unwrap();
+        let ne = arena
+            .alloc(SLTNode::Binary(selector, BinaryOp::NeWildcard, opcode))
+            .unwrap();
 
         let eq_probability = SLTToSIRLowerer::static_true_probability(eq, &arena);
         let ne_probability = SLTToSIRLowerer::static_true_probability(ne, &arena);
@@ -2588,11 +2598,13 @@ mod tests {
         let else_input = input(&mut arena, 2, 64);
         let then_expr = operation_chain(&mut arena, then_input, BinaryOp::Add, 8, 10, 64);
         let else_expr = operation_chain(&mut arena, else_input, BinaryOp::Xor, 12, 100, 64);
-        let mux = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        });
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            })
+            .unwrap();
         let mut builder = SIRBuilder::new();
         SLTToSIRLowerer::new(false).lower(
             &mut builder,
@@ -2620,13 +2632,19 @@ mod tests {
         let else_source = input(&mut arena, 3, 64);
         let then_unique = operation_chain(&mut arena, then_source, BinaryOp::Add, 5, 20, 64);
         let else_unique = operation_chain(&mut arena, else_source, BinaryOp::Sub, 5, 40, 64);
-        let then_expr = arena.alloc(SLTNode::Binary(shared, BinaryOp::Add, then_unique));
-        let else_expr = arena.alloc(SLTNode::Binary(shared, BinaryOp::Sub, else_unique));
-        let mux = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        });
+        let then_expr = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::Add, then_unique))
+            .unwrap();
+        let else_expr = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::Sub, else_unique))
+            .unwrap();
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            })
+            .unwrap();
         let mut builder = SIRBuilder::new();
         SLTToSIRLowerer::new(false).lower(
             &mut builder,
@@ -2665,17 +2683,21 @@ mod tests {
         let c = input(&mut arena, 4, 64);
         let inner_then = operation_chain(&mut arena, a, BinaryOp::Add, 8, 10, 64);
         let inner_else = operation_chain(&mut arena, b, BinaryOp::Sub, 8, 30, 64);
-        let inner = arena.alloc(SLTNode::Mux {
-            cond: inner_cond,
-            then_expr: inner_then,
-            else_expr: inner_else,
-        });
+        let inner = arena
+            .alloc(SLTNode::Mux {
+                cond: inner_cond,
+                then_expr: inner_then,
+                else_expr: inner_else,
+            })
+            .unwrap();
         let outer_else = operation_chain(&mut arena, c, BinaryOp::Xor, 16, 70, 64);
-        let outer = arena.alloc(SLTNode::Mux {
-            cond: outer_cond,
-            then_expr: inner,
-            else_expr: outer_else,
-        });
+        let outer = arena
+            .alloc(SLTNode::Mux {
+                cond: outer_cond,
+                then_expr: inner,
+                else_expr: outer_else,
+            })
+            .unwrap();
         let mut builder = SIRBuilder::new();
         SLTToSIRLowerer::new(false).lower(
             &mut builder,
@@ -2695,14 +2717,20 @@ mod tests {
         let narrow = input(&mut arena, 1, 8);
         let numerator = input(&mut arena, 2, 16);
         let denominator = input(&mut arena, 3, 16);
-        let quotient = arena.alloc(SLTNode::Binary(numerator, BinaryOp::Div, denominator));
+        let quotient = arena
+            .alloc(SLTNode::Binary(numerator, BinaryOp::Div, denominator))
+            .unwrap();
         let one = constant(&mut arena, 1, 16);
-        let deep_division = arena.alloc(SLTNode::Binary(quotient, BinaryOp::Add, one));
-        let mux = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr: narrow,
-            else_expr: deep_division,
-        });
+        let deep_division = arena
+            .alloc(SLTNode::Binary(quotient, BinaryOp::Add, one))
+            .unwrap();
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr: narrow,
+                else_expr: deep_division,
+            })
+            .unwrap();
         let mut builder = SIRBuilder::new();
         SLTToSIRLowerer::new(false).lower(
             &mut builder,
@@ -2729,11 +2757,13 @@ mod tests {
         let else_input = input(&mut arena, 2, 64);
         let then_expr = operation_chain(&mut arena, then_input, BinaryOp::Add, 10, 10, 64);
         let else_expr = operation_chain(&mut arena, else_input, BinaryOp::Sub, 10, 30, 64);
-        let mux = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        });
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            })
+            .unwrap();
         let mut builder = SIRBuilder::new();
         SLTToSIRLowerer::new(true).lower(&mut builder, mux, &arena, &mut crate::HashMap::default());
         let eu = finish_lowering(builder);
@@ -2752,34 +2782,36 @@ mod tests {
         let update = input(&mut arena, 1, 8);
         let continue_cond = constant(&mut arena, 1, 1);
         let target = VarAtomBase::new(2, 0, 7);
-        let fold = arena.alloc(SLTNode::ForFold {
-            loop_var: 3,
-            loop_width: 8,
-            loop_signed: false,
-            start: SLTLoopBound::Const(0),
-            end: SLTLoopBound::Const(2),
-            inclusive: false,
-            step: 1,
-            step_op: SLTStepOp::Add,
-            reverse: false,
-            result: target.clone(),
-            initials: vec![crate::logic_tree::comb::SLTForUpdate {
-                target: target.clone(),
-                expr: initial,
-            }],
-            updates: vec![crate::logic_tree::comb::SLTForUpdate {
-                target,
-                expr: update,
-            }],
-            effects: vec![crate::logic_tree::comb::SLTForEffect {
-                site_id: 1,
-                guard: None,
-                emit_on_true: true,
-                args: vec![update],
-                fatal_error_code: None,
-            }],
-            continue_cond,
-        });
+        let fold = arena
+            .alloc(SLTNode::ForFold {
+                loop_var: 3,
+                loop_width: 8,
+                loop_signed: false,
+                start: SLTLoopBound::Const(0),
+                end: SLTLoopBound::Const(2),
+                inclusive: false,
+                step: 1,
+                step_op: SLTStepOp::Add,
+                reverse: false,
+                result: target.clone(),
+                initials: vec![crate::logic_tree::comb::SLTForUpdate {
+                    target: target.clone(),
+                    expr: initial,
+                }],
+                updates: vec![crate::logic_tree::comb::SLTForUpdate {
+                    target,
+                    expr: update,
+                }],
+                effects: vec![crate::logic_tree::comb::SLTForEffect {
+                    site_id: 1,
+                    guard: None,
+                    emit_on_true: true,
+                    args: vec![update],
+                    fatal_error_code: None,
+                }],
+                continue_cond,
+            })
+            .unwrap();
 
         assert!(!SLTToSIRLowerer::new(false).is_speculatable_pure(fold, &arena));
     }
@@ -2792,11 +2824,13 @@ mod tests {
         let else_input = input(&mut arena, 2, 256);
         let then_expr = operation_chain(&mut arena, then_input, BinaryOp::And, 12, 10, 256);
         let else_expr = operation_chain(&mut arena, else_input, BinaryOp::Xor, 12, 100, 256);
-        let mux = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        });
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            })
+            .unwrap();
         let mut builder = SIRBuilder::new();
         SLTToSIRLowerer::new(false).lower_region_slice(
             &mut builder,
@@ -2825,11 +2859,13 @@ mod tests {
                 1_000 + u64::from(depth) * 8,
                 64,
             );
-            value = arena.alloc(SLTNode::Mux {
-                cond,
-                then_expr: arm,
-                else_expr: value,
-            });
+            value = arena
+                .alloc(SLTNode::Mux {
+                    cond,
+                    then_expr: arm,
+                    else_expr: value,
+                })
+                .unwrap();
         }
 
         let lowerer = SLTToSIRLowerer::new(false);
@@ -2853,11 +2889,13 @@ mod tests {
         let else_input = input(&mut arena, 2, 64);
         let then_expr = operation_chain(&mut arena, then_input, BinaryOp::Add, 8, 10, 64);
         let else_expr = operation_chain(&mut arena, else_input, BinaryOp::Sub, 8, 100, 64);
-        let mux = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        });
+        let mux = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            })
+            .unwrap();
 
         let empty_lowerer = SLTToSIRLowerer::new(false);
         let mut empty_builder = SIRBuilder::new();
@@ -2886,12 +2924,14 @@ mod tests {
     #[test]
     fn signed_inputs_report_signedness() {
         let mut arena = SLTNodeArena::<u32>::new();
-        let node = arena.alloc(SLTNode::Input {
-            variable: 0,
-            signed: true,
-            index: vec![],
-            access: BitAccess::new(0, 7),
-        });
+        let node = arena
+            .alloc(SLTNode::Input {
+                variable: 0,
+                signed: true,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
         let lowerer = SLTToSIRLowerer::new(false);
         assert!(lowerer.get_bound_signed(node, &arena));
     }
@@ -2899,12 +2939,14 @@ mod tests {
     #[test]
     fn unsigned_inputs_report_unsignedness() {
         let mut arena = SLTNodeArena::<u32>::new();
-        let node = arena.alloc(SLTNode::Input {
-            variable: 0,
-            signed: false,
-            index: vec![],
-            access: BitAccess::new(0, 7),
-        });
+        let node = arena
+            .alloc(SLTNode::Input {
+                variable: 0,
+                signed: false,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
         let lowerer = SLTToSIRLowerer::new(false);
         assert!(!lowerer.get_bound_signed(node, &arena));
     }
@@ -2912,14 +2954,20 @@ mod tests {
     #[test]
     fn mixed_sign_subtraction_bound_is_unsigned() {
         let mut arena = SLTNodeArena::<u32>::new();
-        let lhs = arena.alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 8, false));
-        let rhs = arena.alloc(SLTNode::Input {
-            variable: 0,
-            signed: true,
-            index: vec![],
-            access: BitAccess::new(0, 7),
-        });
-        let node = arena.alloc(SLTNode::Binary(lhs, BinaryOp::Sub, rhs));
+        let lhs = arena
+            .alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 8, false))
+            .unwrap();
+        let rhs = arena
+            .alloc(SLTNode::Input {
+                variable: 0,
+                signed: true,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let node = arena
+            .alloc(SLTNode::Binary(lhs, BinaryOp::Sub, rhs))
+            .unwrap();
         let lowerer = SLTToSIRLowerer::new(false);
         assert!(!lowerer.get_bound_signed(node, &arena));
     }
@@ -2927,24 +2975,32 @@ mod tests {
     #[test]
     fn mixed_sign_mux_bound_is_unsigned() {
         let mut arena = SLTNodeArena::<u32>::new();
-        let cond = arena.alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 1, false));
-        let then_expr = arena.alloc(SLTNode::Input {
-            variable: 0,
-            signed: true,
-            index: vec![],
-            access: BitAccess::new(0, 7),
-        });
-        let else_expr = arena.alloc(SLTNode::Input {
-            variable: 1,
-            signed: false,
-            index: vec![],
-            access: BitAccess::new(0, 7),
-        });
-        let node = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        });
+        let cond = arena
+            .alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 1, false))
+            .unwrap();
+        let then_expr = arena
+            .alloc(SLTNode::Input {
+                variable: 0,
+                signed: true,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let else_expr = arena
+            .alloc(SLTNode::Input {
+                variable: 1,
+                signed: false,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let node = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            })
+            .unwrap();
         let lowerer = SLTToSIRLowerer::new(false);
         assert!(!lowerer.get_bound_signed(node, &arena));
     }
@@ -2952,19 +3008,25 @@ mod tests {
     #[test]
     fn comparison_bound_is_not_signed() {
         let mut arena = SLTNodeArena::<u32>::new();
-        let lhs = arena.alloc(SLTNode::Input {
-            variable: 0,
-            signed: false,
-            index: vec![],
-            access: BitAccess::new(0, 7),
-        });
-        let rhs = arena.alloc(SLTNode::Input {
-            variable: 1,
-            signed: true,
-            index: vec![],
-            access: BitAccess::new(0, 7),
-        });
-        let node = arena.alloc(SLTNode::Binary(lhs, BinaryOp::LtS, rhs));
+        let lhs = arena
+            .alloc(SLTNode::Input {
+                variable: 0,
+                signed: false,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let rhs = arena
+            .alloc(SLTNode::Input {
+                variable: 1,
+                signed: true,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let node = arena
+            .alloc(SLTNode::Binary(lhs, BinaryOp::LtS, rhs))
+            .unwrap();
         let lowerer = SLTToSIRLowerer::new(false);
         assert!(!lowerer.get_bound_signed(node, &arena));
     }
@@ -2972,16 +3034,20 @@ mod tests {
     #[test]
     fn unsigned_target_bound_zero_extends_signed_slice() {
         let mut arena = SLTNodeArena::<u32>::new();
-        let inner = arena.alloc(SLTNode::Input {
-            variable: 0,
-            signed: true,
-            index: vec![],
-            access: BitAccess::new(0, 15),
-        });
-        let casted = arena.alloc(SLTNode::Slice {
-            expr: inner,
-            access: BitAccess::new(0, 7),
-        });
+        let inner = arena
+            .alloc(SLTNode::Input {
+                variable: 0,
+                signed: true,
+                index: vec![],
+                access: BitAccess::new(0, 15),
+            })
+            .unwrap();
+        let casted = arena
+            .alloc(SLTNode::Slice {
+                expr: inner,
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
         let mut builder = SIRBuilder::<u32>::new();
         let mut cache = crate::HashMap::default();
         let lowerer = SLTToSIRLowerer::new(false);

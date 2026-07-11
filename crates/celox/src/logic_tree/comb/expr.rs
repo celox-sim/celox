@@ -116,7 +116,7 @@ pub(super) fn eval_array_literal_expression(
     }
 
     Ok((
-        (arena.alloc(SLTNode::Concat(parts)), total_sources),
+        (arena.alloc(SLTNode::Concat(parts))?, total_sources),
         all_bounds,
     ))
 }
@@ -435,7 +435,7 @@ pub(super) fn eval_function_body_return(
         let ret_parts = range_store
             .get_parts(ret_access)
             .map_err(|error| super::range_store_error("function return value", error, None))?;
-        Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena))
+        Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena)?)
     }
 
     fn function_control_target(
@@ -474,12 +474,12 @@ pub(super) fn eval_function_body_return(
                 )?;
                 let merged_live_expr = match constant_bool(arena, next_live_expr) {
                     Some(true) => state.live_expr,
-                    Some(false) => bool_node(arena, false),
+                    Some(false) => bool_node(arena, false)?,
                     None => arena.alloc(SLTNode::Binary(
                         state.live_expr,
                         BinaryOp::And,
                         next_live_expr,
-                    )),
+                    ))?,
                 };
                 let mut merged_live_sources = state.live_sources;
                 merged_live_sources.extend(next_live_sources);
@@ -566,7 +566,7 @@ pub(super) fn eval_function_body_return(
                 then_state.live_expr,
                 else_state.live_expr,
                 arena,
-            ),
+            )?,
             live_sources,
         })
     }
@@ -616,7 +616,7 @@ pub(super) fn eval_function_body_return(
                             next_function.live_expr,
                             state.function.live_expr,
                             arena,
-                        ),
+                        )?,
                         live_sources: merged_live_sources,
                     },
                     ..state
@@ -706,7 +706,7 @@ pub(super) fn eval_function_body_return(
                         then_state.function.live_expr,
                         else_state.function.live_expr,
                         arena,
-                    ),
+                    )?,
                     live_sources,
                 },
                 continue_expr: merge_control_expr(
@@ -714,7 +714,7 @@ pub(super) fn eval_function_body_return(
                     then_state.continue_expr,
                     else_state.continue_expr,
                     arena,
-                ),
+                )?,
                 continue_sources: merged_sources,
             })
         }
@@ -823,7 +823,7 @@ pub(super) fn eval_function_body_return(
                             then_state.function.live_expr,
                             else_state.function.live_expr,
                             arena,
-                        ),
+                        )?,
                         live_sources,
                     },
                     continue_expr: merge_control_expr(
@@ -831,7 +831,7 @@ pub(super) fn eval_function_body_return(
                         then_state.continue_expr,
                         else_state.continue_expr,
                         arena,
-                    ),
+                    )?,
                     continue_sources: merged_sources,
                 })
             }
@@ -870,7 +870,7 @@ pub(super) fn eval_function_body_return(
                 }
                 Statement::Break => Ok(FunctionLoopControlState {
                     continue_sources: HashSet::default(),
-                    continue_expr: bool_node(arena, false),
+                    continue_expr: bool_node(arena, false)?,
                     ..state
                 }),
                 Statement::IfReset(ir) => Err(ParserError::illegal_context(
@@ -955,7 +955,7 @@ pub(super) fn eval_function_body_return(
                         Some(&for_stmt.token),
                     )
                 })?;
-                let (expr, sources) = combine_parts_with_default(*id, access.lsb, parts, arena);
+                let (expr, sources) = combine_parts_with_default(*id, access.lsb, parts, arena)?;
                 loop_store
                     .update(access, Some((expr, sources)))
                     .map_err(|error| {
@@ -976,10 +976,10 @@ pub(super) fn eval_function_body_return(
                 function: FunctionControlState {
                     store: symbolic_store,
                     boundaries: state.boundaries.clone(),
-                    live_expr: bool_node(arena, true),
+                    live_expr: bool_node(arena, true)?,
                     live_sources: HashSet::default(),
                 },
-                continue_expr: bool_node(arena, true),
+                continue_expr: bool_node(arena, true)?,
                 continue_sources: HashSet::default(),
             },
             |s, stmt| eval_function_loop_statement(module, s, stmt, ret_id, arena),
@@ -1087,7 +1087,7 @@ pub(super) fn eval_function_body_return(
         merged_boundaries = merge_boundaries(merged_boundaries, start_bounds);
         merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
 
-        let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena);
+        let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena)?;
         let folded_updates: Vec<_> = updates
             .iter()
             .map(|(target, expr, _)| SLTForUpdate {
@@ -1117,7 +1117,7 @@ pub(super) fn eval_function_body_return(
                     )
                 })?;
                 let (expr, _) =
-                    combine_parts_with_default(target.id, target.access.lsb, parts, arena);
+                    combine_parts_with_default(target.id, target.access.lsb, parts, arena)?;
                 Ok(SLTForUpdate {
                     target: *target,
                     expr,
@@ -1130,7 +1130,7 @@ pub(super) fn eval_function_body_return(
             iter_state.continue_expr,
             BinaryOp::And,
             iter_state.function.live_expr,
-        ));
+        ))?;
         for (target, _expr, sources) in &updates {
             let mut all_sources = start_sources.clone();
             all_sources.extend(end_sources.iter().copied());
@@ -1171,7 +1171,7 @@ pub(super) fn eval_function_body_return(
                 updates: folded_updates.clone(),
                 effects: Vec::new(),
                 continue_cond: loop_effective_continue,
-            });
+            })?;
 
             let variable = module.variables.get(&target.id).ok_or_else(|| {
                 ParserError::illegal_context(
@@ -1206,7 +1206,7 @@ pub(super) fn eval_function_body_return(
             let mut control_initials = initial_updates.clone();
             control_initials.push(SLTForUpdate {
                 target: control_target,
-                expr: bool_node(arena, true),
+                expr: bool_node(arena, true)?,
             });
             let mut control_updates = folded_updates.clone();
             control_updates.push(SLTForUpdate {
@@ -1228,9 +1228,9 @@ pub(super) fn eval_function_body_return(
                 updates: control_updates,
                 effects: Vec::new(),
                 continue_cond: iter_state.continue_expr,
-            })
+            })?
         } else {
-            bool_node(arena, true)
+            bool_node(arena, true)?
         };
 
         apply_function_guard(
@@ -1282,7 +1282,7 @@ pub(super) fn eval_function_body_return(
                         next_function.live_expr,
                         state.function.live_expr,
                         arena,
-                    ),
+                    )?,
                     live_sources: merged_live_sources,
                 },
                 ..state
@@ -1372,7 +1372,7 @@ pub(super) fn eval_function_body_return(
                         then_state.function.live_expr,
                         else_state.function.live_expr,
                         arena,
-                    ),
+                    )?,
                     live_sources,
                 },
                 continue_expr: merge_control_expr(
@@ -1380,7 +1380,7 @@ pub(super) fn eval_function_body_return(
                     then_state.continue_expr,
                     else_state.continue_expr,
                     arena,
-                ),
+                )?,
                 continue_sources: merged_sources,
             }
         };
@@ -1397,12 +1397,12 @@ pub(super) fn eval_function_body_return(
         )?;
         let continue_expr = match constant_bool(arena, executed_state.continue_expr) {
             Some(true) => outer_state.continue_expr,
-            Some(false) => bool_node(arena, false),
+            Some(false) => bool_node(arena, false)?,
             None => arena.alloc(SLTNode::Binary(
                 outer_state.continue_expr,
                 BinaryOp::And,
                 executed_state.continue_expr,
-            )),
+            ))?,
         };
         let mut continue_sources = outer_state.continue_sources;
         continue_sources.extend(executed_state.continue_sources);
@@ -1517,7 +1517,7 @@ pub(super) fn eval_function_body_return(
                         then_state.function.live_expr,
                         else_state.function.live_expr,
                         arena,
-                    ),
+                    )?,
                     live_sources,
                 },
                 continue_expr: merge_control_expr(
@@ -1525,7 +1525,7 @@ pub(super) fn eval_function_body_return(
                     then_state.continue_expr,
                     else_state.continue_expr,
                     arena,
-                ),
+                )?,
                 continue_sources: merged_sources,
             })
         }
@@ -1545,12 +1545,12 @@ pub(super) fn eval_function_body_return(
         )?;
         let continue_expr = match constant_bool(arena, executed_state.continue_expr) {
             Some(true) => outer_state.continue_expr,
-            Some(false) => bool_node(arena, false),
+            Some(false) => bool_node(arena, false)?,
             None => arena.alloc(SLTNode::Binary(
                 outer_state.continue_expr,
                 BinaryOp::And,
                 executed_state.continue_expr,
-            )),
+            ))?,
         };
         let mut continue_sources = outer_state.continue_sources;
         continue_sources.extend(executed_state.continue_sources);
@@ -1590,7 +1590,7 @@ pub(super) fn eval_function_body_return(
             }
             Statement::Break => Ok(FunctionLoopControlState {
                 continue_sources: HashSet::default(),
-                continue_expr: bool_node(arena, false),
+                continue_expr: bool_node(arena, false)?,
                 ..state
             }),
             Statement::IfReset(ir) => Err(ParserError::illegal_context(
@@ -1619,7 +1619,7 @@ pub(super) fn eval_function_body_return(
         let loop_state = statements.iter().try_fold(
             FunctionLoopControlState {
                 function: state,
-                continue_expr: bool_node(arena, true),
+                continue_expr: bool_node(arena, true)?,
                 continue_sources: HashSet::default(),
             },
             |s, stmt| eval_function_break_statement(module, s, stmt, ret_id, arena),
@@ -1749,7 +1749,7 @@ pub(super) fn eval_function_body_return(
                     then_state.live_expr,
                     else_state.live_expr,
                     arena,
-                ),
+                )?,
                 live_sources,
             })
         }
@@ -1774,9 +1774,9 @@ pub(super) fn eval_function_body_return(
                 let (next_store, next_bounds) =
                     eval_assign(module, state.store, state.boundaries, assign, arena)?;
                 let next_live = if is_whole_var_assign_to(assign, ret_id) {
-                    bool_node(arena, false)
+                    bool_node(arena, false)?
                 } else {
-                    bool_node(arena, true)
+                    bool_node(arena, true)?
                 };
                 apply_function_guard(
                     module,
@@ -1808,7 +1808,7 @@ pub(super) fn eval_function_body_return(
                     guard_state,
                     next_store,
                     next_bounds,
-                    bool_node(arena, true),
+                    bool_node(arena, true)?,
                     HashSet::default(),
                     arena,
                 )
@@ -1866,7 +1866,7 @@ pub(super) fn eval_function_body_return(
         FunctionControlState {
             store: local_store,
             boundaries: local_bounds,
-            live_expr: bool_node(arena, true),
+            live_expr: bool_node(arena, true)?,
             live_sources: HashSet::default(),
         },
         &body.statements,
@@ -1993,8 +1993,8 @@ pub fn eval_expression(
         let ct = expr.comptime();
         if ct.is_const {
             if let Some((celox_value, mask_xz, width, signed)) = celox_value_from_comptime(ct) {
-                let node = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
-                let node = coerce_node_width(arena, node, context_width, signed);
+                let node = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed))?;
+                let node = coerce_node_width(arena, node, context_width, signed)?;
                 return Ok(((node, HashSet::default()), BoundaryMap::default()));
             }
         }
@@ -2095,7 +2095,7 @@ pub fn eval_expression(
                     l_expr,
                     Some(target_width),
                     target_signed || is_signed(module, l_expr, arena),
-                );
+                )?;
                 return Ok((
                     (result_node, l_sources),
                     merge_boundaries(l_bounds, r_bounds),
@@ -2122,11 +2122,11 @@ pub fn eval_expression(
                         BigUint::from(0u32),
                         lhs_width,
                         false,
-                    ))
+                    ))?
                 } else {
                     let mut acc = l_expr;
                     for _ in 1..exp {
-                        acc = arena.alloc(SLTNode::Binary(acc, BinaryOp::Mul, l_expr));
+                        acc = arena.alloc(SLTNode::Binary(acc, BinaryOp::Mul, l_expr))?;
                     }
                     acc
                 };
@@ -2143,16 +2143,16 @@ pub fn eval_expression(
             // BitXnor/BitNand/BitNor は既存演算に分解
             let result_node = match op {
                 Op::BitXnor => {
-                    let xor_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Xor, r_expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, xor_node))
+                    let xor_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Xor, r_expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, xor_node))?
                 }
                 Op::BitNand => {
-                    let and_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::And, r_expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, and_node))
+                    let and_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::And, r_expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, and_node))?
                 }
                 Op::BitNor => {
-                    let or_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Or, r_expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))
+                    let or_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Or, r_expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))?
                 }
                 Op::Sub => {
                     let lhs_signed = expression_signed_override(lhs)
@@ -2161,7 +2161,7 @@ pub fn eval_expression(
                         .unwrap_or_else(|| is_signed(module, r_expr, arena));
                     let signed = lhs_signed && rhs_signed;
                     let bin_op = convert_binary_op(op, signed);
-                    let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr));
+                    let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?;
                     let width = {
                         let lw = get_width(l_expr, arena);
                         let rw = get_width(r_expr, arena);
@@ -2170,7 +2170,7 @@ pub fn eval_expression(
                     arena.alloc(SLTNode::Slice {
                         expr: sub_node,
                         access: BitAccess::new(0, width - 1),
-                    })
+                    })?
                 }
                 _ => {
                     let lhs_signed = expression_signed_override(lhs)
@@ -2187,7 +2187,7 @@ pub fn eval_expression(
                     } else {
                         convert_binary_op(op, signed)
                     };
-                    let res = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr));
+                    let res = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?;
                     if matches!(
                         op,
                         Op::Less
@@ -2206,8 +2206,8 @@ pub fn eval_expression(
                             BigUint::from(0u32),
                             width - 1,
                             false,
-                        ));
-                        arena.alloc(SLTNode::Concat(vec![(zero, width - 1), (res, 1)]))
+                        ))?;
+                        arena.alloc(SLTNode::Concat(vec![(zero, width - 1), (res, 1)]))?
                     } else if matches!(
                         op,
                         Op::ArithShiftL
@@ -2222,18 +2222,18 @@ pub fn eval_expression(
                             arena.alloc(SLTNode::Slice {
                                 expr: res,
                                 access: BitAccess::new(0, width - 1),
-                            })
+                            })?
                         } else if res_width < width {
                             let zero = arena.alloc(SLTNode::Constant(
                                 BigUint::from(0u8),
                                 BigUint::from(0u32),
                                 res_width - 1,
                                 false,
-                            ));
+                            ))?;
                             arena.alloc(SLTNode::Concat(vec![
                                 (zero, width - res_width),
                                 (res, res_width),
-                            ]))
+                            ]))?
                         } else {
                             res
                         }
@@ -2280,7 +2280,7 @@ pub fn eval_expression(
                 }
             }
             Ok((
-                (arena.alloc(SLTNode::Concat(parts)), total_sources),
+                (arena.alloc(SLTNode::Concat(parts))?, total_sources),
                 all_bounds,
             ))
         }
@@ -2289,18 +2289,18 @@ pub fn eval_expression(
             // Reduction Nand/Nor/Xnor は既存のリダクション + Not に分解
             let result_node = match op {
                 Op::BitNand => {
-                    let and_node = arena.alloc(SLTNode::Unary(UnaryOp::And, expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, and_node))
+                    let and_node = arena.alloc(SLTNode::Unary(UnaryOp::And, expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, and_node))?
                 }
                 Op::BitNor => {
-                    let or_node = arena.alloc(SLTNode::Unary(UnaryOp::Or, expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, or_node))
+                    let or_node = arena.alloc(SLTNode::Unary(UnaryOp::Or, expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, or_node))?
                 }
                 Op::BitXnor => {
-                    let xor_node = arena.alloc(SLTNode::Unary(UnaryOp::Xor, expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, xor_node))
+                    let xor_node = arena.alloc(SLTNode::Unary(UnaryOp::Xor, expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, xor_node))?
                 }
-                _ => arena.alloc(SLTNode::Unary(convert_unary_op(op), expr)),
+                _ => arena.alloc(SLTNode::Unary(convert_unary_op(op), expr))?,
             };
             Ok(((result_node, sources), bounds))
         }
@@ -2322,7 +2322,7 @@ pub fn eval_expression(
                         cond: cond_expr,
                         then_expr,
                         else_expr,
-                    }),
+                    })?,
                     sources,
                 ),
                 merge_boundaries(cond_bounds, merge_boundaries(then_bounds, else_bounds)),
@@ -2363,7 +2363,7 @@ pub fn eval_expression(
                     part_expr = arena.alloc(SLTNode::Slice {
                         expr: part_expr,
                         access: BitAccess::new(0, member_width - 1),
-                    });
+                    })?;
                 } else if part_width < member_width {
                     let pad_width = member_width - part_width;
                     let pad = arena.alloc(SLTNode::Constant(
@@ -2371,18 +2371,18 @@ pub fn eval_expression(
                         BigUint::from(0u32),
                         pad_width,
                         false,
-                    ));
+                    ))?;
                     part_expr = arena.alloc(SLTNode::Concat(vec![
                         (pad, pad_width),
                         (part_expr, part_width),
-                    ]));
+                    ]))?;
                 }
 
                 parts.push((part_expr, member_width));
             }
 
             Ok((
-                (arena.alloc(SLTNode::Concat(parts)), total_sources),
+                (arena.alloc(SLTNode::Concat(parts))?, total_sources),
                 all_bounds,
             ))
         }
@@ -2430,7 +2430,7 @@ pub fn eval_assignment_expression(
     // turn an unsigned value into a sign-extended one.  Explicit casts and the
     // signed/unsigned system functions are retained by the override helper.
     let signed = expression_signed_override(expr).unwrap_or(expr.comptime().expr_context.signed);
-    let node = coerce_node_width(arena, node, Some(target_width), signed);
+    let node = coerce_node_width(arena, node, Some(target_width), signed)?;
     Ok(((node, sources), boundaries))
 }
 
@@ -2468,8 +2468,9 @@ fn eval_factor(
                         (extracted_val, extracted_mask, extracted_width)
                     };
 
-                    let expr = arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare));
-                    let expr = coerce_node_width(arena, expr, context_width, signed && is_bare);
+                    let expr =
+                        arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare))?;
+                    let expr = coerce_node_width(arena, expr, context_width, signed && is_bare)?;
                     return Ok(((expr, HashSet::default()), BoundaryMap::default()));
                 }
             }
@@ -2505,12 +2506,12 @@ fn eval_factor(
                 // If all parts are Some(...), we only depend on the sources of those expressions.
                 let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
                 let (expr, mut sources) =
-                    combine_parts_with_default(*var_id, access.lsb, parts, arena);
+                    combine_parts_with_default(*var_id, access.lsb, parts, arena)?;
                 if has_unassigned {
                     sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
                 }
                 let expr =
-                    coerce_node_width(arena, expr, context_width, is_signed(module, expr, arena));
+                    coerce_node_width(arena, expr, context_width, is_signed(module, expr, arena))?;
                 Ok(((expr, sources), bounds))
             } else {
                 let mut all_sources = HashSet::default();
@@ -2574,24 +2575,24 @@ fn eval_factor(
                         signed: module.variables[var_id].r#type.signed,
                         index: dynamic_indices,
                         access: BitAccess::new(0, width - 1),
-                    });
+                    })?;
                     arena.alloc(SLTNode::Slice {
                         expr: raw_input,
                         access: BitAccess::new(0, element_width - 1),
-                    })
+                    })?
                 } else {
                     // --- If already written ---
                     // Combine latest values in register and align with Shr
                     let (current_expr, current_sources) =
-                        combine_parts_with_default(*var_id, 0, parts, arena);
+                        combine_parts_with_default(*var_id, 0, parts, arena)?;
                     all_sources.extend(current_sources);
 
                     let shifted =
-                        arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset_node));
+                        arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset_node))?;
                     arena.alloc(SLTNode::Slice {
                         expr: shifted,
                         access: BitAccess::new(0, element_width - 1),
-                    })
+                    })?
                 };
 
                 let extracted_expr = coerce_node_width(
@@ -2599,7 +2600,7 @@ fn eval_factor(
                     extracted_expr,
                     context_width,
                     is_signed(module, extracted_expr, arena),
-                );
+                )?;
 
                 let prefix_access = eval_var_select(module, *var_id, index, select)?;
                 all_sources.insert(VarAtomBase::new(
@@ -2649,8 +2650,8 @@ fn eval_factor(
                 mask_xz,
                 effective_width,
                 signed,
-            ));
-            let node = coerce_node_width(arena, node, context_width, signed);
+            ))?;
+            let node = coerce_node_width(arena, node, context_width, signed)?;
             Ok(((node, HashSet::default()), BoundaryMap::default()))
         }
         Factor::SystemFunctionCall(call) => {
@@ -2669,7 +2670,7 @@ fn eval_factor(
 pub fn get_width<A: Hash + Eq + Clone>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
     arena
         .width(expr)
-        .unwrap_or_else(|| panic!("width is unavailable for malformed SLT node n{}", expr.0))
+        .unwrap_or_else(|| panic!("SLT node id n{} is outside the arena", expr.0))
 }
 
 pub(super) fn merge_boundaries(
@@ -2687,24 +2688,41 @@ pub(crate) fn coerce_node_width<A: Hash + Eq + Clone>(
     expr: NodeId,
     target_width: Option<usize>,
     sign_extend: bool,
-) -> NodeId {
+) -> Result<NodeId, SLTNodeFactsError> {
     let Some(target_width) = target_width else {
-        return expr;
+        return Ok(expr);
     };
     let expr_width = get_width(expr, arena);
+    if expr_width == 0 && target_width != 0 {
+        return Err(SLTNodeFactsError::new(
+            "WIDTH.COERCE_SOURCE_NON_ZERO",
+            expr,
+            format!(
+                "cannot coerce zero-width n{} to width {target_width}",
+                expr.0
+            ),
+        ));
+    }
+    if target_width == 0 && expr_width != 0 {
+        return Err(SLTNodeFactsError::new(
+            "WIDTH.COERCE_TARGET_NON_ZERO",
+            expr,
+            format!("cannot coerce width-{expr_width} n{} to zero width", expr.0),
+        ));
+    }
     if expr_width < target_width {
         let pad_width = target_width - expr_width;
         let pad = if sign_extend {
             let msb_slice = arena.alloc(SLTNode::Slice {
                 expr,
                 access: BitAccess::new(expr_width - 1, expr_width - 1),
-            });
+            })?;
             let pad = if pad_width == 1 {
                 msb_slice
             } else {
                 arena.alloc(SLTNode::Concat(
                     std::iter::repeat_n((msb_slice, 1), pad_width).collect(),
-                ))
+                ))?
             };
             (pad, pad_width)
         } else {
@@ -2713,7 +2731,7 @@ pub(crate) fn coerce_node_width<A: Hash + Eq + Clone>(
                 BigUint::from(0u32),
                 pad_width,
                 false,
-            ));
+            ))?;
             (zero, pad_width)
         };
         arena.alloc(SLTNode::Concat(vec![pad, (expr, expr_width)]))
@@ -2723,7 +2741,7 @@ pub(crate) fn coerce_node_width<A: Hash + Eq + Clone>(
             access: BitAccess::new(0, target_width - 1),
         })
     } else {
-        expr
+        Ok(expr)
     }
 }
 
@@ -2736,23 +2754,23 @@ fn eval_system_function_call(
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     match &call.kind {
         SystemFunctionKind::Bits(input) => {
-            let width = system_function_input_bits_width(module, store, &input.0, arena);
+            let width = system_function_input_bits_width(module, store, &input.0, arena)?;
             let result = arena.alloc(SLTNode::Constant(
                 BigUint::from(width),
                 BigUint::from(0u8),
                 32,
                 false,
-            ));
+            ))?;
             Ok(((result, HashSet::default()), HashMap::default()))
         }
         SystemFunctionKind::Size(input) => {
-            let size = system_function_input_size(module, store, &input.0, arena);
+            let size = system_function_input_size(module, store, &input.0, arena)?;
             let result = arena.alloc(SLTNode::Constant(
                 BigUint::from(size),
                 BigUint::from(0u8),
                 32,
                 false,
-            ));
+            ))?;
             Ok(((result, HashSet::default()), HashMap::default()))
         }
         SystemFunctionKind::Clog2(input) => {
@@ -2763,26 +2781,26 @@ fn eval_system_function_call(
                 BigUint::from(0u8),
                 32,
                 false,
-            ));
+            ))?;
             for k in 1..=width {
                 let threshold = arena.alloc(SLTNode::Constant(
                     BigUint::from(1u8) << (k - 1),
                     BigUint::from(0u8),
                     width,
                     false,
-                ));
-                let cond = arena.alloc(SLTNode::Binary(arg, BinaryOp::GtU, threshold));
+                ))?;
+                let cond = arena.alloc(SLTNode::Binary(arg, BinaryOp::GtU, threshold))?;
                 let value = arena.alloc(SLTNode::Constant(
                     BigUint::from(k),
                     BigUint::from(0u8),
                     32,
                     false,
-                ));
+                ))?;
                 result = arena.alloc(SLTNode::Mux {
                     cond,
                     then_expr: value,
                     else_expr: result,
-                });
+                })?;
             }
             Ok(((result, sources), bounds))
         }
@@ -2794,18 +2812,18 @@ fn eval_system_function_call(
                 BigUint::from(0u8),
                 width,
                 false,
-            ));
+            ))?;
             let one = arena.alloc(SLTNode::Constant(
                 BigUint::from(1u8),
                 BigUint::from(0u8),
                 width,
                 false,
-            ));
-            let arg_minus_one = arena.alloc(SLTNode::Binary(arg, BinaryOp::Sub, one));
-            let overlap = arena.alloc(SLTNode::Binary(arg, BinaryOp::And, arg_minus_one));
-            let non_zero = arena.alloc(SLTNode::Binary(arg, BinaryOp::Ne, zero));
-            let no_overlap = arena.alloc(SLTNode::Binary(overlap, BinaryOp::Eq, zero));
-            let result = arena.alloc(SLTNode::Binary(non_zero, BinaryOp::LogicAnd, no_overlap));
+            ))?;
+            let arg_minus_one = arena.alloc(SLTNode::Binary(arg, BinaryOp::Sub, one))?;
+            let overlap = arena.alloc(SLTNode::Binary(arg, BinaryOp::And, arg_minus_one))?;
+            let non_zero = arena.alloc(SLTNode::Binary(arg, BinaryOp::Ne, zero))?;
+            let no_overlap = arena.alloc(SLTNode::Binary(overlap, BinaryOp::Eq, zero))?;
+            let result = arena.alloc(SLTNode::Binary(non_zero, BinaryOp::LogicAnd, no_overlap))?;
             Ok(((result, sources), bounds))
         }
         SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
@@ -2813,7 +2831,7 @@ fn eval_system_function_call(
             let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
             Ok((
                 (
-                    coerce_node_width(arena, arg, context_width, signed),
+                    coerce_node_width(arena, arg, context_width, signed)?,
                     sources,
                 ),
                 bounds,
@@ -2851,15 +2869,15 @@ fn system_function_input_bits_width(
     store: &SymbolicStore<VarId>,
     expr: &Expression,
     arena: &mut SLTNodeArena<VarId>,
-) -> usize {
+) -> Result<usize, ParserError> {
     let comptime = expr.comptime();
     match &comptime.value {
-        ValueVariant::Type(ty) => system_function_type_bits_width(ty).unwrap_or(0),
-        _ => system_function_type_bits_width(&comptime.r#type).unwrap_or_else(|| {
-            eval_expression(module, store, expr, arena, None)
-                .map(|((node, _), _)| get_width(node, arena))
-                .unwrap_or(0)
-        }),
+        ValueVariant::Type(ty) => Ok(system_function_type_bits_width(ty).unwrap_or(0)),
+        _ => match system_function_type_bits_width(&comptime.r#type) {
+            Some(width) => Ok(width),
+            None => eval_expression(module, store, expr, arena, None)
+                .map(|((node, _), _)| get_width(node, arena)),
+        },
     }
 }
 
@@ -2868,15 +2886,15 @@ fn system_function_input_size(
     store: &SymbolicStore<VarId>,
     expr: &Expression,
     arena: &mut SLTNodeArena<VarId>,
-) -> usize {
+) -> Result<usize, ParserError> {
     let comptime = expr.comptime();
     match &comptime.value {
-        ValueVariant::Type(ty) => system_function_type_size(ty).unwrap_or(0),
-        _ => system_function_type_size(&comptime.r#type).unwrap_or_else(|| {
-            eval_expression(module, store, expr, arena, None)
-                .map(|((node, _), _)| get_width(node, arena))
-                .unwrap_or(0)
-        }),
+        ValueVariant::Type(ty) => Ok(system_function_type_size(ty).unwrap_or(0)),
+        _ => match system_function_type_size(&comptime.r#type) {
+            Some(size) => Ok(size),
+            None => eval_expression(module, store, expr, arena, None)
+                .map(|((node, _), _)| get_width(node, arena)),
+        },
     }
 }
 

@@ -153,8 +153,8 @@ fn collect_system_function_effect(
             Some(active),
             Some(explicit),
         ) => {
-            let inactive = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, active));
-            Some(arena.alloc(SLTNode::Binary(inactive, BinaryOp::LogicOr, explicit)))
+            let inactive = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, active))?;
+            Some(arena.alloc(SLTNode::Binary(inactive, BinaryOp::LogicOr, explicit))?)
         }
         (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, Some(active), None) => {
             Some(active)
@@ -231,7 +231,7 @@ fn collect_system_function_effect(
         if !parts.iter().any(|(value, _)| value.is_some()) {
             continue;
         }
-        let (node, _) = combine_parts_with_default(*id, 0, parts, arena);
+        let (node, _) = combine_parts_with_default(*id, 0, parts, arena)?;
         local_inputs.push((*id, node));
     }
 
@@ -283,7 +283,7 @@ where
     let saved_guard = collector.active_guard;
     let saved_guard_sources = collector.active_guard_sources.clone();
     let active_guard = if let Some(active) = saved_guard {
-        arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, guard))
+        arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, guard))?
     } else {
         guard
     };
@@ -586,7 +586,7 @@ fn collect_function_body_effects(
             state.live_expr,
             BinaryOp::LogicAnd,
             cond_node,
-        ));
+        ))?;
         let mut true_sources = state.live_sources.clone();
         true_sources.extend(cond_sources.iter().copied());
         let then_state = with_collector_guard(
@@ -611,12 +611,12 @@ fn collect_function_body_effects(
             },
         )?;
 
-        let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+        let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node))?;
         let false_guard = arena.alloc(SLTNode::Binary(
             state.live_expr,
             BinaryOp::LogicAnd,
             false_cond,
-        ));
+        ))?;
         let mut false_sources = state.live_sources.clone();
         false_sources.extend(cond_sources.iter().copied());
         let else_state = with_collector_guard(
@@ -661,7 +661,7 @@ fn collect_function_body_effects(
                 then_state.live_expr,
                 else_state.live_expr,
                 arena,
-            ),
+            )?,
             live_sources,
         })
     }
@@ -688,9 +688,9 @@ fn collect_function_body_effects(
                 let (store, boundaries) =
                     eval_assign(module, state.store, state.boundaries, assign, arena)?;
                 let live_expr = if function_assigns_whole_var(assign, ret_id) {
-                    bool_node(arena, false)
+                    bool_node(arena, false)?
                 } else {
-                    bool_node(arena, true)
+                    bool_node(arena, true)?
                 };
                 Ok(FunctionControlState {
                     store,
@@ -726,7 +726,7 @@ fn collect_function_body_effects(
                 Ok(FunctionControlState {
                     store,
                     boundaries,
-                    live_expr: bool_node(arena, true),
+                    live_expr: bool_node(arena, true)?,
                     live_sources: HashSet::default(),
                 })
             }
@@ -744,7 +744,7 @@ fn collect_function_body_effects(
                     state.live_expr,
                     BinaryOp::LogicAnd,
                     cond_node,
-                ));
+                ))?;
                 let mut true_sources = state.live_sources.clone();
                 true_sources.extend(cond_sources.iter().copied());
                 with_collector_guard(
@@ -765,12 +765,12 @@ fn collect_function_body_effects(
                     },
                 )?;
 
-                let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+                let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node))?;
                 let false_guard = arena.alloc(SLTNode::Binary(
                     state.live_expr,
                     BinaryOp::LogicAnd,
                     false_cond,
-                ));
+                ))?;
                 let mut false_sources = state.live_sources.clone();
                 false_sources.extend(cond_sources.iter().copied());
                 with_collector_guard(
@@ -796,7 +796,7 @@ fn collect_function_body_effects(
                 Ok(FunctionControlState {
                     store,
                     boundaries,
-                    live_expr: bool_node(arena, true),
+                    live_expr: bool_node(arena, true)?,
                     live_sources: HashSet::default(),
                 })
             }
@@ -816,7 +816,7 @@ fn collect_function_body_effects(
                 Ok(FunctionControlState {
                     store,
                     boundaries,
-                    live_expr: bool_node(arena, true),
+                    live_expr: bool_node(arena, true)?,
                     live_sources: HashSet::default(),
                 })
             }
@@ -841,7 +841,7 @@ fn collect_function_body_effects(
         FunctionControlState {
             store: local_store,
             boundaries: BoundaryMap::default(),
-            live_expr: bool_node(arena, true),
+            live_expr: bool_node(arena, true)?,
             live_sources: HashSet::default(),
         },
         statements,
@@ -974,7 +974,7 @@ pub(super) fn collect_comb_effects_statements(
                 let saved_guard = collector.active_guard;
                 let saved_guard_sources = collector.active_guard_sources.clone();
                 let true_guard = if let Some(active) = saved_guard {
-                    arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, cond_node))
+                    arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, cond_node))?
                 } else {
                     cond_node
                 };
@@ -989,9 +989,9 @@ pub(super) fn collect_comb_effects_statements(
                     arena,
                     collector,
                 )?;
-                let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+                let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node))?;
                 let false_guard = if let Some(active) = saved_guard {
-                    arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, false_cond))
+                    arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, false_cond))?
                 } else {
                     false_cond
                 };
@@ -1012,7 +1012,7 @@ pub(super) fn collect_comb_effects_statements(
                     module,
                     &side_store,
                     &else_store,
-                    bool_node(arena, true),
+                    bool_node(arena, true)?,
                     &HashSet::default(),
                     arena,
                 )?;
@@ -1063,7 +1063,7 @@ fn collect_comb_effects_case(
         let saved_guard = collector.active_guard;
         let saved_guard_sources = collector.active_guard_sources.clone();
         let true_guard = if let Some(active) = saved_guard {
-            arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, cond_node))
+            arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, cond_node))?
         } else {
             cond_node
         };
@@ -1074,9 +1074,9 @@ fn collect_comb_effects_case(
         let side_store =
             collect_comb_effects_statements(module, store.clone(), &arm.body, arena, collector)?;
 
-        let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node));
+        let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node))?;
         let false_guard = if let Some(active) = saved_guard {
-            arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, false_cond))
+            arena.alloc(SLTNode::Binary(active, BinaryOp::LogicAnd, false_cond))?
         } else {
             false_cond
         };
@@ -1093,7 +1093,7 @@ fn collect_comb_effects_case(
             module,
             &side_store,
             &else_store,
-            bool_node(arena, true),
+            bool_node(arena, true)?,
             &HashSet::default(),
             arena,
         )
@@ -1167,7 +1167,7 @@ fn collect_comb_effects_for(
             BigUint::from(0u8),
             loop_width,
             for_stmt.var_type.signed,
-        ));
+        ))?;
         iter_store.insert(
             for_stmt.var_id,
             RangeStore::new(Some((node, HashSet::default())), loop_width),
@@ -1227,7 +1227,7 @@ fn collect_dynamic_for_effects(
             let parts = original.get_parts(access).map_err(|error| {
                 super::range_store_error("observer for-loop state", error, Some(&for_stmt.token))
             })?;
-            let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena);
+            let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena)?;
             loop_store
                 .update(access, Some((expr, sources)))
                 .map_err(|error| {

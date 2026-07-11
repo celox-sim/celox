@@ -3,7 +3,7 @@ use std::{fmt, hash::Hash};
 use num_bigint::BigUint;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use super::{node_facts::SLTNodeFacts, node_rules};
+use super::node_facts::{SLTNodeFactsError, verify_append, verify_raw_nodes};
 
 use crate::{
     HashMap,
@@ -75,18 +75,17 @@ pub struct SLTNodeArena<A: Hash + Eq + Clone> {
     nodes: Vec<SLTNode<A>>,
     #[serde(skip)]
     cache: crate::HashMap<SLTNode<A>, NodeId>,
-    /// Construction-time widths in stable [`NodeId`] order.
-    ///
-    /// `None` is retained for malformed nodes so constructing an arena for the
-    /// verifier does not turn a verifier error into an allocation-time panic.
-    /// Production construction only consumes widths of nodes accepted by the
-    /// scalar rules in [`node_rules`].
+    /// Locally derived construction widths in stable [`NodeId`] order.
+    /// Full verification recomputes these independently from `nodes`.
     #[serde(skip)]
-    widths: Vec<Option<usize>>,
+    widths: Vec<usize>,
 }
 
-#[derive(Deserialize)]
-#[serde(bound(deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"))]
+#[derive(Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + std::hash::Hash + Eq + Clone",
+    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
 struct SLTNodeArenaWire<A: Hash + Eq + Clone> {
     nodes: Vec<SLTNode<A>>,
 }
@@ -100,14 +99,7 @@ where
         D: Deserializer<'de>,
     {
         let wire = SLTNodeArenaWire::<A>::deserialize(deserializer)?;
-        let mut arena = Self {
-            nodes: wire.nodes,
-            cache: crate::HashMap::default(),
-            widths: Vec::new(),
-        };
-        SLTNodeFacts::verify(&arena).map_err(D::Error::custom)?;
-        arena.rebuild_cache();
-        Ok(arena)
+        Self::from_raw_nodes(wire.nodes).map_err(D::Error::custom)
     }
 }
 
@@ -128,57 +120,33 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         }
     }
 
-    pub fn alloc(&mut self, node: SLTNode<A>) -> NodeId
+    pub fn alloc(&mut self, node: SLTNode<A>) -> Result<NodeId, SLTNodeFactsError>
     where
         A: Hash + Eq + Clone,
     {
         if let Some(id) = self.cache.get(&node) {
-            return *id;
+            return Ok(*id);
         }
-        let width = self.compute_width(&node);
+        let width = verify_append(&node, &self.widths)?;
         let id = NodeId(self.nodes.len());
         self.cache.insert(node.clone(), id);
         self.nodes.push(node);
         self.widths.push(width);
         debug_assert_eq!(self.nodes.len(), self.widths.len());
-        id
+        Ok(id)
     }
 
     /// Return a construction-time width computed once when `id` was interned.
     pub(super) fn width(&self, id: NodeId) -> Option<usize> {
-        self.widths.get(id.0).copied().flatten()
+        self.widths.get(id.0).copied()
     }
 
-    fn compute_width(&self, node: &SLTNode<A>) -> Option<usize> {
-        let child_width = |child: NodeId| self.width(child);
-        match node {
-            SLTNode::Input { access, .. } => node_rules::access_width(*access, "input").ok(),
-            SLTNode::Constant(value, mask, width, _) => {
-                node_rules::constant_width(value, mask, *width).ok()
-            }
-            SLTNode::Binary(lhs, op, rhs) => {
-                node_rules::binary_width(*op, child_width(*lhs)?, child_width(*rhs)?).ok()
-            }
-            SLTNode::Unary(op, inner) => Some(node_rules::unary_width(*op, child_width(*inner)?)),
-            SLTNode::Mux {
-                then_expr,
-                else_expr,
-                ..
-            } => Some(node_rules::mux_width(
-                child_width(*then_expr)?,
-                child_width(*else_expr)?,
-            )),
-            SLTNode::ForFold { result, .. } => {
-                node_rules::access_width(result.access, "ForFold result").ok()
-            }
-            SLTNode::Concat(parts) => {
-                node_rules::concat_width(parts.iter().map(|(_, width)| *width)).ok()
-            }
-            SLTNode::Slice { expr, access } => {
-                node_rules::slice_width(*access, child_width(*expr)?, format_args!("n{}", expr.0))
-                    .ok()
-            }
-        }
+    pub(super) fn nodes(&self) -> &[SLTNode<A>] {
+        &self.nodes
+    }
+
+    pub(super) fn cached_widths(&self) -> &[usize] {
+        &self.widths
     }
 
     /// Return the number of nodes in stable [`NodeId`] order.
@@ -283,17 +251,13 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         Ok(())
     }
 
-    /// Rebuilds derived interning and width caches from the persistent node list.
+    /// Rebuild the derived interning cache from the persistent node list.
     ///
     /// If the list already contains duplicate nodes, the smallest (and therefore
     /// first) [`NodeId`] is retained as the canonical identity.
     fn rebuild_cache(&mut self) {
         self.cache.clear();
-        self.widths.clear();
-        self.widths.reserve(self.nodes.len());
         for (idx, node) in self.nodes.iter().cloned().enumerate() {
-            let width = self.compute_width(&node);
-            self.widths.push(width);
             self.cache.entry(node).or_insert(NodeId(idx));
         }
         debug_assert_eq!(self.nodes.len(), self.widths.len());
@@ -307,17 +271,22 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         NodeDisplay { arena: self, id }
     }
 
-    /// Construct malformed arenas for verifier tests without exposing raw node
-    /// storage to production code.
-    #[cfg(test)]
-    pub(crate) fn from_nodes_unchecked(nodes: Vec<SLTNode<A>>) -> Self {
+    fn from_raw_nodes(nodes: Vec<SLTNode<A>>) -> Result<Self, SLTNodeFactsError> {
+        let widths = verify_raw_nodes(&nodes)?;
         let mut arena = Self {
             nodes,
             cache: crate::HashMap::default(),
-            widths: Vec::new(),
+            widths,
         };
         arena.rebuild_cache();
-        arena
+        Ok(arena)
+    }
+
+    /// Verify raw node storage for tests without exposing it to production
+    /// construction paths.
+    #[cfg(test)]
+    pub(crate) fn try_from_nodes(nodes: Vec<SLTNode<A>>) -> Result<Self, SLTNodeFactsError> {
+        Self::from_raw_nodes(nodes)
     }
 }
 
@@ -807,14 +776,14 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
         target_arena: &mut SLTNodeArena<B>,
         cache: &mut HashMap<NodeId, NodeId>,
         f: &F,
-    ) -> NodeId
+    ) -> Result<NodeId, SLTNodeFactsError>
     where
         A: Hash + Eq + Clone,
         B: Hash + Eq + Clone,
         F: Fn(&A) -> B,
     {
         if let Some(mapped_id) = cache.get(&id) {
-            return *mapped_id;
+            return Ok(*mapped_id);
         }
 
         let new_node = match self {
@@ -827,13 +796,19 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             } => {
                 let mapped_index = index
                     .iter()
-                    .map(|idx| SLTIndex {
-                        node: arena
-                            .get(idx.node)
-                            .map_addr(idx.node, arena, target_arena, cache, f),
-                        stride: idx.stride,
+                    .map(|idx| {
+                        Ok(SLTIndex {
+                            node: arena.get(idx.node).map_addr(
+                                idx.node,
+                                arena,
+                                target_arena,
+                                cache,
+                                f,
+                            )?,
+                            stride: idx.stride,
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
                 SLTNode::Input {
                     variable: f(addr),
                     signed: *signed,
@@ -851,17 +826,17 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             SLTNode::Binary(lhs, op, rhs) => {
                 let l = arena
                     .get(*lhs)
-                    .map_addr(*lhs, arena, target_arena, cache, f);
+                    .map_addr(*lhs, arena, target_arena, cache, f)?;
                 let r = arena
                     .get(*rhs)
-                    .map_addr(*rhs, arena, target_arena, cache, f);
+                    .map_addr(*rhs, arena, target_arena, cache, f)?;
                 SLTNode::Binary(l, *op, r)
             }
 
             SLTNode::Unary(op, inner) => {
                 let i = arena
                     .get(*inner)
-                    .map_addr(*inner, arena, target_arena, cache, f);
+                    .map_addr(*inner, arena, target_arena, cache, f)?;
                 SLTNode::Unary(*op, i)
             }
 
@@ -872,13 +847,15 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             } => {
                 let c = arena
                     .get(*cond)
-                    .map_addr(*cond, arena, target_arena, cache, f);
-                let t = arena
-                    .get(*then_expr)
-                    .map_addr(*then_expr, arena, target_arena, cache, f);
-                let e = arena
-                    .get(*else_expr)
-                    .map_addr(*else_expr, arena, target_arena, cache, f);
+                    .map_addr(*cond, arena, target_arena, cache, f)?;
+                let t =
+                    arena
+                        .get(*then_expr)
+                        .map_addr(*then_expr, arena, target_arena, cache, f)?;
+                let e =
+                    arena
+                        .get(*else_expr)
+                        .map_addr(*else_expr, arena, target_arena, cache, f)?;
                 SLTNode::Mux {
                     cond: c,
                     then_expr: t,
@@ -902,65 +879,69 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 effects,
                 continue_cond,
             } => {
-                let map_bound =
-                    |bound: &SLTLoopBound,
-                     cache: &mut HashMap<NodeId, NodeId>,
-                     target_arena: &mut SLTNodeArena<B>|
-                     -> SLTLoopBound {
-                        match bound {
-                            SLTLoopBound::Const(v) => SLTLoopBound::Const(*v),
-                            SLTLoopBound::Expr(node) => SLTLoopBound::Expr(
-                                arena
-                                    .get(*node)
-                                    .map_addr(*node, arena, target_arena, cache, f),
-                            ),
-                        }
-                    };
+                let map_bound = |bound: &SLTLoopBound,
+                                 cache: &mut HashMap<NodeId, NodeId>,
+                                 target_arena: &mut SLTNodeArena<B>|
+                 -> Result<SLTLoopBound, SLTNodeFactsError> {
+                    match bound {
+                        SLTLoopBound::Const(v) => Ok(SLTLoopBound::Const(*v)),
+                        SLTLoopBound::Expr(node) => Ok(SLTLoopBound::Expr(
+                            arena
+                                .get(*node)
+                                .map_addr(*node, arena, target_arena, cache, f)?,
+                        )),
+                    }
+                };
                 let mapped_initials = initials
                     .iter()
-                    .map(|update| SLTForUpdate {
-                        target: VarAtomBase::new(
-                            f(&update.target.id),
-                            update.target.access.lsb,
-                            update.target.access.msb,
-                        ),
-                        expr: arena.get(update.expr).map_addr(
-                            update.expr,
-                            arena,
-                            target_arena,
-                            cache,
-                            f,
-                        ),
+                    .map(|update| {
+                        Ok(SLTForUpdate {
+                            target: VarAtomBase::new(
+                                f(&update.target.id),
+                                update.target.access.lsb,
+                                update.target.access.msb,
+                            ),
+                            expr: arena.get(update.expr).map_addr(
+                                update.expr,
+                                arena,
+                                target_arena,
+                                cache,
+                                f,
+                            )?,
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
                 let mapped_updates = updates
                     .iter()
-                    .map(|update| SLTForUpdate {
-                        target: VarAtomBase::new(
-                            f(&update.target.id),
-                            update.target.access.lsb,
-                            update.target.access.msb,
-                        ),
-                        expr: arena.get(update.expr).map_addr(
-                            update.expr,
-                            arena,
-                            target_arena,
-                            cache,
-                            f,
-                        ),
+                    .map(|update| {
+                        Ok(SLTForUpdate {
+                            target: VarAtomBase::new(
+                                f(&update.target.id),
+                                update.target.access.lsb,
+                                update.target.access.msb,
+                            ),
+                            expr: arena.get(update.expr).map_addr(
+                                update.expr,
+                                arena,
+                                target_arena,
+                                cache,
+                                f,
+                            )?,
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
                 let mapped_effects = effects
                     .iter()
-                    .map(|effect| SLTForEffect {
-                        site_id: effect.site_id,
-                        guard: effect.guard.map(|guard| {
-                            arena
-                                .get(guard)
-                                .map_addr(guard, arena, target_arena, cache, f)
-                        }),
-                        emit_on_true: effect.emit_on_true,
-                        args: effect
+                    .map(|effect| {
+                        let guard = effect
+                            .guard
+                            .map(|guard| {
+                                arena
+                                    .get(guard)
+                                    .map_addr(guard, arena, target_arena, cache, f)
+                            })
+                            .transpose()?;
+                        let args = effect
                             .args
                             .iter()
                             .map(|arg| {
@@ -968,16 +949,22 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                                     .get(*arg)
                                     .map_addr(*arg, arena, target_arena, cache, f)
                             })
-                            .collect(),
-                        fatal_error_code: effect.fatal_error_code,
+                            .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
+                        Ok(SLTForEffect {
+                            site_id: effect.site_id,
+                            guard,
+                            emit_on_true: effect.emit_on_true,
+                            args,
+                            fatal_error_code: effect.fatal_error_code,
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
                 SLTNode::ForFold {
                     loop_var: f(loop_var),
                     loop_width: *loop_width,
                     loop_signed: *loop_signed,
-                    start: map_bound(start, cache, target_arena),
-                    end: map_bound(end, cache, target_arena),
+                    start: map_bound(start, cache, target_arena)?,
+                    end: map_bound(end, cache, target_arena)?,
                     inclusive: *inclusive,
                     step: *step,
                     step_op: *step_op,
@@ -992,7 +979,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                         target_arena,
                         cache,
                         f,
-                    ),
+                    )?,
                 }
             }
 
@@ -1000,40 +987,41 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 let mapped_parts = parts
                     .iter()
                     .map(|(node, width)| {
-                        (
+                        Ok((
                             arena
                                 .get(*node)
-                                .map_addr(*node, arena, target_arena, cache, f),
+                                .map_addr(*node, arena, target_arena, cache, f)?,
                             *width,
-                        )
+                        ))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
                 SLTNode::Concat(mapped_parts)
             }
 
             SLTNode::Slice { expr, access } => {
                 let e = arena
                     .get(*expr)
-                    .map_addr(*expr, arena, target_arena, cache, f);
+                    .map_addr(*expr, arena, target_arena, cache, f)?;
                 SLTNode::Slice {
                     expr: e,
                     access: *access,
                 }
             }
         };
-        let new_id = target_arena.alloc(new_node);
+        let new_id = target_arena.alloc(new_node)?;
         cache.insert(id, new_id);
-        new_id
+        Ok(new_id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        NodeId, SLTForEffect, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
+        NodeId, SLTForEffect, SLTIndex, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError,
+        SLTNodeArenaWire, SLTStepOp,
     };
     use crate::{
-        ir::{BinaryOp, UnaryOp, VarAtomBase},
+        ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
         logic_tree::comb::{expr::get_width, node_facts::SLTNodeFacts},
     };
     use num_bigint::BigUint;
@@ -1045,35 +1033,31 @@ mod tests {
     #[test]
     fn rebuild_cache_uses_first_duplicate_node_id() {
         let duplicate = constant(7);
-        let mut arena = SLTNodeArena::from_nodes_unchecked(vec![
-            constant(1),
-            duplicate.clone(),
-            duplicate.clone(),
-        ]);
+        let mut arena =
+            SLTNodeArena::try_from_nodes(vec![constant(1), duplicate.clone(), duplicate.clone()])
+                .unwrap();
         arena.cache.insert(duplicate.clone(), NodeId(2));
 
         arena.rebuild_cache();
 
         assert_eq!(arena.cache.get(&duplicate), Some(&NodeId(1)));
         let node_count = arena.len();
-        assert_eq!(arena.alloc(duplicate), NodeId(1));
+        assert_eq!(arena.alloc(duplicate).unwrap(), NodeId(1));
         assert_eq!(arena.len(), node_count);
     }
 
     #[test]
     fn json_roundtrip_rebuilds_cache_with_minimum_node_id() {
         let duplicate = constant(9);
-        let arena = SLTNodeArena::from_nodes_unchecked(vec![
-            constant(2),
-            duplicate.clone(),
-            duplicate.clone(),
-        ]);
+        let arena =
+            SLTNodeArena::try_from_nodes(vec![constant(2), duplicate.clone(), duplicate.clone()])
+                .unwrap();
 
         let json = serde_json::to_string(&arena).unwrap();
         let mut decoded: SLTNodeArena<u32> = serde_json::from_str(&json).unwrap();
         let node_count = decoded.len();
 
-        assert_eq!(decoded.alloc(duplicate), NodeId(1));
+        assert_eq!(decoded.alloc(duplicate).unwrap(), NodeId(1));
         assert_eq!(decoded.len(), node_count);
         assert_eq!(decoded.width(NodeId(1)), Some(8));
         assert_eq!(decoded.widths.len(), decoded.nodes.len());
@@ -1085,14 +1069,18 @@ mod tests {
         assert!(arena.is_empty());
         assert!(arena.widths.is_empty());
 
-        let narrow = arena.alloc(SLTNode::Constant(
-            BigUint::from(3u8),
-            BigUint::from(0u8),
-            2,
-            false,
-        ));
-        let wide = arena.alloc(constant(7));
-        let sum = arena.alloc(SLTNode::Binary(narrow, BinaryOp::Add, wide));
+        let narrow = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(3u8),
+                BigUint::from(0u8),
+                2,
+                false,
+            ))
+            .unwrap();
+        let wide = arena.alloc(constant(7)).unwrap();
+        let sum = arena
+            .alloc(SLTNode::Binary(narrow, BinaryOp::Add, wide))
+            .unwrap();
         assert_eq!(get_width(sum, &arena), 8);
         assert_eq!(arena.widths.len(), arena.nodes.len());
 
@@ -1106,7 +1094,7 @@ mod tests {
         assert_eq!(cloned.widths, arena.widths);
         assert_eq!(get_width(sum, &cloned), 8);
         let node_count = cloned.len();
-        assert_eq!(cloned.alloc(arena.get(sum).clone()), sum);
+        assert_eq!(cloned.alloc(arena.get(sum).clone()).unwrap(), sum);
         assert_eq!(cloned.len(), node_count);
     }
 
@@ -1115,21 +1103,25 @@ mod tests {
         const DEPTH: usize = 64;
 
         let mut arena = SLTNodeArena::<u32>::new();
-        let cond = arena.alloc(SLTNode::Constant(
-            BigUint::from(1u8),
-            BigUint::from(0u8),
-            1,
-            false,
-        ));
-        let mut value = arena.alloc(constant(0));
+        let cond = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let mut value = arena.alloc(constant(0)).unwrap();
         for _ in 0..DEPTH {
-            let then_expr = arena.alloc(SLTNode::Unary(UnaryOp::Ident, value));
-            let else_expr = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, value));
-            value = arena.alloc(SLTNode::Mux {
-                cond,
-                then_expr,
-                else_expr,
-            });
+            let then_expr = arena.alloc(SLTNode::Unary(UnaryOp::Ident, value)).unwrap();
+            let else_expr = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, value)).unwrap();
+            value = arena
+                .alloc(SLTNode::Mux {
+                    cond,
+                    then_expr,
+                    else_expr,
+                })
+                .unwrap();
         }
 
         // Recursively walking both arms revisits the shared predecessor twice
@@ -1141,12 +1133,98 @@ mod tests {
     }
 
     #[test]
+    fn failed_append_does_not_mutate_arena_or_caches() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let valid = arena.alloc(constant(1)).unwrap();
+        let nodes_before = arena.nodes.clone();
+        let widths_before = arena.widths.clone();
+        let cache_before = arena.cache.clone();
+
+        let error = arena
+            .alloc(SLTNode::Binary(valid, BinaryOp::Add, NodeId(99)))
+            .unwrap_err();
+
+        assert_eq!(error.invariant, "GRAPH.CHILD_EXISTS");
+        assert_eq!(arena.nodes, nodes_before);
+        assert_eq!(arena.widths, widths_before);
+        assert_eq!(arena.cache, cache_before);
+
+        let error = arena
+            .alloc(SLTNode::Concat(vec![(valid, usize::MAX), (valid, 1)]))
+            .unwrap_err();
+        assert_eq!(error.invariant, "WIDTH.CONCAT_REPRESENTABLE");
+        assert_eq!(arena.nodes, nodes_before);
+        assert_eq!(arena.widths, widths_before);
+        assert_eq!(arena.cache, cache_before);
+    }
+
+    #[test]
+    fn append_derives_width_but_defers_semantic_rules_to_full_verifier() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let oversized = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0x10u8),
+                BigUint::from(0u8),
+                4,
+                false,
+            ))
+            .expect("declared width is locally derivable");
+
+        assert_eq!(arena.width(oversized), Some(4));
+        assert_eq!(
+            SLTNodeFacts::verify(&arena).unwrap_err().invariant,
+            "CONSTANT.VALUE_FITS_WIDTH"
+        );
+    }
+
+    #[test]
+    fn full_verifier_rejects_a_divergent_construction_width_cache() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        arena.alloc(constant(1)).unwrap();
+        arena.widths[0] = 7;
+
+        assert_eq!(
+            SLTNodeFacts::verify(&arena).unwrap_err().invariant,
+            "FACTS.CACHED_WIDTH_MATCHES"
+        );
+    }
+
+    #[test]
+    fn zero_width_coercion_is_a_structured_error() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let zero = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                0,
+                false,
+            ))
+            .unwrap();
+        let nonzero = arena.alloc(constant(1)).unwrap();
+
+        assert_eq!(
+            crate::logic_tree::coerce_node_width(&mut arena, zero, Some(8), true)
+                .unwrap_err()
+                .invariant,
+            "WIDTH.COERCE_SOURCE_NON_ZERO"
+        );
+        assert_eq!(
+            crate::logic_tree::coerce_node_width(&mut arena, nonzero, Some(0), false)
+                .unwrap_err()
+                .invariant,
+            "WIDTH.COERCE_TARGET_NON_ZERO"
+        );
+    }
+
+    #[test]
     fn json_deserialization_rejects_noncanonical_graphs() {
-        let arena = SLTNodeArena::from_nodes_unchecked(vec![
-            SLTNode::Binary(NodeId(1), BinaryOp::Add, NodeId(1)),
-            constant(1),
-        ]);
-        let json = serde_json::to_string(&arena).unwrap();
+        let wire = SLTNodeArenaWire {
+            nodes: vec![
+                SLTNode::Binary(NodeId(1), BinaryOp::Add, NodeId(1)),
+                constant(1),
+            ],
+        };
+        let json = serde_json::to_string(&wire).unwrap();
 
         let error = serde_json::from_str::<SLTNodeArena<u32>>(&json).unwrap_err();
 
@@ -1154,53 +1232,86 @@ mod tests {
     }
 
     #[test]
+    fn json_deserialization_checks_children_not_used_to_derive_width() {
+        let cases = [
+            vec![
+                constant(1),
+                SLTNode::Mux {
+                    cond: NodeId(99),
+                    then_expr: NodeId(0),
+                    else_expr: NodeId(0),
+                },
+            ],
+            vec![SLTNode::Input {
+                variable: 1,
+                signed: false,
+                index: vec![SLTIndex {
+                    node: NodeId(99),
+                    stride: 1,
+                }],
+                access: BitAccess::new(0, 0),
+            }],
+        ];
+
+        for nodes in cases {
+            let json = serde_json::to_string(&SLTNodeArenaWire { nodes }).unwrap();
+            let error = serde_json::from_str::<SLTNodeArena<u32>>(&json).unwrap_err();
+            assert!(error.to_string().contains("GRAPH.CHILD_EXISTS"));
+        }
+    }
+
+    #[test]
     fn for_fold_effect_remap_updates_only_the_requested_range() {
         let mut arena = SLTNodeArena::new();
-        let condition = arena.alloc(constant(1));
-        let first_fold = arena.alloc(SLTNode::ForFold {
-            loop_var: 1,
-            loop_width: 8,
-            loop_signed: false,
-            start: SLTLoopBound::Const(0),
-            end: SLTLoopBound::Const(1),
-            inclusive: false,
-            step: 1,
-            step_op: SLTStepOp::Add,
-            reverse: false,
-            result: VarAtomBase::new(2, 0, 7),
-            initials: Vec::new(),
-            updates: Vec::new(),
-            effects: vec![SLTForEffect {
-                site_id: 3,
-                guard: None,
-                emit_on_true: true,
-                args: Vec::new(),
-                fatal_error_code: Some(3),
-            }],
-            continue_cond: condition,
-        });
-        let second_fold = arena.alloc(SLTNode::ForFold {
-            loop_var: 1,
-            loop_width: 8,
-            loop_signed: false,
-            start: SLTLoopBound::Const(0),
-            end: SLTLoopBound::Const(1),
-            inclusive: false,
-            step: 1,
-            step_op: SLTStepOp::Add,
-            reverse: false,
-            result: VarAtomBase::new(2, 0, 7),
-            initials: Vec::new(),
-            updates: Vec::new(),
-            effects: vec![SLTForEffect {
-                site_id: 4,
-                guard: None,
-                emit_on_true: true,
-                args: Vec::new(),
-                fatal_error_code: None,
-            }],
-            continue_cond: condition,
-        });
+        let condition = arena.alloc(constant(1)).unwrap();
+        let first_fold = arena
+            .alloc(SLTNode::ForFold {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: false,
+                start: SLTLoopBound::Const(0),
+                end: SLTLoopBound::Const(1),
+                inclusive: false,
+                step: 1,
+                step_op: SLTStepOp::Add,
+                reverse: false,
+                result: VarAtomBase::new(2, 0, 7),
+                initials: Vec::new(),
+                updates: Vec::new(),
+                effects: vec![SLTForEffect {
+                    site_id: 3,
+                    guard: None,
+                    emit_on_true: true,
+                    args: Vec::new(),
+                    fatal_error_code: Some(3),
+                }],
+                continue_cond: condition,
+            })
+            .unwrap();
+        let second_fold = arena
+            .alloc(SLTNode::ForFold {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: false,
+                start: SLTLoopBound::Const(0),
+                end: SLTLoopBound::Const(1),
+                inclusive: false,
+                step: 1,
+                step_op: SLTStepOp::Add,
+                reverse: false,
+                result: VarAtomBase::new(2, 0, 7),
+                initials: Vec::new(),
+                updates: Vec::new(),
+                effects: vec![SLTForEffect {
+                    site_id: 4,
+                    guard: None,
+                    emit_on_true: true,
+                    args: Vec::new(),
+                    fatal_error_code: None,
+                }],
+                continue_cond: condition,
+            })
+            .unwrap();
 
         arena
             .remap_for_fold_effect_sites(first_fold.0..second_fold.0, |site, fatal| {
@@ -1214,7 +1325,7 @@ mod tests {
         assert_eq!(effects[0].site_id, 13);
         assert_eq!(effects[0].fatal_error_code, Some(99));
         let remapped_first = arena.get(first_fold).clone();
-        assert_eq!(arena.alloc(remapped_first), first_fold);
+        assert_eq!(arena.alloc(remapped_first).unwrap(), first_fold);
         let SLTNode::ForFold { effects, .. } = arena.get(second_fold) else {
             panic!("expected second ForFold");
         };
