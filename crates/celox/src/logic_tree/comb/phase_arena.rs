@@ -26,21 +26,21 @@ mod sealed {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhaseKind {
+pub(super) enum PhaseKind {
     Source,
     DraftOccurrence,
     Occurrence,
 }
 
 /// A closed marker trait for an SLT node-ID namespace.
-pub trait SLTPhase: sealed::Sealed + Copy + Eq + Ord + fmt::Debug + 'static {
+pub(super) trait SLTPhase: sealed::Sealed + Copy + Eq + Ord + fmt::Debug + 'static {
     const KIND: PhaseKind;
 }
 
 macro_rules! phase_marker {
     ($name:ident, $kind:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name;
+        pub(super) struct $name;
         impl sealed::Sealed for $name {}
         impl SLTPhase for $name {
             const KIND: PhaseKind = PhaseKind::$kind;
@@ -54,7 +54,7 @@ phase_marker!(OccurrencePhase, Occurrence);
 
 /// A checked index into one owning arena in phase `P`.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PhaseNodeId<P: SLTPhase> {
+struct PhaseNodeId<P: SLTPhase> {
     index: usize,
     phase: PhantomData<fn() -> P>,
 }
@@ -67,7 +67,7 @@ impl<P: SLTPhase> PhaseNodeId<P> {
         }
     }
 
-    pub fn index(self) -> usize {
+    fn index(self) -> usize {
         self.index
     }
 }
@@ -88,7 +88,7 @@ impl<P: SLTPhase> fmt::Debug for PhaseNodeId<P> {
 
 /// A checked input-table ID in phase `P`.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PhaseInputId<P: SLTPhase> {
+struct PhaseInputId<P: SLTPhase> {
     index: u32,
     phase: PhantomData<fn() -> P>,
 }
@@ -101,7 +101,7 @@ impl<P: SLTPhase> PhaseInputId<P> {
         }
     }
 
-    pub fn index(self) -> u32 {
+    fn index(self) -> u32 {
         self.index
     }
 }
@@ -120,9 +120,9 @@ impl<P: SLTPhase> fmt::Debug for PhaseInputId<P> {
     }
 }
 
-pub type SourceInputId = PhaseInputId<SourcePhase>;
-pub type DraftOccurrenceInputId = PhaseInputId<DraftOccurrencePhase>;
-pub type OccurrenceInputId = PhaseInputId<OccurrencePhase>;
+type SourceInputId = PhaseInputId<SourcePhase>;
+type DraftOccurrenceInputId = PhaseInputId<DraftOccurrencePhase>;
+type OccurrenceInputId = PhaseInputId<OccurrencePhase>;
 
 /// A checked semantic-object-table ID in phase `P`.
 ///
@@ -130,7 +130,7 @@ pub type OccurrenceInputId = PhaseInputId<OccurrencePhase>;
 /// declaration/binding object may have several exact read geometries, while
 /// state overlap and storage bounds are properties of the object itself.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PhaseSemanticObjectId<P: SLTPhase> {
+struct PhaseSemanticObjectId<P: SLTPhase> {
     index: u32,
     phase: PhantomData<fn() -> P>,
 }
@@ -143,7 +143,7 @@ impl<P: SLTPhase> PhaseSemanticObjectId<P> {
         }
     }
 
-    pub fn index(self) -> u32 {
+    fn index(self) -> u32 {
         self.index
     }
 }
@@ -162,13 +162,13 @@ impl<P: SLTPhase> fmt::Debug for PhaseSemanticObjectId<P> {
     }
 }
 
-pub type SourceSemanticObjectId = PhaseSemanticObjectId<SourcePhase>;
-pub type DraftOccurrenceSemanticObjectId = PhaseSemanticObjectId<DraftOccurrencePhase>;
-pub type OccurrenceSemanticObjectId = PhaseSemanticObjectId<OccurrencePhase>;
+type SourceSemanticObjectId = PhaseSemanticObjectId<SourcePhase>;
+type DraftOccurrenceSemanticObjectId = PhaseSemanticObjectId<DraftOccurrencePhase>;
+type OccurrenceSemanticObjectId = PhaseSemanticObjectId<OccurrencePhase>;
 
 /// A checked runtime-event site ID isolated by the owning SLT phase.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PhaseRuntimeEventSiteId<P: SLTPhase> {
+struct PhaseRuntimeEventSiteId<P: SLTPhase> {
     index: u32,
     phase: PhantomData<fn() -> P>,
 }
@@ -181,7 +181,7 @@ impl<P: SLTPhase> PhaseRuntimeEventSiteId<P> {
         }
     }
 
-    pub fn index(self) -> u32 {
+    fn index(self) -> u32 {
         self.index
     }
 }
@@ -200,13 +200,13 @@ impl<P: SLTPhase> fmt::Debug for PhaseRuntimeEventSiteId<P> {
     }
 }
 
-pub type SourceRuntimeEventSiteId = PhaseRuntimeEventSiteId<SourcePhase>;
-pub type DraftOccurrenceRuntimeEventSiteId = PhaseRuntimeEventSiteId<DraftOccurrencePhase>;
-pub type OccurrenceRuntimeEventSiteId = PhaseRuntimeEventSiteId<OccurrencePhase>;
+type SourceRuntimeEventSiteId = PhaseRuntimeEventSiteId<SourcePhase>;
+type DraftOccurrenceRuntimeEventSiteId = PhaseRuntimeEventSiteId<DraftOccurrencePhase>;
+type OccurrenceRuntimeEventSiteId = PhaseRuntimeEventSiteId<OccurrencePhase>;
 
 /// Whether an input's declared element domain is two-state or four-state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum InputElementDomain {
+pub(super) enum InputElementDomain {
     Bit,
     Logic,
 }
@@ -505,7 +505,7 @@ impl<P: SLTPhase> InputAccessFact<P> {
 ///
 /// It has no serialization boundary and no public production constructor.
 #[derive(Debug, PartialEq, Eq)]
-pub struct InputSemanticFacts<P: SLTPhase> {
+struct InputSemanticFacts<P: SLTPhase> {
     objects: Vec<SemanticObjectFact>,
     inputs: Vec<InputAccessFact<P>>,
     phase: PhantomData<fn() -> P>,
@@ -943,13 +943,13 @@ impl<P: SLTPhase> InputSemanticFacts<P> {
         })
     }
 
-    pub fn object_id_at(&self, index: usize) -> Option<PhaseSemanticObjectId<P>> {
+    fn object_id_at(&self, index: usize) -> Option<PhaseSemanticObjectId<P>> {
         self.objects.get(index)?;
         let index = u32::try_from(index).ok()?;
         Some(PhaseSemanticObjectId::new(index))
     }
 
-    pub fn input_id_at(&self, index: usize) -> Option<PhaseInputId<P>> {
+    fn input_id_at(&self, index: usize) -> Option<PhaseInputId<P>> {
         self.inputs.get(index)?;
         let index = u32::try_from(index).ok()?;
         Some(PhaseInputId::new(index))
@@ -966,24 +966,24 @@ impl<P: SLTPhase> InputSemanticFacts<P> {
 
 /// A bit range on one semantic storage object.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseObjectAtom<P: SLTPhase> {
-    pub object: PhaseSemanticObjectId<P>,
-    pub access: BitAccess,
+struct PhaseObjectAtom<P: SLTPhase> {
+    object: PhaseSemanticObjectId<P>,
+    access: BitAccess,
 }
 
 /// The exact coercion applied to a completed value use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PhaseCoercion {
-    pub target_width: usize,
+pub(super) struct PhaseCoercion {
+    pub(super) target_width: usize,
     /// Declared semantic target signedness. Structural replay checks the
     /// role-specific rule, but this is not proof of typed-HIR agreement until
     /// the owning aggregate verifier matches the expected value relation.
-    pub target_signed: bool,
-    pub kind: PhaseCoercionKind,
+    pub(super) target_signed: bool,
+    pub(super) kind: PhaseCoercionKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PhaseCoercionKind {
+pub(super) enum PhaseCoercionKind {
     Identity,
     ZeroExtend,
     SignExtend,
@@ -992,20 +992,20 @@ pub enum PhaseCoercionKind {
 
 /// A completed operand together with its explicit width coercion.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseValueUse<P: SLTPhase> {
-    pub value: PhaseNodeId<P>,
-    pub coercion: PhaseCoercion,
+struct PhaseValueUse<P: SLTPhase> {
+    value: PhaseNodeId<P>,
+    coercion: PhaseCoercion,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseTypedConstant {
-    pub payload: BigUint,
-    pub width: usize,
-    pub signed: bool,
+pub(super) struct PhaseTypedConstant {
+    pub(super) payload: BigUint,
+    pub(super) width: usize,
+    pub(super) signed: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PhaseSLTLoopBound<P: SLTPhase> {
+enum PhaseSLTLoopBound<P: SLTPhase> {
     Const {
         value: PhaseTypedConstant,
         coercion: PhaseCoercion,
@@ -1015,26 +1015,26 @@ pub enum PhaseSLTLoopBound<P: SLTPhase> {
 
 /// One canonical ForFold state row. Initial/update order remains parallel.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseForFoldState<P: SLTPhase> {
-    pub target: PhaseObjectAtom<P>,
-    pub initial: PhaseValueUse<P>,
-    pub update: PhaseValueUse<P>,
+struct PhaseForFoldState<P: SLTPhase> {
+    target: PhaseObjectAtom<P>,
+    initial: PhaseValueUse<P>,
+    update: PhaseValueUse<P>,
 }
 
 /// A source-ordered ForFold effect row.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseForFoldEffect<P: SLTPhase> {
-    pub site_id: PhaseRuntimeEventSiteId<P>,
-    pub guard: Option<PhaseNodeId<P>>,
-    pub emit_on_true: bool,
-    pub args: Vec<PhaseNodeId<P>>,
-    pub fatal_error_code: Option<i64>,
+struct PhaseForFoldEffect<P: SLTPhase> {
+    site_id: PhaseRuntimeEventSiteId<P>,
+    guard: Option<PhaseNodeId<P>>,
+    emit_on_true: bool,
+    args: Vec<PhaseNodeId<P>>,
+    fatal_error_code: Option<i64>,
 }
 
 /// One concat operand and its explicit coercion to the declared part width.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseConcatPart<P: SLTPhase> {
-    pub value: PhaseValueUse<P>,
+struct PhaseConcatPart<P: SLTPhase> {
+    value: PhaseValueUse<P>,
 }
 
 /// One fallibly allocated, uniquely owned out-of-line node payload.
@@ -1043,7 +1043,7 @@ pub struct PhaseConcatPart<P: SLTPhase> {
 /// `Box::try_new`. The storage is private, always has exactly one element, and
 /// is never cloned into an interning key.
 #[derive(Debug, PartialEq, Eq)]
-pub struct PhaseOwnedPayload<T> {
+struct PhaseOwnedPayload<T> {
     storage: Vec<T>,
 }
 
@@ -1068,45 +1068,45 @@ impl<T> PhaseOwnedPayload<T> {
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseInputNode<P: SLTPhase> {
-    pub input: PhaseInputId<P>,
-    pub indices: Vec<PhaseNodeId<P>>,
+struct PhaseInputNode<P: SLTPhase> {
+    input: PhaseInputId<P>,
+    indices: Vec<PhaseNodeId<P>>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseConstantNode {
-    pub payload: BigUint,
-    pub mask: BigUint,
-    pub width: usize,
-    pub signed: bool,
+struct PhaseConstantNode {
+    payload: BigUint,
+    mask: BigUint,
+    width: usize,
+    signed: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseMuxNode<P: SLTPhase> {
-    pub cond: PhaseNodeId<P>,
-    pub then_value: PhaseValueUse<P>,
-    pub else_value: PhaseValueUse<P>,
+struct PhaseMuxNode<P: SLTPhase> {
+    cond: PhaseNodeId<P>,
+    then_value: PhaseValueUse<P>,
+    else_value: PhaseValueUse<P>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct PhaseForFoldNode<P: SLTPhase> {
-    pub loop_object: PhaseSemanticObjectId<P>,
-    pub start: PhaseSLTLoopBound<P>,
-    pub end: PhaseSLTLoopBound<P>,
-    pub inclusive: bool,
-    pub step: PhaseTypedConstant,
-    pub step_coercion: PhaseCoercion,
-    pub step_op: SLTStepOp,
-    pub reverse: bool,
-    pub states: Vec<PhaseForFoldState<P>>,
-    pub result_state: usize,
-    pub effects: Vec<PhaseForFoldEffect<P>>,
-    pub continue_cond: PhaseNodeId<P>,
+struct PhaseForFoldNode<P: SLTPhase> {
+    loop_object: PhaseSemanticObjectId<P>,
+    start: PhaseSLTLoopBound<P>,
+    end: PhaseSLTLoopBound<P>,
+    inclusive: bool,
+    step: PhaseTypedConstant,
+    step_coercion: PhaseCoercion,
+    step_op: SLTStepOp,
+    reverse: bool,
+    states: Vec<PhaseForFoldState<P>>,
+    result_state: usize,
+    effects: Vec<PhaseForFoldEffect<P>>,
+    continue_cond: PhaseNodeId<P>,
 }
 
 /// A phase-local symbolic node. It is intentionally not serializable.
 #[derive(Debug, PartialEq, Eq)]
-pub enum PhaseSLTNode<P: SLTPhase> {
+enum PhaseSLTNode<P: SLTPhase> {
     Input(PhaseOwnedPayload<PhaseInputNode<P>>),
     Constant(PhaseOwnedPayload<PhaseConstantNode>),
     Binary {
@@ -1128,7 +1128,7 @@ pub enum PhaseSLTNode<P: SLTPhase> {
 }
 
 impl<P: SLTPhase> PhaseSLTNode<P> {
-    pub fn try_input(
+    fn try_input(
         input: PhaseInputId<P>,
         indices: Vec<PhaseNodeId<P>>,
     ) -> Result<Self, PhaseArenaError<P>> {
@@ -1138,7 +1138,7 @@ impl<P: SLTPhase> PhaseSLTNode<P> {
         )?))
     }
 
-    pub fn try_constant(
+    fn try_constant(
         payload: BigUint,
         mask: BigUint,
         width: usize,
@@ -1155,7 +1155,7 @@ impl<P: SLTPhase> PhaseSLTNode<P> {
         )?))
     }
 
-    pub fn try_mux(
+    fn try_mux(
         cond: PhaseNodeId<P>,
         then_value: PhaseValueUse<P>,
         else_value: PhaseValueUse<P>,
@@ -1170,7 +1170,7 @@ impl<P: SLTPhase> PhaseSLTNode<P> {
         )?))
     }
 
-    pub fn try_for_fold(payload: PhaseForFoldNode<P>) -> Result<Self, PhaseArenaError<P>> {
+    fn try_for_fold(payload: PhaseForFoldNode<P>) -> Result<Self, PhaseArenaError<P>> {
         Ok(Self::ForFold(PhaseOwnedPayload::try_new::<P>(
             payload, "ForFold",
         )?))
@@ -1338,13 +1338,13 @@ fn step_op_tag(op: SLTStepOp) -> u8 {
 
 /// Whether ordinary interning reused or inserted the canonical node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InternOutcome<P: SLTPhase> {
+enum InternOutcome<P: SLTPhase> {
     Existing(PhaseNodeId<P>),
     Inserted(PhaseNodeId<P>),
 }
 
 impl<P: SLTPhase> InternOutcome<P> {
-    pub fn id(self) -> PhaseNodeId<P> {
+    fn id(self) -> PhaseNodeId<P> {
         match self {
             Self::Existing(id) | Self::Inserted(id) => id,
         }
@@ -1353,8 +1353,8 @@ impl<P: SLTPhase> InternOutcome<P> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SemanticFactError {
-    pub invariant: &'static str,
-    pub message: String,
+    invariant: &'static str,
+    message: String,
 }
 
 impl SemanticFactError {
@@ -1379,18 +1379,18 @@ impl fmt::Display for SemanticFactError {
 impl std::error::Error for SemanticFactError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhaseArenaOwner {
+enum PhaseArenaOwner {
     Typed(usize),
     Raw(usize),
 }
 
 /// A structured construction or replay failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PhaseArenaError<P: SLTPhase> {
-    pub phase: PhaseKind,
-    pub invariant: &'static str,
-    pub owner: Option<PhaseArenaOwner>,
-    pub message: String,
+struct PhaseArenaError<P: SLTPhase> {
+    phase: PhaseKind,
+    invariant: &'static str,
+    owner: Option<PhaseArenaOwner>,
+    message: String,
     marker: PhantomData<fn() -> P>,
 }
 
@@ -1450,7 +1450,7 @@ struct NodeFactsRow {
 
 /// Retained compact facts for a fully replayed phase arena.
 #[derive(Debug)]
-pub struct PhaseSLTNodeFacts<P: SLTPhase> {
+struct PhaseSLTNodeFacts<P: SLTPhase> {
     widths: Vec<usize>,
     signed: Vec<bool>,
     zero_mask: Vec<bool>,
@@ -1459,19 +1459,19 @@ pub struct PhaseSLTNodeFacts<P: SLTPhase> {
 }
 
 impl<P: SLTPhase> PhaseSLTNodeFacts<P> {
-    pub fn width(&self, node: PhaseNodeId<P>) -> Option<usize> {
+    fn width(&self, node: PhaseNodeId<P>) -> Option<usize> {
         self.widths.get(node.index).copied()
     }
 
-    pub fn signed(&self, node: PhaseNodeId<P>) -> Option<bool> {
+    fn signed(&self, node: PhaseNodeId<P>) -> Option<bool> {
         self.signed.get(node.index).copied()
     }
 
-    pub fn has_zero_mask(&self, node: PhaseNodeId<P>) -> Option<bool> {
+    fn has_zero_mask(&self, node: PhaseNodeId<P>) -> Option<bool> {
         self.zero_mask.get(node.index).copied()
     }
 
-    pub fn is_lowerable(&self, node: PhaseNodeId<P>) -> Option<bool> {
+    fn is_lowerable(&self, node: PhaseNodeId<P>) -> Option<bool> {
         self.lowerable.get(node.index).copied()
     }
 }
@@ -1533,7 +1533,7 @@ impl AvlLink {
 }
 
 /// Mutable ordinary-node construction storage for one phase.
-pub struct MutableSLTNodeArena<P: SLTPhase> {
+struct MutableSLTNodeArena<P: SLTPhase> {
     inputs: InputSemanticFacts<P>,
     nodes: Vec<PhaseSLTNode<P>>,
     widths: Vec<usize>,
@@ -1547,7 +1547,7 @@ pub struct MutableSLTNodeArena<P: SLTPhase> {
 }
 
 impl<P: SLTPhase> MutableSLTNodeArena<P> {
-    pub fn new(inputs: InputSemanticFacts<P>) -> Self {
+    fn new(inputs: InputSemanticFacts<P>) -> Self {
         Self {
             inputs,
             nodes: Vec::new(),
@@ -1562,24 +1562,24 @@ impl<P: SLTPhase> MutableSLTNodeArena<P> {
         }
     }
 
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.nodes.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
-    pub fn node(&self, id: PhaseNodeId<P>) -> Option<&PhaseSLTNode<P>> {
+    fn node(&self, id: PhaseNodeId<P>) -> Option<&PhaseSLTNode<P>> {
         self.nodes.get(id.index)
     }
 
-    pub fn width(&self, id: PhaseNodeId<P>) -> Option<usize> {
+    fn width(&self, id: PhaseNodeId<P>) -> Option<usize> {
         self.widths.get(id.index).copied()
     }
 
     /// Intern one ordinary completed node. No gated identity can enter here.
-    pub fn try_intern_ordinary(
+    fn try_intern_ordinary(
         &mut self,
         node: PhaseSLTNode<P>,
     ) -> Result<InternOutcome<P>, PhaseArenaError<P>> {
