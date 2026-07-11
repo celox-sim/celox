@@ -14,6 +14,7 @@ mod pass_concat_folding;
 pub(crate) mod pass_dead_store_elimination;
 mod pass_eliminate_dead_working_stores;
 pub(crate) mod pass_eliminate_working_round_trip;
+mod pass_guarded_region_sinking;
 mod pass_gvn;
 mod pass_hoist_common_branch_loads;
 mod pass_identity_store_bypass;
@@ -40,6 +41,7 @@ use pass_coalesce_stores::CoalesceStoresPass;
 use pass_commit_sinking::CommitSinkingPass;
 use pass_concat_folding::ConcatFoldingPass;
 use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
+use pass_guarded_region_sinking::GuardedRegionSinkingPass;
 use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
 use pass_inline_commit_forwarding::InlineCommitForwardingPass;
@@ -495,6 +497,11 @@ fn optimize_with_options(
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, &options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, eu, &options);
         }
     }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
