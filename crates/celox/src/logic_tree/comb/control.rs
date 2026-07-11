@@ -21,6 +21,8 @@ pub(crate) enum ControlBuildError {
         kind: &'static str,
         attempted_length: usize,
     },
+    /// Dense storage for the next record could not be reserved.
+    StorageUnavailable { kind: &'static str, count: usize },
     /// A reserved slot was never defined, or an unreserved slot was named.
     UndefinedSlot { kind: &'static str, slot: usize },
     /// A slot was defined more than once.
@@ -37,6 +39,12 @@ impl fmt::Display for ControlBuildError {
                 formatter,
                 "{kind} ID space is exhausted at vector length {attempted_length}"
             ),
+            Self::StorageUnavailable { kind, count } => {
+                write!(
+                    formatter,
+                    "cannot reserve storage for {count} {kind} records"
+                )
+            }
             Self::UndefinedSlot { kind, slot } => {
                 write!(formatter, "{kind} slot {slot} is undefined")
             }
@@ -101,15 +109,61 @@ macro_rules! define_control_id {
     };
 }
 
+define_control_id!(SourceRootId);
+define_control_id!(SourceControlUnitId);
+define_control_id!(SourcePredicateRegionId);
+define_control_id!(SourceControlPointId);
+define_control_id!(SourceControlEdgeId);
+define_control_id!(SourceGateId);
+define_control_id!(SourceDecisionId);
+define_control_id!(SourceValueOccurrenceId);
+define_control_id!(ValueOccurrenceId);
+define_control_id!(RootExpansionId);
 define_control_id!(ControlUnitId);
 define_control_id!(ExternalRootId);
+define_control_id!(ObserverId);
+define_control_id!(ObserverOccurrenceId);
+define_control_id!(ControlActionId);
 define_control_id!(GateId);
 define_control_id!(DecisionId);
 define_control_id!(GatedMuxId);
 define_control_id!(DecisionResultMergeId);
 define_control_id!(PredicateRegionId);
 define_control_id!(ControlPointId);
+define_control_id!(ControlEdgeId);
+define_control_id!(GlobalControlPointId);
+define_control_id!(GlobalControlEdgeId);
 define_control_id!(InstValueId);
+define_control_id!(DynamicAddressPlanId);
+define_control_id!(MemoryTokenId);
+define_control_id!(EnvironmentTokenId);
+define_control_id!(EffectTokenId);
+define_control_id!(ForFoldTemplateId);
+define_control_id!(WriteDomainId);
+define_control_id!(BindingId);
+define_control_id!(EffectStreamId);
+define_control_id!(SLTMemoryDependencyId);
+define_control_id!(SLTEnvDependencyId);
+
+/// A source-level position before, between, or after ordered source actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) struct SourceControlSite {
+    pub(crate) point: SourceControlPointId,
+    pub(crate) slot: usize,
+}
+
+impl SourceControlSite {
+    pub(crate) const fn new(point: SourceControlPointId, slot: usize) -> Self {
+        Self { point, slot }
+    }
+}
+
+/// A source operand use either at an action slot or on one exact CFG edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) enum SourceControlUseSite {
+    Slot(SourceControlSite),
+    Edge(SourceControlEdgeId),
+}
 
 /// A position before, between, or after the ordered actions in a control point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -122,6 +176,13 @@ impl ControlSite {
     pub(crate) const fn new(point: ControlPointId, slot: usize) -> Self {
         Self { point, slot }
     }
+}
+
+/// A flattened operand use either at an action slot or on one exact CFG edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) enum ControlUseSite {
+    Slot(ControlSite),
+    Edge(ControlEdgeId),
 }
 
 /// Dense storage that supports reserving IDs before their records are known.
@@ -165,6 +226,13 @@ where
     /// Reserve one undefined slot and return its checked dense ID.
     pub(crate) fn reserve(&mut self) -> Result<Id, ControlBuildError> {
         let id = Id::checked_from_len(self.slots.len())?;
+        let count = self.slots.len().saturating_add(1);
+        self.slots
+            .try_reserve(1)
+            .map_err(|_| ControlBuildError::StorageUnavailable {
+                kind: Id::KIND,
+                count,
+            })?;
         self.slots.push(None);
         Ok(id)
     }
@@ -198,7 +266,13 @@ where
             return Err(error);
         }
 
-        let mut values = Vec::with_capacity(self.slots.len());
+        let mut values = Vec::new();
+        values.try_reserve_exact(self.slots.len()).map_err(|_| {
+            ControlBuildError::StorageUnavailable {
+                kind: Id::KIND,
+                count: self.slots.len(),
+            }
+        })?;
         for (slot, value) in self.slots.into_iter().enumerate() {
             let Some(value) = value else {
                 return Err(ControlBuildError::UndefinedSlot {
@@ -252,15 +326,41 @@ mod tests {
             }};
         }
 
+        check_id!(SourceRootId);
+        check_id!(SourceControlUnitId);
+        check_id!(SourcePredicateRegionId);
+        check_id!(SourceControlPointId);
+        check_id!(SourceControlEdgeId);
+        check_id!(SourceGateId);
+        check_id!(SourceDecisionId);
+        check_id!(SourceValueOccurrenceId);
+        check_id!(ValueOccurrenceId);
+        check_id!(RootExpansionId);
         check_id!(ControlUnitId);
         check_id!(ExternalRootId);
+        check_id!(ObserverId);
+        check_id!(ObserverOccurrenceId);
+        check_id!(ControlActionId);
         check_id!(GateId);
         check_id!(DecisionId);
         check_id!(GatedMuxId);
         check_id!(DecisionResultMergeId);
         check_id!(PredicateRegionId);
         check_id!(ControlPointId);
+        check_id!(ControlEdgeId);
+        check_id!(GlobalControlPointId);
+        check_id!(GlobalControlEdgeId);
         check_id!(InstValueId);
+        check_id!(DynamicAddressPlanId);
+        check_id!(MemoryTokenId);
+        check_id!(EnvironmentTokenId);
+        check_id!(EffectTokenId);
+        check_id!(ForFoldTemplateId);
+        check_id!(WriteDomainId);
+        check_id!(BindingId);
+        check_id!(EffectStreamId);
+        check_id!(SLTMemoryDependencyId);
+        check_id!(SLTEnvDependencyId);
     }
 
     #[test]
@@ -278,6 +378,22 @@ mod tests {
         let encoded = serde_json::to_string(&site).expect("site must serialize");
         let decoded: ControlSite = serde_json::from_str(&encoded).expect("site must deserialize");
         assert_eq!(decoded, site);
+
+        let edge_use =
+            ControlUseSite::Edge(ControlEdgeId::checked_from_len(9).expect("small ID must fit"));
+        let encoded = serde_json::to_string(&edge_use).expect("edge use must serialize");
+        let decoded: ControlUseSite =
+            serde_json::from_str(&encoded).expect("edge use must deserialize");
+        assert_eq!(decoded, edge_use);
+
+        let source_slot = SourceControlUseSite::Slot(SourceControlSite::new(
+            SourceControlPointId::checked_from_len(4).expect("small ID must fit"),
+            3,
+        ));
+        let encoded = serde_json::to_string(&source_slot).expect("source use must serialize");
+        let decoded: SourceControlUseSite =
+            serde_json::from_str(&encoded).expect("source use must deserialize");
+        assert_eq!(decoded, source_slot);
     }
 
     #[cfg(target_pointer_width = "64")]
