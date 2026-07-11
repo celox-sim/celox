@@ -1229,16 +1229,17 @@ impl<'a> FfParser<'a> {
         let header_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let fitcheck_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
-        let precheck_bb = ir_builder.new_block();
+        let needs_range_check = compare_width != loop_width;
+        let precheck_bb = (!reverse && needs_range_check).then(|| ir_builder.new_block());
         let empty_exit_counter = ir_builder.alloc_bit(compare_width, loop_signed);
-        let empty_exit_check_bb = ir_builder.new_block_with(vec![empty_exit_counter]);
+        let empty_exit_check_bb =
+            needs_range_check.then(|| ir_builder.new_block_with(vec![empty_exit_counter]));
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
         let fitcheck_bb = ir_builder.new_block_with(vec![fitcheck_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
-        let range_error_bb = ir_builder.new_block();
-        let stall_bb = ir_builder.new_block();
+        let range_error_bb = needs_range_check.then(|| ir_builder.new_block());
         let exit_bb = ir_builder.new_block();
-        if !reverse && compare_width != loop_width {
+        if let Some(precheck_bb) = precheck_bb {
             ir_builder.seal_block(SIRTerminator::Jump(precheck_bb, vec![]));
         } else {
             ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
@@ -1247,7 +1248,9 @@ impl<'a> FfParser<'a> {
         let pre_loop_defined = self.defined_ranges.clone();
         let pre_loop_dynamic = self.dynamic_defined_vars.clone();
 
-        if !reverse && compare_width != loop_width {
+        if let (Some(precheck_bb), Some(empty_exit_check_bb), Some(range_error_bb)) =
+            (precheck_bb, empty_exit_check_bb, range_error_bb)
+        {
             ir_builder.switch_to_block(precheck_bb);
             let end_allowed_reg = if compare_width > 64 {
                 Self::emit_loop_value_fits(
@@ -1364,23 +1367,20 @@ impl<'a> FfParser<'a> {
                 } else {
                     None
                 };
-                let singleton_bb = ir_builder.new_block();
+                let singleton_bb = singleton.map(|_| ir_builder.new_block());
                 let true_loop_bb = ir_builder.new_block();
                 let in_range_bb = ir_builder.new_block();
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: in_range,
                     true_block: (in_range_bb, vec![]),
-                    false_block: if compare_width != loop_width {
-                        (empty_exit_check_bb, vec![header_counter])
-                    } else {
-                        (exit_bb, vec![])
-                    },
+                    false_block: empty_exit_check_bb
+                        .map_or((exit_bb, vec![]), |block| (block, vec![header_counter])),
                 });
                 ir_builder.switch_to_block(in_range_bb);
-                if let Some(singleton) = singleton {
+                if let (Some(singleton), Some(singleton_bb)) = (singleton, singleton_bb) {
                     ir_builder.seal_block(SIRTerminator::Branch {
                         cond: singleton,
-                        true_block: (singleton_bb, vec![header_counter]),
+                        true_block: (singleton_bb, vec![]),
                         false_block: (true_loop_bb, vec![]),
                     });
                 } else {
@@ -1390,8 +1390,10 @@ impl<'a> FfParser<'a> {
                 let error_code =
                     self.runtime_error(non_progress_message.clone(), vec![stmt.var_id]);
                 ir_builder.seal_block(SIRTerminator::Error(error_code));
-                ir_builder.switch_to_block(singleton_bb);
-                ir_builder.seal_block(SIRTerminator::Jump(fitcheck_bb, vec![header_counter]));
+                if let Some(singleton_bb) = singleton_bb {
+                    ir_builder.switch_to_block(singleton_bb);
+                    ir_builder.seal_block(SIRTerminator::Jump(fitcheck_bb, vec![header_counter]));
+                }
             } else {
                 let loop_math =
                     self.cast_reg_width_ext(ir_builder, header_counter, math_width, loop_signed);
@@ -1436,11 +1438,8 @@ impl<'a> FfParser<'a> {
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: cond_reg,
                     true_block: (fitcheck_bb, vec![body_counter_reg]),
-                    false_block: if compare_width != loop_width {
-                        (empty_exit_check_bb, vec![header_counter])
-                    } else {
-                        (exit_bb, vec![])
-                    },
+                    false_block: empty_exit_check_bb
+                        .map_or((exit_bb, vec![]), |block| (block, vec![header_counter])),
                 });
             }
         } else {
@@ -1466,7 +1465,9 @@ impl<'a> FfParser<'a> {
             });
         }
 
-        if compare_width != loop_width {
+        if let (Some(empty_exit_check_bb), Some(range_error_bb)) =
+            (empty_exit_check_bb, range_error_bb)
+        {
             ir_builder.switch_to_block(empty_exit_check_bb);
             let empty_fits_reg = if compare_width > 64 {
                 Self::emit_loop_value_fits(
@@ -1549,7 +1550,7 @@ impl<'a> FfParser<'a> {
             Vec::new(),
             Vec::new(),
         ));
-        if compare_width != loop_width {
+        if let Some(range_error_bb) = range_error_bb {
             let fits_loop_reg = if compare_width > 64 {
                 Self::emit_loop_value_fits(
                     ir_builder,
@@ -1583,9 +1584,11 @@ impl<'a> FfParser<'a> {
         } else {
             ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![fitcheck_counter]));
         }
-        ir_builder.switch_to_block(range_error_bb);
-        let error_code = self.runtime_error(range_message, vec![stmt.var_id]);
-        ir_builder.seal_block(SIRTerminator::Error(error_code));
+        if let Some(range_error_bb) = range_error_bb {
+            ir_builder.switch_to_block(range_error_bb);
+            let error_code = self.runtime_error(range_message, vec![stmt.var_id]);
+            ir_builder.seal_block(SIRTerminator::Error(error_code));
+        }
         ir_builder.switch_to_block(body_bb);
         self.local_working_vars.insert(stmt.var_id);
 
@@ -1661,6 +1664,7 @@ impl<'a> FfParser<'a> {
                 crate::ir::BinaryOp::Ne,
                 current_math,
             ));
+            let stall_bb = ir_builder.new_block();
             let continue_bb = ir_builder.new_block();
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: progress_reg,
