@@ -425,6 +425,9 @@ accepted set; unknown, SystemVerilog, string, floating, and non-data kinds are
 rejected until a distinct executable value-domain rule exists. A producer
 cannot make a wrong `[2, 3]` shape self-consistent by supplying width six and
 strides `[2, 1]` because none of those summaries is proof-bearing input.
+The complete normative normalization, identity, mapping, and producer-
+connection contract is specified in
+[Source semantic objects and input accesses](./source-semantic-inputs.md).
 
 SourceWriteDomain / SourceBinding / SourceEffectStream
   checked module-local semantic state/binding/effect identity and type
