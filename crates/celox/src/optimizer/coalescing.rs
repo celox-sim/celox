@@ -480,11 +480,8 @@ fn optimize_with_options(
     // Identity Store bypass: detect Store(B, identity_copy_from_A), remove it,
     // and register B→A alias for memory layout sharing.
     if on(SirPass::IdentityStoreBypass) {
-        let identity_pass = pass_identity_store_bypass::IdentityStoreBypassPass::new();
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&identity_pass, eu, &options);
-        }
-        let identity_aliases = identity_pass.aliases.into_inner();
+        let identity_aliases =
+            pass_identity_store_bypass::find_program_aliases(program, options.four_state);
         if !identity_aliases.is_empty() {
             // Store alias candidates in program for memory layout validation
             program.address_aliases.extend(identity_aliases);
