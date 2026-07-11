@@ -28,9 +28,58 @@ impl ExecutionUnitPass for LoopIdiomPass {
         let mut next_reg = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
         for block in eu.blocks.values_mut() {
             recover_block(&mut block.instructions, &mut eu.register_map, &mut next_reg);
+            reuse_growing_or_reductions(&mut block.instructions, &eu.register_map);
         }
         prune_dead_pure_instructions(eu);
     }
+}
+
+/// Reuse an already-computed reduction when vectorization exposes a growing
+/// predicate prefix:
+///
+/// ```text
+/// previous = Or(Concat([p[n-1], ..., p[0]]))
+/// current  = Or(Concat([p[n], p[n-1], ..., p[0]]))
+/// ```
+///
+/// In two-state mode `current` is exactly `p[n] | previous`.  Procedural
+/// accumulator loops otherwise rebuild every preceding predicate at every
+/// step, turning a linear reduction into quadratic generated work.
+fn reuse_growing_or_reductions(
+    instructions: &mut [SIRInstruction<RegionedAbsoluteAddr>],
+    register_map: &HashMap<RegisterId, RegisterType>,
+) -> bool {
+    let defs = instruction_defs(instructions);
+    let mut reductions = HashMap::<Vec<RegisterId>, RegisterId>::default();
+    let mut replacements = Vec::new();
+
+    for (index, inst) in instructions.iter().enumerate() {
+        let SIRInstruction::Unary(dst, UnaryOp::Or, concat) = inst else {
+            continue;
+        };
+        if register_map.get(dst).map(RegisterType::width) != Some(1) {
+            continue;
+        }
+        let Some(&concat_index) = defs.get(concat) else {
+            continue;
+        };
+        let SIRInstruction::Concat(_, parts) = &instructions[concat_index] else {
+            continue;
+        };
+        if parts.len() >= 2
+            && register_map.get(&parts[0]).map(RegisterType::width) == Some(1)
+            && let Some(&previous) = reductions.get(&parts[1..])
+            && register_map.get(&previous).map(RegisterType::width) == Some(1)
+        {
+            replacements.push((index, *dst, parts[0], previous));
+        }
+        reductions.insert(parts.clone(), *dst);
+    }
+
+    for (index, dst, new_predicate, previous) in replacements.iter().copied() {
+        instructions[index] = SIRInstruction::Binary(dst, new_predicate, BinaryOp::Or, previous);
+    }
+    !replacements.is_empty()
 }
 
 #[derive(Clone, Copy)]
@@ -973,5 +1022,157 @@ mod tests {
         let mut unit = b.finish(acc, result_width);
         run(&mut unit);
         assert_eq!(count_op(&unit), Some((UnaryOp::PopCount, source)));
+    }
+
+    #[test]
+    fn reuses_a_growing_or_reduction_prefix() {
+        let mut b = UnitBuilder::new();
+        let p0 = b.source(1);
+        let p1 = b.source(1);
+        let p2 = b.source(1);
+
+        let first_concat = b.reg(2);
+        b.instructions
+            .push(SIRInstruction::Concat(first_concat, vec![p1, p0]));
+        let first_reduction = b.reg(1);
+        b.instructions.push(SIRInstruction::Unary(
+            first_reduction,
+            UnaryOp::Or,
+            first_concat,
+        ));
+
+        let growing_concat = b.reg(3);
+        b.instructions
+            .push(SIRInstruction::Concat(growing_concat, vec![p2, p1, p0]));
+        let result = b.reg(1);
+        b.instructions
+            .push(SIRInstruction::Unary(result, UnaryOp::Or, growing_concat));
+        let mut unit = b.finish(result, 1);
+
+        run(&mut unit);
+
+        assert!(unit.blocks[&BlockId(0)].instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Binary(dst, lhs, BinaryOp::Or, rhs)
+                    if *dst == result && *lhs == p2 && *rhs == first_reduction
+            )
+        }));
+        assert!(
+            !unit.blocks[&BlockId(0)].instructions.iter().any(
+                |inst| matches!(inst, SIRInstruction::Concat(dst, _) if *dst == growing_concat)
+            )
+        );
+    }
+
+    #[test]
+    fn does_not_reassociate_a_reordered_or_reduction() {
+        let mut b = UnitBuilder::new();
+        let p0 = b.source(1);
+        let p1 = b.source(1);
+        let p2 = b.source(1);
+
+        let first_concat = b.reg(2);
+        b.instructions
+            .push(SIRInstruction::Concat(first_concat, vec![p1, p0]));
+        let first_reduction = b.reg(1);
+        b.instructions.push(SIRInstruction::Unary(
+            first_reduction,
+            UnaryOp::Or,
+            first_concat,
+        ));
+
+        let reordered = b.reg(3);
+        b.instructions
+            .push(SIRInstruction::Concat(reordered, vec![p2, p0, p1]));
+        let result = b.reg(1);
+        b.instructions
+            .push(SIRInstruction::Unary(result, UnaryOp::Or, reordered));
+        let mut unit = b.finish(result, 1);
+
+        run(&mut unit);
+
+        assert!(unit.blocks[&BlockId(0)].instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Unary(dst, UnaryOp::Or, src)
+                    if *dst == result && *src == reordered
+            )
+        }));
+    }
+
+    #[test]
+    fn does_not_reuse_a_multi_bit_growing_or_prefix() {
+        let mut b = UnitBuilder::new();
+        let p0 = b.source(1);
+        let p1 = b.source(1);
+        let wide_prefix = b.source(2);
+
+        let first_concat = b.reg(2);
+        b.instructions
+            .push(SIRInstruction::Concat(first_concat, vec![p1, p0]));
+        let first_reduction = b.reg(1);
+        b.instructions.push(SIRInstruction::Unary(
+            first_reduction,
+            UnaryOp::Or,
+            first_concat,
+        ));
+
+        let growing_concat = b.reg(4);
+        b.instructions.push(SIRInstruction::Concat(
+            growing_concat,
+            vec![wide_prefix, p1, p0],
+        ));
+        let result = b.reg(1);
+        b.instructions
+            .push(SIRInstruction::Unary(result, UnaryOp::Or, growing_concat));
+        let mut unit = b.finish(result, 1);
+
+        run(&mut unit);
+
+        assert!(unit.blocks[&BlockId(0)].instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Unary(dst, UnaryOp::Or, src)
+                    if *dst == result && *src == growing_concat
+            )
+        }));
+    }
+
+    #[test]
+    fn leaves_growing_or_reductions_unchanged_in_four_state_mode() {
+        let mut b = UnitBuilder::new();
+        let p0 = b.source(1);
+        let p1 = b.source(1);
+        let p2 = b.source(1);
+
+        let first_concat = b.reg(2);
+        b.instructions
+            .push(SIRInstruction::Concat(first_concat, vec![p1, p0]));
+        let first_reduction = b.reg(1);
+        b.instructions.push(SIRInstruction::Unary(
+            first_reduction,
+            UnaryOp::Or,
+            first_concat,
+        ));
+
+        let growing_concat = b.reg(3);
+        b.instructions
+            .push(SIRInstruction::Concat(growing_concat, vec![p2, p1, p0]));
+        let result = b.reg(1);
+        b.instructions
+            .push(SIRInstruction::Unary(result, UnaryOp::Or, growing_concat));
+        let mut unit = b.finish(result, 1);
+        let original = unit.clone();
+        let options = PassOptions {
+            four_state: true,
+            ..PassOptions::default()
+        };
+
+        LoopIdiomPass.run(&mut unit, &options);
+
+        unit.verify();
+        assert_eq!(unit.blocks, original.blocks);
+        assert_eq!(unit.register_map, original.register_map);
     }
 }
