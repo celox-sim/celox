@@ -8,7 +8,7 @@ use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Turns a prioritized chain of exact, same-selector muxes into one balanced
 /// sparse dispatch.  This remains separate from `BranchifyMuxPass`: the latter
@@ -56,7 +56,7 @@ struct DefSite {
 #[derive(Clone)]
 struct CaseStage {
     mux_index: usize,
-    key: BigUint,
+    keys: Vec<BigUint>,
     value: RegisterId,
 }
 
@@ -119,8 +119,8 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
             return;
         }
 
-        // Every successful rewrite removes at least two muxes.  Re-discovery
-        // is intentional: splitting one block can expose another independent
+        // Every successful rewrite removes at least one mux.  Re-discovery is
+        // intentional: splitting one block can expose another independent
         // chain in its head or merge block.  Termination follows from the
         // strictly decreasing number of SIR Mux instructions; there is no
         // iteration or function-size cap.
@@ -174,8 +174,11 @@ fn find_best_sparse_case_plan(
                     continue;
                 };
                 let replace = best.as_ref().is_none_or(|current| {
-                    plan.stages.len() > current.stages.len()
-                        || (plan.stages.len() == current.stages.len()
+                    case_key_count(&plan.stages) > case_key_count(&current.stages)
+                        || (case_key_count(&plan.stages) == case_key_count(&current.stages)
+                            && plan.stages.len() > current.stages.len())
+                        || (case_key_count(&plan.stages) == case_key_count(&current.stages)
+                            && plan.stages.len() == current.stages.len()
                             && plan.profitability.avoided_cost()
                                 > current.profitability.avoided_cost())
                 });
@@ -288,7 +291,7 @@ fn dense_constant_lookup_mux_indices(
             selector = Some(condition.selector);
             stages.push(CaseStage {
                 mux_index,
-                key: condition.key,
+                keys: condition.keys,
                 value: *true_value,
             });
             cursor = *false_value;
@@ -302,7 +305,9 @@ fn dense_constant_lookup_mux_indices(
         };
         let mut effective = BTreeMap::new();
         for stage in &stages {
-            effective.entry(stage.key.clone()).or_insert(stage.value);
+            for key in &stage.keys {
+                effective.entry(key.clone()).or_insert(stage.value);
+            }
         }
         if is_dense_constant_lookup(
             eu,
@@ -368,16 +373,13 @@ fn recognize_sparse_case_chain(
         selector = Some(condition.selector);
         stages.push(CaseStage {
             mux_index,
-            key: condition.key,
+            keys: condition.keys,
             value: *true_value,
         });
         cursor = *false_value;
     }
 
-    // One exact key is an ordinary branchification problem, not a sparse
-    // case-dispatch problem.  Requiring multiple keys is structural, while
-    // profitability below decides every size/cost tradeoff.
-    if stages.len() < 2 {
+    if stages.is_empty() {
         return None;
     }
     let selector = selector?;
@@ -391,8 +393,13 @@ fn recognize_sparse_case_chain(
     // chain; inner duplicates are unreachable and deliberately omitted.
     let mut effective = BTreeMap::<BigUint, RegisterId>::new();
     for stage in &stages {
-        effective.entry(stage.key.clone()).or_insert(stage.value);
+        for key in &stage.keys {
+            effective.entry(key.clone()).or_insert(stage.value);
+        }
     }
+    // One exact key is an ordinary branchification problem, not a sparse
+    // case-dispatch problem.  A grouped condition can make one mux a genuine
+    // multi-key dispatch, so count semantic keys rather than mux stages.
     if effective.len() < 2 {
         return None;
     }
@@ -416,12 +423,17 @@ fn recognize_sparse_case_chain(
         value: cursor,
         sink_defs: Vec::new(),
     });
+    let mut arm_by_value = HashMap::default();
+    arm_by_value.insert(cursor, 0usize);
     let mut changes = BTreeMap::<BigUint, usize>::new();
     for (key, value) in effective {
-        let arm = arms.len();
-        arms.push(DispatchArm {
-            value,
-            sink_defs: Vec::new(),
+        let arm = *arm_by_value.entry(value).or_insert_with(|| {
+            let arm = arms.len();
+            arms.push(DispatchArm {
+                value,
+                sink_defs: Vec::new(),
+            });
+            arm
         });
         changes.insert(key.clone(), arm);
         let next = &key + BigUint::one();
@@ -433,11 +445,19 @@ fn recognize_sparse_case_chain(
     }
 
     let initial_arm = changes.remove(&BigUint::zero()).unwrap_or(0);
+    let mut current_arm = initial_arm;
     let boundaries = changes
         .into_iter()
-        .map(|(threshold, right_arm)| Boundary {
-            threshold,
-            right_arm,
+        .filter_map(|(threshold, right_arm)| {
+            if right_arm == current_arm {
+                None
+            } else {
+                current_arm = right_arm;
+                Some(Boundary {
+                    threshold,
+                    right_arm,
+                })
+            }
         })
         .collect::<Vec<_>>();
     if boundaries.is_empty() {
@@ -550,7 +570,11 @@ fn is_dense_constant_lookup(
     let Some(domain_size) = 1usize.checked_shl(selector_width as u32) else {
         return false;
     };
-    if domain_size < 4 || stages.len() != domain_size || effective.len() != domain_size {
+    if domain_size < 4
+        || stages.len() != domain_size
+        || stages.iter().any(|stage| stage.keys.len() != 1)
+        || effective.len() != domain_size
+    {
         return false;
     }
     if !effective
@@ -563,6 +587,12 @@ fn is_dense_constant_lookup(
     effective
         .values()
         .all(|&value| is_direct_definite_u64_constant(eu, def_sites, value))
+}
+
+fn case_key_count(stages: &[CaseStage]) -> usize {
+    stages.iter().fold(0usize, |count, stage| {
+        count.saturating_add(stage.keys.len())
+    })
 }
 
 fn is_direct_definite_u64_constant(
@@ -578,13 +608,36 @@ fn is_direct_definite_u64_constant(
 
 struct ExactCaseCondition {
     selector: RegisterId,
-    key: BigUint,
+    keys: Vec<BigUint>,
 }
 
 fn match_exact_case_condition(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     def_sites: &HashMap<RegisterId, DefSite>,
     cond: RegisterId,
+) -> Option<ExactCaseCondition> {
+    match_exact_case_condition_inner(eu, def_sites, cond, &mut HashSet::default())
+}
+
+fn match_exact_case_condition_inner(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_sites: &HashMap<RegisterId, DefSite>,
+    cond: RegisterId,
+    active: &mut HashSet<RegisterId>,
+) -> Option<ExactCaseCondition> {
+    if !active.insert(cond) {
+        return None;
+    }
+    let result = match_exact_case_condition_inner_impl(eu, def_sites, cond, active);
+    active.remove(&cond);
+    result
+}
+
+fn match_exact_case_condition_inner_impl(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_sites: &HashMap<RegisterId, DefSite>,
+    cond: RegisterId,
+    active: &mut HashSet<RegisterId>,
 ) -> Option<ExactCaseCondition> {
     let mut cursor = cond;
     let mut seen = HashSet::default();
@@ -613,6 +666,31 @@ fn match_exact_case_condition(
             }
             _ => break,
         }
+    }
+
+    if let SIRInstruction::Binary(result, lhs, BinaryOp::LogicOr | BinaryOp::Or, rhs) =
+        instruction_defining(eu, def_sites, cursor)?
+    {
+        if eu.register_map.get(result)?.width() != 1
+            || eu.register_map.get(lhs)?.width() != 1
+            || eu.register_map.get(rhs)?.width() != 1
+        {
+            return None;
+        }
+        let lhs = match_exact_case_condition_inner(eu, def_sites, *lhs, active)?;
+        let rhs = match_exact_case_condition_inner(eu, def_sites, *rhs, active)?;
+        if lhs.selector != rhs.selector {
+            return None;
+        }
+        let mut keys = lhs.keys.into_iter().collect::<BTreeSet<_>>();
+        keys.extend(rhs.keys);
+        if keys.is_empty() {
+            return None;
+        }
+        return Some(ExactCaseCondition {
+            selector: lhs.selector,
+            keys: keys.into_iter().collect(),
+        });
     }
 
     let SIRInstruction::Binary(
@@ -650,18 +728,26 @@ fn match_exact_case_condition(
         }
         _ => unreachable!(),
     };
-    let selector = canonical_identity(eu, def_sites, selector);
+    let compare_width = eu.register_map.get(&selector)?.width();
+    if compare_width == 0 || eu.register_map.get(&key_reg)?.width() != compare_width {
+        return None;
+    }
+    let key = truncate_to_width(key, compare_width);
+    let selector = canonical_case_selector(eu, def_sites, selector);
     let selector_width = eu.register_map.get(&selector)?.width();
-    if selector_width == 0 || eu.register_map.get(&key_reg)?.width() != selector_width {
+    // A zero-extension wrapper is removable only for keys whose high part is
+    // zero.  A non-fitting key makes that equality constantly false; reject
+    // the whole condition instead of silently dropping one OR alternative.
+    if selector_width == 0 || !value_fits_width(&key, selector_width) {
         return None;
     }
     Some(ExactCaseCondition {
         selector,
-        key: truncate_to_width(key, selector_width),
+        keys: vec![key],
     })
 }
 
-fn canonical_identity(
+fn canonical_case_selector(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     def_sites: &HashMap<RegisterId, DefSite>,
     mut reg: RegisterId,
@@ -674,6 +760,44 @@ fn canonical_identity(
             {
                 reg = *inner;
             }
+            Some(SIRInstruction::Concat(dst, args)) if !args.is_empty() => {
+                let (&low, high) = match args.split_last() {
+                    Some(parts) => parts,
+                    None => break,
+                };
+                let Some(low_width) = eu.register_map.get(&low).map(RegisterType::width) else {
+                    break;
+                };
+                let Some(dst_width) = eu.register_map.get(dst).map(RegisterType::width) else {
+                    break;
+                };
+                let Some(total_width) = high.iter().try_fold(low_width, |sum, high| {
+                    sum.checked_add(eu.register_map.get(high)?.width())
+                }) else {
+                    break;
+                };
+                if low_width == 0
+                    || dst_width != total_width
+                    || high.iter().any(|high| {
+                        exact_constant(eu, def_sites, *high).is_none_or(|value| !value.is_zero())
+                    })
+                    || (dst_width == low_width && !identity_preserves_bits(eu, *dst, low))
+                {
+                    break;
+                }
+                reg = low;
+            }
+            Some(SIRInstruction::Slice(dst, src, 0, width))
+                if *width
+                    == eu
+                        .register_map
+                        .get(src)
+                        .map(RegisterType::width)
+                        .unwrap_or(0)
+                    && identity_preserves_bits(eu, *dst, *src) =>
+            {
+                reg = *src;
+            }
             _ => break,
         }
     }
@@ -683,23 +807,60 @@ fn canonical_identity(
 fn exact_constant(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     def_sites: &HashMap<RegisterId, DefSite>,
-    mut reg: RegisterId,
+    reg: RegisterId,
 ) -> Option<BigUint> {
-    let mut seen = HashSet::default();
-    while seen.insert(reg) {
-        match instruction_defining(eu, def_sites, reg)? {
-            SIRInstruction::Imm(_, value) if value.mask.is_zero() => {
-                return Some(value.payload.clone());
-            }
-            SIRInstruction::Unary(dst, UnaryOp::Ident, inner)
-                if identity_preserves_bits(eu, *dst, *inner) =>
-            {
-                reg = *inner;
-            }
-            _ => return None,
-        }
+    exact_constant_inner(eu, def_sites, reg, &mut HashSet::default())
+}
+
+fn exact_constant_inner(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_sites: &HashMap<RegisterId, DefSite>,
+    reg: RegisterId,
+    active: &mut HashSet<RegisterId>,
+) -> Option<BigUint> {
+    if !active.insert(reg) {
+        return None;
     }
-    None
+    let width = eu.register_map.get(&reg)?.width();
+    let result = match instruction_defining(eu, def_sites, reg)? {
+        SIRInstruction::Imm(_, value) if value.mask.is_zero() => {
+            Some(truncate_to_width(value.payload.clone(), width))
+        }
+        SIRInstruction::Unary(dst, UnaryOp::Ident, inner)
+            if identity_preserves_bits(eu, *dst, *inner) =>
+        {
+            exact_constant_inner(eu, def_sites, *inner, active)
+        }
+        SIRInstruction::Concat(dst, args) if !args.is_empty() => {
+            let mut value = BigUint::zero();
+            let mut total_width = 0usize;
+            for &arg in args {
+                let arg_width = eu.register_map.get(&arg)?.width();
+                total_width = total_width.checked_add(arg_width)?;
+                value <<= arg_width;
+                value |= exact_constant_inner(eu, def_sites, arg, active)?;
+            }
+            if total_width != eu.register_map.get(dst)?.width() {
+                None
+            } else {
+                Some(truncate_to_width(value, width))
+            }
+        }
+        SIRInstruction::Slice(dst, src, offset, slice_width) => {
+            let end = offset.checked_add(*slice_width)?;
+            if *slice_width != eu.register_map.get(dst)?.width()
+                || end > eu.register_map.get(src)?.width()
+            {
+                None
+            } else {
+                let value = exact_constant_inner(eu, def_sites, *src, active)? >> offset;
+                Some(truncate_to_width(value, *slice_width))
+            }
+        }
+        _ => None,
+    };
+    active.remove(&reg);
+    result
 }
 
 fn identity_preserves_bits(
@@ -1416,6 +1577,48 @@ mod tests {
             self.binary(1, selector, op, key)
         }
 
+        fn exact_condition_with_zero_extended_key(
+            &mut self,
+            selector: RegisterId,
+            key_width: usize,
+            key: u64,
+            op: BinaryOp,
+        ) -> RegisterId {
+            let selector_width = self.register_map[&selector].width();
+            assert!(key_width < selector_width);
+            let high = self.immediate(selector_width - key_width, 0);
+            let low = self.immediate(key_width, key);
+            let key = self.concat(vec![high, low]);
+            self.binary(1, selector, op, key)
+        }
+
+        fn grouped_condition(&mut self, conditions: &[RegisterId]) -> RegisterId {
+            assert!(!conditions.is_empty());
+            conditions[1..].iter().fold(conditions[0], |lhs, &rhs| {
+                self.binary(1, lhs, BinaryOp::LogicOr, rhs)
+            })
+        }
+
+        fn concat(&mut self, args: Vec<RegisterId>) -> RegisterId {
+            let width = args.iter().map(|arg| self.register_map[arg].width()).sum();
+            let dst = self.register(width);
+            self.instructions.push(SIRInstruction::Concat(dst, args));
+            dst
+        }
+
+        fn slice(&mut self, source: RegisterId, offset: usize, width: usize) -> RegisterId {
+            let dst = self.register(width);
+            self.instructions
+                .push(SIRInstruction::Slice(dst, source, offset, width));
+            dst
+        }
+
+        fn zero_extend(&mut self, source: RegisterId, extension: usize) -> RegisterId {
+            assert!(extension > 0);
+            let zero = self.immediate(extension, 0);
+            self.concat(vec![zero, source])
+        }
+
         fn expensive_value(&mut self, seed: u64, factor: RegisterId) -> RegisterId {
             let mut value = self.immediate(64, seed);
             for _ in 0..6 {
@@ -1507,6 +1710,246 @@ mod tests {
         assert_eq!(actual, expected);
         // The outer duplicate is stage 7 (seed 37), rather than stage 0.
         assert_eq!(actual[2], BigUint::from(37u8) * BigUint::from(3u8).pow(6));
+    }
+
+    #[test]
+    fn lowers_grouped_keys_across_exact_zero_extensions() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        let selector_5 = builder.zero_extend(selector, 1);
+        let selector_6 = builder.zero_extend(selector, 2);
+        let factor = builder.immediate(64, 3);
+        let mut previous = builder.expensive_value(10, factor);
+
+        let condition_13 = [
+            builder.exact_condition(selector_5, 1, BinaryOp::EqWildcard),
+            builder.exact_condition(selector_5, 3, BinaryOp::EqWildcard),
+        ];
+        let condition_13 = builder.grouped_condition(&condition_13);
+        let value_13 = builder.expensive_value(20, factor);
+        previous = builder.mux(condition_13, value_13, previous);
+
+        let condition_246 = [
+            builder.exact_condition_with_zero_extended_key(selector_6, 4, 2, BinaryOp::EqWildcard),
+            builder.exact_condition_with_zero_extended_key(selector_6, 4, 4, BinaryOp::EqWildcard),
+            builder.exact_condition_with_zero_extended_key(selector_6, 4, 6, BinaryOp::EqWildcard),
+        ];
+        let condition_246 = builder.grouped_condition(&condition_246);
+        let value_246 = builder.expensive_value(30, factor);
+        previous = builder.mux(condition_246, value_246, previous);
+
+        let condition_89 = [
+            builder.exact_condition(selector, 8, BinaryOp::Eq),
+            builder.exact_condition(selector, 9, BinaryOp::Eq),
+        ];
+        let condition_89 = builder.grouped_condition(&condition_89);
+        let value_89 = builder.expensive_value(40, factor);
+        previous = builder.mux(condition_89, value_89, previous);
+
+        let output = builder.ident(previous);
+        let mut eu = builder.finish(vec![selector]);
+        eu.verify();
+        let expected = (0..16)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Mux(..)))
+        }));
+        let actual = (0..16)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn grouped_duplicates_and_overlaps_preserve_outer_priority() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        let factor = builder.immediate(64, 3);
+        let mut previous = builder.expensive_value(10, factor);
+
+        for (keys, seed) in [
+            (&[1, 2, 2][..], 20),
+            (&[2, 3, 3][..], 30),
+            (&[4, 5][..], 40),
+        ] {
+            let leaves = keys
+                .iter()
+                .map(|&key| builder.exact_condition(selector, key, BinaryOp::EqWildcard))
+                .collect::<Vec<_>>();
+            let condition = builder.grouped_condition(&leaves);
+            let value = builder.expensive_value(seed, factor);
+            previous = builder.mux(condition, value, previous);
+        }
+        let output = builder.ident(previous);
+        let mut eu = builder.finish(vec![selector]);
+        eu.verify();
+        let expected = (0..16)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        let actual = (0..16)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(actual[2], BigUint::from(30u8) * BigUint::from(3u8).pow(6));
+    }
+
+    #[test]
+    fn lowers_bitwise_or_with_exact_concat_and_slice_keys() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        let sliced_selector = builder.slice(selector, 0, 4);
+
+        let key_high = builder.immediate(2, 0);
+        let key_low = builder.immediate(2, 1);
+        let concat_key = builder.concat(vec![key_high, key_low]);
+        let concat_condition = builder.binary(1, sliced_selector, BinaryOp::Eq, concat_key);
+
+        let key_source = builder.immediate(8, 0b10_10_01);
+        let slice_key = builder.slice(key_source, 2, 4);
+        let slice_condition = builder.binary(1, selector, BinaryOp::Eq, slice_key);
+        let condition = builder.binary(1, concat_condition, BinaryOp::Or, slice_condition);
+
+        let factor = builder.immediate(64, 3);
+        let make_value = |builder: &mut FixtureBuilder, seed| {
+            let mut value = builder.immediate(64, seed);
+            for _ in 0..16 {
+                value = builder.binary(64, value, BinaryOp::Mul, factor);
+            }
+            value
+        };
+        let default_value = make_value(&mut builder, 10);
+        let case_value = make_value(&mut builder, 20);
+        let result = builder.mux(condition, case_value, default_value);
+        let output = builder.ident(result);
+        let mut eu = builder.finish(vec![selector]);
+        eu.verify();
+        let expected = (0..16)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Mux(..)))
+        }));
+        let actual = (0..16)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rejects_grouped_mixed_selectors_and_nonzero_extensions() {
+        let mut mixed = FixtureBuilder::new();
+        let selector_a = mixed.register(4);
+        let selector_b = mixed.register(4);
+        let factor = mixed.immediate(64, 3);
+        let mut previous = mixed.expensive_value(1, factor);
+        for key in 0..4 {
+            let leaves = [
+                mixed.exact_condition(selector_a, key, BinaryOp::EqWildcard),
+                mixed.exact_condition(selector_b, key + 4, BinaryOp::EqWildcard),
+            ];
+            let condition = mixed.grouped_condition(&leaves);
+            let value = mixed.expensive_value(20 + key, factor);
+            previous = mixed.mux(condition, value, previous);
+        }
+        mixed.ident(previous);
+        let mut mixed = mixed.finish(vec![selector_a, selector_b]);
+        mixed.verify();
+        let original = mixed.clone();
+
+        SparseCaseDispatchPass::default().run(&mut mixed, &PassOptions::default());
+
+        assert_eq!(mixed.blocks, original.blocks);
+        assert_eq!(mixed.register_map, original.register_map);
+
+        let mut extended = FixtureBuilder::new();
+        let selector = extended.register(4);
+        let zero = extended.immediate(1, 0);
+        let one = extended.immediate(1, 1);
+        let zero_extended = extended.concat(vec![zero, selector]);
+        let nonzero_extended = extended.concat(vec![one, selector]);
+        let factor = extended.immediate(64, 3);
+        let mut previous = extended.expensive_value(1, factor);
+        for key in 0..4 {
+            let leaves = [
+                extended.exact_condition(zero_extended, key, BinaryOp::Eq),
+                extended.exact_condition(nonzero_extended, 16 + key, BinaryOp::Eq),
+            ];
+            let condition = extended.grouped_condition(&leaves);
+            let value = extended.expensive_value(30 + key, factor);
+            previous = extended.mux(condition, value, previous);
+        }
+        extended.ident(previous);
+        let mut extended = extended.finish(vec![selector]);
+        extended.verify();
+        let original = extended.clone();
+
+        SparseCaseDispatchPass::default().run(&mut extended, &PassOptions::default());
+
+        assert_eq!(extended.blocks, original.blocks);
+        assert_eq!(extended.register_map, original.register_map);
+    }
+
+    #[test]
+    fn rejects_grouped_signed_width_changing_identity_casts() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        builder.register_map.insert(
+            selector,
+            RegisterType::Bit {
+                width: 4,
+                signed: true,
+            },
+        );
+        let cast = builder.register(8);
+        builder.register_map.insert(
+            cast,
+            RegisterType::Bit {
+                width: 8,
+                signed: true,
+            },
+        );
+        builder
+            .instructions
+            .push(SIRInstruction::Unary(cast, UnaryOp::Ident, selector));
+        let factor = builder.immediate(64, 3);
+        let mut previous = builder.expensive_value(1, factor);
+        for key in 0..4 {
+            let leaves = [
+                builder.exact_condition(selector, key, BinaryOp::Eq),
+                builder.exact_condition(cast, key, BinaryOp::Eq),
+            ];
+            let condition = builder.grouped_condition(&leaves);
+            let value = builder.expensive_value(40 + key, factor);
+            previous = builder.mux(condition, value, previous);
+        }
+        builder.ident(previous);
+        let mut eu = builder.finish(vec![selector]);
+        eu.verify();
+        let original = eu.clone();
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.blocks, original.blocks);
+        assert_eq!(eu.register_map, original.register_map);
     }
 
     #[test]
@@ -2042,6 +2485,10 @@ mod tests {
                             BinaryOp::Eq | BinaryOp::EqWildcard => {
                                 BigUint::from(u8::from(lhs == rhs))
                             }
+                            BinaryOp::LogicOr => {
+                                BigUint::from(u8::from(!lhs.is_zero() || !rhs.is_zero()))
+                            }
+                            BinaryOp::Or => lhs | rhs,
                             BinaryOp::LtU => BigUint::from(u8::from(lhs < rhs)),
                             BinaryOp::Mul => lhs * rhs,
                             BinaryOp::Add => lhs + rhs,
@@ -2051,6 +2498,18 @@ mod tests {
                     }
                     SIRInstruction::Unary(dst, UnaryOp::Ident, src) => {
                         values.insert(*dst, values[src].clone());
+                    }
+                    SIRInstruction::Concat(dst, args) => {
+                        let mut value = BigUint::zero();
+                        for arg in args {
+                            value <<= eu.register_map[arg].width();
+                            value |= values[arg].clone();
+                        }
+                        values.insert(*dst, value);
+                    }
+                    SIRInstruction::Slice(dst, src, offset, width) => {
+                        let value = values[src].clone() >> offset;
+                        values.insert(*dst, truncate_to_width(value, *width));
                     }
                     SIRInstruction::Mux(dst, cond, true_value, false_value) => {
                         let selected = if values[cond].is_zero() {
