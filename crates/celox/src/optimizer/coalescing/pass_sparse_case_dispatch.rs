@@ -47,7 +47,7 @@ impl SparseCaseDispatchPass {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct DefSite {
     block: BlockId,
     index: usize,
@@ -124,8 +124,17 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
         // chain in its head or merge block.  Termination follows from the
         // strictly decreasing number of SIR Mux instructions; there is no
         // iteration or function-size cap.
+        let mut changed = false;
         while let Some(plan) = find_best_sparse_case_plan(eu, &self.stable_alias_class) {
             apply_sparse_case_plan(eu, plan);
+            changed = true;
+        }
+        if changed {
+            // A condition can be defined in a dominating predecessor left by
+            // an earlier CFG rewrite.  Prune those newly dead pure DAGs once,
+            // after plan discovery is complete, rather than rescanning the
+            // whole EU after every independently rewritten chain.
+            prune_dead_pure_instructions(eu);
         }
     }
 }
@@ -508,6 +517,17 @@ fn recognize_sparse_case_chain(
         local_defs,
         &occupied_sink_defs,
     )?;
+    let cross_block_dead_defs = cross_block_exact_dead_defs_after_rewrite(
+        eu,
+        block,
+        &stages,
+        selector,
+        boundaries.len(),
+        &arms,
+        &reachable_arms,
+        use_counts,
+        def_sites,
+    )?;
     let profitability = sparse_case_profitability(
         eu,
         block,
@@ -517,6 +537,7 @@ fn recognize_sparse_case_chain(
         &arms,
         &reachable_arms,
         &dead_defs,
+        &cross_block_dead_defs,
         boundaries.len(),
     );
     if !profitability.proves_worst_case_benefit() {
@@ -1120,6 +1141,186 @@ fn dead_defs_after_rewrite(
     Some(dead)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn cross_block_exact_dead_defs_after_rewrite(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    stages: &[CaseStage],
+    selector: RegisterId,
+    boundary_count: usize,
+    arms: &[DispatchArm],
+    reachable_arms: &[usize],
+    use_counts: &HashMap<RegisterId, usize>,
+    def_sites: &HashMap<RegisterId, DefSite>,
+) -> Option<HashSet<DefSite>> {
+    // Matching proves the shape of every condition, but the definitions can
+    // live in a predecessor after an earlier CFG rewrite.  Restrict the
+    // additional profitability credit to that exact predicate/key DAG.  In
+    // particular, do not turn this into speculative global DCE credit for an
+    // unrelated pure expression which happens to be dead already.
+    let mut candidates = HashSet::<RegisterId>::default();
+    for stage in stages {
+        collect_exact_condition_dag_defs(
+            eu,
+            def_sites,
+            stage_condition(block, stage)?,
+            selector,
+            &mut candidates,
+        );
+    }
+
+    let mut dominance = HashMap::<BlockId, bool>::default();
+    for &reg in &candidates {
+        let site = def_sites.get(&reg)?;
+        if site.block != block.id
+            && !*dominance
+                .entry(site.block)
+                .or_insert_with(|| block_dominates(eu, site.block, block.id))
+        {
+            // A verifier-valid producer must dominate its use.  Refusing the
+            // credit here keeps this proof conservative even for malformed IR
+            // presented to the pass without verification.
+            return Some(HashSet::default());
+        }
+    }
+
+    let mut remaining = use_counts.clone();
+    for stage in stages {
+        for operand in instruction_uses(&block.instructions[stage.mux_index]) {
+            decrement_count(&mut remaining, operand)?;
+        }
+    }
+    let selector_uses = remaining.entry(selector).or_default();
+    *selector_uses = selector_uses.checked_add(boundary_count)?;
+    for &arm_index in reachable_arms {
+        let arm_uses = remaining.entry(arms[arm_index].value).or_default();
+        *arm_uses = arm_uses.checked_add(1)?;
+    }
+
+    let mut queue = candidates
+        .iter()
+        .copied()
+        .filter(|reg| remaining.get(reg).copied().unwrap_or(0) == 0)
+        .collect::<VecDeque<_>>();
+    let mut dead = HashSet::<RegisterId>::default();
+    while let Some(reg) = queue.pop_front() {
+        if !dead.insert(reg) {
+            continue;
+        }
+        let inst = instruction_defining(eu, def_sites, reg)?;
+        for operand in instruction_uses(inst) {
+            decrement_count(&mut remaining, operand)?;
+            if candidates.contains(&operand) && remaining.get(&operand).copied().unwrap_or(0) == 0 {
+                queue.push_back(operand);
+            }
+        }
+    }
+
+    Some(
+        dead.into_iter()
+            .filter_map(|reg| def_sites.get(&reg).copied())
+            .filter(|site| site.block != block.id)
+            .collect(),
+    )
+}
+
+fn stage_condition(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    stage: &CaseStage,
+) -> Option<RegisterId> {
+    match block.instructions.get(stage.mux_index)? {
+        SIRInstruction::Mux(_, cond, _, _) => Some(*cond),
+        _ => None,
+    }
+}
+
+fn collect_exact_condition_dag_defs(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_sites: &HashMap<RegisterId, DefSite>,
+    reg: RegisterId,
+    selector: RegisterId,
+    out: &mut HashSet<RegisterId>,
+) {
+    if reg == selector || out.contains(&reg) {
+        return;
+    }
+    let Some(inst) = instruction_defining(eu, def_sites, reg) else {
+        // Block parameters and external inputs are never removable defs.
+        return;
+    };
+    if !is_exact_condition_dag_instruction(inst) {
+        return;
+    }
+    out.insert(reg);
+    for operand in instruction_uses(inst) {
+        collect_exact_condition_dag_defs(eu, def_sites, operand, selector, out);
+    }
+}
+
+fn is_exact_condition_dag_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    matches!(
+        inst,
+        SIRInstruction::Imm(..)
+            | SIRInstruction::Binary(
+                _,
+                _,
+                BinaryOp::Eq | BinaryOp::EqWildcard | BinaryOp::LogicOr | BinaryOp::Or,
+                _,
+            )
+            | SIRInstruction::Unary(_, UnaryOp::Ident, _)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+    )
+}
+
+fn block_dominates(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    dominator: BlockId,
+    target: BlockId,
+) -> bool {
+    if dominator == target || dominator == eu.entry_block_id {
+        return eu.blocks.contains_key(&dominator) && eu.blocks.contains_key(&target);
+    }
+    if !eu.blocks.contains_key(&dominator)
+        || !eu.blocks.contains_key(&target)
+        || !eu.blocks.contains_key(&eu.entry_block_id)
+    {
+        return false;
+    }
+
+    // `dominator` dominates `target` exactly when removing it makes `target`
+    // unreachable from the entry.  This one-target proof runs only for the
+    // distinct external producer blocks of an otherwise profitable-looking
+    // case chain, avoiding a whole-EU dominator matrix in the common path.
+    let mut seen = HashSet::default();
+    let mut queue = VecDeque::from([eu.entry_block_id]);
+    while let Some(block_id) = queue.pop_front() {
+        if block_id == dominator || !seen.insert(block_id) {
+            continue;
+        }
+        if block_id == target {
+            return false;
+        }
+        let Some(block) = eu.blocks.get(&block_id) else {
+            return false;
+        };
+        queue.extend(terminator_successors(&block.terminator));
+    }
+    true
+}
+
+fn terminator_successors(term: &SIRTerminator) -> Vec<BlockId> {
+    match term {
+        SIRTerminator::Jump(target, _) => vec![*target],
+        SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => vec![true_block.0, false_block.0],
+        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+    }
+}
+
 fn decrement_count(counts: &mut HashMap<RegisterId, usize>, reg: RegisterId) -> Option<()> {
     let count = counts.get_mut(&reg)?;
     *count = count.checked_sub(1)?;
@@ -1144,6 +1345,7 @@ fn sparse_case_profitability(
     arms: &[DispatchArm],
     reachable_arms: &[usize],
     dead_defs: &HashSet<usize>,
+    cross_block_dead_defs: &HashSet<DefSite>,
     boundary_count: usize,
 ) -> SparseCaseProfitability {
     let chain_cost = saturating_sum(stages.iter().map(|stage| {
@@ -1153,7 +1355,15 @@ fn sparse_case_profitability(
         dead_defs
             .iter()
             .map(|&index| runtime_instruction_cost(&block.instructions[index], &eu.register_map)),
-    );
+    )
+    .saturating_add(saturating_sum(cross_block_dead_defs.iter().filter_map(
+        |site| {
+            eu.blocks
+                .get(&site.block)
+                .and_then(|block| block.instructions.get(site.index))
+                .map(|inst| runtime_instruction_cost(inst, &eu.register_map))
+        },
+    )));
     let arm_costs = reachable_arms
         .iter()
         .map(|&arm_index| {
@@ -1345,6 +1555,35 @@ fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Sp
     eu.blocks.insert(plan.block_id, head);
     eu.blocks.insert(merge_id, merge);
     eu.blocks.extend(generated);
+}
+
+fn prune_dead_pure_instructions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    let defs = definition_sites(eu);
+    let mut work = Vec::new();
+    for block in eu.blocks.values() {
+        work.extend(terminator_uses(&block.terminator));
+        for inst in &block.instructions {
+            if !is_removable_pure(inst) {
+                work.extend(instruction_uses(inst));
+            }
+        }
+    }
+
+    let mut live = HashSet::default();
+    while let Some(reg) = work.pop() {
+        if !live.insert(reg) {
+            continue;
+        }
+        if let Some(inst) = instruction_defining(eu, &defs, reg) {
+            work.extend(instruction_uses(inst));
+        }
+    }
+
+    for block in eu.blocks.values_mut() {
+        block.instructions.retain(|inst| {
+            !is_removable_pure(inst) || def_reg(inst).is_some_and(|dst| live.contains(&dst))
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1647,6 +1886,17 @@ mod tests {
             dst
         }
 
+        fn observe(&mut self, source: RegisterId) {
+            self.instructions.push(SIRInstruction::Store(
+                address(usize::MAX),
+                SIROffset::Static(0),
+                self.register_map[&source].width(),
+                source,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+
         fn finish(self, params: Vec<RegisterId>) -> ExecutionUnit<RegionedAbsoluteAddr> {
             let block = BasicBlock {
                 id: BlockId(0),
@@ -1683,7 +1933,74 @@ mod tests {
             previous = builder.mux(cond, value, previous);
         }
         let output = builder.ident(previous);
+        builder.observe(output);
         (builder.finish(vec![selector]), selector, output)
+    }
+
+    fn cross_block_case_fixture(
+        case_count: usize,
+        keep_first_condition_live: bool,
+    ) -> (
+        ExecutionUnit<RegionedAbsoluteAddr>,
+        RegisterId,
+        RegisterId,
+        Vec<RegisterId>,
+    ) {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(7);
+        let default_value = builder.immediate(64, 0xf0);
+        let mut conditions = Vec::with_capacity(case_count);
+        let mut values = Vec::with_capacity(case_count);
+        for key in 0..case_count {
+            conditions.push(builder.exact_condition(selector, key as u64, BinaryOp::EqWildcard));
+            values.push(builder.immediate(64, 0x100 + key as u64));
+        }
+        if keep_first_condition_live {
+            builder.instructions.push(SIRInstruction::Store(
+                address(usize::MAX - 1),
+                SIROffset::Static(0),
+                1,
+                conditions[0],
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+
+        let split = builder.instructions.len();
+        let mut previous = default_value;
+        for (&condition, &value) in conditions.iter().zip(&values) {
+            previous = builder.mux(condition, value, previous);
+        }
+        let output = builder.ident(previous);
+        builder.observe(output);
+        let mut eu = builder.finish(vec![selector]);
+        let successor_instructions = eu
+            .blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .instructions
+            .split_off(split);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().terminator =
+            SIRTerminator::Jump(BlockId(1), Vec::new());
+        eu.blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: Vec::new(),
+                instructions: successor_instructions,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        (eu, selector, output, conditions)
+    }
+
+    fn has_definition(eu: &ExecutionUnit<RegionedAbsoluteAddr>, reg: RegisterId) -> bool {
+        eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|inst| def_reg(inst) == Some(reg))
+        })
     }
 
     #[test]
@@ -1747,6 +2064,7 @@ mod tests {
         previous = builder.mux(condition_89, value_89, previous);
 
         let output = builder.ident(previous);
+        builder.observe(output);
         let mut eu = builder.finish(vec![selector]);
         eu.verify();
         let expected = (0..16)
@@ -1789,6 +2107,7 @@ mod tests {
             previous = builder.mux(condition, value, previous);
         }
         let output = builder.ident(previous);
+        builder.observe(output);
         let mut eu = builder.finish(vec![selector]);
         eu.verify();
         let expected = (0..16)
@@ -1833,6 +2152,7 @@ mod tests {
         let case_value = make_value(&mut builder, 20);
         let result = builder.mux(condition, case_value, default_value);
         let output = builder.ident(result);
+        builder.observe(output);
         let mut eu = builder.finish(vec![selector]);
         eu.verify();
         let expected = (0..16)
@@ -2112,6 +2432,83 @@ mod tests {
     }
 
     #[test]
+    fn counts_and_prunes_dead_cross_block_exact_conditions() {
+        let (mut eu, selector, output, conditions) = cross_block_case_fixture(71, false);
+        eu.verify();
+        let expected = (0..128)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Mux(..)))
+        }));
+        assert!(
+            conditions
+                .iter()
+                .all(|condition| !has_definition(&eu, *condition))
+        );
+        let actual = (0..128)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn retains_a_cross_block_condition_with_an_external_effect_use() {
+        let (mut eu, selector, output, conditions) = cross_block_case_fixture(71, true);
+        eu.verify();
+        let expected = (0..128)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        let shared = conditions[0];
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert!(has_definition(&eu, shared));
+        assert!(
+            conditions[1..]
+                .iter()
+                .all(|condition| !has_definition(&eu, *condition))
+        );
+        assert!(eu.blocks.values().any(|block| {
+            block.instructions.iter().any(
+                |inst| matches!(inst, SIRInstruction::Store(_, _, _, src, _, _) if *src == shared),
+            )
+        }));
+        let actual = (0..128)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cross_block_dead_cost_does_not_force_an_unprofitable_dispatch() {
+        let (mut eu, selector, output, _) = cross_block_case_fixture(2, false);
+        eu.verify();
+        let expected = (0..8)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        let original = eu.clone();
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert_eq!(eu.blocks, original.blocks);
+        assert_eq!(eu.register_map, original.register_map);
+        let actual = (0..8)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn does_not_partially_rewrite_a_full_domain_constant_lookup() {
         let mut builder = FixtureBuilder::new();
         let selector = builder.register(7);
@@ -2253,12 +2650,17 @@ mod tests {
             BasicBlock {
                 id: BlockId(1),
                 params: Vec::new(),
-                instructions: vec![SIRInstruction::Binary(
-                    external_result,
-                    shared,
-                    BinaryOp::Add,
-                    previous,
-                )],
+                instructions: vec![
+                    SIRInstruction::Binary(external_result, shared, BinaryOp::Add, previous),
+                    SIRInstruction::Store(
+                        address(usize::MAX),
+                        SIROffset::Static(0),
+                        64,
+                        external_result,
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
                 terminator: SIRTerminator::Return,
             },
         );
@@ -2518,6 +2920,9 @@ mod tests {
                             true_value
                         };
                         values.insert(*dst, values[selected].clone());
+                    }
+                    SIRInstruction::Store(_, _, _, src, _, _) => {
+                        assert!(values.contains_key(src));
                     }
                     other => panic!("unsupported test instruction {other:?}"),
                 }
