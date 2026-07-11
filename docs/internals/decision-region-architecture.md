@@ -2330,6 +2330,14 @@ ControlValueWire { OccurrenceWire,
                    raw action-order/scheduled-edge rows }
 ```
 
+The byte-level envelope, section/pool canonicality, allocation plan, and the
+private unclassified source-node stage are specified separately in
+[Private source-wire framing and staging](./source-wire-format.md). That
+document is not a `SourceWireV1` declaration: no source schema version or
+frozen artifact exists until the complete typed-HIR, provenance, expected-graph,
+and ordinary/gated classification relation below can be verified as one
+aggregate.
+
 Only aggregate `decode_and_verify` entry points are public. New wires are
 version-tagged and reject unknown fields; only an explicit old-version adapter
 may discard obsolete derived fields. Source decoding first converts
