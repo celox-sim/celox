@@ -1,6 +1,6 @@
 use crate::BigUint;
 use crate::parser::{ParserError, resolve_dims};
-use num_traits::Zero;
+use num_traits::{ToPrimitive as _, Zero};
 use veryl_analyzer::ir::{
     AssignDestination, Comptime, Expression, Factor, Module, Op, VarId, VarIndex, VarSelect,
     VarSelectOp,
@@ -122,6 +122,41 @@ pub fn eval_constexpr(expr: &Expression) -> Option<BigUint> {
     }
 }
 
+fn eval_constexpr_usize(
+    expr: &Expression,
+    feature: &'static str,
+) -> Result<Option<usize>, ParserError> {
+    let Some(value) = eval_constexpr(expr) else {
+        return Ok(None);
+    };
+    value.to_usize().map(Some).ok_or_else(|| {
+        ParserError::illegal_context(
+            feature,
+            "compile-time value cannot be represented as usize",
+            Some(&expr.token_range()),
+        )
+    })
+}
+
+fn checked_bit_access(
+    base: usize,
+    width: usize,
+    feature: &'static str,
+    token: Option<&TokenRange>,
+) -> Result<BitAccess, ParserError> {
+    if width == 0 {
+        return Err(ParserError::illegal_context(
+            feature,
+            "selected width must be nonzero",
+            token,
+        ));
+    }
+    let msb = base
+        .checked_add(width - 1)
+        .ok_or_else(|| ParserError::illegal_context(feature, "bit range overflows usize", token))?;
+    Ok(BitAccess::new(base, msb))
+}
+
 fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserError> {
     let variable = &module.variables[&var_id];
     let var_type = &variable.r#type;
@@ -147,44 +182,261 @@ fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserErro
     Ok(dims)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartSelectGeometry {
+    Colon { lsb: usize, elements: usize },
+    PlusColon { elements: usize },
+    MinusColon { elements: usize },
+    Step { elements: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectGeometry {
+    pub dimensions: Vec<usize>,
+    pub strides: Vec<usize>,
+    pub total_width: usize,
+    /// Number of aggregate indices before the optional part-select anchor.
+    pub dimension_count: usize,
+    pub part: Option<PartSelectGeometry>,
+    pub selected_width: usize,
+}
+
+/// Validate and normalize a variable select before any consumer constructs IR.
+///
+/// In particular, a part-select anchor never consumes another aggregate
+/// dimension.  `+:`, `-:`, and `step` require a static, nonzero width, while
+/// both bounds of `:` must be static because its result width is otherwise not
+/// representable in the typed IR.
+pub(crate) fn select_geometry(
+    module: &Module,
+    var_id: VarId,
+    index: &VarIndex,
+    select: &VarSelect,
+) -> Result<SelectGeometry, ParserError> {
+    let (dimensions, strides, total_width) = get_dimensions_and_strides(module, var_id)?;
+    let total_indices = index.0.len().checked_add(select.0.len()).ok_or_else(|| {
+        ParserError::illegal_context("variable select", "index count overflows usize", None)
+    })?;
+
+    let Some((op, range_expr)) = &select.1 else {
+        if total_indices > dimensions.len() {
+            return Err(ParserError::illegal_context(
+                "variable select",
+                format!(
+                    "{total_indices} indices exceed the variable's {} dimensions",
+                    dimensions.len()
+                ),
+                None,
+            ));
+        }
+        let selected_width = if total_indices == 0 {
+            total_width
+        } else {
+            *strides.get(total_indices - 1).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "variable select",
+                    "selected dimension is absent from the stride table",
+                    None,
+                )
+            })?
+        };
+        return Ok(SelectGeometry {
+            dimensions,
+            strides,
+            total_width,
+            dimension_count: total_indices,
+            part: None,
+            selected_width,
+        });
+    };
+
+    let anchor_expr = select.0.last().ok_or_else(|| {
+        ParserError::illegal_context(
+            "variable part select",
+            "part select is missing its anchor expression",
+            Some(&range_expr.token_range()),
+        )
+    })?;
+    let dimension_count = total_indices.checked_sub(1).ok_or_else(|| {
+        ParserError::illegal_context(
+            "variable part select",
+            "part select is missing its anchor expression",
+            Some(&range_expr.token_range()),
+        )
+    })?;
+    let dimension_width = *dimensions.get(dimension_count).ok_or_else(|| {
+        ParserError::illegal_context(
+            "variable part select",
+            format!(
+                "part-select dimension {dimension_count} is outside the {}-dimension variable",
+                dimensions.len()
+            ),
+            Some(&range_expr.token_range()),
+        )
+    })?;
+    let stride = *strides.get(dimension_count).ok_or_else(|| {
+        ParserError::illegal_context(
+            "variable part select",
+            format!(
+                "part-select dimension {dimension_count} is outside the {}-entry stride table",
+                strides.len()
+            ),
+            Some(&range_expr.token_range()),
+        )
+    })?;
+    let range =
+        eval_constexpr_usize(range_expr, "variable part-select range")?.ok_or_else(|| {
+            ParserError::illegal_context(
+                "variable part select",
+                "part-select range must be a compile-time value",
+                Some(&range_expr.token_range()),
+            )
+        })?;
+    let anchor = eval_constexpr_usize(anchor_expr, "variable part-select anchor")?;
+
+    let part = match op {
+        VarSelectOp::Colon => {
+            let anchor = anchor.ok_or_else(|| {
+                ParserError::illegal_context(
+                    "variable part select",
+                    "colon-select bounds must both be compile-time values",
+                    Some(&anchor_expr.token_range()),
+                )
+            })?;
+            if anchor < range || anchor >= dimension_width {
+                return Err(ParserError::illegal_context(
+                    "variable part select",
+                    format!(
+                        "colon-select [{anchor}:{range}] is outside dimension width {dimension_width}"
+                    ),
+                    Some(&anchor_expr.token_range()),
+                ));
+            }
+            PartSelectGeometry::Colon {
+                lsb: range,
+                elements: anchor - range + 1,
+            }
+        }
+        VarSelectOp::PlusColon | VarSelectOp::MinusColon | VarSelectOp::Step => {
+            if range == 0 {
+                return Err(ParserError::illegal_context(
+                    "variable part select",
+                    "part-select width must be nonzero",
+                    Some(&range_expr.token_range()),
+                ));
+            }
+            if range > dimension_width {
+                return Err(ParserError::illegal_context(
+                    "variable part select",
+                    format!("part-select width {range} exceeds dimension width {dimension_width}"),
+                    Some(&range_expr.token_range()),
+                ));
+            }
+            if let Some(anchor) = anchor {
+                let valid = match op {
+                    VarSelectOp::PlusColon => anchor
+                        .checked_add(range)
+                        .is_some_and(|end| end <= dimension_width),
+                    VarSelectOp::MinusColon => {
+                        anchor < dimension_width
+                            && anchor.checked_add(1).is_some_and(|n| n >= range)
+                    }
+                    VarSelectOp::Step => anchor
+                        .checked_mul(range)
+                        .and_then(|start| start.checked_add(range))
+                        .is_some_and(|end| end <= dimension_width),
+                    VarSelectOp::Colon => false,
+                };
+                if !valid {
+                    return Err(ParserError::illegal_context(
+                        "variable part select",
+                        format!(
+                            "part-select anchor {anchor} and width {range} are outside dimension width {dimension_width}"
+                        ),
+                        Some(&anchor_expr.token_range()),
+                    ));
+                }
+            }
+            match op {
+                VarSelectOp::PlusColon => PartSelectGeometry::PlusColon { elements: range },
+                VarSelectOp::MinusColon => PartSelectGeometry::MinusColon { elements: range },
+                VarSelectOp::Step => PartSelectGeometry::Step { elements: range },
+                VarSelectOp::Colon => {
+                    return Err(ParserError::illegal_context(
+                        "variable part select",
+                        "inconsistent colon-select geometry",
+                        Some(&range_expr.token_range()),
+                    ));
+                }
+            }
+        }
+    };
+    let elements = match part {
+        PartSelectGeometry::Colon { elements, .. }
+        | PartSelectGeometry::PlusColon { elements }
+        | PartSelectGeometry::MinusColon { elements }
+        | PartSelectGeometry::Step { elements } => elements,
+    };
+    let selected_width = elements.checked_mul(stride).ok_or_else(|| {
+        ParserError::illegal_context(
+            "variable part select",
+            format!("select width {elements} times stride {stride} overflows usize"),
+            Some(&range_expr.token_range()),
+        )
+    })?;
+
+    Ok(SelectGeometry {
+        dimensions,
+        strides,
+        total_width,
+        dimension_count,
+        part: Some(part),
+        selected_width,
+    })
+}
+
 pub fn eval_var_select(
     module: &Module,
     var_id: VarId,
     index: &VarIndex,
     select: &VarSelect,
 ) -> Result<BitAccess, ParserError> {
-    let dims = collect_dims(module, var_id)?;
-
-    let mut strides = vec![1; dims.len()];
-    let mut current_stride = 1;
-    for i in (0..dims.len()).rev() {
-        strides[i] = current_stride;
-        current_stride *= dims[i];
-    }
-
-    let total_width = current_stride;
+    let geometry = select_geometry(module, var_id, index, select)?;
+    let strides = &geometry.strides;
+    let total_width = geometry.total_width;
 
     // Helper: Calculates the "full slice range" at that point
     // i: Index of the failed dimension
-    let get_slice_fallback = |base: usize, i: usize| -> BitAccess {
-        let width = if i == 0 { total_width } else { strides[i - 1] };
-        BitAccess::new(base, base + width - 1)
-    };
-
-    let to_u = |e: &Expression| -> Option<usize> {
-        eval_constexpr(e).map(|v| {
-            if v.is_zero() {
-                0
-            } else {
-                v.to_u64_digits().first().copied().unwrap_or(0) as usize
-            }
-        })
+    let get_slice_fallback = |base: usize, i: usize| -> Result<BitAccess, ParserError> {
+        let width = if i == 0 {
+            total_width
+        } else {
+            *strides.get(i - 1).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "variable select",
+                    format!("fallback dimension {i} is outside the stride table"),
+                    None,
+                )
+            })?
+        };
+        let access = checked_bit_access(base, width, "variable select", None)?;
+        if access.msb >= total_width {
+            return Err(ParserError::illegal_context(
+                "variable select",
+                format!(
+                    "dynamic fallback range [{}:{}] is outside width {total_width}",
+                    access.msb, access.lsb
+                ),
+                None,
+            ));
+        }
+        Ok(access)
     };
 
     let mut all_indices = index.0.clone();
     all_indices.extend(select.0.iter().cloned());
 
-    let mut base_offset = 0;
+    let mut base_offset = 0usize;
     let mut processed_count = 0;
 
     let limit = if select.1.is_some() {
@@ -194,54 +446,157 @@ pub fn eval_var_select(
     };
 
     for (i, index_val) in all_indices[..limit].iter().enumerate() {
-        if let Some(idx) = to_u(index_val) {
+        if let Some(idx) = eval_constexpr_usize(index_val, "variable select index")? {
             if let Some(&stride) = strides.get(i) {
-                base_offset += idx * stride;
+                let term = idx.checked_mul(stride).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "variable select",
+                        format!("index {idx} times stride {stride} overflows usize"),
+                        Some(&index_val.token_range()),
+                    )
+                })?;
+                base_offset = base_offset.checked_add(term).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "variable select",
+                        "selected bit offset overflows usize",
+                        Some(&index_val.token_range()),
+                    )
+                })?;
                 processed_count += 1;
             }
         } else {
             // Encountered dynamic index: return the entire range of this level based on current base_offset
-            return Ok(get_slice_fallback(base_offset, i));
+            return get_slice_fallback(base_offset, i);
         }
     }
 
     if let Some((op, range_expr)) = &select.1 {
-        let anchor_expr = all_indices.last().unwrap();
-        let Some(anchor) = to_u(anchor_expr) else {
+        let Some(anchor_expr) = all_indices.last() else {
+            return Err(ParserError::illegal_context(
+                "variable select",
+                "part select is missing its anchor expression",
+                Some(&range_expr.token_range()),
+            ));
+        };
+        let Some(anchor) = eval_constexpr_usize(anchor_expr, "variable select anchor")? else {
             // Dynamic part-select anchor: the longest static prefix stops
             // before this select, so conservatively use the whole current level.
-            return Ok(get_slice_fallback(base_offset, processed_count));
+            return get_slice_fallback(base_offset, processed_count);
         };
-        let val = if let Some(v) = to_u(range_expr) {
+        let val = if let Some(v) = eval_constexpr_usize(range_expr, "variable select range")? {
             v
         } else {
             // If range width is dynamic, also return the entire level range
-            return Ok(get_slice_fallback(base_offset, processed_count));
+            return get_slice_fallback(base_offset, processed_count);
         };
 
-        let weight = strides[processed_count];
+        let Some(&weight) = strides.get(processed_count) else {
+            return Err(ParserError::illegal_context(
+                "variable select",
+                format!(
+                    "part-select dimension {processed_count} is outside the {}-entry stride table",
+                    strides.len()
+                ),
+                Some(&anchor_expr.token_range()),
+            ));
+        };
+        if weight == 0 {
+            return Err(ParserError::illegal_context(
+                "variable select",
+                "part-select stride is zero",
+                Some(&anchor_expr.token_range()),
+            ));
+        }
 
         let (lsb_rel, msb_rel) = match op {
-            VarSelectOp::Colon => (val * weight, anchor * weight + (weight - 1)),
-            VarSelectOp::PlusColon => (anchor * weight, (anchor + val) * weight - 1),
+            VarSelectOp::Colon => {
+                let lsb = val.checked_mul(weight);
+                let msb = anchor
+                    .checked_mul(weight)
+                    .and_then(|base| base.checked_add(weight - 1));
+                (lsb, msb)
+            }
+            VarSelectOp::PlusColon => {
+                let lsb = anchor.checked_mul(weight);
+                let msb = anchor
+                    .checked_add(val)
+                    .and_then(|end| end.checked_mul(weight))
+                    .and_then(|end| end.checked_sub(1));
+                (lsb, msb)
+            }
             VarSelectOp::MinusColon => {
-                let msb = anchor * weight + (weight - 1);
-                (msb.saturating_sub(val * weight) + 1, msb)
+                let msb = anchor
+                    .checked_mul(weight)
+                    .and_then(|base| base.checked_add(weight - 1));
+                let span = val.checked_mul(weight);
+                let lsb = msb
+                    .zip(span)
+                    .and_then(|(msb, span)| msb.checked_add(1)?.checked_sub(span));
+                (lsb, msb)
             }
             VarSelectOp::Step => {
-                let actual_lsb = anchor * val;
-                let actual_msb = actual_lsb + val - 1;
-                (actual_lsb * weight, (actual_msb + 1) * weight - 1)
+                let actual_lsb = anchor.checked_mul(val);
+                let lsb = actual_lsb.and_then(|lsb| lsb.checked_mul(weight));
+                let msb = actual_lsb
+                    .and_then(|lsb| lsb.checked_add(val))
+                    .and_then(|end| end.checked_mul(weight))
+                    .and_then(|end| end.checked_sub(1));
+                (lsb, msb)
             }
         };
-        Ok(BitAccess::new(base_offset + lsb_rel, base_offset + msb_rel))
+        let (Some(lsb_rel), Some(msb_rel)) = (lsb_rel, msb_rel) else {
+            return Err(ParserError::illegal_context(
+                "variable select",
+                "part-select range overflows or underflows usize",
+                Some(&anchor_expr.token_range()),
+            ));
+        };
+        let lsb = base_offset.checked_add(lsb_rel).ok_or_else(|| {
+            ParserError::illegal_context(
+                "variable select",
+                "part-select LSB overflows usize",
+                Some(&anchor_expr.token_range()),
+            )
+        })?;
+        let msb = base_offset.checked_add(msb_rel).ok_or_else(|| {
+            ParserError::illegal_context(
+                "variable select",
+                "part-select MSB overflows usize",
+                Some(&anchor_expr.token_range()),
+            )
+        })?;
+        if lsb > msb || msb >= total_width {
+            return Err(ParserError::illegal_context(
+                "variable select",
+                format!("selected range [{msb}:{lsb}] is outside width {total_width}"),
+                Some(&anchor_expr.token_range()),
+            ));
+        }
+        Ok(BitAccess::new(lsb, msb))
     } else {
         let width = if processed_count == 0 {
             total_width
         } else {
-            strides[processed_count - 1]
+            *strides.get(processed_count - 1).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "variable select",
+                    "selected dimension is outside the stride table",
+                    None,
+                )
+            })?
         };
-        Ok(BitAccess::new(base_offset, base_offset + width - 1))
+        let access = checked_bit_access(base_offset, width, "variable select", None)?;
+        if access.msb >= total_width {
+            return Err(ParserError::illegal_context(
+                "variable select",
+                format!(
+                    "selected range [{}:{}] is outside width {total_width}",
+                    access.msb, access.lsb
+                ),
+                None,
+            ));
+        }
+        Ok(access)
     }
 }
 pub fn is_static_access(index: &VarIndex, select: &VarSelect) -> bool {
@@ -273,10 +628,26 @@ pub fn get_dimensions_and_strides(
     let dims = collect_dims(module, var_id)?;
 
     let mut strides = vec![1; dims.len()];
-    let mut current_stride = 1;
+    let mut current_stride = 1usize;
     for i in (0..dims.len()).rev() {
+        if dims[i] == 0 {
+            return Err(ParserError::illegal_context(
+                "variable dimensions",
+                format!("dimension {i} has zero width"),
+                None,
+            ));
+        }
         strides[i] = current_stride;
-        current_stride *= dims[i];
+        current_stride = current_stride.checked_mul(dims[i]).ok_or_else(|| {
+            ParserError::illegal_context(
+                "variable dimensions",
+                format!(
+                    "dimension {} times accumulated stride {current_stride} overflows usize",
+                    dims[i]
+                ),
+                None,
+            )
+        })?;
     }
     Ok((dims, strides, current_stride))
 }
@@ -287,64 +658,7 @@ pub fn get_access_width(
     index: &VarIndex,
     select: &VarSelect,
 ) -> Result<usize, ParserError> {
-    let (dims, strides, total_width) = get_dimensions_and_strides(module, var_id)?;
-    let total_indices = index.0.len() + select.0.len();
-
-    let to_u = |e: &Expression| -> Option<usize> {
-        eval_constexpr(e).map(|v| {
-            if v.is_zero() {
-                0
-            } else {
-                v.to_u64_digits().first().copied().unwrap_or(0) as usize
-            }
-        })
-    };
-
-    // Part select handling
-    if let Some((op, range_expr)) = &select.1 {
-        // When there's a part select (+: / -:), the last element of select.0
-        // is the anchor/base expression, not a dimension-consuming index.
-        // This matches eval_var_select which uses limit = all_indices.len() - 1.
-        let effective_idx = total_indices.saturating_sub(1);
-        let stride = if effective_idx < strides.len() {
-            strides[effective_idx]
-        } else {
-            1
-        };
-
-        let anchor = select.0.last().and_then(to_u);
-        let rhs = to_u(range_expr);
-
-        if let (Some(anchor), Some(rhs)) = (anchor, rhs) {
-            let elem_width = match op {
-                VarSelectOp::Colon => {
-                    if anchor >= rhs {
-                        anchor - rhs + 1
-                    } else {
-                        rhs - anchor + 1
-                    }
-                }
-                VarSelectOp::PlusColon | VarSelectOp::MinusColon | VarSelectOp::Step => rhs,
-            };
-            Ok(elem_width * stride)
-        } else {
-            // Fallback: return full width of the current dimension if width is dynamic (should not happen for +: / -:)
-            if effective_idx == 0 {
-                Ok(total_width)
-            } else {
-                Ok(strides[effective_idx - 1])
-            }
-        }
-    } else {
-        // Simple index access
-        if total_indices == 0 {
-            Ok(total_width)
-        } else if total_indices <= dims.len() {
-            Ok(strides[total_indices - 1])
-        } else {
-            Ok(1) // Should not happen if index count matches dimensions
-        }
-    }
+    Ok(select_geometry(module, var_id, index, select)?.selected_width)
 }
 
 /// Build a read-modify-write expression for a static partial assignment.

@@ -417,8 +417,24 @@ pub(super) fn eval_function_body_return(
     ) -> Result<(NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
         let ret_var = &module.variables[&ret_id];
         let ret_width = resolve_total_width(module, ret_var)?;
+        if ret_width == 0 {
+            return Err(ParserError::illegal_context(
+                "function return value",
+                "return variable has zero width",
+                None,
+            ));
+        }
         let ret_access = BitAccess::new(0, ret_width - 1);
-        let ret_parts = store[&ret_id].get_parts(ret_access);
+        let range_store = store.get(&ret_id).ok_or_else(|| {
+            ParserError::illegal_context(
+                "function return value",
+                "return variable is absent from the symbolic store",
+                None,
+            )
+        })?;
+        let ret_parts = range_store
+            .get_parts(ret_access)
+            .map_err(|error| super::range_store_error("function return value", error, None))?;
         Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena))
     }
 
@@ -932,9 +948,23 @@ pub(super) fn eval_function_body_return(
                 }
                 let end = bit - 1;
                 let access = BitAccess::new(start, end);
-                let parts = original.get_parts(access);
+                let parts = original.get_parts(access).map_err(|error| {
+                    super::range_store_error(
+                        "function for-loop state",
+                        error,
+                        Some(&for_stmt.token),
+                    )
+                })?;
                 let (expr, sources) = combine_parts_with_default(*id, access.lsb, parts, arena);
-                loop_store.update(access, Some((expr, sources)));
+                loop_store
+                    .update(access, Some((expr, sources)))
+                    .map_err(|error| {
+                        super::range_store_error(
+                            "function for-loop state",
+                            error,
+                            Some(&for_stmt.token),
+                        )
+                    })?;
             }
             symbolic_store.insert(*id, loop_store);
         }
@@ -1072,15 +1102,28 @@ pub(super) fn eval_function_body_return(
         let initial_updates: Vec<_> = updates
             .iter()
             .map(|(target, _, _)| {
-                let parts = state.store[&target.id].get_parts(target.access);
+                let range_store = state.store.get(&target.id).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "function for-loop initial state",
+                        "state variable is absent from the symbolic store",
+                        Some(&for_stmt.token),
+                    )
+                })?;
+                let parts = range_store.get_parts(target.access).map_err(|error| {
+                    super::range_store_error(
+                        "function for-loop initial state",
+                        error,
+                        Some(&for_stmt.token),
+                    )
+                })?;
                 let (expr, _) =
                     combine_parts_with_default(target.id, target.access.lsb, parts, arena);
-                SLTForUpdate {
+                Ok(SLTForUpdate {
                     target: *target,
                     expr,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ParserError>>()?;
 
         let mut result_store = state.store.clone();
         let loop_effective_continue = arena.alloc(SLTNode::Binary(
@@ -1130,14 +1173,25 @@ pub(super) fn eval_function_body_return(
                 continue_cond: loop_effective_continue,
             });
 
+            let variable = module.variables.get(&target.id).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "function for-loop result state",
+                    "state variable is absent from the semantic module",
+                    Some(&for_stmt.token),
+                )
+            })?;
+            let width = resolve_total_width(module, variable)?;
             result_store
                 .entry(target.id)
-                .or_insert_with(|| {
-                    let width =
-                        resolve_total_width(module, &module.variables[&target.id]).unwrap_or(0);
-                    RangeStore::new(None, width)
-                })
-                .update(target.access, Some((folded_expr, all_sources)));
+                .or_insert_with(|| RangeStore::new(None, width))
+                .update(target.access, Some((folded_expr, all_sources)))
+                .map_err(|error| {
+                    super::range_store_error(
+                        "function for-loop result state",
+                        error,
+                        Some(&for_stmt.token),
+                    )
+                })?;
         }
         result_store.remove(&for_stmt.var_id);
 
@@ -1897,9 +1951,6 @@ fn eval_function_call_expression(
             ));
         };
 
-        let ((arg_node, sources), bounds) = eval_expression(module, store, arg_expr, arena, None)?;
-        arg_bounds = merge_boundaries(arg_bounds, bounds);
-
         let Some(arg_var) = module.variables.get(arg_id) else {
             return Err(ParserError::unsupported(
                 67,
@@ -1910,6 +1961,9 @@ fn eval_function_call_expression(
             ));
         };
         let arg_width = resolve_total_width(module, arg_var)?;
+        let ((arg_node, sources), bounds) =
+            eval_assignment_expression(module, store, arg_expr, arena, arg_width)?;
+        arg_bounds = merge_boundaries(arg_bounds, bounds);
         local_store.insert(
             *arg_id,
             RangeStore::new(Some((arg_node, sources)), arg_width),
@@ -1932,16 +1986,16 @@ pub fn eval_expression(
     context_width: Option<usize>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     // Short-circuit: compile-time constant compound expression → emit Constant node.
-    // context_width is not applied here — compound constant expressions (e.g. `N - 1`)
-    // always have well-defined widths from the analyzer.  Fill-literals like `'0` are
-    // Term(Factor::Value), not compound, so they take the Factor::Value path which
-    // does apply context_width.
+    // The folded value still participates in its enclosing width context.  Skipping
+    // that coercion used to produce mismatched wildcard operands for enum cases and
+    // can also lose carry bits when a folded operand is widened by its parent.
     if !matches!(expr, Expression::Term(_)) {
         let ct = expr.comptime();
         if ct.is_const {
             if let Some((celox_value, mask_xz, width, signed)) = celox_value_from_comptime(ct) {
-                let expr = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
-                return Ok(((expr, HashSet::default()), BoundaryMap::default()));
+                let node = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
+                let node = coerce_node_width(arena, node, context_width, signed);
+                return Ok(((node, HashSet::default()), BoundaryMap::default()));
             }
         }
     }
@@ -2036,36 +2090,12 @@ pub fn eval_expression(
                     ));
                 };
 
-                let mut result_node = l_expr;
-                let expr_width = get_width(result_node, arena);
-
-                if expr_width < target_width {
-                    let pad_width = target_width - expr_width;
-                    let pad = if target_signed || is_signed(module, result_node, arena) {
-                        // 符号拡張: MSBをpad
-                        let msb_slice = arena.alloc(SLTNode::Slice {
-                            expr: result_node,
-                            access: BitAccess::new(expr_width - 1, expr_width - 1),
-                        });
-                        (msb_slice, pad_width)
-                    } else {
-                        // ゼロ拡張: 0をpad
-                        let zero = arena.alloc(SLTNode::Constant(
-                            BigUint::from(0u8),
-                            BigUint::from(0u32),
-                            pad_width,
-                            false,
-                        ));
-                        (zero, pad_width)
-                    };
-                    result_node =
-                        arena.alloc(SLTNode::Concat(vec![pad, (result_node, expr_width)]));
-                } else if expr_width > target_width {
-                    result_node = arena.alloc(SLTNode::Slice {
-                        expr: result_node,
-                        access: BitAccess::new(0, target_width - 1),
-                    });
-                }
+                let result_node = coerce_node_width(
+                    arena,
+                    l_expr,
+                    Some(target_width),
+                    target_signed || is_signed(module, l_expr, arena),
+                );
                 return Ok((
                     (result_node, l_sources),
                     merge_boundaries(l_bounds, r_bounds),
@@ -2362,6 +2392,48 @@ pub fn eval_expression(
     }
 }
 
+/// Evaluate an expression in an assignment-like width context and guarantee
+/// that the returned root has exactly `target_width` bits.
+///
+/// Passing the width into [`eval_expression`] is necessary for operations whose
+/// operands inherit the surrounding width (for example an addition connected
+/// to a wider instance port).  The final coercion is still required because
+/// self-determined expressions and folded compound constants do not all consume
+/// that context internally.
+pub fn eval_assignment_expression(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    target_width: usize,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if target_width == 0 {
+        return Err(ParserError::illegal_context(
+            "assignment expression",
+            "target width must be nonzero",
+            Some(&expr.token_range()),
+        ));
+    }
+
+    let ((node, sources), boundaries) =
+        eval_expression(module, store, expr, arena, Some(target_width))?;
+    let source_width = get_width(node, arena);
+    if source_width == 0 {
+        return Err(ParserError::illegal_context(
+            "assignment expression",
+            "a zero-width expression cannot be assigned",
+            Some(&expr.token_range()),
+        ));
+    }
+
+    // The RHS expression controls extension.  The destination type does not
+    // turn an unsigned value into a sign-extended one.  Explicit casts and the
+    // signed/unsigned system functions are retained by the override helper.
+    let signed = expression_signed_override(expr).unwrap_or(expr.comptime().expr_context.signed);
+    let node = coerce_node_width(arena, node, Some(target_width), signed);
+    Ok(((node, sources), boundaries))
+}
+
 fn eval_factor(
     module: &Module,
     store: &SymbolicStore<VarId>,
@@ -2396,34 +2468,8 @@ fn eval_factor(
                         (extracted_val, extracted_mask, extracted_width)
                     };
 
-                    let mut expr =
-                        arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare));
-                    if let Some(target_width) = context_width {
-                        if width < target_width {
-                            let pad_width = target_width - width;
-                            let pad = if signed && is_bare {
-                                let msb_slice = arena.alloc(SLTNode::Slice {
-                                    expr,
-                                    access: BitAccess::new(width - 1, width - 1),
-                                });
-                                (msb_slice, pad_width)
-                            } else {
-                                let zero = arena.alloc(SLTNode::Constant(
-                                    BigUint::from(0u8),
-                                    BigUint::from(0u32),
-                                    pad_width,
-                                    false,
-                                ));
-                                (zero, pad_width)
-                            };
-                            expr = arena.alloc(SLTNode::Concat(vec![pad, (expr, width)]));
-                        } else if width > target_width {
-                            expr = arena.alloc(SLTNode::Slice {
-                                expr,
-                                access: BitAccess::new(0, target_width - 1),
-                            });
-                        }
-                    }
+                    let expr = arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare));
+                    let expr = coerce_node_width(arena, expr, context_width, signed && is_bare);
                     return Ok(((expr, HashSet::default()), BoundaryMap::default()));
                 }
             }
@@ -2433,130 +2479,92 @@ fn eval_factor(
                 let access = eval_var_select(module, *var_id, index, select)?;
 
                 let mut bounds = BoundaryMap::default();
-                bounds.entry(*var_id).or_default().insert(access.lsb);
-                bounds.entry(*var_id).or_default().insert(access.msb + 1);
+                let access_end = access.msb.checked_add(1).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "static variable read",
+                        "source boundary overflows usize",
+                        Some(&comptime.token),
+                    )
+                })?;
+                let var_bounds = bounds.entry(*var_id).or_default();
+                var_bounds.insert(access.lsb);
+                var_bounds.insert(access_end);
 
-                let range_store = store.get(var_id).unwrap();
-                let parts = range_store.get_parts(access);
+                let range_store = store.get(var_id).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "static variable read",
+                        "source variable is absent from the symbolic store",
+                        Some(&comptime.token),
+                    )
+                })?;
+                let parts = range_store.get_parts(access).map_err(|error| {
+                    super::range_store_error("static variable read", error, Some(&comptime.token))
+                })?;
                 // Check if any part of the requested access is unassigned (None)
                 // If so, we must depend on the variable's previous value (input).
                 // If all parts are Some(...), we only depend on the sources of those expressions.
                 let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
-                let (mut expr, mut sources) =
+                let (expr, mut sources) =
                     combine_parts_with_default(*var_id, access.lsb, parts, arena);
                 if has_unassigned {
                     sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
                 }
-                // context_widthによる拡張
-                if let Some(target_width) = context_width {
-                    let expr_width = get_width(expr, arena);
-                    if expr_width < target_width {
-                        // Slice + Concatで拡張
-                        let sign = is_signed(module, expr, arena);
-                        let pad_width = target_width - expr_width;
-                        let pad = if sign {
-                            // 符号拡張: MSBをpad
-                            let msb_slice = arena.alloc(SLTNode::Slice {
-                                expr,
-                                access: BitAccess::new(expr_width - 1, expr_width - 1),
-                            });
-                            (msb_slice, pad_width)
-                        } else {
-                            // ゼロ拡張: 0をpad
-                            let zero = arena.alloc(SLTNode::Constant(
-                                BigUint::from(0u8),
-                                BigUint::from(0u32),
-                                pad_width,
-                                false,
-                            ));
-                            (zero, pad_width)
-                        };
-                        expr = arena.alloc(SLTNode::Concat(vec![pad, (expr, expr_width)]));
-                    } else if expr_width > target_width {
-                        // Sliceで幅を揃える
-                        expr = arena.alloc(SLTNode::Slice {
-                            expr,
-                            access: BitAccess::new(0, target_width - 1),
-                        });
-                    }
-                }
+                let expr =
+                    coerce_node_width(arena, expr, context_width, is_signed(module, expr, arena));
                 Ok(((expr, sources), bounds))
             } else {
-                let mut dynamic_indices = Vec::new();
-                let mut all_bounds = BoundaryMap::default();
                 let mut all_sources = HashSet::default();
 
                 let var = &module.variables[var_id];
                 let width = resolve_total_width(module, var)?;
-
-                // 1. Build node for offset calculation (used by both Shr and Input approaches)
-                let (_, strides, _) =
-                    crate::parser::bitaccess::get_dimensions_and_strides(module, *var_id)?;
-                let mut offset_node = arena.alloc(SLTNode::Constant(
-                    BigUint::from(0u32),
-                    BigUint::from(0u32),
-                    64,
-                    false,
-                ));
-
-                let mut index_exprs = index.0.clone();
-                index_exprs.extend(select.0.clone());
-
-                // For Colon selects (e.g. [31:0]), the last element of
-                // index_exprs is the MSB anchor—not a dimension index.
-                // Exclude it from the dynamic offset and instead encode
-                // the bit range in the Slice node.
-                // For PlusColon/MinusColon/Step, the anchor is the
-                // dynamic start position and belongs in the offset.
-                let is_colon_select = matches!(&select.1, Some((VarSelectOp::Colon, _)));
-                let dim_limit = if is_colon_select {
-                    index_exprs.len().saturating_sub(1)
-                } else {
-                    index_exprs.len()
-                };
-
-                for (dim_i, idx_expr) in index_exprs[..dim_limit].iter().enumerate() {
-                    let ((expr, sources), bounds) =
-                        eval_expression(module, store, idx_expr, arena, context_width)?;
-                    all_bounds = merge_boundaries(all_bounds, bounds);
-                    all_sources.extend(sources);
-                    let stride = strides.get(dim_i).copied().unwrap_or(1);
-                    dynamic_indices.push(SLTIndex { node: expr, stride });
-
-                    let stride_node = arena.alloc(SLTNode::Constant(
-                        BigUint::from(stride),
-                        BigUint::from(0u32),
-                        64,
-                        false,
+                if width == 0 {
+                    return Err(ParserError::illegal_context(
+                        "dynamic variable read",
+                        "source variable has zero width",
+                        Some(&comptime.token),
                     ));
-                    let term = arena.alloc(SLTNode::Binary(expr, BinaryOp::Mul, stride_node));
-                    offset_node = arena.alloc(SLTNode::Binary(offset_node, BinaryOp::Add, term));
                 }
-
-                // Compute bit-select LSB within the selected element.
-                // For Colon [msb:lsb], the LSB (range_expr) determines
-                // the slice start within the element selected by
-                // the array indices.
-                let bit_select_lsb = if let Some((VarSelectOp::Colon, range_expr)) = &select.1 {
-                    let weight = strides.get(dim_limit).copied().unwrap_or(1);
-                    let rhs = crate::parser::bitaccess::eval_constexpr(range_expr)
-                        .map(|v| v.to_u64_digits().first().copied().unwrap_or(0) as usize)
-                        .unwrap_or(0);
-                    rhs * weight
-                } else {
-                    0
-                };
+                let DynamicSelectOffset {
+                    node: offset_node,
+                    indices: dynamic_indices,
+                    sources: offset_sources,
+                    boundaries: all_bounds,
+                } = super::eval_dynamic_select_offset(
+                    module,
+                    store,
+                    *var_id,
+                    index,
+                    select,
+                    arena,
+                    Some(&comptime.token),
+                )?;
+                all_sources.extend(offset_sources);
 
                 // 2. Check SymbolicStore to determine if "already written"
-                let range_store = store.get(var_id).unwrap();
+                let range_store = store.get(var_id).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "dynamic variable read",
+                        "source variable is absent from the symbolic store",
+                        Some(&comptime.token),
+                    )
+                })?;
                 let access_full = BitAccess::new(0, width - 1);
-                let parts = range_store.get_parts(access_full);
+                let parts = range_store.get_parts(access_full).map_err(|error| {
+                    super::range_store_error("dynamic variable read", error, Some(&comptime.token))
+                })?;
                 let is_unmodified = parts.iter().all(|(val, _)| val.is_none());
 
                 let element_width =
                     crate::parser::bitaccess::get_access_width(module, *var_id, index, select)?;
+                if element_width == 0 || element_width > width {
+                    return Err(ParserError::illegal_context(
+                        "dynamic variable read",
+                        format!("selected width {element_width} must be in 1..={width}"),
+                        Some(&comptime.token),
+                    ));
+                }
 
-                let mut extracted_expr = if is_unmodified {
+                let extracted_expr = if is_unmodified {
                     // --- Code for the approach of aligning at load time ---
                     // Keep the SLT input footprint conservative for dependency analysis.
                     // The SIR lowerer recognizes the following Slice(Input(dynamic)) shape
@@ -2569,7 +2577,7 @@ fn eval_factor(
                     });
                     arena.alloc(SLTNode::Slice {
                         expr: raw_input,
-                        access: BitAccess::new(bit_select_lsb, bit_select_lsb + element_width - 1),
+                        access: BitAccess::new(0, element_width - 1),
                     })
                 } else {
                     // --- If already written ---
@@ -2580,47 +2588,18 @@ fn eval_factor(
 
                     let shifted =
                         arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset_node));
-                    // Slice from bit_select_lsb for element_width bits
                     arena.alloc(SLTNode::Slice {
                         expr: shifted,
-                        access: BitAccess::new(bit_select_lsb, bit_select_lsb + element_width - 1),
+                        access: BitAccess::new(0, element_width - 1),
                     })
                 };
 
-                // context_widthによる拡張
-                if let Some(target_width) = context_width {
-                    let expr_width = get_width(extracted_expr, arena);
-                    if expr_width < target_width {
-                        // Slice + Concatで拡張
-                        let sign = is_signed(module, extracted_expr, arena);
-                        let pad_width = target_width - expr_width;
-                        let pad = if sign {
-                            // 符号拡張: MSBをpad
-                            let msb_slice = arena.alloc(SLTNode::Slice {
-                                expr: extracted_expr,
-                                access: BitAccess::new(expr_width - 1, expr_width - 1),
-                            });
-                            (msb_slice, pad_width)
-                        } else {
-                            // ゼロ拡張: 0をpad
-                            let zero = arena.alloc(SLTNode::Constant(
-                                BigUint::from(0u8),
-                                BigUint::from(0u32),
-                                pad_width,
-                                false,
-                            ));
-                            (zero, pad_width)
-                        };
-                        extracted_expr =
-                            arena.alloc(SLTNode::Concat(vec![pad, (extracted_expr, expr_width)]));
-                    } else if expr_width > target_width {
-                        // Sliceで幅を揃える
-                        extracted_expr = arena.alloc(SLTNode::Slice {
-                            expr: extracted_expr,
-                            access: BitAccess::new(0, target_width - 1),
-                        });
-                    }
-                }
+                let extracted_expr = coerce_node_width(
+                    arena,
+                    extracted_expr,
+                    context_width,
+                    is_signed(module, extracted_expr, arena),
+                );
 
                 let prefix_access = eval_var_select(module, *var_id, index, select)?;
                 all_sources.insert(VarAtomBase::new(
@@ -2665,18 +2644,14 @@ fn eval_factor(
             } else {
                 (celox_value, mask_xz, width)
             };
-            Ok((
-                (
-                    arena.alloc(SLTNode::Constant(
-                        celox_value,
-                        mask_xz,
-                        effective_width,
-                        signed,
-                    )),
-                    HashSet::default(),
-                ),
-                BoundaryMap::default(),
-            ))
+            let node = arena.alloc(SLTNode::Constant(
+                celox_value,
+                mask_xz,
+                effective_width,
+                signed,
+            ));
+            let node = coerce_node_width(arena, node, context_width, signed);
+            Ok(((node, HashSet::default()), BoundaryMap::default()))
         }
         Factor::SystemFunctionCall(call) => {
             eval_system_function_call(module, store, call, arena, context_width)
@@ -2707,7 +2682,9 @@ pub fn get_width<A: Hash + Eq + Clone>(expr: NodeId, arena: &SLTNodeArena<A>) ->
             | BinaryOp::GeU
             | BinaryOp::GeS
             | BinaryOp::LogicAnd
-            | BinaryOp::LogicOr => 1,
+            | BinaryOp::LogicOr
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard => 1,
             BinaryOp::Sub => {
                 let lw = get_width(*lhs, arena);
                 let rw = get_width(*rhs, arena);
@@ -2725,7 +2702,11 @@ pub fn get_width<A: Hash + Eq + Clone>(expr: NodeId, arena: &SLTNodeArena<A>) ->
             UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
             _ => get_width(*inner, arena),
         },
-        SLTNode::Mux { then_expr, .. } => get_width(*then_expr, arena),
+        SLTNode::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => get_width(*then_expr, arena).max(get_width(*else_expr, arena)),
         SLTNode::ForFold { result, .. } => result.access.msb - result.access.lsb + 1,
         SLTNode::Concat(parts) => parts.iter().map(|(_, w)| *w).sum(),
         SLTNode::Slice { access, .. } => access.msb - access.lsb + 1,
@@ -2742,8 +2723,8 @@ pub(super) fn merge_boundaries(
     base
 }
 
-fn apply_context_width(
-    arena: &mut SLTNodeArena<VarId>,
+pub(crate) fn coerce_node_width<A: Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
     expr: NodeId,
     target_width: Option<usize>,
     sign_extend: bool,
@@ -2873,7 +2854,7 @@ fn eval_system_function_call(
             let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
             Ok((
                 (
-                    apply_context_width(arena, arg, context_width, signed),
+                    coerce_node_width(arena, arg, context_width, signed),
                     sources,
                 ),
                 bounds,
@@ -2940,7 +2921,7 @@ fn system_function_input_size(
     }
 }
 
-fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
+pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
     match arena.get(expr) {
         SLTNode::Input { variable: id, .. } => module.variables[id].r#type.signed,
         SLTNode::Constant(_, _, _, signed) => *signed,

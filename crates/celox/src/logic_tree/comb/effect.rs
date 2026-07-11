@@ -184,6 +184,57 @@ fn collect_system_function_effect(
                 })
         })
         .collect();
+    let mut local_inputs = Vec::new();
+    for (id, range_store) in store {
+        if !observed_ids.contains(id) {
+            continue;
+        }
+        if guard.is_none() {
+            let overlaps_observed_input =
+                range_store.ranges.iter().any(|(&lsb, (value, width, _))| {
+                    let Some(msb) = width.checked_sub(1).and_then(|span| lsb.checked_add(span))
+                    else {
+                        return false;
+                    };
+                    value.is_some()
+                        && observed_inputs
+                            .iter()
+                            .chain(position_inputs.iter())
+                            .any(|atom| {
+                                atom.id == *id && atom.access.overlaps(&BitAccess::new(lsb, msb))
+                            })
+                });
+            if !overlaps_observed_input {
+                continue;
+            }
+        }
+        let Some(variable) = module.variables.get(id) else {
+            return Err(ParserError::illegal_context(
+                "combinational observer capture",
+                "observed variable is absent from the semantic module",
+                Some(&call.comptime.token),
+            ));
+        };
+        let width = resolve_total_width(module, variable)?;
+        if width == 0 {
+            continue;
+        }
+        let parts = range_store
+            .get_parts(BitAccess::new(0, width - 1))
+            .map_err(|error| {
+                super::range_store_error(
+                    "combinational observer capture",
+                    error,
+                    Some(&call.comptime.token),
+                )
+            })?;
+        if !parts.iter().any(|(value, _)| value.is_some()) {
+            continue;
+        }
+        let (node, _) = combine_parts_with_default(*id, 0, parts, arena);
+        local_inputs.push((*id, node));
+    }
+
     collector.observers.push(CombObserver {
         site_id,
         activation_group: 0,
@@ -191,45 +242,7 @@ fn collect_system_function_effect(
         args: observer_args,
         loop_runner: None,
         sensitivity: Vec::new(),
-        local_inputs: store
-            .iter()
-            .filter_map(|(id, range_store)| {
-                if !observed_ids.contains(id) {
-                    return None;
-                }
-                if guard.is_none() {
-                    let overlaps_observed_input =
-                        range_store.ranges.iter().any(|(&lsb, (value, width, _))| {
-                            value.is_some()
-                                && observed_inputs.iter().chain(position_inputs.iter()).any(
-                                    |atom| {
-                                        atom.id == *id
-                                            && atom
-                                                .access
-                                                .overlaps(&BitAccess::new(lsb, lsb + width - 1))
-                                    },
-                                )
-                        });
-                    if !overlaps_observed_input {
-                        return None;
-                    }
-                }
-                let width = module
-                    .variables
-                    .get(id)
-                    .and_then(|var| resolve_total_width(module, var).ok())?;
-                if width == 0 {
-                    return None;
-                }
-                let parts = range_store.get_parts(BitAccess::new(0, width - 1));
-                let modified = parts.iter().any(|(value, _)| value.is_some());
-                if !modified {
-                    return None;
-                }
-                let (node, _) = combine_parts_with_default(*id, 0, parts, arena);
-                Some((*id, node))
-            })
-            .collect(),
+        local_inputs,
         observed_inputs: observed_inputs.into_iter().collect(),
         position_inputs: position_inputs.into_iter().collect(),
         preceding_writes: preceding_writes.clone(),
@@ -1211,9 +1224,19 @@ fn collect_dynamic_for_effects(
             }
             let end = bit - 1;
             let access = BitAccess::new(start, end);
-            let parts = original.get_parts(access);
+            let parts = original.get_parts(access).map_err(|error| {
+                super::range_store_error("observer for-loop state", error, Some(&for_stmt.token))
+            })?;
             let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena);
-            loop_store.update(access, Some((expr, sources)));
+            loop_store
+                .update(access, Some((expr, sources)))
+                .map_err(|error| {
+                    super::range_store_error(
+                        "observer for-loop state",
+                        error,
+                        Some(&for_stmt.token),
+                    )
+                })?;
         }
         iter_store.insert(id, loop_store);
     }

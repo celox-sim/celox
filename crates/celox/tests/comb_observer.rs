@@ -3058,6 +3058,7 @@ module Top (
     a: input logic,
     b: input logic<8>,
     out: output logic<8>,
+    dynamic_out: output logic<8>,
 ) {
     var mem: logic<8>[4];
 
@@ -3072,18 +3073,28 @@ module Top (
 
     always_comb {
         out = mem[2];
+        dynamic_out = mem[1];
         $display("v=%0d", mem[2]);
     }
 }
 "#, "Top");
 
+    let idx = sim.signal("idx");
+    let a = sim.signal("a");
     let b = sim.signal("b");
     let out = sim.signal("out");
+    let dynamic_out = sim.signal("dynamic_out");
 
     sim.drain_runtime_events();
 
-    sim.modify(|io| io.set(b, 0x44u8)).unwrap();
+    sim.modify(|io| {
+        io.set(idx, 1u8);
+        io.set(a, 1u8);
+        io.set(b, 0x44u8);
+    })
+    .unwrap();
     assert_eq!(sim.get_as::<u8>(out), 0x44);
+    assert_eq!(sim.get_as::<u8>(dynamic_out), 0x02);
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {

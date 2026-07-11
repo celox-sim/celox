@@ -56,6 +56,10 @@ pub struct LogicPath<A: Hash + Eq + Clone> {
     pub target: LogicPathTarget<A>,
     pub sources: HashSet<VarAtomBase<A>>,
     pub previous_sources: HashSet<VarAtomBase<A>>,
+    /// Sources used to compute a dynamic address.  These remain ordinary
+    /// dependencies even when they overlap a previous-value source.
+    #[serde(default)]
+    pub address_sources: HashSet<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, NodeId)>,
     pub order_before: HashSet<LogicPathId>,
     pub comb_capture_enable_sites: Vec<u32>,
@@ -127,6 +131,11 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                 .collect(),
             previous_sources: self
                 .previous_sources
+                .iter()
+                .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
+                .collect(),
+            address_sources: self
+                .address_sources
                 .iter()
                 .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
                 .collect(),

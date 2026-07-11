@@ -1,6 +1,8 @@
+mod control;
 mod effect;
 mod expr;
 mod node;
+mod node_facts;
 mod path;
 mod state;
 
@@ -10,33 +12,44 @@ pub use state::{BoundaryMap, SymbolicStore};
 use std::{collections::BTreeSet, hash::Hash};
 
 use crate::ParserError;
-use crate::logic_tree::range_store::RangeStore;
+use crate::logic_tree::range_store::{RangeStore, RangeStoreError};
 use crate::parser::{LoweringPhase, case::case_arm_condition_expr, resolve_total_width};
 use crate::{
     HashMap, HashSet,
     ir::{
         BinaryOp, BitAccess, CombObserver, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase,
     },
-    parser::bitaccess::{eval_constexpr, eval_var_select},
+    parser::bitaccess::{PartSelectGeometry, eval_constexpr, eval_var_select, select_geometry},
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CaseStatement, CombDeclaration, Expression, Factor,
     ForBound, ForRange, ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall,
-    SystemFunctionInput, SystemFunctionKind, VarId, VarSelectOp,
+    SystemFunctionInput, SystemFunctionKind, VarId, VarIndex, VarSelect,
 };
 use veryl_analyzer::value::{Value, byte_value_to_string};
 use veryl_parser::resource_table;
+use veryl_parser::token_range::TokenRange;
 
 use effect::{CombEffectCollector, collect_comb_effects_statements, subtract_written_sensitivity};
+pub(crate) use expr::coerce_node_width;
 use expr::{eval_array_literal_expression, eval_function_body_return, merge_boundaries};
-pub use expr::{eval_expression, get_width};
+pub use expr::{eval_assignment_expression, eval_expression, get_width};
 use state::{FunctionControlState, LoopControlState};
 
 pub use node::{
     NodeId, SLTForEffect, SLTForUpdate, SLTIndex, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
 };
+pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
+
+pub(super) fn range_store_error(
+    context: &'static str,
+    error: RangeStoreError,
+    token: Option<&TokenRange>,
+) -> ParserError {
+    ParserError::illegal_context(context, error.to_string(), token)
+}
 
 pub fn parse_comb(
     module: &Module,
@@ -129,6 +142,7 @@ pub fn parse_comb(
                             })
                         })
                         .collect(),
+                    address_sources: HashSet::default(),
                     local_inputs: Vec::new(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
@@ -522,8 +536,12 @@ fn merge_symbolic_stores(
             let next_lsb = lsbs_vec[i + 1];
             let access = BitAccess::new(lsb, next_lsb - 1);
 
-            let then_parts = t_range_store.get_parts(access);
-            let else_parts = e_range_store.get_parts(access);
+            let then_parts = t_range_store
+                .get_parts(access)
+                .map_err(|error| range_store_error("conditional merge", error, None))?;
+            let else_parts = e_range_store
+                .get_parts(access)
+                .map_err(|error| range_store_error("conditional merge", error, None))?;
             let (t_expr, t_sources) =
                 combine_parts_with_default(*id, lsb, then_parts.clone(), arena);
             let (e_expr, e_sources) =
@@ -1133,9 +1151,13 @@ fn eval_for_with_effects(
             }
             let end = bit - 1;
             let access = BitAccess::new(start, end);
-            let parts = original.get_parts(access);
+            let parts = original
+                .get_parts(access)
+                .map_err(|error| range_store_error("for-loop state", error, None))?;
             let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena);
-            loop_store.update(access, Some((expr, sources)));
+            loop_store
+                .update(access, Some((expr, sources)))
+                .map_err(|error| range_store_error("for-loop state", error, None))?;
         }
         symbolic_store.insert(id, loop_store);
     }
@@ -1287,15 +1309,24 @@ fn eval_for_with_effects(
         updates
             .iter()
             .map(|(target, _, _)| {
-                let parts = store[&target.id].get_parts(target.access);
+                let range_store = store.get(&target.id).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "for-loop initial state",
+                        "state variable is absent from the symbolic store",
+                        Some(&for_stmt.token),
+                    )
+                })?;
+                let parts = range_store.get_parts(target.access).map_err(|error| {
+                    range_store_error("for-loop initial state", error, Some(&for_stmt.token))
+                })?;
                 let (expr, _) =
                     combine_parts_with_default(target.id, target.access.lsb, parts, arena);
-                SLTForUpdate {
+                Ok(SLTForUpdate {
                     target: *target,
                     expr,
-                }
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, ParserError>>()?
     };
 
     let loop_runner = if effects.is_empty() {
@@ -1361,17 +1392,143 @@ fn eval_for_with_effects(
             continue_cond: loop_state.continue_expr,
         });
 
+        let variable = module.variables.get(&target.id).ok_or_else(|| {
+            ParserError::illegal_context(
+                "for-loop result state",
+                "state variable is absent from the semantic module",
+                Some(&for_stmt.token),
+            )
+        })?;
+        let width = resolve_total_width(module, variable)?;
         result_store
             .entry(target.id)
-            .or_insert_with(|| {
-                let width = resolve_total_width(module, &module.variables[&target.id]).unwrap_or(0);
-                RangeStore::new(None, width)
-            })
-            .update(target.access, Some((folded_expr, all_sources)));
+            .or_insert_with(|| RangeStore::new(None, width))
+            .update(target.access, Some((folded_expr, all_sources)))
+            .map_err(|error| {
+                range_store_error("for-loop result state", error, Some(&for_stmt.token))
+            })?;
     }
 
     result_store.remove(&for_stmt.var_id);
     Ok((result_store, merged_boundaries, loop_runner))
+}
+
+fn checked_destination_width(
+    module: &Module,
+    destinations: &[veryl_analyzer::ir::AssignDestination],
+    context: &'static str,
+    token: Option<&TokenRange>,
+) -> Result<usize, ParserError> {
+    if destinations.is_empty() {
+        return Err(ParserError::illegal_context(
+            context,
+            "assignment has no destination",
+            token,
+        ));
+    }
+    let mut total = 0usize;
+    for destination in destinations {
+        let width = crate::parser::bitaccess::get_access_width(
+            module,
+            destination.id,
+            &destination.index,
+            &destination.select,
+        )?;
+        total = total.checked_add(width).ok_or_else(|| {
+            ParserError::illegal_context(
+                context,
+                "concatenated destination width overflows usize",
+                Some(&destination.token),
+            )
+        })?;
+    }
+    if total == 0 {
+        return Err(ParserError::illegal_context(
+            context,
+            "assignment destination has zero width",
+            token,
+        ));
+    }
+    Ok(total)
+}
+
+fn checked_assignment_slice(
+    offset: usize,
+    width: usize,
+    rhs_width: usize,
+    destination: &veryl_analyzer::ir::AssignDestination,
+) -> Result<(BitAccess, usize), ParserError> {
+    let end = offset.checked_add(width).ok_or_else(|| {
+        ParserError::illegal_context(
+            "concatenated assignment",
+            "RHS slice end overflows usize",
+            Some(&destination.token),
+        )
+    })?;
+    if width == 0 || end > rhs_width {
+        return Err(ParserError::illegal_context(
+            "concatenated assignment",
+            format!("RHS slice {offset}..{end} is outside width {rhs_width}"),
+            Some(&destination.token),
+        ));
+    }
+    Ok((BitAccess::new(offset, end - 1), end))
+}
+
+fn record_assignment_boundary(
+    boundaries: &mut BoundaryMap<VarId>,
+    destination: &veryl_analyzer::ir::AssignDestination,
+    access: BitAccess,
+) -> Result<(), ParserError> {
+    let end = access.msb.checked_add(1).ok_or_else(|| {
+        ParserError::illegal_context(
+            "assignment destination",
+            "destination boundary overflows usize",
+            Some(&destination.token),
+        )
+    })?;
+    let entry = boundaries.entry(destination.id).or_default();
+    entry.insert(access.lsb);
+    entry.insert(end);
+    Ok(())
+}
+
+fn update_assignment_range(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    destination: &veryl_analyzer::ir::AssignDestination,
+    access: BitAccess,
+    value: (NodeId, HashSet<VarAtomBase<VarId>>),
+) -> Result<(), ParserError> {
+    let variable = module.variables.get(&destination.id).ok_or_else(|| {
+        ParserError::illegal_context(
+            "assignment destination",
+            "destination variable is absent from the semantic module",
+            Some(&destination.token),
+        )
+    })?;
+    let variable_width = resolve_total_width(module, variable)?;
+    if variable_width == 0 || access.msb >= variable_width {
+        return Err(ParserError::illegal_context(
+            "assignment destination",
+            format!(
+                "destination access [{}:{}] is outside variable width {variable_width}",
+                access.msb, access.lsb
+            ),
+            Some(&destination.token),
+        ));
+    }
+    let range_store = store.get_mut(&destination.id).ok_or_else(|| {
+        ParserError::illegal_context(
+            "assignment destination",
+            "destination variable is absent from the symbolic store",
+            Some(&destination.token),
+        )
+    })?;
+    range_store.update(access, Some(value)).map_err(|error| {
+        range_store_error("assignment destination", error, Some(&destination.token))
+    })?;
+    Ok(())
 }
 
 fn eval_assign(
@@ -1381,19 +1538,34 @@ fn eval_assign(
     stmt: &AssignStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
-    let rhs_expected_width: usize = stmt
-        .dst
-        .iter()
-        .map(|dst| {
-            crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)
-        })
-        .sum::<Result<usize, ParserError>>()?;
-    let ((rhs_expr, rhs_sources), rhs_bounds) =
-        if let Expression::ArrayLiteral(items, _) = &stmt.expr {
-            eval_array_literal_expression(module, &store, items, Some(rhs_expected_width), arena)?
-        } else {
-            eval_expression(module, &store, &stmt.expr, arena, Some(rhs_expected_width))?
-        };
+    let rhs_expected_width = checked_destination_width(
+        module,
+        &stmt.dst,
+        "assignment destination",
+        Some(&stmt.expr.token_range()),
+    )?;
+    let ((rhs_expr, rhs_sources), rhs_bounds) = if let Expression::ArrayLiteral(items, _) =
+        &stmt.expr
+    {
+        let ((node, sources), bounds) =
+            eval_array_literal_expression(module, &store, items, Some(rhs_expected_width), arena)?;
+        if get_width(node, arena) == 0 {
+            return Err(ParserError::illegal_context(
+                "assignment expression",
+                "a zero-width array literal cannot be assigned",
+                Some(&stmt.expr.token_range()),
+            ));
+        }
+        (
+            (
+                coerce_node_width(arena, node, Some(rhs_expected_width), false),
+                sources,
+            ),
+            bounds,
+        )
+    } else {
+        eval_assignment_expression(module, &store, &stmt.expr, arena, rhs_expected_width)?
+    };
     let mut boundaries = merge_boundaries(boundaries, rhs_bounds);
 
     if stmt.dst.len() == 1 {
@@ -1403,12 +1575,14 @@ fn eval_assign(
         if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
             let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
 
-            let b = boundaries.entry(dst.id).or_default();
-            b.insert(access.lsb);
-            b.insert(access.msb + 1);
-            if let Some(range_store) = store.get_mut(&dst.id) {
-                range_store.update(access, Some((rhs_expr, rhs_sources.clone())));
-            }
+            record_assignment_boundary(&mut boundaries, dst, access)?;
+            update_assignment_range(
+                module,
+                &mut store,
+                dst,
+                access,
+                (rhs_expr, rhs_sources.clone()),
+            )?;
         } else {
             let (s, b) = eval_dynamic_assign(
                 module,
@@ -1435,21 +1609,24 @@ fn eval_assign(
             )?;
 
             // Slice the RHS to extract the bits for this destination
+            let (slice_access, next_offset) =
+                checked_assignment_slice(current_offset, part_width, rhs_expected_width, dst)?;
             let slice_expr = arena.alloc(SLTNode::Slice {
                 expr: rhs_expr,
-                access: BitAccess::new(current_offset, current_offset + part_width - 1),
+                access: slice_access,
             });
 
             if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
                 let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
 
-                let b = boundaries.entry(dst.id).or_default();
-                b.insert(access.lsb);
-                b.insert(access.msb + 1);
-
-                if let Some(range_store) = store.get_mut(&dst.id) {
-                    range_store.update(access, Some((slice_expr, rhs_sources.clone())));
-                }
+                record_assignment_boundary(&mut boundaries, dst, access)?;
+                update_assignment_range(
+                    module,
+                    &mut store,
+                    dst,
+                    access,
+                    (slice_expr, rhs_sources.clone()),
+                )?;
             } else {
                 let (s, b) = eval_dynamic_assign(
                     module,
@@ -1464,7 +1641,16 @@ fn eval_assign(
                 boundaries = b;
             }
 
-            current_offset += part_width;
+            current_offset = next_offset;
+        }
+        if current_offset != rhs_expected_width {
+            return Err(ParserError::illegal_context(
+                "concatenated assignment",
+                format!(
+                    "destinations cover {current_offset} bits, but the RHS has width {rhs_expected_width}"
+                ),
+                Some(&stmt.expr.token_range()),
+            ));
         }
     }
     Ok((store, boundaries))
@@ -1479,18 +1665,29 @@ fn assign_node_to_dsts(
     rhs_sources: HashSet<VarAtomBase<VarId>>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    let destination_width = checked_destination_width(
+        module,
+        dsts,
+        "function output destination",
+        dsts.first().map(|destination| &destination.token),
+    )?;
+    let rhs_width = get_width(rhs_expr, arena);
+    if rhs_width == 0 {
+        return Err(ParserError::illegal_context(
+            "function output destination",
+            "function output value has zero width",
+            dsts.first().map(|destination| &destination.token),
+        ));
+    }
+    let rhs_signed = expr::is_signed(module, rhs_expr, arena);
+    let rhs_expr = coerce_node_width(arena, rhs_expr, Some(destination_width), rhs_signed);
+
     if dsts.len() == 1 {
         let dst = &dsts[0];
         if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
             let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
-
-            let b = boundaries.entry(dst.id).or_default();
-            b.insert(access.lsb);
-            b.insert(access.msb + 1);
-
-            if let Some(range_store) = store.get_mut(&dst.id) {
-                range_store.update(access, Some((rhs_expr, rhs_sources)));
-            }
+            record_assignment_boundary(&mut boundaries, dst, access)?;
+            update_assignment_range(module, &mut store, dst, access, (rhs_expr, rhs_sources))?;
 
             return Ok((store, boundaries));
         }
@@ -1502,21 +1699,24 @@ fn assign_node_to_dsts(
     for dst in dsts.iter().rev() {
         let part_width =
             crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)?;
+        let (slice_access, next_offset) =
+            checked_assignment_slice(current_offset, part_width, destination_width, dst)?;
         let slice_expr = arena.alloc(SLTNode::Slice {
             expr: rhs_expr,
-            access: BitAccess::new(current_offset, current_offset + part_width - 1),
+            access: slice_access,
         });
 
         if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
             let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
 
-            let b = boundaries.entry(dst.id).or_default();
-            b.insert(access.lsb);
-            b.insert(access.msb + 1);
-
-            if let Some(range_store) = store.get_mut(&dst.id) {
-                range_store.update(access, Some((slice_expr, rhs_sources.clone())));
-            }
+            record_assignment_boundary(&mut boundaries, dst, access)?;
+            update_assignment_range(
+                module,
+                &mut store,
+                dst,
+                access,
+                (slice_expr, rhs_sources.clone()),
+            )?;
         } else {
             let (next_store, next_boundaries) = eval_dynamic_assign(
                 module,
@@ -1531,7 +1731,17 @@ fn assign_node_to_dsts(
             boundaries = next_boundaries;
         }
 
-        current_offset += part_width;
+        current_offset = next_offset;
+    }
+
+    if current_offset != destination_width {
+        return Err(ParserError::illegal_context(
+            "function output destination",
+            format!(
+                "destinations cover {current_offset} bits, but the output value has width {destination_width}"
+            ),
+            dsts.first().map(|destination| &destination.token),
+        ));
     }
 
     Ok((store, boundaries))
@@ -1583,13 +1793,28 @@ fn eval_statement_form_function_call(
 
     for (arg_path, arg_id) in &function_body.arg_map {
         let Some(arg_expr) = call.inputs.get(arg_path) else {
-            continue;
+            if call.outputs.contains_key(arg_path) {
+                continue;
+            }
+            return Err(ParserError::unsupported(
+                61,
+                phase,
+                "function call missing argument",
+                format!("{call}"),
+                Some(&call.comptime.token),
+            ));
         };
 
-        let formal = &module.variables[arg_id];
+        let formal = module.variables.get(arg_id).ok_or_else(|| {
+            ParserError::illegal_context(
+                "function input argument",
+                "formal variable is absent from the semantic module",
+                Some(&call.comptime.token),
+            )
+        })?;
         let arg_width = resolve_total_width(module, formal)?;
         let ((arg_node, arg_sources), arg_bounds) =
-            eval_expression(module, &store, arg_expr, arena, Some(arg_width))?;
+            eval_assignment_expression(module, &store, arg_expr, arena, arg_width)?;
         boundaries = merge_boundaries(boundaries, arg_bounds);
         local_store.insert(
             *arg_id,
@@ -1622,14 +1847,33 @@ fn eval_statement_form_function_call(
             ));
         };
 
-        let formal = &module.variables[arg_id];
+        let formal = module.variables.get(arg_id).ok_or_else(|| {
+            ParserError::illegal_context(
+                "function output value",
+                "formal variable is absent from the semantic module",
+                Some(&call.comptime.token),
+            )
+        })?;
         let formal_width = resolve_total_width(module, formal)?;
+        if formal_width == 0 {
+            return Err(ParserError::illegal_context(
+                "function output value",
+                "formal output has zero width",
+                Some(&call.comptime.token),
+            ));
+        }
         let access = BitAccess::new(0, formal_width - 1);
-        let Some(range_store) = final_local_store.get(arg_id) else {
-            continue;
-        };
-        let (output_expr, output_sources) =
-            combine_parts_with_default(*arg_id, 0, range_store.get_parts(access), arena);
+        let range_store = final_local_store.get(arg_id).ok_or_else(|| {
+            ParserError::illegal_context(
+                "function output value",
+                "formal output is absent from the final symbolic store",
+                Some(&call.comptime.token),
+            )
+        })?;
+        let parts = range_store.get_parts(access).map_err(|error| {
+            range_store_error("function output value", error, Some(&call.comptime.token))
+        })?;
+        let (output_expr, output_sources) = combine_parts_with_default(*arg_id, 0, parts, arena);
         let (next_store, next_boundaries) = assign_node_to_dsts(
             module,
             store,
@@ -1646,6 +1890,160 @@ fn eval_statement_form_function_call(
     Ok((store, boundaries))
 }
 
+struct DynamicSelectOffset {
+    node: NodeId,
+    indices: Vec<SLTIndex>,
+    sources: HashSet<VarAtomBase<VarId>>,
+    boundaries: BoundaryMap<VarId>,
+}
+
+/// Build the effective LSB for a dynamic access from validated select
+/// geometry.  The returned `indices` and arithmetic `node` encode the same
+/// offset so direct dynamic loads and read-modify-write paths cannot diverge.
+fn eval_dynamic_select_offset(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    var_id: VarId,
+    index: &VarIndex,
+    select: &VarSelect,
+    arena: &mut SLTNodeArena<VarId>,
+    token: Option<&TokenRange>,
+) -> Result<DynamicSelectOffset, ParserError> {
+    let geometry = select_geometry(module, var_id, index, select)?;
+    let mut offset = arena.alloc(SLTNode::Constant(
+        BigUint::from(0u8),
+        BigUint::from(0u8),
+        64,
+        false,
+    ));
+    let mut indices = Vec::new();
+    let mut sources = HashSet::default();
+    let mut boundaries = BoundaryMap::default();
+
+    let mut expressions = index.0.clone();
+    expressions.extend(select.0.clone());
+    for (dimension, expression) in expressions[..geometry.dimension_count].iter().enumerate() {
+        let ((node, node_sources), node_boundaries) =
+            eval_expression(module, store, expression, arena, None)?;
+        sources.extend(node_sources);
+        boundaries = merge_boundaries(boundaries, node_boundaries);
+        let stride = geometry.strides.get(dimension).copied().ok_or_else(|| {
+            ParserError::illegal_context(
+                "dynamic variable select",
+                format!(
+                    "index dimension {dimension} is outside the {}-entry stride table",
+                    geometry.strides.len()
+                ),
+                token,
+            )
+        })?;
+        indices.push(SLTIndex { node, stride });
+        let stride_node = arena.alloc(SLTNode::Constant(
+            BigUint::from(stride),
+            BigUint::from(0u8),
+            64,
+            false,
+        ));
+        let term = arena.alloc(SLTNode::Binary(node, BinaryOp::Mul, stride_node));
+        offset = arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, term));
+    }
+
+    if let Some(part) = geometry.part {
+        let stride = geometry
+            .strides
+            .get(geometry.dimension_count)
+            .copied()
+            .ok_or_else(|| {
+                ParserError::illegal_context(
+                    "dynamic variable select",
+                    format!(
+                        "part-select dimension {} is outside the {}-entry stride table",
+                        geometry.dimension_count,
+                        geometry.strides.len()
+                    ),
+                    token,
+                )
+            })?;
+        let start = match part {
+            PartSelectGeometry::Colon { lsb, .. } => arena.alloc(SLTNode::Constant(
+                BigUint::from(lsb),
+                BigUint::from(0u8),
+                64,
+                false,
+            )),
+            PartSelectGeometry::PlusColon { .. }
+            | PartSelectGeometry::MinusColon { .. }
+            | PartSelectGeometry::Step { .. } => {
+                let anchor_expression = select.0.last().ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "dynamic variable select",
+                        "part select is missing its anchor expression",
+                        token,
+                    )
+                })?;
+                let ((anchor, anchor_sources), anchor_boundaries) =
+                    eval_expression(module, store, anchor_expression, arena, None)?;
+                sources.extend(anchor_sources);
+                boundaries = merge_boundaries(boundaries, anchor_boundaries);
+                match part {
+                    PartSelectGeometry::PlusColon { .. } => anchor,
+                    PartSelectGeometry::MinusColon { elements } => {
+                        let decrement = elements.checked_sub(1).ok_or_else(|| {
+                            ParserError::illegal_context(
+                                "dynamic variable select",
+                                "minus-colon width underflows",
+                                token,
+                            )
+                        })?;
+                        let decrement = arena.alloc(SLTNode::Constant(
+                            BigUint::from(decrement),
+                            BigUint::from(0u8),
+                            64,
+                            false,
+                        ));
+                        arena.alloc(SLTNode::Binary(anchor, BinaryOp::Sub, decrement))
+                    }
+                    PartSelectGeometry::Step { elements } => {
+                        let elements = arena.alloc(SLTNode::Constant(
+                            BigUint::from(elements),
+                            BigUint::from(0u8),
+                            64,
+                            false,
+                        ));
+                        arena.alloc(SLTNode::Binary(anchor, BinaryOp::Mul, elements))
+                    }
+                    PartSelectGeometry::Colon { .. } => {
+                        return Err(ParserError::illegal_context(
+                            "dynamic variable select",
+                            "inconsistent colon-select geometry",
+                            token,
+                        ));
+                    }
+                }
+            }
+        };
+        indices.push(SLTIndex {
+            node: start,
+            stride,
+        });
+        let stride_node = arena.alloc(SLTNode::Constant(
+            BigUint::from(stride),
+            BigUint::from(0u8),
+            64,
+            false,
+        ));
+        let term = arena.alloc(SLTNode::Binary(start, BinaryOp::Mul, stride_node));
+        offset = arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, term));
+    }
+
+    Ok(DynamicSelectOffset {
+        node: offset,
+        indices,
+        sources,
+        boundaries,
+    })
+}
+
 fn eval_dynamic_assign(
     module: &Module,
     mut store: SymbolicStore<VarId>,
@@ -1656,69 +2054,30 @@ fn eval_dynamic_assign(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let mut all_sources = rhs_sources;
-
-    let (_, strides, _) = crate::parser::bitaccess::get_dimensions_and_strides(module, dst.id)?;
-    let mut offset_node = arena.alloc(SLTNode::Constant(
-        BigUint::from(0u32),
-        BigUint::from(0u32),
-        64,
-        false,
-    ));
-
-    let mut index_exprs = dst.index.0.clone();
-    index_exprs.extend(dst.select.0.clone());
-
-    // For Colon selects (e.g. [31:0]), the last element of index_exprs is
-    // the MSB anchor—not a dimension index. Exclude it from the dynamic
-    // offset and instead add the LSB as a static bit offset below.
-    // For PlusColon/MinusColon/Step, the anchor is the dynamic start
-    // position and belongs in the offset.
-    let is_colon_select = matches!(&dst.select.1, Some((VarSelectOp::Colon, _)));
-    let dim_limit = if is_colon_select {
-        index_exprs.len().saturating_sub(1)
-    } else {
-        index_exprs.len()
-    };
-
-    for (dim_i, idx_expr) in index_exprs[..dim_limit].iter().enumerate() {
-        let ((expr, sources), bounds) = eval_expression(module, &store, idx_expr, arena, None)?;
-        boundaries = merge_boundaries(boundaries, bounds);
-        all_sources.extend(sources);
-
-        let stride = strides.get(dim_i).copied().unwrap_or(1);
-        let stride_node = arena.alloc(SLTNode::Constant(
-            BigUint::from(stride),
-            BigUint::from(0u32),
-            64,
-            false,
-        ));
-        let term = arena.alloc(SLTNode::Binary(expr, BinaryOp::Mul, stride_node));
-        offset_node = arena.alloc(SLTNode::Binary(offset_node, BinaryOp::Add, term));
-    }
-
-    // For Colon selects, add the LSB as a static bit offset within the
-    // element selected by the array indices.
-    if let Some((VarSelectOp::Colon, range_expr)) = &dst.select.1 {
-        let weight = strides.get(dim_limit).copied().unwrap_or(1);
-        let lsb = eval_constexpr(range_expr)
-            .map(|v| v.to_u64_digits().first().copied().unwrap_or(0) as usize)
-            .unwrap_or(0);
-        let bit_offset = lsb * weight;
-        if bit_offset > 0 {
-            let lsb_node = arena.alloc(SLTNode::Constant(
-                BigUint::from(bit_offset),
-                BigUint::from(0u32),
-                64,
-                false,
-            ));
-            offset_node = arena.alloc(SLTNode::Binary(offset_node, BinaryOp::Add, lsb_node));
-        }
-    }
+    let select_offset = eval_dynamic_select_offset(
+        module,
+        &store,
+        dst.id,
+        &dst.index,
+        &dst.select,
+        arena,
+        Some(&dst.token),
+    )?;
+    boundaries = merge_boundaries(boundaries, select_offset.boundaries);
+    all_sources.extend(select_offset.sources);
+    let offset_node = select_offset.node;
 
     let access_width =
         crate::parser::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)?;
     let var = &module.variables[&dst.id];
     let width = resolve_total_width(module, var)?;
+    if width == 0 || access_width == 0 || access_width > width {
+        return Err(ParserError::illegal_context(
+            "dynamic assignment",
+            format!("destination width {access_width} must be in 1..={width}"),
+            Some(&dst.token),
+        ));
+    }
 
     let access_full = BitAccess::new(0, width - 1);
     let range_store = store
@@ -1727,8 +2086,10 @@ fn eval_dynamic_assign(
 
     // Evaluate the variable's current state.
     // Sub-ranges that haven't been assigned yet will fall back to their initial input state.
-    let (old_val, old_sources) =
-        combine_parts_with_default(dst.id, 0, range_store.get_parts(access_full), arena);
+    let old_parts = range_store
+        .get_parts(access_full)
+        .map_err(|error| range_store_error("dynamic assignment", error, Some(&dst.token)))?;
+    let (old_val, old_sources) = combine_parts_with_default(dst.id, 0, old_parts, arena);
     // Note: Partial dynamic updates are not treated as self-dependencies (latches)
     // to maintain consistency with existing test expectations and Verilog semantics.
     for source in old_sources {
@@ -1750,10 +2111,12 @@ fn eval_dynamic_assign(
     let mask_shifted = arena.alloc(SLTNode::Binary(mask_constant, BinaryOp::Shl, offset_node));
     let mask_node = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, mask_shifted));
 
-    // Align the new value to the target offset: new_val_term = rhs << offset
-    let rhs_width = get_width(rhs_expr, arena);
-    let rhs_widened = if rhs_width < width {
-        let padding = width - rhs_width;
+    // Apply assignment coercion before embedding the value in the full
+    // destination.  Otherwise discarded high RHS bits can corrupt neighbours.
+    let rhs_signed = expr::is_signed(module, rhs_expr, arena);
+    let rhs_expr = coerce_node_width(arena, rhs_expr, Some(access_width), rhs_signed);
+    let rhs_widened = if access_width < width {
+        let padding = width - access_width;
         let zero = arena.alloc(SLTNode::Constant(
             BigUint::from(0u32),
             BigUint::from(0u32),
@@ -1763,12 +2126,13 @@ fn eval_dynamic_assign(
         // Concatenate zero padding to match variable width: {padding'b0, rhs_expr}
         arena.alloc(SLTNode::Concat(vec![
             (zero, padding),
-            (rhs_expr, rhs_width),
+            (rhs_expr, access_width),
         ]))
     } else {
         rhs_expr
     };
     let new_val_term = arena.alloc(SLTNode::Binary(rhs_widened, BinaryOp::Shl, offset_node));
+    let new_val_term = arena.alloc(SLTNode::Binary(new_val_term, BinaryOp::And, mask_shifted));
 
     // Apply the update: final_val = (old_val & mask) | new_val_term
     let new_val_masked = arena.alloc(SLTNode::Binary(old_val, BinaryOp::And, mask_node));
@@ -1783,7 +2147,9 @@ fn eval_dynamic_assign(
             access: prefix_access,
         })
     };
-    range_store.update(prefix_access, Some((stored_expr, all_sources)));
+    range_store
+        .update(prefix_access, Some((stored_expr, all_sources)))
+        .map_err(|error| range_store_error("dynamic assignment", error, Some(&dst.token)))?;
 
     Ok((store, boundaries))
 }

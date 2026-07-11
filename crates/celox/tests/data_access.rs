@@ -133,6 +133,50 @@ assign o = mem[idx*4 +: 4];
 
     }
 
+    fn test_dynamic_minus_colon_and_step_read_write(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Top (
+    minus_idx: input logic<4>,
+    step_idx: input logic<4>,
+    data: input logic<16>,
+    val: input logic<4>,
+    minus_read: output logic<4>,
+    step_read: output logic<4>,
+    step_write: output logic<16>
+) {
+var step_tmp: logic<16>;
+assign minus_read = data[minus_idx -: 4];
+assign step_read = data[step_idx step 4];
+always_comb {
+    step_tmp = data;
+    step_tmp[step_idx step 4] = val;
+}
+assign step_write = step_tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let minus_idx = sim.signal("minus_idx");
+    let step_idx = sim.signal("step_idx");
+    let data = sim.signal("data");
+    let val = sim.signal("val");
+    let minus_read = sim.signal("minus_read");
+    let step_read = sim.signal("step_read");
+    let step_write = sim.signal("step_write");
+
+    sim.modify(|io| {
+        io.set(minus_idx, 7u8);
+        io.set(step_idx, 2u8);
+        io.set(data, 0xABCDu16);
+        io.set(val, 0x5u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(minus_read), 0xCu8.into());
+    assert_eq!(sim.get(step_read), 0xBu8.into());
+    assert_eq!(sim.get(step_write), 0xA5CDu16.into());
+
+    }
+
     fn test_partial_write_merging(sim) {
         @setup { let code = r#"
 module Top (a: input logic<4>, b: input logic<4>, o: output logic<8>) {

@@ -175,11 +175,21 @@ fn atomize_logic_paths(
                     .filter(|input_atom| original_source_ids.contains(&input_atom.id))
                     .collect();
                 let filtered_previous_sources: crate::HashSet<_> = merged_sources
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|input_atom| {
                         original_previous_sources.iter().any(|previous| {
                             previous.id == input_atom.id
                                 && previous.access.overlaps(&input_atom.access)
+                        })
+                    })
+                    .collect();
+                let filtered_address_sources: crate::HashSet<_> = merged_sources
+                    .into_iter()
+                    .filter(|input_atom| {
+                        path.address_sources.iter().any(|address| {
+                            address.id == input_atom.id
+                                && address.access.overlaps(&input_atom.access)
                         })
                     })
                     .collect();
@@ -189,6 +199,7 @@ fn atomize_logic_paths(
                     target: LogicPathTarget::Var(target),
                     sources: filtered_sources,
                     previous_sources: filtered_previous_sources,
+                    address_sources: filtered_address_sources,
                     local_inputs: path.local_inputs.clone(),
                     order_before: path.order_before.clone(),
                     comb_capture_enable_sites: path.comb_capture_enable_sites.clone(),

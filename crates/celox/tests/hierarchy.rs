@@ -82,6 +82,219 @@ o_data: top_out
 
     }
 
+    fn test_instance_input_port_assignment_width_context(sim) {
+        // veryl-simulator 0.20.1 currently zero-extends the signed input-port
+        // case; the language assignment semantics require sign extension.
+        @omit_veryl;
+        @setup { let code = r#"
+module Child (
+widen_u: input  logic<16>,
+widen_s: input  signed logic<16>,
+sum9:    input  logic<9>,
+trunc8:  input  logic<8>,
+fill8:   input  logic<8>,
+o_u16:   output logic<16>,
+o_s16:   output logic<16>,
+o_sum9:  output logic<9>,
+o_trunc: output logic<8>,
+o_fill:  output logic<8>
+) {
+assign o_u16 = widen_u;
+assign o_s16 = widen_s;
+assign o_sum9 = sum9;
+assign o_trunc = trunc8;
+assign o_fill = fill8;
+}
+module Top (
+narrow_u: input  logic<8>,
+s8:      input  signed logic<8>,
+a:       input  logic<8>,
+b:       input  logic<8>,
+wide16:  input  logic<16>,
+o_u16:   output logic<16>,
+o_s16:   output logic<16>,
+o_sum9:  output logic<9>,
+o_trunc: output logic<8>,
+o_fill:  output logic<8>
+) {
+inst child: Child (
+widen_u: narrow_u,
+widen_s: s8,
+sum9: a + b,
+trunc8: wide16,
+fill8: '1,
+o_u16,
+o_s16,
+o_sum9,
+o_trunc,
+o_fill
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let u8_in = sim.signal("narrow_u");
+    let s8 = sim.signal("s8");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let wide16 = sim.signal("wide16");
+    let o_u16 = sim.signal("o_u16");
+    let o_s16 = sim.signal("o_s16");
+    let o_sum9 = sim.signal("o_sum9");
+    let o_trunc = sim.signal("o_trunc");
+    let o_fill = sim.signal("o_fill");
+
+    sim.modify(|io| {
+        io.set(u8_in, 0xffu8);
+        io.set(s8, 0x80u8);
+        io.set(a, 0xffu8);
+        io.set(b, 1u8);
+        io.set(wide16, 0xab34u16);
+    })
+    .unwrap();
+
+    assert_eq!(sim.get(o_u16), 0x00ffu16.into());
+    assert_eq!(sim.get(o_s16), 0xff80u16.into());
+    assert_eq!(sim.get(o_sum9), 0x0100u16.into());
+    assert_eq!(sim.get(o_trunc), 0x34u8.into());
+    assert_eq!(sim.get(o_fill), 0xffu8.into());
+
+    }
+
+    fn test_dynamic_output_port_rmw_preserves_unselected_bits(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Child (
+a: input logic<2>,
+y: output logic<2>
+) {
+assign y = a;
+}
+module Top (
+idx: input logic<3>,
+a: input logic<2>,
+out: output logic<8>
+) {
+var mem: logic<8>;
+inst child: Child (
+a,
+y: mem[idx +: 2]
+);
+assign out = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let idx = sim.signal("idx");
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.modify(|io| {
+        io.set(idx, 0u8);
+        io.set(a, 3u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(out), 0x03u8.into());
+
+    sim.modify(|io| io.set(idx, 2u8)).unwrap();
+    assert_eq!(sim.get(out), 0x0fu8.into());
+
+    sim.modify(|io| {
+        io.set(a, 2u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(out), 0x0bu8.into());
+
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(out), 0x03u8.into());
+
+    sim.modify(|io| {
+        io.set(idx, 6u8);
+        io.set(a, 3u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(out), 0xc3u8.into());
+
+    }
+
+    fn test_dynamic_minus_colon_output_port_rmw(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Child (a: input logic<2>, y: output logic<2>) {
+assign y = a;
+}
+module Top (idx: input logic<3>, a: input logic<2>, out: output logic<8>) {
+var mem: logic<8>;
+inst child: Child (a, y: mem[idx -: 2]);
+assign out = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let idx = sim.signal("idx");
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.modify(|io| { io.set(idx, 1u8); io.set(a, 3u8); }).unwrap();
+    assert_eq!(sim.get(out), 0x03u8.into());
+    sim.modify(|io| { io.set(idx, 4u8); io.set(a, 2u8); }).unwrap();
+    assert_eq!(sim.get(out), 0x13u8.into());
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(out), 0x03u8.into());
+    sim.modify(|io| { io.set(idx, 7u8); io.set(a, 3u8); }).unwrap();
+    assert_eq!(sim.get(out), 0xc3u8.into());
+
+    }
+
+    fn test_dynamic_step_output_port_rmw(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Child (a: input logic<2>, y: output logic<2>) {
+assign y = a;
+}
+module Top (idx: input logic<2>, a: input logic<2>, out: output logic<8>) {
+var mem: logic<8>;
+inst child: Child (a, y: mem[idx step 2]);
+assign out = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let idx = sim.signal("idx");
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.modify(|io| { io.set(idx, 0u8); io.set(a, 3u8); }).unwrap();
+    assert_eq!(sim.get(out), 0x03u8.into());
+    sim.modify(|io| { io.set(idx, 2u8); io.set(a, 2u8); }).unwrap();
+    assert_eq!(sim.get(out), 0x23u8.into());
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(out), 0x03u8.into());
+    sim.modify(|io| { io.set(idx, 3u8); io.set(a, 3u8); }).unwrap();
+    assert_eq!(sim.get(out), 0xc3u8.into());
+
+    }
+
+    fn test_dynamic_prefix_colon_output_port_allows_zero_lsb(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Child (a: input logic<8>, y: output logic<8>) {
+assign y = a;
+}
+module Top (idx: input logic, a: input logic<8>, out: output logic<16>) {
+var mem: logic<8> [2];
+inst child: Child (a, y: mem[idx][7:0]);
+assign out = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let idx = sim.signal("idx");
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.modify(|io| { io.set(idx, 0u8); io.set(a, 0x5au8); }).unwrap();
+    assert_eq!(sim.get(out), 0x005au16.into());
+    sim.modify(|io| { io.set(idx, 1u8); io.set(a, 0xa5u8); }).unwrap();
+    assert_eq!(sim.get(out), 0xa55au16.into());
+
+    }
+
     fn test_multiple_instances_isolation(sim) {
         @setup { let code = r#"
 module Worker (

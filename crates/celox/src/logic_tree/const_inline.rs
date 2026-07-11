@@ -208,6 +208,10 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
         if path.sources.iter().any(|s| const_vars.contains_key(&s.id)) {
             path.expr = rewrite_expr(path.expr, arena, &const_vars, &mut rewrite_cache);
             path.sources.retain(|src| !const_vars.contains_key(&src.id));
+            path.previous_sources
+                .retain(|src| !const_vars.contains_key(&src.id));
+            path.address_sources
+                .retain(|src| !const_vars.contains_key(&src.id));
         }
     }
 

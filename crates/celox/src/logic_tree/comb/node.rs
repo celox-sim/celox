@@ -1,7 +1,7 @@
 use std::{fmt, hash::Hash};
 
 use num_bigint::BigUint;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     HashMap,
@@ -11,15 +11,36 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(bound(
-    serialize = "A: Serialize + std::hash::Hash + Eq + Clone",
-    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
-))]
+#[derive(Debug, Clone, Serialize)]
+#[serde(bound(serialize = "A: Serialize + std::hash::Hash + Eq + Clone"))]
 pub struct SLTNodeArena<A: Hash + Eq + Clone> {
     pub nodes: Vec<SLTNode<A>>,
-    #[serde(skip, default = "crate::HashMap::default")]
+    #[serde(skip)]
     pub cache: crate::HashMap<SLTNode<A>, NodeId>,
+}
+
+#[derive(Deserialize)]
+#[serde(bound(deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"))]
+struct SLTNodeArenaWire<A: Hash + Eq + Clone> {
+    nodes: Vec<SLTNode<A>>,
+}
+
+impl<'de, A> Deserialize<'de> for SLTNodeArena<A>
+where
+    A: Deserialize<'de> + Hash + Eq + Clone,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SLTNodeArenaWire::<A>::deserialize(deserializer)?;
+        let mut arena = Self {
+            nodes: wire.nodes,
+            cache: crate::HashMap::default(),
+        };
+        arena.rebuild_cache();
+        Ok(arena)
+    }
 }
 
 impl<A: PartialEq + Hash + Eq + Clone> PartialEq for SLTNodeArena<A> {
@@ -49,6 +70,17 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         self.cache.insert(node.clone(), id);
         self.nodes.push(node);
         id
+    }
+
+    /// Rebuilds the derived interning cache from the persistent node list.
+    ///
+    /// If the list already contains duplicate nodes, the smallest (and therefore
+    /// first) [`NodeId`] is retained as the canonical identity.
+    pub fn rebuild_cache(&mut self) {
+        self.cache.clear();
+        for (idx, node) in self.nodes.iter().cloned().enumerate() {
+            self.cache.entry(node).or_insert(NodeId(idx));
+        }
     }
 
     pub fn get(&self, id: NodeId) -> &SLTNode<A> {
@@ -763,6 +795,49 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
         let new_id = target_arena.alloc(new_node);
         cache.insert(id, new_id);
         new_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NodeId, SLTNode, SLTNodeArena};
+    use num_bigint::BigUint;
+
+    fn constant(value: u8) -> SLTNode<u32> {
+        SLTNode::Constant(BigUint::from(value), BigUint::from(0u8), 8, false)
+    }
+
+    #[test]
+    fn rebuild_cache_uses_first_duplicate_node_id() {
+        let duplicate = constant(7);
+        let mut arena = SLTNodeArena {
+            nodes: vec![constant(1), duplicate.clone(), duplicate.clone()],
+            cache: crate::HashMap::default(),
+        };
+        arena.cache.insert(duplicate.clone(), NodeId(2));
+
+        arena.rebuild_cache();
+
+        assert_eq!(arena.cache.get(&duplicate), Some(&NodeId(1)));
+        let node_count = arena.nodes.len();
+        assert_eq!(arena.alloc(duplicate), NodeId(1));
+        assert_eq!(arena.nodes.len(), node_count);
+    }
+
+    #[test]
+    fn json_roundtrip_rebuilds_cache_with_minimum_node_id() {
+        let duplicate = constant(9);
+        let arena = SLTNodeArena {
+            nodes: vec![constant(2), duplicate.clone(), duplicate.clone()],
+            cache: crate::HashMap::default(),
+        };
+
+        let json = serde_json::to_string(&arena).unwrap();
+        let mut decoded: SLTNodeArena<u32> = serde_json::from_str(&json).unwrap();
+        let node_count = decoded.nodes.len();
+
+        assert_eq!(decoded.alloc(duplicate), NodeId(1));
+        assert_eq!(decoded.nodes.len(), node_count);
     }
 }
 

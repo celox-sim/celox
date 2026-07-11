@@ -251,6 +251,7 @@ fn gvn_dom_dfs(
     let mut added_loop_deps = Vec::new();
     let mut imm_changes = Vec::new();
 
+    let mut removed_defs = Vec::new();
     if let Some(block) = eu.blocks.get_mut(&block_id) {
         let mut aliases: HashMap<RegisterId, RegisterId> = HashMap::default();
         if !loop_blocks.contains(&block_id) {
@@ -278,6 +279,18 @@ fn gvn_dom_dfs(
             }
             apply_aliases_to_terminator(&mut block.terminator, canonical);
         }
+        if !aliases.is_empty() {
+            block.instructions.retain(|inst| {
+                let redundant = def_reg(inst).is_some_and(|dst| aliases.contains_key(&dst));
+                if redundant && let Some(dst) = def_reg(inst) {
+                    removed_defs.push(dst);
+                }
+                !redundant
+            });
+        }
+    }
+    for removed in removed_defs {
+        eu.register_map.remove(&removed);
     }
 
     for &child in &cfg.dom_children[node] {
@@ -585,5 +598,72 @@ fn apply_aliases(
                 *new = a;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removes_redundant_definition_after_rewriting_uses() {
+        let r0 = RegisterId(0);
+        let r1 = RegisterId(1);
+        let r2 = RegisterId(2);
+        let block_id = BlockId(0);
+        let mut unit = ExecutionUnit {
+            entry_block_id: block_id,
+            blocks: std::iter::once((
+                block_id,
+                BasicBlock {
+                    id: block_id,
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Imm(r0, SIRValue::new(1u8)),
+                        SIRInstruction::Imm(r1, SIRValue::new(1u8)),
+                        SIRInstruction::Binary(r2, r1, BinaryOp::Add, r1),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            ))
+            .collect(),
+            register_map: [
+                (
+                    r0,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    r1,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    r2,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        GvnPass.run(&mut unit, &PassOptions::default());
+
+        assert_eq!(
+            unit.blocks[&block_id].instructions,
+            vec![
+                SIRInstruction::Imm(r0, SIRValue::new(1u8)),
+                SIRInstruction::Binary(r2, r0, BinaryOp::Add, r0),
+            ]
+        );
+        assert!(!unit.register_map.contains_key(&r1));
+        unit.verify_result().unwrap();
     }
 }

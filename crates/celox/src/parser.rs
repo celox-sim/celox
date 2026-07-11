@@ -8,13 +8,6 @@ use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 use veryl_parser::token_range::TokenRange;
 
-fn rebuild_slt_cache<A: std::hash::Hash + Eq + Clone>(arena: &mut SLTNodeArena<A>) {
-    arena.cache.clear();
-    for (idx, node) in arena.nodes.iter().cloned().enumerate() {
-        arena.cache.insert(node, crate::logic_tree::NodeId(idx));
-    }
-}
-
 fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     start: usize,
@@ -36,8 +29,267 @@ fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
         }
     }
     if changed {
-        rebuild_slt_cache(arena);
+        arena.rebuild_cache();
     }
+}
+
+fn verify_slt_roots<A>(
+    arena: &SLTNodeArena<A>,
+    paths: &[LogicPath<A>],
+    observers: &[CombObserver<A>],
+    variable_widths: &HashMap<A, usize>,
+    phase: &'static str,
+) -> Result<(), ParserError>
+where
+    A: Hash + Eq + Clone,
+{
+    let facts =
+        SLTNodeFacts::verify(arena).map_err(|error| ParserError::SltVerify { phase, error })?;
+    let require = |node, role| {
+        facts
+            .require_lowerable(node, role)
+            .map_err(|error| ParserError::SltVerify { phase, error })
+    };
+    let fail = |invariant, node, message| ParserError::SltVerify {
+        phase,
+        error: crate::logic_tree::SLTNodeFactsError::new(invariant, node, message),
+    };
+    let access_width = |access: crate::ir::BitAccess,
+                        role: &'static str,
+                        node: NodeId|
+     -> Result<usize, ParserError> {
+        let span = access.msb.checked_sub(access.lsb).ok_or_else(|| {
+            fail(
+                "ROOT.ACCESS_ORDERED",
+                node,
+                format!(
+                    "{role} access has lsb {} greater than msb {}",
+                    access.lsb, access.msb
+                ),
+            )
+        })?;
+        span.checked_add(1).ok_or_else(|| {
+            fail(
+                "ROOT.ACCESS_REPRESENTABLE",
+                node,
+                format!(
+                    "{role} access [{}:{}] has an unrepresentable width",
+                    access.msb, access.lsb
+                ),
+            )
+        })
+    };
+    let verify_atom = |id: &A,
+                       access: crate::ir::BitAccess,
+                       role: &'static str,
+                       node: NodeId|
+     -> Result<usize, ParserError> {
+        let width = access_width(access, role, node)?;
+        let Some(&variable_width) = variable_widths.get(id) else {
+            return Err(fail(
+                "ROOT.VARIABLE_EXISTS",
+                node,
+                format!("{role} names a variable absent from the semantic type table"),
+            ));
+        };
+        if variable_width == 0 || access.msb >= variable_width {
+            return Err(fail(
+                "ROOT.ACCESS_IN_VARIABLE_BOUNDS",
+                node,
+                format!(
+                    "{role} access [{}:{}] is outside variable width {variable_width}",
+                    access.msb, access.lsb
+                ),
+            ));
+        }
+        Ok(width)
+    };
+
+    for (node_index, node) in arena.nodes.iter().enumerate() {
+        let node_id = NodeId(node_index);
+        match node {
+            crate::logic_tree::SLTNode::Input {
+                variable, access, ..
+            } => {
+                verify_atom(variable, *access, "SLT input", node_id)?;
+            }
+            crate::logic_tree::SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                result,
+                initials,
+                updates,
+                ..
+            } => {
+                let Some(&declared_loop_width) = variable_widths.get(loop_var) else {
+                    return Err(fail(
+                        "FOR_FOLD.LOOP_VARIABLE_EXISTS",
+                        node_id,
+                        "ForFold loop variable is absent from the semantic type table".to_string(),
+                    ));
+                };
+                if *loop_width != declared_loop_width {
+                    return Err(fail(
+                        "FOR_FOLD.LOOP_WIDTH_MATCHES_VARIABLE",
+                        node_id,
+                        format!(
+                            "ForFold loop width {loop_width} does not equal declared width {declared_loop_width}"
+                        ),
+                    ));
+                }
+                verify_atom(&result.id, result.access, "ForFold result", node_id)?;
+                for update in initials.iter().chain(updates) {
+                    verify_atom(
+                        &update.target.id,
+                        update.target.access,
+                        "ForFold state target",
+                        node_id,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (path_index, path) in paths.iter().enumerate() {
+        let expression_width = require(path.expr, "logic-path result")?;
+        if let LogicPathTarget::Var(target) = &path.target {
+            let target_width =
+                verify_atom(&target.id, target.access, "logic-path target", path.expr)?;
+            if expression_width != target_width {
+                return Err(fail(
+                    "ROOT.RESULT_WIDTH_MATCHES_TARGET",
+                    path.expr,
+                    format!(
+                        "logic-path result width {expression_width} does not equal target width {target_width}"
+                    ),
+                ));
+            }
+        }
+        for &node in &path.pre_lower_nodes {
+            require(node, "logic-path pre-lower value")?;
+        }
+        let mut local_ids = HashSet::default();
+        for (_, node) in &path.local_inputs {
+            require(*node, "logic-path local input")?;
+        }
+        for (id, _) in &path.local_inputs {
+            if !local_ids.insert(id.clone()) {
+                return Err(fail(
+                    "ROOT.LOCAL_INPUT_ID_UNIQUE",
+                    path.expr,
+                    "logic-path contains duplicate local-input IDs".to_string(),
+                ));
+            }
+        }
+        for source in path
+            .sources
+            .iter()
+            .chain(&path.previous_sources)
+            .chain(&path.address_sources)
+        {
+            verify_atom(&source.id, source.access, "logic-path source", path.expr)?;
+        }
+        for address in &path.address_sources {
+            if !path
+                .sources
+                .iter()
+                .any(|source| source.id == address.id && source.access.overlaps(&address.access))
+            {
+                return Err(fail(
+                    "ROOT.ADDRESS_SOURCE_IS_CURRENT_SOURCE",
+                    path.expr,
+                    "logic-path address source is absent from current-value sources".to_string(),
+                ));
+            }
+        }
+        for &successor in &path.order_before {
+            if successor.0 >= paths.len() {
+                return Err(fail(
+                    "ROOT.ORDER_EDGE_EXISTS",
+                    path.expr,
+                    format!(
+                        "logic path {path_index} orders before missing path {}",
+                        successor.0
+                    ),
+                ));
+            }
+            if successor.0 == path_index {
+                return Err(fail(
+                    "ROOT.ORDER_EDGE_NOT_SELF",
+                    path.expr,
+                    format!("logic path {path_index} contains a self ordering edge"),
+                ));
+            }
+        }
+        if let LogicPathTarget::CombCaptureEvent {
+            guard,
+            args,
+            loop_runner,
+            ..
+        } = &path.target
+        {
+            if let Some(guard) = guard {
+                require(*guard, "capture-event guard")?;
+            }
+            for &arg in args {
+                require(arg, "capture-event argument")?;
+            }
+            if let Some(loop_runner) = loop_runner {
+                require(*loop_runner, "capture-event loop runner")?;
+            }
+        }
+    }
+
+    for observer in observers {
+        if let Some(guard) = observer.guard {
+            require(guard, "observer guard")?;
+        }
+        for &arg in &observer.args {
+            require(arg, "observer argument")?;
+        }
+        if let Some(loop_runner) = observer.loop_runner {
+            require(loop_runner, "observer loop runner")?;
+        }
+        let mut local_ids = HashSet::default();
+        for (id, node) in &observer.local_inputs {
+            require(*node, "observer local input")?;
+            if !local_ids.insert(id.clone()) {
+                return Err(fail(
+                    "ROOT.LOCAL_INPUT_ID_UNIQUE",
+                    *node,
+                    "observer contains duplicate local-input IDs".to_string(),
+                ));
+            }
+        }
+        let diagnostic_node = observer
+            .guard
+            .or(observer.loop_runner)
+            .or_else(|| observer.args.first().copied())
+            .unwrap_or(NodeId(0));
+        for atom in observer
+            .sensitivity
+            .iter()
+            .chain(&observer.observed_inputs)
+            .chain(&observer.position_inputs)
+            .chain(&observer.preceding_writes)
+            .chain(&observer.written_before)
+            .chain(&observer.written_input_atoms)
+        {
+            verify_atom(&atom.id, atom.access, "observer atom", diagnostic_node)?;
+        }
+        for id in &observer.written_inputs {
+            if !variable_widths.contains_key(id) {
+                return Err(fail(
+                    "ROOT.VARIABLE_EXISTS",
+                    diagnostic_node,
+                    "observer written input is absent from the semantic type table".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,13 +323,14 @@ pub mod module;
 pub mod registry;
 mod scheduler;
 use crate::ir::{
-    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, LogicPathId,
-    ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule,
-    VarAtomBase, VariableInfo,
+    AbsoluteAddr, CombObserver, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath,
+    LogicPathId, ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION,
+    SimModule, VarAtomBase, VariableInfo,
 };
-use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena};
+use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena, SLTNodeFacts};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::Hash;
 use veryl_analyzer::ir::Declaration;
 
 /// Source location information for rich error diagnostics.
@@ -177,6 +430,13 @@ pub enum ParserError {
         #[source]
         error: crate::ir::verify::SirVerifyError,
     },
+
+    #[error("SLT verification failed {phase}: {error}")]
+    SltVerify {
+        phase: &'static str,
+        #[source]
+        error: crate::logic_tree::SLTNodeFactsError,
+    },
 }
 
 impl ParserError {
@@ -241,6 +501,7 @@ impl miette::Diagnostic for ParserError {
             ParserError::TopNotFound { .. } => Some(Box::new("top_not_found")),
             ParserError::GenericTop { .. } => Some(Box::new("generic_top")),
             ParserError::SirVerify { .. } => Some(Box::new("sir_verify")),
+            ParserError::SltVerify { .. } => Some(Box::new("slt_verify")),
         }
     }
 
@@ -775,6 +1036,14 @@ pub(crate) fn flatten(
                 signals: Vec::new(),
             });
     }
+
+    verify_slt_roots(
+        &global_arena,
+        &comb_blocks,
+        &comb_observers,
+        &var_widths,
+        "after flattening symbolic logic",
+    )?;
 
     let sched_start = flatten_timing.then(crate::timing::now);
     let schedule = scheduler::sort(
@@ -2070,6 +2339,7 @@ fn build_comb_observer_capture_paths(
                 },
                 sources,
                 previous_sources: HashSet::default(),
+                address_sources: HashSet::default(),
                 local_inputs: observer.local_inputs.clone(),
                 order_before: order_before.clone(),
                 comb_capture_enable_sites: Vec::new(),
@@ -2098,6 +2368,7 @@ fn build_comb_observer_capture_paths(
                     },
                     sources: std::iter::once(trigger_target).collect(),
                     previous_sources: HashSet::default(),
+                    address_sources: HashSet::default(),
                     local_inputs: observer.local_inputs.clone(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
@@ -2179,6 +2450,7 @@ fn build_comb_observer_capture_paths(
             },
             sources,
             previous_sources: HashSet::default(),
+            address_sources: HashSet::default(),
             local_inputs: observer.local_inputs.clone(),
             order_before,
             comb_capture_enable_sites: Vec::new(),
@@ -2233,6 +2505,7 @@ fn build_comb_observer_capture_paths(
                     },
                     sources: std::iter::once(trigger_target).collect(),
                     previous_sources: HashSet::default(),
+                    address_sources: HashSet::default(),
                     local_inputs: member.local_inputs.clone(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
@@ -2257,10 +2530,15 @@ fn apply_always_comb_previous_source_ordering(comb_blocks: &mut [LogicPath<Absol
         }
 
         let previous_sources = path.previous_sources.clone();
+        let address_sources = path.address_sources.clone();
         path.sources.retain(|source| {
-            !previous_sources.iter().any(|previous| {
+            let is_previous = previous_sources.iter().any(|previous| {
                 previous.id == source.id && previous.access.overlaps(&source.access)
-            })
+            });
+            let is_address = address_sources
+                .iter()
+                .any(|address| address.id == source.id && address.access.overlaps(&source.access));
+            !is_previous || is_address
         });
 
         let mut order_before = Vec::new();
