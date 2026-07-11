@@ -1020,7 +1020,30 @@ but do not invent this control topology. A future synthetic control rule needs
 new expected-row and mapping variants rather than reusing `SyntheticOriginId`.
 
 SourceCoercion
-  operand/result widths, extension/truncation, signed comparison rule
+  source width / source signedness
+  target width / target signedness
+  context: SelfDetermined | AssignmentValue | ExplicitCast |
+           CommonExpressionOperand | ForFoldCounterOperand(rule ID)
+  width action: Identity | Truncate | ZeroExtend | SignExtend
+
+`SourceCoercion` is a derived row, not a producer-selected extension tag.  The
+context fixes the extension basis before the width action is checked:
+
+- `SelfDetermined` requires identical source/target types and `Identity`;
+- `AssignmentValue` and `ExplicitCast` use source signedness when widening,
+  while the typed destination/cast independently fixes target signedness;
+- `CommonExpressionOperand` uses the operator-derived common result
+  signedness when widening, so one unsigned ternary/binary arm forces
+  zero-extension of every arm into the common type; and
+- `ForFoldCounterOperand` uses the closed language-version rule named by the
+  independently derived transition-semantics row.  For the current rule,
+  widening sign-extends only when both the source and counter types are
+  signed.  Compare width and the operator-specific Add/Mul/Shl step-math width
+  remain separate derivations.
+
+Truncation is independent of the extension basis.  The verifier derives the
+exact target width from the typed HIR context; a wire may not choose a wider
+type merely because its extension kind is internally consistent.
 
 SourceComparison
   operator / signedness / SourceCoercion
@@ -1985,6 +2008,21 @@ produces their maximum width; concat uses checked addition. Selector/condition
 sites additionally require nonzero width. This same fact table becomes the
 sole width API so verifier and lowering cannot disagree or panic on malformed
 IDs, underflow, overflow, or a deep graph.
+Signedness is also derived by one closed shared rule: arithmetic and bitwise
+binary results are signed only when both operands are signed; shifts inherit
+the left operand; comparison and logical results are unsigned; identity,
+unary minus, and bit-not preserve operand signedness; reductions are unsigned;
+and concatenation is unsigned. A whole declared input read preserves its
+declared signedness, whereas a bit/part select and the phase `Slice` node are
+unsigned. A mux derives common signedness from both raw arms. Its two declared
+arm target types must match, their width must be at least the maximum raw arm
+width (allowing an independently verified enclosing context to widen it), and
+their extension uses common target signedness rather than each arm's source
+signedness. ForFold state initial/update coercions use assignment semantics.
+Step 1 retains arbitrary-width typed bound and step payloads without deriving
+a partial counter-width formula; the exact compare and Add/Mul/Shl math
+coercions belong to the independently verified `SourceForFoldTransitionSemantics`
+row in step 2.
 Two-state facts for input leaves come from an explicit verified
 `InputSemanticFacts<P>` context built from the declaration/flattened variable type
 table; `SLTNode::Input` alone does not encode `Bit` versus `Logic`. Derived
