@@ -124,6 +124,48 @@ pub type SourceInputId = PhaseInputId<SourcePhase>;
 pub type DraftOccurrenceInputId = PhaseInputId<DraftOccurrencePhase>;
 pub type OccurrenceInputId = PhaseInputId<OccurrencePhase>;
 
+/// A checked semantic-object-table ID in phase `P`.
+///
+/// This namespace is deliberately distinct from [`PhaseInputId`]. One
+/// declaration/binding object may have several exact read geometries, while
+/// state overlap and storage bounds are properties of the object itself.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PhaseSemanticObjectId<P: SLTPhase> {
+    index: u32,
+    phase: PhantomData<fn() -> P>,
+}
+
+impl<P: SLTPhase> PhaseSemanticObjectId<P> {
+    fn new(index: u32) -> Self {
+        Self {
+            index,
+            phase: PhantomData,
+        }
+    }
+
+    pub fn index(self) -> u32 {
+        self.index
+    }
+}
+
+impl<P: SLTPhase> Copy for PhaseSemanticObjectId<P> {}
+
+impl<P: SLTPhase> Clone for PhaseSemanticObjectId<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: SLTPhase> fmt::Debug for PhaseSemanticObjectId<P> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "po{}", self.index)
+    }
+}
+
+pub type SourceSemanticObjectId = PhaseSemanticObjectId<SourcePhase>;
+pub type DraftOccurrenceSemanticObjectId = PhaseSemanticObjectId<DraftOccurrencePhase>;
+pub type OccurrenceSemanticObjectId = PhaseSemanticObjectId<OccurrencePhase>;
+
 /// A checked runtime-event site ID isolated by the owning SLT phase.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PhaseRuntimeEventSiteId<P: SLTPhase> {
@@ -169,91 +211,763 @@ pub enum InputElementDomain {
     Logic,
 }
 
-/// One row independently derived from verified source/flattened type data.
-#[derive(Debug, PartialEq, Eq)]
-pub struct InputSemanticFact {
-    width: usize,
-    signed: bool,
-    domain: InputElementDomain,
-    dynamic_index_strides: Vec<usize>,
+/// One canonical aggregate dimension and its suffix-product bit stride.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticDimensionKind {
+    Unpacked,
+    Packed,
+    Intrinsic,
 }
 
-impl InputSemanticFact {
+impl SemanticDimensionKind {
+    fn canonical_rank(self) -> u8 {
+        match self {
+            Self::Unpacked => 0,
+            Self::Packed => 1,
+            Self::Intrinsic => 2,
+        }
+    }
+}
+
+/// One canonical aggregate dimension and its suffix-product bit stride.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticDimensionFact {
+    kind: SemanticDimensionKind,
+    extent: usize,
+    stride: usize,
+}
+
+/// One semantic declaration/binding/storage object.
+///
+/// These fields are retained facts, but their agreement with typed HIR is not
+/// established by this low-level arena. The future verified semantic-context
+/// builder is the only production path which may construct these private rows.
+#[derive(Debug, PartialEq, Eq)]
+struct SemanticObjectFact {
+    width: usize,
+    declared_signed: bool,
+    domain: InputElementDomain,
+    dimensions: Vec<SemanticDimensionFact>,
+}
+
+impl SemanticObjectFact {
     fn try_new(
         width: usize,
-        signed: bool,
+        declared_signed: bool,
         domain: InputElementDomain,
-        dynamic_index_strides: Vec<usize>,
-    ) -> Result<Self, InputSemanticFactError> {
+        dimensions: Vec<SemanticDimensionFact>,
+    ) -> Result<Self, SemanticFactError> {
         if width == 0 {
-            return Err(InputSemanticFactError::new(
-                "INPUT.WIDTH_NON_ZERO",
-                "input semantic width is zero",
+            return Err(SemanticFactError::new(
+                "OBJECT.WIDTH_NON_ZERO",
+                "semantic object width is zero",
             ));
         }
-        if let Some((ordinal, _)) = dynamic_index_strides
-            .iter()
-            .enumerate()
-            .find(|(_, stride)| **stride == 0)
-        {
-            return Err(InputSemanticFactError::new(
-                "INPUT.INDEX_STRIDE_NON_ZERO",
-                format!("dynamic index stride {ordinal} is zero"),
+        if dimensions.is_empty() {
+            return Err(SemanticFactError::new(
+                "OBJECT.DIMENSION_COUNT_NON_ZERO",
+                "supported semantic object has no canonical dimension row",
+            ));
+        }
+        if dimensions.len() > u32::MAX as usize {
+            return Err(SemanticFactError::new(
+                "OBJECT.DIMENSION_COUNT_REPRESENTABLE",
+                format!(
+                    "{} semantic object dimensions do not fit a checked u32 ordinal",
+                    dimensions.len()
+                ),
+            ));
+        }
+
+        let mut previous_rank = 0u8;
+        let mut saw_intrinsic = false;
+        for (ordinal, dimension) in dimensions.iter().enumerate() {
+            let rank = dimension.kind.canonical_rank();
+            if ordinal != 0 && rank < previous_rank {
+                return Err(SemanticFactError::new(
+                    "OBJECT.DIMENSION_KINDS_CANONICAL",
+                    format!(
+                        "semantic object dimension {ordinal} kind {:?} is out of unpacked/packed/intrinsic order",
+                        dimension.kind
+                    ),
+                ));
+            }
+            if saw_intrinsic {
+                return Err(SemanticFactError::new(
+                    "OBJECT.INTRINSIC_DIMENSION_IS_FINAL",
+                    format!(
+                        "semantic object has a dimension after intrinsic dimension {}",
+                        ordinal - 1
+                    ),
+                ));
+            }
+            if dimension.kind == SemanticDimensionKind::Intrinsic {
+                // Width-one enum/struct/union intrinsic dimensions remain
+                // normative and selectable. The common nonzero check below
+                // still rejects an intrinsic extent of zero.
+                saw_intrinsic = true;
+            }
+            previous_rank = rank;
+        }
+
+        let mut suffix_product = 1usize;
+        for (ordinal, dimension) in dimensions.iter().enumerate().rev() {
+            if dimension.extent == 0 {
+                return Err(SemanticFactError::new(
+                    "OBJECT.DIMENSION_NON_ZERO",
+                    format!("semantic object dimension {ordinal} has zero extent"),
+                ));
+            }
+            if dimension.stride == 0 {
+                return Err(SemanticFactError::new(
+                    "OBJECT.STRIDE_NON_ZERO",
+                    format!("semantic object dimension {ordinal} has zero stride"),
+                ));
+            }
+            if dimension.stride != suffix_product {
+                return Err(SemanticFactError::new(
+                    "OBJECT.STRIDES_ARE_SUFFIX_PRODUCTS",
+                    format!(
+                        "semantic object dimension {ordinal} has stride {}, expected suffix product {suffix_product}",
+                        dimension.stride
+                    ),
+                ));
+            }
+            suffix_product = suffix_product.checked_mul(dimension.extent).ok_or_else(|| {
+                SemanticFactError::new(
+                    "OBJECT.WIDTH_REPRESENTABLE",
+                    format!(
+                        "semantic object dimension {ordinal} extent {} overflows accumulated width {suffix_product}",
+                        dimension.extent
+                    ),
+                )
+            })?;
+        }
+        if suffix_product != width {
+            return Err(SemanticFactError::new(
+                "OBJECT.DIMENSIONS_MATCH_WIDTH",
+                format!(
+                    "canonical dimension product {suffix_product} does not equal semantic object width {width}"
+                ),
             ));
         }
         Ok(Self {
             width,
-            signed,
+            declared_signed,
             domain,
-            dynamic_index_strides,
+            dimensions,
         })
     }
 }
 
-/// Phase-bound semantic input facts. It has no serialization boundary.
+/// Provenance class of one exact semantic read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputAccessProvenance {
+    WholeObject,
+    UnpackedOnly,
+    PackedBitSelect,
+    PackedPartSelect {
+        kind: PhasePartSelectKind,
+        elements: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhasePartSelectKind {
+    Colon,
+    PlusColon,
+    MinusColon,
+    Step,
+}
+
+/// Role of one ordered input-address child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputIndexRole {
+    AggregateDimension {
+        dimension: u32,
+    },
+    /// A normalized dynamic part-select start. Static part-select contribution
+    /// is already included in `static_base` and therefore has no child row.
+    PartSelectStart {
+        dimension: u32,
+        kind: PhasePartSelectKind,
+        elements: usize,
+    },
+}
+
+impl InputIndexRole {
+    fn dimension(self) -> u32 {
+        match self {
+            Self::AggregateDimension { dimension } | Self::PartSelectStart { dimension, .. } => {
+                dimension
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputIndexFact {
+    role: InputIndexRole,
+    extent: usize,
+    stride: usize,
+}
+
+/// One exact semantic read geometry of a semantic object.
+#[derive(Debug, PartialEq, Eq)]
+struct InputAccessFact<P: SLTPhase> {
+    object: PhaseSemanticObjectId<P>,
+    static_base: usize,
+    /// Aggregate dimensions consumed before an optional part-select anchor.
+    aggregate_dimension_count: u32,
+    result_width: usize,
+    /// Access-provenance-derived signedness. Step 1 retains this expected row;
+    /// the future aggregate semantic verifier proves its agreement with HIR.
+    result_signed: bool,
+    result_domain: InputElementDomain,
+    provenance: InputAccessProvenance,
+    indices: Vec<InputIndexFact>,
+}
+
+impl<P: SLTPhase> InputAccessFact<P> {
+    fn try_new(
+        object: PhaseSemanticObjectId<P>,
+        static_base: usize,
+        aggregate_dimension_count: u32,
+        result_width: usize,
+        result_signed: bool,
+        result_domain: InputElementDomain,
+        provenance: InputAccessProvenance,
+        indices: Vec<InputIndexFact>,
+    ) -> Result<Self, SemanticFactError> {
+        if result_width == 0 {
+            return Err(SemanticFactError::new(
+                "INPUT.RESULT_WIDTH_NON_ZERO",
+                "semantic input result width is zero",
+            ));
+        }
+        if indices.len() > u32::MAX as usize {
+            return Err(SemanticFactError::new(
+                "INPUT.INDEX_COUNT_REPRESENTABLE",
+                format!(
+                    "{} semantic input index rows do not fit a checked u32 count",
+                    indices.len()
+                ),
+            ));
+        }
+        for (ordinal, index) in indices.iter().enumerate() {
+            if index.extent == 0 {
+                return Err(SemanticFactError::new(
+                    "INPUT.INDEX_EXTENT_NON_ZERO",
+                    format!("semantic input index {ordinal} has zero extent"),
+                ));
+            }
+            if index.stride == 0 {
+                return Err(SemanticFactError::new(
+                    "INPUT.INDEX_STRIDE_NON_ZERO",
+                    format!("semantic input index {ordinal} has zero stride"),
+                ));
+            }
+            if let InputIndexRole::PartSelectStart { elements, .. } = index.role
+                && elements == 0
+            {
+                return Err(SemanticFactError::new(
+                    "INPUT.PART_ELEMENTS_NON_ZERO",
+                    format!("semantic input part-select index {ordinal} has zero elements"),
+                ));
+            }
+            if let InputIndexRole::PartSelectStart {
+                kind: PhasePartSelectKind::Colon,
+                ..
+            } = index.role
+            {
+                return Err(SemanticFactError::new(
+                    "INPUT.COLON_PART_HAS_NO_RUNTIME_CHILD",
+                    format!(
+                        "semantic input part-select index {ordinal} uses Colon, whose two bounds must both be known constants"
+                    ),
+                ));
+            }
+        }
+        Ok(Self {
+            object,
+            static_base,
+            aggregate_dimension_count,
+            result_width,
+            result_signed,
+            result_domain,
+            provenance,
+            indices,
+        })
+    }
+}
+
+/// Phase-bound semantic object and exact input-access facts.
+///
+/// It has no serialization boundary and no public production constructor.
 #[derive(Debug, PartialEq, Eq)]
 pub struct InputSemanticFacts<P: SLTPhase> {
-    rows: Vec<InputSemanticFact>,
+    objects: Vec<SemanticObjectFact>,
+    inputs: Vec<InputAccessFact<P>>,
     phase: PhantomData<fn() -> P>,
 }
 
 impl<P: SLTPhase> InputSemanticFacts<P> {
-    fn try_from_verified_rows(rows: Vec<InputSemanticFact>) -> Result<Self, PhaseArenaError<P>> {
-        if rows.len() > u32::MAX as usize {
+    fn try_from_verified_rows(
+        objects: Vec<SemanticObjectFact>,
+        inputs: Vec<InputAccessFact<P>>,
+    ) -> Result<Self, PhaseArenaError<P>> {
+        if objects.len() > u32::MAX as usize {
+            return Err(PhaseArenaError::new(
+                "OBJECT.ID_REPRESENTABLE",
+                None,
+                format!(
+                    "{} semantic object rows do not fit a checked u32 ID",
+                    objects.len()
+                ),
+            ));
+        }
+        if inputs.len() > u32::MAX as usize {
             return Err(PhaseArenaError::new(
                 "INPUT.ID_REPRESENTABLE",
                 None,
-                format!("{} input rows do not fit a checked u32 ID", rows.len()),
+                format!("{} input rows do not fit a checked u32 ID", inputs.len()),
             ));
         }
+
+        for (ordinal, input) in inputs.iter().enumerate() {
+            let Some(object) = objects.get(input.object.index as usize) else {
+                return Err(PhaseArenaError::new(
+                    "INPUT.OBJECT_EXISTS",
+                    None,
+                    format!(
+                        "semantic input {ordinal} names missing object po{}",
+                        input.object.index
+                    ),
+                ));
+            };
+            // This private step-1 foundation currently admits only reads whose
+            // selected element domain is the object's closed Bit/Logic domain.
+            // A future named-member projection may select a different member
+            // type; relaxing this requires the step-2 exact selected-type/HIR
+            // connection rather than guessing projection semantics here.
+            if input.result_domain != object.domain {
+                return Err(PhaseArenaError::new(
+                    "INPUT.RESULT_DOMAIN_MATCHES_OBJECT",
+                    None,
+                    format!(
+                        "semantic input {ordinal} result domain {:?} differs from object domain {:?}",
+                        input.result_domain, object.domain
+                    ),
+                ));
+            }
+            let static_end = input
+                .static_base
+                .checked_add(input.result_width)
+                .ok_or_else(|| {
+                    PhaseArenaError::new(
+                        "INPUT.STATIC_WINDOW_REPRESENTABLE",
+                        None,
+                        format!("semantic input {ordinal} static result window overflows usize"),
+                    )
+                })?;
+            if static_end > object.width {
+                return Err(PhaseArenaError::new(
+                    "INPUT.STATIC_WINDOW_IN_OBJECT",
+                    None,
+                    format!(
+                        "semantic input {ordinal} base {} plus result width {} exceeds object width {}",
+                        input.static_base, input.result_width, object.width
+                    ),
+                ));
+            }
+
+            let aggregate_dimension_count = input.aggregate_dimension_count as usize;
+            if aggregate_dimension_count > object.dimensions.len() {
+                return Err(PhaseArenaError::new(
+                    "INPUT.AGGREGATE_DIMENSION_COUNT_IN_OBJECT",
+                    None,
+                    format!(
+                        "semantic input {ordinal} consumes {aggregate_dimension_count} dimensions from an object with {}",
+                        object.dimensions.len()
+                    ),
+                ));
+            }
+            let unpacked_dimension_count = object
+                .dimensions
+                .iter()
+                .take_while(|dimension| dimension.kind == SemanticDimensionKind::Unpacked)
+                .count();
+            let expected_signed = match input.provenance {
+                InputAccessProvenance::WholeObject => object.declared_signed,
+                InputAccessProvenance::UnpackedOnly => object.declared_signed,
+                InputAccessProvenance::PackedBitSelect
+                | InputAccessProvenance::PackedPartSelect { .. } => false,
+            };
+            if input.result_signed != expected_signed {
+                return Err(PhaseArenaError::new(
+                    "INPUT.RESULT_SIGNEDNESS_DERIVED",
+                    None,
+                    format!(
+                        "semantic input {ordinal} provenance {:?} requires signedness {expected_signed}, got {}",
+                        input.provenance, input.result_signed
+                    ),
+                ));
+            }
+            let radix_dimension_count = match input.provenance {
+                InputAccessProvenance::WholeObject => {
+                    if input.static_base != 0
+                        || input.result_width != object.width
+                        || aggregate_dimension_count != 0
+                        || !input.indices.is_empty()
+                    {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.WHOLE_OBJECT_GEOMETRY_EXACT",
+                            None,
+                            format!(
+                                "semantic input {ordinal} whole-object geometry must be base 0, width {}, zero consumed dimensions, and no index rows",
+                                object.width
+                            ),
+                        ));
+                    }
+                    0
+                }
+                InputAccessProvenance::UnpackedOnly => {
+                    if aggregate_dimension_count == 0
+                        || aggregate_dimension_count > unpacked_dimension_count
+                    {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.UNPACKED_SELECTION_STAYS_UNPACKED",
+                            None,
+                            format!(
+                                "semantic input {ordinal} unpacked-only access consumes {aggregate_dimension_count} dimensions but object has {unpacked_dimension_count} unpacked dimensions"
+                            ),
+                        ));
+                    }
+                    let expected_width = object.dimensions[aggregate_dimension_count - 1].stride;
+                    if input.result_width != expected_width {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.RESULT_WIDTH_MATCHES_DIMENSIONS",
+                            None,
+                            format!(
+                                "semantic input {ordinal} unpacked-only result width {} differs from remaining stride {expected_width}",
+                                input.result_width
+                            ),
+                        ));
+                    }
+                    aggregate_dimension_count
+                }
+                InputAccessProvenance::PackedBitSelect => {
+                    if aggregate_dimension_count <= unpacked_dimension_count
+                        || aggregate_dimension_count > object.dimensions.len()
+                    {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.PACKED_SELECT_CONSUMES_PACKED_DIMENSION",
+                            None,
+                            format!(
+                                "semantic input {ordinal} packed bit-select consumes {aggregate_dimension_count} dimensions after {unpacked_dimension_count} unpacked dimensions"
+                            ),
+                        ));
+                    }
+                    let expected_width = object.dimensions[aggregate_dimension_count - 1].stride;
+                    if input.result_width != expected_width {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.RESULT_WIDTH_MATCHES_DIMENSIONS",
+                            None,
+                            format!(
+                                "semantic input {ordinal} packed bit-select result width {} differs from remaining stride {expected_width}",
+                                input.result_width
+                            ),
+                        ));
+                    }
+                    aggregate_dimension_count
+                }
+                InputAccessProvenance::PackedPartSelect { elements, .. } => {
+                    let Some(dimension) = object.dimensions.get(aggregate_dimension_count) else {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.PART_DIMENSION_EXISTS",
+                            None,
+                            format!(
+                                "semantic input {ordinal} part-select anchor dimension {aggregate_dimension_count} is absent"
+                            ),
+                        ));
+                    };
+                    if dimension.kind == SemanticDimensionKind::Unpacked {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.PACKED_SELECT_CONSUMES_PACKED_DIMENSION",
+                            None,
+                            format!(
+                                "semantic input {ordinal} packed part-select targets unpacked dimension {aggregate_dimension_count}"
+                            ),
+                        ));
+                    }
+                    if elements == 0 || elements > dimension.extent {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.PART_ELEMENTS_IN_DIMENSION",
+                            None,
+                            format!(
+                                "semantic input {ordinal} selects {elements} elements from extent {}",
+                                dimension.extent
+                            ),
+                        ));
+                    }
+                    let expected_width = elements.checked_mul(dimension.stride).ok_or_else(|| {
+                        PhaseArenaError::new(
+                            "INPUT.RESULT_WIDTH_REPRESENTABLE",
+                            None,
+                            format!(
+                                "semantic input {ordinal} part elements {elements} times stride {} overflow usize",
+                                dimension.stride
+                            ),
+                        )
+                    })?;
+                    if input.result_width != expected_width {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.PART_WIDTH_MATCHES_GEOMETRY",
+                            None,
+                            format!(
+                                "semantic input {ordinal} part result width {} differs from elements-times-stride {expected_width}",
+                                input.result_width
+                            ),
+                        ));
+                    }
+                    aggregate_dimension_count.checked_add(1).ok_or_else(|| {
+                        PhaseArenaError::new(
+                            "INPUT.RADIX_DIMENSION_COUNT_REPRESENTABLE",
+                            None,
+                            format!(
+                                "semantic input {ordinal} part-select radix dimension count overflows usize"
+                            ),
+                        )
+                    })?
+                }
+            };
+
+            // `static_base` is a canonical mixed-radix sum over exactly the
+            // dimensions consumed by this access, plus the normalized part
+            // start dimension when present. Runtime roles own their complete
+            // digit, so their static digit must be zero. This deliberately
+            // does not reserve unexplained low bits for a future member
+            // projection; such a projection first needs the step-2 exact HIR
+            // selected-type relation described above.
+            let mut remaining_base = input.static_base;
+            let mut runtime_rows = input.indices.iter().peekable();
+            for dimension_ordinal in 0..radix_dimension_count {
+                let dimension = &object.dimensions[dimension_ordinal];
+                let digit = remaining_base / dimension.stride;
+                remaining_base %= dimension.stride;
+                if digit >= dimension.extent {
+                    return Err(PhaseArenaError::new(
+                        "INPUT.STATIC_BASE_DIGIT_IN_BOUNDS",
+                        None,
+                        format!(
+                            "semantic input {ordinal} static digit {digit} is outside dimension {dimension_ordinal} extent {}",
+                            dimension.extent
+                        ),
+                    ));
+                }
+
+                let runtime_role = if runtime_rows
+                    .peek()
+                    .is_some_and(|row| row.role.dimension() as usize == dimension_ordinal)
+                {
+                    runtime_rows.next().map(|row| row.role)
+                } else {
+                    None
+                };
+                if runtime_role.is_some() && digit != 0 {
+                    return Err(PhaseArenaError::new(
+                        "INPUT.RUNTIME_DIMENSION_STATIC_DIGIT_ZERO",
+                        None,
+                        format!(
+                            "semantic input {ordinal} runtime dimension {dimension_ordinal} also has static digit {digit}"
+                        ),
+                    ));
+                }
+
+                if dimension_ordinal == aggregate_dimension_count
+                    && runtime_role.is_none()
+                    && let InputAccessProvenance::PackedPartSelect { elements, .. } =
+                        input.provenance
+                {
+                    let end = digit.checked_add(elements).ok_or_else(|| {
+                        PhaseArenaError::new(
+                            "INPUT.STATIC_PART_END_REPRESENTABLE",
+                            None,
+                            format!(
+                                "semantic input {ordinal} static part start {digit} plus {elements} elements overflows usize"
+                            ),
+                        )
+                    })?;
+                    if end > dimension.extent {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.STATIC_PART_IN_BOUNDS",
+                            None,
+                            format!(
+                                "semantic input {ordinal} static part [{digit} +: {elements}] exceeds dimension {dimension_ordinal} extent {}",
+                                dimension.extent
+                            ),
+                        ));
+                    }
+                }
+            }
+            if remaining_base != 0 {
+                return Err(PhaseArenaError::new(
+                    "INPUT.STATIC_BASE_EXACT_RADIX",
+                    None,
+                    format!(
+                        "semantic input {ordinal} static base has unaccounted remainder {remaining_base} below {radix_dimension_count} consumed radix dimensions"
+                    ),
+                ));
+            }
+
+            let mut previous_dimension = None;
+            let mut saw_part = false;
+            for (index_ordinal, index) in input.indices.iter().enumerate() {
+                let dimension_ordinal = index.role.dimension() as usize;
+                let Some(dimension) = object.dimensions.get(dimension_ordinal) else {
+                    return Err(PhaseArenaError::new(
+                        "INPUT.INDEX_DIMENSION_EXISTS",
+                        None,
+                        format!(
+                            "semantic input {ordinal} index {index_ordinal} names missing object dimension {dimension_ordinal}"
+                        ),
+                    ));
+                };
+                if previous_dimension.is_some_and(|previous| previous >= dimension_ordinal) {
+                    return Err(PhaseArenaError::new(
+                        "INPUT.INDEX_ROWS_CANONICAL",
+                        None,
+                        format!(
+                            "semantic input {ordinal} index {index_ordinal} is not in strict dimension order"
+                        ),
+                    ));
+                }
+                previous_dimension = Some(dimension_ordinal);
+                match index.role {
+                    InputIndexRole::AggregateDimension { .. }
+                        if dimension_ordinal >= aggregate_dimension_count =>
+                    {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.INDEX_ROLE_WITHIN_ACCESS_GEOMETRY",
+                            None,
+                            format!(
+                                "semantic input {ordinal} aggregate index {index_ordinal} names dimension {dimension_ordinal} at/after consumed count {aggregate_dimension_count}"
+                            ),
+                        ));
+                    }
+                    InputIndexRole::PartSelectStart { .. }
+                        if dimension_ordinal != aggregate_dimension_count =>
+                    {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.INDEX_ROLE_WITHIN_ACCESS_GEOMETRY",
+                            None,
+                            format!(
+                                "semantic input {ordinal} part-select index names dimension {dimension_ordinal}, expected {aggregate_dimension_count}"
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
+                if (index.extent, index.stride) != (dimension.extent, dimension.stride) {
+                    return Err(PhaseArenaError::new(
+                        "INPUT.INDEX_GEOMETRY_MATCHES_OBJECT",
+                        None,
+                        format!(
+                            "semantic input {ordinal} index {index_ordinal} has extent/stride {}/{}, expected {}/{}",
+                            index.extent, index.stride, dimension.extent, dimension.stride
+                        ),
+                    ));
+                }
+                match index.role {
+                    InputIndexRole::AggregateDimension { .. } if saw_part => {
+                        return Err(PhaseArenaError::new(
+                            "INPUT.PART_INDEX_IS_LAST",
+                            None,
+                            format!(
+                                "semantic input {ordinal} has aggregate index {index_ordinal} after a part-select start"
+                            ),
+                        ));
+                    }
+                    InputIndexRole::AggregateDimension { .. } => {}
+                    InputIndexRole::PartSelectStart { kind, elements, .. } => {
+                        if saw_part || index_ordinal + 1 != input.indices.len() {
+                            return Err(PhaseArenaError::new(
+                                "INPUT.PART_INDEX_IS_LAST",
+                                None,
+                                format!(
+                                    "semantic input {ordinal} part-select start must be its unique final index"
+                                ),
+                            ));
+                        }
+                        saw_part = true;
+                        if input.provenance
+                            != (InputAccessProvenance::PackedPartSelect { kind, elements })
+                        {
+                            return Err(PhaseArenaError::new(
+                                "INPUT.PART_ROLE_MATCHES_PROVENANCE",
+                                None,
+                                format!(
+                                    "semantic input {ordinal} part-select index kind {kind:?} differs from access provenance {:?}",
+                                    input.provenance
+                                ),
+                            ));
+                        }
+                        let expected_width = elements.checked_mul(index.stride).ok_or_else(|| {
+                            PhaseArenaError::new(
+                                "INPUT.RESULT_WIDTH_REPRESENTABLE",
+                                None,
+                                format!(
+                                    "semantic input {ordinal} part elements {elements} times stride {} overflow usize",
+                                    index.stride
+                                ),
+                            )
+                        })?;
+                        if input.result_width != expected_width {
+                            return Err(PhaseArenaError::new(
+                                "INPUT.PART_WIDTH_MATCHES_GEOMETRY",
+                                None,
+                                format!(
+                                    "semantic input {ordinal} part result width {} differs from elements-times-stride {expected_width}",
+                                    input.result_width
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         Ok(Self {
-            rows,
+            objects,
+            inputs,
             phase: PhantomData,
         })
     }
 
-    pub fn id_at(&self, index: usize) -> Option<PhaseInputId<P>> {
-        self.rows.get(index)?;
+    pub fn object_id_at(&self, index: usize) -> Option<PhaseSemanticObjectId<P>> {
+        self.objects.get(index)?;
+        let index = u32::try_from(index).ok()?;
+        Some(PhaseSemanticObjectId::new(index))
+    }
+
+    pub fn input_id_at(&self, index: usize) -> Option<PhaseInputId<P>> {
+        self.inputs.get(index)?;
         let index = u32::try_from(index).ok()?;
         Some(PhaseInputId::new(index))
     }
 
-    fn get(&self, input: PhaseInputId<P>) -> Option<&InputSemanticFact> {
-        self.rows.get(input.index as usize)
+    fn get_object(&self, object: PhaseSemanticObjectId<P>) -> Option<&SemanticObjectFact> {
+        self.objects.get(object.index as usize)
+    }
+
+    fn get_input(&self, input: PhaseInputId<P>) -> Option<&InputAccessFact<P>> {
+        self.inputs.get(input.index as usize)
     }
 }
 
-/// A dynamic input index and its declaration-derived stride.
+/// A bit range on one semantic storage object.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseSLTIndex<P: SLTPhase> {
-    pub node: PhaseNodeId<P>,
-    pub stride: usize,
-}
-
-/// A bit range on one phase input.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhaseInputAtom<P: SLTPhase> {
-    pub input: PhaseInputId<P>,
+pub struct PhaseObjectAtom<P: SLTPhase> {
+    pub object: PhaseSemanticObjectId<P>,
     pub access: BitAccess,
 }
 
@@ -302,7 +1016,7 @@ pub enum PhaseSLTLoopBound<P: SLTPhase> {
 /// One canonical ForFold state row. Initial/update order remains parallel.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PhaseForFoldState<P: SLTPhase> {
-    pub target: PhaseInputAtom<P>,
+    pub target: PhaseObjectAtom<P>,
     pub initial: PhaseValueUse<P>,
     pub update: PhaseValueUse<P>,
 }
@@ -356,8 +1070,7 @@ impl<T> PhaseOwnedPayload<T> {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PhaseInputNode<P: SLTPhase> {
     pub input: PhaseInputId<P>,
-    pub index: Vec<PhaseSLTIndex<P>>,
-    pub access: BitAccess,
+    pub indices: Vec<PhaseNodeId<P>>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -377,9 +1090,7 @@ pub struct PhaseMuxNode<P: SLTPhase> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PhaseForFoldNode<P: SLTPhase> {
-    pub loop_input: PhaseInputId<P>,
-    pub loop_width: usize,
-    pub loop_signed: bool,
+    pub loop_object: PhaseSemanticObjectId<P>,
     pub start: PhaseSLTLoopBound<P>,
     pub end: PhaseSLTLoopBound<P>,
     pub inclusive: bool,
@@ -419,15 +1130,10 @@ pub enum PhaseSLTNode<P: SLTPhase> {
 impl<P: SLTPhase> PhaseSLTNode<P> {
     pub fn try_input(
         input: PhaseInputId<P>,
-        index: Vec<PhaseSLTIndex<P>>,
-        access: BitAccess,
+        indices: Vec<PhaseNodeId<P>>,
     ) -> Result<Self, PhaseArenaError<P>> {
         Ok(Self::Input(PhaseOwnedPayload::try_new::<P>(
-            PhaseInputNode {
-                input,
-                index,
-                access,
-            },
+            PhaseInputNode { input, indices },
             "input",
         )?))
     }
@@ -511,9 +1217,7 @@ impl<P: SLTPhase> Ord for PhaseSLTNode<P> {
                 let lhs = lhs.get();
                 let rhs = rhs.get();
                 (
-                    &lhs.loop_input,
-                    &lhs.loop_width,
-                    &lhs.loop_signed,
+                    &lhs.loop_object,
                     &lhs.start,
                     &lhs.end,
                     &lhs.inclusive,
@@ -521,9 +1225,7 @@ impl<P: SLTPhase> Ord for PhaseSLTNode<P> {
                     &lhs.step_coercion,
                 )
                     .cmp(&(
-                        &rhs.loop_input,
-                        &rhs.loop_width,
-                        &rhs.loop_signed,
+                        &rhs.loop_object,
                         &rhs.start,
                         &rhs.end,
                         &rhs.inclusive,
@@ -650,12 +1352,12 @@ impl<P: SLTPhase> InternOutcome<P> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct InputSemanticFactError {
+struct SemanticFactError {
     pub invariant: &'static str,
     pub message: String,
 }
 
-impl InputSemanticFactError {
+impl SemanticFactError {
     fn new(invariant: &'static str, message: impl Into<String>) -> Self {
         Self {
             invariant,
@@ -664,17 +1366,17 @@ impl InputSemanticFactError {
     }
 }
 
-impl fmt::Display for InputSemanticFactError {
+impl fmt::Display for SemanticFactError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "input semantic fact [{}]: {}",
+            "semantic context fact [{}]: {}",
             self.invariant, self.message
         )
     }
 }
 
-impl std::error::Error for InputSemanticFactError {}
+impl std::error::Error for SemanticFactError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseArenaOwner {
@@ -1044,62 +1746,48 @@ fn verify_node<P: SLTPhase>(
 
     let (width, signed, zero_mask) = match node {
         PhaseSLTNode::Input(payload) => {
-            let PhaseInputNode {
-                input,
-                index,
-                access,
-            } = payload.get();
-            let Some(input_fact) = inputs.get(*input) else {
+            let PhaseInputNode { input, indices } = payload.get();
+            let Some(input_fact) = inputs.get_input(*input) else {
                 return Err(PhaseArenaError::new(
                     "INPUT.ID_EXISTS",
                     Some(owner),
                     format!("input pi{} does not exist", input.index),
                 ));
             };
-            let width = map_rule(owner, node_rules::access_width(*access, "input"))?;
-            if access.msb >= input_fact.width {
+            if inputs.get_object(input_fact.object).is_none() {
                 return Err(PhaseArenaError::new(
-                    "INPUT.ACCESS_IN_BOUNDS",
+                    "INPUT.OBJECT_EXISTS",
                     Some(owner),
                     format!(
-                        "input access [{}:{}] exceeds declared width {}",
-                        access.msb, access.lsb, input_fact.width
+                        "input pi{} names missing semantic object po{}",
+                        input.index, input_fact.object.index
                     ),
                 ));
             }
-            if index.len() != input_fact.dynamic_index_strides.len() {
+            if indices.len() != input_fact.indices.len() {
                 return Err(PhaseArenaError::new(
-                    "INPUT.INDEX_GEOMETRY_MATCHES",
+                    "INPUT.INDEX_CHILD_COUNT_MATCHES",
                     Some(owner),
                     format!(
-                        "input supplies {} dynamic indices but declaration requires {}",
-                        index.len(),
-                        input_fact.dynamic_index_strides.len()
+                        "input pi{} supplies {} ordered index children but its exact access row requires {}",
+                        input.index,
+                        indices.len(),
+                        input_fact.indices.len()
                     ),
                 ));
             }
-            for (ordinal, (actual, expected)) in index
-                .iter()
-                .zip(input_fact.dynamic_index_strides.iter())
-                .enumerate()
-            {
-                if actual.stride != *expected {
-                    return Err(PhaseArenaError::new(
-                        "INPUT.INDEX_GEOMETRY_MATCHES",
-                        Some(owner),
-                        format!(
-                            "dynamic index {ordinal} has stride {}, expected {expected}",
-                            actual.stride
-                        ),
-                    ));
-                }
-                let child = facts.child(owner, actual.node.index)?;
-                require_nonzero(owner, child.width, "input dynamic index", actual.node.index)?;
+            for child in indices {
+                let child_fact = facts.child(owner, child.index)?;
+                require_nonzero(owner, child_fact.width, "input index", child.index)?;
             }
             (
-                width,
-                selected_signed(input_fact.signed, input_fact.width, *access),
-                input_fact.domain == InputElementDomain::Bit && all_children_zero_mask,
+                input_fact.result_width,
+                input_fact.result_signed,
+                // Checked input semantics define an unknown/out-of-bounds Bit
+                // address as zero. A Logic/masked index child therefore does
+                // not turn a Bit result into four-state data. Index children
+                // still contribute to lowerability above.
+                input_fact.result_domain == InputElementDomain::Bit,
             )
         }
         PhaseSLTNode::Constant(node) => {
@@ -1187,9 +1875,7 @@ fn verify_node<P: SLTPhase>(
         }
         PhaseSLTNode::ForFold(payload) => {
             let PhaseForFoldNode {
-                loop_input,
-                loop_width,
-                loop_signed,
+                loop_object,
                 start,
                 end,
                 inclusive: _,
@@ -1202,30 +1888,13 @@ fn verify_node<P: SLTPhase>(
                 effects,
                 continue_cond,
             } = payload.get();
-            if *loop_width == 0 {
+            let Some(_loop_fact) = inputs.get_object(*loop_object) else {
                 return Err(PhaseArenaError::new(
-                    "FOR_FOLD.LOOP_WIDTH_NON_ZERO",
+                    "FOR_FOLD.LOOP_OBJECT_EXISTS",
                     Some(owner),
-                    "ForFold loop width is zero",
-                ));
-            }
-            let Some(loop_fact) = inputs.get(*loop_input) else {
-                return Err(PhaseArenaError::new(
-                    "INPUT.ID_EXISTS",
-                    Some(owner),
-                    format!("ForFold loop input pi{} does not exist", loop_input.index),
+                    format!("ForFold loop object po{} does not exist", loop_object.index),
                 ));
             };
-            if loop_fact.width != *loop_width || loop_fact.signed != *loop_signed {
-                return Err(PhaseArenaError::new(
-                    "FOR_FOLD.LOOP_INPUT_TYPE_MATCHES",
-                    Some(owner),
-                    format!(
-                        "ForFold loop declares width/sign {loop_width}/{loop_signed} but input has {}/{}",
-                        loop_fact.width, loop_fact.signed
-                    ),
-                ));
-            }
             let (start_source, start_coercion) = bound_source_type(owner, "start", start, facts)?;
             let (end_source, end_coercion) = bound_source_type(owner, "end", end, facts)?;
             let step_source = typed_constant_type(owner, "step", step)?;
@@ -1255,15 +1924,15 @@ fn verify_node<P: SLTPhase>(
                     ),
                 ));
             };
-            let mut previous: Option<&PhaseInputAtom<P>> = None;
+            let mut previous: Option<&PhaseObjectAtom<P>> = None;
             for (ordinal, state) in states.iter().enumerate() {
-                let Some(target_input) = inputs.get(state.target.input) else {
+                let Some(target_object) = inputs.get_object(state.target.object) else {
                     return Err(PhaseArenaError::new(
-                        "INPUT.ID_EXISTS",
+                        "FOR_FOLD.STATE_OBJECT_EXISTS",
                         Some(owner),
                         format!(
-                            "ForFold state {ordinal} target pi{} does not exist",
-                            state.target.input.index
+                            "ForFold state {ordinal} target object po{} does not exist",
+                            state.target.object.index
                         ),
                     ));
                 };
@@ -1271,28 +1940,28 @@ fn verify_node<P: SLTPhase>(
                     owner,
                     node_rules::access_width(state.target.access, "ForFold state target"),
                 )?;
-                if state.target.access.msb >= target_input.width {
+                if state.target.access.msb >= target_object.width {
                     return Err(PhaseArenaError::new(
                         "FOR_FOLD.STATE_TARGET_IN_BOUNDS",
                         Some(owner),
                         format!(
-                            "state {ordinal} target [{}:{}] exceeds input width {}",
-                            state.target.access.msb, state.target.access.lsb, target_input.width
+                            "state {ordinal} target [{}:{}] exceeds object width {}",
+                            state.target.access.msb, state.target.access.lsb, target_object.width
                         ),
                     ));
                 }
                 if let Some(previous) = previous {
-                    if previous.input > state.target.input
-                        || (previous.input == state.target.input
+                    if previous.object > state.target.object
+                        || (previous.object == state.target.object
                             && previous.access.lsb >= state.target.access.lsb)
                     {
                         return Err(PhaseArenaError::new(
                             "FOR_FOLD.STATE_ROWS_CANONICAL",
                             Some(owner),
-                            format!("state row {ordinal} is not in strict input/range order"),
+                            format!("state row {ordinal} is not in strict object/range order"),
                         ));
                     }
-                    if previous.input == state.target.input
+                    if previous.object == state.target.object
                         && previous.access.msb >= state.target.access.lsb
                     {
                         return Err(PhaseArenaError::new(
@@ -1305,16 +1974,17 @@ fn verify_node<P: SLTPhase>(
                 previous = Some(&state.target);
                 let initial_type = verify_value_use(owner, &state.initial, facts)?;
                 let update_type = verify_value_use(owner, &state.update, facts)?;
-                let target_type = (
-                    target_width,
-                    selected_signed(target_input.signed, target_input.width, state.target.access),
-                );
-                if initial_type != target_type || update_type != target_type {
+                // STEP2.FOR_FOLD_STATE_TARGET_TYPE_MATCHES_EXPECTED_ACCESS:
+                // Step 1 deliberately does not infer signedness from a flat
+                // object range. It retains the matching initial/update target
+                // signedness; the expected transition/access relation proves
+                // that signedness against typed HIR in step 2.
+                if initial_type != update_type || initial_type.0 != target_width {
                     return Err(PhaseArenaError::new(
                         "FOR_FOLD.STATE_COERCION_MATCHES_TARGET",
                         Some(owner),
                         format!(
-                            "state {ordinal} target type {target_type:?}, initial/update types {initial_type:?}/{update_type:?}"
+                            "state {ordinal} target width {target_width}, initial/update target types {initial_type:?}/{update_type:?}"
                         ),
                     ));
                 }
@@ -1336,24 +2006,21 @@ fn verify_node<P: SLTPhase>(
                 "ForFold continue condition",
                 continue_cond.index,
             )?;
-            let result_input = inputs.get(result.target.input).ok_or_else(|| {
+            let result_object = inputs.get_object(result.target.object).ok_or_else(|| {
                 PhaseArenaError::new(
-                    "INPUT.ID_EXISTS",
+                    "FOR_FOLD.STATE_OBJECT_EXISTS",
                     Some(owner),
-                    "ForFold result state input disappeared",
+                    "ForFold result state object disappeared",
                 )
             })?;
+            let result_type = verify_value_use(owner, &result.initial, facts)?;
             (
                 map_rule(
                     owner,
                     node_rules::access_width(result.target.access, "ForFold result state"),
                 )?,
-                selected_signed(
-                    result_input.signed,
-                    result_input.width,
-                    result.target.access,
-                ),
-                result_input.domain == InputElementDomain::Bit && all_children_zero_mask,
+                result_type.1,
+                result_object.domain == InputElementDomain::Bit,
             )
         }
         PhaseSLTNode::Concat(parts) => {
@@ -1416,10 +2083,6 @@ fn verify_value_use_with_basis<P: SLTPhase>(
 ) -> Result<(usize, bool), PhaseArenaError<P>> {
     let source = facts.child(owner, value.value.index)?;
     verify_coercion(owner, (source.width, source.signed), value.coercion, basis)
-}
-
-fn selected_signed(declared_signed: bool, declared_width: usize, access: BitAccess) -> bool {
-    declared_signed && access.lsb == 0 && access.msb == declared_width - 1
 }
 
 fn verify_coercion<P: SLTPhase>(
@@ -1520,8 +2183,8 @@ fn try_for_each_child<P: SLTPhase, E>(
 ) -> Result<(), E> {
     match node {
         PhaseSLTNode::Input(node) => {
-            for entry in &node.get().index {
-                visit(entry.node)?;
+            for child in &node.get().indices {
+                visit(*child)?;
             }
         }
         PhaseSLTNode::Constant(_) => {}
@@ -1921,12 +2584,189 @@ fn replay_typed<P: SLTPhase>(
 mod tests {
     use super::*;
 
+    fn dimensions(extents: &[usize], unpacked_count: usize) -> Vec<SemanticDimensionFact> {
+        let mut rows = vec![
+            SemanticDimensionFact {
+                kind: SemanticDimensionKind::Packed,
+                extent: 0,
+                stride: 0,
+            };
+            extents.len()
+        ];
+        let mut stride = 1usize;
+        for (ordinal, &extent) in extents.iter().enumerate().rev() {
+            rows[ordinal] = SemanticDimensionFact {
+                kind: if ordinal < unpacked_count {
+                    SemanticDimensionKind::Unpacked
+                } else {
+                    SemanticDimensionKind::Packed
+                },
+                extent,
+                stride,
+            };
+            stride = stride.checked_mul(extent).unwrap();
+        }
+        rows
+    }
+
+    fn object(
+        width: usize,
+        declared_signed: bool,
+        domain: InputElementDomain,
+        extents: &[usize],
+        unpacked_count: usize,
+    ) -> SemanticObjectFact {
+        SemanticObjectFact::try_new(
+            width,
+            declared_signed,
+            domain,
+            dimensions(extents, unpacked_count),
+        )
+        .unwrap()
+    }
+
+    fn access(
+        object: u32,
+        static_base: usize,
+        aggregate_dimension_count: u32,
+        result_width: usize,
+        result_signed: bool,
+        result_domain: InputElementDomain,
+        provenance: InputAccessProvenance,
+        indices: Vec<InputIndexFact>,
+    ) -> InputAccessFact<SourcePhase> {
+        InputAccessFact::try_new(
+            PhaseSemanticObjectId::new(object),
+            static_base,
+            aggregate_dimension_count,
+            result_width,
+            result_signed,
+            result_domain,
+            provenance,
+            indices,
+        )
+        .unwrap()
+    }
+
+    fn aggregate_index(dimension: u32, extent: usize, stride: usize) -> InputIndexFact {
+        InputIndexFact {
+            role: InputIndexRole::AggregateDimension { dimension },
+            extent,
+            stride,
+        }
+    }
+
     fn inputs() -> InputSemanticFacts<SourcePhase> {
-        InputSemanticFacts::try_from_verified_rows(vec![
-            InputSemanticFact::try_new(64, false, InputElementDomain::Bit, Vec::new()).unwrap(),
-            InputSemanticFact::try_new(64, true, InputElementDomain::Logic, Vec::new()).unwrap(),
-            InputSemanticFact::try_new(8, false, InputElementDomain::Bit, vec![8]).unwrap(),
-        ])
+        InputSemanticFacts::try_from_verified_rows(
+            vec![
+                object(64, false, InputElementDomain::Bit, &[64], 0),
+                object(64, true, InputElementDomain::Logic, &[64], 0),
+                object(8, true, InputElementDomain::Bit, &[8], 0),
+                object(16, true, InputElementDomain::Bit, &[2, 8], 1),
+                object(16, false, InputElementDomain::Logic, &[2, 8], 1),
+            ],
+            vec![
+                access(
+                    0,
+                    0,
+                    0,
+                    64,
+                    false,
+                    InputElementDomain::Bit,
+                    InputAccessProvenance::WholeObject,
+                    Vec::new(),
+                ),
+                access(
+                    1,
+                    0,
+                    0,
+                    64,
+                    true,
+                    InputElementDomain::Logic,
+                    InputAccessProvenance::WholeObject,
+                    Vec::new(),
+                ),
+                access(
+                    0,
+                    0,
+                    0,
+                    8,
+                    false,
+                    InputElementDomain::Bit,
+                    InputAccessProvenance::PackedPartSelect {
+                        kind: PhasePartSelectKind::Colon,
+                        elements: 8,
+                    },
+                    Vec::new(),
+                ),
+                access(
+                    2,
+                    0,
+                    0,
+                    8,
+                    true,
+                    InputElementDomain::Bit,
+                    InputAccessProvenance::WholeObject,
+                    Vec::new(),
+                ),
+                access(
+                    2,
+                    0,
+                    1,
+                    1,
+                    false,
+                    InputElementDomain::Bit,
+                    InputAccessProvenance::PackedBitSelect,
+                    Vec::new(),
+                ),
+                access(
+                    3,
+                    0,
+                    1,
+                    8,
+                    true,
+                    InputElementDomain::Bit,
+                    InputAccessProvenance::UnpackedOnly,
+                    vec![aggregate_index(0, 2, 8)],
+                ),
+                access(
+                    3,
+                    0,
+                    1,
+                    8,
+                    false,
+                    InputElementDomain::Bit,
+                    InputAccessProvenance::PackedPartSelect {
+                        kind: PhasePartSelectKind::Colon,
+                        elements: 8,
+                    },
+                    Vec::new(),
+                ),
+                access(
+                    1,
+                    0,
+                    0,
+                    8,
+                    false,
+                    InputElementDomain::Logic,
+                    InputAccessProvenance::PackedPartSelect {
+                        kind: PhasePartSelectKind::Colon,
+                        elements: 8,
+                    },
+                    Vec::new(),
+                ),
+                access(
+                    4,
+                    0,
+                    1,
+                    8,
+                    false,
+                    InputElementDomain::Logic,
+                    InputAccessProvenance::UnpackedOnly,
+                    vec![aggregate_index(0, 2, 8)],
+                ),
+            ],
+        )
         .unwrap()
     }
 
@@ -1934,11 +2774,15 @@ mod tests {
         PhaseSLTNode::try_constant(BigUint::from(value), BigUint::from(0u8), width, false).unwrap()
     }
 
-    fn input_node(
+    fn input_node(input: PhaseInputId<SourcePhase>) -> PhaseSLTNode<SourcePhase> {
+        PhaseSLTNode::try_input(input, Vec::new()).unwrap()
+    }
+
+    fn indexed_input_node(
         input: PhaseInputId<SourcePhase>,
-        access: BitAccess,
+        indices: Vec<PhaseNodeId<SourcePhase>>,
     ) -> PhaseSLTNode<SourcePhase> {
-        PhaseSLTNode::try_input(input, Vec::new(), access).unwrap()
+        PhaseSLTNode::try_input(input, indices).unwrap()
     }
 
     fn mux_node(
@@ -1950,11 +2794,19 @@ mod tests {
     }
 
     fn identity<P: SLTPhase>(value: PhaseNodeId<P>, width: usize) -> PhaseValueUse<P> {
+        identity_with_signedness(value, width, false)
+    }
+
+    fn identity_with_signedness<P: SLTPhase>(
+        value: PhaseNodeId<P>,
+        width: usize,
+        signed: bool,
+    ) -> PhaseValueUse<P> {
         PhaseValueUse {
             value,
             coercion: PhaseCoercion {
                 target_width: width,
-                target_signed: false,
+                target_signed: signed,
                 kind: PhaseCoercionKind::Identity,
             },
         }
@@ -1979,29 +2831,259 @@ mod tests {
         }
     }
 
+    fn simple_for_fold(
+        loop_object: PhaseSemanticObjectId<SourcePhase>,
+        states: Vec<PhaseForFoldState<SourcePhase>>,
+        result_state: usize,
+        continue_cond: PhaseNodeId<SourcePhase>,
+    ) -> PhaseSLTNode<SourcePhase> {
+        PhaseSLTNode::try_for_fold(PhaseForFoldNode {
+            loop_object,
+            start: loop_bound(0, 64, false),
+            end: loop_bound(2, 64, false),
+            inclusive: false,
+            step: typed_constant(1, 64, false),
+            step_coercion: PhaseCoercion {
+                target_width: 64,
+                target_signed: false,
+                kind: PhaseCoercionKind::Identity,
+            },
+            step_op: SLTStepOp::Add,
+            reverse: false,
+            states,
+            result_state,
+            effects: Vec::new(),
+            continue_cond,
+        })
+        .unwrap()
+    }
+
     #[test]
     fn phase_ids_and_input_semantics_are_checked() {
         let inputs = inputs();
-        let bit = inputs.id_at(0).unwrap();
-        let logic = inputs.id_at(1).unwrap();
+        let bit = inputs.input_id_at(2).unwrap();
+        let logic = inputs.input_id_at(7).unwrap();
         let mut arena = MutableSLTNodeArena::new(inputs);
-        let bit_node = arena
-            .try_intern_ordinary(input_node(bit, BitAccess { lsb: 0, msb: 7 }))
-            .unwrap()
-            .id();
-        let logic_node = arena
-            .try_intern_ordinary(input_node(logic, BitAccess { lsb: 0, msb: 7 }))
-            .unwrap()
-            .id();
+        let bit_node = arena.try_intern_ordinary(input_node(bit)).unwrap().id();
+        let logic_node = arena.try_intern_ordinary(input_node(logic)).unwrap().id();
         assert_eq!(arena.width(bit_node), Some(8));
         assert_eq!(arena.zero_mask[bit_node.index], true);
         assert_eq!(arena.zero_mask[logic_node.index], false);
 
         let error = arena
-            .try_intern_ordinary(input_node(bit, BitAccess { lsb: 0, msb: 64 }))
+            .try_intern_ordinary(input_node(PhaseInputId::new(99)))
             .unwrap_err();
-        assert_eq!(error.invariant, "INPUT.ACCESS_IN_BOUNDS");
+        assert_eq!(error.invariant, "INPUT.ID_EXISTS");
         assert_eq!(arena.len(), 2);
+    }
+
+    #[test]
+    fn exact_input_children_and_result_domain_are_verified() {
+        let inputs = inputs();
+        let bit_access = inputs.input_id_at(5).unwrap();
+        let logic_access = inputs.input_id_at(8).unwrap();
+        let mut arena = MutableSLTNodeArena::new(inputs);
+        let masked_logic_index = arena
+            .try_intern_ordinary(
+                PhaseSLTNode::try_constant(BigUint::from(0u8), BigUint::from(1u8), 1, false)
+                    .unwrap(),
+            )
+            .unwrap()
+            .id();
+        assert!(!arena.zero_mask[masked_logic_index.index]);
+
+        let error = arena
+            .try_intern_ordinary(input_node(bit_access))
+            .unwrap_err();
+        assert_eq!(error.invariant, "INPUT.INDEX_CHILD_COUNT_MATCHES");
+
+        let bit = arena
+            .try_intern_ordinary(indexed_input_node(bit_access, vec![masked_logic_index]))
+            .unwrap()
+            .id();
+        let logic = arena
+            .try_intern_ordinary(indexed_input_node(logic_access, vec![masked_logic_index]))
+            .unwrap()
+            .id();
+        assert!(arena.zero_mask[bit.index]);
+        assert!(!arena.zero_mask[logic.index]);
+    }
+
+    #[test]
+    fn input_signedness_comes_from_exact_access_provenance() {
+        let inputs = inputs();
+        let unpacked_element = inputs.input_id_at(5).unwrap();
+        let explicit_full_packed_select = inputs.input_id_at(6).unwrap();
+        let unpacked_fact = inputs.get_input(unpacked_element).unwrap();
+        let packed_fact = inputs.get_input(explicit_full_packed_select).unwrap();
+        assert_eq!(unpacked_fact.object, packed_fact.object);
+        assert_eq!(unpacked_fact.static_base, packed_fact.static_base);
+        assert_eq!(unpacked_fact.result_width, packed_fact.result_width);
+
+        let mut arena = MutableSLTNodeArena::new(inputs);
+        let zero_index = arena.try_intern_ordinary(constant(0, 1)).unwrap().id();
+        let unpacked = arena
+            .try_intern_ordinary(indexed_input_node(unpacked_element, vec![zero_index]))
+            .unwrap()
+            .id();
+        let packed = arena
+            .try_intern_ordinary(input_node(explicit_full_packed_select))
+            .unwrap()
+            .id();
+        assert_eq!(arena.width(unpacked), Some(8));
+        assert_eq!(arena.width(packed), Some(8));
+        assert!(arena.signed[unpacked.index]);
+        assert!(!arena.signed[packed.index]);
+    }
+
+    #[test]
+    fn semantic_context_rejects_internally_inconsistent_signedness_and_geometry_rows() {
+        let signed_object = object(8, true, InputElementDomain::Bit, &[8], 0);
+        let bad_whole = access(
+            0,
+            0,
+            0,
+            8,
+            false,
+            InputElementDomain::Bit,
+            InputAccessProvenance::WholeObject,
+            Vec::new(),
+        );
+        let error =
+            InputSemanticFacts::try_from_verified_rows(vec![signed_object], vec![bad_whole])
+                .unwrap_err();
+        assert_eq!(error.invariant, "INPUT.RESULT_SIGNEDNESS_DERIVED");
+
+        let bad_dimensions = vec![
+            SemanticDimensionFact {
+                kind: SemanticDimensionKind::Packed,
+                extent: 2,
+                stride: 2,
+            },
+            SemanticDimensionFact {
+                kind: SemanticDimensionKind::Packed,
+                extent: 3,
+                stride: 1,
+            },
+        ];
+        let error = SemanticObjectFact::try_new(6, false, InputElementDomain::Bit, bad_dimensions)
+            .unwrap_err();
+        assert_eq!(error.invariant, "OBJECT.STRIDES_ARE_SUFFIX_PRODUCTS");
+    }
+
+    #[test]
+    fn width_one_intrinsic_dimension_is_normative_and_selectable() {
+        let intrinsic = SemanticObjectFact::try_new(
+            1,
+            true,
+            InputElementDomain::Bit,
+            vec![SemanticDimensionFact {
+                kind: SemanticDimensionKind::Intrinsic,
+                extent: 1,
+                stride: 1,
+            }],
+        )
+        .unwrap();
+        let selected = access(
+            0,
+            0,
+            1,
+            1,
+            false,
+            InputElementDomain::Bit,
+            InputAccessProvenance::PackedBitSelect,
+            Vec::new(),
+        );
+        let facts =
+            InputSemanticFacts::try_from_verified_rows(vec![intrinsic], vec![selected]).unwrap();
+        assert!(facts.object_id_at(0).is_some());
+        assert!(facts.input_id_at(0).is_some());
+    }
+
+    #[test]
+    fn width_one_object_without_a_canonical_dimension_is_rejected() {
+        let error =
+            SemanticObjectFact::try_new(1, false, InputElementDomain::Bit, Vec::new()).unwrap_err();
+        assert_eq!(error.invariant, "OBJECT.DIMENSION_COUNT_NON_ZERO");
+    }
+
+    #[test]
+    fn dynamic_colon_part_select_is_rejected() {
+        let error = InputAccessFact::<SourcePhase>::try_new(
+            PhaseSemanticObjectId::new(0),
+            0,
+            0,
+            2,
+            false,
+            InputElementDomain::Bit,
+            InputAccessProvenance::PackedPartSelect {
+                kind: PhasePartSelectKind::Colon,
+                elements: 2,
+            },
+            vec![InputIndexFact {
+                role: InputIndexRole::PartSelectStart {
+                    dimension: 0,
+                    kind: PhasePartSelectKind::Colon,
+                    elements: 2,
+                },
+                extent: 8,
+                stride: 1,
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(error.invariant, "INPUT.COLON_PART_HAS_NO_RUNTIME_CHILD");
+    }
+
+    #[test]
+    fn static_base_is_an_exact_checked_dimension_radix() {
+        let object_2x8 = || object(16, false, InputElementDomain::Bit, &[2, 8], 1);
+        let misaligned = access(
+            0,
+            1,
+            1,
+            8,
+            false,
+            InputElementDomain::Bit,
+            InputAccessProvenance::UnpackedOnly,
+            Vec::new(),
+        );
+        let error =
+            InputSemanticFacts::try_from_verified_rows(vec![object_2x8()], vec![misaligned])
+                .unwrap_err();
+        assert_eq!(error.invariant, "INPUT.STATIC_BASE_EXACT_RADIX");
+
+        let runtime_and_static_same_dimension = access(
+            0,
+            8,
+            1,
+            8,
+            false,
+            InputElementDomain::Bit,
+            InputAccessProvenance::UnpackedOnly,
+            vec![aggregate_index(0, 2, 8)],
+        );
+        let error = InputSemanticFacts::try_from_verified_rows(
+            vec![object_2x8()],
+            vec![runtime_and_static_same_dimension],
+        )
+        .unwrap_err();
+        assert_eq!(error.invariant, "INPUT.RUNTIME_DIMENSION_STATIC_DIGIT_ZERO");
+
+        let mixed_static_runtime = access(
+            0,
+            24,
+            2,
+            8,
+            true,
+            InputElementDomain::Bit,
+            InputAccessProvenance::UnpackedOnly,
+            vec![aggregate_index(1, 3, 8)],
+        );
+        InputSemanticFacts::try_from_verified_rows(
+            vec![object(48, true, InputElementDomain::Bit, &[2, 3, 8], 2)],
+            vec![mixed_static_runtime],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2063,7 +3145,7 @@ mod tests {
     #[test]
     fn explicit_coercion_is_verified() {
         let inputs = inputs();
-        let signed_input = inputs.id_at(1).unwrap();
+        let signed_input = inputs.input_id_at(3).unwrap();
         let mut arena = MutableSLTNodeArena::new(inputs);
         let c = arena.try_intern_ordinary(constant(1, 1)).unwrap().id();
         let invalid = mux_node(
@@ -2090,7 +3172,7 @@ mod tests {
         assert_eq!(arena.len(), 1);
 
         let signed = arena
-            .try_intern_ordinary(input_node(signed_input, BitAccess { lsb: 0, msb: 0 }))
+            .try_intern_ordinary(input_node(signed_input))
             .unwrap()
             .id();
         let invalid_signed_widen = mux_node(
@@ -2124,7 +3206,7 @@ mod tests {
                     coercion: PhaseCoercion {
                         target_width: 8,
                         target_signed: false,
-                        kind: PhaseCoercionKind::ZeroExtend,
+                        kind: PhaseCoercionKind::Identity,
                     },
                 },
                 PhaseValueUse {
@@ -2172,14 +3254,15 @@ mod tests {
     #[test]
     fn signedness_and_zero_mask_follow_language_rules() {
         let inputs = inputs();
-        let signed_input = inputs.id_at(1).unwrap();
+        let signed_input = inputs.input_id_at(1).unwrap();
+        let packed_part_input = inputs.input_id_at(7).unwrap();
         let mut arena = MutableSLTNodeArena::new(inputs);
         let signed_full = arena
-            .try_intern_ordinary(input_node(signed_input, BitAccess { lsb: 0, msb: 63 }))
+            .try_intern_ordinary(input_node(signed_input))
             .unwrap()
             .id();
         let signed_part = arena
-            .try_intern_ordinary(input_node(signed_input, BitAccess { lsb: 0, msb: 7 }))
+            .try_intern_ordinary(input_node(packed_part_input))
             .unwrap()
             .id();
         let unsigned = arena.try_intern_ordinary(constant(0, 64)).unwrap().id();
@@ -2249,23 +3332,21 @@ mod tests {
     #[test]
     fn for_fold_state_rows_are_canonical_and_result_is_explicit() {
         let inputs = inputs();
-        let loop_input = inputs.id_at(0).unwrap();
-        let state_input = inputs.id_at(0).unwrap();
+        let loop_object = inputs.object_id_at(0).unwrap();
+        let state_object = inputs.object_id_at(0).unwrap();
         let mut arena = MutableSLTNodeArena::new(inputs);
         let value = arena.try_intern_ordinary(constant(0, 8)).unwrap().id();
         let condition = arena.try_intern_ordinary(constant(1, 1)).unwrap().id();
         let state = |lsb, msb| PhaseForFoldState {
-            target: PhaseInputAtom {
-                input: state_input,
+            target: PhaseObjectAtom {
+                object: state_object,
                 access: BitAccess { lsb, msb },
             },
             initial: identity(value, 8),
             update: identity(value, 8),
         };
         let valid = PhaseSLTNode::try_for_fold(PhaseForFoldNode {
-            loop_input,
-            loop_width: 64,
-            loop_signed: false,
+            loop_object,
             start: loop_bound(0, 64, false),
             end: loop_bound(2, 64, false),
             inclusive: false,
@@ -2287,9 +3368,7 @@ mod tests {
         assert_eq!(arena.width(id), Some(8));
 
         let invalid = PhaseSLTNode::try_for_fold(PhaseForFoldNode {
-            loop_input,
-            loop_width: 64,
-            loop_signed: false,
+            loop_object,
             start: loop_bound(0, 64, false),
             end: loop_bound(2, 64, false),
             inclusive: false,
@@ -2314,9 +3393,109 @@ mod tests {
     }
 
     #[test]
+    fn for_fold_overlap_uses_object_identity_not_input_access_identity() {
+        let inputs = inputs();
+        let first_access = inputs.input_id_at(5).unwrap();
+        let second_access = inputs.input_id_at(6).unwrap();
+        assert_ne!(first_access, second_access);
+        let shared_object = inputs.get_input(first_access).unwrap().object;
+        assert_eq!(
+            shared_object,
+            inputs.get_input(second_access).unwrap().object
+        );
+        let other_object = inputs.object_id_at(4).unwrap();
+        let loop_object = inputs.object_id_at(0).unwrap();
+
+        let mut arena = MutableSLTNodeArena::new(inputs);
+        let value = arena.try_intern_ordinary(constant(0, 8)).unwrap().id();
+        let condition = arena.try_intern_ordinary(constant(1, 1)).unwrap().id();
+        let state = |object, lsb, msb| PhaseForFoldState {
+            target: PhaseObjectAtom {
+                object,
+                access: BitAccess { lsb, msb },
+            },
+            initial: identity(value, 8),
+            update: identity(value, 8),
+        };
+
+        let overlapping = simple_for_fold(
+            loop_object,
+            vec![state(shared_object, 0, 7), state(shared_object, 4, 11)],
+            0,
+            condition,
+        );
+        assert_eq!(
+            arena
+                .try_intern_ordinary(overlapping)
+                .unwrap_err()
+                .invariant,
+            "FOR_FOLD.STATE_TARGETS_DISJOINT"
+        );
+
+        let separate_objects = simple_for_fold(
+            loop_object,
+            vec![state(shared_object, 0, 7), state(other_object, 0, 7)],
+            1,
+            condition,
+        );
+        let result = arena.try_intern_ordinary(separate_objects).unwrap().id();
+        assert_eq!(arena.width(result), Some(8));
+        assert!(!arena.zero_mask[result.index]);
+    }
+
+    #[test]
+    fn for_fold_retains_matched_target_signedness_for_step_two() {
+        let inputs = inputs();
+        let loop_object = inputs.object_id_at(0).unwrap();
+        let target_object = inputs.object_id_at(2).unwrap();
+        let mut arena = MutableSLTNodeArena::new(inputs);
+        let value = arena.try_intern_ordinary(constant(0, 8)).unwrap().id();
+        let condition = arena.try_intern_ordinary(constant(1, 1)).unwrap().id();
+        let signed_state = PhaseForFoldState {
+            target: PhaseObjectAtom {
+                object: target_object,
+                access: BitAccess { lsb: 0, msb: 7 },
+            },
+            initial: identity_with_signedness(value, 8, true),
+            update: identity_with_signedness(value, 8, true),
+        };
+        let result = arena
+            .try_intern_ordinary(simple_for_fold(
+                loop_object,
+                vec![signed_state],
+                0,
+                condition,
+            ))
+            .unwrap()
+            .id();
+        assert!(arena.signed[result.index]);
+
+        let mismatched_state = PhaseForFoldState {
+            target: PhaseObjectAtom {
+                object: target_object,
+                access: BitAccess { lsb: 0, msb: 7 },
+            },
+            initial: identity_with_signedness(value, 8, true),
+            update: identity(value, 8),
+        };
+        assert_eq!(
+            arena
+                .try_intern_ordinary(simple_for_fold(
+                    loop_object,
+                    vec![mismatched_state],
+                    0,
+                    condition,
+                ))
+                .unwrap_err()
+                .invariant,
+            "FOR_FOLD.STATE_COERCION_MATCHES_TARGET"
+        );
+    }
+
+    #[test]
     fn for_fold_retains_arbitrary_width_operands_for_transition_verification() {
         let inputs = inputs();
-        let loop_input = inputs.id_at(0).unwrap();
+        let loop_object = inputs.object_id_at(0).unwrap();
         let mut arena = MutableSLTNodeArena::new(inputs);
         let huge = arena
             .try_intern_ordinary(constant(0, usize::MAX))
@@ -2325,9 +3504,7 @@ mod tests {
         let condition = arena.try_intern_ordinary(constant(1, 1)).unwrap().id();
         let state_value = arena.try_intern_ordinary(constant(0, 8)).unwrap().id();
         let node = PhaseSLTNode::try_for_fold(PhaseForFoldNode {
-            loop_input,
-            loop_width: 64,
-            loop_signed: false,
+            loop_object,
             start: PhaseSLTLoopBound::Expr(PhaseValueUse {
                 value: huge,
                 coercion: PhaseCoercion {
@@ -2347,8 +3524,8 @@ mod tests {
             step_op: SLTStepOp::Add,
             reverse: false,
             states: vec![PhaseForFoldState {
-                target: PhaseInputAtom {
-                    input: loop_input,
+                target: PhaseObjectAtom {
+                    object: loop_object,
                     access: BitAccess { lsb: 0, msb: 7 },
                 },
                 initial: identity(state_value, 8),
@@ -2532,7 +3709,7 @@ mod tests {
     }
 
     fn large_for_fold_node(
-        loop_input: PhaseInputId<SourcePhase>,
+        loop_object: PhaseSemanticObjectId<SourcePhase>,
         bit: PhaseNodeId<SourcePhase>,
         payload_width: usize,
         state_count: usize,
@@ -2552,8 +3729,8 @@ mod tests {
         states.try_reserve_exact(state_count).unwrap();
         for ordinal in 0..state_count {
             states.push(PhaseForFoldState {
-                target: PhaseInputAtom {
-                    input: loop_input,
+                target: PhaseObjectAtom {
+                    object: loop_object,
                     access: BitAccess {
                         lsb: ordinal,
                         msb: ordinal,
@@ -2575,9 +3752,7 @@ mod tests {
             });
         }
         PhaseSLTNode::try_for_fold(PhaseForFoldNode {
-            loop_input,
-            loop_width: payload_width,
-            loop_signed: false,
+            loop_object,
             start: PhaseSLTLoopBound::Const {
                 value: typed_payload(1),
                 coercion: identity_coercion,
@@ -2607,19 +3782,25 @@ mod tests {
         const EFFECT_COUNT: usize = 10_000;
 
         let started = std::time::Instant::now();
-        let inputs = InputSemanticFacts::try_from_verified_rows(vec![
-            InputSemanticFact::try_new(PAYLOAD_WIDTH, false, InputElementDomain::Bit, Vec::new())
-                .unwrap(),
-        ])
+        let inputs = InputSemanticFacts::try_from_verified_rows(
+            vec![object(
+                PAYLOAD_WIDTH,
+                false,
+                InputElementDomain::Bit,
+                &[PAYLOAD_WIDTH],
+                0,
+            )],
+            Vec::new(),
+        )
         .unwrap();
-        let loop_input = inputs.id_at(0).unwrap();
+        let loop_object = inputs.object_id_at(0).unwrap();
         let mut arena = MutableSLTNodeArena::new(inputs);
         let bit = arena.try_intern_ordinary(constant(1, 1)).unwrap().id();
-        let node = large_for_fold_node(loop_input, bit, PAYLOAD_WIDTH, STATE_COUNT, EFFECT_COUNT);
+        let node = large_for_fold_node(loop_object, bit, PAYLOAD_WIDTH, STATE_COUNT, EFFECT_COUNT);
         let inserted = arena.try_intern_ordinary(node).unwrap().id();
         let inserted_at = started.elapsed();
         let duplicate =
-            large_for_fold_node(loop_input, bit, PAYLOAD_WIDTH, STATE_COUNT, EFFECT_COUNT);
+            large_for_fold_node(loop_object, bit, PAYLOAD_WIDTH, STATE_COUNT, EFFECT_COUNT);
         assert_eq!(
             arena.try_intern_ordinary(duplicate).unwrap(),
             InternOutcome::Existing(inserted)
