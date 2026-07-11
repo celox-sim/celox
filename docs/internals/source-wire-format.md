@@ -253,19 +253,20 @@ Only after all pass-1 checks succeed does pass 2:
 1. create empty private vectors;
 2. call `try_reserve_exact` with the already checked counts for every vector;
 3. decode fixed rows without changing a published object;
-4. copy each owned string/byte range once; and
-5. retain each validated arbitrary-width magnitude as one uniquely owned raw
-   byte payload until the phase-node materialization that consumes it.
+4. copy each aggregate-owned string/byte pool once; and
+5. retain each validated arbitrary-width magnitude as one disjoint canonical
+   range in that aggregate-owned raw byte pool until the joint typed-value
+   verifier consumes it.
 
 Failure of any reservation drops the private staging value. No partially
 decoded table, checked ID, semantic fact, or artifact is returned. Production
 code has no allocation retry, smaller fallback format, or semantic size
-cutoff. Conversion of a validated raw magnitude to `num_bigint::BigUint`
-occurs later, exactly once when its owning phase-node payload is constructed.
-As in the main architecture, this design does not claim recovery from a
-process-wide allocator abort inside that third-party scalar constructor; it
-does prevent an encoded length or aliased range from requesting unaccounted
-scalar payloads.
+cutoff. A validated magnitude is decoded only into the aggregate's flat,
+fallibly pre-reserved limb arena. Proof-path code never constructs
+`num_bigint::BigUint`/`BigInt`, and a phase node names an independently
+verified typed-value ID rather than owning payload/mask integers. Every limb,
+scratch, row, and range allocation is therefore covered by the same structured
+reservation-failure contract.
 
 Tests use an injected `fail-at-N` reservation policy so every reserve site can
 be failed deterministically. The production policy performs only the checked
@@ -289,8 +290,11 @@ Construction is ordered as follows:
    node-reference pools.
 2. Check all raw input and runtime-site indices against the complete expected
    semantic tables, while they are still raw integers.
-3. Convert one append-ordered node at a time to phase-typed IDs and a
-   fallibly-owned `PhaseSLTNode<SourcePhase>` payload.
+3. Convert one append-ordered node at a time to phase-typed IDs, checked ranges
+   in pre-reserved flat payload pools, and a fixed
+   `PhaseSLTNode<SourcePhase>` descriptor. Constant rows name the exact
+   `VerifiedSourceTypedValueId` already derived by the joint aggregate;
+   they never construct or own an integer payload here.
 4. Recompute width, signedness, zero-mask, lowerability, access geometry, and
    structural coercion rules from the verified input facts and checked prefix.
 5. Compare each node recipe and coercion context with the independently
@@ -323,12 +327,58 @@ Byte decoding borrows `&[u8]`; every error therefore leaves the encoded input
 unchanged. All decoded rows and node materialization live in private staging
 owners which are dropped on failure.
 
+Artifact identity uses one fallibly allocated, non-ZST live token, not a
+serialized/global number or a durable address key:
+
+```text
+ArtifactBrandOwner
+  private exactly-one BrandToken allocation created with try_reserve_exact
+  not Clone/Copy/Serialize/Deserialize
+
+BrandRef<'a>
+  private &'a BrandToken
+
+BrandedId<'a, P, K>
+  BrandRef<'a> / compact private ID / phase and kind markers
+```
+
+`BrandRef` equality uses reference identity only while both owners are live.
+The owner allocation is stable across aggregate moves, and Rust borrowing
+prevents either token from being freed while a reference exists; allocator
+address reuse therefore cannot make two live brands equal. No raw pointer,
+`NonNull`, integer address, token address, global counter, random value, digest,
+or split bit field is stored in a row/key or used as durable identity.
+
+One `SourceConstructionSession` owns the brand, decoded input, staging pools,
+and construction indices. A field-splitting editor borrows `BrandRef<'a>` and
+may return `BrandedId<'a, ...>` handles. On every multi-handle operation it
+checks brand equality before indexing, then stores only compact local IDs in
+session rows. Neither the session nor any prepared/frozen part stores a
+`BrandRef`, branded handle, or reference to its own owner. The borrow checker
+therefore prevents `finish(self)` or moving/dropping the session while any
+handle remains live; no self-referential aggregate is created.
+
+`finish(self)` verifies all compact relations/capacity, drops transient
+handles/indices, strips staging wrappers to unbranded prepared parts, and only
+then moves the owner and parts together into `PreparedSourceAggregate`.
+Failure returns the owned session/error so the top-level API can return every
+unchanged input. Commit moves the same owner and unbranded parts into
+`FrozenSourceArtifact` without allocation. Frozen APIs create new ephemeral
+branded views borrowed from that owner; tables have no standalone constructor,
+freeze, serializer, or public compact-ID constructor.
+
+Brands are never proof-bearing wire fields. Deserialization rejects a legacy
+brand field, verifies compact raw relations, creates a fresh owner, and reruns
+the aggregate preparation. Decoding identical bytes twice therefore yields
+distinct live brands; cross-artifact compact IDs compose only through an
+explicit verified mapping relation, never equality by number or shape.
+
 The complete future aggregate API has this ownership shape:
 
 ```text
-try_prepare_source_aggregate(decoded wire, verified semantic context)
+try_prepare_source_aggregate(decoded complete raw source aggregate)
   -> Result<PreparedSourceAggregate,
-            (decoded wire, SourceAggregateError)>
+            (decoded complete raw source aggregate, SourceAggregateError)>
 
 PreparedSourceAggregate::commit(self) -> FrozenSourceArtifact
 ```
@@ -401,7 +451,7 @@ The initially reserved stable rule IDs are:
 | `WIRE.RANGE` | a checked pool range is outside its pool |
 | `WIRE.POOL_CANONICAL` | pool ranges overlap, have a gap, alias, or lack coverage |
 | `WIRE.UTF8` | a string payload is not UTF-8 |
-| `WIRE.BIGUINT_CANONICAL` | an unsigned magnitude is not minimally encoded |
+| `WIRE.MAGNITUDE_CANONICAL` | an unsigned magnitude is not minimally encoded |
 | `WIRE.STORAGE_AVAILABLE` | a planned private allocation failed |
 
 Node and semantic verification retain their more specific stable IDs, such as
@@ -435,7 +485,16 @@ Before any production schema descriptor is added, private tests must cover:
 - nonreciprocal/unsorted source adjacency and wrong occurrence operand arity,
   order, unit, or site when the complete provenance rows are added;
 - deterministic failure at every `try_reserve_exact` site, with no published
-  output and an unchanged live builder/input owner; and
+  output and an unchanged live builder/input owner;
+- non-ZST exactly-one brand-token allocation, moves of prepared/frozen owners,
+  same-artifact composition, cross-artifact rejection before indexing, and
+  allocation-address reuse stress after prior owners are dropped;
+- compile-fail lifetime fixtures where a branded handle outlives, is stored in,
+  or prevents finishing/moving its session, and source/occurrence phase handles
+  cannot be interchanged;
+- serialization contains no brand, decoding identical bytes twice creates
+  distinct brands, no issuer/global-counter state exists, and commit performs
+  zero allocator calls; and
 - iterative 100k/1M-node graphs plus large concat and `ForFold` pools.
 
 Tests for a narrow fixture schema demonstrate decoder safety only. They are not
