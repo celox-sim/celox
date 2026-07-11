@@ -82,6 +82,33 @@ o_data: top_out
 
     }
 
+    fn test_unconnected_child_output_needs_no_parent_glue(sim) {
+        @setup { let code = r#"
+module Child (
+i: input logic,
+unused: output logic
+) {
+assign unused = i;
+}
+module Top (
+i: input logic,
+o: output logic
+) {
+inst child: Child (
+i: i
+);
+assign o = i;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let i = sim.signal("i");
+    let o = sim.signal("o");
+
+    sim.modify(|io| io.set(i, 1u8)).unwrap();
+    assert_eq!(sim.get(o), 1u8.into());
+
+    }
+
     fn test_instance_input_port_assignment_width_context(sim) {
         // veryl-simulator 0.20.1 currently zero-extends the signed input-port
         // case; the language assignment semantics require sign extension.

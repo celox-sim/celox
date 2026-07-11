@@ -570,6 +570,12 @@ impl<'a> ModuleParser<'a> {
         let mut output_ports = Vec::new();
 
         for output in &decl.outputs {
+            // The analyzer includes deliberately unconnected child outputs
+            // with an empty destination list. They produce no parent glue;
+            // width coverage applies only to connected destinations.
+            if output.dst.is_empty() {
+                continue;
+            }
             let child_port_id = output.id;
             let ty = get_port_type(child_module, &child_port_id)?;
             let width = ty.width();
