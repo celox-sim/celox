@@ -1,13 +1,8 @@
 # Native register allocation
 
-> **Status:** this document records the currently implemented interim SSA
-> allocator and the failures that motivated its replacement. It is not the
-> target architecture for new work. The normative fixed phase order, including
-> verified scheduling, full-cut `PressureRegion`s, independently rebuilt
-> `RegionalNextUse`, post-materialization normalization, final affinity,
-> `ParallelCopyPlan`, edge lineage, and the executable Heliodor gate, is in
-> [Decision-region architecture](./decision-region-architecture.md), sections
-> 4--9. Where the two documents differ, that design is authoritative.
+> **Status:** this document records the currently implemented SSA allocator and
+> its known failures. A replacement is accepted only by correctness tests and
+> the executable Heliodor gate; speculative phase designs are not normative.
 
 The native backend treats register allocation as a verified sequence of IR
 transformations.  It is not permitted to recover from an invalid MIR graph,

@@ -114,8 +114,8 @@ dominating live-ins, four-state mode, and rejected break-even candidates.
 Local same-build `avg_comb_us` A/B measurements are diagnostics only. A
 compile-only reduction, a smaller SIR/MIR count, or a partial runtime window is
 not an acceptance result. The sole performance gate is the pinned same-input
-full Heliodor Linux-boot run defined in
-`decision-region-architecture.md`: both `veryl-cc` and Celox must report
+full Heliodor Linux-boot run implemented by
+`scripts/run-heliodor-bench.sh gate`: both `veryl-cc` and Celox must report
 `status=pass`, Celox must report `compile_only=false`, and Celox wall time must
 not exceed the corresponding Veryl wall time.
 
@@ -148,6 +148,3 @@ may select a value lookup table, jump table, balanced comparison tree, ordered
 early-exit chain, or branchless tail. This does not compete with binary mux
 lowering: a decision region owns the tests, dominance-aware placement owns its
 shared DAG, and ordinary mux lowering handles the residual leaves.
-
-The frozen data model and implementation sequence are in
-[Decision-region architecture](./decision-region-architecture.md).
