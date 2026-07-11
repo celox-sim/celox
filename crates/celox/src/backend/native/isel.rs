@@ -702,17 +702,39 @@ impl<'a> ISelContext<'a> {
         }
     }
 
+    /// Return the smallest native access size only when it covers exactly the
+    /// bytes allocated for the logical value. A wider access would read or
+    /// write an adjacent packed variable.
+    fn exact_storage_access_size(width_bits: usize) -> Option<OpSize> {
+        if width_bits == 0 || width_bits > 64 {
+            return None;
+        }
+        let size = Self::op_size_for_width(width_bits);
+        (size.bytes() as usize == width_bits.div_ceil(8)).then_some(size)
+    }
+
+    fn full_static_access_size(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        bit_offset: usize,
+        width_bits: usize,
+    ) -> Option<OpSize> {
+        if bit_offset != 0 {
+            return None;
+        }
+        let var_width = self.layout.widths.get(&addr.absolute_addr()).copied()?;
+        (var_width == width_bits)
+            .then(|| Self::exact_storage_access_size(width_bits))
+            .flatten()
+    }
+
     fn full_static_store_size(
         &self,
         addr: &RegionedAbsoluteAddr,
         bit_offset: usize,
         width_bits: usize,
     ) -> Option<OpSize> {
-        if bit_offset != 0 || width_bits == 0 || width_bits > 64 {
-            return None;
-        }
-        let var_width = self.layout.widths.get(&addr.absolute_addr()).copied()?;
-        (var_width == width_bits).then(|| Self::op_size_for_width(width_bits))
+        self.full_static_access_size(addr, bit_offset, width_bits)
     }
 
     fn full_static_load_size(
@@ -721,11 +743,7 @@ impl<'a> ISelContext<'a> {
         bit_offset: usize,
         width_bits: usize,
     ) -> Option<OpSize> {
-        if bit_offset != 0 || width_bits == 0 || width_bits > 64 {
-            return None;
-        }
-        let var_width = self.layout.widths.get(&addr.absolute_addr()).copied()?;
-        (var_width == width_bits).then(|| Self::op_size_for_width(width_bits))
+        self.full_static_access_size(addr, bit_offset, width_bits)
     }
 
     fn mask_for_store_width(&mut self, block: &mut MBlock, src: VReg, width_bits: usize) -> VReg {
@@ -8471,6 +8489,34 @@ fn lower_wide_unary_mask(
                     ctx.set_mask(dst, has_x);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_static_native_access_must_fit_allocated_bytes_exactly() {
+        for (width, expected) in [
+            (0, None),
+            (17, None),
+            (24, None),
+            (33, None),
+            (40, None),
+            (56, None),
+            (65, None),
+            (31, Some(OpSize::S32)),
+            (32, Some(OpSize::S32)),
+            (63, Some(OpSize::S64)),
+            (64, Some(OpSize::S64)),
+        ] {
+            assert_eq!(
+                ISelContext::exact_storage_access_size(width),
+                expected,
+                "width={width}"
+            );
         }
     }
 }
