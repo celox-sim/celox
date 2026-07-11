@@ -4,6 +4,7 @@ mod expr;
 mod node;
 mod node_facts;
 mod path;
+mod source_control;
 mod state;
 
 pub use path::{LogicPath, LogicPathTarget};
