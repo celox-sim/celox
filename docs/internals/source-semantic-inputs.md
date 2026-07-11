@@ -290,6 +290,67 @@ logic<8, 4>[2, 3]
   object_width = 192
 ```
 
+### Named member projection normalization
+
+The verified type graph derives one packed member layout independently from
+the analyzer's cached offsets. For a struct with declaration-order members
+`f[0..n)`, each checked member width is `W[i]` and:
+
+```text
+field_lsb(i) = checked_sum(W[i + 1..n])
+field_msb(i) = field_lsb(i) + W[i] - 1
+```
+
+Thus the last declared member occupies the least-significant bits, matching
+the packed Veryl/SystemVerilog layout. A union requires equal checked member
+widths and every member has `field_lsb = 0`. Enum variants are constants, not
+member projections. Every field ID, declaration ordinal, width, offset, and
+selected type is retained in the expected projection row; a producer offset
+is never an oracle.
+
+Access normalization uses a projection cursor:
+
+```text
+ProjectionCursor
+  base object
+  checked flat static base within that object
+  current verified selected type
+  active dimensions of that selected type
+  ordered projected field IDs
+```
+
+Before projecting a named member, every unpacked dimension of the current
+object and every packed dimension preceding its final `Intrinsic` dimension
+must have been selected to one element. The projection does not consume the
+`Intrinsic` dimension numerically. Instead it:
+
+1. verifies that the current type is the owning struct/union and that the
+   requested field ID is its exact member;
+2. adds `field_lsb` to the cursor's flat base with checked arithmetic and
+   proves `field_lsb + member_width` remains within the current packed value;
+3. replaces the current type's final `Intrinsic` dimension with the selected
+   member type's normalized packed dimensions, including an extent-one
+   primitive Packed or composite Intrinsic dimension; and
+4. derives subsequent indices, nested member projections, result signedness,
+   and result domain only from that selected member type.
+
+Nested projections repeat these steps, so their checked offsets compose by
+addition relative to the previously selected member. A projection can never
+consume an index intended for the aggregate's replaced Intrinsic dimension.
+For example, in `s[i].member[j]`, `i` first consumes an outer dimension of
+`s`; the member projection then replaces only the scalar struct Intrinsic
+dimension; and `j` consumes the selected member's first packed dimension.
+
+If a named member is requested while an outer packed dimension preceding the
+struct/union Intrinsic dimension is still unconsumed, its lanes need not form
+one contiguous flat range. That form is not encoded as one `InputAccess`.
+The closed `StaticComposite` rule expands canonical lane projections in
+dimension order and constructs the exact concat/projection relation in the
+expected value graph. Each lane still uses the same checked member layout,
+and the aggregate verifier proves complete, nonoverlapping lane coverage and
+the final result type. It may not pretend the strided member set is one
+contiguous memory input.
+
 ## Exact access normalization
 
 Let a verified semantic object have dimensions `D[0..N)`, strides `S[0..N)`,
@@ -640,6 +701,8 @@ its input owner unchanged.
 - mixed Bit/Logic struct and union domain derivation;
 - a Bit member selected from a mixed-domain object has Bit result domain,
   while a Logic member has Logic result domain;
+- nested struct field offsets compose according to declaration-order packed
+  layout, while every union field offset remains zero;
 - enum base width/domain derivation;
 - bare one-bit Bit/Logic retains one selectable Packed extent of one;
 - a width-one enum/struct/union retains one Intrinsic extent of one, while an
@@ -675,9 +738,13 @@ its input owner unchanged.
 - minus-colon underflow and `anchor + 1` overflow;
 - step anchor multiplication and end-add overflow;
 - a packed range covering the whole packed width but incorrectly marked
-  signed; and
+  signed;
 - a dynamic unpacked element incorrectly represented as whole-object Input
-  plus unsigned generic Slice.
+  plus unsigned generic Slice;
+- `s[i].member[j]` consumes the outer dimension, replaces the struct
+  Intrinsic dimension, then consumes the member dimension; and
+- an unconsumed outer packed array's `s.member` is expanded by the exact
+  `StaticComposite` lane rule rather than forged as one contiguous range.
 
 ### Domain and signedness fixtures
 
