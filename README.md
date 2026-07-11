@@ -1,19 +1,28 @@
 # Celox
 
-High-speed JIT simulator for [Veryl HDL](https://veryl-lang.org/). Compiles Veryl designs to native x86-64 machine code for near-hardware simulation performance.
+JIT simulator for [Veryl HDL](https://veryl-lang.org/). Celox lowers Veryl
+designs to native x86-64 machine code through a custom compiler pipeline.
 
 ## Performance
 
-Celox's native backend generates optimized x86-64 code directly, outperforming both Cranelift JIT and Verilator on key benchmarks:
+The following numbers are narrow kernel microbenchmarks. They demonstrate that
+individual generated kernels can be competitive; they do not establish
+whole-design performance:
 
 | Benchmark | Celox (native) | Cranelift JIT | Verilator |
 |---|---|---|---|
 | counter_n1000 (sequential) | **245 ns/tick** | 395 ns/tick | 392 ns/tick |
 | linear_sec_p6 (combinational) | **9.8 ns/eval** | 140 ns/eval | 19 ns/eval |
 
+Celox has not yet produced a fast successful full Linux-boot result on the
+pinned Heliodor gate. Project-wide performance remains an open engineering
+target and is accepted only when the same-input full run completes no slower
+than `veryl-cc`; compile-only results, partial timing windows, and projected
+times are not performance results.
+
 ## Features
 
-- **Native x86-64 Backend** — Custom compiler pipeline (SIR → MIR → regalloc → x86-64) with SIR-level optimization (store coalescing, vectorize-concat, identity alias bypass), MIR optimization (constant folding, GVN, PEXT fusion), and 32-bit narrow emit
+- **Native x86-64 Backend** — Experimental custom compiler pipeline (SIR → MIR → regalloc → x86-64) with SIR-level optimization (store coalescing, vectorize-concat, identity alias bypass), MIR optimization (constant folding, GVN, PEXT fusion), and 32-bit narrow emit
 - **Cranelift JIT Fallback** — Automatically used on non-x86-64 platforms (ARM, RISC-V)
 - **Event-Driven Scheduling** — Multi-clock domain support with combinational clock cascade
 - **4-State Simulation** — IEEE 1800-compliant X/Z propagation
