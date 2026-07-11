@@ -1,5 +1,14 @@
 # Native register allocation
 
+> **Status:** this document records the currently implemented interim SSA
+> allocator and the failures that motivated its replacement. It is not the
+> target architecture for new work. The normative fixed phase order, including
+> verified scheduling, full-cut `PressureRegion`s, independently rebuilt
+> `RegionalNextUse`, post-materialization normalization, final affinity,
+> `ParallelCopyPlan`, edge lineage, and the executable Heliodor gate, is in
+> [Decision-region architecture](./decision-region-architecture.md), sections
+> 4--9. Where the two documents differ, that design is authoritative.
+
 The native backend treats register allocation as a verified sequence of IR
 transformations.  It is not permitted to recover from an invalid MIR graph,
 allocation failure, or excessive compile time by truncating work, limiting CFG
@@ -31,10 +40,13 @@ machine constraints and edge shuffles, not as a source of compact identifiers:
 `regalloc2` is not a dependency or design target.  Its large-function behavior
 and compact internal index constraints do not meet Celox's requirements.
 
-## Complete allocator architecture
+## Interim allocator architecture
 
-The techniques below solve different subproblems and run in one fixed order.
-They are not competing allocators and there is no spill/color retry loop.
+The techniques below describe the current implementation and solve different
+subproblems in one fixed order. They are not competing allocators and there is
+no spill/color retry loop. This order is retained here for diagnosis and
+migration; it must not be copied as the final implementation where it omits
+the authoritative pressure-region input/output relations.
 
 ```text
 canonical strict-SSA MIR
@@ -237,7 +249,8 @@ branch edge. Copy-free fallthrough block chains share a machine-code label
 instead of receiving padding instructions. Dead rows are absent before
 resolution.
 
-These are phase boundaries, not suggestions.  Each has a verifier for the
+Within the interim implementation these are phase boundaries, not suggestions.
+Each has a verifier for the
 intended IR; no phase weakens a contract merely to accept an existing producer.
 
 ## Phase data model and APIs
@@ -401,8 +414,9 @@ per-optimizer-pass audits; neither is required for the boundaries above.
 
 ## Performance and migration gates
 
-The allocator is evaluated on `scripts/run-heliodor-bench.sh`, not only on
-small unit tests.  The migration is complete only when:
+The allocator will be accepted by `scripts/run-heliodor-bench.sh gate`, not
+only by small unit tests. Until that command is implemented, the replacement
+is not performance-qualified. It is complete only when:
 
 - allocation does not panic on large valid MIR;
 - compilation and execution complete without an iteration or CFG-size cap;
@@ -417,7 +431,7 @@ fallback.  Its source remains compiled only by unit tests while the remaining
 differential fixture is migrated; a failure in the new allocator is a bug to
 diagnose and fix.
 
-## Implementation status
+## Interim implementation status
 
 The frozen allocation pipeline is now the default `auto` implementation.  It
 contains:

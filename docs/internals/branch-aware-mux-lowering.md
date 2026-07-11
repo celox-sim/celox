@@ -2,9 +2,10 @@
 
 Celox represents hardware selection as a `Mux`, but software simulation does
 not always benefit from evaluating both inputs and selecting afterward.  The
-compiler therefore has two complementary opportunities to preserve control
-flow.  They share one profitability rule; they are not competing register
-allocation workarounds.
+legacy compiler currently has two opportunities to preserve control flow.
+They share one profitability rule; they are not competing register allocation
+workarounds. This document describes that legacy boundary, not the final
+decision-region pipeline.
 
 ## Relationship between the two stages
 
@@ -16,7 +17,7 @@ allocation workarounds.
    the mux branchless instead of duplicating CSE work.  This is where
    case/decoder control should normally be preserved, before eager lowering has
    lengthened all arm live ranges.
-2. **`BranchifyMux` is a cleanup transform.**  It considers muxes that remain
+2. **`BranchifyMux` is a legacy cleanup transform.**  It considers muxes that remain
    after lowering and SIR optimization.  It may sink only pure, single-use arm
    definitions.  Shared definitions remain in the head block.  The transform
    uses the exact set of definitions that its legality repair will move when
@@ -27,6 +28,13 @@ An SLT mux already lowered to CFG is no longer a SIR `Mux`, so the cleanup pass
 cannot branchify it a second time.  The cleanup pass exists for opportunities
 that only become visible after SIR simplification, not as a replacement for
 source-DAG lowering.
+
+At the verified decision-region production switch, `BranchifyMux` is retired
+from the production pass registry/API. It cannot run before or after the new
+one-shot Gate/Decision selection and placement. A future select-to-control
+optimization must use a verified `DecisionRewritePlan` that proves semantic
+equivalence to the original mux; generic SIR CFG/SSA verification is not such
+a proof.
 
 ## Local expected-cost decision
 
@@ -103,10 +111,13 @@ tests enforce those bounds; there is no depth or node-count cutoff.
 Correctness is checked by SIR verification before and after optimization and by
 focused tests for shared definitions, aliasing loads, merge parameters,
 dominating live-ins, four-state mode, and rejected break-even candidates.
-Profitability is accepted only with same-build runtime A/B measurements.  A
-compile-only reduction or a smaller SIR/MIR count is not sufficient: the
-Heliodor gate compares `avg_comb_us` with the cleanup pass explicitly disabled
-and enabled under the same optimization level.
+Local same-build `avg_comb_us` A/B measurements are diagnostics only. A
+compile-only reduction, a smaller SIR/MIR count, or a partial runtime window is
+not an acceptance result. The sole performance gate is the pinned same-input
+full Heliodor Linux-boot run defined in
+`decision-region-architecture.md`: both `veryl-cc` and Celox must report
+`status=pass`, Celox must report `compile_only=false`, and Celox wall time must
+not exceed the corresponding Veryl wall time.
 
 ## Current boundary and next region transform
 
@@ -118,13 +129,17 @@ and are rejected solely because a nontrivial DAG node is shared below the arm
 roots. Treating those as independent diamonds would either duplicate code or
 lose CSE.
 
-The required follow-up is whole-EU, dominance-aware DAG placement. Candidate
-control regions are formed first; every NodeId's use predicates are then
-combined, and the node is scheduled once in the nearest common dominator (or
-the deepest conditional region containing all uses). This is the gated-SSA /
-lazy-code-motion relationship: profitability decides which control regions
-exist, while placement decides where shared pure work belongs. It replaces
-per-arm global-cache cloning and does not use a mux, block, or iteration cap.
+The production replacement is whole-unit, occurrence- and token-aware DAG
+placement. Source provenance and the occurrence action skeleton are verified
+first; token SSA then creates versioned `InstValue`s, execution-safety analysis
+limits their legal domains, and ScheduleEarly/ScheduleLate derives
+state-specific use envelopes. Bottom-up gate/decision selection is followed by
+one final `PlacementPlan`, which assigns each pure `InstValue` once to its
+latest legal dominating control site. This is the gated-SSA/lazy-code-motion
+relationship: profitability selects control regions while verified placement
+owns shared pure work. Raw `NodeId` reachability or nearest-common-dominator
+placement is not the final value identity. The design uses no mux, block,
+iteration, or traversal cap.
 
 Long mutually exclusive equality chains form a higher-level `DecisionRegion`.
 After proving selector identity, key width, uniqueness/mask overlap, priority,
