@@ -23,6 +23,7 @@ mod pass_manager;
 mod pass_optimize_blocks;
 mod pass_partial_forward;
 mod pass_reschedule;
+mod pass_sparse_case_dispatch;
 mod pass_split_coalesced_stores;
 mod pass_split_wide_commits;
 mod pass_store_load_forwarding;
@@ -47,6 +48,7 @@ use pass_manager::ExecutionUnitPassManager;
 use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_partial_forward::PartialForwardPass;
 use pass_reschedule::ReschedulePass;
+use pass_sparse_case_dispatch::SparseCaseDispatchPass;
 use pass_split_coalesced_stores::SplitCoalescedStoresPass;
 use pass_split_wide_commits::SplitWideCommitsPass;
 use pass_store_load_forwarding::StoreLoadForwardingPass;
@@ -496,6 +498,12 @@ fn optimize_with_options(
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, &options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        let sparse_case_pass = SparseCaseDispatchPass::new(&program.address_aliases);
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, &options);
         }
     }
     if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
