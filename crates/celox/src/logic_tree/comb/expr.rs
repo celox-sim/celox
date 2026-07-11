@@ -2667,50 +2667,9 @@ fn eval_factor(
     }
 }
 pub fn get_width<A: Hash + Eq + Clone>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
-    match arena.get(expr) {
-        SLTNode::Input { access, .. } => access.msb - access.lsb + 1,
-        SLTNode::Constant(_, _, width, _) => *width,
-        SLTNode::Binary(lhs, op, rhs) => match op {
-            BinaryOp::Eq
-            | BinaryOp::Ne
-            | BinaryOp::LtU
-            | BinaryOp::LtS
-            | BinaryOp::LeU
-            | BinaryOp::LeS
-            | BinaryOp::GtU
-            | BinaryOp::GtS
-            | BinaryOp::GeU
-            | BinaryOp::GeS
-            | BinaryOp::LogicAnd
-            | BinaryOp::LogicOr
-            | BinaryOp::EqWildcard
-            | BinaryOp::NeWildcard => 1,
-            BinaryOp::Sub => {
-                let lw = get_width(*lhs, arena);
-                let rw = get_width(*rhs, arena);
-                lw.max(rw)
-            }
-            BinaryOp::Sar | BinaryOp::Shl | BinaryOp::Shr => get_width(*lhs, arena),
-            _ => {
-                let lw = get_width(*lhs, arena);
-                let rw = get_width(*rhs, arena);
-                lw.max(rw)
-            }
-        },
-        SLTNode::Unary(op, inner) => match op {
-            UnaryOp::LogicNot => 1,
-            UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
-            _ => get_width(*inner, arena),
-        },
-        SLTNode::Mux {
-            then_expr,
-            else_expr,
-            ..
-        } => get_width(*then_expr, arena).max(get_width(*else_expr, arena)),
-        SLTNode::ForFold { result, .. } => result.access.msb - result.access.lsb + 1,
-        SLTNode::Concat(parts) => parts.iter().map(|(_, w)| *w).sum(),
-        SLTNode::Slice { access, .. } => access.msb - access.lsb + 1,
-    }
+    arena
+        .width(expr)
+        .unwrap_or_else(|| panic!("width is unavailable for malformed SLT node n{}", expr.0))
 }
 
 pub(super) fn merge_boundaries(

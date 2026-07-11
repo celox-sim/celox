@@ -3,7 +3,7 @@ use std::{fmt, hash::Hash};
 use num_bigint::BigUint;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use super::node_facts::SLTNodeFacts;
+use super::{node_facts::SLTNodeFacts, node_rules};
 
 use crate::{
     HashMap,
@@ -75,6 +75,14 @@ pub struct SLTNodeArena<A: Hash + Eq + Clone> {
     nodes: Vec<SLTNode<A>>,
     #[serde(skip)]
     cache: crate::HashMap<SLTNode<A>, NodeId>,
+    /// Construction-time widths in stable [`NodeId`] order.
+    ///
+    /// `None` is retained for malformed nodes so constructing an arena for the
+    /// verifier does not turn a verifier error into an allocation-time panic.
+    /// Production construction only consumes widths of nodes accepted by the
+    /// scalar rules in [`node_rules`].
+    #[serde(skip)]
+    widths: Vec<Option<usize>>,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +103,7 @@ where
         let mut arena = Self {
             nodes: wire.nodes,
             cache: crate::HashMap::default(),
+            widths: Vec::new(),
         };
         SLTNodeFacts::verify(&arena).map_err(D::Error::custom)?;
         arena.rebuild_cache();
@@ -115,6 +124,7 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         Self {
             nodes: Vec::new(),
             cache: crate::HashMap::default(),
+            widths: Vec::new(),
         }
     }
 
@@ -125,10 +135,50 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         if let Some(id) = self.cache.get(&node) {
             return *id;
         }
+        let width = self.compute_width(&node);
         let id = NodeId(self.nodes.len());
         self.cache.insert(node.clone(), id);
         self.nodes.push(node);
+        self.widths.push(width);
+        debug_assert_eq!(self.nodes.len(), self.widths.len());
         id
+    }
+
+    /// Return a construction-time width computed once when `id` was interned.
+    pub(super) fn width(&self, id: NodeId) -> Option<usize> {
+        self.widths.get(id.0).copied().flatten()
+    }
+
+    fn compute_width(&self, node: &SLTNode<A>) -> Option<usize> {
+        let child_width = |child: NodeId| self.width(child);
+        match node {
+            SLTNode::Input { access, .. } => node_rules::access_width(*access, "input").ok(),
+            SLTNode::Constant(value, mask, width, _) => {
+                node_rules::constant_width(value, mask, *width).ok()
+            }
+            SLTNode::Binary(lhs, op, rhs) => {
+                node_rules::binary_width(*op, child_width(*lhs)?, child_width(*rhs)?).ok()
+            }
+            SLTNode::Unary(op, inner) => Some(node_rules::unary_width(*op, child_width(*inner)?)),
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => Some(node_rules::mux_width(
+                child_width(*then_expr)?,
+                child_width(*else_expr)?,
+            )),
+            SLTNode::ForFold { result, .. } => {
+                node_rules::access_width(result.access, "ForFold result").ok()
+            }
+            SLTNode::Concat(parts) => {
+                node_rules::concat_width(parts.iter().map(|(_, width)| *width)).ok()
+            }
+            SLTNode::Slice { expr, access } => {
+                node_rules::slice_width(*access, child_width(*expr)?, format_args!("n{}", expr.0))
+                    .ok()
+            }
+        }
     }
 
     /// Return the number of nodes in stable [`NodeId`] order.
@@ -233,15 +283,20 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         Ok(())
     }
 
-    /// Rebuilds the derived interning cache from the persistent node list.
+    /// Rebuilds derived interning and width caches from the persistent node list.
     ///
     /// If the list already contains duplicate nodes, the smallest (and therefore
     /// first) [`NodeId`] is retained as the canonical identity.
     fn rebuild_cache(&mut self) {
         self.cache.clear();
+        self.widths.clear();
+        self.widths.reserve(self.nodes.len());
         for (idx, node) in self.nodes.iter().cloned().enumerate() {
+            let width = self.compute_width(&node);
+            self.widths.push(width);
             self.cache.entry(node).or_insert(NodeId(idx));
         }
+        debug_assert_eq!(self.nodes.len(), self.widths.len());
     }
 
     pub fn get(&self, id: NodeId) -> &SLTNode<A> {
@@ -259,6 +314,7 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         let mut arena = Self {
             nodes,
             cache: crate::HashMap::default(),
+            widths: Vec::new(),
         };
         arena.rebuild_cache();
         arena
@@ -976,7 +1032,10 @@ mod tests {
     use super::{
         NodeId, SLTForEffect, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
     };
-    use crate::ir::{BinaryOp, VarAtomBase};
+    use crate::{
+        ir::{BinaryOp, UnaryOp, VarAtomBase},
+        logic_tree::comb::{expr::get_width, node_facts::SLTNodeFacts},
+    };
     use num_bigint::BigUint;
 
     fn constant(value: u8) -> SLTNode<u32> {
@@ -1016,6 +1075,69 @@ mod tests {
 
         assert_eq!(decoded.alloc(duplicate), NodeId(1));
         assert_eq!(decoded.len(), node_count);
+        assert_eq!(decoded.width(NodeId(1)), Some(8));
+        assert_eq!(decoded.widths.len(), decoded.nodes.len());
+    }
+
+    #[test]
+    fn default_allocation_and_clone_preserve_width_cache() {
+        let mut arena = SLTNodeArena::<u32>::default();
+        assert!(arena.is_empty());
+        assert!(arena.widths.is_empty());
+
+        let narrow = arena.alloc(SLTNode::Constant(
+            BigUint::from(3u8),
+            BigUint::from(0u8),
+            2,
+            false,
+        ));
+        let wide = arena.alloc(constant(7));
+        let sum = arena.alloc(SLTNode::Binary(narrow, BinaryOp::Add, wide));
+        assert_eq!(get_width(sum, &arena), 8);
+        assert_eq!(arena.widths.len(), arena.nodes.len());
+
+        let facts = SLTNodeFacts::verify(&arena).expect("allocated arena must verify");
+        for index in 0..arena.len() {
+            let id = NodeId(index);
+            assert_eq!(arena.width(id), facts.width(id));
+        }
+
+        let mut cloned = arena.clone();
+        assert_eq!(cloned.widths, arena.widths);
+        assert_eq!(get_width(sum, &cloned), 8);
+        let node_count = cloned.len();
+        assert_eq!(cloned.alloc(arena.get(sum).clone()), sum);
+        assert_eq!(cloned.len(), node_count);
+    }
+
+    #[test]
+    fn get_width_does_not_rewalk_a_shared_mux_dag() {
+        const DEPTH: usize = 64;
+
+        let mut arena = SLTNodeArena::<u32>::new();
+        let cond = arena.alloc(SLTNode::Constant(
+            BigUint::from(1u8),
+            BigUint::from(0u8),
+            1,
+            false,
+        ));
+        let mut value = arena.alloc(constant(0));
+        for _ in 0..DEPTH {
+            let then_expr = arena.alloc(SLTNode::Unary(UnaryOp::Ident, value));
+            let else_expr = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, value));
+            value = arena.alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            });
+        }
+
+        // Recursively walking both arms revisits the shared predecessor twice
+        // per level. A construction-time fact lookup is independent of that
+        // exponential number of graph paths.
+        assert_eq!(get_width(value, &arena), 8);
+        assert_eq!(arena.width(value), Some(8));
+        assert_eq!(arena.widths.len(), arena.nodes.len());
     }
 
     #[test]
