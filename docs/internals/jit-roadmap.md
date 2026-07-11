@@ -197,6 +197,13 @@ sparse comparison tree, ordered wildcard chain, and small branchless tail by
 target cost. This is a region transform above binary mux lowering, not another
 `BranchifyMux` threshold.
 
+The complete fixed phase order, provenance model, placement algorithm,
+Decision verifier, target strategy selection, pressure cuts, and final
+phi-congruence affinity are specified in
+[Decision-region architecture](./decision-region-architecture.md). New code is
+added verifier-first in that order; a failed plan cannot select the old
+allocator or an unverified binary fallback.
+
 A same-build A/B of the cleanup pass confirms the distinction. Explicitly
 enabling `BranchifyMux` applied 464 additional diamonds, increased the spill
 frame from about 79.2 to 84.3 KiB and effective edge copies from 10,110 to

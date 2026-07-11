@@ -133,3 +133,6 @@ may select a value lookup table, jump table, balanced comparison tree, ordered
 early-exit chain, or branchless tail. This does not compete with binary mux
 lowering: a decision region owns the tests, dominance-aware placement owns its
 shared DAG, and ordinary mux lowering handles the residual leaves.
+
+The frozen data model and implementation sequence are in
+[Decision-region architecture](./decision-region-architecture.md).
