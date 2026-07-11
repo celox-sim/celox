@@ -149,8 +149,9 @@ several module instances, so each form is a forest of isolated control units
 rather than one arena-wide tree:
 
 ```text
-SourceArtifactId, SourceInstanceId, SourceInputId, DraftOccurrenceInputId,
-OccurrenceInputId,
+SourceArtifactId, SourceInstanceId, SourceSemanticObjectId, SourceInputId,
+DraftOccurrenceSemanticObjectId, DraftOccurrenceInputId,
+OccurrenceSemanticObjectId, OccurrenceInputId,
 SourceRootId, SourceControlUnitId,
 SourcePredicateRegionId,
 SourceControlPointId, SourceControlEdgeId, SourceGateId, SourceDecisionId,
@@ -386,10 +387,44 @@ SourceInputResolution = InputResolutionKind<SourceDynamicAddressPlanId>
 SourceFoldInputResolution =
   InputResolutionKind<SourceFoldDynamicAddressPlanId>
 
+SourceSemanticObject
+  object: SourceSemanticObjectId
+  exact declaration/binding identity
+  independently derived full width / signedness / Bit-or-Logic domain
+  canonical aggregate dimensions and full flattened stride vector
+
 SourceInput
   input: SourceInputId
-  exact declaration/type/access identity
+  object: SourceSemanticObjectId
+  exact HIR read role and static access
+  exact selected dimensions / part-select kind / index count and stride prefix
+  independently derived result width / result signedness / result domain
   expected semantic input row from VerifiedSourceSemanticContext
+
+`SourceSemanticObjectId` and `SourceInputId` are deliberately different
+namespaces. One object can have several valid input rows: for example
+`mem[i]`, `mem[i][j]`, and a dynamic part-select have different exact stride
+prefixes. Conversely, ForFold state overlap, write-domain membership, and
+object bounds are checked by `(SourceSemanticObjectId, bit range)`, never by
+input-row identity. Canonical source-input rows are derived in expected-HIR
+traversal order and are not copied from an `SLTNode::Input` payload. A phase
+input node can name only that row plus its ordered index children; its child
+count must equal the row and it has no duplicate object/access/stride fields to
+override. The expected value graph separately matches each index child to the
+exact HIR operand occurrence.
+
+Object dimensions are derived with checked arithmetic as unpacked extents,
+then packed-width extents, then the normalized intrinsic struct/union/enum
+width when it is greater than one. Every extent is resolved and nonzero;
+suffix products define strides and their checked product must equal the
+independently derived object width. The verifier does not use Veryl's
+unchecked `Shape::total`, `Type::total_width`, struct-width addition, or
+Celox's legacy `resolve_total_width` as an oracle. `Bit`, `Logic`, clock/reset,
+and recursively normalized enum/struct/union data domains form the closed
+accepted set; unknown, SystemVerilog, string, floating, and non-data kinds are
+rejected until a distinct executable value-domain rule exists. A producer
+cannot make a wrong `[2, 3]` shape self-consistent by supplying width six and
+strides `[2, 1]` because none of those summaries is proof-bearing input.
 
 SourceWriteDomain / SourceBinding / SourceEffectStream
   checked module-local semantic state/binding/effect identity and type
@@ -707,8 +742,15 @@ ControlOccurrencePlan
   producer dependency DAG / ordinary rewrite relations / root-order barriers
 
 OccurrenceInput
-  semantic/type/access row
+  object: OccurrenceSemanticObjectId
+  semantic/type/access/index-geometry row
   origin: MappedSource(SourceRef<SourceInputId>) |
+          PortGlue(GlueOriginId) | Synthetic(SyntheticOriginId)
+
+OccurrenceSemanticObject
+  exact flattened variable/binding/storage identity and independently derived
+  width / signedness / Bit-or-Logic domain / aggregate dimensions
+  origin: MappedSource(SourceRef<SourceSemanticObjectId>) |
           PortGlue(GlueOriginId) | Synthetic(SyntheticOriginId)
 
 WriteDomain
@@ -2012,9 +2054,15 @@ Signedness is also derived by one closed shared rule: arithmetic and bitwise
 binary results are signed only when both operands are signed; shifts inherit
 the left operand; comparison and logical results are unsigned; identity,
 unary minus, and bit-not preserve operand signedness; reductions are unsigned;
-and concatenation is unsigned. A whole declared input read preserves its
-declared signedness, whereas a bit/part select and the phase `Slice` node are
-unsigned. A mux derives common signedness from both raw arms. Its two declared
+and concatenation is unsigned. A whole-object input read and a read selected
+only through unpacked array dimensions preserve declared signedness; any
+packed bit/part select is unsigned even when its numeric range happens to
+cover the complete packed width. The phase `Slice` node is likewise unsigned.
+This rule is derived from access provenance, not from comparing a flat bit
+range with object width. In particular, dynamic unpacked-array extraction is
+represented as one exact semantic input row with its selected result type; it
+is not modeled as a signed whole-object input followed by an unsigned generic
+`Slice`. A mux derives common signedness from both raw arms. Its two declared
 arm target types must match, their width must be at least the maximum raw arm
 width (allowing an independently verified enclosing context to widen it), and
 their extension uses common target signedness rather than each arm's source
@@ -2024,15 +2072,56 @@ a partial counter-width formula; the exact compare and Add/Mul/Shl math
 coercions belong to the independently verified `SourceForFoldTransitionSemantics`
 row in step 2.
 Two-state facts for input leaves come from an explicit verified
-`InputSemanticFacts<P>` context built from the declaration/flattened variable type
-table; `SLTNode::Input` alone does not encode `Bit` versus `Logic`. Derived
-zero-mask facts are recomputed over the checked node DAG. A serialized boolean
-or producer-supplied tag is never accepted as the proof.
+`InputSemanticFacts<P>` context built from the declaration/flattened semantic
+object table plus the independently derived exact HIR input rows;
+`SLTNode::Input` alone does not encode object identity, exact access geometry,
+or `Bit` versus `Logic`. `PhaseSemanticObjectId<P>` identifies the declaration,
+binding, or flattened object, while `PhaseInputId<P>` identifies one exact read
+geometry. Input rows carry the object ID, normalized static base/part rule,
+exact ordered index roles, extents/strides, selected width, and derived result
+signedness/domain. `PhaseSLTNode::Input` carries only the input ID and ordered
+index child IDs; it cannot repeat or override access, stride, width,
+signedness, or domain. ForFold state rows and result identity use
+`PhaseSemanticObjectId<P>` plus a bit range, so two different read geometries
+cannot hide overlapping state on the same object.
+
+```text
+InputSemanticFacts<P>
+  objects: [SemanticObjectFact<P>]
+  inputs: [InputAccessFact<P>]
+
+SemanticObjectFact<P>
+  object: PhaseSemanticObjectId<P>
+  object_width / declared_signed / domain
+  canonical [(extent, stride)]
+
+InputAccessFact<P>
+  input: PhaseInputId<P>
+  object: PhaseSemanticObjectId<P>
+  static base / normalized part-select rule / selected width
+  ordered index roles with extent and stride
+  result_signed / result_domain
+```
+
+The object table is dense in canonical typed-declaration/binding traversal
+order. The input table is dense in expected-HIR traversal order, and only an
+identical complete input key may reuse an earlier row. Neither analyzer
+`HashMap` iteration order nor producer node/cache order allocates either ID.
+
+Derived zero-mask facts are recomputed over the checked node DAG. A `Bit`
+object read is known two-state regardless of whether a dynamic `Logic`
+index/anchor contains X/Z: the checked dynamic-read semantics produces zero
+for an unknown address. A `Logic` object read is not known two-state merely
+because its index is. Index children still participate in lowerability and in
+the separately verified address-known/bounds guard. A serialized boolean or
+producer-supplied tag is never accepted as the proof.
 
 The new pipeline uses phase-typed `PhaseNodeId<SourcePhase>`,
 `PhaseNodeId<DraftOccurrencePhase>`, and
 `PhaseNodeId<OccurrencePhase>` with `PhaseSLTNode<P>` payloads whose child and
-input fields carry that same phase.
+input/object fields carry that same phase. `PhaseInputId<P>` and
+`PhaseSemanticObjectId<P>` are distinct checked namespaces even when both are
+backed by dense `u32` tables.
 The public legacy `NodeId` is accepted only by `LegacyStructuralArena`; it
 cannot be passed to a new frozen artifact. Raw wire integers are decoded first
 to untrusted raw rows and become phase-typed IDs only after aggregate
