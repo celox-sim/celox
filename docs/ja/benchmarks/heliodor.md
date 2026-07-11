@@ -11,6 +11,9 @@ scripts/run-heliodor-bench.sh prepare
 scripts/run-heliodor-bench.sh run
 ```
 
+`run` は構成を変更できる診断用コマンドです。測定値を追記しますが、Celox
+が性能要件を満たすかは判定しません。その判定には固定構成の `gate` を使います。
+
 デフォルトでは `test_soc_linux_boot` を Veryl Cranelift、Veryl cc、Celox の順に走らせます。Celox はその test で成功した最速 Veryl baseline の `HELIODOR_CELOX_TIMEOUT_MULTIPLIER` 倍で timeout します。
 
 ```bash
@@ -20,6 +23,46 @@ scripts/run-heliodor-bench.sh run
 ```
 
 `HELIODOR_REF` を指定しない限り、Heliodor は commit `7ad830fc0f8506c934b61a853ce2eadfa5926b82` に固定します。
+
+## Acceptance gate
+
+clean かつ commit 済みの Celox checkout から、再現可能な end-to-end 比較を
+実行します。
+
+```bash
+scripts/run-heliodor-bench.sh gate
+```
+
+gate の構成は変更できません。以下をすべて固定します。
+
+- 公式 repository の Heliodor commit
+  `7ad830fc0f8506c934b61a853ce2eadfa5926b82` と clean な checkout
+- benchmark 所有ディレクトリにある Veryl `0.20.2`。`PATH` や
+  `VERYL_BIN` は使わず、固定 path と `--version` の完全一致で選択
+- clean で途中に変化しない Celox `HEAD`。invocation ごとの空の Cargo
+  target directory に `--locked` release build し、その成果物を実行
+- `test_soc_linux_boot`、runner 順序 `veryl-cc`、`celox`、各 300 秒 timeout
+- Celox native backend、`O2`、2-state、full execution、SIR pass override なし
+- runner ごとに別の detached Heliodor worktree。project-local な生成物を
+  runner 間で共有しない
+
+gate は `target/heliodor/results` の下に、新しい独立した
+`gate_<timestamp>.<suffix>` directory を作ります。その invocation が生成した
+2 行だけを受理します。Veryl は正常終了し、対象 test の成功をちょうど 1 件、
+集計を `1 passed, 0 failed` と報告する必要があります。Celox は正常終了し、
+native/O2/`four_state=false`/`compile_only=false` の config 行と full-pass
+result 行をそれぞれちょうど 1 件報告する必要があります。実行前後で source
+manifest、checkout identity、runner executable hash も検査します。
+
+subprocess 時間は monotonic nanosecond clock で測定します。両方の semantic
+check が成功し、Celox の process 時間が Veryl 以下の場合にだけ gate は 0 で
+終了します。compile-only、partial window、runner 内部の報告時間、または正確な
+marker を伴わない process exit 0 は失敗です。`--kill-after` を持つ GNU
+`timeout` と Python 3 が必要です。
+
+Celox は現時点で、この gate における競争力のある full Linux-boot 成功結果を
+一度も出していません。コマンドの実装によって acceptance 判定を実行可能にした
+のであって、それ自体が性能要件の合格実績になるわけではありません。
 
 ## テスト
 
@@ -71,7 +114,7 @@ Celox runner は Celox の default backend を使います。x86-64 host では 
 | `log` | runner の完全な log |
 | `semantic_status` | `pass`、`fail`、`compile-only`、`unreported`、`invalid` |
 | `exit_status` | subprocess の終了 status |
-| `process_elapsed_ns` | fail や compile-only を含む subprocess の wall time |
+| `process_elapsed_ns` | fail や compile-only を含む subprocess の monotonic elapsed time |
 | `reported_elapsed_ns` | Celox runner 内部の elapsed。取得できない場合は `NA` |
 
 従来の `runner`、`test`、`status`、`elapsed_ns`、`log` は同じ順序で
@@ -98,11 +141,12 @@ process 終了 status との不一致は pass になりません。
 終了 status が 0 という事実だけで Celox full pass に昇格させることは
 ありません。
 
-parser と migration の fixture は Heliodor の checkout や実行なしで
-テストできます。
+parser/migration と acceptance gate の fixture は、Heliodor や compiler を
+checkout・実行せずにテストできます。
 
 ```bash
 bash scripts/tests/run-heliodor-bench-results.sh
+bash scripts/tests/run-heliodor-bench-gate.sh
 ```
 
 ## 現状の注意

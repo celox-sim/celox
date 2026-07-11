@@ -11,6 +11,10 @@ scripts/run-heliodor-bench.sh prepare
 scripts/run-heliodor-bench.sh run
 ```
 
+`run` is a configurable diagnostic command. It appends measurements, but does
+not decide whether Celox meets the performance requirement. Use the fixed
+`gate` command for that decision.
+
 By default this runs `test_soc_linux_boot` with Veryl Cranelift, Veryl cc, then Celox. Celox is timed out after `HELIODOR_CELOX_TIMEOUT_MULTIPLIER` times the fastest successful Veryl baseline for that test.
 
 ```bash
@@ -20,6 +24,49 @@ scripts/run-heliodor-bench.sh run
 ```
 
 The script pins Heliodor to commit `7ad830fc0f8506c934b61a853ce2eadfa5926b82` unless `HELIODOR_REF` is set.
+
+## Acceptance gate
+
+Run the reproducible end-to-end comparison from a clean, committed Celox
+checkout:
+
+```bash
+scripts/run-heliodor-bench.sh gate
+```
+
+The gate is deliberately not configurable. It forces all of the following:
+
+- Heliodor commit `7ad830fc0f8506c934b61a853ce2eadfa5926b82`
+  from the official repository, with a clean checkout;
+- benchmark-owned Veryl `0.20.2`, selected by its exact path and checked with
+  `--version` rather than taken from `PATH` or `VERYL_BIN`;
+- a clean, unchanged Celox `HEAD`, a locked release build in a fresh
+  invocation-owned Cargo target directory, and execution of that exact built
+  binary;
+- `test_soc_linux_boot`, runners `veryl-cc` then `celox`, and a fixed 300-second
+  timeout for each;
+- Celox native backend, `O2`, two-state mode, full execution, and no SIR pass
+  overrides; and
+- separate detached Heliodor worktrees for the two runners so project-local
+  generated files cannot flow from one runner into the other.
+
+The gate writes a new isolated `gate_<timestamp>.<suffix>` directory under
+`target/heliodor/results`. It accepts exactly two result rows from that
+invocation. Veryl must exit successfully and log exactly one success for the
+requested test plus `1 passed, 0 failed`. Celox must exit successfully and log
+exactly one native/O2/`four_state=false`/`compile_only=false` config record and
+one full-pass result record. Source manifests, checkout identities, and runner
+executable hashes are checked before and after execution.
+
+Subprocess elapsed time is measured with a monotonic nanosecond clock. The gate
+exits successfully only if both semantic checks pass and the Celox process time
+is no greater than the Veryl process time. Compile-only completion, a partial
+window, runner-reported internal time, or process exit zero without the exact
+markers is a failure. GNU `timeout` with `--kill-after` and Python 3 are required.
+
+Celox has not yet produced a competitive successful full Linux-boot result on
+this gate. The existence of the command makes the acceptance decision
+executable; it is not itself evidence that the performance requirement passes.
 
 ## Tests
 
@@ -71,7 +118,7 @@ from the simulated test result. Its columns are:
 | `log` | Full runner log |
 | `semantic_status` | `pass`, `fail`, `compile-only`, `unreported`, or `invalid` |
 | `exit_status` | Subprocess exit status |
-| `process_elapsed_ns` | Wall time of the subprocess, including failed and compile-only runs |
+| `process_elapsed_ns` | Monotonic elapsed time of the subprocess, including failed and compile-only runs |
 | `reported_elapsed_ns` | Celox runner's internal elapsed value, or `NA` when unavailable |
 
 The original `runner`, `test`, `status`, `elapsed_ns`, and `log` columns remain
@@ -98,11 +145,12 @@ referenced logs where possible, and marks records without conclusive evidence
 as `unreported` or `invalid`. The migration never promotes process exit zero
 alone to a Celox full pass.
 
-The parser and migration fixtures run without checking out or executing
-Heliodor:
+The parser/migration and acceptance-gate fixtures run without checking out or
+executing Heliodor or either compiler:
 
 ```bash
 bash scripts/tests/run-heliodor-bench-results.sh
+bash scripts/tests/run-heliodor-bench-gate.sh
 ```
 
 ## Current Caveat

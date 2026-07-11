@@ -415,8 +415,9 @@ per-optimizer-pass audits; neither is required for the boundaries above.
 ## Performance and migration gates
 
 The allocator will be accepted by `scripts/run-heliodor-bench.sh gate`, not
-only by small unit tests. Until that command is implemented, the replacement
-is not performance-qualified. It is complete only when:
+only by small unit tests. The command and its external-process-free contract
+fixtures are implemented; the replacement is not performance-qualified until
+that fixed gate itself returns success. It is complete only when:
 
 - allocation does not panic on large valid MIR;
 - compilation and execution complete without an iteration or CFG-size cap;
@@ -480,8 +481,8 @@ allocation then produces a 79,216-byte spill frame. SSA destruction sees
 
 The 252-test library suite, all 145 non-ignored `comb_observer` cases, the
 16-test native suite with per-pass SIR/MIR auditing, and the native
-control-preserving mux integration test pass. End-to-end Heliodor execution and
-the same-condition `veryl-cc` comparison gate remain open. Celox has not had a
+control-preserving mux integration test pass. A successful end-to-end Heliodor
+execution under the fixed `veryl-cc` comparison remains open. Celox has not had a
 fast successful full Linux-boot run on this gate: prior status-0 Celox entries
 were compile-only, and current 60-second executions are intentionally partial
 diagnostic windows.

@@ -3989,17 +3989,20 @@ CELOX_OPT_LEVEL=O2 \
 scripts/run-heliodor-bench.sh gate
 ```
 
-`gate` is distinct from the diagnostic `run` command. Its implementation must
-install and select
+`gate` is distinct from the diagnostic `run` command. It installs and selects
 the pinned Veryl version in benchmark-owned storage, rejects a dirty or
-non-matching Celox/Heliodor checkout, forces full execution for both runners,
-records exactly the paired rows produced by that invocation, validates their
-semantic pass markers (including Celox's single exact native/O2/
-`four_state=false`/`compile_only=false` config record and the pinned Veryl
-one-passed/zero-failed completion record), and exits nonzero unless the Celox time is no greater
-than the Veryl time. Until the script implements and tests this command, the
-acceptance gate remains open; merely appending result rows is not an executable
-gate.
+non-matching Celox/Heliodor checkout, builds Celox with `--locked` in a fresh
+invocation-owned target directory, and forces full execution for both runners
+in separate detached Heliodor worktrees. It records exactly the paired rows
+produced by that invocation, validates their semantic pass markers (including
+Celox's single exact native/O2/`four_state=false`/`compile_only=false` config
+record and the pinned Veryl one-passed/zero-failed completion record), checks
+source and executable immutability, uses monotonic process time, and exits
+nonzero unless the Celox time is no greater than the Veryl time. Its
+external-process-free contract fixtures are
+`scripts/tests/run-heliodor-bench-gate.sh`. This makes the acceptance gate
+executable, but Celox has not yet returned a competitive full Linux-boot pass
+from it; merely appending diagnostic result rows still is not acceptance.
 
 ### Research boundary
 
