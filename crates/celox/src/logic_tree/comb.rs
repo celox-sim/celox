@@ -3,7 +3,9 @@ mod effect;
 mod expr;
 mod node;
 mod node_facts;
+mod node_rules;
 mod path;
+pub(crate) mod phase_arena;
 mod source_control;
 mod state;
 

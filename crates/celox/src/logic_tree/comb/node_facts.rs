@@ -1,8 +1,9 @@
 use std::{fmt, hash::Hash};
 
-use crate::ir::{BinaryOp, BitAccess, UnaryOp};
+use crate::ir::BitAccess;
 
 use super::node::{NodeId, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp};
+use super::node_rules;
 
 /// Width facts for every node in an [`SLTNodeArena`].
 ///
@@ -87,8 +88,10 @@ where
         for (node_index, node) in arena.iter().enumerate() {
             let node_id = NodeId(node_index);
             let width = compute_width(node_id, node, &widths)?;
-            let mut node_lowerable = width != 0
-                && !matches!(node, SLTNode::Concat(parts) if parts.iter().any(|(_, width)| *width == 0));
+            let mut node_lowerable = node_rules::direct_lowerable(
+                width,
+                matches!(node, SLTNode::Concat(parts) if parts.iter().any(|(_, width)| *width == 0)),
+            );
             try_for_each_child(node, |child| {
                 let Some(&child_lowerable) = lowerable.get(child.0) else {
                     return Err(SLTNodeFactsError::new(
@@ -265,78 +268,23 @@ where
 
     match node {
         SLTNode::Input { access, .. } => checked_access_width(node_id, *access, "input"),
-        SLTNode::Constant(value, mask, width, _) => {
-            let representable_bits = u64::try_from(*width).unwrap_or(u64::MAX);
-            if value.bits() > representable_bits {
-                return Err(SLTNodeFactsError::new(
-                    "CONSTANT.VALUE_FITS_WIDTH",
-                    node_id,
-                    format!(
-                        "constant payload needs {} bits but declares width {width}",
-                        value.bits()
-                    ),
-                ));
-            }
-            if mask.bits() > representable_bits {
-                return Err(SLTNodeFactsError::new(
-                    "CONSTANT.MASK_FITS_WIDTH",
-                    node_id,
-                    format!(
-                        "constant X/Z mask needs {} bits but declares width {width}",
-                        mask.bits()
-                    ),
-                ));
-            }
-            Ok(*width)
-        }
+        SLTNode::Constant(value, mask, width, _) => node_rules::constant_width(value, mask, *width)
+            .map_err(|error| rule_error(node_id, error)),
         SLTNode::Binary(lhs, op, rhs) => {
             let lhs_width = child_width(*lhs)?;
             let rhs_width = child_width(*rhs)?;
-            match op {
-                BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
-                    if lhs_width != rhs_width {
-                        return Err(SLTNodeFactsError::new(
-                            "WIDTH.WILDCARD_OPERANDS_MATCH",
-                            node_id,
-                            format!(
-                                "wildcard comparison operands have widths {lhs_width} and {rhs_width}"
-                            ),
-                        ));
-                    }
-                    Ok(1)
-                }
-                BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::LtU
-                | BinaryOp::LtS
-                | BinaryOp::LeU
-                | BinaryOp::LeS
-                | BinaryOp::GtU
-                | BinaryOp::GtS
-                | BinaryOp::GeU
-                | BinaryOp::GeS
-                | BinaryOp::LogicAnd
-                | BinaryOp::LogicOr => Ok(1),
-                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => Ok(lhs_width),
-                BinaryOp::Add
-                | BinaryOp::Sub
-                | BinaryOp::Mul
-                | BinaryOp::Div
-                | BinaryOp::Rem
-                | BinaryOp::And
-                | BinaryOp::Or
-                | BinaryOp::Xor => Ok(lhs_width.max(rhs_width)),
-            }
+            node_rules::binary_width(*op, lhs_width, rhs_width)
+                .map_err(|error| rule_error(node_id, error))
         }
-        SLTNode::Unary(op, inner) => match op {
-            UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => Ok(1),
-            UnaryOp::Ident | UnaryOp::Minus | UnaryOp::BitNot => child_width(*inner),
-        },
+        SLTNode::Unary(op, inner) => Ok(node_rules::unary_width(*op, child_width(*inner)?)),
         SLTNode::Mux {
             then_expr,
             else_expr,
             ..
-        } => Ok(child_width(*then_expr)?.max(child_width(*else_expr)?)),
+        } => Ok(node_rules::mux_width(
+            child_width(*then_expr)?,
+            child_width(*else_expr)?,
+        )),
         SLTNode::ForFold {
             loop_var: _,
             loop_width,
@@ -470,38 +418,12 @@ where
             require_nonzero_child(*continue_cond, "ForFold continue condition")?;
             checked_access_width(node_id, result.access, "ForFold result")
         }
-        SLTNode::Concat(parts) => {
-            let mut total = 0usize;
-            for (_, part_width) in parts {
-                let Some(next) = total.checked_add(*part_width) else {
-                    return Err(SLTNodeFactsError::new(
-                        "WIDTH.CONCAT_REPRESENTABLE",
-                        node_id,
-                        format!(
-                            "declared concat widths overflow usize while adding {part_width} to {total}"
-                        ),
-                    ));
-                };
-                total = next;
-            }
-            Ok(total)
-        }
+        SLTNode::Concat(parts) => node_rules::concat_width(parts.iter().map(|(_, width)| *width))
+            .map_err(|error| rule_error(node_id, error)),
         SLTNode::Slice { expr, access } => {
-            let width = checked_access_width(node_id, *access, "slice")?;
             let expression_width = child_width(*expr)?;
-            if access.msb >= expression_width {
-                return Err(SLTNodeFactsError::new(
-                    "WIDTH.SLICE_IN_BOUNDS",
-                    node_id,
-                    format!(
-                        "slice [{msb}:{lsb}] exceeds child n{} width {expression_width}",
-                        expr.0,
-                        lsb = access.lsb,
-                        msb = access.msb
-                    ),
-                ));
-            }
-            Ok(width)
+            node_rules::slice_width(*access, expression_width, format_args!("n{}", expr.0))
+                .map_err(|error| rule_error(node_id, error))
         }
     }
 }
@@ -511,26 +433,11 @@ fn checked_access_width(
     access: BitAccess,
     role: &str,
 ) -> Result<usize, SLTNodeFactsError> {
-    let Some(span) = access.msb.checked_sub(access.lsb) else {
-        return Err(SLTNodeFactsError::new(
-            "WIDTH.ACCESS_ORDERED",
-            node,
-            format!(
-                "{role} access has lsb {} greater than msb {}",
-                access.lsb, access.msb
-            ),
-        ));
-    };
-    span.checked_add(1).ok_or_else(|| {
-        SLTNodeFactsError::new(
-            "WIDTH.ACCESS_REPRESENTABLE",
-            node,
-            format!(
-                "{role} access [{}:{}] has a width that overflows usize",
-                access.msb, access.lsb
-            ),
-        )
-    })
+    node_rules::access_width(access, role).map_err(|error| rule_error(node, error))
+}
+
+fn rule_error(node: NodeId, error: node_rules::NodeRuleError) -> SLTNodeFactsError {
+    SLTNodeFactsError::new(error.invariant, node, error.message)
 }
 
 fn try_for_each_child<A, E>(
@@ -606,7 +513,7 @@ where
 mod tests {
     use num_bigint::BigUint;
 
-    use crate::ir::VarAtomBase;
+    use crate::ir::{BinaryOp, UnaryOp, VarAtomBase};
 
     use super::*;
     use crate::logic_tree::comb::node::{SLTForEffect, SLTForUpdate, SLTStepOp};
