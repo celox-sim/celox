@@ -2888,6 +2888,9 @@ fn compile_unary(
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
             }
         }
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            compile_count_unary_value(&d, op, &s, d_width, s_width, locals, instrs);
+        }
     }
 
     if four_state {
@@ -2931,6 +2934,36 @@ fn compile_unary_mask(
             for c in 0..src.num_chunks {
                 instrs.push(Instruction::LocalGet(has_x));
                 instrs.push(Instruction::LocalGet(src_mask + c as u32));
+                instrs.push(Instruction::I64Or);
+                instrs.push(Instruction::LocalSet(has_x));
+            }
+            instrs.push(Instruction::LocalGet(has_x));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            for c in 0..dst.num_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(dst_mask + c as u32));
+            }
+            instrs.push(Instruction::Else);
+            for c in 0..dst.num_chunks {
+                let chunk_mask = chunk_mask_for_width(c, dst.num_chunks, d_width);
+                instrs.push(Instruction::I64Const(chunk_mask as i64));
+                instrs.push(Instruction::LocalSet(dst_mask + c as u32));
+            }
+            instrs.push(Instruction::End);
+        }
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            let has_x = locals.alloc(1);
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(has_x));
+            for c in 0..src.num_chunks {
+                instrs.push(Instruction::LocalGet(has_x));
+                instrs.push(Instruction::LocalGet(src_mask + c as u32));
+                if c + 1 == src.num_chunks && !s_width.is_multiple_of(64) {
+                    let valid_bits = s_width % 64;
+                    instrs.push(Instruction::I64Const(((1u64 << valid_bits) - 1) as i64));
+                    instrs.push(Instruction::I64And);
+                }
                 instrs.push(Instruction::I64Or);
                 instrs.push(Instruction::LocalSet(has_x));
             }
@@ -3044,6 +3077,150 @@ fn compile_unary_mask(
             }
         }
     }
+}
+
+fn emit_masked_source_chunk(
+    src: &RegLocal,
+    chunk: usize,
+    source_width: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    instrs.push(Instruction::LocalGet(src.value_idx + chunk as u32));
+    if chunk + 1 == src.num_chunks && !source_width.is_multiple_of(64) {
+        let valid_bits = source_width % 64;
+        instrs.push(Instruction::I64Const(((1u64 << valid_bits) - 1) as i64));
+        instrs.push(Instruction::I64And);
+    }
+}
+
+fn compile_count_unary_value(
+    dst: &RegLocal,
+    op: &UnaryOp,
+    src: &RegLocal,
+    destination_width: usize,
+    source_width: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    debug_assert!(source_width > 0);
+    let count = locals.alloc(1);
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::LocalSet(count));
+
+    match op {
+        UnaryOp::PopCount => {
+            for chunk in 0..src.num_chunks {
+                instrs.push(Instruction::LocalGet(count));
+                emit_masked_source_chunk(src, chunk, source_width, instrs);
+                instrs.push(Instruction::I64Popcnt);
+                instrs.push(Instruction::I64Add);
+                instrs.push(Instruction::LocalSet(count));
+            }
+        }
+        UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            let active = locals.alloc(1);
+            let source_chunk = locals.alloc(1);
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::LocalSet(active));
+
+            if matches!(op, UnaryOp::CountLeadingZeros) {
+                for chunk in (0..src.num_chunks).rev() {
+                    compile_zero_count_chunk(
+                        src,
+                        chunk,
+                        source_width,
+                        true,
+                        count,
+                        active,
+                        source_chunk,
+                        instrs,
+                    );
+                }
+            } else {
+                for chunk in 0..src.num_chunks {
+                    compile_zero_count_chunk(
+                        src,
+                        chunk,
+                        source_width,
+                        false,
+                        count,
+                        active,
+                        source_chunk,
+                        instrs,
+                    );
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    instrs.push(Instruction::LocalGet(count));
+    emit_mask_to_width(instrs, destination_width);
+    instrs.push(Instruction::LocalSet(dst.value_idx));
+    for chunk in 1..dst.num_chunks {
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(dst.value_idx + chunk as u32));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_zero_count_chunk(
+    src: &RegLocal,
+    chunk: usize,
+    source_width: usize,
+    leading: bool,
+    count: u32,
+    active: u32,
+    source_chunk: u32,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    instrs.push(Instruction::LocalGet(active));
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::I64Ne);
+    instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+
+    emit_masked_source_chunk(src, chunk, source_width, instrs);
+    instrs.push(Instruction::LocalSet(source_chunk));
+    let valid_bits = if chunk + 1 == src.num_chunks && !source_width.is_multiple_of(64) {
+        source_width % 64
+    } else {
+        64
+    };
+
+    if leading {
+        instrs.push(Instruction::LocalGet(count));
+        instrs.push(Instruction::LocalGet(source_chunk));
+        instrs.push(Instruction::I64Clz);
+        if valid_bits < 64 {
+            instrs.push(Instruction::I64Const((64 - valid_bits) as i64));
+            instrs.push(Instruction::I64Sub);
+        }
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(count));
+
+        instrs.push(Instruction::LocalGet(source_chunk));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(active));
+    } else {
+        instrs.push(Instruction::LocalGet(source_chunk));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::LocalGet(count));
+        instrs.push(Instruction::I64Const(valid_bits as i64));
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(count));
+        instrs.push(Instruction::Else);
+        instrs.push(Instruction::LocalGet(count));
+        instrs.push(Instruction::LocalGet(source_chunk));
+        instrs.push(Instruction::I64Ctz);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(count));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(active));
+        instrs.push(Instruction::End);
+    }
+    instrs.push(Instruction::End);
 }
 
 // ============================================================
@@ -4757,4 +4934,328 @@ fn emit_trigger_detection(
         }));
     }
     instrs.push(Instruction::End); // end if
+}
+
+#[cfg(test)]
+mod bit_count_tests {
+    use num_bigint::BigUint;
+    use veryl_analyzer::ir::VarId;
+    use wasmtime::{Engine, Linker, Memory, Module as WasmtimeModule, Store};
+
+    use super::*;
+    use crate::{
+        SimulatorOptions,
+        backend::JitEngine,
+        ir::{BasicBlock, InstanceId},
+    };
+
+    const OUTPUT_OFFSET: usize = 32;
+    const SLOT_BITS: usize = 128;
+
+    #[derive(Clone)]
+    struct CountCase {
+        source_width: usize,
+        destination_width: usize,
+        value: BigUint,
+        mask: BigUint,
+        expected: [usize; 3],
+    }
+
+    fn address() -> AbsoluteAddr {
+        AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        }
+    }
+
+    fn layout(variable_width: usize, four_state: bool) -> MemoryLayout {
+        let addr = address();
+        let mut offsets = HashMap::default();
+        offsets.insert(addr, OUTPUT_OFFSET);
+        let mut widths = HashMap::default();
+        widths.insert(addr, variable_width);
+        let mut is_4states = HashMap::default();
+        is_4states.insert(addr, true);
+        let variable_bytes = get_byte_size(variable_width);
+        let total_size = OUTPUT_OFFSET + variable_bytes * usize::from(four_state) + variable_bytes;
+        let working_base_offset = (total_size + 7) & !7;
+
+        MemoryLayout {
+            four_state,
+            offsets,
+            widths,
+            is_4states,
+            total_size,
+            working_offsets: HashMap::default(),
+            working_base_offset,
+            merged_total_size: 65_536,
+            triggered_bits_offset: working_base_offset,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: working_base_offset,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: Vec::new(),
+        }
+    }
+
+    fn execution_unit(cases: &[CountCase]) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut register_map = HashMap::default();
+        let mut instructions = Vec::new();
+        let mut next_reg = 0usize;
+        let ops = [
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ];
+
+        for (case_index, case) in cases.iter().enumerate() {
+            let source = RegisterId(next_reg);
+            next_reg += 1;
+            register_map.insert(
+                source,
+                RegisterType::Logic {
+                    width: case.source_width,
+                },
+            );
+            instructions.push(SIRInstruction::Imm(
+                source,
+                SIRValue::new_four_state(case.value.clone(), case.mask.clone()),
+            ));
+
+            for (op_index, op) in ops.iter().copied().enumerate() {
+                let destination = RegisterId(next_reg);
+                next_reg += 1;
+                register_map.insert(
+                    destination,
+                    RegisterType::Logic {
+                        width: case.destination_width,
+                    },
+                );
+                instructions.push(SIRInstruction::Unary(destination, op, source));
+                let result_index = case_index * ops.len() + op_index;
+                instructions.push(SIRInstruction::Store(
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address()),
+                    SIROffset::Static(result_index * SLOT_BITS),
+                    case.destination_width,
+                    destination,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+        }
+
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: std::iter::once((BlockId(0), block)).collect(),
+            register_map,
+        }
+    }
+
+    fn run_cranelift(
+        unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+        layout: &MemoryLayout,
+        four_state: bool,
+    ) -> Vec<u8> {
+        let options = SimulatorOptions {
+            four_state,
+            ..SimulatorOptions::default()
+        };
+        let mut engine = JitEngine::new(layout.clone(), &options).expect("create JIT engine");
+        let code = engine
+            .compile_units(std::slice::from_ref(unit), None, None, None)
+            .expect("compile count operations");
+        let function: unsafe extern "C" fn(*mut u8) -> u64 = unsafe { std::mem::transmute(code) };
+        let mut memory = vec![0u8; layout.merged_total_size];
+        let status = unsafe { function(memory.as_mut_ptr()) };
+        assert_eq!(status, 0);
+        memory
+    }
+
+    fn run_wasm(
+        unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+        layout: &MemoryLayout,
+        four_state: bool,
+    ) -> Vec<u8> {
+        let wasm = compile_units(std::slice::from_ref(unit), layout, four_state, false);
+        let engine = Engine::default();
+        let module = WasmtimeModule::new(&engine, &wasm.bytes).expect("compile Wasm module");
+        let mut store = Store::new(&engine, ());
+        let memory = Memory::new(&mut store, wasmtime::MemoryType::new(1, None))
+            .expect("create Wasm memory");
+        let mut linker = Linker::new(&engine);
+        linker
+            .define(&mut store, "env", "memory", memory)
+            .expect("define Wasm memory");
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .expect("instantiate Wasm module");
+        let run = instance
+            .get_typed_func::<(), i64>(&mut store, "run")
+            .expect("find Wasm entry point");
+        assert_eq!(run.call(&mut store, ()).expect("execute Wasm"), 0);
+        memory.data(&store).to_vec()
+    }
+
+    fn read_bits_at(memory: &[u8], base_offset: usize, bit_offset: usize, width: usize) -> BigUint {
+        assert!(bit_offset.is_multiple_of(8));
+        let byte_offset = base_offset + bit_offset / 8;
+        BigUint::from_bytes_le(&memory[byte_offset..byte_offset + get_byte_size(width)])
+            & ((BigUint::from(1u8) << width) - BigUint::from(1u8))
+    }
+
+    fn read_bits(memory: &[u8], bit_offset: usize, width: usize) -> BigUint {
+        read_bits_at(memory, OUTPUT_OFFSET, bit_offset, width)
+    }
+
+    fn assert_results(cases: &[CountCase], memory: &[u8]) {
+        for (case_index, case) in cases.iter().enumerate() {
+            for (op_index, expected) in case.expected.iter().copied().enumerate() {
+                let result_index = case_index * 3 + op_index;
+                assert_eq!(
+                    read_bits(memory, result_index * SLOT_BITS, case.destination_width),
+                    BigUint::from(expected),
+                    "case {case_index}, operation {op_index}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bit_counts_match_for_narrow_and_wide_two_state_values() {
+        let cases = vec![
+            CountCase {
+                source_width: 1,
+                destination_width: 1,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(0u8),
+                expected: [0, 1, 1],
+            },
+            CountCase {
+                source_width: 5,
+                destination_width: 3,
+                value: BigUint::from(0b0_0100u8),
+                mask: BigUint::from(0u8),
+                expected: [1, 2, 2],
+            },
+            CountCase {
+                source_width: 63,
+                destination_width: 6,
+                value: (BigUint::from(1u8) << 62) | (BigUint::from(1u8) << 7),
+                mask: BigUint::from(0u8),
+                expected: [2, 0, 7],
+            },
+            CountCase {
+                source_width: 64,
+                destination_width: 7,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(0u8),
+                expected: [0, 64, 64],
+            },
+            CountCase {
+                source_width: 65,
+                destination_width: 7,
+                value: (BigUint::from(1u8) << 64) | (BigUint::from(1u8) << 40),
+                mask: BigUint::from(0u8),
+                expected: [2, 0, 40],
+            },
+            CountCase {
+                source_width: 70,
+                destination_width: 80,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(0u8),
+                expected: [0, 70, 70],
+            },
+            CountCase {
+                source_width: 130,
+                destination_width: 8,
+                value: (BigUint::from(1u8) << 128)
+                    | (BigUint::from(1u8) << 65)
+                    | (BigUint::from(1u8) << 3),
+                mask: BigUint::from(0u8),
+                expected: [3, 1, 3],
+            },
+        ];
+        let variable_width = cases.len() * 3 * SLOT_BITS;
+        let layout = layout(variable_width, false);
+        let unit = execution_unit(&cases);
+
+        assert_results(&cases, &run_cranelift(&unit, &layout, false));
+        assert_results(&cases, &run_wasm(&unit, &layout, false));
+    }
+
+    #[test]
+    fn bit_counts_propagate_unknown_as_full_destination_mask() {
+        let cases = vec![
+            CountCase {
+                source_width: 5,
+                destination_width: 3,
+                value: BigUint::from(0b0_0100u8),
+                mask: BigUint::from(0u8),
+                expected: [1, 2, 2],
+            },
+            CountCase {
+                source_width: 5,
+                destination_width: 3,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(1u8) << 2,
+                expected: [0, 0, 0],
+            },
+            CountCase {
+                source_width: 70,
+                destination_width: 80,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(1u8) << 66,
+                expected: [0, 0, 0],
+            },
+        ];
+        let variable_width = cases.len() * 3 * SLOT_BITS;
+        let layout = layout(variable_width, true);
+        let unit = execution_unit(&cases);
+        let value_bytes = get_byte_size(variable_width);
+
+        for memory in [
+            run_cranelift(&unit, &layout, true),
+            run_wasm(&unit, &layout, true),
+        ] {
+            for (case_index, case) in cases.iter().enumerate() {
+                let expected_mask = if case.mask == BigUint::from(0u8) {
+                    BigUint::from(0u8)
+                } else {
+                    (BigUint::from(1u8) << case.destination_width) - BigUint::from(1u8)
+                };
+                for (op_index, expected_count) in case.expected.iter().copied().enumerate() {
+                    let result_index = case_index * 3 + op_index;
+                    let bit_offset = result_index * SLOT_BITS;
+                    let expected_value = if expected_mask == BigUint::from(0u8) {
+                        BigUint::from(expected_count)
+                    } else {
+                        expected_mask.clone()
+                    };
+                    assert_eq!(
+                        read_bits(&memory, bit_offset, case.destination_width),
+                        expected_value,
+                        "case {case_index}, operation {op_index} value",
+                    );
+                    assert_eq!(
+                        read_bits_at(
+                            &memory,
+                            OUTPUT_OFFSET + value_bytes,
+                            bit_offset,
+                            case.destination_width,
+                        ),
+                        expected_mask,
+                        "case {case_index}, operation {op_index} mask",
+                    );
+                }
+            }
+        }
+    }
 }

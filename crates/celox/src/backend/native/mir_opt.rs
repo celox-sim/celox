@@ -636,6 +636,7 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
                 Some(64 - value.leading_zeros() as usize)
             }
         }
+        MInst::LoadConstantTableAddr { .. } => Some(64),
         MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => {
             Some(size.bytes() as usize * 8)
         }
@@ -726,6 +727,7 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
 /// Key for GVN: opcode discriminant + operands (sorted for commutative ops).
 #[derive(Hash, PartialEq, Eq, Clone)]
 enum GvnKey {
+    ConstantTable(ConstantTableId),
     BinRR(u8, VReg, VReg),
     BinRI(u8, VReg, u64),
     ShiftI(u8, VReg, u8),
@@ -766,6 +768,7 @@ fn gvn_is_commutative(op: u8) -> bool {
 
 fn gvn_key(inst: &MInst) -> Option<GvnKey> {
     match inst {
+        MInst::LoadConstantTableAddr { table, .. } => Some(GvnKey::ConstantTable(*table)),
         MInst::Add { lhs, rhs, .. } => Some(gvn_bin_rr(GVN_ADD, *lhs, *rhs)),
         MInst::Sub { lhs, rhs, .. } => Some(GvnKey::BinRR(GVN_SUB, *lhs, *rhs)),
         MInst::Mul { lhs, rhs, .. } => Some(gvn_bin_rr(GVN_MUL, *lhs, *rhs)),
@@ -1373,7 +1376,7 @@ fn simplify_cfg(func: &mut MFunction) {
 // Load sinking (instruction reordering for shorter live ranges)
 // ────────────────────────────────────────────────────────────────
 
-/// Move Load and LoadImm instructions closer to their first use within
+/// Move operand-free materializations closer to their first use within
 /// each basic block. This shortens live ranges, reducing register pressure
 /// and improving the quality of the single-pass register allocator.
 ///
@@ -1386,8 +1389,9 @@ fn sink_loads(func: &mut MFunction) {
         // moving one definition changes the target index of another definition
         // and can place it after its use.
         for from in (0..block.insts.len()).rev() {
-            let MInst::LoadImm { dst, .. } = block.insts[from] else {
-                continue;
+            let dst = match block.insts[from] {
+                MInst::LoadImm { dst, .. } | MInst::LoadConstantTableAddr { dst, .. } => dst,
+                _ => continue,
             };
             let Some(use_pos) = block.insts[from + 1..]
                 .iter()
@@ -1656,6 +1660,7 @@ fn compute_value_widths(func: &mut MFunction) {
                         Some((64 - value.leading_zeros()) as u8)
                     }
                 }
+                MInst::LoadConstantTableAddr { .. } => Some(64),
                 MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => {
                     Some((size.bytes() * 8) as u8)
                 }
@@ -2153,9 +2158,10 @@ fn trace_value_window(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u
                 None
             }
         }
-        MInst::Load { .. } | MInst::LoadIndexed { .. } | MInst::LoadPtr { .. } => {
-            Some((reg, 0, 64))
-        }
+        MInst::LoadConstantTableAddr { .. }
+        | MInst::Load { .. }
+        | MInst::LoadIndexed { .. }
+        | MInst::LoadPtr { .. } => Some((reg, 0, 64)),
         _ => None,
     }
 }

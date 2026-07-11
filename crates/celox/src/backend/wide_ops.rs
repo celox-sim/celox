@@ -153,6 +153,106 @@ pub fn emit_wide_unary(
         UnaryOp::And => {
             emit_wide_reduction_and(builder, r_chunks, num_chunks, common_logical_width)
         }
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            let count = emit_wide_bit_count(builder, op, r_chunks, common_logical_width);
+            let zero = builder.ins().iconst(types::I64, 0);
+            std::iter::once(count)
+                .chain(std::iter::repeat_n(zero, num_chunks.saturating_sub(1)))
+                .collect()
+        }
+    }
+}
+
+/// Count bits in a logical-width integer represented by little-endian i64 chunks.
+///
+/// The returned count is an i64 scalar. Padding above `logical_width` in the
+/// most-significant physical chunk is ignored. CLZ/CTZ return `logical_width`
+/// for an all-zero input.
+pub fn emit_wide_bit_count(
+    builder: &mut FunctionBuilder,
+    op: &UnaryOp,
+    r_chunks: &[Value],
+    logical_width: usize,
+) -> Value {
+    debug_assert!(logical_width > 0);
+    debug_assert!(matches!(
+        op,
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros
+    ));
+
+    let num_chunks = logical_width.div_ceil(64);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let logical_chunk = |builder: &mut FunctionBuilder, index: usize| {
+        let chunk = get_chunk_as_i64(builder, r_chunks, index);
+        if index + 1 == num_chunks && !logical_width.is_multiple_of(64) {
+            let valid_bits = logical_width % 64;
+            builder
+                .ins()
+                .band_imm(chunk, ((1u64 << valid_bits) - 1) as i64)
+        } else {
+            chunk
+        }
+    };
+
+    match op {
+        UnaryOp::PopCount => {
+            let mut count = zero;
+            for index in 0..num_chunks {
+                let chunk = logical_chunk(builder, index);
+                let chunk_count = builder.ins().popcnt(chunk);
+                count = builder.ins().iadd(count, chunk_count);
+            }
+            count
+        }
+        UnaryOp::CountLeadingZeros => {
+            let mut count = zero;
+            let mut still_zero = builder.ins().iconst(types::I8, 1);
+            for index in (0..num_chunks).rev() {
+                let valid_bits = if index + 1 == num_chunks && !logical_width.is_multiple_of(64) {
+                    logical_width % 64
+                } else {
+                    64
+                };
+                let chunk = logical_chunk(builder, index);
+                let physical_count = builder.ins().clz(chunk);
+                let logical_count = if valid_bits < 64 {
+                    builder
+                        .ins()
+                        .iadd_imm(physical_count, -((64 - valid_bits) as i64))
+                } else {
+                    physical_count
+                };
+                let contribution = builder.ins().select(still_zero, logical_count, zero);
+                count = builder.ins().iadd(count, contribution);
+                let chunk_is_zero = builder.ins().icmp_imm(IntCC::Equal, chunk, 0);
+                still_zero = builder.ins().band(still_zero, chunk_is_zero);
+            }
+            count
+        }
+        UnaryOp::CountTrailingZeros => {
+            let mut count = zero;
+            let mut still_zero = builder.ins().iconst(types::I8, 1);
+            for index in 0..num_chunks {
+                let valid_bits = if index + 1 == num_chunks && !logical_width.is_multiple_of(64) {
+                    logical_width % 64
+                } else {
+                    64
+                };
+                let chunk = logical_chunk(builder, index);
+                let chunk_is_zero = builder.ins().icmp_imm(IntCC::Equal, chunk, 0);
+                let physical_count = builder.ins().ctz(chunk);
+                let valid_bits_value = builder.ins().iconst(types::I64, valid_bits as i64);
+                let logical_count =
+                    builder
+                        .ins()
+                        .select(chunk_is_zero, valid_bits_value, physical_count);
+                let contribution = builder.ins().select(still_zero, logical_count, zero);
+                count = builder.ins().iadd(count, contribution);
+                still_zero = builder.ins().band(still_zero, chunk_is_zero);
+            }
+            count
+        }
+        _ => unreachable!(),
     }
 }
 

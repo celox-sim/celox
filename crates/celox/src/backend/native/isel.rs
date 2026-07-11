@@ -79,8 +79,38 @@ pub fn lower_execution_unit(
     }
 
     let mut func = MFunction::new(vregs.clone(), spill_descs);
-
     let block_ids = ordered_sir_blocks(eu);
+    let native_priority_encode = !four_state;
+    let sir_use_sites = if native_priority_encode {
+        Some(collect_sir_use_sites(eu))
+    } else {
+        None
+    };
+    let mut dense_lookup_plans_by_block: HashMap<crate::ir::BlockId, DenseLookupPlans> =
+        HashMap::default();
+    if !four_state {
+        let constants = collect_exact_sir_constants(eu);
+        let uses = sir_use_sites
+            .as_ref()
+            .expect("two-state lookup planning must collect SIR uses");
+        for &block_id in &block_ids {
+            let block = &eu.blocks[&block_id];
+            let mut plans = find_dense_lookup_plans(block, &eu.register_map, &constants, uses);
+            let mut root_indices: Vec<_> = plans.roots.keys().copied().collect();
+            root_indices.sort_unstable();
+            for root_idx in root_indices {
+                let plan = plans
+                    .roots
+                    .get_mut(&root_idx)
+                    .expect("collected dense lookup root must still exist");
+                plan.table = Some(func.intern_constant_table(plan.entries.clone()));
+            }
+            if !plans.roots.is_empty() {
+                dense_lookup_plans_by_block.insert(block_id, plans);
+            }
+        }
+    }
+
     let mut next_extra_block_id = block_ids.iter().map(|bid| bid.0).max().unwrap_or(0) + 1;
     let mut sir_exit_mir_blocks: std::collections::HashMap<crate::ir::BlockId, BlockId> =
         std::collections::HashMap::new();
@@ -112,14 +142,6 @@ pub fn lower_execution_unit(
         trigger_only_seen: HashSet::default(),
         trace_regs,
     };
-    let native_priority_encode = !four_state
-        && std::env::var_os("CELOX_NATIVE_PRIORITY_ENCODE").is_none_or(|value| value != "0");
-    let sir_use_sites = if native_priority_encode {
-        Some(collect_sir_use_sites(eu))
-    } else {
-        None
-    };
-
     // Pre-seed wide block params so instructions in those blocks can read the
     // full chunked value before phi nodes are materialized in a later pass.
     for sir_block in eu.blocks.values() {
@@ -184,6 +206,10 @@ pub fn lower_execution_unit(
         } else {
             PriorityEncodePlans::default()
         };
+        let lookup_plans = dense_lookup_plans_by_block
+            .remove(&sir_block_id)
+            .unwrap_or_default();
+        let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let sir_defs = collect_sir_defs(sir_block);
 
         // Lower instructions
@@ -195,6 +221,22 @@ pub fn lower_execution_unit(
                     "[isel-trace] b{} inst {} lowering r{}: {}",
                     sir_block.id.0, inst_idx, dst.0, inst
                 );
+            }
+            if lookup_plans.skip_indices.contains(&inst_idx) {
+                if let Some(plan) = lookup_plans.roots.get(&inst_idx) {
+                    if ctx.trace_regs.contains(&plan.dst) {
+                        eprintln!(
+                            "[isel-trace] b{} inst {} dense-lookup root r{} selector=r{} entries={}",
+                            sir_block.id.0,
+                            inst_idx,
+                            plan.dst.0,
+                            plan.selector.0,
+                            plan.entries.len(),
+                        );
+                    }
+                    emit_dense_lookup(&mut ctx, &mut mblock, plan, &mut lookup_emit_cache);
+                }
+                continue;
             }
             if priority_plans.skip_indices.contains(&inst_idx) {
                 if let Some(plan) = priority_plans.roots.get(&inst_idx) {
@@ -1470,6 +1512,385 @@ struct PriorityEncodePlan {
     width: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExactSirConstant {
+    value: u64,
+}
+
+#[derive(Default)]
+struct DenseLookupPlans {
+    roots: HashMap<usize, DenseLookupPlan>,
+    skip_indices: HashSet<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct DenseLookupPlan {
+    root_idx: usize,
+    dst: RegisterId,
+    selector: RegisterId,
+    selector_width: usize,
+    default: RegisterId,
+    entries: Vec<u64>,
+    table: Option<ConstantTableId>,
+}
+
+struct DenseLookupCandidate {
+    plan: DenseLookupPlan,
+    covered_indices: HashSet<usize>,
+}
+
+#[derive(Default)]
+struct DenseLookupEmitCache {
+    byte_indices: HashMap<(RegisterId, usize), VReg>,
+    table_addrs: HashMap<ConstantTableId, VReg>,
+}
+
+fn exact_sir_constant(value: &crate::ir::SIRValue) -> Option<ExactSirConstant> {
+    if value.mask != num_bigint::BigUint::ZERO {
+        return None;
+    }
+    let digits = value.payload.to_u64_digits();
+    let value = match digits.as_slice() {
+        [] => 0,
+        [value] => *value,
+        _ => return None,
+    };
+    Some(ExactSirConstant { value })
+}
+
+fn collect_exact_sir_constants(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, ExactSirConstant> {
+    let mut constants = HashMap::default();
+    let mut ambiguous = HashSet::default();
+    for block in eu.blocks.values() {
+        for inst in &block.instructions {
+            let SIRInstruction::Imm(dst, value) = inst else {
+                continue;
+            };
+            let Some(value) = exact_sir_constant(value) else {
+                continue;
+            };
+            if constants.insert(*dst, value).is_some() {
+                ambiguous.insert(*dst);
+            }
+        }
+    }
+    for reg in ambiguous {
+        constants.remove(&reg);
+    }
+    constants
+}
+
+fn find_dense_lookup_plans(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> DenseLookupPlans {
+    let defs = collect_sir_defs(block);
+    let mut candidates = Vec::new();
+    for (root_idx, inst) in block.instructions.iter().enumerate() {
+        let SIRInstruction::Mux(root_dst, ..) = inst else {
+            continue;
+        };
+        let only_feeds_later_chain_stages = uses.get(root_dst).is_some_and(|sites| {
+            !sites.is_empty()
+                && sites.iter().all(|site| {
+                    site.block == block.id
+                        && site.inst_idx.is_some_and(|use_idx| {
+                            matches!(
+                                block.instructions.get(use_idx),
+                                Some(SIRInstruction::Mux(_, _, _, else_value))
+                                    if else_value == root_dst
+                            )
+                        })
+                })
+        });
+        if only_feeds_later_chain_stages {
+            continue;
+        }
+        if let Some(candidate) = collect_dense_lookup_candidate(
+            block,
+            register_types,
+            constants,
+            &defs,
+            root_idx,
+            *root_dst,
+        ) {
+            candidates.push(candidate);
+        }
+    }
+    if candidates.is_empty() {
+        return DenseLookupPlans::default();
+    }
+
+    let mut covered_indices = HashSet::default();
+    let mut root_indices = HashSet::default();
+    let mut roots = HashMap::default();
+    for candidate in candidates {
+        root_indices.insert(candidate.plan.root_idx);
+        covered_indices.extend(candidate.covered_indices);
+        roots.insert(candidate.plan.root_idx, candidate.plan);
+    }
+
+    // Compute the greatest removable subset of the covered union.  Roots are
+    // replaced in-place and therefore remain removable even though their
+    // values have users outside the union.  Any other covered definition with
+    // an outside user is retained, then retention is propagated backwards to
+    // its covered operands.  This is what permits several lookup roots to
+    // share comparison/constant definitions without leaving those definitions
+    // behind merely because another recognized root also uses them.
+    let mut retained = HashSet::default();
+    let mut worklist = Vec::new();
+    for &idx in &covered_indices {
+        if root_indices.contains(&idx) {
+            continue;
+        }
+        let Some(def) = sir_def_reg(&block.instructions[idx]) else {
+            continue;
+        };
+        let has_outside_use = uses.get(&def).is_some_and(|sites| {
+            sites.iter().any(|site| {
+                site.block != block.id
+                    || site
+                        .inst_idx
+                        .is_none_or(|use_idx| !covered_indices.contains(&use_idx))
+            })
+        });
+        if has_outside_use && retained.insert(idx) {
+            worklist.push(idx);
+        }
+    }
+    while let Some(idx) = worklist.pop() {
+        collect_sir_inst_uses(&block.instructions[idx], |operand| {
+            let Some(&operand_idx) = defs.get(&operand) else {
+                return;
+            };
+            if covered_indices.contains(&operand_idx)
+                && !root_indices.contains(&operand_idx)
+                && retained.insert(operand_idx)
+            {
+                worklist.push(operand_idx);
+            }
+        });
+    }
+
+    let skip_indices = covered_indices
+        .into_iter()
+        .filter(|idx| !retained.contains(idx))
+        .collect();
+    DenseLookupPlans {
+        roots,
+        skip_indices,
+    }
+}
+
+fn collect_dense_lookup_candidate(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    defs: &HashMap<RegisterId, usize>,
+    root_idx: usize,
+    root_dst: RegisterId,
+) -> Option<DenseLookupCandidate> {
+    let result_width = register_types.get(&root_dst)?.width();
+    if result_width == 0 || result_width > 64 {
+        return None;
+    }
+
+    let mut cursor = root_dst;
+    let mut selector = None;
+    let mut selector_width = None;
+    let mut items = Vec::new();
+    let mut keys = HashSet::default();
+    let mut covered_indices = HashSet::default();
+
+    let default = loop {
+        let &mux_idx = defs.get(&cursor)?;
+        let SIRInstruction::Mux(dst, cond, then_value, else_value) = &block.instructions[mux_idx]
+        else {
+            return None;
+        };
+        if *dst != cursor
+            || register_types.get(dst)?.width() != result_width
+            || register_types.get(then_value)?.width() != result_width
+            || register_types.get(else_value)?.width() != result_width
+        {
+            return None;
+        }
+
+        let matched = match_dense_lookup_condition(block, register_types, constants, defs, *cond)?;
+        if let Some(expected) = selector {
+            if expected != matched.selector {
+                return None;
+            }
+        } else {
+            selector = Some(matched.selector);
+            selector_width = Some(matched.selector_width);
+        }
+        if !keys.insert(matched.key) {
+            // Duplicate exact keys make mux priority observable.  Do not
+            // silently choose either occurrence when constructing the table.
+            return None;
+        }
+
+        let then_constant = constants.get(then_value)?;
+        let table_value = then_constant.value & mask_for_width(result_width);
+        items.push((matched.key, table_value));
+        covered_indices.insert(mux_idx);
+        covered_indices.extend(matched.covered_indices);
+        if let Some(&idx) = defs.get(then_value) {
+            covered_indices.insert(idx);
+        }
+
+        if let Some(&previous_idx) = defs.get(else_value)
+            && matches!(block.instructions[previous_idx], SIRInstruction::Mux(..))
+        {
+            cursor = *else_value;
+            continue;
+        }
+        if let Some(&idx) = defs.get(else_value) {
+            covered_indices.insert(idx);
+        }
+        break *else_value;
+    };
+
+    let selector = selector?;
+    let selector_width = selector_width?;
+    if selector_width == 0 || selector_width >= usize::BITS as usize {
+        return None;
+    }
+    let domain_size = 1usize.checked_shl(selector_width as u32)?;
+    if items.len() != domain_size {
+        return None;
+    }
+    // A full two-case chain already lowers to roughly the same four MIR
+    // operations as address-mask, scale, table-address, and load.  Require a
+    // strict instruction-count win; domain sizes are powers of two, so the
+    // next profitable shape has four cases.
+    if domain_size < 4 {
+        return None;
+    }
+
+    // Allocate only after proving that the already-existing chain contains
+    // exactly one stage for every selector value.
+    let mut entries = vec![0u64; items.len()];
+    let mut occupied = vec![false; items.len()];
+    for (key, value) in items {
+        let index = usize::try_from(key).ok()?;
+        if index >= entries.len() || occupied[index] {
+            return None;
+        }
+        entries[index] = value;
+        occupied[index] = true;
+    }
+    if occupied.iter().any(|occupied| !occupied) {
+        return None;
+    }
+
+    Some(DenseLookupCandidate {
+        plan: DenseLookupPlan {
+            root_idx,
+            dst: root_dst,
+            selector,
+            selector_width,
+            default,
+            entries,
+            table: None,
+        },
+        covered_indices,
+    })
+}
+
+struct DenseLookupCondition {
+    selector: RegisterId,
+    selector_width: usize,
+    key: u64,
+    covered_indices: HashSet<usize>,
+}
+
+fn match_dense_lookup_condition(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    defs: &HashMap<RegisterId, usize>,
+    cond: RegisterId,
+) -> Option<DenseLookupCondition> {
+    let mut cursor = cond;
+    let mut covered_indices = HashSet::default();
+    loop {
+        let Some(&idx) = defs.get(&cursor) else {
+            break;
+        };
+        match &block.instructions[idx] {
+            SIRInstruction::Unary(_, UnaryOp::Ident, inner) => {
+                covered_indices.insert(idx);
+                cursor = *inner;
+            }
+            SIRInstruction::Concat(_, args) if !args.is_empty() => {
+                let (&inner, high) = args.split_last()?;
+                if register_types.get(&inner)?.width() != 1 {
+                    return None;
+                }
+                for high_reg in high {
+                    if constants.get(high_reg)?.value != 0 {
+                        return None;
+                    }
+                    if let Some(&constant_idx) = defs.get(high_reg) {
+                        covered_indices.insert(constant_idx);
+                    }
+                }
+                covered_indices.insert(idx);
+                cursor = inner;
+            }
+            _ => break,
+        }
+    }
+
+    let &compare_idx = defs.get(&cursor)?;
+    let SIRInstruction::Binary(_, lhs, op @ (BinaryOp::Eq | BinaryOp::EqWildcard), rhs) =
+        &block.instructions[compare_idx]
+    else {
+        return None;
+    };
+    let (selector, key_reg, key) = match op {
+        BinaryOp::EqWildcard => {
+            // IEEE wildcard matching is directional.  Only a definite RHS
+            // immediate is an exact lookup key.
+            let key = constants.get(rhs)?.value;
+            if constants.contains_key(lhs) {
+                return None;
+            }
+            (*lhs, *rhs, key)
+        }
+        BinaryOp::Eq => match (constants.get(lhs), constants.get(rhs)) {
+            (None, Some(key)) => (*lhs, *rhs, key.value),
+            (Some(key), None) => (*rhs, *lhs, key.value),
+            _ => return None,
+        },
+        _ => unreachable!(),
+    };
+    let selector_width = register_types.get(&selector)?.width();
+    if selector_width == 0
+        || selector_width > 64
+        || register_types.get(&key_reg)?.width() != selector_width
+        || key & !mask_for_width(selector_width) != 0
+    {
+        return None;
+    }
+    covered_indices.insert(compare_idx);
+    if let Some(&key_idx) = defs.get(&key_reg) {
+        covered_indices.insert(key_idx);
+    }
+    Some(DenseLookupCondition {
+        selector,
+        selector_width,
+        key,
+        covered_indices,
+    })
+}
+
 fn collect_sir_use_sites(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> HashMap<RegisterId, Vec<SirUseSite>> {
@@ -1706,17 +2127,10 @@ fn collect_priority_encode_candidate(
     if width != items.len() {
         return None;
     }
-    let mut seen_then = vec![false; width];
-    let mut seen_bits = vec![false; width];
-    for (then_value, bit_index) in items {
-        if then_value >= width || bit_index >= width || then_value + bit_index != width - 1 {
+    for (stage, (then_value, bit_index)) in items.into_iter().enumerate() {
+        if then_value != width - 1 - stage || bit_index != stage {
             return None;
         }
-        if seen_then[then_value] || seen_bits[bit_index] {
-            return None;
-        }
-        seen_then[then_value] = true;
-        seen_bits[bit_index] = true;
     }
 
     Some((
@@ -1908,6 +2322,62 @@ fn def_used_only_by_candidate(
                     .is_some_and(|use_idx| candidate_indices.contains(&use_idx))
         })
     })
+}
+
+fn emit_dense_lookup(
+    ctx: &mut ISelContext<'_>,
+    block: &mut MBlock,
+    plan: &DenseLookupPlan,
+    cache: &mut DenseLookupEmitCache,
+) {
+    debug_assert_eq!(
+        ctx.sir_width(&plan.default),
+        ctx.sir_width(&plan.dst),
+        "full-domain lookup default must have the result width",
+    );
+    let table = plan
+        .table
+        .expect("dense lookup table must be interned before instruction selection");
+    let byte_index = *cache
+        .byte_indices
+        .entry((plan.selector, plan.selector_width))
+        .or_insert_with(|| {
+            let selector = ctx.reg_map.get(plan.selector);
+            let masked = ctx.alloc_vreg(SpillDesc::transient());
+            // The SIR type width is not enough to make a memory access safe:
+            // materialized registers can still carry stale upper bits.  Keep
+            // this explicit even when known-bits analysis could elide it.
+            block.push(MInst::AndImm {
+                dst: masked,
+                src: selector,
+                imm: mask_for_width(plan.selector_width),
+            });
+            ctx.known_bits.insert(masked, plan.selector_width);
+            let scaled = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShlImm {
+                dst: scaled,
+                src: masked,
+                imm: 3,
+            });
+            scaled
+        });
+    let table_addr = *cache.table_addrs.entry(table).or_insert_with(|| {
+        let table_addr = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadConstantTableAddr {
+            dst: table_addr,
+            table,
+        });
+        table_addr
+    });
+    let dst = ctx.reg_map.get(plan.dst);
+    block.push(MInst::LoadPtrIndexed {
+        dst,
+        ptr: table_addr,
+        offset: 0,
+        index: byte_index,
+        size: OpSize::S64,
+    });
+    ctx.known_bits.insert(dst, ctx.sir_width(&plan.dst));
 }
 
 fn emit_priority_encode(ctx: &mut ISelContext<'_>, block: &mut MBlock, plan: &PriorityEncodePlan) {
@@ -4521,6 +4991,10 @@ fn lower_instruction(
                     ctx.emit_and_imm(block, dst_vreg, pc, 1);
                     ctx.known_bits.insert(dst_vreg, 1);
                 }
+                UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+                    lower_narrow_bit_count(ctx, block, dst_vreg, op, src_vreg, src_width);
+                    ctx.known_bits.insert(dst_vreg, d_width);
+                }
             }
 
             // 4-state: compute result mask for unary ops
@@ -6550,6 +7024,253 @@ fn wide_reduce_or(
     result
 }
 
+/// Mask a source word to its logical SIR width before a bit-count operation.
+///
+/// Loads normally zero-extend narrow values, but keeping the mask here makes
+/// the count operations correct for every producer, including values that
+/// reached ISel through a wide-to-narrow path.
+fn mask_bit_count_word(ctx: &mut ISelContext, block: &mut MBlock, src: VReg, width: usize) -> VReg {
+    if width >= 64 {
+        src
+    } else {
+        let masked = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_and_imm(block, masked, src, mask_for_width(width));
+        masked
+    }
+}
+
+fn bit_count_imm(ctx: &mut ISelContext, block: &mut MBlock, value: u64) -> VReg {
+    let reg = ctx.alloc_vreg(SpillDesc::remat(value));
+    block.push(MInst::LoadImm { dst: reg, value });
+    reg
+}
+
+fn bit_count_nonzero(ctx: &mut ISelContext, block: &mut MBlock, src: VReg) -> VReg {
+    let nonzero = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::CmpImm {
+        dst: nonzero,
+        lhs: src,
+        imm: 0,
+        kind: CmpKind::Ne,
+    });
+    nonzero
+}
+
+/// Return `(src != 0, base - bsr(src))`.  ORing bit 0 makes BSR defined for
+/// zero without changing the highest set bit of any non-zero source.
+fn clz_word_candidate(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    src: VReg,
+    base: u64,
+) -> (VReg, VReg) {
+    let safe_src = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::OrImm {
+        dst: safe_src,
+        src,
+        imm: 1,
+    });
+    let highest = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Bsr {
+        dst: highest,
+        src: safe_src,
+    });
+    let base = bit_count_imm(ctx, block, base);
+    let candidate = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Sub {
+        dst: candidate,
+        lhs: base,
+        rhs: highest,
+    });
+    (bit_count_nonzero(ctx, block, src), candidate)
+}
+
+/// Return `(src != 0, offset + ctz(src))`.  `x ^ (x - 1)` is non-zero for
+/// every x and its highest set bit is ctz(x) whenever x itself is non-zero.
+fn ctz_word_candidate(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    src: VReg,
+    offset: u64,
+) -> (VReg, VReg) {
+    let decremented = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::SubImm {
+        dst: decremented,
+        src,
+        imm: 1,
+    });
+    let low_span = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Xor {
+        dst: low_span,
+        lhs: src,
+        rhs: decremented,
+    });
+    let local = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Bsr {
+        dst: local,
+        src: low_span,
+    });
+    let candidate = if offset == 0 {
+        local
+    } else {
+        let offset = bit_count_imm(ctx, block, offset);
+        let candidate = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Add {
+            dst: candidate,
+            lhs: offset,
+            rhs: local,
+        });
+        candidate
+    };
+    (bit_count_nonzero(ctx, block, src), candidate)
+}
+
+/// Lower a bit-count operation whose source fits in one machine word.
+fn lower_narrow_bit_count(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: VReg,
+    op: &UnaryOp,
+    src: VReg,
+    src_width: usize,
+) {
+    if src_width == 0 {
+        block.push(MInst::LoadImm { dst, value: 0 });
+        return;
+    }
+
+    let src = mask_bit_count_word(ctx, block, src, src_width);
+    let (nonzero, candidate) = match op {
+        UnaryOp::PopCount => {
+            block.push(MInst::Popcnt { dst, src });
+            return;
+        }
+        UnaryOp::CountLeadingZeros => clz_word_candidate(ctx, block, src, (src_width - 1) as u64),
+        UnaryOp::CountTrailingZeros => ctz_word_candidate(ctx, block, src, 0),
+        _ => return,
+    };
+    let width = bit_count_imm(ctx, block, src_width as u64);
+    block.push(MInst::Select {
+        dst,
+        cond: nonzero,
+        true_val: candidate,
+        false_val: width,
+    });
+}
+
+/// Return chunk `index`, masked to the part that belongs to the logical source.
+fn bit_count_chunk(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    chunks: &[(VReg, usize)],
+    src_width: usize,
+    index: usize,
+) -> VReg {
+    let chunk = ctx.wide_chunk_or_zero(chunks, index, block);
+    let chunk_width = (src_width - index * 64).min(64);
+    mask_bit_count_word(ctx, block, chunk, chunk_width)
+}
+
+/// Lower a bit-count operation over an arbitrary-width source.  The result of
+/// all three operations is at most `src_width`, so its canonical SIR result
+/// always fits in one native word even when the source spans many chunks.
+fn lower_wide_bit_count(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    op: &UnaryOp,
+    src: RegisterId,
+) {
+    let d_width = ctx.sir_width(&dst);
+    let src_width = ctx.sir_width(&src);
+    let chunks = ctx.get_wide_chunks(&src, block);
+    let n_src = ISelContext::num_chunks(src_width);
+
+    let result = match op {
+        UnaryOp::PopCount => {
+            let mut total = None;
+            for index in 0..n_src {
+                let chunk = bit_count_chunk(ctx, block, &chunks, src_width, index);
+                let count = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Popcnt {
+                    dst: count,
+                    src: chunk,
+                });
+                total = Some(if let Some(total) = total {
+                    let next = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Add {
+                        dst: next,
+                        lhs: total,
+                        rhs: count,
+                    });
+                    next
+                } else {
+                    count
+                });
+            }
+            total.unwrap_or_else(|| bit_count_imm(ctx, block, 0))
+        }
+        UnaryOp::CountLeadingZeros => {
+            let mut count = bit_count_imm(ctx, block, src_width as u64);
+
+            // Visiting chunks from least to most significant lets each
+            // non-zero chunk overwrite the previous candidate; the last one
+            // is therefore the highest non-zero chunk.
+            for index in 0..n_src {
+                let chunk = bit_count_chunk(ctx, block, &chunks, src_width, index);
+                let base_value = src_width - 1 - index * 64;
+                let (nonzero, candidate) = clz_word_candidate(ctx, block, chunk, base_value as u64);
+                let next = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select {
+                    dst: next,
+                    cond: nonzero,
+                    true_val: candidate,
+                    false_val: count,
+                });
+                count = next;
+            }
+            count
+        }
+        UnaryOp::CountTrailingZeros => {
+            let mut count = bit_count_imm(ctx, block, src_width as u64);
+
+            // Visiting chunks from most to least significant lets each
+            // non-zero chunk overwrite the previous candidate; the last one
+            // is therefore the lowest non-zero chunk.
+            for index in (0..n_src).rev() {
+                let chunk = bit_count_chunk(ctx, block, &chunks, src_width, index);
+                let (nonzero, candidate) =
+                    ctz_word_candidate(ctx, block, chunk, (index * 64) as u64);
+                let next = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select {
+                    dst: next,
+                    cond: nonzero,
+                    true_val: candidate,
+                    false_val: count,
+                });
+                count = next;
+            }
+            count
+        }
+        _ => return,
+    };
+
+    ctx.known_bits
+        .insert(result, op.result_width(src_width).min(d_width));
+    let n_dst = ISelContext::num_chunks(d_width).max(1);
+    let mut dst_chunks = Vec::with_capacity(n_dst);
+    dst_chunks.push((result, d_width.min(64)));
+    for index in 1..n_dst {
+        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+        block.push(MInst::LoadImm {
+            dst: zero,
+            value: 0,
+        });
+        dst_chunks.push((zero, (d_width - index * 64).min(64)));
+    }
+    ctx.set_wide_chunks(dst, dst_chunks);
+}
+
 /// Lower a unary operation on wide (>64-bit) values.
 fn lower_wide_unary(
     ctx: &mut ISelContext,
@@ -6792,6 +7513,10 @@ fn lower_wide_unary(
                 dst_chunks.push((z, 64));
             }
             ctx.set_wide_chunks(dst, dst_chunks);
+        }
+
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            lower_wide_bit_count(ctx, block, dst, op, src);
         }
     }
 
@@ -7545,7 +8270,11 @@ fn lower_unary_mask(
                 src_m
             }
         }
-        UnaryOp::Minus | UnaryOp::LogicNot => {
+        UnaryOp::Minus
+        | UnaryOp::LogicNot
+        | UnaryOp::PopCount
+        | UnaryOp::CountLeadingZeros
+        | UnaryOp::CountTrailingZeros => {
             // Conservative: any X → all-X
             let zero = ctx.alloc_vreg(SpillDesc::remat(0));
             block.push(MInst::LoadImm {
@@ -8320,7 +9049,11 @@ fn lower_wide_unary_mask(
             ctx.set_mask(dst, dst_m_chunks[0].0);
             ctx.wide_masks.insert(dst, dst_m_chunks);
         }
-        UnaryOp::Minus | UnaryOp::LogicNot => {
+        UnaryOp::Minus
+        | UnaryOp::LogicNot
+        | UnaryOp::PopCount
+        | UnaryOp::CountLeadingZeros
+        | UnaryOp::CountTrailingZeros => {
             // Conservative: any X → all-X
             let has_x = any_chunk_has_x(ctx, block, &sm_chunks);
             let n_dst = ISelContext::num_chunks(d_width);
@@ -8344,6 +9077,7 @@ fn lower_wide_unary_mask(
                     false_val: zero,
                 });
                 ctx.set_mask(dst, res);
+                ctx.wide_masks.insert(dst, vec![(res, d_width)]);
             } else {
                 let all_ones = ctx.alloc_vreg(SpillDesc::remat(u64::MAX));
                 block.push(MInst::LoadImm {
@@ -8513,6 +9247,773 @@ fn lower_wide_unary_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::native::{emit, jit_mem::JitCode, mir_legalize, mir_opt, regalloc};
+    use crate::ir::{AbsoluteAddr, BasicBlock, BlockId as SirBlockId, InstanceId, SIRValue};
+    use num_bigint::BigUint;
+    use veryl_analyzer::ir::VarId;
+
+    struct LookupFixture {
+        eu: ExecutionUnit<RegionedAbsoluteAddr>,
+        block_id: SirBlockId,
+        roots: Vec<(RegisterId, usize)>,
+        selector: RegisterId,
+        alternate_selector: RegisterId,
+        defaults: Vec<RegisterId>,
+        key_defs: Vec<(RegisterId, usize)>,
+        conditions: Vec<(RegisterId, usize, usize)>,
+        mux_indices: Vec<Vec<usize>>,
+    }
+
+    struct LookupFixtureBuilder {
+        next_reg: usize,
+        register_map: HashMap<RegisterId, RegisterType>,
+        constants: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+        instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    }
+
+    impl LookupFixtureBuilder {
+        fn new() -> Self {
+            Self {
+                next_reg: 0,
+                register_map: HashMap::default(),
+                constants: Vec::new(),
+                instructions: Vec::new(),
+            }
+        }
+
+        fn register(&mut self, width: usize) -> RegisterId {
+            let reg = RegisterId(self.next_reg);
+            self.next_reg += 1;
+            self.register_map.insert(
+                reg,
+                RegisterType::Bit {
+                    width,
+                    signed: false,
+                },
+            );
+            reg
+        }
+
+        fn constant(&mut self, width: usize, value: u64, mask: u64) -> (RegisterId, usize) {
+            let reg = self.register(width);
+            let idx = self.constants.len();
+            self.constants.push(SIRInstruction::Imm(
+                reg,
+                SIRValue::new_four_state(value, mask),
+            ));
+            (reg, idx)
+        }
+
+        fn instruction(
+            &mut self,
+            width: usize,
+            make: impl FnOnce(RegisterId) -> SIRInstruction<RegionedAbsoluteAddr>,
+        ) -> (RegisterId, usize) {
+            let reg = self.register(width);
+            let idx = self.instructions.len();
+            self.instructions.push(make(reg));
+            (reg, idx)
+        }
+    }
+
+    fn dense_lookup_fixture(root_count: usize) -> LookupFixture {
+        let mut builder = LookupFixtureBuilder::new();
+        let selector = builder.register(2);
+        let alternate_selector = builder.register(2);
+        let (zero, _) = builder.constant(1, 0, 0);
+        let mut key_defs = Vec::new();
+        for key in 0..4 {
+            key_defs.push(builder.constant(2, key, 0));
+        }
+        let mut defaults = Vec::new();
+        let mut value_regs = Vec::new();
+        for root in 0..root_count {
+            defaults.push(builder.constant(8, 0xe0 + root as u64, 0).0);
+            let mut values = Vec::new();
+            for key in 0..4 {
+                // Key 3 deliberately carries a payload bit outside the
+                // logical result width.  Table construction must truncate it
+                // exactly like ordinary SIR immediate lowering.
+                let value = if root == 0 && key == 3 {
+                    0x100 + 13
+                } else {
+                    10 + root as u64 * 16 + key as u64
+                };
+                values.push(builder.constant(8, value, 0).0);
+            }
+            value_regs.push(values);
+        }
+
+        // Use a non-sorted stage order so the test observes that key/value
+        // association, rather than mux position, defines the table entry.
+        let stage_keys = [2usize, 0, 3, 1];
+        let mut conditions = Vec::new();
+        for (stage, &key) in stage_keys.iter().enumerate() {
+            let key_reg = key_defs[key].0;
+            let (compare, compare_idx) = if stage % 2 == 0 {
+                builder.instruction(1, |dst| {
+                    SIRInstruction::Binary(dst, selector, BinaryOp::EqWildcard, key_reg)
+                })
+            } else {
+                // Exact equality is symmetric; exercise a constant LHS too.
+                builder.instruction(1, |dst| {
+                    SIRInstruction::Binary(dst, key_reg, BinaryOp::Eq, selector)
+                })
+            };
+            let (condition, concat_idx) =
+                builder.instruction(2, |dst| SIRInstruction::Concat(dst, vec![zero, compare]));
+            conditions.push((condition, compare_idx, concat_idx));
+        }
+
+        let mut roots = Vec::new();
+        let mut mux_indices = Vec::new();
+        for root in 0..root_count {
+            let mut previous = defaults[root];
+            let mut indices = Vec::new();
+            for (stage, &key) in stage_keys.iter().enumerate() {
+                let condition = conditions[stage].0;
+                let then_value = value_regs[root][key];
+                let (next, idx) = builder.instruction(8, |dst| {
+                    SIRInstruction::Mux(dst, condition, then_value, previous)
+                });
+                previous = next;
+                indices.push(idx);
+            }
+            roots.push((previous, *indices.last().unwrap()));
+            mux_indices.push(indices);
+        }
+
+        let constants_block = BasicBlock {
+            id: SirBlockId(0),
+            params: vec![],
+            instructions: builder.constants,
+            terminator: SIRTerminator::Jump(SirBlockId(1), vec![]),
+        };
+        let lookup_block = BasicBlock {
+            id: SirBlockId(1),
+            params: vec![],
+            instructions: builder.instructions,
+            terminator: SIRTerminator::Return,
+        };
+        LookupFixture {
+            eu: ExecutionUnit {
+                entry_block_id: SirBlockId(0),
+                blocks: [
+                    (SirBlockId(0), constants_block),
+                    (SirBlockId(1), lookup_block),
+                ]
+                .into_iter()
+                .collect(),
+                register_map: builder.register_map,
+            },
+            block_id: SirBlockId(1),
+            roots,
+            selector,
+            alternate_selector,
+            defaults,
+            key_defs,
+            conditions,
+            mux_indices,
+        }
+    }
+
+    fn lookup_plans(fixture: &LookupFixture) -> DenseLookupPlans {
+        let constants = collect_exact_sir_constants(&fixture.eu);
+        let uses = collect_sir_use_sites(&fixture.eu);
+        find_dense_lookup_plans(
+            &fixture.eu.blocks[&fixture.block_id],
+            &fixture.eu.register_map,
+            &constants,
+            &uses,
+        )
+    }
+
+    #[test]
+    fn recognizes_full_domain_dense_lookup_with_global_constants_and_zero_extended_conditions() {
+        let fixture = dense_lookup_fixture(2);
+        let plans = lookup_plans(&fixture);
+        assert_eq!(plans.roots.len(), 2);
+
+        let first = &plans.roots[&fixture.roots[0].1];
+        assert_eq!(first.selector, fixture.selector);
+        assert_eq!(first.selector_width, 2);
+        assert_eq!(first.entries, vec![10, 11, 12, 13]);
+        assert_eq!(first.default, fixture.defaults[0]);
+        for &(_, compare_idx, concat_idx) in &fixture.conditions {
+            assert!(plans.skip_indices.contains(&compare_idx));
+            assert!(plans.skip_indices.contains(&concat_idx));
+        }
+        for indices in &fixture.mux_indices {
+            assert!(indices.iter().all(|idx| plans.skip_indices.contains(idx)));
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_missing_masked_and_mixed_selector_keys() {
+        let mut duplicate = dense_lookup_fixture(1);
+        let duplicate_key_idx = duplicate.key_defs[3].1;
+        duplicate
+            .eu
+            .blocks
+            .get_mut(&SirBlockId(0))
+            .unwrap()
+            .instructions[duplicate_key_idx] =
+            SIRInstruction::Imm(duplicate.key_defs[3].0, SIRValue::new(2u8));
+        assert!(lookup_plans(&duplicate).roots.is_empty());
+
+        let mut missing = dense_lookup_fixture(1);
+        let missing_key_idx = missing.key_defs[3].1;
+        missing
+            .eu
+            .blocks
+            .get_mut(&SirBlockId(0))
+            .unwrap()
+            .instructions[missing_key_idx] =
+            SIRInstruction::Imm(missing.key_defs[3].0, SIRValue::new(4u8));
+        assert!(lookup_plans(&missing).roots.is_empty());
+
+        let mut masked = dense_lookup_fixture(1);
+        let masked_key_idx = masked.key_defs[2].1;
+        masked
+            .eu
+            .blocks
+            .get_mut(&SirBlockId(0))
+            .unwrap()
+            .instructions[masked_key_idx] =
+            SIRInstruction::Imm(masked.key_defs[2].0, SIRValue::new_four_state(2u8, 1u8));
+        assert!(lookup_plans(&masked).roots.is_empty());
+
+        let mut mixed = dense_lookup_fixture(1);
+        let compare_idx = mixed.conditions[0].1;
+        let key = mixed.key_defs[2].0;
+        let compare_dst =
+            sir_def_reg(&mixed.eu.blocks[&mixed.block_id].instructions[compare_idx]).unwrap();
+        mixed
+            .eu
+            .blocks
+            .get_mut(&mixed.block_id)
+            .unwrap()
+            .instructions[compare_idx] = SIRInstruction::Binary(
+            compare_dst,
+            mixed.alternate_selector,
+            BinaryOp::EqWildcard,
+            key,
+        );
+        assert!(lookup_plans(&mixed).roots.is_empty());
+    }
+
+    #[test]
+    fn rejects_width_default_and_direction_mismatches() {
+        let mut default_width = dense_lookup_fixture(1);
+        default_width.eu.register_map.insert(
+            default_width.defaults[0],
+            RegisterType::Bit {
+                width: 7,
+                signed: false,
+            },
+        );
+        assert!(lookup_plans(&default_width).roots.is_empty());
+
+        let mut wide_selector = dense_lookup_fixture(1);
+        wide_selector.eu.register_map.insert(
+            wide_selector.selector,
+            RegisterType::Bit {
+                width: usize::BITS as usize,
+                signed: false,
+            },
+        );
+        for &(key, _) in &wide_selector.key_defs {
+            wide_selector.eu.register_map.insert(
+                key,
+                RegisterType::Bit {
+                    width: usize::BITS as usize,
+                    signed: false,
+                },
+            );
+        }
+        assert!(lookup_plans(&wide_selector).roots.is_empty());
+
+        let mut reversed_wildcard = dense_lookup_fixture(1);
+        let compare_idx = reversed_wildcard.conditions[0].1;
+        let compare = &mut reversed_wildcard
+            .eu
+            .blocks
+            .get_mut(&reversed_wildcard.block_id)
+            .unwrap()
+            .instructions[compare_idx];
+        let (dst, selector, key) = match compare {
+            SIRInstruction::Binary(dst, selector, BinaryOp::EqWildcard, key) => {
+                (*dst, *selector, *key)
+            }
+            _ => unreachable!(),
+        };
+        *compare = SIRInstruction::Binary(dst, key, BinaryOp::EqWildcard, selector);
+        assert!(lookup_plans(&reversed_wildcard).roots.is_empty());
+
+        let mut wide_result = dense_lookup_fixture(1);
+        wide_result.eu.register_map.insert(
+            wide_result.roots[0].0,
+            RegisterType::Bit {
+                width: 65,
+                signed: false,
+            },
+        );
+        assert!(lookup_plans(&wide_result).roots.is_empty());
+    }
+
+    #[test]
+    fn group_dce_retains_shared_condition_when_unrecognized_code_uses_it() {
+        let mut fixture = dense_lookup_fixture(2);
+        let (condition, compare_idx, concat_idx) = fixture.conditions[0];
+        let outside = RegisterId(
+            fixture
+                .eu
+                .register_map
+                .keys()
+                .map(|reg| reg.0)
+                .max()
+                .unwrap()
+                + 1,
+        );
+        fixture.eu.register_map.insert(
+            outside,
+            RegisterType::Bit {
+                width: 2,
+                signed: false,
+            },
+        );
+        fixture
+            .eu
+            .blocks
+            .get_mut(&fixture.block_id)
+            .unwrap()
+            .instructions
+            .push(SIRInstruction::Unary(outside, UnaryOp::Ident, condition));
+
+        let plans = lookup_plans(&fixture);
+        assert_eq!(plans.roots.len(), 2);
+        assert!(!plans.skip_indices.contains(&concat_idx));
+        assert!(!plans.skip_indices.contains(&compare_idx));
+    }
+
+    #[test]
+    fn group_dce_retains_old_mux_and_its_inputs_for_an_outside_use() {
+        let mut fixture = dense_lookup_fixture(1);
+        let old_mux_idx = fixture.mux_indices[0][0];
+        let old_mux = match fixture.eu.blocks[&fixture.block_id].instructions[old_mux_idx] {
+            SIRInstruction::Mux(dst, ..) => dst,
+            _ => unreachable!(),
+        };
+        let outside = RegisterId(
+            fixture
+                .eu
+                .register_map
+                .keys()
+                .map(|reg| reg.0)
+                .max()
+                .unwrap()
+                + 1,
+        );
+        fixture.eu.register_map.insert(
+            outside,
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        fixture
+            .eu
+            .blocks
+            .get_mut(&fixture.block_id)
+            .unwrap()
+            .instructions
+            .push(SIRInstruction::Unary(outside, UnaryOp::Ident, old_mux));
+
+        let plans = lookup_plans(&fixture);
+        assert_eq!(plans.roots.len(), 1);
+        assert!(!plans.skip_indices.contains(&old_mux_idx));
+        assert!(!plans.skip_indices.contains(&fixture.conditions[0].2));
+    }
+
+    #[test]
+    fn lowers_shared_selector_roots_to_cached_indexed_table_loads() {
+        let mut fixture = dense_lookup_fixture(2);
+        // Make the executable fixture verifier-valid; truncation of the
+        // deliberately malformed payload is covered by the recognizer test.
+        for inst in &mut fixture
+            .eu
+            .blocks
+            .get_mut(&SirBlockId(0))
+            .unwrap()
+            .instructions
+        {
+            if let SIRInstruction::Imm(_, value) = inst
+                && value.payload == BigUint::from(0x10du16)
+            {
+                value.payload = BigUint::from(13u8);
+            }
+        }
+
+        let input_var = VarId::default();
+        let mut first_output_var = input_var;
+        first_output_var.inc();
+        let mut second_output_var = first_output_var;
+        second_output_var.inc();
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: input_var,
+        };
+        let first_output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: first_output_var,
+        };
+        let second_output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: second_output_var,
+        };
+        let input_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let first_output_addr =
+            RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, first_output_abs);
+        let second_output_addr =
+            RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, second_output_abs);
+
+        let mut instructions = vec![SIRInstruction::Load(
+            fixture.selector,
+            input_addr,
+            SIROffset::Static(0),
+            2,
+        )];
+        instructions.extend(std::mem::take(
+            &mut fixture
+                .eu
+                .blocks
+                .get_mut(&SirBlockId(0))
+                .unwrap()
+                .instructions,
+        ));
+        instructions.extend(std::mem::take(
+            &mut fixture
+                .eu
+                .blocks
+                .get_mut(&fixture.block_id)
+                .unwrap()
+                .instructions,
+        ));
+        instructions.push(SIRInstruction::Store(
+            first_output_addr,
+            SIROffset::Static(0),
+            8,
+            fixture.roots[0].0,
+            vec![],
+            vec![],
+        ));
+        instructions.push(SIRInstruction::Store(
+            second_output_addr,
+            SIROffset::Static(0),
+            8,
+            fixture.roots[1].0,
+            vec![],
+            vec![],
+        ));
+        fixture.eu.blocks = [(
+            SirBlockId(0),
+            BasicBlock {
+                id: SirBlockId(0),
+                params: vec![],
+                instructions,
+                terminator: SIRTerminator::Return,
+            },
+        )]
+        .into_iter()
+        .collect();
+        fixture.eu.entry_block_id = SirBlockId(0);
+        fixture.eu.verify();
+
+        let layout = MemoryLayout {
+            four_state: false,
+            offsets: [
+                (input_abs, 0),
+                (first_output_abs, 8),
+                (second_output_abs, 16),
+            ]
+            .into_iter()
+            .collect(),
+            widths: [
+                (input_abs, 2),
+                (first_output_abs, 8),
+                (second_output_abs, 8),
+            ]
+            .into_iter()
+            .collect(),
+            is_4states: [
+                (input_abs, false),
+                (first_output_abs, false),
+                (second_output_abs, false),
+            ]
+            .into_iter()
+            .collect(),
+            total_size: 24,
+            working_offsets: HashMap::default(),
+            working_base_offset: 24,
+            merged_total_size: 24,
+            triggered_bits_offset: 24,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: 24,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: vec![],
+        };
+
+        let mut function = lower_execution_unit(&fixture.eu, &layout, false);
+        function.verify();
+        assert_eq!(function.constant_tables().len(), 2);
+        assert!(
+            function
+                .constant_tables()
+                .iter()
+                .any(|table| table == &[10, 11, 12, 13])
+        );
+        assert!(
+            function
+                .constant_tables()
+                .iter()
+                .any(|table| table == &[26, 27, 28, 29])
+        );
+        let insts = function.blocks.iter().flat_map(|block| &block.insts);
+        let (mut masks, mut scales, mut addresses, mut loads, mut comparisons) = (0, 0, 0, 0, 0);
+        for inst in insts {
+            match inst {
+                MInst::AndImm { imm: 3, .. } => masks += 1,
+                MInst::ShlImm { imm: 3, .. } => scales += 1,
+                MInst::LoadConstantTableAddr { .. } => addresses += 1,
+                MInst::LoadPtrIndexed {
+                    size: OpSize::S64, ..
+                } => loads += 1,
+                MInst::Cmp { .. } | MInst::CmpImm { .. } | MInst::Select { .. } => comparisons += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            (masks, scales, addresses, loads, comparisons),
+            (1, 1, 2, 2, 0)
+        );
+
+        mir_legalize::legalize(&mut function);
+        function.verify();
+        mir_opt::optimize(&mut function);
+        function.verify();
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        for selector in 0u8..4 {
+            let mut state = vec![0u8; 24];
+            state[0] = selector;
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(state[8], 10 + selector);
+            assert_eq!(state[16], 26 + selector);
+        }
+    }
+
+    struct CompiledBitCount {
+        jit: JitCode,
+        state_size: usize,
+        input_offset: usize,
+        input_bytes: usize,
+        input_mask_offset: Option<usize>,
+        output_offset: usize,
+        output_bytes: usize,
+        output_mask_offset: Option<usize>,
+    }
+
+    impl CompiledBitCount {
+        fn run(&self, value: &BigUint, mask: &BigUint) -> (u64, u64) {
+            let mut state = vec![0u8; self.state_size];
+            let value_bytes = value.to_bytes_le();
+            let value_len = value_bytes.len().min(self.input_bytes);
+            state[self.input_offset..self.input_offset + value_len]
+                .copy_from_slice(&value_bytes[..value_len]);
+
+            if let Some(input_mask_offset) = self.input_mask_offset {
+                let mask_bytes = mask.to_bytes_le();
+                let mask_len = mask_bytes.len().min(self.input_bytes);
+                state[input_mask_offset..input_mask_offset + mask_len]
+                    .copy_from_slice(&mask_bytes[..mask_len]);
+            }
+
+            assert_eq!(unsafe { self.jit.call(&mut state) }, 0);
+
+            let read_word = |offset: usize| {
+                let mut bytes = [0u8; 8];
+                let len = self.output_bytes.min(bytes.len());
+                bytes[..len].copy_from_slice(&state[offset..offset + len]);
+                u64::from_le_bytes(bytes)
+            };
+            let result = read_word(self.output_offset);
+            let result_mask = self.output_mask_offset.map(read_word).unwrap_or(0);
+            (result, result_mask)
+        }
+    }
+
+    fn compile_bit_count(op: UnaryOp, source_width: usize, four_state: bool) -> CompiledBitCount {
+        let result_width = op.result_width(source_width);
+        let input_bytes = source_width.div_ceil(8);
+        let output_bytes = result_width.div_ceil(8);
+        let input_storage_bytes = input_bytes * if four_state { 2 } else { 1 };
+        let output_offset = input_storage_bytes.next_multiple_of(8);
+        let output_storage_bytes = output_bytes * if four_state { 2 } else { 1 };
+        let state_size = (output_offset + output_storage_bytes).max(8);
+
+        let input_var = VarId::default();
+        let mut output_var = input_var;
+        output_var.inc();
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: input_var,
+        };
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let input_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let output_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+
+        let source = RegisterId(0);
+        let result = RegisterId(1);
+        let register_type = |width| {
+            if four_state {
+                RegisterType::Logic { width }
+            } else {
+                RegisterType::Bit {
+                    width,
+                    signed: false,
+                }
+            }
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(
+                            source,
+                            input_addr,
+                            SIROffset::Static(0),
+                            source_width,
+                        ),
+                        SIRInstruction::Unary(result, op, source),
+                        SIRInstruction::Store(
+                            output_addr,
+                            SIROffset::Static(0),
+                            result_width,
+                            result,
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (source, register_type(source_width)),
+                (result, register_type(result_width)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        eu.verify();
+
+        let layout = MemoryLayout {
+            four_state,
+            offsets: [(input_abs, 0), (output_abs, output_offset)]
+                .into_iter()
+                .collect(),
+            widths: [(input_abs, source_width), (output_abs, result_width)]
+                .into_iter()
+                .collect(),
+            is_4states: [(input_abs, four_state), (output_abs, four_state)]
+                .into_iter()
+                .collect(),
+            total_size: state_size,
+            working_offsets: HashMap::default(),
+            working_base_offset: state_size,
+            merged_total_size: state_size,
+            triggered_bits_offset: state_size,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: state_size,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: vec![],
+        };
+
+        let mut function = lower_execution_unit(&eu, &layout, four_state);
+        function.verify();
+        mir_legalize::legalize(&mut function);
+        function.verify();
+        mir_opt::optimize(&mut function);
+        function.verify();
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+
+        CompiledBitCount {
+            jit: JitCode::new(&emitted.code).unwrap(),
+            state_size,
+            input_offset: 0,
+            input_bytes,
+            input_mask_offset: four_state.then_some(input_bytes),
+            output_offset,
+            output_bytes,
+            output_mask_offset: four_state.then_some(output_offset + output_bytes),
+        }
+    }
+
+    fn assert_bit_counts(
+        source_width: usize,
+        cases: impl IntoIterator<Item = (BigUint, u64, u64, u64)>,
+    ) {
+        let popcount = compile_bit_count(UnaryOp::PopCount, source_width, false);
+        let leading = compile_bit_count(UnaryOp::CountLeadingZeros, source_width, false);
+        let trailing = compile_bit_count(UnaryOp::CountTrailingZeros, source_width, false);
+        for (value, expected_popcount, expected_leading, expected_trailing) in cases {
+            assert_eq!(
+                popcount.run(&value, &BigUint::from(0u8)),
+                (expected_popcount, 0),
+                "popcount width={source_width} value={value:#x}"
+            );
+            assert_eq!(
+                leading.run(&value, &BigUint::from(0u8)),
+                (expected_leading, 0),
+                "clz width={source_width} value={value:#x}"
+            );
+            assert_eq!(
+                trailing.run(&value, &BigUint::from(0u8)),
+                (expected_trailing, 0),
+                "ctz width={source_width} value={value:#x}"
+            );
+        }
+    }
 
     #[test]
     fn full_static_native_access_must_fit_allocated_bytes_exactly() {
@@ -8533,6 +10034,91 @@ mod tests {
                 ISelContext::exact_storage_access_size(width),
                 expected,
                 "width={width}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_bit_counts_cover_one_to_sixty_four_bits_and_zero() {
+        for source_width in 1..=64 {
+            let top = BigUint::from(1u8) << (source_width - 1);
+            let edge_bits = if source_width == 1 {
+                top
+            } else {
+                top | BigUint::from(1u8)
+            };
+            let edge_popcount = if source_width == 1 { 1 } else { 2 };
+            assert_bit_counts(
+                source_width,
+                [
+                    (
+                        BigUint::from(0u8),
+                        0,
+                        source_width as u64,
+                        source_width as u64,
+                    ),
+                    (edge_bits, edge_popcount, 0, 0),
+                ],
+            );
+        }
+
+        assert_bit_counts(
+            7,
+            [
+                (BigUint::from(0b001_0100u8), 2, 2, 2),
+                (BigUint::from(0b100_0000u8), 1, 0, 6),
+            ],
+        );
+        assert_bit_counts(
+            64,
+            [
+                (BigUint::from(1u64), 1, 63, 0),
+                (BigUint::from(1u64 << 63), 1, 0, 63),
+                (BigUint::from(u64::MAX), 64, 0, 0),
+            ],
+        );
+    }
+
+    #[test]
+    fn native_bit_counts_cover_wide_and_partial_top_chunks() {
+        let bit64 = BigUint::from(1u8) << 64usize;
+        assert_bit_counts(
+            65,
+            [
+                (BigUint::from(0u8), 0, 65, 65),
+                (BigUint::from(1u8), 1, 64, 0),
+                (bit64.clone(), 1, 0, 64),
+                (bit64 | BigUint::from(1u8), 2, 0, 0),
+            ],
+        );
+
+        let mixed = (BigUint::from(1u8) << 129usize)
+            | (BigUint::from(1u8) << 64usize)
+            | (BigUint::from(1u8) << 3usize);
+        let middle = BigUint::from(1u8) << 64usize;
+        assert_bit_counts(
+            130,
+            [
+                (BigUint::from(0u8), 0, 130, 130),
+                (mixed, 3, 0, 3),
+                (middle, 1, 65, 64),
+            ],
+        );
+    }
+
+    #[test]
+    fn native_wide_bit_counts_produce_conservative_x_results() {
+        let unknown = BigUint::from(1u8) << 64usize;
+        for op in [
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ] {
+            let compiled = compile_bit_count(op, 65, true);
+            assert_eq!(
+                compiled.run(&BigUint::from(0u8), &unknown),
+                (0x7f, 0x7f),
+                "{op}"
             );
         }
     }

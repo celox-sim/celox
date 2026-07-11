@@ -85,8 +85,7 @@ about `4.63s`, but it is not the order-of-magnitude runtime gap. The runtime gap
 is already present in the per-tick hot code: `eval_comb` alone takes about ten
 times the Veryl cc per-cycle time.
 
-A native priority-encoder lowering handles part of this shape by default
-(`CELOX_NATIVE_PRIORITY_ENCODE=0` disables it for debugging). It reduces
+A native priority-encoder lowering handles part of this shape by default. It reduces
 compile-only `eval_comb` instruction counts, but did not materially improve a
 same-conditions 60 second timed sample:
 

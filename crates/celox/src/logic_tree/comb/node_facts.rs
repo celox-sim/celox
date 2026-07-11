@@ -691,11 +691,29 @@ mod tests {
                 access: BitAccess { lsb: 2, msb: 5 },
             }, // n9 = 4
             SLTNode::Binary(NodeId(1), BinaryOp::EqWildcard, NodeId(1)), // n10 = 1
+            SLTNode::Unary(UnaryOp::PopCount, NodeId(2)),         // n11 = ceil(log2(9 + 1)) = 4
+            SLTNode::Unary(UnaryOp::CountLeadingZeros, NodeId(1)), // n12 = 3
+            SLTNode::Unary(UnaryOp::CountTrailingZeros, NodeId(0)), // n13 = 0
         ]);
 
         let facts = SLTNodeFacts::verify(&arena).expect("well-formed arena must verify");
-        assert_eq!(facts.widths(), &[0, 4, 9, 9, 4, 1, 1, 9, 9, 4, 1]);
-        assert_eq!(facts.width(NodeId(11)), None);
+        assert_eq!(facts.widths(), &[0, 4, 9, 9, 4, 1, 1, 9, 9, 4, 1, 4, 3, 0]);
+        assert_eq!(facts.width(NodeId(14)), None);
+    }
+
+    #[test]
+    fn bit_count_width_handles_power_of_two_and_usize_limit() {
+        let arena = arena(vec![
+            constant(8),
+            SLTNode::Unary(UnaryOp::PopCount, NodeId(0)),
+            constant(usize::MAX),
+            SLTNode::Unary(UnaryOp::CountLeadingZeros, NodeId(2)),
+            SLTNode::Unary(UnaryOp::CountTrailingZeros, NodeId(2)),
+        ]);
+        let facts = SLTNodeFacts::verify(&arena).expect("well-formed arena must verify");
+        assert_eq!(facts.width(NodeId(1)), Some(4));
+        assert_eq!(facts.width(NodeId(3)), Some(usize::BITS as usize));
+        assert_eq!(facts.width(NodeId(4)), Some(usize::BITS as usize));
     }
 
     #[test]

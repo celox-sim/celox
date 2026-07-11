@@ -1096,6 +1096,14 @@ impl SIRTranslator {
         op: &UnaryOp,
         rhs: &RegisterId,
     ) {
+        if matches!(
+            op,
+            UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros
+        ) {
+            self.translate_count_unary_inst(state, dst, op, rhs);
+            return;
+        }
+
         // 1. 各オペランドの「論理幅」を取得
         let r_width = state.register_map[rhs].width();
         let d_width = state.register_map[dst].width();
@@ -1159,6 +1167,9 @@ impl SIRTranslator {
                     let one_val = state.builder.ins().iconst(common_ty, 1);
                     state.builder.ins().select(is_all_ones, one_val, zero)
                 }
+                UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+                    unreachable!()
+                }
             };
 
             let dst_ty = get_cl_type(d_width);
@@ -1214,7 +1225,12 @@ impl SIRTranslator {
                         let x_mask = state.builder.ins().select(has_any_x, all_ones, zero);
                         state.builder.ins().select(has_definite_zero, zero, x_mask)
                     }
-                    UnaryOp::Minus | UnaryOp::LogicNot | UnaryOp::Xor => {
+                    UnaryOp::Minus
+                    | UnaryOp::LogicNot
+                    | UnaryOp::Xor
+                    | UnaryOp::PopCount
+                    | UnaryOp::CountLeadingZeros
+                    | UnaryOp::CountTrailingZeros => {
                         let zero = state.builder.ins().iconst(common_ty, 0);
                         let any_x = state.builder.ins().icmp(IntCC::NotEqual, r_m, zero);
                         let all_ones = state.builder.ins().iconst(common_ty, -1);
@@ -1540,6 +1556,90 @@ impl SIRTranslator {
                 state.regs.insert(*dst, TransValue::TwoState(res_chunks));
             }
         }
+    }
+
+    fn translate_count_unary_inst(
+        &self,
+        state: &mut TranslationState,
+        dst: &RegisterId,
+        op: &UnaryOp,
+        rhs: &RegisterId,
+    ) {
+        let r_width = state.register_map[rhs].width();
+        let d_width = state.register_map[dst].width();
+        let r_chunks = state.regs[rhs].load_value_chunks(state.builder);
+        let count = wide_ops::emit_wide_bit_count(state.builder, op, &r_chunks, r_width);
+        let final_num_chunks = d_width.div_ceil(64);
+        let zero = state.builder.ins().iconst(types::I64, 0);
+
+        let mut values = if d_width <= 64 {
+            let dst_ty = get_cl_type(d_width);
+            let value = cast_type(state.builder, count, dst_ty);
+            vec![apply_d_width_mask(state, value, dst_ty, d_width)]
+        } else {
+            std::iter::once(count)
+                .chain(std::iter::repeat_n(
+                    zero,
+                    final_num_chunks.saturating_sub(1),
+                ))
+                .collect()
+        };
+
+        if !self.options.four_state {
+            state.regs.insert(*dst, TransValue::TwoState(values));
+            return;
+        }
+
+        let r_masks = state.regs[rhs]
+            .load_mask_chunks(state.builder)
+            .unwrap_or_default();
+        let source_chunks = r_width.div_ceil(64);
+        let mut any_x = zero;
+        for index in 0..source_chunks {
+            let mut mask = get_chunk_as_i64(state.builder, &r_masks, index);
+            if index + 1 == source_chunks && !r_width.is_multiple_of(64) {
+                let valid_bits = r_width % 64;
+                mask = state
+                    .builder
+                    .ins()
+                    .band_imm(mask, ((1u64 << valid_bits) - 1) as i64);
+            }
+            any_x = state.builder.ins().bor(any_x, mask);
+        }
+        let has_x = state.builder.ins().icmp_imm(IntCC::NotEqual, any_x, 0);
+
+        let masks = if d_width <= 64 {
+            let dst_ty = get_cl_type(d_width);
+            let zero = state.builder.ins().iconst(dst_ty, 0);
+            let logical_mask = if d_width == dst_ty.bits() as usize {
+                state.builder.ins().iconst(dst_ty, -1)
+            } else {
+                state
+                    .builder
+                    .ins()
+                    .iconst(dst_ty, ((1u64 << d_width) - 1) as i64)
+            };
+            vec![state.builder.ins().select(has_x, logical_mask, zero)]
+        } else {
+            (0..final_num_chunks)
+                .map(|index| {
+                    let logical_mask =
+                        if index + 1 == final_num_chunks && !d_width.is_multiple_of(64) {
+                            ((1u64 << (d_width % 64)) - 1) as i64
+                        } else {
+                            -1
+                        };
+                    let logical_mask = state.builder.ins().iconst(types::I64, logical_mask);
+                    state.builder.ins().select(has_x, logical_mask, zero)
+                })
+                .collect::<Vec<_>>()
+        };
+        for (value, mask) in values.iter_mut().zip(&masks) {
+            *value = state.builder.ins().bor(*value, *mask);
+        }
+        state
+            .regs
+            .insert(*dst, TransValue::FourState { values, masks });
     }
 }
 pub(super) fn apply_d_width_mask(

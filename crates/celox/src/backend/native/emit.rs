@@ -1001,6 +1001,11 @@ fn emit_planned(
     // BlockIds at the same machine-code IP must be aliases here rather than
     // zero-length pseudo instructions in the assembler stream.
     let mut block_labels = BlockLabels::new(&mut asm, func, assignment, plan);
+    let mut constant_table_labels = func
+        .constant_tables()
+        .iter()
+        .map(|_| asm.create_label())
+        .collect::<Vec<_>>();
 
     let callee_saved = used_callee_saved(assignment);
     let frame_size = checked_frame_size(spill_frame_size, callee_saved.len())?;
@@ -1184,10 +1189,18 @@ fn emit_planned(
                             inst,
                             assignment,
                             func,
+                            &constant_table_labels,
                             Some(block_labels.label_mut(index)),
                         )?
                     } else {
-                        emit_inst(&mut asm, inst, assignment, func, None)?
+                        emit_inst(
+                            &mut asm,
+                            inst,
+                            assignment,
+                            func,
+                            &constant_table_labels,
+                            None,
+                        )?
                     };
                     if let (true, Some(index)) = (bound_continuation, continuation_label) {
                         block_labels.mark_bound(index);
@@ -1208,6 +1221,14 @@ fn emit_planned(
         asm.pop(preg_to_reg64(reg))?;
     }
     asm.ret()?;
+
+    // Keep immutable lookup data out of every control-flow path. Table
+    // addresses are encoded RIP-relatively, so the resulting code remains
+    // relocatable when copied into executable memory by the JIT.
+    for (label, table) in constant_table_labels.iter_mut().zip(func.constant_tables()) {
+        asm.set_label(label)?;
+        asm.dq(table)?;
+    }
 
     let result = asm.assemble_options(0x0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
     let mut block_offsets = Vec::with_capacity(func.blocks.len());
@@ -1475,6 +1496,7 @@ fn emit_inst(
     inst: &MInst,
     assignment: &AssignmentMap,
     func: &MFunction,
+    constant_table_labels: &[CodeLabel],
     continuation_label: Option<&mut CodeLabel>,
 ) -> Result<bool, IcedError> {
     let mut bound_continuation = false;
@@ -1504,6 +1526,12 @@ fn emit_inst(
             } else {
                 asm.mov(d, *value as i64)?;
             }
+        }
+
+        MInst::LoadConstantTableAddr { dst, table } => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            // MIR verification guarantees that the table identity exists.
+            asm.lea(d, ptr(constant_table_labels[table.0]))?;
         }
 
         MInst::Load {
@@ -3090,7 +3118,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
         for inst in &block.insts {
             match inst {
                 MInst::Mov { .. } => mov += 1,
-                MInst::LoadImm { .. } => imm += 1,
+                MInst::LoadImm { .. } | MInst::LoadConstantTableAddr { .. } => imm += 1,
                 MInst::Load { base, .. } => match base {
                     BaseReg::SimState => load_sim += 1,
                     BaseReg::StackFrame => load_stack += 1,
@@ -3183,7 +3211,7 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     | MInst::StorePtrIndexed { .. }
                     | MInst::ReleaseStorePtrIndexed { .. } => indexed_mem += 1,
                     MInst::MemCopy { .. } => memcopy += 1,
-                    MInst::LoadImm { .. } => imm += 1,
+                    MInst::LoadImm { .. } | MInst::LoadConstantTableAddr { .. } => imm += 1,
                     MInst::Add { .. }
                     | MInst::Sub { .. }
                     | MInst::Mul { .. }
@@ -3793,6 +3821,111 @@ mod shift_encoding_tests {
             return;
         }
         execute_variable_shift_boundaries(true);
+    }
+
+    #[test]
+    fn rip_relative_constant_tables_execute_for_multiple_indexes() {
+        let mut vregs = VRegAllocator::new();
+        let index = vregs.alloc();
+        let byte_index = vregs.alloc();
+        let first_addr = vregs.alloc();
+        let second_addr = vregs.alloc();
+        let first_value = vregs.alloc();
+        let second_value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 6]);
+        let first_values = vec![0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 0, u64::MAX];
+        let second_values = vec![11, 29, 47, 83];
+        let first_table = func.intern_constant_table(first_values.clone());
+        let second_table = func.intern_constant_table(second_values.clone());
+
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: index,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::ShlImm {
+            dst: byte_index,
+            src: index,
+            imm: 3,
+        });
+        block.push(MInst::LoadConstantTableAddr {
+            dst: first_addr,
+            table: first_table,
+        });
+        block.push(MInst::LoadPtrIndexed {
+            dst: first_value,
+            ptr: first_addr,
+            offset: 0,
+            index: byte_index,
+            size: OpSize::S64,
+        });
+        block.push(MInst::LoadConstantTableAddr {
+            dst: second_addr,
+            table: second_table,
+        });
+        block.push(MInst::LoadPtrIndexed {
+            dst: second_value,
+            ptr: second_addr,
+            offset: 0,
+            index: byte_index,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: first_value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 16,
+            src: second_value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        mir_legalize::legalize(&mut func);
+        mir_opt::optimize(&mut func);
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+
+        let trailing_table = second_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert!(emitted.code.ends_with(&trailing_table));
+
+        let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+        let mut table_leas = 0;
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            if instruction.mnemonic() == Mnemonic::Lea {
+                assert_eq!(instruction.memory_base(), Register::RIP);
+                table_leas += 1;
+            }
+            if instruction.mnemonic() == Mnemonic::Ret {
+                break;
+            }
+        }
+        assert_eq!(table_leas, 2);
+
+        let jit = JitCode::new(&emitted.code).unwrap();
+        for index_value in 0..first_values.len() {
+            let mut state = [0u8; 24];
+            state[0..8].copy_from_slice(&(index_value as u64).to_le_bytes());
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(
+                u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                first_values[index_value]
+            );
+            assert_eq!(
+                u64::from_le_bytes(state[16..24].try_into().unwrap()),
+                second_values[index_value]
+            );
+        }
     }
 
     #[test]

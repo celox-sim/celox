@@ -93,15 +93,36 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
         }
         SLTNode::Unary(op, inner) => {
             use crate::ir::UnaryOp;
-            let (v, m, _) = eval_const_expr(*inner, arena);
+            let (v, m, inner_width) = eval_const_expr(*inner, arena);
             if m != BigUint::from(0u32) {
                 return (BigUint::from(0u32), width_mask.clone(), width);
             }
             let result = match op {
                 UnaryOp::BitNot => (&width_mask) ^ &v,
+                UnaryOp::PopCount => BigUint::from(
+                    v.iter_u64_digits()
+                        .map(|digit| digit.count_ones() as usize)
+                        .sum::<usize>(),
+                ),
+                UnaryOp::CountLeadingZeros => {
+                    BigUint::from(inner_width.saturating_sub(v.bits() as usize))
+                }
+                UnaryOp::CountTrailingZeros => {
+                    let zeros = v
+                        .iter_u64_digits()
+                        .enumerate()
+                        .find_map(|(index, digit)| {
+                            (digit != 0).then_some(
+                                index * u64::BITS as usize + digit.trailing_zeros() as usize,
+                            )
+                        })
+                        .unwrap_or(inner_width)
+                        .min(inner_width);
+                    BigUint::from(zeros)
+                }
                 _ => return (BigUint::from(0u32), width_mask.clone(), width),
             };
-            (result, BigUint::from(0u32), width)
+            (result & &width_mask, BigUint::from(0u32), width)
         }
         _ => (BigUint::from(0u32), width_mask, width),
     }
@@ -313,4 +334,59 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
 
     cache.insert(node, result);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ir::UnaryOp;
+    use crate::logic_tree::comb::{SLTNode, SLTNodeArena};
+    use num_bigint::BigUint;
+
+    use super::eval_const_expr;
+
+    #[test]
+    fn evaluates_two_state_bit_count_constants() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let value = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0b0011_0100u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+
+        for (op, expected) in [
+            (UnaryOp::PopCount, 3u8),
+            (UnaryOp::CountLeadingZeros, 2u8),
+            (UnaryOp::CountTrailingZeros, 2u8),
+        ] {
+            let node = arena.alloc(SLTNode::Unary(op, value)).unwrap();
+            assert_eq!(
+                eval_const_expr(node, &arena),
+                (BigUint::from(expected), BigUint::from(0u8), 4),
+            );
+        }
+    }
+
+    #[test]
+    fn zero_has_full_operand_width_leading_and_trailing_zero_counts() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let zero = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+
+        for op in [UnaryOp::CountLeadingZeros, UnaryOp::CountTrailingZeros] {
+            let node = arena.alloc(SLTNode::Unary(op, zero)).unwrap();
+            assert_eq!(
+                eval_const_expr(node, &arena),
+                (BigUint::from(8u8), BigUint::from(0u8), 4),
+            );
+        }
+    }
 }

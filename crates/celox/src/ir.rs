@@ -1137,6 +1137,27 @@ pub enum UnaryOp {
     And,
     Or,
     Xor,
+    PopCount,
+    CountLeadingZeros,
+    CountTrailingZeros,
+}
+
+impl UnaryOp {
+    /// Return the canonical result width for an operand of `operand_width` bits.
+    ///
+    /// Bit-count operations return a value in `0..=operand_width`, which needs
+    /// `ceil(log2(operand_width + 1))` bits.  Computing that as the bit length
+    /// of `operand_width` avoids overflowing when the operand width is
+    /// `usize::MAX`.
+    pub fn result_width(self, operand_width: usize) -> usize {
+        match self {
+            UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
+            UnaryOp::Ident | UnaryOp::Minus | UnaryOp::BitNot => operand_width,
+            UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+                usize::BITS as usize - operand_width.leading_zeros() as usize
+            }
+        }
+    }
 }
 
 impl fmt::Display for UnaryOp {
@@ -1149,6 +1170,9 @@ impl fmt::Display for UnaryOp {
             UnaryOp::And => "And",
             UnaryOp::Or => "Or",
             UnaryOp::Xor => "Xor",
+            UnaryOp::PopCount => "PopCount",
+            UnaryOp::CountLeadingZeros => "CountLeadingZeros",
+            UnaryOp::CountTrailingZeros => "CountTrailingZeros",
         };
         write!(f, "{}", op_str)
     }
@@ -1533,6 +1557,48 @@ mod tests {
         assert_eq!(format!("{}", UnaryOp::Minus), "Minus");
         assert_eq!(format!("{}", UnaryOp::LogicNot), "LogicNot");
         assert_eq!(format!("{}", UnaryOp::BitNot), "BitNot");
+        assert_eq!(format!("{}", UnaryOp::PopCount), "PopCount");
+        assert_eq!(
+            format!("{}", UnaryOp::CountLeadingZeros),
+            "CountLeadingZeros"
+        );
+        assert_eq!(
+            format!("{}", UnaryOp::CountTrailingZeros),
+            "CountTrailingZeros"
+        );
+    }
+
+    #[test]
+    fn bit_count_result_width_represents_operand_width() {
+        for (operand_width, expected) in [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 2),
+            (8, 4),
+            (usize::MAX, usize::BITS as usize),
+        ] {
+            for op in [
+                UnaryOp::PopCount,
+                UnaryOp::CountLeadingZeros,
+                UnaryOp::CountTrailingZeros,
+            ] {
+                assert_eq!(op.result_width(operand_width), expected, "{op}");
+            }
+        }
+    }
+
+    #[test]
+    fn bit_count_unary_ops_roundtrip_through_serde() {
+        for op in [
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ] {
+            let encoded = serde_json::to_string(&op).unwrap();
+            let decoded: UnaryOp = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, op);
+        }
     }
 
     #[test]

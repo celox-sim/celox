@@ -102,6 +102,14 @@ pub fn verify_function(func: &MFunction) -> Result<(), MirVerifyError> {
             ));
         }
     }
+    for (index, table) in func.constant_tables().iter().enumerate() {
+        if table.is_empty() {
+            return Err(MirVerifyError::function(
+                "SIDETABLE.CONSTANT_TABLE_NON_EMPTY",
+                format!("constant table {index} has no entries"),
+            ));
+        }
+    }
 
     let entry = func.blocks[0].id;
     let mut block_indices = BTreeMap::new();
@@ -221,7 +229,7 @@ pub fn verify_function(func: &MFunction) -> Result<(), MirVerifyError> {
             }
         }
         for (index, inst) in block.insts.iter().enumerate() {
-            verify_instruction_constraints(block.id, index, inst)?;
+            verify_instruction_constraints(func, block.id, index, inst)?;
             for reg in inst.uses() {
                 require_vreg(func, block.id, Some(index), reg)?;
             }
@@ -263,6 +271,7 @@ pub fn verify_function(func: &MFunction) -> Result<(), MirVerifyError> {
 }
 
 fn verify_instruction_constraints(
+    func: &MFunction,
     block: BlockId,
     index: usize,
     inst: &MInst,
@@ -305,6 +314,17 @@ fn verify_instruction_constraints(
             index,
             "zero-length memcpy must be eliminated before MIR",
         )),
+        MInst::LoadConstantTableAddr { table, .. } if func.constant_table(*table).is_none() => {
+            Err(MirVerifyError::instruction(
+                "OPCODE.CONSTANT_TABLE_EXISTS",
+                block,
+                index,
+                format!(
+                    "{table} is outside constant table range 0..{}",
+                    func.constant_tables().len()
+                ),
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -529,7 +549,7 @@ impl Dominators {
 
 #[cfg(test)]
 mod tests {
-    use super::super::mir::{MBlock, PhiNode, SpillDesc, VRegAllocator};
+    use super::super::mir::{ConstantTableId, MBlock, PhiNode, SpillDesc, VRegAllocator};
     use super::*;
 
     fn function(vreg_count: u32, blocks: Vec<MBlock>) -> MFunction {
@@ -698,5 +718,54 @@ mod tests {
         });
         block.push(MInst::Return);
         assert_eq!(function(2, vec![block]).verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn accepts_existing_constant_table_reference() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadConstantTableAddr {
+            dst: VReg(0),
+            table: ConstantTableId(0),
+        });
+        block.push(MInst::Return);
+        let mut func = function(1, vec![block]);
+        assert_eq!(
+            func.intern_constant_table(vec![3, 5, 8]),
+            ConstantTableId(0)
+        );
+
+        assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_missing_constant_table_reference() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadConstantTableAddr {
+            dst: VReg(0),
+            table: ConstantTableId(4),
+        });
+        block.push(MInst::Return);
+
+        let error = function(1, vec![block]).verify_result().unwrap_err();
+        assert_eq!(error.invariant, "OPCODE.CONSTANT_TABLE_EXISTS");
+        assert_eq!(error.block, Some(BlockId(0)));
+        assert_eq!(error.instruction, Some(0));
+    }
+
+    #[test]
+    fn rejects_empty_constant_table() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadConstantTableAddr {
+            dst: VReg(0),
+            table: ConstantTableId(0),
+        });
+        block.push(MInst::Return);
+        let mut func = function(1, vec![block]);
+        func.intern_constant_table(Vec::new());
+
+        assert_eq!(
+            func.verify_result().unwrap_err().invariant,
+            "SIDETABLE.CONSTANT_TABLE_NON_EMPTY"
+        );
     }
 }

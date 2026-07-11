@@ -331,6 +331,22 @@ fn verify_instruction_types<A>(
                 ty(*dst)?;
                 ty(*src)?;
             }
+            UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+                let dst_width = ty(*dst)?.width();
+                let src_width = ty(*src)?.width();
+                let required_width = op.result_width(src_width);
+                if dst_width < required_width {
+                    return Err(SirVerifyError::instruction(
+                        "TYPE.BIT_COUNT_RESULT_WIDTH",
+                        block,
+                        index,
+                        format!(
+                            "{op} of r{} width {src_width} may produce {src_width}, which requires at least {required_width} result bits, but r{} has width {dst_width}",
+                            src.0, dst.0,
+                        ),
+                    ));
+                }
+            }
         },
         SIRInstruction::Load(dst, _, offset, bits) => {
             non_zero_width(block, index, *bits, "TYPE.LOAD_NON_ZERO")?;
@@ -922,5 +938,54 @@ mod tests {
             eu.verify_result().unwrap_err().invariant,
             "TYPE.EDGE_ARGUMENT"
         );
+    }
+
+    fn bit_count_unit(
+        op: UnaryOp,
+        source_width: usize,
+        result_width: usize,
+    ) -> ExecutionUnit<usize> {
+        unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8)),
+                    SIRInstruction::Unary(RegisterId(1), op, RegisterId(0)),
+                ],
+                terminator: SIRTerminator::Return,
+            }],
+            [
+                (RegisterId(0), bit(source_width)),
+                (RegisterId(1), bit(result_width)),
+            ],
+        )
+    }
+
+    #[test]
+    fn accepts_bit_count_result_that_can_represent_source_width() {
+        for op in [
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ] {
+            assert_eq!(bit_count_unit(op, 8, 4).verify_result(), Ok(()));
+            assert_eq!(bit_count_unit(op, 8, 8).verify_result(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn rejects_bit_count_result_that_cannot_represent_source_width() {
+        for op in [
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ] {
+            let error = bit_count_unit(op, 8, 3).verify_result().unwrap_err();
+            assert_eq!(error.invariant, "TYPE.BIT_COUNT_RESULT_WIDTH");
+            assert_eq!(error.block, Some(BlockId(0)));
+            assert_eq!(error.instruction, Some(1));
+            assert!(error.message.contains("requires at least 4 result bits"));
+        }
     }
 }

@@ -124,6 +124,19 @@ impl fmt::Display for VReg {
     }
 }
 
+/// Index of an immutable u64 constant table owned by an [`MFunction`].
+///
+/// The emitter materializes table addresses relative to the generated code,
+/// so MIR refers to tables by identity rather than embedding host pointers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConstantTableId(pub usize);
+
+impl fmt::Display for ConstantTableId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "table{}", self.0)
+    }
+}
+
 /// Allocator for virtual registers.
 #[derive(Debug, Clone)]
 pub struct VRegAllocator {
@@ -392,6 +405,8 @@ pub enum MInst {
     Mov { dst: VReg, src: VReg },
     /// dst = immediate
     LoadImm { dst: VReg, value: u64 },
+    /// dst = address of an immutable function-local constant table
+    LoadConstantTableAddr { dst: VReg, table: ConstantTableId },
 
     // ── Memory access (word-level, byte offsets) ───────────────
     /// dst = load [base + offset]
@@ -629,6 +644,9 @@ impl fmt::Display for MInst {
         match self {
             MInst::Mov { dst, src } => write!(f, "{dst} = mov {src}"),
             MInst::LoadImm { dst, value } => write!(f, "{dst} = imm {value:#x}"),
+            MInst::LoadConstantTableAddr { dst, table } => {
+                write!(f, "{dst} = constant_table_addr {table}")
+            }
             MInst::Load {
                 dst,
                 base,
@@ -845,6 +863,7 @@ impl MInst {
         match self {
             MInst::Mov { dst, .. }
             | MInst::LoadImm { dst, .. }
+            | MInst::LoadConstantTableAddr { dst, .. }
             | MInst::Load { dst, .. }
             | MInst::LoadPtr { dst, .. }
             | MInst::LoadIndexed { dst, .. }
@@ -901,7 +920,10 @@ impl MInst {
     pub fn uses(&self) -> Uses {
         match self {
             MInst::Mov { src, .. } => Uses::one(*src),
-            MInst::LoadImm { .. } | MInst::Load { .. } | MInst::MemCopy { .. } => Uses::none(),
+            MInst::LoadImm { .. }
+            | MInst::LoadConstantTableAddr { .. }
+            | MInst::Load { .. }
+            | MInst::MemCopy { .. } => Uses::none(),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -1186,6 +1208,7 @@ impl MInst {
                 }
             }
             MInst::LoadImm { .. }
+            | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::MemCopy { .. }
             | MInst::Jump { .. }
@@ -1272,6 +1295,8 @@ pub struct MFunction {
     /// Known value widths for each VReg (None = unknown/64-bit).
     /// When Some(w) with w <= 32, the emit phase can use 32-bit registers.
     pub value_widths: Vec<Option<u8>>,
+    /// Immutable u64 lookup tables embedded in the emitted function body.
+    constant_tables: Vec<Vec<u64>>,
     /// Target facts shared by optimization, register allocation, and emission.
     pub(crate) target_features: super::features::X86Features,
 }
@@ -1283,8 +1308,33 @@ impl MFunction {
             spill_descs,
             vregs,
             value_widths: Vec::new(),
+            constant_tables: Vec::new(),
             target_features: super::features::X86Features::detect(),
         }
+    }
+
+    /// Return the stable identity of `values`, reusing an identical table.
+    pub fn intern_constant_table(&mut self, values: Vec<u64>) -> ConstantTableId {
+        if let Some(index) = self
+            .constant_tables
+            .iter()
+            .position(|existing| existing == &values)
+        {
+            return ConstantTableId(index);
+        }
+        let id = ConstantTableId(self.constant_tables.len());
+        self.constant_tables.push(values);
+        id
+    }
+
+    /// All function-local constant tables, in stable emission order.
+    pub fn constant_tables(&self) -> &[Vec<u64>] {
+        &self.constant_tables
+    }
+
+    /// Resolve a constant-table identity without panicking on malformed MIR.
+    pub fn constant_table(&self, id: ConstantTableId) -> Option<&[u64]> {
+        self.constant_tables.get(id.0).map(Vec::as_slice)
     }
 
     /// Returns true if VReg is known to fit in 32 bits (upper 32 guaranteed zero).
@@ -1364,6 +1414,14 @@ mod tests {
             UseCase {
                 name: "LoadImm",
                 inst: MInst::LoadImm { dst, value: 42 },
+                expected: vec![],
+            },
+            UseCase {
+                name: "LoadConstantTableAddr",
+                inst: MInst::LoadConstantTableAddr {
+                    dst,
+                    table: ConstantTableId(0),
+                },
                 expected: vec![],
             },
             UseCase {
@@ -1797,7 +1855,7 @@ mod tests {
         let cases = use_cases();
         assert_eq!(
             cases.len(),
-            49,
+            50,
             "the MInst variant table must stay exhaustive"
         );
 

@@ -131,12 +131,20 @@ pub fn estimate_clif_cost(
             let width = d_w.max(s_w);
 
             if width <= 64 {
-                2 * state_mul
+                let base = match op {
+                    UnaryOp::PopCount
+                    | UnaryOp::CountLeadingZeros
+                    | UnaryOp::CountTrailingZeros => 3,
+                    _ => 2,
+                };
+                base * state_mul
             } else {
                 let nc = num_chunks(width);
                 let base = match op {
                     UnaryOp::Minus => 5 * nc + 1,
                     UnaryOp::LogicNot => 2 * nc + 4,
+                    UnaryOp::PopCount => 2 * nc + 1,
+                    UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => 3 * nc + 1,
                     _ => 2 * nc,
                 };
                 base * state_mul

@@ -385,6 +385,9 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                     crate::ir::UnaryOp::And => "&", // reduction
                     crate::ir::UnaryOp::Or => "|",
                     crate::ir::UnaryOp::Xor => "^",
+                    crate::ir::UnaryOp::PopCount => "popcount",
+                    crate::ir::UnaryOp::CountLeadingZeros => "clz",
+                    crate::ir::UnaryOp::CountTrailingZeros => "ctz",
                 };
                 write!(f, "{}(", op_str)?;
                 write!(f, "n{}:", inner.0)?;

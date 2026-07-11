@@ -518,6 +518,7 @@ fn is_schedulable_at(
             inst,
             MInst::Mov { .. }
                 | MInst::LoadImm { .. }
+                | MInst::LoadConstantTableAddr { .. }
                 | MInst::Load { .. }
                 | MInst::Store { .. }
                 | MInst::Add { .. }

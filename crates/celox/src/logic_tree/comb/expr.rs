@@ -2904,6 +2904,10 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
         SLTNode::Constant(_, _, _, signed) => *signed,
         SLTNode::Binary(lhs, _, _) => is_signed(module, *lhs, arena),
         SLTNode::Unary(UnaryOp::Minus, _) => true,
+        SLTNode::Unary(
+            UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros,
+            _,
+        ) => false,
         SLTNode::Unary(_, inner) => is_signed(module, *inner, arena),
         SLTNode::Mux { then_expr, .. } => is_signed(module, *then_expr, arena),
         SLTNode::ForFold { result, .. } => module.variables[&result.id].r#type.signed,

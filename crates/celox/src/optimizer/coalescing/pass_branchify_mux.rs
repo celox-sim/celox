@@ -500,8 +500,15 @@ fn branchified_instruction_cost(
                 | crate::ir::BinaryOp::GeS => 3 * operand_chunks,
             }
         }
-        SIRInstruction::Unary(dst, _, src) => {
-            2 * chunks(register_width(*dst).max(register_width(*src)))
+        SIRInstruction::Unary(dst, op, src) => {
+            let operand_chunks = chunks(register_width(*dst).max(register_width(*src)));
+            match op {
+                crate::ir::UnaryOp::PopCount => 2 * operand_chunks + 1,
+                crate::ir::UnaryOp::CountLeadingZeros | crate::ir::UnaryOp::CountTrailingZeros => {
+                    3 * operand_chunks + 1
+                }
+                _ => 2 * operand_chunks,
+            }
         }
         SIRInstruction::Load(_, _, offset, width) => {
             3 * chunks(*width) + 3 * u128::from(matches!(offset, SIROffset::Dynamic(_)))

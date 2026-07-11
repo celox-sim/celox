@@ -566,6 +566,7 @@ fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
             false_val,
             ..
         } => [Some(*false_val), Some(*true_val)],
+        MInst::LoadConstantTableAddr { .. } => [None, None],
         _ => [None, None],
     }
 }

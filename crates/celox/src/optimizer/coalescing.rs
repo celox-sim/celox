@@ -18,6 +18,7 @@ mod pass_gvn;
 mod pass_hoist_common_branch_loads;
 mod pass_identity_store_bypass;
 mod pass_inline_commit_forwarding;
+mod pass_loop_idiom;
 mod pass_manager;
 mod pass_optimize_blocks;
 mod pass_partial_forward;
@@ -41,6 +42,7 @@ use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
 use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
 use pass_inline_commit_forwarding::InlineCommitForwardingPass;
+use pass_loop_idiom::LoopIdiomPass;
 use pass_manager::ExecutionUnitPassManager;
 use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_partial_forward::PartialForwardPass;
@@ -437,6 +439,9 @@ fn optimize_with_options(
     if on(SirPass::BitExtractPeephole) {
         comb_passes.add_pass(BitExtractPeepholePass);
     }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        comb_passes.add_pass(LoopIdiomPass);
+    }
     if on(SirPass::OptimizeBlocks) {
         comb_passes.add_pass(OptimizeBlocksPass {
             skip_final_schedule: false, // eval_comb has no reschedule pass
@@ -447,6 +452,11 @@ fn optimize_with_options(
     }
     if on(SirPass::VectorizeConcat) {
         comb_passes.add_pass(VectorizeConcatPass);
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        // Vectorization exposes the wide source of predicate concats.  A
+        // second idiom/DCE sweep removes the scalar predicates it replaced.
+        comb_passes.add_pass(LoopIdiomPass);
     }
     if on(SirPass::Gvn) {
         comb_passes.add_pass(GvnPass); // DCE for dead bit-extract chains after vectorization
@@ -460,9 +470,6 @@ fn optimize_with_options(
             eprintln!("[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}");
         }
         comb_passes.run(eu, &options);
-    }
-    if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
-        dump_mux_chain_stats(&program.eval_comb);
     }
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
@@ -480,6 +487,19 @@ fn optimize_with_options(
             // Store alias candidates in program for memory layout validation
             program.address_aliases.extend(identity_aliases);
         }
+    }
+
+    // Identity-store bypass runs after the main comb pipeline and can make an
+    // entire expression DAG dead.  Sweep those definitions before estimating
+    // or lowering native code; otherwise removed local-variable stores leave
+    // their unrolled loop recurrences in every simulation tick.
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, &options);
+        }
+    }
+    if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
+        dump_mux_chain_stats(&program.eval_comb);
     }
 
     // 5. Tail-call chain splitting for eval_comb.

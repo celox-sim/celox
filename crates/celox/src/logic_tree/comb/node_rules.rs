@@ -118,10 +118,7 @@ pub(super) fn binary_result_width(op: BinaryOp, lhs_width: usize, rhs_width: usi
 }
 
 pub(super) fn unary_width(op: UnaryOp, inner_width: usize) -> usize {
-    match op {
-        UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
-        UnaryOp::Ident | UnaryOp::Minus | UnaryOp::BitNot => inner_width,
-    }
+    op.result_width(inner_width)
 }
 
 pub(super) fn mux_width(then_width: usize, else_width: usize) -> usize {

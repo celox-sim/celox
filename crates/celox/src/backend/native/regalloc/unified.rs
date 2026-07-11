@@ -370,6 +370,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
     match inst {
         MInst::Mov { .. } => "mov",
         MInst::LoadImm { .. } => "imm",
+        MInst::LoadConstantTableAddr { .. } => "constant_table_addr",
         MInst::Load { .. } => "load",
         MInst::LoadPtr { .. } => "load_ptr",
         MInst::LoadIndexed { .. } => "load_indexed",
