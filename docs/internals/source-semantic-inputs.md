@@ -10,11 +10,8 @@ and is consumed by the private staging boundary described in
 It is not a source-wire schema, an arena format, or permission to connect the
 new arena to symbolic evaluation. In particular, no production source
 producer may construct an `InputSemanticFacts` value until the complete
-`ExpectedTypedConstantExpr`, source `TriIntent`, and
-`ExpectedSourceValueGraph` relations and their aggregate input/output checks
-have been implemented. A source artifact is not executable: hierarchy mapping
-and port glue must later produce the complete occurrence `TriNet` relation
-before an occurrence artifact can freeze.
+`ExpectedSourceValueGraph` traversal and its aggregate input/output relation
+have been implemented.
 
 The words *must*, *must not*, *required*, and *exactly* below are normative.
 
@@ -24,29 +21,14 @@ The semantic-input ownership chain is:
 
 ```text
 RawTypedSourceHIR
-  -> joint VerifiedTypedSourceHIR + ExpectedTypedConstantExpr relation
-  -> verified canonical semantic-object table + source TriIntent relation
+  -> VerifiedTypedSourceHIR
+  -> verified canonical semantic-object table
   -> complete ExpectedSourceValueGraph traversal
   -> verified canonical source-input table
   -> private InputSemanticFacts<SourcePhase>
   -> unclassified source-node replay
   -> complete source aggregate verification
-  -> FrozenSourceArtifact
-  -> hierarchy mapping, interface flattening, and port glue
-  -> occurrence semantic-object table + complete occurrence TriNet relation
-  -> complete ExpectedOccurrenceGraph and occurrence aggregate verification
 ```
-
-The first arrow is itself an aggregate relation, not a call which may trust a
-resolved analyzer type. It jointly contains the non-constant type
-prerequisites, complete `ExpectedTypedConstantExpr` proofs for every extent
-and explicit enum recipe, and final type/enum replay. None of those pieces may
-be published as a separately trusted substitute for `VerifiedTypedSourceHIR`.
-`TriIntent` proves the exact surface modifier, eligible declaration role, and
-source read/drive provenance only. It is not a driver-resolution proof. The
-occurrence `TriNet` consumes the immutable source catalog plus the complete
-instance/interface/glue relation; it cannot participate in deriving a value
-domain or repair an invalid source type.
 
 The object table cannot be derived from SLT nodes. The input table cannot be
 derived merely by scanning `Input` nodes: symbolic state, static composites,
@@ -78,26 +60,6 @@ OccurrenceInputId            = PhaseInputId<OccurrencePhase>
 
 ExpectedSourceObjectId: checked dense proof ID in the canonical typed-HIR
 object traversal; it is not a producer or storage ID.
-
-ExpectedTypedConstantExprId: checked dense proof ID for one exact
-(RawConstExprOccurrenceId, VerifiedGenericEnvironmentId, root role and typing
-context) evaluation; it is not the raw occurrence index.
-
-VerifiedSourceTriIntentId: checked dense proof ID for one exact eligible
-source object and its retained surface Tri provenance.
-
-OccurrenceTriNetId: checked dense electrical-net component ID in the complete
-flattened driver-resolution relation.
-OccurrenceTriResolutionMapId: checked dense proof ID for one occurrence
-semantic object's complete disjoint lane-to-TriNet mapping. Neither ID is
-inferred from the object's value domain or crosses a phase/artifact boundary.
-
-VerifiedBitsId<P>: checked dense canonical bit-plane ID owned by
-VerifiedBitsArena<P> in the same phase aggregate.
-VerifiedTypedValueId<P>: checked dense typed-value ID owned by
-VerifiedTypedValueArena<P> in the same phase aggregate.
-VerifiedSourceTypedValueId = VerifiedTypedValueId<SourcePhase>
-VerifiedOccurrenceTypedValueId = VerifiedTypedValueId<OccurrencePhase>
 ```
 
 A semantic object is a declaration, binding, or explicitly derived storage
@@ -117,11 +79,7 @@ SemanticObject<P>
   normalized executable type
   object_width
   declared_signed
-  declared_positive_type
   object_domain: Bit | Logic
-  object_resolution: PhaseObjectResolution<P>
-  default_role: None | ExplicitClock | ImplicitClock |
-                ExplicitReset | ImplicitReset
   dimensions: [SemanticDimension]
 
 SemanticDimension
@@ -144,34 +102,12 @@ InputAccess<P>
   ordered runtime index roles
   selected_width
   result_signed
-  result_positive_type
   result_domain: Bit | Logic
-```
-
-The closed phase projections are:
-
-```text
-PhaseObjectResolution<SourcePhase> =
-  Ordinary | TriIntent(VerifiedSourceTriIntentId)
-PhaseObjectResolution<DraftOccurrencePhase> =
-  Ordinary | MappedTriIntent(SourceInstanceId, VerifiedSourceTriIntentId)
-PhaseObjectResolution<OccurrencePhase> =
-  Ordinary | TriNetMap(OccurrenceTriResolutionMapId)
 ```
 
 `SourceInputId` is not a variable ID. `SourceSemanticObjectId` is not an input
 row ID. The types must not be aliases even if both currently use a dense
 `u32` representation.
-
-`object_domain` describes two-state versus four-state values; it does not
-describe driver resolution. In particular, ordinary `Logic` remains
-`Ordinary`. A source Tri object carries only its exact intent proof; only a
-fully flattened occurrence object carries an exact TriNet proof ID.
-`default_role` is a back-reference derived from the independently verified
-module-level clock/reset selection, including whether selection was explicit
-or implicit; it is never reconstructed from the type or analyzer witness.
-The positive fields preserve the `p*` declaration class only for later
-type/value-use checking; they are never a runtime nonzero fact.
 
 `ForFold` state targets and results are object atoms:
 
@@ -233,673 +169,113 @@ verification failure changes no published object/input length or mapping.
 
 ## Verified executable type normalization
 
-Type normalization is a versioned, iterative checked relation over a retained
-typed-HIR aggregate. It must not recurse on the host stack or use
-`Shape::total`, `Type::total_width`, analyzer struct/union/enum width caches,
-analyzer enum member caches, or Celox `resolve_total_width` as a proof oracle.
+Type normalization is an iterative checked relation over verified typed-HIR
+type rows. It must not recurse on the host stack or use the legacy
+`Shape::total`, `Type::total_width`, struct/union width helpers, or Celox
+`resolve_total_width` as a proof oracle.
 
-### Retained raw relation
+### Closed data kinds
 
-The raw boundary separates reusable type declarations, exact syntax type
-uses, modifiers, object ownership, and module context. Combining these into
-one resolved analyzer `Type` loses facts which the verifier needs.
+The accepted executable data kinds are:
 
-```text
-RawTypeRow
-  canonical surface declaration/template identity and source coordinate
-  canonical generic-formal range and owning declaration scope
-  kind: Bit | Logic | BBool | LBool |
-        U8/U16/U32/U64 | P8/P16/P32/P64 | I8/I16/I32/I64 |
-        Clock/ClockPosedge/ClockNegedge |
-        Reset/ResetAsyncHigh/ResetAsyncLow/ResetSyncHigh/ResetSyncLow |
-        Alias(target RawTypeUseId) |
-        Enum(base rule, encoding, canonical variant range) |
-        Struct(canonical member range) | Union(canonical member range) |
-        closed unsupported tag
+- two-state integral `Bit` and fixed integral aliases normalized to `Bit`;
+- four-state `Logic`, clock, and reset variants;
+- enum, struct, union, and resolved user-defined aliases whose complete
+  transitive type graph normalizes to these integral kinds.
 
-RawTypeUseRow
-  exact surface syntax occurrence and owner role
-  core: Concrete(RawTypeId) | GenericFormal(RawGenericFormalId)
-  generic use: RawGenericUseId
-  modifiers: canonical RawModifierRange
-  unpacked extents: canonical RawExtentRange
-  packed extents: canonical RawExtentRange
-
-RawExtentRow
-  exact resolved-expression occurrence
-  expression: RawConstExprOccurrenceId
-
-RawExtentResolutionWitnessRow
-  exact RawExtentId / RawGenericEnvironmentWitnessId
-  analyzer_resolution: Unresolved(exact resolution witness) |
-                       Resolved(RawArbitraryBitsId, exact resolution witness)
-
-RawEnumResolutionWitnessRow
-  exact enum RawTypeId / RawGenericEnvironmentWitnessId
-  analyzer width witness / canonical variant-value witness range
-
-RawEnumVariantValueWitnessRow
-  owner enum-resolution witness / exact RawEnumVariantId and ordinal
-  analyzer value: Unresolved | Known(payload/mask RawArbitraryBitsIds,
-                                     width/sign/domain witnesses)
-
-RawGenericFormalRow
-  exact owner declaration / source coordinate / declaration ordinal
-  bound: Type |
-         Inst(exact retained proto-interface path/bound) |
-         Proto(exact retained fixed/named proto bound)
-  default: None | Some(RawGenericArgumentId)
-
-RawGenericUseRow
-  exact surface owner: TypeUse(RawTypeUseId) |
-    FunctionCall | ModuleInstance | InterfaceInstance | PackageUse |
-    closed other language use
-  exact source coordinate / parent lexical scope
-  canonical RawGenericArgumentRange; a nongeneric use owns the canonical
-    empty range
-
-RawGenericArgumentRow
-  exact owner: RawGenericUseId at source ordinal |
-               declared default of one RawGenericFormalId
-  syntax: Identifier(exact retained symbol-resolution occurrence) |
-          FixedType(RawTypeUseId) |
-          Const(RawConstExprOccurrenceId)
-
-RawGenericEnvironmentWitnessRow
-  analyzer specialization identity / exact surface generic use
-  optional parent witness / canonical selected-binding witness range /
-  canonical extent-resolution and enum-resolution witness ranges
-  comparison witness only; it is never used to choose a verified environment
-
-RawGenericBindingWitnessRow
-  owner witness / exact formal ID / declaration ordinal
-  selection: Explicit(RawGenericArgumentId) | DeclaredDefault
-  analyzer resolved argument identity/value witness
-
-RawConstExprOccurrenceId
-  raw storage reference to one exact retained source expression/root role;
-  it is not an ExpectedTypedConstantExprId
-
-RawArbitraryBitsRow
-  canonical range in borrowed RawArbitraryBytePool
-  independently retained source/value role
-
-RawModifierRow
-  exact syntax token / occurrence ordinal
-  kind: Signed | Tri | Default
-
-RawObjectRow
-  exact declaration/binding/ForFold reference and embedded variable witness
-  owner source coordinate
-  type_use: RawTypeUseId
-  module_context: RawObjectTypeContextId
-
-RawObjectTypeContextRow
-  exact object / module identity
-  owner scope: ModuleTop | Interface | Local | closed other scope
-  declaration role: Port(direction) | Variable | Let | InterfaceMember |
-                    Binding | ForFoldBinding | closed other role
-  exact concrete-inout classification
-
-RawModuleTypeContext
-  exact module identity
-  canonical port/declaration/binding traversal
-  exact clock/reset candidates and their object/type-use identities
-  exact analyzer default-clock/default-reset object witnesses, if any
-  exact port/storage role required by source TriIntent and default-clock/reset
-  rules
-```
-
-`RawTypedSourceHIR<'a>` borrows the arbitrary-bit pool; the verifier boundary
-does not first decode an owned `BigUint`/`BigInt`. A `RawArbitraryBitsRow` is
-one canonical unsigned magnitude encoded as little-endian bytes: zero has an
-empty range, a nonzero value has a nonzero final byte, and no nonempty range
-may be shared, overlap another row, escape the pool, or leave orphan bytes.
-Distinct zero rows remain distinct owners at the same empty cursor. Exact
-typed width, numeric sign, payload role, and X/Z-mask role are retained by the
-owning extent or typed-constant-expression row rather than encoded by leading
-zero bytes. Malformed encodings fail before arithmetic.
-
-The `RawArbitraryBitsId` on an environment-qualified extent witness is only
-the analyzer-resolution witness. The value proof is assigned a fresh
-`ExpectedTypedConstantExprId` only after the exact raw occurrence/environment/
-role/context passes the joint verifier, and the two
-must agree bit-for-bit after the closed coercion. The same raw/proof namespace
-split applies to enum recipes and generic constant actuals. Type normalization
-and typed constant verification therefore form one joint dependency graph. `$bits`,
-`$size`, casts, `type(expr)`, `msb`, and `lsb` contribute closed type-only
-edges; constants, parameters, generics, enum values, and admitted constant
-function calls contribute value edges. The verifier derives these edges from
-retained source AST/symbol rows. Analyzer `Comptime`, `Shape`/`WidthExpr`, enum
-caches, or an already resolved extent cannot replace either edge class.
-
-All pools are dense, logically fully owned, gap-free, and canonical. The raw
-view may borrow the one aggregate-owned byte buffer, but each range still has
-one exclusive logical owner. Every type use has exactly one surface syntax
-owner (object, alias target, member, enum base, or other closed typed-HIR role)
-and owns its modifier/extent ranges once. A specialization never duplicates
-that raw template row; only its verified `(use, environment)` instance is
-distinct.
-struct/union rows own member ranges; enum rows own variant ranges; objects and
-named types own formal ranges; every `RawGenericUseRow` owns one argument
-range; environment
-witnesses own binding, extent-resolution, and enum-resolution witness ranges;
-each enum-resolution witness owns its variant-value witness range; objects and named types have exactly one
-matching root row. A root's coordinate must equal
-its independently retained owner coordinate. Raw table indices are storage
-references, not verified IDs.
-Verified IDs are assigned on first discovery from canonical roots and fixed
-child order. Referential row tables such as type cores may therefore be
-permuted with every reference relocated without changing verified output.
-Syntax-ordered owned pools are different: their physical order is part of the
-canonical raw relation and a permutation is rejected rather than silently
-normalized.
-
-Pool canonicality is stronger than nonoverlap. Walking type uses in canonical
-syntax-owner traversal order, not raw storage/index order, each unpacked range
-must begin at the current extent cursor, its end becomes the cursor, and the
-following packed range must begin at that cursor; empty ranges must also name
-the current cursor. The final cursor must equal the extent-pool length.
-Modifier ranges obey a separate cursor over that same owner traversal.
-Struct/union member ranges and enum variant ranges obey the analogous
-canonical owner-traversal cursor rule, as do generic formal, generic-use
-argument, binding-witness, and extent-resolution-witness ranges in their
-separate pools, together with enum-resolution and variant-value witness ranges.
-Formal-default
-argument rows occur at their formal's fixed traversal position between those
-ranges. Owner bitmaps then independently reject
-duplicate ownership and orphans. A set of disjoint ranges with a gap or
-noncanonical block order is invalid.
-
-Arbitrary-bit rows and their borrowed byte ranges obey the same canonical
-owner-traversal cursor rule. Extents and the retained raw constant-expression
-rows own exact, role-tagged references; two
-equal byte strings do not authorize one row to impersonate or alias another
-proof input.
-
-Generic specialization is replayed rather than accepted as an analyzer-chosen
-resolved type. Formal bound/kind/order, explicit-versus-default selection,
-actual owner scope, parent environment, and every type/instance/proto/constant
-actual are checked from retained source rows. `Type`, `Inst`, and `Proto` have
-distinct verified argument variants and compatibility relations; an instance
-identifier cannot masquerade as an equal-shaped type, and an unsupported bound
-is rejected rather than coerced into `Type`. Number and boolean arguments are
-raw constant-expression occurrences and receive their own typed proofs.
-
-A verified type-use identity is the pair of its surface `RawTypeUseId` and a
-verifier-derived `VerifiedGenericEnvironmentId`; equal coordinates or equal
-resolved member widths cannot merge specializations. The verifier interprets
-the declaration-template alias/member/enum child uses under that environment,
-so the template never contains analyzer-substituted child IDs. Canonical
-environments are allocated in root traversal and formal declaration order.
-Repeated exact specializations may share a completed verified environment only
-after their complete canonical actual keys compare equal by content. The
-analyzer environment/binding witness tables are then compared bidirectionally
-to this independently derived set; missing, extra, or differently parented
-witnesses fail. Each root scope has one canonical empty environment/witness for
-nongeneric uses, so their extent-resolution rows follow the same relation.
-
-The joint static dependency graph has closed node kinds `TypeUseInstance`,
-`GenericEnvironment`, `ConstBinding`, `ConstExprRoot`, and `EnumReplay`, with
-every type-only and value edge independently derived from source ownership.
-An iterative SCC pass rejects every self-edge or nontrivial SCC in this static
-graph, including a width/enum/generic constant which depends back on itself.
-Enum predecessor edges must point to the immediately preceding variant and a
-source reference to a later enum variant is rejected even if another path
-would make it acyclic. Constant-function call/backedge execution edges are not
-static definition edges: recursive concrete calls and loops use the separate
-finite execution-trace relation, so this SCC rule is not a recursion or
-iteration cap. Completed SCC condensation order fixes the one evaluation
-order; analyzer dependency order is not an oracle.
-
-`Signed`, `Tri`, and `Default` are not interchangeable type flags:
-
-- `Signed` participates in executable arithmetic signedness and is accepted
-  only by the closed rules below.
-- `Default` does not change width, domain, or signedness. For Veryl 0.20 it is
-  admitted only on a bare clock/reset type use whose exact object is proved by
-  `RawModuleTypeContext` to be that module's unique default clock/reset.
-- `Tri` does not mean four-state `Logic`. It requests net/driver resolution
-  on an eligible Bit/Logic object use. The source relation proves one exact
-  `TriIntent`; the complete occurrence `TriNet` later proves flattened drivers
-  and resolution. Neither may normalize it as `Logic`.
-
-The resolved analyzer IR cannot reconstruct these distinctions. In
-particular, matching a `VarId` to a symbol later by path, token, or shape is
-not proof of the raw relation.
-
-### Tri and default object context
-
-For V0_20, `Tri` is syntactically a modifier of a direct `Bit` or `Logic` type
-use; it is not inherited through a user-defined alias and it is orthogonal to
-`Signed`. Its underlying object domain and arithmetic signedness are derived
-exactly as for the unmodified Bit/Logic type. The complete owner allow-list is
-a module/interface port, module/interface variable, module `let`, or interface
-member. Alias targets, enum bases, aggregate members, constants/parameters,
-generic formals/actuals, function arguments/returns/locals, nested statement
-locals, and ForFold bindings reject `Tri`. Every concrete `inout` port must
-have this exact source intent; a non-Tri concrete inout is rejected. A module
-local Tri declaration need not be an inout. Port glue, interface flattening,
-multiple drivers, Z contribution, resolution order, and read/write conversion
-are owned by the complete occurrence `TriNet` relation, not by type
-normalization. A `FrozenSourceArtifact` may retain a proved `TriIntent`, but no
-mapped occurrence containing one may freeze or enter planning until its full
-TriNet relation passes.
-
-The source intent relation is independently derived from retained typed HIR:
-
-```text
-ExpectedSourceTriIntent
-  intent / exact source object / exact Tri modifier and direct type use
-  underlying read type and width/signedness/domain
-  canonical expected driver range / expected read-site range
-
-ExpectedSourceTriDriver
-  owner intent / canonical driver identity and ordinal
-  kind: SingleContribution(exact declaration/continuous/port/interface site,
-                           value root, guard, source type,
-                           TriDriveCoercion) |
-        ProceduralProcess(source process ID, canonical update range,
-                          initial driver-state rule)
-
-ExpectedSourceTriDriverUpdate
-  owner procedural driver / exact statement site and source ordinal
-  exact lane access / guard / expected value root / source type
-  TriDriveCoercion / closed overwrite-or-retain transition rule
-
-ExpectedSourceTriRead
-  owner intent / exact expected source use and role/site
-  independently derived TriReadCoercion
-
-VerifiedSourceTriIntent
-  exact bidirectional match to all expected intent/driver/update/read rows
-  no resolved value and no occurrence driver graph
-```
-
-The expected rows come from the complete typed-HIR traversal, not from a
-producer driver summary. Every `ExpectedSourceValueGraph` read, write, port
-boundary, and interface exposure which belongs to a Tri object maps to exactly
-one expected Tri row, and every Tri row maps back. Omitting the same site from
-both a producer summary and its nodes therefore cannot pass. A normal
-non-contributing read is not a driver, and equal-shaped sites/objects are not
-interchangeable.
-
-Driver identity is one contribution source, not one assignment syntax site.
-All writes from the same procedural process to the same Tri object belong to
-one `ProceduralProcess` driver. Its ordered update rows replay guards, partial
-lanes, blocking/nonblocking timing, overwrite, and retain semantics to produce
-that driver's one current contribution. Two sequential writes in one process
-therefore do not resolve against each other. Distinct continuous assignments,
-port boundaries, declarations, interfaces, or procedural processes remain
-distinct drivers. The expected control/action/token graph owns the final
-versioned contribution at every observation point and is matched
-bidirectionally to these update transitions.
-
-Tri drive values use a separate four-state plane even when the underlying
-object domain is Bit. `TriDriveCoercion` applies the target width and signed
-extension rules but preserves X and Z; ordinary Logic-to-Bit assignment must
-not turn a Z disconnect into a driven zero. `TriReadCoercion` preserves the
-resolved plane for a Logic object and maps only known one to one for a Bit
-object, with 0/X/Z becoming zero. Thus object domain, drive domain, and
-resolution are three distinct facts.
-
-After hierarchy mapping, the occurrence relation is:
-
-```text
-OccurrenceTriNet
-  canonical nonempty lane-member range / complete driver range / read range
-  net width / closed lane-wise resolution rule
-
-OccurrenceTriLaneMember
-  exact occurrence object / mapped source intent
-  nonempty disjoint object bit range / equal-width net bit range / orientation
-
-OccurrenceTriResolutionMap
-  exact occurrence object / canonical segment range
-  segments are disjoint, ordered, and exactly cover object width
-  each segment names one OccurrenceTriNetId and exact net range/orientation
-
-OccurrenceTriEquivalenceEdge
-  exact inout port-glue or interface/modport electrical connection
-  equal-width normalized endpoint lane atoms / orientation / lineage
-
-OccurrenceTriDriver
-  MappedSourceDriver(SourceInstanceId, ExpectedSourceTriDriverId) |
-  DirectedPortContribution(GlueOriginId) |
-  DirectedInterfaceContribution(exact interface/modport/member IDs) |
-  ExternalBoundary(exact top port and direction)
-  exact contribution value/guard/coercion and lineage
-
-OccurrenceTriRead
-  mapped or glue read / exact consumer role/site / TriReadCoercion
-```
-
-Inout and electrically aliased interface connections are equivalence edges,
-not drivers from one already resolved object into another. The verifier gathers
-all connection endpoints, splits object ranges only at canonical connection
-boundaries, and uses an iterative deterministic union-find over those interval
-atoms. It never expands one row per bit. Each connected component receives its
-`OccurrenceTriNetId` from the lexicographically first member; orientations and
-offsets then derive lane mappings. A cyclic inout topology is therefore one
-component rather than a cyclic value graph.
-
-Every mapped intent has exactly one complete resolution map, every map segment
-belongs to exactly one net, every net member maps back, and every expected
-mapped/glue/interface/boundary driver and read occurs exactly once. No ordinary
-object may own a map. Driver completeness is checked bidirectionally against
-the mapped expected occurrence graph and port/interface lineage, not a producer count.
-For each bit, Z contributors are inactive; no active contributor resolves to
-Z, unanimous known zero/one resolves to that value, and any active X or
-conflicting known values resolves to X. Veryl V0_20 has no strength/delay rule
-at this boundary. Contributor storage is in canonical lineage order, while the
-resolution function is order-independent. Width lanes, guards, port direction,
-interface exposure, interval partition/orientation, and read conversion are all
-replayed before the intent is replaced by its
-`OccurrenceTriResolutionMapId`.
-
-`Default` is accepted only on a direct bare clock/reset type use: no alias,
-packed width, unpacked dimension, `Signed`, or `Tri`. Its object context must
-have `owner scope = ModuleTop` and role `Port`, `Variable`, or `Let` in the
-same `RawModuleTypeContext`. Clock and reset are selected independently. At
-most one explicit Default object of each class is permitted. If one exists it
-is the selected object. If none exists, exactly one eligible bare candidate
-is selected implicitly; zero or multiple eligible candidates select `None`.
-Every analyzer default-clock/default-reset witness is compared for exact
-object identity with this independently derived result. Equal path, type, or
-shape is insufficient. An `always_ff` or other use which requires a default
-when the derived result is `None` is rejected by its expected-HIR rule.
-
-### Closed Veryl-0.20 kinds and modifiers
-
-The accepted executable kinds and their terminal primitive facts are:
-
-- `Bit`: domain `Bit`, width one when bare; an explicit `Signed` modifier sets
-  signedness.
-- `Logic`: domain `Logic`, width one when bare; an explicit `Signed` modifier
-  sets signedness.
-- `BBool`: unsigned domain `Bit`, exactly `Packed(1)`.
-- `LBool`: unsigned domain `Logic`, exactly `Packed(1)`.
-- `u8/u16/u32/u64`: unsigned domain `Bit` and their fixed width.
-- `p8/p16/p32/p64`: the same executable storage facts, while retaining the
-  declared positive-assignment predicate `known two-state value > 0`. This is
-  a static value-use constraint, not permission for an optimizer to assume
-  that every runtime bit pattern is nonzero.
-- `i8/i16/i32/i64`: signed domain `Bit` and their fixed width.
-- clock and reset variants: unsigned domain `Logic`, `Packed(1)` when bare;
-  explicit packed extents replace that implicit terminal exactly as for direct
-  Bit/Logic, and ordinary unpacked extents are retained.
-- aliases, enums, structs, and unions only through the complete rules below.
-
-Fixed integer/boolean kinds reject explicit packed widths. Fixed
-integer/boolean and clock/reset kinds reject `Signed`. User-defined aliases,
-enums, structs, and unions reject an outer `Signed` modifier under Veryl 0.20;
-an alias inherits its target signedness. Width or array dimensions make a
-clock/reset ineligible for `Default`, but are valid on a non-default use.
-Aliases to `p*` also retain the positive-assignment predicate.
 Unknown, unresolved, SystemVerilog, interface/module/package, abstract,
-modport, type-valued, string, floating-point, and void kinds are rejected.
-Supporting one later requires a new versioned value-domain rule and must not
-fall back to `Bit`.
+modport, type-valued, string, floating-point, and void kinds are rejected at
+this boundary. Supporting one later requires a new closed value-domain rule;
+it must not reuse `Bit` as a fallback.
 
-Every normalized selected type retains this closed storage/value-use row:
+Kind normalization derives intrinsic width and Bit-or-Logic domain. It does
+not choose object signedness:
 
-```text
-VerifiedNormalizedType
-  width / signed / domain: Bit | Logic
-  positive_type: Plain | Positive
-  shape/member/intrinsic facts as applicable
-```
+- `Bit` has intrinsic width one and domain `Bit`.
+- `Logic` and clock/reset variants have intrinsic width one and domain
+  `Logic`.
+- An enum derives intrinsic width and domain from its verified base integral
+  type.
+- A struct derives the checked sum of member packed widths. Its domain is
+  `Logic` if any member domain is `Logic`, otherwise `Bit`.
+- A union must be nonempty and every member must have the same checked packed
+  width. Its intrinsic width is that common width. Its domain is `Logic` if
+  any member domain is `Logic`, otherwise `Bit`.
 
-`Positive` survives only the alias/selection rules stated below. It is not a
-value-range proof.
+An unpacked member inside a packed enum/struct/union kind is rejected until a
+separate packed-member layout rule exists. Empty and zero-width packed kinds
+are rejected.
 
-### Closed assignment and lossless constant coercion
+For the current `Veryl-0.20` semantics, declared signedness is closed as
+follows:
 
-The verifier derives coercions from source and target types; a producer never
-supplies the recipe. For an integral value with canonical payload/mask planes,
-ordinary assignment applies these operations in order:
+- `signed bit` and `signed logic` use their verified explicit modifier;
+- `i8/i16/i32/i64` normalize to signed `Bit`, while unsigned/positive integer
+  aliases normalize to unsigned `Bit`;
+- an enum inherits its verified base integral type's signedness;
+- a struct or union is unsigned because Veryl 0.20 rejects an outer signed
+  modifier on a user-defined type; and
+- a resolved type alias inherits the target type's signedness. Veryl 0.20
+  rejects an outer signed override on that user-defined alias.
 
-1. If the target is wider, extend payload and mask with the source sign bit
-   when the source type is signed, otherwise with zero. If the target is
-   narrower, discard the high bits. Equal widths are unchanged.
-2. A Logic target preserves both planes. A Bit target maps each retained bit
-   to `payload AND NOT mask`, so known one remains one and 0/X/Z become zero;
-   its result mask is empty.
-3. The result receives the target signedness, domain, and positive-type class;
-   those metadata never change step 1 retroactively.
+Member selection derives the selected member type independently. A mixed
+`Logic`/`Bit` struct or union has `Logic` object domain, but an exact access to
+a `Bit` member has `Bit` result domain. `InputAccess.result_domain` therefore
+need not equal its owning object's aggregate domain; the expected typed-HIR
+projection proves the selected type.
 
-`LosslessConstantCoercion`, used by fixed enum bases and every other role which
-requires exact representability, is stricter:
+`declared_signed` is the signedness established by the selected closed
+language-semantics version. It must not be recomputed from member signedness.
+For the current `Veryl-0.20` adapter, a `signed` modifier on a user-defined
+type is rejected by the analyzer and the resolved analyzer IR overwrites the
+outer modifier with the aliased type's signedness. The current verifier must
+therefore reject such an input at the typed-HIR boundary; it cannot infer or
+pretend to preserve provenance that the adapter did not retain.
 
-- a known two-state source is interpreted as a mathematical integer under its
-  source signedness; it must be representable under the target width and
-  signedness, and converting back must yield the same integer;
-- an X/Z-bearing source requires a Logic target, no narrowing, and exact
-  payload/mask preservation after the specified extension;
-- any Logic-to-Bit conversion containing X/Z is lossy even when X/Z would map
-  to zero; and
-- a Positive target additionally requires the final known two-state
-  mathematical value to be greater than zero.
+A future semantics version may support an outer signed modifier on a resolved
+user-defined struct/union, but only when `RawTypedSourceHIR` retains the exact
+surface modifier and the analyzer/adapter is changed to validate and preserve
+it. Under that future rule, alias resolution applies the verified outer
+modifier after deriving recursive kind width/domain. Merely observing
+`Type.signed` in Veryl 0.20.1 is not proof of that rule.
 
-The static Positive assignment rule for ordinary non-enum uses is also closed.
-If an independent constant proof exists, its final coerced value must be known
-two-state and greater than zero. Without a constant proof, the source selected
-type must itself be `Positive`; an unproved dynamic Plain value cannot enter a
-Positive target. This same rule applies to assignments, ports, generic actuals,
-function arguments/returns, aliases/member projections, and constructors.
-Even when accepted, the target's Positive class is not a runtime nonzero fact.
-The pinned analyzer's cached `is_positive` or exception for an X/Z-bearing
-positive-typed constant is not an oracle.
+### Iterative algorithm
 
-Veryl 0.20 requires every member of one packed struct or union to have the
-same value domain: all `Bit` or all `Logic`. Mixed-domain aggregates are
-rejected, even if a later implementation could represent their joined domain.
-A future language-semantics version may define the domain join
-`Bit < Logic`; that future rule must have a distinct version tag and fixtures.
-It must not silently change the V0_20 relation. A struct is unsigned and has
-the checked sum of member packed widths. A union is unsigned, nonempty, and
-all members have the same checked packed width. Unpacked members are rejected.
+The verifier uses an explicit worklist of `Enter(type)` and `Finish(type)`
+frames plus `Unseen`, `Visiting`, and `Done` marks:
 
-Member selection still derives the selected member's independently verified
-type. This matters for future mixed-domain versions, but does not relax the
-V0_20 uniform-domain requirement.
+1. `Enter` validates the type tag and flat child-ID range. A `Visiting` child
+   is a recursive type cycle and fails. Unseen children are pushed before the
+   corresponding `Finish` frame.
+2. `Finish` reads only completed child facts and computes intrinsic width and
+   domain with checked addition/multiplication.
+3. Every explicit packed and unpacked extent must be resolved, representable
+   as `usize`, and nonzero.
+4. The object's dimension vector is, in this exact order:
 
-### Enum base and variant relation
+   ```text
+   all unpacked extents in HIR order
+   ++ the normalized primitive packed-width extents in HIR order
+      (a bare Bit/Logic has one selectable Packed extent of 1)
+   ++ [intrinsic kind width] for an enum/struct/union, including width 1
+   ```
 
-An enum retains one closed base rule rather than a producer-selected width:
+   Alias resolution first determines whether the final kind is primitive or
+   has a distinct intrinsic packed layout, so the same width is not appended
+   twice. An explicit outer width on a user-defined packed kind precedes its
+   one intrinsic dimension. Extent one is retained because it is still a
+   selectable packed dimension and affects index arity and signedness even
+   though multiplying by it does not change storage width.
 
-```text
-RawEnumBaseRule =
-  Omitted |
-  ExplicitFixed(base RawTypeUseId) |
-  InferBit { signed: bool } |
-  InferLogic { signed: bool }
+5. Starting with suffix product one, visit dimensions from last to first.
+   The current suffix product is that dimension's stride; multiply it by the
+   extent with checked arithmetic to obtain the next suffix product.
+6. The final suffix product is `object_width`. It must be nonzero and must
+   equal the separately checked product of unpacked extents, packed extents,
+   and normalized intrinsic width.
 
-RawEnumEncoding = Sequential | OneHot | Gray
-
-RawEnumVariantRow
-  owner enum RawTypeId / declaration ordinal / source coordinate
-  recipe: Implicit | Explicit(RawConstExprOccurrenceId)
-```
-
-The variant pool is nonempty, gap-free, uniquely owned, and in declaration
-order. `ExplicitFixed` accepts only a completely normalized `Bit`, `Logic`,
-`BBool`, `LBool`, fixed integer, or alias to one of those primitives, with no
-unpacked dimension or inferable extent. Clock/reset and every composite or
-non-data kind are not enum bases. `Omitted` means unsigned `Logic` with
-inferred width. `InferBit`/`InferLogic` are the exact single inferable-width
-forms; `_` in any other position is rejected. Enum signedness and domain come
-from this base rule. The enum contributes exactly one
-`Intrinsic(enum_width)` dimension, including width one.
-
-An enum whose explicit fixed base is `p8/p16/p32/p64` applies that base's
-positive predicate to every final variant. Consequently an implicit initial
-Sequential or Gray value zero is invalid; an explicit positive first anchor
-may establish a valid sequence, and OneHot begins at one. X/Z, zero, a
-negative mathematical value, or a value which becomes zero after the closed
-base coercion fails the enum relation. The analyzer's plain unsigned
-width/domain summary is insufficient to prove this refinement.
-
-Every explicit recipe's raw occurrence must receive a completed
-`ExpectedTypedConstantExprId` from the joint relation. Its raw rows refer to
-canonical borrowed `RawArbitraryBitsId` values
-for numeric magnitude, payload, and X/Z mask, with exact role, sign, and typed
-width retained separately. Its verified proof retains the exact source type,
-fallibly verified arbitrary-width signed value, payload, X/Z mask, result
-width/domain/signedness, and the closed lossless assignment coercion to the
-enum base. Analyzer `EnumProperty.width`, cached member values, owned
-`BigUint`/`BigInt` input, `usize` conversion, and the legacy constant evaluator
-are not oracles. Until the complete typed constant-expression relation exists,
-a raw enum with any explicit variant cannot pass the typed-HIR aggregate
-verifier.
-
-Starting with no previous numeric value, implicit values use this exact
-arbitrary-width recurrence. `g(i) = i XOR (i >> 1)` is the reflected Gray
-encoding and `decode_gray` is its unique inverse on nonnegative bit strings:
-
-```text
-                 first implicit       after previous two-state value p
-Sequential             0                         p + 1
-OneHot                  1                         p << 1
-Gray                    0               g(decode_gray(p) + 1)
-```
-
-All addition, shifts, XOR, and Gray decoding use verifier-owned fallible limb
-routines; ordinary `BigUint` or `BigInt` operators are not used on the proof
-path. The conceptual recurrence is not permission to materialize every growing
-OneHot/Gray value. Replay uses one closed cursor per encoding:
-
-```text
-SequentialCursor = explicit mathematical anchor + checked delta
-OneHotCursor      = explicit one-bit proof + arbitrary-width set-bit index
-GrayCursor        = arbitrary-width decoded ordinal
-```
-
-An explicit two-state value replaces the current anchor. Under V0_20, OneHot
-and Gray anchors must be known mathematical nonnegative values before
-encoding; a negative signed expression is rejected rather than interpreted as
-a width-dependent two's-complement pattern. `OneHot` scans the nonnegative
-magnitude once, requires exactly one set bit, and records its bit index; an
-implicit successor increments only that index. A `Gray` explicit value after a
-predecessor must equal `g(ordinal + 1)`. A first explicit Gray value is a legal
-anchor: the verifier decodes it once, and the next implicit or explicit row
-must encode the following ordinal. Thus an all-implicit Gray enum is exactly
-`0, 1, 3, 2, 6, 7, 5, 4, ...`; using the previous encoded value directly as
-the next ordinal is forbidden. Sequential explicit values may be negative on a
-signed base and have no encoding predicate beyond the base/coercion rules.
-
-An X/Z mask is forbidden for every Bit-domain base and under either OneHot or
-Gray encoding. A Logic-domain Sequential enum may contain an explicit X/Z
-value when its typed constant and lossless base coercion prove the exact
-payload and mask, but that value has no numeric successor: the immediately
-following implicit variant is rejected. X/Z is never converted to an integer.
-
-For `ExplicitFixed`, every recipe must fit the fixed base through the verified
-lossless assignment coercion; inferred width does not widen it. For inferred
-bases, `enum_width` is the maximum of one and the exact minimum width required
-by every verified recipe result, including the complete payload/mask width of
-an admitted Logic X/Z value and signed two's-complement representability when
-signed. The recurrence is replayed first and the width is derived second; no
-step truncates to a provisional width. Every final variant is then replayed
-against that width and must fit losslessly. `Omitted` uses the same inference
-with unsigned Logic semantics.
-
-For a signed inferred OneHot/Gray base, minimum width includes the leading zero
-needed to keep every nonnegative anchor/recipe nonnegative. Zero extension to
-the final inferred width therefore preserves its set-bit index or Gray
-magnitude. The verifier nevertheless repeats the OneHot population or exact
-Gray-ordinal predicate after final coercion; a changed final bit pattern is a
-hard error, never an updated cursor.
-
-The durable enum fact stores only `(base rule, encoding, canonical compact
-variant recipes, enum_width, domain, signedness)`. Recipes are sequential
-anchor/delta, OneHot bit index, Gray ordinal, or an explicit X/Z proof ID. It
-does not store analyzer cached values or expand a table indexed by all enum
-values. Required cursor/result/scratch limb capacity is computed and fallibly
-reserved before mutation. In particular, N implicit OneHot variants require N
-checked index increments and O(log N) live cursor limbs, not Θ(N²) shifting or
-payload storage. A concrete full-width value is materialized fallibly only for
-an exact later use which requires it.
-
-Every final coerced variant bit pattern, including its complete X/Z mask, must
-be unique. Gray's strictly consecutive decoded ordinals prove uniqueness
-directly. Sequential anchor/delta runs and OneHot bit-index runs enter a
-fallibly built ordered disjoint-interval index; overlap rejects a duplicate
-without expanding each value. Explicit X/Z patterns enter a content-ordered
-canonical limb index. Analyzer member caches and hash equality are not proof.
-Construction is bounded by canonical recipe/explicit-limb input and a
-logarithmic number of interval/content comparisons; pairwise variant
-comparison is forbidden.
-
-Veryl 0.20.1's analyzer used the previous Gray-encoded value directly in
-`g(p + 1)`, which ceases to be the reflected Gray sequence after the first
-few members. That implementation is a witness to compare and diagnose, not
-the semantic oracle. The verifier uses the corrected decode/increment/encode
-relation above and requires the adapter or producer cache to be fixed when it
-disagrees.
-
-### Iterative normalization and persistent shapes
-
-The verifier uses `Enter(type/use)` and `Finish(type/use)` frames with
-`Unseen`, `Visiting`, and `Done` marks. A `Visiting` child is a recursive type
-cycle. Children are visited by fixed language ordinal. There is no recursion
-depth cutoff, recovery fallback, or type-depth cap.
-
-Every extent remains a `RawExtentRow`, its exact raw constant-expression
-occurrence, and its analyzer-resolution witness at the raw boundary. `Unresolved`, a
-resolved canonical zero magnitude, malformed raw bytes, constant-proof/witness
-disagreement, and failure of checked `usize` conversion are distinct errors.
-The verifier decodes only into pre-reserved fallible limb storage, then
-performs checked conversion; it never requires construction of an owned
-`BigUint` as a prerequisite. Checked products are derived independently for
-unpacked extents, explicit packed extents, terminal/intrinsic width, composed
-packed width, total width, and the final suffix-stride replay.
-
-Normalized shapes are persistent and must not copy a target's complete
-dimension vector into every alias:
-
-```text
-VerifiedExtentArena: canonical normalized usize extents
-
-ShapeSegment
-  extents: nonempty canonical range in VerifiedExtentArena
-  next: optional earlier ShapeSegmentId
-
-VerifiedTypeShape
-  unpacked_head: optional persistent segment chain
-  packed_head: optional persistent segment chain
-  terminal: None | Packed(1) | Packed(fixed width) |
-            Intrinsic(enum/struct/union width, including 1)
-  checked unpacked_count / dimension_count
-  checked unpacked_product / packed_width / total_width
-```
-
-The terminal is derived by the exact core/use relation. A direct `Bit`,
-`Logic`, clock, or reset use has `Packed(1)` only when its own explicit packed
-range is empty; a nonempty explicit range replaces that implicit one-bit
-dimension and uses terminal `None`. `BBool`, `LBool`, and fixed integers retain
-their fixed `Packed` terminal and reject explicit packed ranges. A direct
-enum/struct/union always has its `Intrinsic` terminal, including width one.
-An alias shares its target terminal unchanged: an alias's own packed segment
-is outer shape and therefore does not suppress the target's terminal.
-
-Each nonempty type-use extent range is copied once into the verified extent
-arena and creates at most one unpacked and one packed segment. An alias with an
-empty own range shares the target head; otherwise its segment points to the
-target head. Alias target order is therefore
-`own unpacked ++ target unpacked`, then
-`own packed ++ target packed ++ target terminal`. In Veryl 0.20 an explicit
-outer alias width precedes the target width, so aliasing a bare `Bit` may
-legitimately retain both `Packed(outer)` and the target's selectable
-`Packed(1)`.
-
-Only a semantic object or other required root materializes dimensions: walk
-the unpacked chain outer-to-target, then the packed chain outer-to-target,
-append the one terminal dimension, and derive suffix strides from right to
-left. The final suffix product must equal the independently checked summary.
-Construction is `Theta(type rows + raw extents + shape segments)` plus the
-size of materialized root dimensions. Copying every target vector into every
-alias, and therefore `Theta(depth^2)` alias behavior, is forbidden.
+No type depth cutoff is permitted. Cycle rejection and an explicit worklist,
+not a recursion limit, establish termination.
 
 For example:
 
@@ -913,83 +289,6 @@ logic<8, 4>[2, 3]
   strides = [96, 32, 4, 1]
   object_width = 192
 ```
-
-### Reservation and failure policy
-
-Every raw count, range endpoint, verified ID, segment ID, and dimension count
-is proved representable before publication. Each allocation site uses a
-fallible exact reservation owned by one prepared aggregate. Tests inject
-failure at reservation ordinal `N` for every `N` below the successful
-reservation count; `N` equal to that count is the successful control. Sites
-include raw-owner bitmaps, visit marks, worklists, verified
-limb/extent/segment/type/member/object pools, enum recipe scratch, and root
-materialization. Failure returns one allocation-free structured error and
-leaves all externally visible lengths, mappings, brands, and owners unchanged.
-No `String`, formatting allocation, panic, partial commit, retry with a smaller
-representation, or fallback path is permitted.
-
-### Shared fallible value and payload substrate
-
-Types, constants, phase nodes, enum replay, and later cost arithmetic use one
-implementation substrate but distinct typed ID namespaces. The end-state
-phase representation is:
-
-```text
-RawMagnitudeRef
-  disjoint canonical byte range in the one borrowed/aggregate-owned raw pool
-  exact payload/mask/numeric role and sign role
-
-VerifiedBitsArena<P>
-  rows: flat fallibly reserved VerifiedBitsRow table
-  words: flat fallibly reserved u64 word pool
-
-VerifiedBitsRow
-  disjoint canonical word range / exact bit length
-  zero is an empty range at the current cursor
-  nonzero has a nonzero final word; unused high bits are zero
-
-VerifiedTypedValueArena<P>
-  flat fallibly reserved VerifiedTypedValueRow<P> table
-
-VerifiedTypedValueRow<P>
-  payload: VerifiedBitsId<P>
-  xz_mask: VerifiedBitsId<P>
-  width: nonzero usize
-  signed
-  domain: Bit | Logic
-  exact ExpectedTypedConstantExprId or closed derived-value origin
-```
-
-Bits above `width` are zero. A Bit-domain value has an empty X/Z mask. For a
-Logic value, mask zero means a known data bit; mask one with payload zero means
-X and mask one with payload one means Z. Identity/select/concat preserve X
-versus Z, while an operation whose closed truth table produces an unknown uses
-the specified canonical X result. Mathematical enum/extent/cost arithmetic
-uses separately typed `VerifiedNatural` and `VerifiedSignedMagnitude` views on
-the same word substrate; a fixed-width Logic payload is never reinterpreted as
-one of them merely because its mask is zero.
-
-Phase nodes and their variable-size payloads contain only checked IDs/ranges:
-
-```text
-PhaseSLTNode::Constant { value: VerifiedTypedValueId<P> }
-PhaseSLTLoopBound::Const { value: VerifiedTypedValueId<P>, coercion }
-PhaseForFoldNode.step: VerifiedTypedValueId<P>
-PhaseInputNode { input, index_range }
-PhaseConcatNode { part_range }
-PhaseForFoldNode { state_range, effect_range, ... }
-PhaseForFoldEffect { argument_range, ... }
-```
-
-There is no `PhaseOwnedPayload<T>` wrapper. Reserving a one-element outer
-vector after a `BigUint`, nested `Vec`, or diagnostic `String` was already
-constructed does not satisfy this contract. Canonical interning uses an arena-
-aware `cmp_nodes` which compares referenced typed-value and range contents;
-numeric ID order is not semantic order. All error types are allocation-free
-closed `(rule, phase, owner, context)` records whose `Display` formatting is
-lazy. The current private phase arena's owned `BigUint` constants, nested
-vectors, string-bearing errors, and context-free derived `Ord` are therefore
-migration input, not a representation that may be connected or frozen.
 
 ### Named member projection normalization
 
@@ -1200,7 +499,7 @@ signed whole-object input followed by a generic unsigned `Slice`. The phase
 input itself returns the selected element type. Any backend load narrowing is
 an implementation of this verified input relation, not an IR signedness rule.
 
-## Result signedness, positive type, and domain
+## Result signedness and domain
 
 Signedness is derived from dimension provenance, never by comparing one flat
 range with `object_width`:
@@ -1218,18 +517,6 @@ range with `object_width`:
 - A packed select that happens to cover the complete packed width is still
   unsigned.
 - A later unpacked or whole-width projection does not restore signedness.
-
-The declared positive-type class follows the same selected-type provenance,
-but remains only a value-use class:
-
-- whole-object and unpacked-only selection preserves the object's class;
-- named member projection uses the selected member's class;
-- any packed bit/part selection clears it; and
-- no later projection restores it.
-
-It is retained in `InputAccess.result_positive_type` for subsequent assignment,
-port, generic-actual, return, and constructor checks. Node execution facts do
-not contain a `known_nonzero` bit and no optimization may derive one.
 
 The result domain is independently derived from the exact selected semantic
 type and is either `Bit` or `Logic`. It is not derived from an index type. For
@@ -1287,15 +574,14 @@ InputSemanticFacts<P>
 
 SemanticObjectFact<P>
   object
-  object_width / declared_signed / declared_positive_type / object_domain
-  exact PhaseObjectResolution<P> / default_role
+  object_width / declared_signed / object_domain
   canonical dimensions with extent and stride
 
 InputAccessFact<P>
   input / object
   compact normalized access and ordered runtime role geometry
   optional verified selected-member type projection
-  selected_width / result_signed / result_positive_type / result_domain
+  selected_width / result_signed / result_domain
 ```
 
 Only the aggregate semantic verifier can construct it. It has no public row
@@ -1405,94 +691,22 @@ its input owner unchanged.
 
 ### Type and object fixtures
 
-- raw type/use/modifier/object/module-context/arbitrary-bit pools with gaps,
-  overlaps, duplicate ownership, orphan rows, noncanonical ranges or integer
-  encodings, root/owner coordinate mismatch, wrong embedded `VarId`, and
-  referential-row permutation with exact ID relocation; permuting a
-  syntax-ordered owned pool is rejected;
-- raw constant-expression occurrence/proof-ID substitution, missing type-only
-  or value dependency,
-  analyzer-resolution disagreement, and analyzer `Comptime`,
-  `Shape`/`WidthExpr`, or enum-cache values masquerading as proof;
 - unresolved, zero, and unrepresentable packed/unpacked extents;
-- distinct checked overflow in struct member sum, union/enum intrinsic width,
-  own unpacked product, own explicit-packed product, composed packed width,
-  total width, dimension count, and materialized suffix-stride replay;
+- checked overflow in struct member sum, packed product, unpacked product,
+  intrinsic-width product, and stride suffix product;
 - empty struct/union, unequal union member widths, recursive type cycle, and
   unpacked member in a packed aggregate;
 - unknown, floating, string, SystemVerilog, module/interface, and non-data
   kinds masquerading as `Bit` or `Logic`;
-- `bbool` and `lbool` retain distinct raw tags and normalize respectively to
-  unsigned `Bit` and unsigned `Logic` with exactly `Packed(1)`;
-- `bbool`/`lbool` reject `Signed`, `Tri`, `Default`, and explicit packed width
-  instead of being rewritten to a permissive Bit/Logic type use;
-- bare, packed, unpacked, and multidimensional clock/reset uses are accepted
-  with Bit/Logic-style terminal replacement, while the same non-bare uses with
-  `Default` are rejected;
-- `p8/p16/p32/p64` retain their positive-assignment predicate through aliases;
-  zero, negative, X/Z, wrapped-zero, and implicit-zero enum variants fail,
-  while a positive explicit anchor and OneHot one pass;
-- two specializations of one generic type declaration with different type or
-  constant actuals derive distinct member shapes; swapped actual/default
-  selection, parent environment, specialization witness, or environment ID
-  fails even when final widths match;
-- static type/extent/enum/generic dependency self-cycles and multi-node SCCs,
-  forward enum references, and analyzer-selected dependency order are rejected
-  without rejecting terminating recursive constant-function executions;
-- mixed Bit/Logic structs and unions are rejected under V0_20; a separately
-  tagged future-version fixture may prove domain join and selected-member
-  domain only after that future semantics is specified;
-- `Signed`, `Tri`, and `Default` rows cannot be swapped, omitted, duplicated,
-  attached to the wrong type use, or reconstructed from resolved analyzer
-  flags;
-- `Default` is accepted only with an exact unique module default-clock/reset
-  relation; a source Tri-bearing aggregate retains only exact intent, while a
-  mapped occurrence remains non-freezable until its complete TriNet relation
-  passes;
-- direct signed/unsigned Bit/Logic Tri declarations retain independent domain
-  and signedness; Tri through an alias, Tri on another kind, and a non-Tri
-  concrete inout are rejected;
-- Tri on an alias target, enum base, aggregate member, constant/parameter,
-  generic row, function signature/local, nested local, or ForFold binding is
-  rejected by the closed source-intent owner allow-list;
-- Tri ports, ordinary variables/lets, and interface members retain exact
-  object roles; a source intent cannot impersonate an occurrence TriNet proof,
-  while swapped occurrence object IDs, driver owners, port directions, or
-  aggregate/glue origins fail that complete relation;
-- explicit default clock/reset positives for module ports, variables, and
-  lets; duplicate explicit defaults, wrong module/role/kind, aliases, arrays,
-  widths, and analyzer-witness ID substitutions are rejected;
-- with no explicit default, exactly one eligible candidate is selected and
-  zero or multiple candidates produce `None`; clock/reset selections remain
-  independent and a required use of `None` is rejected;
+- mixed Bit/Logic struct and union domain derivation;
+- a Bit member selected from a mixed-domain object has Bit result domain,
+  while a Logic member has Logic result domain;
 - nested struct field offsets compose according to declaration-order packed
   layout, while every union field offset remains zero;
-- enum base modes `Omitted`, `ExplicitFixed`, `InferBit`, and `InferLogic`,
-  including domain and signedness derivation and rejection of `_` in every
-  other position;
-- canonical nonempty enum variant pools with missing, duplicate, reordered,
-  wrongly owned, or orphan recipes;
-- Sequential, OneHot, and reflected-Gray first values and recurrence, first
-  explicit Gray anchor, explicit restart, OneHot population-count failure,
-  Gray predecessor mismatch, and checked arbitrary-width cursors beyond
-  `usize`;
-- an implicit OneHot enum large enough to expose quadratic limb shifting keeps
-  one bit-index cursor and linear recipe work/storage; overlapping Sequential
-  or OneHot intervals and duplicate explicit X/Z patterns are rejected;
-- explicit enum recipes with missing/wrong typed-constant-expression proof,
-  lossy base coercion, fixed-width overflow, signed fit boundary, and analyzer
-  width/member cache disagreement;
-- Bit-domain and OneHot/Gray X/Z rejection, Logic Sequential X/Z preservation,
-  and rejection of an implicit successor after a nonnumeric X/Z value;
-- inferred enum width from exact positive, signed-negative, and Logic X/Z
-  recipes, followed by complete lossless replay at the derived width;
-- bare one-bit Bit/Logic/clock/reset retains one selectable Packed extent of
-  one, while a direct explicit packed range replaces rather than appends that
-  implicit terminal;
+- enum base width/domain derivation;
+- bare one-bit Bit/Logic retains one selectable Packed extent of one;
 - a width-one enum/struct/union retains one Intrinsic extent of one, while an
   alias does not duplicate its resolved target's dimension;
-- an outer-width alias of a bare primitive retains the Veryl-0.20 ordered
-  packed dimensions for both outer width and target `Packed(1)`;
 - a signed modifier on a user-defined struct/union is rejected by the current
   Veryl-0.20 typed-HIR adapter instead of being silently lost;
 - a future-version fixture, enabled only with retained raw modifier
@@ -1581,13 +795,9 @@ its input owner unchanged.
 ### Failure and scale fixtures
 
 - dense object/input ID exhaustion without allocating an impossible table;
-- deterministic fail-at-`N` at every raw-owner, verified-limb/scratch,
-  visit/worklist, extent/segment/type/member/object, enum-recipe, input/fact,
-  and root-materialization reservation site;
+- deterministic failure at every object/input/fact reservation site;
 - no semantic length or mapping change after any failed derivation/replay;
-- iterative deeply nested type and access graphs without host recursion;
-- a deep alias chain with at least one own extent per alias proving linear
-  verified extent/segment storage and forbidding quadratic copied vectors; and
+- iterative deeply nested type and access graphs without host recursion; and
 - 100k/1M input-access derivation/replay measurements including large
   multidimensional and part-select tables.
 
@@ -1603,52 +813,26 @@ all currently emitted `Input` nodes found a matching row. That would let the
 producer omit the same semantic read from both its node arena and its own
 summary.
 
-The current partial typed-HIR normalizer is also not connection permission.
-In particular, the complete `ExpectedTypedConstantExpr` relation needed by
-every extent and explicit enum variant and the source `TriIntent` relation do
-not yet exist. Rejecting or skipping all examples which exercise one of those
-relations does not make the remaining partial implementation a complete
-Veryl-0.20 adapter. Neither analyzer resolved-expression/enum caches nor
-treating `Tri` as ordinary `Logic` may bridge the gap. Separately, no mapped
-occurrence carrying a Tri intent is valid until complete flattened TriNet
-verification.
-
 Before producer connection, the implementation must have:
 
-1. a verified canonical typed-HIR snapshot with the separate raw type,
-   type-use, modifier, object, module-context, member, enum-variant, and root
-   relations above, including every syntax-level modifier required by its
-   selected semantics version;
-2. the complete iterative `ExpectedTypedConstantExpr` graph, its closed
-   type-only/value dependency relation, and the lossless constant-coercion
-   verifier used by every extent and explicit enum recipe;
-3. the complete source `TriIntent` object/role/modifier/read/drive provenance
-   relation for every admitted `Tri` modifier;
-4. the full iterative `ExpectedSourceValueGraph` traversal for every accepted
+1. a verified canonical typed-HIR snapshot, including every syntax-level type
+   modifier required by its selected semantics version (the current adapter
+   rejects any modifier provenance it cannot retain);
+2. the full iterative `ExpectedSourceValueGraph` traversal for every accepted
    declaration, statement, expression, observer, dynamic-address, environment,
    static-composite, and `ForFold` variant;
-5. canonical source-object and source-input rows derived only from the
-   verified typed-HIR, constant-expression, source-TriIntent, and
-   expected-value relations;
-6. a bidirectional match from every expected read/index role to producer nodes
+3. canonical source-object and source-input rows derived only from those two
+   inputs;
+4. a bidirectional match from every expected read/index role to producer nodes
    and from every producer Input node back to an expected recipe;
-7. complete expected-node reachability and ordinary/gated classification; and
-8. consuming aggregate prepare/commit ownership with no standalone facts or
+5. complete expected-node reachability and ordinary/gated classification; and
+6. consuming aggregate prepare/commit ownership with no standalone facts or
    arena publication.
 
-Until all eight hold, `InputSemanticFacts<SourcePhase>` and source-node replay
+Until all six hold, `InputSemanticFacts<SourcePhase>` and source-node replay
 remain private verifier/test stages. Passing structural node tests, legacy
 lowering tests, or synthetic scale measurements is not evidence that the
 source semantic-input relation is complete.
-
-After those source requirements hold, occurrence preparation must additionally
-derive instance-specific mapped intents, interface/modport exposure, every
-source and glue driver, Z contribution, read conversion, and resolution order;
-prove bidirectional complete lane components/resolution maps for every Tri
-occurrence; and replace each mapped intent with its
-`OccurrenceTriResolutionMapId`. Failure leaves the
-source catalog and occurrence draft unchanged. No occurrence artifact with a
-remaining mapped intent can freeze, lower, allocate registers, or execute.
 
 ## Language references
 
@@ -1664,7 +848,4 @@ using the resolved `Type.signed` field as invented provenance.
 - [Builtin types](https://doc.veryl-lang.org/book/05_language_reference/03_data_type/01_builtin_type.html)
 - [User-defined types](https://doc.veryl-lang.org/book/05_language_reference/03_data_type/02_user_defined_type.html)
 - [Arrays](https://doc.veryl-lang.org/book/05_language_reference/03_data_type/03_array.html)
-- [Clock / Reset](https://doc.veryl-lang.org/book/05_language_reference/03_data_type/04_clock_reset.html)
 - [Bit select](https://doc.veryl-lang.org/book/05_language_reference/04_expression/06_bit_select.html)
-- [Veryl corrected reflected-Gray recurrence](https://github.com/veryl-lang/veryl/commit/95a14877823a4b9214729ab48152a09ab94b8412)
-- [Veryl duplicate enum-value validation](https://github.com/veryl-lang/veryl/commit/22a722a0a6ef483bf3ea54464d83068e38d2fbef)

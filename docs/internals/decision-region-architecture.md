@@ -390,10 +390,7 @@ SourceFoldInputResolution =
 SourceSemanticObject
   object: SourceSemanticObjectId
   exact declaration/binding identity
-  independently derived full width / signedness / positive-type class /
-    Bit-or-Logic domain
-  Ordinary | TriIntent(VerifiedSourceTriIntentId)
-  exact default-clock/reset role, if any
+  independently derived full width / signedness / Bit-or-Logic domain
   canonical aggregate dimensions and full flattened stride vector
 
 SourceInput
@@ -401,8 +398,7 @@ SourceInput
   object: SourceSemanticObjectId
   exact HIR read role and static access
   exact selected dimensions / part-select kind / index count and stride prefix
-  independently derived result width / result signedness /
-    result positive-type class / result domain
+  independently derived result width / result signedness / result domain
   expected semantic input row from VerifiedSourceSemanticContext
 
 `SourceSemanticObjectId` and `SourceInputId` are deliberately different
@@ -419,7 +415,7 @@ exact HIR operand occurrence.
 
 Object dimensions are derived with checked arithmetic as unpacked extents,
 then packed-width extents, then the normalized intrinsic struct/union/enum
-width, including one. Every extent is resolved and nonzero;
+width when it is greater than one. Every extent is resolved and nonzero;
 suffix products define strides and their checked product must equal the
 independently derived object width. The verifier does not use Veryl's
 unchecked `Shape::total`, `Type::total_width`, struct-width addition, or
@@ -675,7 +671,7 @@ SourcePatternOccurrence
 SourceTypedPatternOperand
   value: SourceOccurrenceUse
   source domain: Bit | Logic
-  width / signedness / optional exact constant: VerifiedSourceTypedValueId
+  width / signedness / optional exact constant(value bits, X/Z mask)
 
 SourceDecision
   unit: SourceControlUnitId
@@ -1057,7 +1053,7 @@ OccurrenceTypedPatternOperand
   value: OccurrenceUse
   source domain: Bit | Logic
   width / signedness
-  optional exact constant: VerifiedOccurrenceTypedValueId
+  optional exact constant (value_bits, mask_xz)
 
 ResolvedDecision / ResolvedDecisionArm / ResolvedPattern
   verified views of the same topology and decision semantics with every
@@ -2086,7 +2082,7 @@ or `Bit` versus `Logic`. `PhaseSemanticObjectId<P>` identifies the declaration,
 binding, or flattened object, while `PhaseInputId<P>` identifies one exact read
 geometry. Input rows carry the object ID, normalized static base/part rule,
 exact ordered index roles, extents/strides, selected width, and derived result
-signedness/positive-type/domain. `PhaseSLTNode::Input` carries only the input ID and ordered
+signedness/domain. `PhaseSLTNode::Input` carries only the input ID and ordered
 index child IDs; it cannot repeat or override access, stride, width,
 signedness, or domain. ForFold state rows and result identity use
 `PhaseSemanticObjectId<P>` plus a bit range, so two different read geometries
@@ -2099,8 +2095,7 @@ InputSemanticFacts<P>
 
 SemanticObjectFact<P>
   object: PhaseSemanticObjectId<P>
-  object_width / declared_signed / declared_positive_type / domain
-  exact PhaseObjectResolution<P> / default role
+  object_width / declared_signed / domain
   canonical [(extent, stride)]
 
 InputAccessFact<P>
@@ -2108,7 +2103,7 @@ InputAccessFact<P>
   object: PhaseSemanticObjectId<P>
   static base / normalized part-select rule / selected width
   ordered index roles with extent and stride
-  result_signed / result_positive_type / result_domain
+  result_signed / result_domain
 ```
 
 The object table is dense in canonical typed-declaration/binding traversal
@@ -2177,18 +2172,16 @@ index-tree scheme. Rotations mutate only construction indices after all
 semantic rows/capacity have been staged, and lookup/insertion takes worst-case
 `O(log nodes)` structural comparisons. The indices are dropped at freeze.
 Large concat/ForFold/input-index payloads therefore have one owned
-construction copy in flat phase-local pools and are named by checked ranges.
-Constants name a `VerifiedTypedValueId<P>` in the same prepared aggregate; its
-payload and X/Z mask name canonical ranges in one flat, fallibly reserved limb
-arena. A fixed node descriptor never owns a `BigUint`, `Vec`, string, or
-single-element wrapper around one. Context-aware canonical comparison reads
-the referenced value/range contents rather than comparing numeric IDs. On the
-supported 64-bit host the construction descriptor and one AVL link are each
-bounded to 32 bytes by layout tests. AVL absence uses `usize::MAX` only as a
-private construction sentinel: prospective insertion rejects that index
-before mutation, and the sentinel is neither a serialized ID nor an
-input-dependent node cap. Replay rebuilds the same canonical index transiently
-to reject noncanonical serialized ordinary duplicates.
+construction copy. Variants whose fixed descriptor would otherwise inherit a
+large `BigUint`/`Vec` union layout keep that one copy in a private, fallibly
+allocated, single-element out-of-line payload; the payload cannot be cloned or
+constructed through a wire/public proof API. On the supported 64-bit host the
+construction descriptor and one AVL link are each bounded to 32 bytes by
+layout tests. AVL absence uses `usize::MAX` only as a private construction
+sentinel: prospective insertion rejects that index before mutation, and the
+sentinel is neither a serialized ID nor an input-dependent node cap. Replay
+rebuilds the same canonical index transiently to reject noncanonical
+serialized ordinary duplicates.
 
 Every allocation validates that children already exist, computes width from
 the checked prefix with the same shared rule used by replay, and reserves all
@@ -2200,11 +2193,10 @@ parallel state bindings and carry explicit result-state identity, so this
 storage canonicalization does not reorder effects; effect rows remain in
 source order. Direct lowerability is
 also one shared helper used by construction and replay. Semantic, ID, and
-capacity failures are allocation-free structured errors and leave prior
-IDs/facts unchanged. Error rows contain a closed rule/owner/context tuple and
-no `String`, formatting result, or allocator message. There is no third-party
-scalar construction on the proof path, public node vector, infallible `alloc`,
-recursive `get_width`, or hidden retry. Structural replay
+capacity failures are structured errors and leave prior IDs/facts unchanged;
+the design does not claim recovery from a process-wide allocator abort inside
+third-party scalar payload construction. There is no public node vector,
+infallible `alloc`, recursive `get_width`, or hidden retry. Structural replay
 scans edges and recomputes facts against the same width allocation, then builds
 only packed derived bitsets.
 
@@ -2254,7 +2246,6 @@ FrozenSourceArtifact
   private nonserialized ArtifactBrand
   CanonicalSourceModuleKey
   VerifiedSourceSemanticContext (canonical typed semantic HIR snapshot)
-  VerifiedTypedValueArena<SourcePhase> and flat node-payload pools
   ExpectedSourceControlGraph derived from that exact snapshot
   ExpectedSourceValueGraph derived from that exact snapshot
   FrozenSLTNodeArena<SourcePhase>
@@ -2264,7 +2255,6 @@ FrozenOccurrenceArtifact
   private nonserialized ArtifactBrand
   FrozenSourceCatalog and dense SourceInstance table
   VerifiedFlattenedSemanticContext (instance/type/glue/alias rows)
-  VerifiedTypedValueArena<OccurrencePhase> and flat node-payload pools
   ExpectedOccurrenceGraph derived from that exact context
   FrozenSLTNodeArena<OccurrencePhase>
   VerifiedControlOccurrencePlan
@@ -3361,11 +3351,9 @@ is `O(N + M + (N + U) log N)` and storage is `O(N + M + U)` per function.
 The producer computes the exact identity and list-candidate metrics once. A
 class peak counts simultaneously live chunks plus bundle scratch at every
 boundary; its integral is the sum of live chunks times the block's exact
-`ReachWeight`. Products/sums use a typed `FallibleNaturalCostArena` over the
-same pre-reserved flat-word substrate as verified constants, but in a distinct
-non-interchangeable ID namespace. It never constructs `BigUint`/`BigInt`, so
-arithmetic neither wraps nor imposes a semantic function-size limit. The
-candidate is selected only if peak and integral are componentwise
+`ReachWeight`. Products/sums use a fallible arbitrary-precision unsigned cost
+accumulator, so arithmetic neither wraps nor imposes a semantic function-size
+limit. The candidate is selected only if peak and integral are componentwise
 no greater than identity for every target class; otherwise the prescribed plan
 is identity. This comparison is part of the one construction rule, before the
 output verifier, not a retry after verification failure. The verifier derives
@@ -3459,21 +3447,15 @@ adds a materialization/interface rule.
 Every cross-region logical value has exactly one complete recipe:
 
 ```text
-VerifiedMIRConstantValueId = checked dense ID in the function-local verified
-constant table; its row has exact lineage to a verified occurrence constant or
-a closed MIR-derived constant rule
-
 CrossValueMaterialization =
-    ConstantRemat(VerifiedMIRConstantValueId)
+    ConstantRemat(value_bits, mask_bits, width)
   | StateReload(StateReloadRecipe, lazy reconstruction sites)
   | BoundaryHome(home,
                  edge-sensitive source stores,
                  lazy reload/reconstruction sites)
 ```
 
-The referenced constant row carries exact canonical value/mask limb ranges,
-width, signedness, and Bit/Logic domain and is content-compared by the backend
-verifier. The initial rematerialization form is only that exact constant; an
+The initial rematerialization form is only an exact value/mask constant; an
 expression rematerializer requires a future independently checked semantic
 recipe. `BoundaryHome` is one paired materialization kind, not separate
 "store" and "reload" choices. Its stores cover every incoming cut edge with
