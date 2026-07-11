@@ -10,6 +10,7 @@ use std::fmt;
 use iced_x86::BlockEncoderOptions;
 use iced_x86::code_asm::*;
 
+use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::*;
 use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet};
 use crate::backend::native::ssa_destroy::{
@@ -387,6 +388,15 @@ fn emit_parallel_copy_plan(
             } => {
                 let stack_adjustment = if temporary_live { 8 } else { 0 };
                 emit_single_parallel_copy(asm, destination, source, stack_adjustment)?;
+            }
+            ParallelCopyOperation::SwapRegisters { left, right } => {
+                if temporary_live {
+                    return Err(parallel_copy_input_error(
+                        "EMIT.PARALLEL_COPY_TEMPORARY",
+                        "parallel-copy schedule exchanges registers while a temporary is live",
+                    ));
+                }
+                asm.xchg(preg_to_reg64(left), preg_to_reg64(right))?;
             }
             ParallelCopyOperation::SaveTemporary(location) => {
                 if temporary_live {
@@ -1825,17 +1835,40 @@ fn emit_inst(
             emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Xor, n32)?;
         }
 
-        // Shifts: rhs must be in CL. The emit phase moves rhs to RCX
-        // rather than relying on assignment constraints, to avoid conflicts
-        // when multiple shifts with different amounts coexist.
+        // Variable shifts use BMI2's arbitrary-count three-operand form when
+        // selected for this function; the baseline encoding consumes CL.
         MInst::Shr { dst, lhs, rhs } => {
-            emit_shift(asm, assignment, *dst, *lhs, *rhs, ShiftOp::Shr)?;
+            emit_shift(
+                asm,
+                assignment,
+                *dst,
+                *lhs,
+                *rhs,
+                ShiftOp::Shr,
+                func.target_features.variable_shift_encoding(),
+            )?;
         }
         MInst::Shl { dst, lhs, rhs } => {
-            emit_shift(asm, assignment, *dst, *lhs, *rhs, ShiftOp::Shl)?;
+            emit_shift(
+                asm,
+                assignment,
+                *dst,
+                *lhs,
+                *rhs,
+                ShiftOp::Shl,
+                func.target_features.variable_shift_encoding(),
+            )?;
         }
         MInst::Sar { dst, lhs, rhs } => {
-            emit_shift(asm, assignment, *dst, *lhs, *rhs, ShiftOp::Sar)?;
+            emit_shift(
+                asm,
+                assignment,
+                *dst,
+                *lhs,
+                *rhs,
+                ShiftOp::Sar,
+                func.target_features.variable_shift_encoding(),
+            )?;
         }
 
         // Immediate ALU — use 32-bit regs when result fits
@@ -2400,8 +2433,7 @@ enum ShiftOp {
     Sar,
 }
 
-/// Emit a shift instruction, moving rhs to RCX if needed.
-/// Handles all aliasing cases between dst, lhs, rhs, and RCX.
+/// Emit the shift encoding selected by the function's target-feature snapshot.
 fn emit_shift(
     asm: &mut CodeAssembler,
     assignment: &AssignmentMap,
@@ -2409,26 +2441,44 @@ fn emit_shift(
     lhs: VReg,
     rhs: VReg,
     op: ShiftOp,
+    encoding: VariableShiftEncoding,
 ) -> Result<(), IcedError> {
     let d = preg_to_reg64(resolve(assignment, dst));
     let l = preg_to_reg64(resolve(assignment, lhs));
     let r = preg_to_reg64(resolve(assignment, rhs));
 
-    let do_shift = |asm: &mut CodeAssembler, reg: AsmRegister64| -> Result<(), IcedError> {
-        match op {
-            ShiftOp::Shr => asm.shr(reg, cl),
-            ShiftOp::Shl => asm.shl(reg, cl),
-            ShiftOp::Sar => asm.sar(reg, cl),
+    match encoding {
+        VariableShiftEncoding::Bmi2 => match op {
+            ShiftOp::Shr => asm.shrx(d, l, r)?,
+            ShiftOp::Shl => asm.shlx(d, l, r)?,
+            ShiftOp::Sar => asm.sarx(d, l, r)?,
+        },
+        VariableShiftEncoding::LegacyCl => {
+            // The allocation verifier proves the fixed-use constraint.
+            debug_assert!(r == rcx, "legacy shift rhs must be in RCX");
+            if d == rcx && l != rcx {
+                // Moving lhs into RCX first would destroy the count in CL.
+                // Shift a saved copy in place and pop the result into RCX, so
+                // the original lhs register remains untouched.
+                asm.push(l)?;
+                match op {
+                    ShiftOp::Shr => asm.shr(qword_ptr(rsp), cl)?,
+                    ShiftOp::Shl => asm.shl(qword_ptr(rsp), cl)?,
+                    ShiftOp::Sar => asm.sar(qword_ptr(rsp), cl)?,
+                }
+                asm.pop(rcx)?;
+            } else {
+                if d != l {
+                    asm.mov(d, l)?;
+                }
+                match op {
+                    ShiftOp::Shr => asm.shr(d, cl)?,
+                    ShiftOp::Shl => asm.shl(d, cl)?,
+                    ShiftOp::Sar => asm.sar(d, cl)?,
+                }
+            }
         }
-    };
-
-    // ISel guarantees rhs is a fresh copy (dead after this shift).
-    // Assignment places it in RCX via Fixed constraint.
-    debug_assert!(r == rcx, "shift rhs must be in RCX");
-    if d != l {
-        asm.mov(d, l)?;
     }
-    do_shift(asm, d)?;
     Ok(())
 }
 
@@ -2940,14 +2990,16 @@ pub fn emit_chained_eus(
     if copy_stats {
         let stats = ra.ssa_destruction.stats();
         eprintln!(
-            "[native-edge-copy-stats] label={label} edges={} rows={} identity_rows={} effective_copies={} identity_only_edges={} direct_moves={} cycle_breaks={} ready_pops={} dependency_releases={} max_effective_per_edge={}",
+            "[native-edge-copy-stats] label={label} edges={} rows={} identity_rows={} effective_copies={} identity_only_edges={} direct_moves={} register_swaps={} cycle_breaks={} temporary_cycle_breaks={} ready_pops={} dependency_releases={} max_effective_per_edge={}",
             stats.edges,
             stats.rows,
             stats.identity_rows,
             stats.effective_copies,
             stats.identity_only_edges,
             stats.direct_moves,
+            stats.register_swaps,
             stats.cycle_breaks,
+            stats.temporary_cycle_breaks,
             stats.ready_queue_pops,
             stats.dependency_releases,
             stats.max_effective_copies_per_edge,
@@ -3478,5 +3530,157 @@ fn log_sir_width_stats(eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsolute
     );
     for example in examples {
         eprintln!("[native-timing] sir_width_example {example}");
+    }
+}
+
+#[cfg(test)]
+mod shift_encoding_tests {
+    use super::*;
+    use crate::backend::native::features::X86Features;
+    use crate::backend::native::jit_mem::JitCode;
+    use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
+
+    fn decode_shift(
+        op: ShiftOp,
+        encoding: VariableShiftEncoding,
+        dst: PhysReg,
+        lhs: PhysReg,
+        rhs: PhysReg,
+    ) -> Vec<Instruction> {
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), dst);
+        assignment.set(VReg(1), lhs);
+        assignment.set(VReg(2), rhs);
+        let mut asm = CodeAssembler::new(64).unwrap();
+        emit_shift(
+            &mut asm,
+            &assignment,
+            VReg(0),
+            VReg(1),
+            VReg(2),
+            op,
+            encoding,
+        )
+        .unwrap();
+        let code = asm.assemble(0).unwrap();
+        let mut decoder = Decoder::new(64, &code, DecoderOptions::NONE);
+        let mut instructions = Vec::new();
+        while decoder.can_decode() {
+            instructions.push(decoder.decode());
+        }
+        instructions
+    }
+
+    #[test]
+    fn bmi2_shifts_use_three_arbitrary_register_operands() {
+        for (op, mnemonic) in [
+            (ShiftOp::Shr, Mnemonic::Shrx),
+            (ShiftOp::Shl, Mnemonic::Shlx),
+            (ShiftOp::Sar, Mnemonic::Sarx),
+        ] {
+            let instructions = decode_shift(
+                op,
+                VariableShiftEncoding::Bmi2,
+                PhysReg::R8,
+                PhysReg::R9,
+                PhysReg::R10,
+            );
+            assert_eq!(instructions.len(), 1, "{instructions:?}");
+            assert_eq!(instructions[0].mnemonic(), mnemonic);
+            assert_eq!(instructions[0].op0_register(), Register::R8);
+            assert_eq!(instructions[0].op1_register(), Register::R9);
+            assert_eq!(instructions[0].op2_register(), Register::R10);
+        }
+    }
+
+    #[test]
+    fn legacy_shift_uses_cl_after_copying_the_lhs() {
+        let instructions = decode_shift(
+            ShiftOp::Shl,
+            VariableShiftEncoding::LegacyCl,
+            PhysReg::R8,
+            PhysReg::R9,
+            PhysReg::RCX,
+        );
+
+        assert_eq!(
+            instructions
+                .iter()
+                .map(Instruction::mnemonic)
+                .collect::<Vec<_>>(),
+            vec![Mnemonic::Mov, Mnemonic::Shl]
+        );
+        assert_eq!(instructions[1].op0_register(), Register::R8);
+        assert_eq!(instructions[1].op1_register(), Register::CL);
+    }
+
+    #[test]
+    fn legacy_shift_with_rcx_destination_uses_a_stack_copy() {
+        let instructions = decode_shift(
+            ShiftOp::Shl,
+            VariableShiftEncoding::LegacyCl,
+            PhysReg::RCX,
+            PhysReg::R8,
+            PhysReg::RCX,
+        );
+
+        assert_eq!(
+            instructions
+                .iter()
+                .map(Instruction::mnemonic)
+                .collect::<Vec<_>>(),
+            vec![Mnemonic::Push, Mnemonic::Shl, Mnemonic::Pop]
+        );
+        assert_eq!(instructions[0].op0_register(), Register::R8);
+        assert_eq!(instructions[1].memory_base(), Register::RSP);
+        assert_eq!(instructions[1].op1_register(), Register::CL);
+        assert_eq!(instructions[2].op0_register(), Register::RCX);
+    }
+
+    #[test]
+    fn legacy_rcx_destination_executes_without_clobbering_live_lhs() {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let count = vregs.alloc();
+        let result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        func.target_features = X86Features::for_test(false);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 5 });
+        block.push(MInst::LoadImm {
+            dst: count,
+            value: 3,
+        });
+        block.push(MInst::Shl {
+            dst: result,
+            lhs,
+            rhs: count,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: result,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: lhs,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(lhs, PhysReg::R8);
+        assignment.set(count, PhysReg::RCX);
+        assignment.set(result, PhysReg::RCX);
+        let emitted = emit(&func, &assignment, 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 16];
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 40);
+        assert_eq!(u64::from_le_bytes(state[8..16].try_into().unwrap()), 5);
     }
 }

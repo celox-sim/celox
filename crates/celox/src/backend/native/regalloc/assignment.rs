@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::*;
 
 // ────────────────────────────────────────────────────────────────
@@ -110,12 +111,20 @@ pub enum EdgeLocation {
     Immediate(u64),
 }
 
-pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
+pub(super) fn use_constraints(
+    inst: &MInst,
+    shift_encoding: VariableShiftEncoding,
+) -> Vec<RegConstraint> {
     match inst {
-        // x86 variable shifts require shift amount in CL (low byte of RCX).
+        // BMI2's three-operand shifts accept the count in any GPR. Baseline
+        // x86 shifts require it in CL (the low byte of RCX).
         MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. } => {
-            // uses() = [lhs, rhs]. rhs must be in RCX.
-            vec![RegConstraint::Any, RegConstraint::Fixed(PhysReg::RCX)]
+            let rhs = match shift_encoding {
+                VariableShiftEncoding::Bmi2 => RegConstraint::Any,
+                VariableShiftEncoding::LegacyCl => RegConstraint::Fixed(PhysReg::RCX),
+            };
+            // uses() = [lhs, rhs].
+            vec![RegConstraint::Any, rhs]
         }
         _ => inst.uses().iter().map(|_| RegConstraint::Any).collect(),
     }

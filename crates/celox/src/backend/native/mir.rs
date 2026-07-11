@@ -1272,6 +1272,8 @@ pub struct MFunction {
     /// Known value widths for each VReg (None = unknown/64-bit).
     /// When Some(w) with w <= 32, the emit phase can use 32-bit registers.
     pub value_widths: Vec<Option<u8>>,
+    /// Target facts shared by optimization, register allocation, and emission.
+    pub(crate) target_features: super::features::X86Features,
 }
 
 impl MFunction {
@@ -1281,6 +1283,7 @@ impl MFunction {
             spill_descs,
             vregs,
             value_widths: Vec::new(),
+            target_features: super::features::X86Features::detect(),
         }
     }
 

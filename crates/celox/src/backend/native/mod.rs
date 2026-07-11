@@ -4,6 +4,7 @@
 
 pub mod backend;
 pub mod emit;
+pub(crate) mod features;
 pub mod isel;
 pub mod jit_mem;
 pub mod mir;

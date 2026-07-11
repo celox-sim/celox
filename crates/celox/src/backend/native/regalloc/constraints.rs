@@ -69,7 +69,10 @@ impl ConstraintModel {
                         fixed_uses: inst
                             .uses()
                             .into_iter()
-                            .zip(use_constraints(inst))
+                            .zip(use_constraints(
+                                inst,
+                                func.target_features.variable_shift_encoding(),
+                            ))
                             .filter_map(|(value, constraint)| match constraint {
                                 RegConstraint::Any => None,
                                 RegConstraint::Fixed(register) => Some((value, register)),

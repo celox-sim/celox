@@ -48,7 +48,7 @@ pub fn optimize(func: &mut MFunction) {
             eliminate_redundant_or_terms(func)
         );
         pass!("dead_code_eliminate", dead_code_eliminate(func));
-        if bmi2_available() {
+        if func.target_features.bmi2() {
             pass!(
                 "fold_deposit_chain_to_pdep",
                 fold_deposit_chain_to_pdep(func)
@@ -78,7 +78,7 @@ pub fn optimize(func: &mut MFunction) {
             "eliminate_redundant_or_terms",
             eliminate_redundant_or_terms(func)
         );
-        if bmi2_available() {
+        if func.target_features.bmi2() {
             pass!(
                 "fold_deposit_chain_to_pdep",
                 fold_deposit_chain_to_pdep(func)
@@ -344,18 +344,6 @@ fn fuse_compare_selects(func: &mut MFunction) {
             rewritten.push(replacements.remove(&idx).unwrap_or_else(|| inst.clone()));
         }
         block.insts = rewritten;
-    }
-}
-
-#[inline]
-fn bmi2_available() -> bool {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        std::arch::is_x86_feature_detected!("bmi2")
-    }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    {
-        false
     }
 }
 
@@ -3749,7 +3737,7 @@ mod tests {
 
     #[test]
     fn folds_chunk_deposit_chain_to_pdep() {
-        if !bmi2_available() {
+        if !crate::backend::native::features::X86Features::detect().bmi2() {
             return;
         }
 
@@ -3820,7 +3808,7 @@ mod tests {
 
     #[test]
     fn folds_chunk_extract_chain_to_pext() {
-        if !bmi2_available() {
+        if !crate::backend::native::features::X86Features::detect().bmi2() {
             return;
         }
 

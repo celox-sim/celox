@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::*;
 use crate::{HashMap, HashSet};
 
@@ -112,7 +113,12 @@ impl RegFile {
         self.vreg_to_preg.keys().copied()
     }
 
-    fn verify_instruction(&self, inst: &MInst, assignment: &AssignmentMap) {
+    fn verify_instruction(
+        &self,
+        inst: &MInst,
+        assignment: &AssignmentMap,
+        shift_encoding: VariableShiftEncoding,
+    ) {
         for (&vreg, &preg) in &self.vreg_to_preg {
             assert_eq!(
                 self.get_vreg(preg),
@@ -127,7 +133,7 @@ impl RegFile {
         }
 
         let uses = inst.uses();
-        let constraints = use_constraints(inst);
+        let constraints = use_constraints(inst, shift_encoding);
         assert_eq!(
             uses.len(),
             constraints.len(),
@@ -863,7 +869,7 @@ fn process_block(
         let mut uses: Vec<VReg> = inst.uses().into_iter().collect();
         let edge_sources = edge_phi_sources(func, block.id, inst);
         let def = inst.def();
-        let mut constraints = use_constraints(inst);
+        let mut constraints = use_constraints(inst, func.target_features.variable_shift_encoding());
         constraints.resize(uses.len(), RegConstraint::Any);
         for use_vreg in &mut uses {
             if let Some(&alias) = reload_alias.get(use_vreg) {
@@ -1249,7 +1255,11 @@ fn process_block(
         }
 
         if cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some() {
-            rf.verify_instruction(&rewritten_inst, result);
+            rf.verify_instruction(
+                &rewritten_inst,
+                result,
+                func.target_features.variable_shift_encoding(),
+            );
         }
 
         // Emit instruction

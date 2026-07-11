@@ -47,13 +47,21 @@ impl ParallelCopy {
 
 /// A dependency-ordered lowering step for one edge's parallel assignment.
 ///
-/// `SaveTemporary`/`RestoreTemporary` delimit one cycle at a time.  While the
-/// temporary is live, it occupies one qword below the ordinary stack frame.
+/// Register-only cycles use `SwapRegisters`.  For cycles involving a stack
+/// location, `SaveTemporary`/`RestoreTemporary` delimit one cycle at a time;
+/// while that temporary is live, it occupies one qword below the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParallelCopyOperation {
     Move {
         destination: ParallelCopyDestination,
         source: ParallelCopySource,
+    },
+    /// Exchange two allocated registers.  A register-only cycle of length K
+    /// is lowered to K-1 exchanges, without borrowing a register or touching
+    /// the stack.
+    SwapRegisters {
+        left: PhysReg,
+        right: PhysReg,
     },
     SaveTemporary(ParallelCopyDestination),
     RestoreTemporary(ParallelCopyDestination),
@@ -63,7 +71,9 @@ pub(crate) enum ParallelCopyOperation {
 pub(crate) struct ParallelCopyWork {
     pub effective_copies: usize,
     pub direct_moves: usize,
+    pub register_swaps: usize,
     pub cycle_breaks: usize,
+    pub temporary_cycle_breaks: usize,
     pub ready_queue_pops: usize,
     pub dependency_releases: usize,
 }
@@ -96,7 +106,9 @@ pub(crate) struct SsaDestructionStats {
     pub effective_copies: usize,
     pub identity_only_edges: usize,
     pub direct_moves: usize,
+    pub register_swaps: usize,
     pub cycle_breaks: usize,
+    pub temporary_cycle_breaks: usize,
     pub ready_queue_pops: usize,
     pub dependency_releases: usize,
     pub max_effective_copies_per_edge: usize,
@@ -406,7 +418,9 @@ impl SsaDestructionPlan {
             stats.identity_rows += edge.rows.len() - edge.work.effective_copies;
             stats.identity_only_edges += usize::from(!edge.has_effective_copies());
             stats.direct_moves += edge.work.direct_moves;
+            stats.register_swaps += edge.work.register_swaps;
             stats.cycle_breaks += edge.work.cycle_breaks;
+            stats.temporary_cycle_breaks += edge.work.temporary_cycle_breaks;
             stats.ready_queue_pops += edge.work.ready_queue_pops;
             stats.dependency_releases += edge.work.dependency_releases;
             stats.max_effective_copies_per_edge = stats
@@ -541,6 +555,43 @@ fn source_as_destination(source: ParallelCopySource) -> Option<ParallelCopyDesti
         ParallelCopySource::Register(register) => Some(ParallelCopyDestination::Register(register)),
         ParallelCopySource::Stack(slot) => Some(ParallelCopyDestination::Stack(slot)),
         ParallelCopySource::Immediate(_) => None,
+    }
+}
+
+/// Return a register-only cycle starting at `start`, together with the
+/// exchanges which realize its parallel assignment.  For
+/// `A <- B, B <- C, C <- A`, the result is `xchg A, B; xchg B, C`.
+fn register_cycle(
+    copies: &[PendingCopy],
+    destination_index: &BTreeMap<ParallelCopyDestination, usize>,
+    start: usize,
+) -> Option<(Vec<usize>, Vec<(PhysReg, PhysReg)>)> {
+    let ParallelCopyDestination::Register(start_register) = copies.get(start)?.destination else {
+        return None;
+    };
+    let mut current = start_register;
+    let mut members = Vec::new();
+    let mut swaps = Vec::new();
+    let mut visited = BTreeSet::new();
+    loop {
+        if !visited.insert(current) {
+            return None;
+        }
+        let destination = ParallelCopyDestination::Register(current);
+        let &index = destination_index.get(&destination)?;
+        let copy = copies.get(index)?;
+        if !copy.pending {
+            return None;
+        }
+        let PendingSource::Value(ParallelCopySource::Register(source)) = copy.source else {
+            return None;
+        };
+        members.push(index);
+        if source == start_register {
+            return (members.len() >= 2).then_some((members, swaps));
+        }
+        swaps.push((current, source));
+        current = source;
     }
 }
 
@@ -709,6 +760,26 @@ fn resolve_parallel_copies(
             .edge(predecessor, successor));
         };
         cycle_search_start = cycle + 1;
+
+        // A pure register permutation needs no temporary.  Decomposing each
+        // cycle into transpositions is both the standard Perm lowering and a
+        // strict improvement over the old push/move/pop sequence.
+        if let Some((members, swaps)) = register_cycle(&copies, &destination_index, cycle) {
+            for (left, right) in swaps.iter().copied() {
+                operations.push(ParallelCopyOperation::SwapRegisters { left, right });
+            }
+            for &member in &members {
+                readers.remove(&copies[member].destination);
+                copies[member].pending = false;
+                queued[member] = false;
+            }
+            remaining -= members.len();
+            work.register_swaps += swaps.len();
+            work.cycle_breaks += 1;
+            work.dependency_releases += members.len();
+            continue;
+        }
+
         let saved = copies[cycle].destination;
         let saved_readers = readers.remove(&saved).unwrap_or_default();
         if saved_readers.len() != 1 {
@@ -740,6 +811,7 @@ fn resolve_parallel_copies(
         copies[reader].source = PendingSource::Temporary;
         operations.push(ParallelCopyOperation::SaveTemporary(saved));
         work.cycle_breaks += 1;
+        work.temporary_cycle_breaks += 1;
         work.dependency_releases += 1;
         temporary_live = true;
         if !queued[cycle] {
@@ -776,6 +848,7 @@ fn verify_stack_assumptions(
     let mut temporary_live = false;
     for operation in &edge.operations {
         match *operation {
+            ParallelCopyOperation::SwapRegisters { .. } => {}
             ParallelCopyOperation::SaveTemporary(location) => {
                 if temporary_live {
                     return Err(SsaDestructionError::new(
@@ -920,47 +993,45 @@ mod tests {
     }
 
     #[test]
-    fn resolver_breaks_two_and_three_cycles_once() {
-        for rows in [
-            vec![
-                register_copy(2, 0, PhysReg::RAX, PhysReg::RDX),
-                register_copy(3, 1, PhysReg::RDX, PhysReg::RAX),
-            ],
-            vec![
-                register_copy(3, 0, PhysReg::RAX, PhysReg::RDX),
-                register_copy(4, 1, PhysReg::RDX, PhysReg::RSI),
-                register_copy(5, 2, PhysReg::RSI, PhysReg::RAX),
-            ],
+    fn resolver_lowers_register_cycles_to_k_minus_one_swaps() {
+        for (rows, expected_swaps) in [
+            (
+                vec![
+                    register_copy(2, 0, PhysReg::RAX, PhysReg::RDX),
+                    register_copy(3, 1, PhysReg::RDX, PhysReg::RAX),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    register_copy(3, 0, PhysReg::RAX, PhysReg::RDX),
+                    register_copy(4, 1, PhysReg::RDX, PhysReg::RSI),
+                    register_copy(5, 2, PhysReg::RSI, PhysReg::RAX),
+                ],
+                2,
+            ),
         ] {
             let (operations, work) =
                 resolve_parallel_copies(BlockId(0), BlockId(1), &rows).unwrap();
             assert_eq!(work.cycle_breaks, 1, "{operations:?}");
+            assert_eq!(work.temporary_cycle_breaks, 0, "{operations:?}");
+            assert_eq!(work.register_swaps, expected_swaps, "{operations:?}");
             assert_eq!(
                 operations
                     .iter()
                     .filter(|operation| matches!(
                         operation,
-                        ParallelCopyOperation::SaveTemporary(_)
+                        ParallelCopyOperation::SwapRegisters { .. }
                     ))
                     .count(),
-                1
+                expected_swaps
             );
-            assert_eq!(
-                operations
-                    .iter()
-                    .filter(|operation| matches!(
-                        operation,
-                        ParallelCopyOperation::RestoreTemporary(_)
-                    ))
-                    .count(),
-                1
-            );
-            assert_eq!(operations.len(), rows.len() + 1);
+            assert_eq!(operations.len(), rows.len() - 1);
         }
     }
 
     #[test]
-    fn resolver_drains_cycle_fanout_before_saving_one_temporary() {
+    fn resolver_drains_cycle_fanout_before_register_swap() {
         let rows = vec![
             register_copy(3, 0, PhysReg::RAX, PhysReg::RDX),
             register_copy(4, 1, PhysReg::RDX, PhysReg::RAX),
@@ -977,6 +1048,8 @@ mod tests {
             })
         );
         assert_eq!(work.cycle_breaks, 1);
+        assert_eq!(work.register_swaps, 1);
+        assert_eq!(work.temporary_cycle_breaks, 0);
         assert_eq!(work.effective_copies, 3);
     }
 
@@ -1334,29 +1407,25 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn register_cycle_executes_with_exactly_one_temporary() {
+    fn register_cycle_executes_with_one_exchange_and_no_stack_temporary() {
         use iced_x86::Mnemonic;
 
         let (mnemonics, work, values) = execute_register_parallel_copy(PhysReg::RAX, PhysReg::RDX);
 
         assert_eq!(values, [11, 22]);
         assert_eq!(work.cycle_breaks, 1);
+        assert_eq!(work.register_swaps, 1);
+        assert_eq!(work.temporary_cycle_breaks, 0);
         assert_eq!(
             mnemonics
                 .iter()
-                .filter(|mnemonic| **mnemonic == Mnemonic::Push)
+                .filter(|mnemonic| **mnemonic == Mnemonic::Xchg)
                 .count(),
             1,
             "{mnemonics:?}"
         );
-        assert_eq!(
-            mnemonics
-                .iter()
-                .filter(|mnemonic| **mnemonic == Mnemonic::Pop)
-                .count(),
-            1,
-            "{mnemonics:?}"
-        );
+        assert!(!mnemonics.contains(&Mnemonic::Push), "{mnemonics:?}");
+        assert!(!mnemonics.contains(&Mnemonic::Pop), "{mnemonics:?}");
     }
 
     #[cfg(target_arch = "x86_64")]

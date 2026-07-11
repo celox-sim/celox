@@ -69,7 +69,10 @@ pub(super) fn verify(
             let fixed = inst
                 .uses()
                 .into_iter()
-                .zip(use_constraints(inst))
+                .zip(use_constraints(
+                    inst,
+                    func.target_features.variable_shift_encoding(),
+                ))
                 .filter_map(|(value, constraint)| {
                     matches!(constraint, RegConstraint::Fixed(_)).then_some(value)
                 })

@@ -89,7 +89,7 @@ pub(super) fn verify(
             live_before.extend(inst.uses());
             check_unique(block.id, index, &live_before, &locally_resident, assignment)?;
 
-            let constraints = use_constraints(inst);
+            let constraints = use_constraints(inst, func.target_features.variable_shift_encoding());
             for (used, constraint) in inst.uses().into_iter().zip(constraints) {
                 if let RegConstraint::Fixed(required) = constraint {
                     let actual = assignment.get(used);
@@ -220,5 +220,68 @@ fn error(block: BlockId, instruction: Option<usize>, message: String) -> Allocat
         block,
         instruction,
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::native::features::X86Features;
+    use crate::backend::native::mir::{BaseReg, MBlock, MInst, OpSize, SpillDesc, VRegAllocator};
+
+    fn shift_function(bmi2: bool) -> MFunction {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let count = vregs.alloc();
+        let result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        func.target_features = X86Features::for_test(bmi2);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 8 });
+        block.push(MInst::LoadImm {
+            dst: count,
+            value: 1,
+        });
+        block.push(MInst::Shl {
+            dst: result,
+            lhs,
+            rhs: count,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: result,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        func
+    }
+
+    fn shift_assignment(count: PhysReg) -> AssignmentMap {
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::RAX);
+        assignment.set(VReg(1), count);
+        // The lhs dies at the shift, so the result may reuse its register.
+        assignment.set(VReg(2), PhysReg::RAX);
+        assignment
+    }
+
+    #[test]
+    fn bmi2_shift_accepts_a_count_outside_rcx() {
+        let func = shift_function(true);
+        let analysis = super::super::analysis::analyze(&func);
+
+        verify(&func, &analysis, &shift_assignment(PhysReg::RDX)).unwrap();
+    }
+
+    #[test]
+    fn legacy_shift_requires_rcx_for_the_count() {
+        let func = shift_function(false);
+        let analysis = super::super::analysis::analyze(&func);
+
+        let error = verify(&func, &analysis, &shift_assignment(PhysReg::RDX)).unwrap_err();
+        assert!(error.message.contains("requires rcx"), "{error}");
+        verify(&func, &analysis, &shift_assignment(PhysReg::RCX)).unwrap();
     }
 }

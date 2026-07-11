@@ -406,7 +406,10 @@ fn required_colors(func: &MFunction) -> Result<Vec<Option<PhysReg>>, ColorError>
             if !is_reg_shift(inst) {
                 continue;
             }
-            for (value, constraint) in inst.uses().into_iter().zip(use_constraints(inst)) {
+            for (value, constraint) in inst.uses().into_iter().zip(use_constraints(
+                inst,
+                func.target_features.variable_shift_encoding(),
+            )) {
                 let RegConstraint::Fixed(register) = constraint else {
                     continue;
                 };
@@ -452,7 +455,10 @@ fn forbidden_colors(
             let uses = inst.uses();
             let definition = inst.def();
             if is_reg_shift(inst) {
-                for (fixed, constraint) in uses.iter().copied().zip(use_constraints(inst)) {
+                for (fixed, constraint) in uses.iter().copied().zip(use_constraints(
+                    inst,
+                    func.target_features.variable_shift_encoding(),
+                )) {
                     let RegConstraint::Fixed(register) = constraint else {
                         continue;
                     };
@@ -791,6 +797,7 @@ fn register_bit(register: PhysReg) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::native::features::X86Features;
     use crate::backend::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
 
     fn analyze_and_color(func: &mut MFunction) -> Result<ColoringResult, ColorError> {
@@ -882,6 +889,7 @@ mod tests {
         let shifted = vregs.alloc();
         let later = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        func.target_features = X86Features::for_test(false);
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::LoadImm { dst: lhs, value: 8 });
         block.push(MInst::LoadImm {
@@ -918,6 +926,7 @@ mod tests {
         let shifted = vregs.alloc();
         let result = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+        func.target_features = X86Features::for_test(false);
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::LoadImm {
             dst: left,

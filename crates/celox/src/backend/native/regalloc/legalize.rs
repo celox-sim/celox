@@ -220,11 +220,10 @@ impl PermModel {
             let live_after =
                 live_after_first_instruction(block, &analysis.exit_distances[block_index]);
             let mut fixed = HashMap::<VReg, PhysReg>::new();
-            for (value, constraint) in instruction
-                .uses()
-                .into_iter()
-                .zip(use_constraints(instruction))
-            {
+            for (value, constraint) in instruction.uses().into_iter().zip(use_constraints(
+                instruction,
+                func.target_features.variable_shift_encoding(),
+            )) {
                 let RegConstraint::Fixed(required) = constraint else {
                     continue;
                 };
@@ -353,7 +352,7 @@ impl PermModel {
                 ));
             };
             if clobbers(instruction).is_empty()
-                && !use_constraints(instruction)
+                && !use_constraints(instruction, func.target_features.variable_shift_encoding())
                     .into_iter()
                     .any(|constraint| matches!(constraint, RegConstraint::Fixed(_)))
             {
@@ -510,9 +509,10 @@ fn constraint_boundary_liveness(
         .iter()
         .enumerate()
         .map(|(block_index, block)| {
-            let boundaries = constraint_boundaries(block)
-                .into_iter()
-                .collect::<BTreeSet<_>>();
+            let boundaries =
+                constraint_boundaries(block, func.target_features.variable_shift_encoding())
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
             let mut points = HashMap::with_capacity(boundaries.len());
             let mut live = analysis.exit_distances[block_index]
                 .keys()
@@ -532,13 +532,16 @@ fn constraint_boundary_liveness(
         .collect()
 }
 
-fn constraint_boundaries(block: &MBlock) -> Vec<usize> {
+fn constraint_boundaries(
+    block: &MBlock,
+    shift_encoding: crate::backend::native::features::VariableShiftEncoding,
+) -> Vec<usize> {
     let mut result = BTreeSet::new();
     for (instruction, inst) in block.insts.iter().enumerate() {
         if !clobbers(inst).is_empty() {
             result.insert(instruction);
         }
-        if use_constraints(inst)
+        if use_constraints(inst, shift_encoding)
             .into_iter()
             .any(|constraint| matches!(constraint, RegConstraint::Fixed(_)))
         {
@@ -574,7 +577,8 @@ fn split_constraint_blocks(
     let mut boundary_blocks = Vec::new();
 
     for (block_index, block) in original.into_iter().enumerate() {
-        let boundaries = constraint_boundaries(&block);
+        let boundaries =
+            constraint_boundaries(&block, func.target_features.variable_shift_encoding());
         if boundaries.is_empty() {
             final_block.insert(block.id, block.id);
             rewritten.push((block, true));
@@ -900,7 +904,12 @@ fn perm_logical(logical_for_vreg: &[VReg], value: VReg, block: BlockId) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::native::features::X86Features;
     use crate::backend::native::mir::{SpillDesc, VRegAllocator};
+
+    fn select_legacy_shifts(func: &mut MFunction) {
+        func.target_features = X86Features::for_test(false);
+    }
 
     #[test]
     fn perm_copy_reports_vreg_exhaustion() {
@@ -923,6 +932,7 @@ mod tests {
         let amount = vregs.alloc();
         let result = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        select_legacy_shifts(&mut func);
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::LoadImm { dst: lhs, value: 8 });
         block.push(MInst::LoadImm {
@@ -957,12 +967,45 @@ mod tests {
     }
 
     #[test]
+    fn bmi2_shift_does_not_materialize_a_perm_boundary() {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let amount = vregs.alloc();
+        let result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        func.target_features = X86Features::for_test(true);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 8 });
+        block.push(MInst::LoadImm {
+            dst: amount,
+            value: 1,
+        });
+        block.push(MInst::Shl {
+            dst: result,
+            lhs,
+            rhs: amount,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let original_vregs = func.vregs.count();
+
+        let initial = super::super::cfg::normalize(&mut func).unwrap();
+        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+
+        assert!(model.boundaries.is_empty());
+        assert_eq!(func.blocks.len(), 1);
+        assert_eq!(func.vregs.count(), original_vregs);
+        assert!(func.blocks[0].phis.is_empty());
+    }
+
+    #[test]
     fn incomplete_perm_model_is_a_structured_error() {
         let mut vregs = VRegAllocator::new();
         let lhs = vregs.alloc();
         let amount = vregs.alloc();
         let result = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        select_legacy_shifts(&mut func);
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::LoadImm { dst: lhs, value: 8 });
         block.push(MInst::LoadImm {
@@ -1036,6 +1079,7 @@ mod tests {
         let shifted = vregs.alloc();
         let observed = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        select_legacy_shifts(&mut func);
 
         let mut entry = MBlock::new(BlockId(0));
         entry.push(MInst::LoadImm {
@@ -1121,6 +1165,7 @@ mod tests {
         let shifted = vregs.alloc();
         let observed = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        select_legacy_shifts(&mut func);
 
         let mut entry = MBlock::new(BlockId(0));
         entry.push(MInst::LoadImm {
