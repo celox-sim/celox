@@ -32,12 +32,12 @@ where
 {
     /// Verify `arena` and compute one width for every node.
     pub fn verify(arena: &'arena SLTNodeArena<A>) -> Result<Self, SLTNodeFactsError> {
-        let node_count = arena.nodes.len();
+        let node_count = arena.len();
 
         // An arena is a canonical append-only DAG: a node can only reference
         // operands that were already allocated.  Check every untrusted ID
         // without dereferencing it before building any fact table.
-        for (node_index, node) in arena.nodes.iter().enumerate() {
+        for (node_index, node) in arena.iter().enumerate() {
             let owner = NodeId(node_index);
             try_for_each_child(node, |child| {
                 if child.0 >= node_count {
@@ -84,7 +84,7 @@ where
                 format!("cannot reserve lowerability for {node_count} nodes: {error}"),
             )
         })?;
-        for (node_index, node) in arena.nodes.iter().enumerate() {
+        for (node_index, node) in arena.iter().enumerate() {
             let node_id = NodeId(node_index);
             let width = compute_width(node_id, node, &widths)?;
             let mut node_lowerable = width != 0
@@ -117,7 +117,7 @@ where
     /// Return the verified width of `node`, or `None` when the ID does not
     /// belong to the arena from which this table was built.
     pub fn width(&self, node: NodeId) -> Option<usize> {
-        self.arena.nodes.get(node.0)?;
+        self.arena.get_checked(node)?;
         self.widths.get(node.0).copied()
     }
 
@@ -164,7 +164,7 @@ where
     /// storage; canonical child IDs strictly decrease at every step.
     fn lowerability_blocker(&self, mut node_id: NodeId) -> NodeId {
         loop {
-            let Some(node) = self.arena.nodes.get(node_id.0) else {
+            let Some(node) = self.arena.get_checked(node_id) else {
                 return node_id;
             };
             let direct_blocker = self.widths.get(node_id.0).copied() == Some(0)
@@ -598,10 +598,7 @@ mod tests {
     use crate::logic_tree::comb::node::{SLTForEffect, SLTForUpdate, SLTStepOp};
 
     fn arena(nodes: Vec<SLTNode<u32>>) -> SLTNodeArena<u32> {
-        SLTNodeArena {
-            nodes,
-            cache: crate::HashMap::default(),
-        }
+        SLTNodeArena::from_nodes_unchecked(nodes)
     }
 
     fn constant(width: usize) -> SLTNode<u32> {

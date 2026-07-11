@@ -149,7 +149,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
 
     // Exclude variables that are read via dynamic index anywhere in the arena,
     // because inlining them would change the value seen by the dynamic load.
-    for node in &arena.nodes {
+    for node in arena.iter() {
         if let SLTNode::Input {
             variable, index, ..
         } = node

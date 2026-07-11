@@ -4,6 +4,7 @@ mod lower;
 pub mod range_store;
 pub use comb::SLTLoopBound;
 pub use comb::SLTNode;
+pub(crate) use comb::SLTNodeArenaEditError;
 pub(crate) use comb::coerce_node_width;
 pub use comb::parse_comb;
 pub use comb::{LogicPath, LogicPathTarget};

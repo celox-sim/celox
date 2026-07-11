@@ -883,7 +883,7 @@ impl SLTToSIRLowerer {
         materialized: &crate::HashMap<NodeId, RegisterId>,
         honor_materialized: bool,
     ) {
-        let node_count = arena.nodes.len();
+        let node_count = arena.len();
         let mut fanout = vec![0usize; node_count];
         let mut initially_materialized = vec![false; node_count];
         let mut visited = crate::HashSet::default();
@@ -944,21 +944,15 @@ impl SLTToSIRLowerer {
 
     fn prepare_cost_cache<A: Hash + Eq + Clone>(&self, arena: &SLTNodeArena<A>) {
         let mut cache = self.cost_cache.borrow_mut();
-        if cache.tree_costs.len() < arena.nodes.len() {
-            cache.tree_costs.resize(arena.nodes.len(), None);
-            cache.contains_div_rem.resize(arena.nodes.len(), None);
-            cache.fanout.resize(arena.nodes.len(), 0);
-            cache
-                .initially_materialized
-                .resize(arena.nodes.len(), false);
-            cache.owned_costs.resize(arena.nodes.len(), None);
-            cache
-                .owned_slice_lower_costs
-                .resize(arena.nodes.len(), None);
-            cache
-                .contains_shared_nontrivial
-                .resize(arena.nodes.len(), None);
-            cache.is_speculatable_pure.resize(arena.nodes.len(), None);
+        if cache.tree_costs.len() < arena.len() {
+            cache.tree_costs.resize(arena.len(), None);
+            cache.contains_div_rem.resize(arena.len(), None);
+            cache.fanout.resize(arena.len(), 0);
+            cache.initially_materialized.resize(arena.len(), false);
+            cache.owned_costs.resize(arena.len(), None);
+            cache.owned_slice_lower_costs.resize(arena.len(), None);
+            cache.contains_shared_nontrivial.resize(arena.len(), None);
+            cache.is_speculatable_pure.resize(arena.len(), None);
         }
     }
 
@@ -2842,7 +2836,7 @@ mod tests {
         let mut builder = SIRBuilder::new();
         lowerer.lower(&mut builder, value, &arena, &mut crate::HashMap::default());
         let visits = lowerer.analysis_node_visits();
-        let node_count = arena.nodes.len();
+        let node_count = arena.len();
         finish_lowering(builder);
 
         assert!(
@@ -2878,7 +2872,7 @@ mod tests {
 
         let mut large_cache = crate::HashMap::default();
         for index in 0..20_000usize {
-            large_cache.insert(NodeId(arena.nodes.len() + index), RegisterId(index));
+            large_cache.insert(NodeId(arena.len() + index), RegisterId(index));
         }
         let cached_lowerer = SLTToSIRLowerer::new(false);
         let mut cached_builder = SIRBuilder::new();

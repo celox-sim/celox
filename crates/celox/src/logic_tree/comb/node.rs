@@ -1,7 +1,9 @@
 use std::{fmt, hash::Hash};
 
 use num_bigint::BigUint;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+
+use super::node_facts::SLTNodeFacts;
 
 use crate::{
     HashMap,
@@ -11,12 +13,68 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
+/// Failure from a narrowly scoped mutation of a construction arena.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SLTNodeArenaEditError {
+    RangeOutOfBounds {
+        start: usize,
+        end: usize,
+        node_count: usize,
+    },
+    SiteIdOverflow {
+        site_id: u32,
+        offset: u32,
+    },
+    StorageUnavailable {
+        effect_count: usize,
+    },
+    EffectCountOverflow,
+    EditPlanMismatch,
+}
+
+impl fmt::Display for SLTNodeArenaEditError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RangeOutOfBounds {
+                start,
+                end,
+                node_count,
+            } => write!(
+                formatter,
+                "SLT edit range {start}..{end} is outside arena length {node_count}"
+            ),
+            Self::SiteIdOverflow { site_id, offset } => write!(
+                formatter,
+                "ForFold runtime-event site {site_id} plus offset {offset} overflows u32"
+            ),
+            Self::StorageUnavailable { effect_count } => write!(
+                formatter,
+                "cannot reserve {effect_count} ForFold runtime-event edits"
+            ),
+            Self::EffectCountOverflow => {
+                write!(
+                    formatter,
+                    "ForFold runtime-event effect count overflows usize"
+                )
+            }
+            Self::EditPlanMismatch => {
+                write!(
+                    formatter,
+                    "ForFold runtime-event edit plan no longer matches the arena"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SLTNodeArenaEditError {}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(bound(serialize = "A: Serialize + std::hash::Hash + Eq + Clone"))]
 pub struct SLTNodeArena<A: Hash + Eq + Clone> {
-    pub nodes: Vec<SLTNode<A>>,
+    nodes: Vec<SLTNode<A>>,
     #[serde(skip)]
-    pub cache: crate::HashMap<SLTNode<A>, NodeId>,
+    cache: crate::HashMap<SLTNode<A>, NodeId>,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +96,7 @@ where
             nodes: wire.nodes,
             cache: crate::HashMap::default(),
         };
+        SLTNodeFacts::verify(&arena).map_err(D::Error::custom)?;
         arena.rebuild_cache();
         Ok(arena)
     }
@@ -72,11 +131,113 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         id
     }
 
+    /// Return the number of nodes in stable [`NodeId`] order.
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Return whether the arena contains no nodes.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Iterate over nodes in stable [`NodeId`] order.
+    pub fn iter(&self) -> std::slice::Iter<'_, SLTNode<A>> {
+        self.nodes.iter()
+    }
+
+    /// Look up a node without trusting that an externally supplied ID exists.
+    pub fn get_checked(&self, id: NodeId) -> Option<&SLTNode<A>> {
+        self.nodes.get(id.0)
+    }
+
+    /// Rewrite only the runtime-event identity carried by `ForFold` effects.
+    ///
+    /// The semantic interning cache is rebuilt internally whenever the rewrite
+    /// changes a node, so callers cannot leave node storage and cache identity
+    /// out of sync. `None` leaves an effect unchanged.
+    pub(crate) fn remap_for_fold_effect_sites(
+        &mut self,
+        range: std::ops::Range<usize>,
+        mut remap: impl FnMut(
+            u32,
+            Option<i64>,
+        ) -> Result<Option<(u32, Option<i64>)>, SLTNodeArenaEditError>,
+    ) -> Result<(), SLTNodeArenaEditError> {
+        let node_count = self.nodes.len();
+        let start = range.start;
+        let end = range.end;
+        let Some(nodes) = self.nodes.get(range.clone()) else {
+            return Err(SLTNodeArenaEditError::RangeOutOfBounds {
+                start,
+                end,
+                node_count,
+            });
+        };
+        let effect_count = nodes.iter().try_fold(0usize, |count, node| {
+            let effects = match node {
+                SLTNode::ForFold { effects, .. } => effects.len(),
+                _ => 0,
+            };
+            count.checked_add(effects)
+        });
+        let Some(effect_count) = effect_count else {
+            return Err(SLTNodeArenaEditError::EffectCountOverflow);
+        };
+        let mut edits = Vec::new();
+        edits
+            .try_reserve_exact(effect_count)
+            .map_err(|_| SLTNodeArenaEditError::StorageUnavailable { effect_count })?;
+        for (node_index, node) in nodes.iter().enumerate() {
+            let SLTNode::ForFold { effects, .. } = node else {
+                continue;
+            };
+            for (effect_index, effect) in effects.iter().enumerate() {
+                let Some((site_id, fatal_error_code)) =
+                    remap(effect.site_id, effect.fatal_error_code)?
+                else {
+                    continue;
+                };
+                if effect.site_id != site_id || effect.fatal_error_code != fatal_error_code {
+                    edits.push((node_index, effect_index, site_id, fatal_error_code));
+                }
+            }
+        }
+        if edits.is_empty() {
+            return Ok(());
+        }
+        let Some(nodes) = self.nodes.get_mut(range) else {
+            return Err(SLTNodeArenaEditError::RangeOutOfBounds {
+                start,
+                end,
+                node_count,
+            });
+        };
+        if edits.iter().any(|&(node_index, effect_index, _, _)| {
+            !matches!(
+                nodes.get(node_index),
+                Some(SLTNode::ForFold { effects, .. }) if effect_index < effects.len()
+            )
+        }) {
+            return Err(SLTNodeArenaEditError::EditPlanMismatch);
+        }
+        for (node_index, effect_index, site_id, fatal_error_code) in edits {
+            if let Some(SLTNode::ForFold { effects, .. }) = nodes.get_mut(node_index)
+                && let Some(effect) = effects.get_mut(effect_index)
+            {
+                effect.site_id = site_id;
+                effect.fatal_error_code = fatal_error_code;
+            }
+        }
+        self.rebuild_cache();
+        Ok(())
+    }
+
     /// Rebuilds the derived interning cache from the persistent node list.
     ///
     /// If the list already contains duplicate nodes, the smallest (and therefore
     /// first) [`NodeId`] is retained as the canonical identity.
-    pub fn rebuild_cache(&mut self) {
+    fn rebuild_cache(&mut self) {
         self.cache.clear();
         for (idx, node) in self.nodes.iter().cloned().enumerate() {
             self.cache.entry(node).or_insert(NodeId(idx));
@@ -89,6 +250,18 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
 
     pub fn display(&self, id: NodeId) -> NodeDisplay<'_, A> {
         NodeDisplay { arena: self, id }
+    }
+
+    /// Construct malformed arenas for verifier tests without exposing raw node
+    /// storage to production code.
+    #[cfg(test)]
+    pub(crate) fn from_nodes_unchecked(nodes: Vec<SLTNode<A>>) -> Self {
+        let mut arena = Self {
+            nodes,
+            cache: crate::HashMap::default(),
+        };
+        arena.rebuild_cache();
+        arena
     }
 }
 
@@ -800,7 +973,10 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeId, SLTNode, SLTNodeArena};
+    use super::{
+        NodeId, SLTForEffect, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
+    };
+    use crate::ir::{BinaryOp, VarAtomBase};
     use num_bigint::BigUint;
 
     fn constant(value: u8) -> SLTNode<u32> {
@@ -810,34 +986,147 @@ mod tests {
     #[test]
     fn rebuild_cache_uses_first_duplicate_node_id() {
         let duplicate = constant(7);
-        let mut arena = SLTNodeArena {
-            nodes: vec![constant(1), duplicate.clone(), duplicate.clone()],
-            cache: crate::HashMap::default(),
-        };
+        let mut arena = SLTNodeArena::from_nodes_unchecked(vec![
+            constant(1),
+            duplicate.clone(),
+            duplicate.clone(),
+        ]);
         arena.cache.insert(duplicate.clone(), NodeId(2));
 
         arena.rebuild_cache();
 
         assert_eq!(arena.cache.get(&duplicate), Some(&NodeId(1)));
-        let node_count = arena.nodes.len();
+        let node_count = arena.len();
         assert_eq!(arena.alloc(duplicate), NodeId(1));
-        assert_eq!(arena.nodes.len(), node_count);
+        assert_eq!(arena.len(), node_count);
     }
 
     #[test]
     fn json_roundtrip_rebuilds_cache_with_minimum_node_id() {
         let duplicate = constant(9);
-        let arena = SLTNodeArena {
-            nodes: vec![constant(2), duplicate.clone(), duplicate.clone()],
-            cache: crate::HashMap::default(),
-        };
+        let arena = SLTNodeArena::from_nodes_unchecked(vec![
+            constant(2),
+            duplicate.clone(),
+            duplicate.clone(),
+        ]);
 
         let json = serde_json::to_string(&arena).unwrap();
         let mut decoded: SLTNodeArena<u32> = serde_json::from_str(&json).unwrap();
-        let node_count = decoded.nodes.len();
+        let node_count = decoded.len();
 
         assert_eq!(decoded.alloc(duplicate), NodeId(1));
-        assert_eq!(decoded.nodes.len(), node_count);
+        assert_eq!(decoded.len(), node_count);
+    }
+
+    #[test]
+    fn json_deserialization_rejects_noncanonical_graphs() {
+        let arena = SLTNodeArena::from_nodes_unchecked(vec![
+            SLTNode::Binary(NodeId(1), BinaryOp::Add, NodeId(1)),
+            constant(1),
+        ]);
+        let json = serde_json::to_string(&arena).unwrap();
+
+        let error = serde_json::from_str::<SLTNodeArena<u32>>(&json).unwrap_err();
+
+        assert!(error.to_string().contains("GRAPH.CHILD_PRECEDES_OWNER"));
+    }
+
+    #[test]
+    fn for_fold_effect_remap_updates_only_the_requested_range() {
+        let mut arena = SLTNodeArena::new();
+        let condition = arena.alloc(constant(1));
+        let first_fold = arena.alloc(SLTNode::ForFold {
+            loop_var: 1,
+            loop_width: 8,
+            loop_signed: false,
+            start: SLTLoopBound::Const(0),
+            end: SLTLoopBound::Const(1),
+            inclusive: false,
+            step: 1,
+            step_op: SLTStepOp::Add,
+            reverse: false,
+            result: VarAtomBase::new(2, 0, 7),
+            initials: Vec::new(),
+            updates: Vec::new(),
+            effects: vec![SLTForEffect {
+                site_id: 3,
+                guard: None,
+                emit_on_true: true,
+                args: Vec::new(),
+                fatal_error_code: Some(3),
+            }],
+            continue_cond: condition,
+        });
+        let second_fold = arena.alloc(SLTNode::ForFold {
+            loop_var: 1,
+            loop_width: 8,
+            loop_signed: false,
+            start: SLTLoopBound::Const(0),
+            end: SLTLoopBound::Const(1),
+            inclusive: false,
+            step: 1,
+            step_op: SLTStepOp::Add,
+            reverse: false,
+            result: VarAtomBase::new(2, 0, 7),
+            initials: Vec::new(),
+            updates: Vec::new(),
+            effects: vec![SLTForEffect {
+                site_id: 4,
+                guard: None,
+                emit_on_true: true,
+                args: Vec::new(),
+                fatal_error_code: None,
+            }],
+            continue_cond: condition,
+        });
+
+        arena
+            .remap_for_fold_effect_sites(first_fold.0..second_fold.0, |site, fatal| {
+                Ok(Some((site + 10, fatal.map(|_| 99))))
+            })
+            .expect("valid remap range must succeed");
+
+        let SLTNode::ForFold { effects, .. } = arena.get(first_fold) else {
+            panic!("expected first ForFold");
+        };
+        assert_eq!(effects[0].site_id, 13);
+        assert_eq!(effects[0].fatal_error_code, Some(99));
+        let remapped_first = arena.get(first_fold).clone();
+        assert_eq!(arena.alloc(remapped_first), first_fold);
+        let SLTNode::ForFold { effects, .. } = arena.get(second_fold) else {
+            panic!("expected second ForFold");
+        };
+        assert_eq!(effects[0].site_id, 4);
+        assert_eq!(effects[0].fatal_error_code, None);
+
+        let error = arena
+            .remap_for_fold_effect_sites(first_fold.0..second_fold.0 + 1, |site, fatal| {
+                if site == 4 {
+                    Err(SLTNodeArenaEditError::SiteIdOverflow {
+                        site_id: site,
+                        offset: u32::MAX,
+                    })
+                } else {
+                    Ok(Some((site + 1, fatal)))
+                }
+            })
+            .expect_err("failed remap must be reported");
+        assert!(matches!(
+            error,
+            SLTNodeArenaEditError::SiteIdOverflow { .. }
+        ));
+        let SLTNode::ForFold { effects, .. } = arena.get(first_fold) else {
+            panic!("expected first ForFold");
+        };
+        assert_eq!(effects[0].site_id, 13, "failed remap must be atomic");
+
+        let error = arena
+            .remap_for_fold_effect_sites(0..arena.len() + 1, |site, fatal| Ok(Some((site, fatal))))
+            .expect_err("out-of-range remap must fail");
+        assert!(matches!(
+            error,
+            SLTNodeArenaEditError::RangeOutOfBounds { .. }
+        ));
     }
 }
 

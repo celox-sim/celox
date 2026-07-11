@@ -12,25 +12,23 @@ fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     start: usize,
     runtime_event_site_map: &HashMap<u32, u32>,
-) {
-    let mut changed = false;
-    for node in arena.nodes.iter_mut().skip(start) {
-        let crate::logic_tree::SLTNode::ForFold { effects, .. } = node else {
-            continue;
-        };
-        for effect in effects {
-            if let Some(global_site) = runtime_event_site_map.get(&effect.site_id) {
-                effect.site_id = *global_site;
-                if effect.fatal_error_code.is_some() {
-                    effect.fatal_error_code = Some(*global_site as i64);
-                }
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        arena.rebuild_cache();
-    }
+) -> Result<(), ParserError> {
+    arena
+        .remap_for_fold_effect_sites(start..arena.len(), |site_id, fatal_error_code| {
+            Ok(runtime_event_site_map.get(&site_id).map(|&global_site| {
+                (
+                    global_site,
+                    fatal_error_code.map(|_| i64::from(global_site)),
+                )
+            }))
+        })
+        .map_err(|error| {
+            ParserError::illegal_context(
+                "ForFold runtime-event relocation",
+                error.to_string(),
+                None,
+            )
+        })
 }
 
 fn verify_slt_roots<A>(
@@ -105,7 +103,7 @@ where
         Ok(width)
     };
 
-    for (node_index, node) in arena.nodes.iter().enumerate() {
+    for (node_index, node) in arena.iter().enumerate() {
         let node_id = NodeId(node_index);
         match node {
             crate::logic_tree::SLTNode::Input {
@@ -940,7 +938,7 @@ pub(crate) fn flatten(
             trace_opts,
             &mut trace,
         )
-    );
+    )?;
     let ignored_loops = parse_ignored_loops(ignored_loops, &instance_modules, &modules, &expanded);
     let true_loops = parse_true_loops(true_loops, &instance_modules, &modules, &expanded);
 
@@ -2046,17 +2044,20 @@ fn relocate_units(
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     trace_opts: &crate::debug::TraceOptions,
     trace: &mut Option<&mut crate::debug::CompilationTrace>,
-) -> (
-    SLTNodeArena<AbsoluteAddr>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
-    Vec<crate::ir::CombObserver<AbsoluteAddr>>,
-    HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
-    Vec<crate::ir::RuntimeEventSite>,
-    i64,
-) {
+) -> Result<
+    (
+        SLTNodeArena<AbsoluteAddr>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
+        Vec<crate::ir::CombObserver<AbsoluteAddr>>,
+        HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+        Vec<crate::ir::RuntimeEventSite>,
+        i64,
+    ),
+    ParserError,
+> {
     let mut global_arena = SLTNodeArena::<AbsoluteAddr>::new();
     let mut eval_apply_ffs: HashMap<
         AbsoluteAddr,
@@ -2105,7 +2106,7 @@ fn relocate_units(
             runtime_event_sites.push(site.clone());
         }
 
-        let arena_start = global_arena.nodes.len();
+        let arena_start = global_arena.len();
         let mut relocated_module = flatting::flatting(
             sim_module,
             path,
@@ -2115,7 +2116,11 @@ fn relocate_units(
             trace_opts,
             trace.as_deref_mut(),
         );
-        remap_for_fold_runtime_event_sites(&mut global_arena, arena_start, &runtime_event_site_map);
+        remap_for_fold_runtime_event_sites(
+            &mut global_arena,
+            arena_start,
+            &runtime_event_site_map,
+        )?;
         for observer in &mut relocated_module.comb_observers {
             observer.site_id = runtime_event_site_map[&observer.site_id];
             observer.activation_group = runtime_event_site_map[&observer.activation_group];
@@ -2263,7 +2268,7 @@ fn relocate_units(
             }
         }
     }
-    (
+    Ok((
         global_arena,
         eval_apply_ffs,
         eval_only_ffs,
@@ -2273,7 +2278,7 @@ fn relocate_units(
         runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
-    )
+    ))
 }
 
 fn build_comb_observer_capture_paths(

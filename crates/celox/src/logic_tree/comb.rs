@@ -38,6 +38,7 @@ use expr::{eval_array_literal_expression, eval_function_body_return, merge_bound
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
 use state::{FunctionControlState, LoopControlState};
 
+pub(crate) use node::SLTNodeArenaEditError;
 pub use node::{
     NodeId, SLTForEffect, SLTForUpdate, SLTIndex, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
 };

@@ -340,7 +340,7 @@ fn verify_glue_block(
         Ok(width)
     };
 
-    for (node_index, node) in block.arena.nodes.iter().enumerate() {
+    for (node_index, node) in block.arena.iter().enumerate() {
         if let SLTNode::Input {
             variable, access, ..
         } = node
@@ -454,7 +454,7 @@ impl<'a> ModuleParser<'a> {
         &mut self,
         decl: &veryl_analyzer::ir::CombDeclaration,
     ) -> Result<(), ParserError> {
-        let arena_start = self.arena.nodes.len();
+        let arena_start = self.arena.len();
         let (paths, store, boundaries, mut observers, sites) =
             parse_comb(self.module, decl, &mut self.arena)?;
         let site_offset = self.comb_runtime_event_sites.len();
@@ -462,8 +462,8 @@ impl<'a> ModuleParser<'a> {
             observer.site_id += site_offset as u32;
             observer.activation_group = site_offset as u32;
         }
-        let arena_end = self.arena.nodes.len();
-        remap_for_effect_site_ids(&mut self.arena, arena_start..arena_end, site_offset as u32);
+        let arena_end = self.arena.len();
+        remap_for_effect_site_ids(&mut self.arena, arena_start..arena_end, site_offset as u32)?;
         self.store.extend(store);
         self.comb_blocks.extend(paths);
         self.comb_observers.extend(observers);
@@ -1091,8 +1091,8 @@ impl<'a> ModuleParser<'a> {
             observer.site_id += ff_site_count;
             observer.activation_group += ff_site_count;
         }
-        let arena_end = self.arena.nodes.len();
-        remap_for_effect_site_ids(&mut self.arena, 0..arena_end, ff_site_count);
+        let arena_end = self.arena.len();
+        remap_for_effect_site_ids(&mut self.arena, 0..arena_end, ff_site_count)?;
         let mut runtime_event_sites = self.ff_parser.runtime_event_sites().clone();
         runtime_event_sites.extend(self.comb_runtime_event_sites);
         let mut variable_widths = HashMap::default();
@@ -1254,22 +1254,20 @@ fn remap_for_effect_site_ids<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     range: std::ops::Range<usize>,
     offset: u32,
-) {
+) -> Result<(), ParserError> {
     if offset == 0 {
-        return;
+        return Ok(());
     }
-    let mut changed = false;
-    for node in &mut arena.nodes[range] {
-        if let SLTNode::ForFold { effects, .. } = node {
-            for effect in effects {
-                effect.site_id += offset;
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        arena.rebuild_cache();
-    }
+    arena
+        .remap_for_fold_effect_sites(range, |site_id, fatal_error_code| {
+            site_id
+                .checked_add(offset)
+                .map(|site_id| Some((site_id, fatal_error_code)))
+                .ok_or(crate::logic_tree::SLTNodeArenaEditError::SiteIdOverflow { site_id, offset })
+        })
+        .map_err(|error| {
+            ParserError::illegal_context("ForFold runtime-event remap", error.to_string(), None)
+        })
 }
 
 fn collect_glue_sources(
