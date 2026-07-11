@@ -2080,8 +2080,16 @@ index-tree scheme. Rotations mutate only construction indices after all
 semantic rows/capacity have been staged, and lookup/insertion takes worst-case
 `O(log nodes)` structural comparisons. The indices are dropped at freeze.
 Large concat/ForFold/input-index payloads therefore have one owned
-construction copy. Replay rebuilds the same canonical index transiently to
-reject noncanonical serialized ordinary duplicates.
+construction copy. Variants whose fixed descriptor would otherwise inherit a
+large `BigUint`/`Vec` union layout keep that one copy in a private, fallibly
+allocated, single-element out-of-line payload; the payload cannot be cloned or
+constructed through a wire/public proof API. On the supported 64-bit host the
+construction descriptor and one AVL link are each bounded to 32 bytes by
+layout tests. AVL absence uses `usize::MAX` only as a private construction
+sentinel: prospective insertion rejects that index before mutation, and the
+sentinel is neither a serialized ID nor an input-dependent node cap. Replay
+rebuilds the same canonical index transiently to reject noncanonical
+serialized ordinary duplicates.
 
 Every allocation validates that children already exist, computes width from
 the checked prefix with the same shared rule used by replay, and reserves all
