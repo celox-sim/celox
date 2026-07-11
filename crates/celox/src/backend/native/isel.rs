@@ -3868,8 +3868,8 @@ fn lower_instruction(
                     BinaryOp::And => Some(lc & rc),
                     BinaryOp::Or => Some(lc | rc),
                     BinaryOp::Xor => Some(lc ^ rc),
-                    BinaryOp::Shl => Some(lc.wrapping_shl(rc as u32)),
-                    BinaryOp::Shr => Some(lc.wrapping_shr(rc as u32)),
+                    BinaryOp::Shl => Some(if rc >= 64 { 0 } else { lc << rc }),
+                    BinaryOp::Shr => Some(if rc >= 64 { 0 } else { lc >> rc }),
                     _ => None,
                 };
                 if let Some(val) = result {
@@ -3996,14 +3996,22 @@ fn lower_instruction(
 
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
                     if let Some(&shift_amt) = ctx.consts.get(rhs) {
-                        block.push(MInst::ShrImm {
-                            dst: shifted,
-                            src: lhs_vreg,
-                            imm: shift_amt as u8,
-                        });
+                        if shift_amt < 64 {
+                            block.push(MInst::ShrImm {
+                                dst: shifted,
+                                src: lhs_vreg,
+                                imm: shift_amt as u8,
+                            });
+                        } else {
+                            block.push(MInst::LoadImm {
+                                dst: shifted,
+                                value: 0,
+                            });
+                        }
                         // Track known bits: shr reduces width
                         let lhs_bits = ctx.known_bits.get(&lhs_vreg).copied().unwrap_or(64);
-                        let shifted_bits = lhs_bits.saturating_sub(shift_amt as usize);
+                        let shifted_bits = lhs_bits
+                            .saturating_sub(usize::try_from(shift_amt).unwrap_or(usize::MAX));
                         ctx.known_bits.insert(shifted, shifted_bits);
                     } else {
                         let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
@@ -4022,7 +4030,8 @@ fn lower_instruction(
                         ctx.emit_mov(block, dst_vreg, shifted);
                     }
                     let lz = if let Some(&shift_amt) = ctx.consts.get(rhs) {
-                        low_zero_bits_reg(ctx, *lhs).saturating_sub(shift_amt as u32)
+                        low_zero_bits_reg(ctx, *lhs)
+                            .saturating_sub(u32::try_from(shift_amt).unwrap_or(u32::MAX))
                     } else {
                         0
                     };
@@ -4031,11 +4040,18 @@ fn lower_instruction(
                 BinaryOp::Shl => {
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
                     if let Some(&shift_amt) = ctx.consts.get(rhs) {
-                        block.push(MInst::ShlImm {
-                            dst: shifted,
-                            src: lhs_vreg,
-                            imm: shift_amt as u8,
-                        });
+                        if shift_amt < 64 {
+                            block.push(MInst::ShlImm {
+                                dst: shifted,
+                                src: lhs_vreg,
+                                imm: shift_amt as u8,
+                            });
+                        } else {
+                            block.push(MInst::LoadImm {
+                                dst: shifted,
+                                value: 0,
+                            });
+                        }
                     } else {
                         let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
                         ctx.emit_mov(block, rhs_copy, rhs_vreg);
@@ -4052,7 +4068,8 @@ fn lower_instruction(
                         ctx.emit_mov(block, dst_vreg, shifted);
                     }
                     let lz = if let Some(&shift_amt) = ctx.consts.get(rhs) {
-                        low_zero_bits_reg(ctx, *lhs).saturating_add(shift_amt as u32)
+                        low_zero_bits_reg(ctx, *lhs)
+                            .saturating_add(u32::try_from(shift_amt).unwrap_or(u32::MAX))
                     } else {
                         0
                     };
@@ -4081,7 +4098,7 @@ fn lower_instruction(
                             block.push(MInst::SarImm {
                                 dst: sar_result,
                                 src: sign_extended,
-                                imm: shift_amt as u8,
+                                imm: shift_amt.min(63) as u8,
                             });
                         } else {
                             let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());
@@ -4100,7 +4117,7 @@ fn lower_instruction(
                             block.push(MInst::SarImm {
                                 dst: dst_vreg,
                                 src: lhs_vreg,
-                                imm: shift_amt as u8,
+                                imm: shift_amt.min(63) as u8,
                             });
                         } else {
                             let rhs_copy = ctx.alloc_vreg(SpillDesc::transient());

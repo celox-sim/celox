@@ -4,6 +4,118 @@ use super::mir::*;
 
 pub fn legalize(func: &mut MFunction) {
     eliminate_trivial_phis(func);
+    legalize_variable_shift_counts(func);
+}
+
+/// Make the MIR's non-wrapping shift-count semantics explicit before x86
+/// emission. x86 masks variable counts (modulo 64 for a 64-bit operand), while
+/// MIR defines logical shifts by counts >= 64 as zero and arithmetic shifts as
+/// a sign fill. Every variable shift selects the architectural result only when
+/// the unsigned count is below 64; the raw x86 shift is never exposed directly.
+pub(crate) fn legalize_variable_shift_counts(func: &mut MFunction) {
+    let (blocks, vregs, spill_descs, value_widths) = (
+        &mut func.blocks,
+        &mut func.vregs,
+        &mut func.spill_descs,
+        &mut func.value_widths,
+    );
+
+    for block in blocks {
+        let legalization_count = block
+            .insts
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. }
+                )
+            })
+            .count();
+        if legalization_count == 0 {
+            continue;
+        }
+
+        let mut rewritten = Vec::with_capacity(block.insts.len() + legalization_count * 2);
+        for inst in std::mem::take(&mut block.insts) {
+            match inst {
+                MInst::Shr { dst, lhs, rhs } => {
+                    let raw = alloc_shift_temp(vregs, spill_descs, value_widths, None, false);
+                    let zero = alloc_shift_temp(vregs, spill_descs, value_widths, Some(0), true);
+                    rewritten.push(MInst::Shr { dst: raw, lhs, rhs });
+                    rewritten.push(MInst::LoadImm {
+                        dst: zero,
+                        value: 0,
+                    });
+                    rewritten.push(MInst::CmpImmSelect {
+                        dst,
+                        lhs: rhs,
+                        imm: 64,
+                        kind: CmpKind::LtU,
+                        true_val: raw,
+                        false_val: zero,
+                    });
+                }
+                MInst::Shl { dst, lhs, rhs } => {
+                    let raw = alloc_shift_temp(vregs, spill_descs, value_widths, None, false);
+                    let zero = alloc_shift_temp(vregs, spill_descs, value_widths, Some(0), true);
+                    rewritten.push(MInst::Shl { dst: raw, lhs, rhs });
+                    rewritten.push(MInst::LoadImm {
+                        dst: zero,
+                        value: 0,
+                    });
+                    rewritten.push(MInst::CmpImmSelect {
+                        dst,
+                        lhs: rhs,
+                        imm: 64,
+                        kind: CmpKind::LtU,
+                        true_val: raw,
+                        false_val: zero,
+                    });
+                }
+                MInst::Sar { dst, lhs, rhs } => {
+                    let raw = alloc_shift_temp(vregs, spill_descs, value_widths, None, false);
+                    let sign_fill = alloc_shift_temp(vregs, spill_descs, value_widths, None, false);
+                    rewritten.push(MInst::Sar { dst: raw, lhs, rhs });
+                    rewritten.push(MInst::SarImm {
+                        dst: sign_fill,
+                        src: lhs,
+                        imm: 63,
+                    });
+                    rewritten.push(MInst::CmpImmSelect {
+                        dst,
+                        lhs: rhs,
+                        imm: 64,
+                        kind: CmpKind::LtU,
+                        true_val: raw,
+                        false_val: sign_fill,
+                    });
+                }
+                inst => rewritten.push(inst),
+            }
+        }
+        block.insts = rewritten;
+    }
+}
+
+fn alloc_shift_temp(
+    vregs: &mut VRegAllocator,
+    spill_descs: &mut Vec<SpillDesc>,
+    value_widths: &mut Vec<Option<u8>>,
+    width: Option<u8>,
+    rematerialize_zero: bool,
+) -> VReg {
+    let vreg = vregs.alloc();
+    debug_assert_eq!(spill_descs.len(), vreg.0 as usize);
+    spill_descs.push(if rematerialize_zero {
+        SpillDesc::remat(0)
+    } else {
+        SpillDesc::transient()
+    });
+    if !value_widths.is_empty() {
+        debug_assert_eq!(value_widths.len(), vreg.0 as usize);
+        value_widths.push(width);
+    }
+    vreg
 }
 
 fn eliminate_trivial_phis(func: &mut MFunction) {
@@ -144,5 +256,105 @@ mod tests {
         assert_eq!(func.blocks[0].phis.len(), 2);
         assert_eq!(func.blocks[0].phis[0].sources[0].1, v1);
         assert_eq!(func.blocks[0].phis[1].sources[0].1, v0);
+    }
+
+    #[test]
+    fn large_variable_shift_counts_are_made_explicit() {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let count = vregs.alloc();
+        let shl = vregs.alloc();
+        let shr = vregs.alloc();
+        let sar = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        func.value_widths = vec![Some(64), Some(7), None, None, None];
+
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: lhs,
+            value: u64::MAX,
+        });
+        block.push(MInst::LoadImm {
+            dst: count,
+            value: 64,
+        });
+        block.push(MInst::Shl {
+            dst: shl,
+            lhs,
+            rhs: count,
+        });
+        block.push(MInst::Shr {
+            dst: shr,
+            lhs,
+            rhs: count,
+        });
+        block.push(MInst::Sar {
+            dst: sar,
+            lhs,
+            rhs: count,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        legalize_variable_shift_counts(&mut func);
+
+        assert_eq!(func.vregs.count(), 11);
+        assert_eq!(func.spill_descs.len(), 11);
+        assert_eq!(func.value_widths.len(), 11);
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(inst, MInst::CmpImmSelect { imm: 64, .. }))
+                .count(),
+            3
+        );
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::SarImm {
+                src,
+                imm: 63,
+                ..
+            } if *src == lhs
+        )));
+        func.verify_result().unwrap();
+    }
+
+    #[test]
+    fn all_variable_shift_counts_are_legalized() {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let count = vregs.alloc();
+        let dst = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        func.value_widths = vec![Some(1), Some(6), None];
+
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 1 });
+        block.push(MInst::LoadImm {
+            dst: count,
+            value: 63,
+        });
+        block.push(MInst::Shl {
+            dst,
+            lhs,
+            rhs: count,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        legalize_variable_shift_counts(&mut func);
+
+        assert_eq!(func.vregs.count(), 5);
+        assert_eq!(func.blocks[0].insts.len(), 6);
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::CmpImmSelect {
+                dst: selected,
+                imm: 64,
+                ..
+            } if *selected == dst
+        )));
+        func.verify_result().unwrap();
     }
 }

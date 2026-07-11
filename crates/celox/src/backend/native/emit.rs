@@ -1898,7 +1898,10 @@ fn emit_inst(
             emit_or_imm64(asm, d, *imm)?;
         }
         MInst::ShrImm { dst, src, imm } => {
-            if func.is_narrow32(*src) {
+            // A 32-bit x86 shift masks the count modulo 32. MIR shifts are
+            // 64-bit word operations, so counts 32..63 must use the 64-bit
+            // encoding even when the source's upper half is known zero.
+            if func.is_narrow32(*src) && *imm < 32 {
                 let d = preg_to_reg32(resolve(assignment, *dst));
                 let s = preg_to_reg32(resolve(assignment, *src));
                 if d != s {
@@ -1915,7 +1918,7 @@ fn emit_inst(
             }
         }
         MInst::ShlImm { dst, src, imm } => {
-            if func.is_narrow32(*dst) {
+            if func.is_narrow32(*dst) && *imm < 32 {
                 let d = preg_to_reg32(resolve(assignment, *dst));
                 let s = preg_to_reg32(resolve(assignment, *src));
                 if d != s {
@@ -3538,6 +3541,7 @@ mod shift_encoding_tests {
     use super::*;
     use crate::backend::native::features::X86Features;
     use crate::backend::native::jit_mem::JitCode;
+    use crate::backend::native::{mir_legalize, mir_opt, regalloc};
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
 
     fn decode_shift(
@@ -3682,5 +3686,165 @@ mod shift_encoding_tests {
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 40);
         assert_eq!(u64::from_le_bytes(state[8..16].try_into().unwrap()), 5);
+    }
+
+    fn execute_variable_shift_boundaries(use_bmi2: bool) {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let count = vregs.alloc();
+        let shl = vregs.alloc();
+        let shr = vregs.alloc();
+        let sar = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        func.target_features = X86Features::for_test(use_bmi2);
+
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: lhs,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: count,
+            base: BaseReg::SimState,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Shl {
+            dst: shl,
+            lhs,
+            rhs: count,
+        });
+        block.push(MInst::Shr {
+            dst: shr,
+            lhs,
+            rhs: count,
+        });
+        block.push(MInst::Sar {
+            dst: sar,
+            lhs,
+            rhs: count,
+        });
+        for (offset, src) in [(16, shl), (24, shr), (32, sar)] {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset,
+                src,
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        mir_legalize::legalize(&mut func);
+        mir_opt::optimize(&mut func);
+        assert_eq!(
+            func.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|inst| matches!(inst, MInst::CmpImmSelect { imm: 64, .. }))
+                .count(),
+            3
+        );
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let lhs_value = 0x8000_0000_0000_0001u64;
+
+        for count_value in [63u64, 64, 65, 127, 128, 129] {
+            let mut state = [0u8; 40];
+            state[0..8].copy_from_slice(&lhs_value.to_le_bytes());
+            state[8..16].copy_from_slice(&count_value.to_le_bytes());
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+
+            let actual_shl = u64::from_le_bytes(state[16..24].try_into().unwrap());
+            let actual_shr = u64::from_le_bytes(state[24..32].try_into().unwrap());
+            let actual_sar = u64::from_le_bytes(state[32..40].try_into().unwrap());
+            let expected_shl = if count_value >= 64 {
+                0
+            } else {
+                lhs_value << count_value
+            };
+            let expected_shr = if count_value >= 64 {
+                0
+            } else {
+                lhs_value >> count_value
+            };
+            let expected_sar = if count_value >= 64 {
+                u64::MAX
+            } else {
+                ((lhs_value as i64) >> count_value) as u64
+            };
+            assert_eq!(actual_shl, expected_shl, "shl count={count_value}");
+            assert_eq!(actual_shr, expected_shr, "shr count={count_value}");
+            assert_eq!(actual_sar, expected_sar, "sar count={count_value}");
+        }
+    }
+
+    #[test]
+    fn legacy_variable_shifts_do_not_wrap_large_counts() {
+        execute_variable_shift_boundaries(false);
+    }
+
+    #[test]
+    fn bmi2_variable_shifts_do_not_wrap_large_counts() {
+        if !std::is_x86_feature_detected!("bmi2") {
+            return;
+        }
+        execute_variable_shift_boundaries(true);
+    }
+
+    #[test]
+    fn narrow_immediate_shifts_do_not_use_x86_count_masking() {
+        let mut vregs = VRegAllocator::new();
+        let src = vregs.alloc();
+        let mut results = Vec::new();
+        for imm in [31u8, 32, 33, 63] {
+            results.push((imm, vregs.alloc(), vregs.alloc()));
+        }
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 1 + results.len() * 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: src,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S32,
+        });
+        for (index, (imm, shr, shl)) in results.iter().copied().enumerate() {
+            block.push(MInst::ShrImm { dst: shr, src, imm });
+            block.push(MInst::ShlImm { dst: shl, src, imm });
+            for (column, result) in [shr, shl].into_iter().enumerate() {
+                block.push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: (8 + (index * 16 + column * 8)) as i32,
+                    src: result,
+                    size: OpSize::S64,
+                });
+            }
+        }
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        mir_legalize::legalize(&mut func);
+        mir_opt::optimize(&mut func);
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let value = 9u64;
+        let mut state = [0u8; 72];
+        state[0..8].copy_from_slice(&value.to_le_bytes());
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+
+        for (index, (imm, _, _)) in results.iter().copied().enumerate() {
+            let shr_offset = 8 + index * 16;
+            let shl_offset = shr_offset + 8;
+            let actual_shr =
+                u64::from_le_bytes(state[shr_offset..shr_offset + 8].try_into().unwrap());
+            let actual_shl =
+                u64::from_le_bytes(state[shl_offset..shl_offset + 8].try_into().unwrap());
+            assert_eq!(actual_shr, value >> imm, "shr immediate {imm}");
+            assert_eq!(actual_shl, value << imm, "shl immediate {imm}");
+        }
     }
 }
