@@ -35,21 +35,14 @@ of those properties.
 ## Fixed phase order
 
 ```text
-patched pinned parser/tokens, syntax-lineage analyzer witnesses, and the
-  untrusted module symbolic-evaluation proposal with
-  SourceControlProvenance/SourceRootId
-  -> verifier-owned complete private raw HIR
-  -> joint verified typed HIR, type/extent/enum relation, and constant proofs
-  -> derived TriIntent, ExpectedSourceValueGraph, and InputSemanticFacts
-  -> proposal comparison and complete PreparedPhaseSLTNodeFactsV1<SourcePhase>
-  -> source-root/action/observer/provenance aggregate verification
-  -> simultaneous commit of FrozenSourceArtifact, FrozenSLTNodeArena<SourcePhase>,
-     and branded PhaseSLTNodeFactsV1<SourcePhase> (caches dropped)
+module symbolic evaluation with SourceControlProvenance and SourceRootId
+  -> checked PhaseSLTNodeFacts<SourcePhase> and source-root/provenance verification
+  -> FrozenSourceArtifact (source arena + source provenance; caches dropped)
   -> deterministic whole-unit hierarchy mapping into a temporary draft
   -> atomization, then artifact-global ExternalRootId assignment
   -> constant-rewrite verification
   -> observer-occurrence materialization
-  -> checked PhaseSLTNodeFactsV1<OccurrencePhase>, frozen arena, and frozen root/action
+  -> checked PhaseSLTNodeFacts<OccurrencePhase>, frozen arena, and frozen root/action
      identity/ownership registries as FrozenOccurrenceArtifact
   -> occurrence-valued GlobalActionOrderSkeleton verification
   -> artifact-global control CFG and SSA memory/environment/effect token verification
@@ -65,19 +58,16 @@ patched pinned parser/tokens, syntax-lineage analyzer witnesses, and the
   -> rejected-region contraction
   -> one final DAG placement
   -> GateFormationPlan and DecisionFormationPlan input verification
-  -> SIR construction, runtime-function/invoke formation-output relation,
-     gate/decision formation-output relation, and DecisionRegion verification
+  -> SIR construction, formation-output relation, and DecisionRegion verification
   -> target-independent SIR optimization and DecisionRegion re-verification
-  -> target RuntimeCallLoweringPlanV1 verification
   -> target DecisionLoweringPlan verification
-  -> instruction selection with explicit native MInvoke and MDecision
-  -> RuntimeCallLoweringOutputRelationV1 verification against the emitted backend artifact
+  -> instruction selection with explicit native MDecision
   -> target decision legalization and LoweredDecisionWitness output verification
   -> predicate-aware SLP/store combining
   -> semantic pressure-frontier block splitting and CFG verification
   -> PreScheduleCFGNormalization and machine-constraint markers
-  -> per-function pre-schedule dependence graph and virtual-liveness verification
-  -> one pressure-aware MIR SchedulePlan per function and output-permutation verification
+  -> pre-schedule dependence graph and virtual-liveness verification
+  -> one pressure-aware MIR SchedulePlan and output-permutation verification
   -> MIRMemoryTokenAnalysis, CSSA, next-use, and loop analysis
   -> PressureRegion cut selection
   -> cut materialization and verified RegionalAllocationInput/RegionalNextUse
@@ -101,7 +91,6 @@ The techniques solve different problems:
 | DAG placement | place each pure `InstValue` once at the latest legal site inside its execution-safety domain | invent or remove control |
 | Gate selection | choose eager dataflow versus control using expected target work | clone a global cache per arm |
 | Decision lowering | choose value table, jump table, search tree, ordered chain, or branchless tail | repair invalid or overlapping semantics |
-| Runtime-function formation | compile each verified type/environment program once and retain exact invoke/writeback boundaries | recursively inline the call DAG or merge calls by current values |
 | MIR scheduling | choose one verified topological instruction permutation that does not worsen the pressure objective | infer or omit dependencies inside the heuristic |
 | PressureRegion planning | choose verified full-register cuts, then constrain the one ordinary spill-placement plan | split into functions or retry allocation |
 | Component affinity | reduce copies after feasibility is proved | force an unavailable common color |
@@ -118,9 +107,8 @@ source meaning
   -> SSA state/effect tokens
   -> versioned values, resolved action uses, and legal placement envelopes
   -> gate/decision profitability and final placement
-  -> canonical SIR control plus shared runtime functions and invokes
-  -> verified target call/decision lowering and canonical MIR control
-  -> verified pre-schedule dependencies and one pressure-aware permutation per function
+  -> canonical SIR/MIR control
+  -> verified pre-schedule dependencies and one pressure-aware permutation
   -> rebuilt MIR state/CSSA/next-use analyses
   -> pressure-region cuts, RegionalNextUse, and one regional spill-placement plan
   -> reconstruction/Perm, frame layout, coloring, verified parallel copies, layout
@@ -171,11 +159,8 @@ SourceGateResultMergeId, SourceGatedMuxId, SourceDecisionResultMergeId,
 SourceValueOccurrenceId, SourceObserverId, SourceObserverOccurrenceId,
 SourceControlActionId, SourceDynamicAddressPlanId, SourceForFoldTemplateId,
 SourceRuntimeEventSiteId, SourceSyntheticOriginId,
-ExpectedSourceTargetHandleId,
 SourceWriteDomainId, SourceBindingId, SourceEffectStreamId,
 SourceCanonicalProducerId,
-ExpectedSourceRuntimeCallInstanceId, RuntimeSourceExecutionLineageId,
-VerifiedRuntimeFunctionSpecializationId,
 ValueOccurrenceId, RootExpansionId, ActionExpansionId,
 ControlUnitId, ExternalRootId, ObserverId,
 ObserverOccurrenceId, ControlActionId, GateId, DecisionId, GatedMuxId,
@@ -184,8 +169,6 @@ ControlEdgeId,
 GlobalControlPointId, GlobalControlEdgeId, InstValueId, DynamicAddressPlanId,
 RuntimeEventSiteId, MemoryTokenId, EnvironmentTokenId, EffectTokenId,
 ForFoldTemplateId, WriteDomainId, BindingId, EffectStreamId,
-OccurrencePreparedTargetHandleId,
-OccurrenceRuntimeCallInstanceId, OccurrenceRuntimeExecutionLineageId,
 CanonicalProducerId, SLTMemoryDependencyId, SLTEnvDependencyId:
 checked u32 IDs
 
@@ -207,14 +190,12 @@ DecisionArmOrdinal: checked u32 ordinal within one occurrence decision
 
 SourceFoldPointId, SourceFoldEdgeId, SourceFoldActionId,
 SourceFoldValueOccurrenceId, SourceFoldDynamicAddressPlanId,
-SourceFoldPreparedTargetHandleId,
 SourceFoldPredicateRegionId, SourceFoldCanonicalProducerId,
 ExpectedSourceFoldUseId, ExpectedSourceFoldResultId:
 checked u32 IDs scoped by SourceForFoldTemplateId
 
 FoldPointId, FoldEdgeId, FoldActionId, FoldValueOccurrenceId,
-FoldDynamicAddressPlanId, FoldPreparedTargetHandleId,
-FoldValueCandidateId, FoldInstValueId,
+FoldDynamicAddressPlanId, FoldValueCandidateId, FoldInstValueId,
 FoldMemoryTokenId, FoldEnvironmentTokenId, FoldEffectTokenId:
 checked u32 IDs scoped by ForFoldTemplateId
 
@@ -229,8 +210,6 @@ VerifiedSourceSemanticContext
   independently derived expected root/action/control-result specifications
   if/ternary/case constructs and exact pattern semantics
   observer definitions and runtime-event sites
-  shared type-specialized runtime-function programs, call instances, and
-    Root-or-RuntimeCall execution lineages
   ForFold semantic specifications
   explicitly pinned synthetic/ordinary-mux origins
 
@@ -241,8 +220,7 @@ ExpectedSourceValueGraph
   canonical result rows: HIR results plus derived gated/decision-step/
     pinned results
   exact owner/role/site/type/node recipe and ordered producer edges per row
-  expected source action/observer/runtime-call/dynamic/ForFold records and
-    access summaries
+  expected source action/observer/dynamic/ForFold records and access summaries
 
 ExpectedSourceControlGraph
   canonical units/regions/points/edges, entry/exit/parent/owner kinds, ordered
@@ -253,21 +231,14 @@ ExpectedSourceControlGraph
     structurally valid control row is permitted
 
 `ExpectedSourceValueGraph` has one normative producer independent of symbolic
-evaluation. Before assigning any expected ID, the joint typed/constant verifier
-computes the controller-first activated-edge relation and maximal
-`SourceGraphStaticValue` frontier from raw executable HIR. Starting from that
-completed relation and `VerifiedTypedSourceHIR`, an iterative worklist walks
+evaluation. Starting from `VerifiedTypedSourceHIR`, an iterative worklist walks
 declarations by canonical module/source coordinate, statements in language
-order, activated expression operands by operator-defined ordinal, and derived
-control/action/result slots by fixed rule ordinal. Every demanded runtime
-semantic evaluation position emits an `EvaluateHere` use; one maximal
-projectable static frontier root emits one Constant definition and no child
-value occurrences; a statically suppressed but well-typed operand emits none.
-Unknown/runtime control retains every semantically possible arm. Every other
-language/action/control result emits a `Definition`; only a closed language rule
-that reuses an already evaluated condition, action result, merge step, loop
-binding, or pinned value emits `FixedValue`. Pure CSE and raw-node equality
-never select `FixedValue`.
+order, expression operands by operator-defined ordinal, and derived control/
+action/result slots by fixed rule ordinal. Every semantic evaluation position
+emits an `EvaluateHere` use; every language/action/control result emits a
+`Definition`; only a closed language rule that reuses an already evaluated
+condition, action result, merge step, loop binding, or pinned value emits
+`FixedValue`. Pure CSE and raw-node equality never select `FixedValue`.
 Expected IDs are dense in that traversal order. The builder then derives the
 canonical producer relation and dependency DAG from these rows. Producer wire
 tables are at most compatibility caches: current decode ignores them, rebuilds
@@ -279,7 +250,6 @@ SourceControlProvenance
   source_value_occurrences / source_gated_muxes /
   source_decision_result_merges / source canonical producer relation
   source observers / source observer occurrences / runtime sites
-  runtime-function programs / call instances / execution lineages
   dynamic address plans / ForFold templates / pinned synthetic origins
 
 SourceValueOccurrence
@@ -291,7 +261,7 @@ SourceOccurrenceSite
   Use { site: SourceControlUseSite,
         semantic_use: ExpectedSourceUseId,
         owner: SourceUseOwner,
-        role: SourceOccurrenceUseRoleV1,
+        role,
         value_source: EvaluateHere |
                       FixedValue(SourceCanonicalProducerId, ValueFlowReason) }
   Definition { site: SourceControlSite,
@@ -306,13 +276,7 @@ SourceUseOwner
   DecisionPatternOperand(decision, arm, pattern, operand) |
   DecisionPatternPredicate(decision, arm, pattern) |
   DecisionArmPredicate(decision, arm) |
-  DecisionResultOperand(result merge, arm,
-                        SourceDecisionResultOperandRoleV1)
-
-SourceOccurrenceUseRoleV1 =
-  Value | Address | Predicate | Argument | PreviousValue |
-  MergeOperand | Recurrence
-SourceDecisionResultOperandRoleV1 = SelectedArm | Default
+  DecisionResultOperand(result merge, arm/role)
 
 SourceDefinitionOwner
   ActionResult(action, result ordinal) |
@@ -346,35 +310,20 @@ SourceControlUnit
 SourceControlPoint
   unit: SourceControlUnitId
   region: SourcePredicateRegionId
-  kind: SourceControlPointKindV1
+  kind
   ordered_actions: [SourceControlActionId]
   predecessor / successor edges: [SourceControlEdgeId]
-
-SourceControlPointKindV1 =
-  UnitEntry | ArmEntry | RegionExit | GateHeader |
-  DecisionHeader | Join | Continuation | Effect
 
 SourceControlEdge
   unit: SourceControlUnitId
   predecessor / successor: SourceControlPointId
-  kind: SourceControlEdgeKindV1
-
-SourceControlEdgeKindV1 =
-  Ordinary | GateArm | DecisionArm | DecisionDefault | UnitBoundary
+  kind
 
 SourceRoot
   unit: SourceControlUnitId
-  source-order identity
-  semantic_specification: SourceRootSemanticSpecificationV1
+  source-order identity and exact root semantic specification
   ordered_operands: [SourceOccurrenceUse]
   disposition: Scheduled(SourceControlActionId) | MetadataOnly
-
-SourceRootSemanticSpecificationV1 =
-  ExecutableUnit(Module | Interface) |
-  ProtoDeclaration | ObjectDeclaration | StaticBinding |
-  TypeDeclaration | FunctionTemplate | Process | ContinuousAssignment |
-  InstanceConnection { declared_port_ordinal: u32 } |
-  BindConnection | ModportExposure | RuntimeEvent | RetainedForFold
 
 SourceControlAction
   unit: SourceControlUnitId
@@ -386,30 +335,25 @@ SourceControlAction
 
 SourceControlActionKind =
   ActionSemanticKind<SourceRootId, SourceInputId, SourceBindingId,
-                     ExpectedSourceTargetHandleId,
                      SourceDynamicAddressPlanId, SourceObserverId,
-                     SourceRuntimeEventSiteId,
-                     ExpectedSourceRuntimeCallInstanceId,
-                     SourceForFoldTemplateId,
+                     SourceRuntimeEventSiteId, SourceForFoldTemplateId,
                      SourceControlSite, SourceInputResolution>
 
-ActionSemanticKind<Root, Input, Binding, Target, DynamicPlan, Observer, RuntimeSite,
-                   RuntimeCall, ForFoldTemplate, Site, Resolution>
+ActionSemanticKind<Root, Input, Binding, DynamicPlan, Observer, RuntimeSite,
+                   ForFoldTemplate, Site, Resolution>
   ReadInput { result_slot, input: Input, resolution: Resolution }
-  CaptureValue { result_slot, source_operand }
+  CaptureValue { result_slot, source_operand, purpose }
   BindEnvironment { result_slot, source_operand, binding: Binding }
-  EvaluatePinned { result_slot, ordered_operand_slots }
+  EvaluatePinned { result_slot, ordered_operand_slots, reason }
   StoreRoot { root: Root,
-              target: StaticTarget(Target) |
-                      DynamicTarget(Target, DynamicPlan),
+              target: StaticTarget |
+                      DynamicTarget(DynamicPlan),
               value_operand, observed_old_operand: optional,
               capture_enable_sites: [Site], triggers: [Root] }
   RuntimeEvent { root: Root, observer: Observer, site: RuntimeSite,
                  predicate_operand, argument_operands,
                  enabled_value_operand: optional,
                  consume-enabled / termination }
-  InvokeRuntimeFunction { optional root: Root, instance: RuntimeCall,
-                          operand_role_range, result_role_range }
   ForFold { optional root: Root, result_slot, template: ForFoldTemplate }
 
 Every operand/result field above is a checked ordinal into the owning action's
@@ -421,86 +365,21 @@ and typed-ID substitutions, and resolution changes only array values. A
 rootless helper is intentionally a different action and is governed by the
 closed helper rule below, not this primary-shape equality.
 
-NestedActionSemanticKind<Input, Binding, Target, DynamicPlan, EffectStream,
-                         RuntimeSite, RuntimeCall, Site, Resolution>
+NestedActionSemanticKind<Input, Binding, DynamicPlan, EffectStream,
+                         RuntimeSite, Site, Resolution>
   ReadInput { result_slot, input: Input, resolution: Resolution }
-  CaptureValue { result_slot, source_operand }
+  CaptureValue { result_slot, source_operand, purpose }
   BindEnvironment { result_slot, source_operand, binding: Binding }
-  EvaluatePinned { result_slot, ordered_operand_slots }
-  StoreState { target: StaticTarget(Target) |
-                       DynamicTarget(Target, DynamicPlan),
+  EvaluatePinned { result_slot, ordered_operand_slots, reason }
+  StoreState { target: StaticTarget | DynamicTarget(DynamicPlan),
                value_operand, observed_old_operand: optional,
                capture_enable_sites: [Site] }
   PublishRuntimeEvent { stream: EffectStream, site: RuntimeSite,
                         predicate_operand, argument_operands, termination }
-  InvokeRuntimeFunction { instance: RuntimeCall,
-                          operand_role_range, result_role_range }
 
 Nested variants also use only checked operand/result ordinals. The expected
-runtime-function or ForFold graph fixes the exact variant, slots, and semantic
-access summary; a nested action cannot acquire an outer root identity.
-`CaptureValue` purpose and the proof which requires an `EvaluatePinned` action
-are already fixed by the exact expected result/action owner and its inverse.
-Neither action stores a second producer-selected purpose/reason scalar which
-could disagree with that owner.
-
-`InvokeRuntimeFunction` is a verified nested-program boundary, not an ordinary
-value node and not a return-only shorthand. The action joins two distinct
-authoritative objects defined by
-[Source semantic objects and input accesses](./source-semantic-inputs.md):
-
-- `SourceRuntimeFunctionInvokeOperandRoleV1` and
-  `SourceRuntimeFunctionInvokeResultRoleV1` are the sole role enums;
-- `VerifiedRuntimeFunctionProgramV1` and
-  `ExpectedSourceRuntimeCallInstanceV1` own respectively the shared program and
-  one call instance; and
-- `SourceRuntimeFunctionInvokeOwnerTargetV1` and
-  `SourceRuntimeFunctionInvokeV1` own the action-specific role pools, nested
-  mapping, writebacks, component summaries, and combined summary.
-
-This document does not redeclare shortened aliases for those V1 types. The
-outer/fold action kind's `RuntimeCall` field names only the expected occurrence
-instance. Its exact `SourceRuntimeFunctionInvokeOwnerTargetV1` inverse selects
-`Outer`, `RuntimeProgram`, or `ForFold`; those variants use respectively an
-outer action plus occurrence instance, a specialization-scoped program action
-plus `RuntimeFunctionProgramNestedCallInstanceIdV1`, or a template-scoped fold
-action plus occurrence instance.
-Each invoke action owns exactly one `SourceRuntimeFunctionInvokeV1`, every
-invoke row maps back to that action and slot ranges, and non-invoke actions own
-none. No owner namespace may substitute the call-instance row or another
-equal-numbered action namespace for this action-owned aggregate.
-
-The operand-role range is a bijection to the owning action's existing operand
-ordinals: explicit arguments are evaluated in source order, then missing input
-defaults in formal order. An output/inout actual prepares its one target handle
-once; inout reads that same handle, and copyout reuses it. The result-role range
-is optional return first and every flattened output/inout result in declaration
-order. Copyout is also in that declaration order. The roles contain ordinals,
-not a duplicate value-ID list. Missing, extra, reordered, cross-instance, or
-return-only rows reject even when types or current bits happen to match.
-
-Program sharing is by the complete type specialization above and never by
-argument value. The complete instantiated identity key is the pair
-`RuntimeSourceExecutionLineageRowV1 = Root | RuntimeCall(parent, call,
-specialization)` and `RuntimeSourceLocalScopeV1 = Body |
-ForFold(SourceForFoldTemplateId)`. `ExpectedSourceRuntimeCallInstanceV1`
-records its caller scope explicitly. Call instances and instantiated slots
-remain distinct through that pair. A retained ForFold changes only local scope;
-it creates neither a lineage row nor one row per iteration. The
-verifier rejects the first canonical self-edge or nontrivial SCC
-in the runtime function-template call graph before specialization. It uses a
-worklist and imposes no call-depth, body-size, loop-trip, or compilation-time
-cap. Constant-function evaluation remains the separate finite certificate VM
-and cannot prove or replace this runtime relation.
-
-The invoke action is scheduled and atomized only as `Whole`. Its semantic access
-summary is independently recomputed from setup, the shared program, and
-copyout, and its result publication plus all memory/environment/effect token
-updates is atomic at the outer boundary. Nested program actions remain visible
-to the dedicated boundary verifier; neither source construction nor a later
-planner may inline an unverified body, clone the call per result slice, omit a
-discarded expression result's effects, or keep a return while dropping a
-writeback.
+ForFold graph fixes the exact variant, slots, and semantic access summary; a
+nested action cannot acquire an outer root identity.
 
 InputResolutionKind<DynamicPlan> = Memory | Environment | StaticComposite |
                                    DynamicOverlay(DynamicPlan)
@@ -554,46 +433,18 @@ The complete normative normalization, identity, mapping, and producer-
 connection contract is specified in
 [Source semantic objects and input accesses](./source-semantic-inputs.md).
 
-SourceWriteDomain
-  checked module-local semantic state identity and normalized type/access
-  exact owner in ExpectedSourceValueGraph
-
-SourceBindingRoleV1 =
-  LexicalEnvironment | RetainedForCounter | RetainedForState
-
-SourceBinding
-  checked module-local semantic binding identity and normalized type
-  role: SourceBindingRoleV1
-  exact owner in ExpectedSourceValueGraph
-
-SourceEffectStreamKindV1 = RuntimeOutput | RuntimeAssertion | Termination
-SourceEffectPublicationRuleV1 = OnActionExecution | OnPredicateFalse
-
-SourceEffectStream
-  checked module-local effect identity
-  kind: SourceEffectStreamKindV1
-  publication_rule: SourceEffectPublicationRuleV1
+SourceWriteDomain / SourceBinding / SourceEffectStream
+  checked module-local semantic state/binding/effect identity and type
   exact owner in ExpectedSourceValueGraph
 
 SourceSemanticAccessSummary
   canonical sorted exact read/write SourceWriteDomainIds
   canonical sorted exact read/write SourceBindingIds
-  canonical sorted exact SourceEffectStreamIds and
-    SourceEffectPublicationKindV1 values
-
-SourceEffectPublicationKindV1 = Definite | Conditional
+  canonical sorted exact SourceEffectStreamIds and publication kinds
 
 SourceObserver
   observer: SourceObserverId
-  kind: SourceObserverKindV1
-  metadata: SourceObserverMetadataV1
-  exact sensitivity/capture/event semantic specification
-
-SourceObserverKindV1 = CombinationalProcess | RetainedForFold
-SourceObserverMetadataV1
-  activation_group_count: nonzero u32
-  capture_policy: SnapshotAtActivation
-  event_order: SourceOrder
+  exact metadata/sensitivity/capture/event semantic specification
 
 SourceObserverOccurrence
   observer / occurrence IDs
@@ -601,156 +452,26 @@ SourceObserverOccurrence
 
 SourceRuntimeEventSite
   site: SourceRuntimeEventSiteId
-  emit_rule: SourceRuntimeEventEmitRuleV1
   exact predicate/argument/termination semantics
-
-SourceRuntimeEventEmitRuleV1 =
-  Display | Write | AssertContinue | AssertFatal | Finish
 
 SourcePinnedSyntheticMuxOrigin
   proof: SourceSyntheticOriginId
-  semantic HIR owner / reason: SourcePinnedSyntheticReasonV1 /
-    SourceValueOccurrenceId
+  semantic HIR owner/reason and SourceValueOccurrenceId
   exact pinned dataflow-select semantics
-
-SourcePinnedSyntheticReasonV1 = RequiredDataflowSelect
 
 SourceDynamicAddressPlan
   plan: SourceDynamicAddressPlanId
-  owner action / once-prepared ExpectedSourceTargetHandleId /
-    semantic input / object type and width
+  owner action / semantic input / object type and width
   ordered typed index uses: [SourceOccurrenceUse]
   dimensions / exact part-select geometry / selected width
   offset / address_known / bounds_when_known / access_guard:
     SourceOccurrenceUse
   access semantics: CheckedRead | CheckedOverlayWrite
-```
 
-### Shared Veryl-0.20 `for` transition relation
-
-Every Veryl V0_20 source `for` identifier is emitted as `i32`: signed,
-two-state, and exactly 32 bits. The verifier derives that type from the retained
-source loop declaration and requires the analyzer/type witness to agree; a
-producer-selected counter width or signedness is not evidence. Define `C(x)` as
-ordinary assignment coercion of the typed value `x` to this exact `i32` type:
-source signedness chooses widening, narrowing keeps the low 32 bits, and the
-final Logic-to-Bit conversion maps X/Z to zero. A singleton has only
-`A = C(value)`; a bounded range has `A = C(start)` and `B = C(end)`. Empty tests
-and header comparisons are signed 32-bit comparisons after those coercions.
-Each consumer evaluates/acquires exactly the operands present in that closed sum
-once at loop entry; a backedge reuses the verified counter values. It never
-duplicates a singleton value into a synthetic end occurrence.
-
-```text
-SourceForCounterRuleV1 = CeloxSourceV0_20SignedI32
-SourceForCounterRule = generated source-facing alias of
-  SourceForCounterRuleV1
-SourceForRangeForm = SingleForward | SingleReverse |
-                     ForwardExclusive | ForwardInclusive |
-                     ReverseExclusive | ReverseInclusive
-```
-
-The six range forms are closed:
-
-| Source form | Empty before initialization when | Initial counter | Header predicate |
-| --- | --- | --- | --- |
-| singleton `a` | never | `A` | one-shot `first` state |
-| singleton `rev a` | never | `A` | one-shot `first` state |
-| forward exclusive `a..b` | `A >= B` | `A` | `i < B` |
-| forward inclusive `a..=b` | `A > B` | `A` | `i <= B` |
-| reverse exclusive `rev a..b` | `B <= A` | `B - 1` | `i >= A` |
-| reverse inclusive `rev a..=b` | `B < A` | `B` | `i >= A` |
-
-For reverse exclusive, `B - 1` is formed only after the empty predicate is
-known false. Reverse inclusive starts at `B`; it never subtracts one merely
-because the range is reversed. Initialization is assignment-coerced to the
-same `i32` counter. After a singleton body the one-shot state becomes complete
-without applying a counter update. The default update is `i += 1` for either
-nonsingleton forward form and `i -= 1` for either nonsingleton reverse form.
-
-An explicit step replaces only that default update. It is still type/value
-verified and acquired once for a singleton form, but the singleton completes
-without executing it. The one shared closed tag set is:
-
-```text
-SourceForStepAssignmentOpV1 =
-  AddAssign("+=") | SubAssign("-=") | MulAssign("*=") |
-  DivAssign("/=") | RemAssign("%=") |
-  BitAndAssign("&=") | BitOrAssign("|=") | BitXorAssign("^=") |
-  LogicShiftLeftAssign("<<=") | LogicShiftRightAssign(">>=") |
-  ArithShiftLeftAssign("<<<=") | ArithShiftRightAssign(">>>=")
-
-SourceForStepAssignmentOp = generated source-facing alias of
-  SourceForStepAssignmentOpV1
-```
-
-The spelling, tag, and operator rule are one-to-one; in particular logical and
-arithmetic shifts cannot share a producer tag. A step evaluates the counter
-LHS once, applies the corresponding closed typed integral operator to that
-signed 32-bit LHS and the typed step operand, and assignment-coerces the result
-back to `i32`. Arithmetic and bitwise results, including the default `+ 1` and
-`- 1`, wrap modulo `2^32`; shifts use the exact arbitrary-width count rule
-before any host conversion. Division/remainder by zero and X/Z follow the
-shared four-state operator rule and final two-state counter conversion. There
-is no host integer arithmetic in this relation.
-
-Zero steps, `next == current`, movement in either direction, and signed wrap
-are ordinary results of the update relation. None is a verifier correctness
-error, overflow exit, progress assertion, iteration limit, or license for a
-fallback. After a true continue, the transition is `Advance` exactly when the
-updated counter satisfies the same header predicate; otherwise it is
-`NormalRangeExit`. Therefore a nonprogressing in-range update takes the
-backedge and may run forever.
-
-This transition relation has three distinct consumers:
-
-- a source loop which Veryl has already expanded at compile time has no
-  `PhaseForFold`/`SourceForFoldTemplate`; the source aggregate checks the finite
-  expanded HIR and its exact source lineage rather than inventing a VM trace;
-- a non-expanded source loop becomes the pinned `PhaseForFold`/
-`SourceForFoldTemplate` runtime relation below. Its singleton-or-bounded/step operands
-  are acquired exactly where that source relation specifies, and compilation
-  makes no claim that the runtime loop terminates; and
-- a `RawConstStatement::For` reached while evaluating a constant function uses
-  the independently derived constant-function small-step VM. Its concrete
-  recursion/loop termination is established only by a finite accepted trace,
-  with one row per actual transition and no depth, iteration, wall-clock, or
-  branchification cap. The VM never creates or consumes a `PhaseForFold` row.
-
-These consumers share only the closed range/counter/operator semantics. Their
-IDs, ownership rows, execution timing, and termination evidence never alias.
-In V0_20 an explicit step is a completed typed constant proof: both a
-`SourceForFoldTemplate` and a constant-function VM evaluate/acquire it once on
-loop entry and reuse the value at each update. Both then call the same
-`SourceForStepAssignmentOp` value rule.
-
-The pinned analyzer currently lowers an operator-less range to the empty
-exclusive pair `A..A`, while the pinned emitter lowers it to an inclusive
-counter loop which can execute more than once after a wrapping or nonprogressing
-update. Both disagree with the source singleton relation and must be fixed.
-Neither producer result is a verifier oracle.
-
-Required fixtures cover both one-element singleton forms, plus empty and
-singleton instances of all four bounded range forms;
-`i32::MIN`/`i32::MAX` boundaries; every explicit step tag; division/remainder
-by zero; X/Z step operands; zero, nonprogressing, direction-changing, and
-wrapping updates; a finite trace which terminates after wrap; and finite
-prefixes of nonterminating executions, each of which remains nonterminal.
-Cross-consumer fixtures prove that an expanded source loop, a retained
-`PhaseForFold`, and a constant-function VM trace cannot reuse one another's IDs
-or completion evidence.
-
-```text
 SourceForFoldTemplate
   template: SourceForFoldTemplateId
   unit: SourceControlUnitId / owner_action: SourceControlActionId
-  counter SourceBindingId / exact signed 32-bit Bit type
-  range_inputs: Single { value_use, SingleForward | SingleReverse } |
-                Between { start_use, end_use,
-                          ForwardExclusive | ForwardInclusive |
-                          ReverseExclusive | ReverseInclusive }
-  counter update: DefaultByRangeDirection |
-                  Explicit(outer step use, SourceForStepAssignmentOp)
+  counter SourceBindingId / type / outer bound uses / step / reverse
   transition_semantics: SourceForFoldTransitionSemantics
   canonical parallel state outer initial uses and result state
   body: SourceFoldGraph
@@ -759,33 +480,28 @@ SourceForFoldTemplate
 
 SourceForFoldTransitionSemantics
   language_semantics_version
-  counter_rule: SourceForCounterRuleV1::CeloxSourceV0_20SignedI32
-  exact singleton-or-start/end and optional-step typed source facts with
-    derived assignment/operator coercions
+  counter/start/end/step typed coercions and arbitrary-width signedness
   counter_initial_and_bound:
-    SingleForward(A, never empty, initial A, one-shot first) |
-    SingleReverse(A, never empty, initial A, one-shot first) |
-    ForwardExclusive(A, B, empty A>=B, initial A, signed <) |
-    ForwardInclusive(A, B, empty A>B, initial A, signed <=) |
-    ReverseExclusive(A, B, empty B<=A,
-                     otherwise initial sub32(B, 1), signed >=) |
-    ReverseInclusive(A, B, empty B<A, initial B, signed >=)
-  counter_step_rule: SingleCompleteWithoutUpdate |
-    SourceForStepAssignmentOp with exact operand/result width, signedness,
-    domain conversion, and modulo-2^32 assignment
-  post_update_range_rule: Advance | NormalRangeExit
-  continue_condition: SourceForContinueRuleV1 over the typed continue use
-
-SourceForContinueRuleV1 = TrueContinuesFalseOrXzExits
+    Forward(initial = coerced start, bound = coerced end, < or <=) |
+    Reverse(initial = coerced end, bound = coerced start, > or >=),
+    derived from inclusive/reverse with exact X/Z comparison behavior
+  counter_step_rule: Add | Subtract | Multiply | ShiftLeft with exact
+    operand width, result width, truncation/wrap/overflow behavior
+  progress_rule: exact comparison of current/next/direction/range yielding
+    Advance | NormalRangeExit | ErrorNonProgress | ErrorOverflow
+  continue_condition: closed IfReduction language rule over the typed
+    continue use
+  error_event_site: SourceRuntimeEventSiteId exactly when an error outcome is
+    possible
 
 This row is independently derived from the typed HIR ForFold operator and
 language version. It fixes the expected HeaderCondition, Counter recurrence
-update, ContinueLatch predicate, transition outcome, and normal exit edges.
-Step zero, `next == current`, direction changes, wrap, every closed step
-operator, and X/Z conversion are handled only by these rules; a wire-supplied
-formula, progress bit, overflow bit, or two-state tag is not proof. Header and
-continue truth reduction use the same closed `IfReduction` semantics as source
-control.
+update, ContinueLatch predicate, transition outcome, progress/error action, and normal/error exit
+edges. Step zero, `next == current`, wrong-direction movement, arbitrary-width
+overflow/wrap, reverse iteration, multiply/shift steps, and X/Z conditions are
+handled only by these closed rules; a wire-supplied formula or two-state tag is
+not proof. Header and continue truth reduction use the same closed
+`IfReduction` semantics as source control.
 
 SourceFoldGraph
   topology: SourceFoldControlTopology
@@ -803,36 +519,36 @@ SourceFoldControlTopology =
 
 FoldControlTopology<Region, Point, Edge, Use, Action>
   root_region / entry / header / body_entry / continue_latch /
-    transition_dispatch / normal_exit
+    transition_dispatch / normal_exit / optional terminal_error_exit
   region rows: ID / optional parent / entry / normal_exit /
+    optional exceptional terminal exit /
     owner: LoopRoot | Body
   point rows: ID / region / kind: Entry | Header | BodyEntry | Body |
-    ContinueLatch | TransitionDispatch | NormalExit /
+    ContinueLatch | TransitionDispatch | NormalExit | TerminalErrorExit /
     ordered Action slots /
     exact predecessor-successor Edge IDs
   edge rows: ID / predecessor / successor /
     kind: EntryHeader | HeaderBody | HeaderExit | BodyFlow |
           ContinueExit | ContinueDispatch | TransitionAdvance |
-          TransitionRangeExit /
+          TransitionRangeExit | TransitionError /
     optional predicate: Use with exact polarity/outcome pattern
   exactly Entry->Header, Header->{BodyEntry,NormalExit}, body flow to
     ContinueLatch, ContinueLatch->{NormalExit,TransitionDispatch}, and
-    TransitionDispatch->{Header,NormalExit};
-    TransitionAdvance is the sole backedge/cycle
+    TransitionDispatch->{Header,NormalExit[,TerminalErrorExit]};
+    TransitionAdvance is the sole backedge/cycle and TerminalErrorExit exists
+    iff transition semantics can error
   removing TransitionAdvance yields one reachable DAG covering every row;
-    NormalExit post-dominates every finite exiting path
-
-FoldEdgePredicateV1 = True | False | Advance | NormalRangeExit
+    NormalExit post-dominates normal paths while TerminalErrorExit has no
+    successor and maps only to the owning action's terminating outcome
 
 HeaderBody/HeaderExit project the same primary `HeaderCondition` use with
 true/false polarity; it compares the direction-specific current counter/bound
 from transition semantics. ContinueDispatch/ContinueExit project one primary
-`ContinueCondition` use with true/false polarity. TransitionAdvance and
-TransitionRangeExit project one primary `TransitionOutcome` use with the
-exhaustive mutually exclusive Advance/NormalRangeExit outcome patterns; it is
-evaluated only on the continue-true path. Edge rows cannot supply independent
-predicate occurrences. A nonprogressing or wrapped next counter which still
-satisfies the header predicate is `Advance`, not a third outcome.
+`ContinueCondition` use with true/false polarity. TransitionAdvance,
+TransitionRangeExit, and TransitionError project one primary
+`TransitionOutcome` use with the exhaustive mutually exclusive
+Advance/NormalRangeExit/Error outcome patterns; it is evaluated only on the
+continue-true path. Edge rows cannot supply independent predicate occurrences.
 
 ExpectedSourceForFoldGraph
   independently derived from the typed HIR ForFold semantic specification
@@ -846,23 +562,18 @@ SourceFoldAction
     SourceFoldOccurrenceDef results
   exact SourceSemanticAccessSummary
   kind: NestedActionSemanticKind<SourceInputId, SourceBindingId,
-          SourceFoldPreparedTargetHandleId,
           SourceFoldDynamicAddressPlanId, SourceEffectStreamId,
-          SourceRuntimeEventSiteId, ExpectedSourceRuntimeCallInstanceId,
+          SourceRuntimeEventSiteId,
           SourceFoldUseSite, SourceFoldInputResolution>
 
 SourceFoldValueOccurrence
-  semantic source-phase node or fixed private runtime leaf:
-    SourceFoldRuntimeLeafKindV1
+  semantic source-phase node or fixed private runtime leaf
   flow: SourceFoldValueFlow
   ordered_operands: [SourceFoldOccurrenceUse]
 
-SourceFoldRuntimeLeafKindV1 = OuterEntry | HeaderParameter | ExitParameter
-
 SourceFoldValueFlow
   Use { semantic_use: ExpectedSourceFoldUseId,
-        site / owner: SourceFoldUseOwner /
-        role: SourceFoldOccurrenceUseRoleV1,
+        site / owner: SourceFoldUseOwner / role,
         value_source: EvaluateHere |
           FixedValue(SourceFoldCanonicalProducerId, ValueFlowReason) }
   Definition { semantic_result: ExpectedSourceFoldResultId,
@@ -871,10 +582,6 @@ SourceFoldValueFlow
                       HeaderParam(Counter | State(state ordinal)) |
                       ExitParam(State(state ordinal)) |
                       ActionResult(SourceFoldActionId, result ordinal) }
-
-SourceFoldOccurrenceUseRoleV1 =
-  Value | Address | Predicate | Argument | PreviousValue |
-  Recurrence | Transition
 
 SourceFoldUseOwner
   ValueOperand(SourceFoldValueOccurrenceId, operand ordinal) |
@@ -902,24 +609,11 @@ SourceFoldRecurrenceRelation
     parameter unless a future typed result explicitly exposes it
   recurrence edges are not SourceFoldProducerDependencyDAG operand edges
 
-SourceFoldPreparedTargetHandle
-  id: SourceFoldPreparedTargetHandleId scoped by SourceForFoldTemplateId
-  exact assignable fold-body target syntax / object / normalized access / type
-  ordered selector SourceFoldOccurrenceUses
-  prepared exactly once; old-value reads and writebacks reuse this ID
-
 SourceFoldDynamicAddressPlan
-  plan / owner SourceFoldActionId / once-prepared
-    SourceFoldPreparedTargetHandleId / expected HIR dynamic-select row
+  plan / owner SourceFoldActionId / expected HIR dynamic-select row
   ordered typed SourceFoldOccurrenceUse indices, object/type/width,
     dimensions, part-select geometry, offset, address-known,
     bounds-when-known, access guard, access semantics, and result projection
-
-Every source outer/fold/program `StaticTarget` names its namespace's prepared
-handle directly. Every `DynamicTarget(handle, plan)` has one exact inverse plan
-row naming the same handle; a plan or handle cannot be shared across those
-nominal namespaces. Selector evaluation constructs the handle once before an
-old-value read and copyout reuses it.
 
 SourcePredicateRegion
   unit: SourceControlUnitId
@@ -941,20 +635,11 @@ SourceGate
 
 SourceConditionSemantics
   IfReduction { language_semantics_version, source domain: Bit | Logic,
-                width, rule: SourceIfReductionRuleV1 }
+                width, closed reduction rule ID }
   TernaryBitMerge { language_semantics_version,
                     condition domain/width,
                     then/else/result coercions,
-                    rule: SourceTernaryBitMergeRuleV1 }
-
-SourceIfReductionRuleV1 = OneIsTrueZeroXzFalse
-SourceTernaryBitMergeRuleV1 =
-  KnownSelectOtherwiseEqualBitsElseCanonicalX
-
-For `CeloxSourceV0_20`, both variants require `width == 1`; the rule ID
-distinguishes known-zero, known-one, and X/Z handling, not an arbitrary-width
-truth reduction. A future profile which admits wide conditions requires a new
-semantics tag and rule.
+                    closed unknown-condition merge rule ID }
 
 The aggregate verifier derives this variant and every coercion/rule ID from
 the typed HIR, then evaluates the closed language
@@ -1003,18 +688,10 @@ SourceDecision
 
 SourceCaseSemantics
   language_semantics_version / case operator kind
-  first_match_rule: SourceCaseFirstMatchRuleV1
-  default_rule: SourceCaseDefaultRuleV1
-  xz_rule: SourceCaseXzRuleV1
+  ordered first-match and closed default rule
   selector source domain / width / signedness
+  derived equality/wildcard/range X/Z rules
   per-pattern derived SourceCoercion / SourceComparison rules
-
-SourceCaseFirstMatchRuleV1 =
-  ProceduralFirstKnownTrue | ExpressionOrderedTruth3Merge
-SourceCaseDefaultRuleV1 =
-  RequiredExpressionDefault | ProceduralDefaultOrFallthrough
-SourceCaseXzRuleV1 =
-  ExactFourState | PatternXzWildcard | SwitchKnownOne
 
 The verifier derives case/casez/range/default behavior from the HIR operator
 and language version, not from an arbitrary semantic table. A default-only
@@ -1064,8 +741,7 @@ ControlOccurrencePlan
   source instance table referencing the owning source catalog
   mapped-source and explicit synthetic-origin relations
   inputs / write domains / bindings / effect streams
-  observers / runtime sites / runtime-function call instances and execution
-    lineages / dynamic plans / ForFold templates
+  observers / runtime sites / dynamic plans / ForFold templates
   units / regions / points / edges / roots / occurrence_actions
   gates / gate result merges / decisions / gated_muxes /
   decision_result_merges
@@ -1212,39 +888,6 @@ OccurrenceAction
   semantic_accesses: SemanticAccessSummary
   kind: occurrence-valued ControlActionKind
 
-Runtime-function occurrence identity uses the exact semantic-owned V1 records
-`OccurrenceRuntimeRootOwnerV1`,
-`OccurrenceRuntimeExecutionLineageRowV1`,
-`OccurrenceRuntimeLocalScopeV1`,
-`SourceToOccurrenceRuntimeLocalScopeRowV1`,
-`OccurrenceRuntimeProgramActionCoordinateV1`,
-`OccurrenceRuntimeFunctionInvokeOwnerTargetV1`,
-`OccurrenceRuntimeFunctionInvokeV1`, and
-`OccurrenceRuntimeFunctionCallInstanceV1`. This document defines no shortened
-occurrence enum or call-instance alias.
-
-`OccurrenceRuntimeExecutionLineageRowV1::Root` retains the exact
-`RuntimeSourceRootRoleV1` and matching `OccurrenceRuntimeRootOwnerV1` variant:
-source-instance-qualified catalog owner, Whole `ControlRootRef`, scheduled
-`ObserverOccurrenceId`, or source-instance-qualified initializer owner.
-`RuntimeCall` retains the exact parent and `OccurrenceRuntimeCallInstanceId`.
-ForFold never creates a lineage row.
-
-The complete semantic-owned `SourceToOccurrenceRuntimeFunctionRelationV1`
-maps execution lineages/root owners, local scopes, program slots/actions,
-formal/local objects, inputs/results, targets/plans/coercions/events/folds,
-invoke owner variants, operand/result roles, and formal-order writebacks. Every
-map has an exact inverse and boundary token/value equality. In particular,
-`Body` maps to `Body`, while `ForFold(SourceForFoldTemplateId)` maps to
-`ForFold(the exact mapped ForFoldTemplateId)`; only the tag is unchanged, never
-the checked template-ID namespace. No occurrence row is created for an
-iteration or equal current bits.
-For a shared nested program call, the relation is a total bijection from
-`(RuntimeFunctionProgramNestedCallInstanceIdV1,
-OccurrenceRuntimeExecutionLineageId, OccurrenceRuntimeLocalScopeV1)` to one
-`OccurrenceRuntimeCallInstanceId`; the immutable program action retains only
-its structural site ID.
-
 ControlRootRef
   unit: ControlUnitId
   root: ExternalRootId
@@ -1354,9 +997,7 @@ EffectTokenFlow
 
 ControlActionKind =
   ActionSemanticKind<ControlRootRef, OccurrenceInputId, BindingId,
-                     OccurrencePreparedTargetHandleId,
                      DynamicAddressPlanId, ObserverId, RuntimeEventSiteId,
-                     OccurrenceRuntimeCallInstanceId,
                      ForFoldTemplateId, ControlSite, InputResolution>
 
 InputResolution = InputResolutionKind<DynamicAddressPlanId>
@@ -1431,8 +1072,7 @@ SourceCoercion
   source width / source signedness
   target width / target signedness
   context: SelfDetermined | AssignmentValue | ExplicitCast |
-           CommonExpressionOperand |
-           ForFoldCounterOperand(SourceForCounterRule)
+           CommonExpressionOperand | ForFoldCounterOperand(rule ID)
   width action: Identity | Truncate | ZeroExtend | SignExtend
 
 `SourceCoercion` is a derived row, not a producer-selected extension tag.  The
@@ -1445,23 +1085,17 @@ context fixes the extension basis before the width action is checked:
   signedness when widening, so one unsigned ternary/binary arm forces
   zero-extension of every arm into the common type; and
 - `ForFoldCounterOperand` uses the closed language-version rule named by the
-  independently derived transition-semantics row. For Veryl V0_20 its target
-  is always signed two-state width 32. Start/end/initial and final step-result
-  conversion use ordinary assignment rules, including source-signed widening,
-  low-bit truncation, Logic-to-Bit conversion, and modulo-`2^32` wrap. Bound
-  comparison is then signed width 32. The step RHS retains the operand context
-  required by the exact shared `SourceForStepAssignmentOp`; shift counts remain
-  self-determined and are never truncated to a host word.
+  independently derived transition-semantics row.  For the current rule,
+  widening sign-extends only when both the source and counter types are
+  signed.  Compare width and the operator-specific Add/Mul/Shl step-math width
+  remain separate derivations.
 
 Truncation is independent of the extension basis.  The verifier derives the
 exact target width from the typed HIR context; a wire may not choose a wider
 type merely because its extension kind is internally consistent.
 
-SourceComparisonOperatorV1 =
-  LessThan | LessThanOrEqual | GreaterThan | GreaterThanOrEqual
-
 SourceComparison
-  operator: SourceComparisonOperatorV1 / signedness / SourceCoercion
+  operator / signedness / SourceCoercion
 
 OccurrenceGatedOwner = GateResult(GateResultMergeId) |
                        DecisionStep(DecisionResultMergeId,
@@ -1695,8 +1329,7 @@ Actions are the only owners of scheduled-root execution and token flow; pure
 `InstValue` evaluation is owned separately by the verified placement plan.
 Version advance and publication are never standalone actions that can be
 separated from the operation they describe: a `StoreRoot`, `BindEnvironment`,
-`RuntimeEvent`, `InvokeRuntimeFunction`, or `ForFold` publishes its results and
-output tokens atomically.
+`RuntimeEvent`, or `ForFold` publishes its result and output tokens atomically.
 `ReadInput` records whether a load came from memory, a loop/function
 environment, a statically assembled value, or a dynamic overlay; later passes
 do not infer that distinction from a raw `SLTNode::Input`. `EvaluatePinned` is
@@ -1706,8 +1339,7 @@ a failed placement proof.
 For a scheduled root, the root-facing projection of its action operands must
 equal `ResolvedControlRoot.ordered_operands` role-for-role, value-for-value, and
 site-for-site. Its action kind must carry that same root reference. Conversely,
-each root-bearing `StoreRoot`, `RuntimeEvent`, `InvokeRuntimeFunction`, or outer
-`ForFold` action is
+each root-bearing `StoreRoot`, `RuntimeEvent`, or outer `ForFold` action is
 named by exactly one scheduled root; helper read/capture/bind/pinned actions
 are rootless. Definition/publication sites come only from the action result
 records; there is no root-wide use or publication site.
@@ -1758,12 +1390,7 @@ MappedSourceRelations
   unit / input / value / action / gate / decision expansions
   write-domain / binding / effect-stream expansions
   gate-result / decision-result / gated-mux expansions with exact bit ranges
-  root / observer / runtime-site / runtime-call-instance / execution-lineage /
-    dynamic-plan / ForFold-template expansions
-  complete SourceToOccurrenceRuntimeFunctionRelationV1, including four-role
-    runtime root owners, local-scope rows, program slots/actions/formals/locals/
-    inputs/results/targets/plans/coercions/events/fold rows, invoke owner
-    variants/roles/writebacks, inverse origins, and boundary equality
+  root / observer / runtime-site / dynamic-plan / ForFold-template expansions
   explicit synthetic-origin rows for every non-source object
 
 SourceUseExpansion
@@ -1810,12 +1437,6 @@ ActionExpansionEntry
   optional exact RootExpansionEntry for root-bearing actions
   primary ordinal / inverse OccurrenceAction origin
 
-  InvokeRuntimeFunction requires the sole `Whole` entry and an exact
-    `OccurrenceRuntimeFunctionCallInstanceV1` plus
-    `OccurrenceRuntimeFunctionInvokeV1` outer-owner inverse; its individual
-    return/output/inout result projections may atomize only after the invoke
-    boundary completes
-
 HelperExpansionEntry
   action: ControlActionId / typed purpose / helper ordinal
   rule: HelperDerivationRule
@@ -1857,9 +1478,8 @@ source artifact. A bare module-local ID is never accepted at an occurrence
 boundary.
 
 `MappedSourceRelations` is verified by source-object kind, not as an untyped
-bag. Each instantiated source unit, input, gate, decision, observer, runtime
-site, runtime call instance, execution lineage, dynamic plan, and loop template
-has exactly one mapped owner row.
+bag. Each instantiated source unit, input, gate, decision, observer,
+runtime-site, dynamic plan, and loop template has exactly one mapped owner row.
 Roots, values, gate/decision result merges, and gated muxes may
 atomize only into a nonempty canonical sequence of disjoint bit ranges whose
 ordered union is the complete source result range. Every mapped row points
@@ -2045,17 +1665,14 @@ definition-table row, not a root. An `SLTForEffect` is an action inside the
 owning `ForFold` template, not a top-level root.
 
 `SourceObserverId`, `SourceObserverOccurrenceId`,
-`SourceRuntimeEventSiteId`, `ExpectedSourceRuntimeCallInstanceId`,
-`RuntimeSourceExecutionLineageId`, `SourceDynamicAddressPlanId`, and
+`SourceRuntimeEventSiteId`, `SourceDynamicAddressPlanId`, and
 `SourceForFoldTemplateId` are module-local.
 For each `SourceInstanceId`, mapping allocates fresh artifact-global
-`ObserverId`, `ObserverOccurrenceId`, runtime-site, runtime-call-instance,
-execution-lineage,
+`ObserverId`, `ObserverOccurrenceId`, runtime-site,
 `DynamicAddressPlanId`, and `ForFoldTemplateId` rows and records a total
 source-reference relation. The occurrence verifier
 checks those relations bidirectionally; a source observer, runtime site,
-runtime call, lineage, dynamic-address plan, or loop template cannot disappear,
-and no
+dynamic-address plan, or loop template cannot disappear, and no
 artifact-global row can be invented without an explicit verified synthetic
 origin.
 
@@ -2083,11 +1700,6 @@ Between them the verifiers check:
   and action operand has its own valid role-specific use site; each
   root-bearing action has exactly one matching root, the root operand
   projection is exact, and helper actions are rootless;
-- every runtime-function invoke has exactly one call instance and parent-first
-  execution lineage; its role ranges, setup order, shared-program boundary,
-  nested calls/folds, prepared targets, result order, writebacks, and complete
-  semantic summary agree bidirectionally with the expected source/occurrence
-  call graph, and no ForFold creates an execution-lineage row;
 - in the final artifact, each action's semantic read/write/effect set agrees
   exactly with its per-domain token flows, every outgoing action token is
   defined by that action, and no `(action, domain/binding/stream)` flow is
@@ -2130,26 +1742,10 @@ Between them the verifiers check:
   IDs or retaining a cache in a frozen arena.
 
 Unit-CFG acyclicity is checked with a worklist/topological count, without a
-depth or iteration cap. A runtime invoke remains one outer DAG action with a
-separately verified nested program. `OccurrenceRuntimeFunctionCallInstanceV1` maps every
-program-relative value, action, target handle, nested call/fold, exit value, and
-effect token both ways through the complete
-`SourceToOccurrenceRuntimeFunctionRelationV1`; the Root-or-RuntimeCall lineage
-is remapped, `Body` remains `Body`, and a source ForFold template ID is remapped
-to its exact occurrence `ForFoldTemplateId`. The outer
-token transfer is the exact nested entry-to-exit summary, not a producer-supplied
-may-effect set. Nested program construction is completed in reverse topological
-runtime-call-graph order; equal type specializations share immutable program
-rows, while equal argument values never merge instances. The resolved artifact
-retains this boundary and mapping rather than materializing an unchecked
-recursive inline tree.
-
-A source loop already expanded by the Veryl emitter has
-disappeared into finite ordinary source HIR and owns no template. A retained
+depth or iteration cap. Source loops have already been statically expanded;
 runtime `ForFold` remains one pinned outer action/value and never introduces a
-backedge into the outer control-point graph. Its runtime loop is nevertheless
-explicit in a separately verified nested template; this is not the
-constant-function certificate VM:
+control-point backedge. Its internal loop is nevertheless explicit in a
+separately verified nested template:
 
 ```text
 OccurrenceForFoldTemplate
@@ -2157,16 +1753,9 @@ OccurrenceForFoldTemplate
   unit: ControlUnitId / owner_action: ControlActionId
   origin: MappedSource { source: SourceRef<SourceForFoldTemplateId>,
                          body_mapping: SourceToOccurrenceForFoldRelation }
-  counter: { binding, exact signed 32-bit Bit facts,
-             range_inputs:
-               Single { value_use: OccurrenceUse,
-                        SingleForward | SingleReverse } |
-               Between { start_use: OccurrenceUse, end_use: OccurrenceUse,
-                         ForwardExclusive | ForwardInclusive |
-                         ReverseExclusive | ReverseInclusive },
-             update: DefaultByRangeDirection |
-                     Explicit(step OccurrenceUse,
-                              SourceForStepAssignmentOp) }
+  counter: { binding, width, signed,
+             start_use: OccurrenceUse, end_use: OccurrenceUse,
+             inclusive, step, step_op, reverse }
   states: [OccurrenceForFoldState]
   body: OccurrenceForFoldBody
   expected: ExpectedOccurrenceForFoldGraph
@@ -2241,9 +1830,7 @@ FoldAction
   FoldOccurrenceDef results
   exact SemanticAccessSummary
   kind: NestedActionSemanticKind<OccurrenceInputId, BindingId,
-          FoldPreparedTargetHandleId, FoldDynamicAddressPlanId,
-          EffectStreamId, RuntimeEventSiteId,
-          OccurrenceRuntimeCallInstanceId,
+          FoldDynamicAddressPlanId, EffectStreamId, RuntimeEventSiteId,
           FoldControlUseSite, FoldInputResolution>
 
 FoldCanonicalProducerRelation / FoldProducerDependencyDAG
@@ -2312,6 +1899,9 @@ ForFoldTokenOverlay
     an ExitPhi with all three edge operands in FoldEdgeId order (equal edge
     values are not omitted); the outer outgoing action token names
     only this verified merge
+  optional ErrorExit tokens and runtime-event/effect token map exactly to the
+    owning outer ForFold action's termination outcome and never to normal
+    outgoing state
 
 FoldResolvedOperand = Outer(InstValueId) | Local(FoldInstValueId)
 
@@ -2368,6 +1958,8 @@ ForFoldValueResolutionOverlay
 ForFoldOutcomeBoundary
   NormalExit { selected state ExitParam -> outer action result,
                normal token merges -> outer outgoing flows }
+  optional ErrorExit { exact progress-error runtime site/effect token,
+                       terminating outcome and no outer value result }
 
 ResolvedForFoldTemplate
   verified view of OccurrenceForFoldTemplate plus token/value/placement overlays
@@ -2405,7 +1997,7 @@ each source and occurrence template has exactly one same-unit owner action,
 that action names exactly that template/result slot, mapped owners agree with
 `ActionExpansion`, and every OuterEntry references one of that action's exact
 operand projections. A template cannot be shared by two actions or cross a
-control unit. Normal token and result boundaries name only this owner.
+control unit. Normal/error token and result boundaries name only this owner.
 
 Within a fold, action operands are primary `ActionOperand` rows and nested
 dynamic/action-kind fields project those same rows exactly as in the outer
@@ -2422,10 +2014,8 @@ in source order; every update and the continue condition reads the same
 iteration-entry bindings; updates are parallel; a false continue exits with
 the already computed next states. A true continue evaluates the closed
 `TransitionOutcome`: only `Advance` updates the counter and takes the backedge,
-while `NormalRangeExit` takes the normal exit with next states. Zero,
-nonprogress, direction change, and wrap cannot select an error path because no
-such path exists; an updated in-range counter, including an unchanged one, is
-`Advance`. The occurrence template owns a private
+`NormalRangeExit` takes the normal exit with next states, and an error outcome
+takes the terminal error path. The occurrence template owns a private
 site/control namespace and is verified, including exact access/effect
 summaries, before `FrozenOccurrenceArtifact`; the outer action skeleton
 consumes those summaries. Step 3 then builds its private token overlay. Every
@@ -2447,7 +2037,7 @@ incoming/outgoing action tokens equal the nested entry/exit token overlay, and
 the nested exit state selected by `result_state` exactly defines the outer
 ForFold action result.
 
-`PhaseSLTNodeFactsV1<P>` is the prerequisite and retained fact artifact for each
+`PhaseSLTNodeFacts<P>` is the prerequisite and retained fact artifact for each
 new phase; it is not a recursive `get_width` and cannot be paired with another
 phase's arena. Existing lowering temporarily keeps an explicitly legacy fact
 adapter until the step-4 switch. Every phase arena is a canonical append-only
@@ -2458,61 +2048,45 @@ references, self references, and cycles are noncanonical IR and fail
 size cutoff.
 
 Verification first scans all edges without dereferencing an unchecked ID, then
-computes the complete node facts and lowerability in arena order with checked arithmetic. It
+computes width and lowerability in arena order with checked arithmetic. It
 needs no reverse-edge CSR, Kahn queue, recursion, or `Option<usize>` table, so
-its persistent facts are one fixed `PhaseSLTNodeFactV1<P>` row per node:
-
-```text
-PhaseSLTNodeFactV1<P>
-  width: nonzero usize / signed / positive_type
-  static_domain: Bit | Logic
-  value_class: Evaluation | MaterializedStorage
-  mask_class: AlwaysZero | MayCarryXZ
-  lowerable: bool
-```
-
-There is no separate type lookup which can disagree with this row. The exact
-closed node sum, coercion ownership, per-variant width/signed/positive/domain/
-value/mask transfer table, and `PhasePrimitiveV1` lowerability inventory are
-normatively defined in
-[Source semantic objects and input accesses](./source-semantic-inputs.md).
-Replay implements that table with an exhaustive match; this document does not
-define a shorter competing rule. In particular, `Coerce` is a first-class node,
-every unary/binary/mux operand is a `PhaseValueUseV1` with an independently
-verified coercion, contextual mux width may exceed the maximum natural arm
-width, and a materializing Bit coercion is the only ordinary coercion allowed
-to clear X/Z. Equality, relational, logical, wildcard equality, and wildcard
-inequality produce width one; concat uses checked nonzero addition; selector
-and condition uses require the exact width/coercion stated by the expected
-graph. This same fact table becomes the sole width API so verifier and lowering
-cannot disagree or panic on malformed IDs, underflow, overflow, or a deep
-graph.
-
-Signedness is likewise the one normative transfer relation: arithmetic and
-bitwise binary results use the raw-natural signedness rule while extension uses
-the common verified coercion target; shifts inherit the raw left signedness;
-comparison/logical/reduction/concat/slice results are unsigned. A whole-object
-input read and a read selected only through unpacked dimensions preserve the
-declared result signedness; any packed bit/part select is unsigned even when its
-range covers the complete packed width. This derives from access provenance,
-not a flat range comparison. Dynamic unpacked-array extraction is one exact
-semantic input row, not a signed whole-object input plus a generic `Slice`.
-ForFold state initial/update coercions use assignment materialization.
-The raw source proposal retains the original arbitrary-width bound and step
-references without allowing them to choose the counter type. During semantic
-relation step 2, the joint typed verifier derives their exact values and the
-signed-32 bound coercions, comparison, and complete
-`+= -= *= /= %= &= |= ^= <<= >>= <<<= >>>=` step-operator relation in the
-independently verified `SourceForFoldTransitionSemantics` row.
-Static-domain, value-class, and mask facts for input leaves come from an explicit verified
+its persistent facts are one `usize` width per node plus a packed lowerability
+bitset. Equality, relational, logical, wildcard equality, and wildcard
+inequality produce width one; `Mux` applies the declared arm coercion and
+produces their maximum width; concat uses checked addition. Selector/condition
+sites additionally require nonzero width. This same fact table becomes the
+sole width API so verifier and lowering cannot disagree or panic on malformed
+IDs, underflow, overflow, or a deep graph.
+Signedness is also derived by one closed shared rule: arithmetic and bitwise
+binary results are signed only when both operands are signed; shifts inherit
+the left operand; comparison and logical results are unsigned; identity,
+unary minus, and bit-not preserve operand signedness; reductions are unsigned;
+and concatenation is unsigned. A whole-object input read and a read selected
+only through unpacked array dimensions preserve declared signedness; any
+packed bit/part select is unsigned even when its numeric range happens to
+cover the complete packed width. The phase `Slice` node is likewise unsigned.
+This rule is derived from access provenance, not from comparing a flat bit
+range with object width. In particular, dynamic unpacked-array extraction is
+represented as one exact semantic input row with its selected result type; it
+is not modeled as a signed whole-object input followed by an unsigned generic
+`Slice`. A mux derives common signedness from both raw arms. Its two declared
+arm target types must match, their width must be at least the maximum raw arm
+width (allowing an independently verified enclosing context to widen it), and
+their extension uses common target signedness rather than each arm's source
+signedness. ForFold state initial/update coercions use assignment semantics.
+Step 1 retains arbitrary-width typed bound and step payloads without deriving
+a partial counter-width formula; the exact compare and Add/Mul/Shl math
+coercions belong to the independently verified `SourceForFoldTransitionSemantics`
+row in step 2.
+Two-state facts for input leaves come from an explicit verified
 `InputSemanticFacts<P>` context built from the declaration/flattened semantic
 object table plus the independently derived exact HIR input rows;
 `SLTNode::Input` alone does not encode object identity, exact access geometry,
 or `Bit` versus `Logic`. `PhaseSemanticObjectId<P>` identifies the declaration,
 binding, or flattened object, while `PhaseInputId<P>` identifies one exact read
 geometry. Input rows carry the object ID, normalized static base/part rule,
-  exact ordered index roles, extents/strides, selected width, and derived result
-  signedness/positive-type/static-domain/value-class/mask-class. `PhaseSLTNodeV1::Input` carries only the input ID and ordered
+exact ordered index roles, extents/strides, selected width, and derived result
+signedness/positive-type/domain. `PhaseSLTNode::Input` carries only the input ID and ordered
 index child IDs; it cannot repeat or override access, stride, width,
 signedness, or domain. ForFold state rows and result identity use
 `PhaseSemanticObjectId<P>` plus a bit range, so two different read geometries
@@ -2533,10 +2107,8 @@ InputAccessFact<P>
   input: PhaseInputId<P>
   object: PhaseSemanticObjectId<P>
   static base / normalized part-select rule / selected width
-  ordered index roles with extent, stride, evaluation-mask use, and
-    PackedEvaluationX | UnpackedStorageDefault invalid behavior
-  result_signed / result_positive_type / result_static_domain
-  result_value_class / result_mask_class
+  ordered index roles with extent and stride
+  result_signed / result_positive_type / result_domain
 ```
 
 The object table is dense in canonical typed-declaration/binding traversal
@@ -2544,18 +2116,17 @@ order. The input table is dense in expected-HIR traversal order, and only an
 identical complete input key may reuse an earlier row. Neither analyzer
 `HashMap` iteration order nor producer node/cache order allocates either ID.
 
-Derived mask facts are recomputed over the checked node DAG. A materialized
-`Bit` object read is `AlwaysZero` only when every possible invalid selector is
-unpacked and therefore returns a Bit storage default. Any dynamic/unknown
-packed selector yields `MayCarryXZ` and can produce X evaluation content even
-with static Bit result domain. A Logic object read is likewise not known
-two-state merely because its index is. Index children participate in
-lowerability, mask class, and the separately verified address-known/bounds/
-partial-lane plan. A serialized boolean or producer-supplied tag is never proof.
+Derived zero-mask facts are recomputed over the checked node DAG. A `Bit`
+object read is known two-state regardless of whether a dynamic `Logic`
+index/anchor contains X/Z: the checked dynamic-read semantics produces zero
+for an unknown address. A `Logic` object read is not known two-state merely
+because its index is. Index children still participate in lowerability and in
+the separately verified address-known/bounds guard. A serialized boolean or
+producer-supplied tag is never accepted as the proof.
 
 The new pipeline uses phase-typed `PhaseNodeId<SourcePhase>`,
 `PhaseNodeId<DraftOccurrencePhase>`, and
-`PhaseNodeId<OccurrencePhase>` with `PhaseSLTNodeV1<P>` payloads whose child and
+`PhaseNodeId<OccurrencePhase>` with `PhaseSLTNode<P>` payloads whose child and
 input/object fields carry that same phase. `PhaseInputId<P>` and
 `PhaseSemanticObjectId<P>` are distinct checked namespaces even when both are
 backed by dense `u32` tables.
@@ -2597,7 +2168,7 @@ ordinary mux. A repeated complete key must return the same coordinated handle
 or fail on different semantics.
 
 Interning does not clone an `SLTNode` into a map key and does not rely on a
-hash-collision complexity assumption. `PhaseSLTNodeV1<P>` has one exhaustive
+hash-collision complexity assumption. `PhaseSLTNode<P>` has one exhaustive
 canonical total order over variant tag and direct payload. The arena stores an
 index-only AVL tree whose links/heights are parallel construction vectors;
 comparisons read the one owned node payload in the arena. Complete fixed-size
@@ -2755,17 +2326,15 @@ provenance/key together. A frozen semantic rewrite similarly creates an entire
 new aggregate artifact plus relation; it cannot mutate a frozen arena or
 silently rebuild a cache during lowering.
 
-There are likewise three aggregate boundaries, never an arena-only
-planner-ready wire. The source boundary is in-memory first; the names below do
-not assign a persistent byte schema:
+There are likewise three private raw wire boundaries, never an arena-only
+planner-ready wire:
 
 ```text
-SourceRawAggregate { pinned parsed syntax/tokens, analyzer witnesses,
-                     nodes, source provenance }
-OccurrenceRawAggregate { [FrozenSourceArtifact], canonical elaborated
+SourceWire { module key, typed semantic HIR snapshot, nodes, source provenance }
+OccurrenceWire { [SourceWire], canonical elaborated
                  instance/type/glue/alias/observer semantic-input rows,
                  nodes, occurrence plan }
-ControlValueRawAggregate { FrozenOccurrenceArtifact,
+ControlValueWire { OccurrenceWire,
                    dense occurrence-to-InstValue IDs,
                    InstValue rows with normalized safety classifications,
                    producer-indexed safety-witness and value-resolution rows,
@@ -2782,13 +2351,10 @@ frozen artifact exists until the complete typed-HIR, provenance, expected-graph,
 and ordinary/gated classification relation below can be verified as one
 aggregate.
 
-Only aggregate `try_prepare_source_aggregate` entry points are public. A byte
-`decode_and_prepare` adapter, when one exists, privately constructs that same raw
-aggregate and cannot publish it. New persistent wires are version-tagged and
-reject unknown fields; only an explicit old-version adapter may discard
-obsolete derived fields. Source verification first flattens the pinned parsed
-syntax/tokens to its private raw semantic tables and converts that view to
-`VerifiedTypedSourceHIR`, then independently traverses
+Only aggregate `decode_and_verify` entry points are public. New wires are
+version-tagged and reject unknown fields; only an explicit old-version adapter
+may discard obsolete derived fields. Source decoding first converts
+`RawTypedSourceHIR` to `VerifiedTypedSourceHIR`, then independently traverses
 that verified semantic snapshot and derives expected source
 specifications and `InputSemanticFacts<SourcePhase>`, structurally
 replays nodes, verifies source provenance, construction classification, and
@@ -2815,8 +2381,8 @@ wire fields. An explicit compatibility adapter discards any old copies before
 verification; the current decoder never silently accepts them. No internal
 verified record implements standalone `Deserialize`.
 
-An optional raw aggregate byte decoder is nonrecursive and allocation-fallible
-before any semantic verifier runs. Every encoded aggregate starts with an exact `schema_version`
+The raw aggregate decoder is nonrecursive and allocation-fallible before any
+semantic verifier runs. Every aggregate starts with an exact `schema_version`
 and checked flat-table lengths; recursive HIR/control shapes are encoded as
 flat rows with checked IDs. Before `try_reserve`, the decoder proves with
 checked multiplication/addition that each length and payload fits the remaining
@@ -2874,12 +2440,11 @@ Before building the maximal skeleton, `ControlEligibilityPlan` classifies every
 source gate/decision with an independently checked proof or a semantic
 `PinnedDataflow` result. A branch is legal only when its source condition
 semantics are branch-equivalent and the condition has a `KnownTwoState` proof
-(a `MaterializedStorage` Bit value, an `AlwaysZero` fact, or an independently
-recomputed actual zero mask). Static Bit domain alone is insufficient. A Logic condition is
+(a `Bit` value or an independently verified zero mask). A `Logic` condition is
 not made branchy merely by attaching a two-state tag. Four-state ternaries whose
 X/Z behavior cannot be represented by branch control and nodes containing
-`ForFold`, runtime-function invokes, runtime events, stores, or other effects
-are pinned to their existing semantics.
+`ForFold`, runtime events, stores, or other effects are pinned to their existing
+semantics.
 
 For a source decision, eligibility replays each recorded typed wildcard/range
 predicate and coercion. It requires a two-state selector, constant normalized
@@ -3083,7 +2648,7 @@ derived closed interval, and boolean preconditions only move from unproved to
 proved. Because the producer graph is a DAG, the implementation evaluates each
 closed transfer once rather than iterating to a cap. `OperationFactRule` and
 `OperationSafetyRule` are exhaustive versioned enums over every
-`PhaseSLTNodeV1<P>`, runtime/header origin, typed coercion, and dynamic-access kind.
+`PhaseSLTNode`, runtime/header origin, typed coercion, and dynamic-access kind.
 They derive facts from operand facts, verified types, token rows, and address
 plans; an unknown rule/version is a decode error, not `Total`.
 
@@ -3289,14 +2854,12 @@ part select and is the remaining aggregate stride otherwise. Every addition,
 subtraction, and multiplication in this normalization is checked.
 
 `address_known` is a `KnownTwoState` one-bit value which is true exactly when
-every normalized index/anchor evaluation has an empty X/Z mask. Static Bit
-domain does not contribute true by itself because a Bit-typed intermediate may
-carry transient X before materialization. `bounds_when_known` is a
-`KnownTwoState` one-bit value equal to the conjunction of
-`0 <= index_i < extent_i` for every aggregate index,
-`0 <= anchor && anchor + elements <= extent` for `+:`,
+every normalized `Logic` index/anchor has no X/Z mask bit (`Bit` indices
+contribute true). `bounds_when_known` is a `KnownTwoState` one-bit value equal
+to the conjunction of `index_i < extent_i` for every
+aggregate index, `anchor + elements <= extent` for `+:`,
 `anchor < extent && anchor + 1 >= elements` for `-:`,
-`0 <= anchor && anchor * elements + elements <= extent` for `step`, and
+`anchor * elements + elements <= extent` for `step`, and
 `offset + selected_width <= object_width`; static `:` bounds are verified when
 the plan is created. `access_guard` is the exact two-state conjunction
 `address_known && bounds_when_known`. Comparisons occur in the original normalized arbitrary-
@@ -3319,17 +2882,13 @@ action. A backend may lower the checked action to a branch, mask, or
 indivisible checked-load bundle, but may not omit the source action. An eager
 mux containing an unchecked load does not count as a guard.
 
-Runtime semantics retain each selector's packed/unpacked dimension tag and are
-applied left-to-right. With a known address, in-range lanes read/write the
-object; an out-of-range unpacked read substitutes the recursive materialized
-element default, while an out-of-range packed lane produces X evaluation
-content. Known indexed part-selects retain in-range lanes and use X for only
-their out-of-range packed lanes. If an address component has X/Z, an unpacked
-read uses its element default, a packed read is all-X regardless of static
-domain, and a write is a no-op. A later Bit materialization may convert that X
-to zero. Backends may use masked or branched implementations, but the output
-verifier checks this exact relation and proves that no machine memory access
-occurs outside the object.
+Runtime semantics are per selected bit lane. With a known two-state address,
+in-range lanes read/write the object, out-of-range read lanes produce the
+source domain's default (`X` for four-state `Logic`, zero for `Bit`) and
+out-of-range write lanes are ignored. If any address bit is X/Z, a `Logic` read
+is all-X, a `Bit` read is zero, and a write is a no-op. Backends may use masked
+or branched implementations, but the output verifier checks this exact lane
+relation and proves that no machine memory access occurs outside the object.
 
 Alias analysis declares a finite set of write domains and the sparse
 `may_write_domain(read_class)` relation. A static nonaliasing store advances
@@ -3507,116 +3066,6 @@ arm, every restricted value stays in its required execution domain, pinned
 effects did not move, and every root receives a dominating value of the
 declared width and memory/environment tokens.
 
-### Verified runtime-function formation
-
-Runtime functions remain shared functions downstream. Recursively inlining a
-call DAG would duplicate a callee for every path, enlarge the native function
-presented to scheduling and allocation, and make code size proportional to an
-expanded call tree rather than the verified input. V1 therefore has one
-target-independent SIR function per complete occurrence program environment and
-one opaque invoke at each verified call boundary:
-
-```text
-SIRRuntimeFunctionId, SIRRuntimeInvokeId, OccurrenceRuntimeProgramEnvironmentId:
-  checked dense u32 IDs
-
-OccurrenceRuntimeProgramEnvironment
-  source-program specialization
-  complete flattened mapping of captured objects/bindings/effect streams
-  no actual value, call-instance ID, profile count, or analyzer cache identity
-
-SIRRuntimeFunction
-  id / OccurrenceRuntimeProgramEnvironmentId
-  hidden SimulationState capability
-  flattened Input/Inout value parameters in formal/member order
-  verified program CFG, locals, nested invoke sites, and retained ForFold regions
-  result tuple: optional Return, then Output/Inout values in formal/member order
-  exact read/write/binding/effect summary and every normal/termination exit
-
-SIRRuntimeInvoke
-  id / exact OccurrenceRuntimeCallInstanceId / callee SIRRuntimeFunctionId
-  existing ordered operand registers plus operand-role bijection
-  result registers plus result-role bijection
-  once-prepared caller target handles and formal-order writebacks
-  exact semantic and token boundary
-
-RuntimeFunctionFormationPlan
-  consumes the complete verified SourceToOccurrenceRuntimeFunctionRelationV1
-  total program-row-to-SIR-function and call-instance-to-invoke mappings
-  total nested control/value/action/formal/local/object/input/result/target/
-    dynamic-plan/coercion/event/fold, OccurrenceRuntimeFunctionInvokeV1 owner,
-    and entry/exit mappings
-  unchanged invoke roles/writebacks and boundary token/value equality
-  exact inverse coverage and semantic output relation
-```
-
-The environment key permits structurally identical flattened instances to
-share generated code only when every captured address/binding/effect mapping is
-identical; input bits never enter it. Programs and calls are formed in reverse
-topological runtime-call-graph order with explicit worklists. Every verified
-program has exactly one SIR function in its occurrence environment and every
-call instance has exactly one invoke. There is no inline-vs-call heuristic,
-body-size threshold, retry, or legacy fallback in V1. A future inliner must
-provide a separate total `RuntimeFunctionInlinePlan` and semantic output
-relation before it may replace an invoke.
-
-`SIRRuntimeInvoke` is an effectful multi-definition operation. Ordinary SIR
-optimizers treat the invoke, its termination status, and its writebacks as one
-opaque ordered bundle; they may project a completed value result but cannot
-move a load/store/effect or another writeback into the bundle. The standalone
-SIR verifier replays the callee summary, checks all operand/result roles and
-types, proves the exact caller target handle is reused, and checks declaration-
-order copyout. Dropping an unused return never drops the invoke. SIR function
-return edges carry the complete result tuple; early source returns first join
-through verified program exit parameters.
-
-Each backend consumes a verified closed `RuntimeCallLoweringPlanV1`. Its logical ABI has
-the simulation-state capability, typed value parameters, typed result tuple,
-and explicit termination status. The target plan selects concrete register,
-stack, or caller-frame locations; proves nonoverlap, alignment, total width,
-all argument/result moves, target-handle writebacks, and status propagation;
-and relates the emitted call/output bundle back to the one SIR invoke. Arbitrary
-width or multi-result values may use a caller-owned frame, but its layout is a
-checked plan derived from the complete logical signature rather than a fixed
-field-count encoding.
-
-```text
-RuntimeCallLoweringPlanV1
-  exact target/ABI rule version and closed physical resource inventory
-  one selected function ABI row per SIRRuntimeFunctionId
-  one selected call bundle row per SIRRuntimeInvokeId
-  ordered argument/result/status locations, moves, clobbers, successors, and
-    writeback locations derived from the complete logical signature
-
-RuntimeCallLoweringOutputRelationV1
-  total bijection from every SIRRuntimeFunctionId in the artifact to exactly one
-    backend function body and verified concrete ABI signature
-  total bijection from every SIRRuntimeInvokeId to exactly one MInvoke/call
-    bundle in the mapped caller function
-  total ordered maps for every logical argument/result/status location, move,
-    normal/termination edge, prepared target, and formal-order writeback
-  exact inverse coverage: no backend function, invoke, ABI move, result,
-    writeback, call edge, or call-clobber record without one mapped SIR owner
-```
-
-The output verifier derives this relation from the completed SIR and emitted
-backend artifact; it does not accept producer-supplied coverage counts. It
-checks the function-call graph, callee identity, signature, roles, complete
-control/effect summary, and every forward/inverse row before either caller or
-callee can enter scheduling or allocation.
-
-Native MIR carries an explicit `MInvoke` bundle with fixed ABI uses/defs,
-caller-clobber masks, state-base preservation, memory/effect ordering, and
-normal/termination successors. Cranelift and Wasm carry the same logical
-function/invoke relation through their own typed call primitives. Each shared
-MIR function is scheduled, analyzed, and register-allocated independently;
-values live across `MInvoke` exclude every declared caller-clobbered register,
-and the allocator/output verifier checks that constraint. A call-lowering
-failure is a structured backend error, never permission to inline, truncate,
-or retry another allocator. Code and verifier storage are linear in shared
-program rows plus call sites, result roles, and ABI moves, not in a recursively
-expanded call tree.
-
 ## 3. Canonical DecisionRegion
 
 A selected multiway source decision is retained in canonical SIR instead of
@@ -3683,8 +3132,7 @@ The SIR verifier checks the ordinary CFG/SSA edge contract plus:
   separately owned by `DecisionFormationPlan`;
 - one default edge, total edge argument arity/types, and target existence;
 - an explicitly two-state selector value, until four-state X/Z branch behavior
-  is specified. A `MaterializedStorage` Bit value or independently recomputed
-  `AlwaysZero` definition qualifies; static Bit domain alone does not. Otherwise the
+  is specified. An inherent `Bit` value qualifies directly. Otherwise the
   producer must insert a typed `KnownTwoState` conversion whose zero-mask fact
   is recomputed by the standalone SIR verifier from the value's definitions;
   a semantics tag or unverified annotation alone never qualifies.
@@ -4544,23 +3992,6 @@ valid alignment/relocations; all code and table labels must resolve.
 All trees and graphs use explicit worklists; deeply nested source control and
 phi webs must not recurse on the host stack.
 
-Constant-function loop replay is linear in the finite certificate's consumed
-small-step rows plus executed typed-value/limb work. A trace exhausted in a
-nonterminal loop state rejects; an accepted trace has no unread row. There is
-no recursion/iteration/trace-length policy cap and no zero-step, nonprogress,
-or wrap shortcut. In contrast, verification of a retained runtime
-`PhaseForFold` is proportional to its finite template rows and does not execute
-or claim termination of the runtime backedge.
-
-- source-static frontier classification: `O(expression instances + typed
-  operand edges + activated guard edges + static-control limb work)` time and
-  linear class/control-cursor storage. Every raw expression/context instance is
-  classified once; suppressed edges are typed but not value-walked, while an
-  unknown/runtime controller contributes each semantically possible edge once.
-  Persistent packed projections are content-interned, so equal completed roots
-  share bits/value content while retaining distinct proof-origin rows; storage
-  is proportional to unique projection content plus selected frontier roots,
-  never paths or call-input combinations;
 - canonical SLT structural verification: `O(nodes + child edges + payload
   words)` time, where payload words include constant limbs, concat/index/state/
   effect rows, one width per node
@@ -4607,194 +4038,9 @@ or claim termination of the runtime backedge.
   entries for fixed `K`.
 
 Every producer, decoder, transformer, and verifier phase is an atomic
-`Result<OwnedOutputArtifact, PhaseErrorV1>`. The error schema is a lossless
-closed sum:
-
-```text
-PhaseErrorV1 =
-  Source(SourceAggregateErrorV1) |
-  Brand(ArtifactBrandErrorV1) |
-  Local(PhaseLocalErrorV1)
-
-PhaseResourceWaveV1 =
-  InputScan | ExpectedDerive | ProposalCompare | PlanConstruct |
-  PlanVerify | OutputMaterialize | OutputVerify | Commit
-
-OccurrenceResourceKindV1 =
-  SemanticObjectRows | InputRows |
-  TypedValueRows | BitsRows | BitPlaneWords | PhaseCoercionRows |
-  NodeRows | NodeInputIndexEntries | NodeOperandEntries |
-  NodeForStateEntries | NodeForEffectEntries |
-  NodeForEffectArgumentEntries | NodeConcatPartEntries | NodeFactRows |
-  UnitRows | RegionRows | PointRows | EdgeRows | RootRows | ActionRows |
-  ActionOperandEntries | ActionResultEntries |
-  ValueOccurrenceRows | ValueOperandEntries |
-  GateRows | GateResultMergeRows | DecisionRows | DecisionArmEntries |
-  DecisionPatternEntries | DecisionResultMergeRows | DecisionStepEntries |
-  GatedMuxRows | ObserverRows | ObserverOccurrenceRows | RuntimeEventRows |
-  RuntimeExecutionLineageRows | RuntimeLocalScopeRows |
-  RuntimeCallInstanceRows | RuntimeProgramMappingRows |
-  RuntimeInvokeRoleEntries | RuntimeWritebackRows |
-  DynamicAddressRows | DynamicAddressIndexEntries |
-  ForFoldTemplateRows | FoldRegionRows | FoldPointRows | FoldEdgeRows |
-  FoldActionRows | FoldActionOperandEntries | FoldActionResultEntries |
-  FoldValueRows | FoldValueOperandEntries | FoldDynamicAddressRows |
-  FoldStateRows | FoldRecurrenceRows | FoldEffectRows |
-  TriIntentRows | TriNetRows | TriDriverRows | TriReadRows |
-  ExpectedUseRows | ExpectedResultRows | ExpectedControlRows |
-  SourceMappingRows | RewriteRows | CanonicalProducerRows |
-  DependencyRows | ReachabilityRows | OwnerBits |
-  ConstructionIndexNodes | TraversalScratchRows | TransactionRows
-
-ControlValueResourceKindV1 =
-  ActionOrderRows | GlobalPointRows | GlobalEdgeRows |
-  MemoryTokenRows | EnvironmentTokenRows | EffectTokenRows |
-  TokenFlowRows | TokenPhiOperandEntries |
-  CandidateRows | CandidateOperandEntries | SafetyRows |
-  InstValueRows | InstValueOperandEntries | FoldInstValueRows |
-  PersistentTrieNodes | UnionPairMemoRows | ResolutionRows |
-  DynamicResolutionRows | ForFoldTokenOverlayRows |
-  ForFoldValueOverlayRows | ScheduledEdgeRows |
-  OwnerBits | ConstructionIndexNodes | TraversalScratchRows
-
-DecisionResourceKindV1 =
-  EligibilityRows | SkeletonRegionRows | SkeletonEdgeRows |
-  EarlySiteRows | LateSiteRows | UseMapRows | RegionSummaryRows |
-  CostWitnessRows | SelectionRows | ContractionRows | PlacementRows |
-  GateFormationRows | DecisionFormationRows | DecisionPatternRows |
-  DecisionCaseRows | LoweringPlanRows | LoweringWitnessRows |
-  VectorPackRows | OwnerBits | ConstructionIndexNodes | TraversalScratchRows
-
-SirResourceKindV1 =
-  FunctionRows | FunctionParameterEntries | BlockRows | BlockParameterEntries |
-  InstructionRows | OperandEntries | DefinitionRows | UseRows |
-  TerminatorEdgeRows | DecisionRows | DecisionCaseRows |
-  RuntimeFunctionRows | RuntimeInvokeRows | RuntimeAbiLogicalRows |
-  OriginRows | RewriteRows | OwnerBits | TraversalScratchRows
-
-MirResourceKindV1 =
-  FunctionRows | BlockRows | InstructionRows | OperandEntries |
-  PhiRows | PhiOperandEntries | ConstraintRows | BundleRows |
-  DecisionRows | DecisionTargetEntries | InvokeRows | InvokeClobberEntries |
-  EdgeLineageRows | DependencyRows | MemoryTokenRows |
-  OwnerBits | TraversalScratchRows
-
-AllocationResourceKindV1 =
-  CfgBlockRows | CfgEdgeRows | DominatorRows | LoopRows |
-  ScheduleInputRows | SchedulePlanRows | LivenessRows | LiveFactEntries |
-  CssaRows | NextUseRows | NextUseEntryRows | PressureEventRows |
-  PressureSummaryRows | PressureRegionRows | CutRows |
-  RegionalInputRows | RegionalNextUseRows | SpillPlanRows |
-  SpillPlacementRows | ReconstructionRows | PermRows |
-  HomeRows | FrameLayoutRows | CongruenceRows | AffinityRows |
-  ColorRows | AssignmentRows | ParallelCopyRows | CopyMoveRows |
-  OwnerBits | WorklistRows | SparseFactRows | ConstructionIndexNodes
-
-LayoutResourceKindV1 =
-  EmissionFragmentRows | BlockOrderRows | FallthroughRows |
-  CopyFragmentRows | DataFragmentRows | RelocationPlanRows |
-  OwnerBits | TraversalScratchRows
-
-EmissionResourceKindV1 =
-  CodeBytes | DataBytes | LabelRows | RelocationRows |
-  StackMapRows | UnwindRows | VerificationRows
-
-PhaseResourceKindV1 =
-  Occurrence(OccurrenceResourceKindV1) |
-  ControlValue(ControlValueResourceKindV1) |
-  Decision(DecisionResourceKindV1) | Sir(SirResourceKindV1) |
-  Mir(MirResourceKindV1) | Allocation(AllocationResourceKindV1) |
-  Layout(LayoutResourceKindV1) | Emission(EmissionResourceKindV1)
-
-PhaseResourceDemandIdV1
-  semantics: exact pipeline/rule version / wave_serial: u64 /
-  wave: PhaseResourceWaveV1 / resource: PhaseResourceKindV1
-
-PhaseResourceSiteIdV1
-  demand: PhaseResourceDemandIdV1 / grow_ordinal_within_wave: u32
-
-PhaseLocalErrorV1
-  rule: PhaseLocalRuleIdV1
-  owner: None | Node(u64) | Unit(u64) | Region(u64) | Point(u64) |
-         Edge(u64, u64) | Block(u64) | Instruction(u64, u64) |
-         Value(u64) | Use(u64, u64) | Token(u64) | Constraint(u64) |
-         ResourceDemand(PhaseResourceDemandIdV1) |
-         ReservationSite(PhaseResourceSiteIdV1)
-  context: None | ExpectedActual(u64, u64) | Pair(u64, u64) |
-           Range(u64, u64, u64) | Widths(u64, u64) |
-           RegisterMask(u64) | Capacity(u64, u64)
-
-PhaseLocalRuleIdV1 =
-  Occurrence(OccurrenceRuleV1) |
-  ControlValue(ControlValueRuleV1) |
-  Decision(DecisionRuleV1) |
-  Scheduling(SchedulingRuleV1) |
-  Sir(SirRuleV1) | Mir(MirRuleV1) |
-  Allocation(AllocationRuleV1) |
-  Layout(LayoutRuleV1) | Emission(EmissionRuleV1) |
-  Resource(PhaseResourceRuleV1)
-
-OccurrenceRuleV1 =
-  SourceMapping | Instance | InterfaceGlue | Alias | Observer | TriNet |
-  RuntimeFunctionMapping | ExpectedGraph | NodeReplay | Reachability |
-  Classification
-ControlValueRuleV1 =
-  TokenDefinition | TokenFlow | Safety | Candidate | Resolution |
-  Dependency | RuntimeFunctionBoundary | ForFoldBoundary | ExpectedBijection
-DecisionRuleV1 =
-  Skeleton | Placement | Region | Gate | Pattern | Profitability |
-  Vectorization | Witness
-SchedulingRuleV1 =
-  Dependency | AliasOrder | MemoryOrder | Permutation | ResourceOrder |
-  PressureOrder | Witness
-SirRuleV1 =
-  DenseId | Entry | EdgeEndpoint | PredecessorSuccessor | Terminator |
-  Definition | Use | Dominance | Phi | Opcode | Type | Width | MemoryAccess |
-  RuntimeFunction | RuntimeInvoke | RuntimeCallAbi | RuntimeCallOutput
-MirRuleV1 =
-  DenseId | Entry | EdgeEndpoint | PredecessorSuccessor | Terminator |
-  Definition | Use | Dominance | Phi | Opcode | Type | Width | MemoryAccess |
-  FixedUse | FixedDef | Clobber | EarlyClobber |
-  RuntimeInvoke | RuntimeCallAbi | RuntimeCallOutput
-AllocationRuleV1 =
-  Cfg | Cssa | Liveness | NextUse | Pressure | SpillPlan |
-  Reconstruction | ColorFeasibility | Coloring | Assignment |
-  EdgeLocation | ParallelCopy | SsaDestruction
-LayoutRuleV1 = BlockOrder | Fallthrough | EdgeCopyPlacement | Reachability
-EmissionRuleV1 = Constraint | Location | StackFrame | Encoding | Relocation
-PhaseResourceRuleV1 =
-  CountRepresentable | PlanRepresentable | IdExhausted | StorageAvailable
-```
-
-`PhaseResourceKindV1::ALL` expands every outer/subkind pair in written order;
-`COUNT` is that checked compile-time length and every demand plan is exactly
-`[CheckedCount; COUNT]`. Each expanded value names one and only one physical
-growable arena and every phase-local arena, including construction scratch,
-has one value. Adding/splitting storage changes the rule version and the
-const-exhaustive resource-to-arena fixture; no numeric, `Other`, or generic
-allocator tag exists. The source-local and typed-constant verifiers instantiate
-the same demand/site shape with their own closed wave/resource enums, so all
-three retain `wave_serial` and grow ordinal losslessly.
-
-`CountRepresentable`, `PlanRepresentable`, and `IdExhausted` permit only
-`ResourceDemand`; they identify failure before a grow is attempted.
-`StorageAvailable` permits only `ReservationSite`, which identifies the one
-actual `try_reserve_exact` call. Both use `Capacity`; neither may substitute a
-row owner or erase the demand ID. `RULE_META_V1` and the check-site table test
-these owner/context restrictions exhaustively.
-
-The nested variant is the only lift path. A typed-constant failure is always
-`PhaseErrorV1::Source(SourceAggregateErrorV1::TypedConstant(error))`; there is
-no direct/flattened typed-constant variant. `From<SourceAggregateErrorV1>` and
-`From<ArtifactBrandErrorV1>` are allocation-free moves preserving every field.
-Brand comparison precedes local-ID lookup. The variant of
-`PhaseLocalRuleIdV1` derives the phase; it is not a separately writable field.
-Each phase has an exhaustive immutable rule-metadata/check-site table fixing
-allowed owner/context variants and local check ordinal, with one malformed
-fixture per check site. Adding a rule or enum variant requires updating that
-table and fails the const exhaustiveness test otherwise.
-
-A phase reserves/stages all output and validates
+`Result<OwnedOutputArtifact, PhaseError>`. `PhaseError` contains a stable
+machine-readable rule ID, phase, offending typed owner/ID when one exists, and
+bounded diagnostic context. A phase reserves/stages all output and validates
 its complete input/output relation before publishing the owned artifact; error
 return leaves the input and destination unchanged. Valid or invalid external
 input, ID exhaustion, capacity failure, malformed CFG, infeasible machine
@@ -4808,34 +4054,26 @@ input-dependent traversal limit, CFG cap, or legacy correctness fallback.
 
 ## 9. Verifier-first implementation sequence
 
-1. Complete only the representation-verifier substrate: checked raw versus
-   phase-branded IDs and ranges, fallible count/reservation arithmetic,
-   transactional flat arenas, artifact-brand checks, closed rule/error
-   registries, and the private cache-free frozen shell. Its tests construct
-   malformed rows directly and must cover every rejecting check before any
-   semantic producer is changed. This step does **not** construct
-   `InputSemanticFacts`, derive typed constants, replay a source node, or call a
-   mutable arena verified/frozen. There is no gated arena API yet because gated
-   allocation must be coordinated with provenance. Measure the substrate's
-   RSS/time on synthetic 100k and 1M flat-row inputs, but do not treat those
-   measurements as an end-to-end performance result.
-2. Close and implement the semantic relation in its dependency order. First
-   flatten the patched pinned parser input into the complete private raw HIR and
-   map every producer witness from its public syntax-lineage key. Next run the
-   joint typed-HIR/type/constant verifier and publish only verified types,
-   values, coercions, environments, and function programs. From that artifact,
-   independently derive Tri intent, the complete expected source value graph,
-   and `InputSemanticFacts`; compare the untrusted source proposal only after
-   those expected rows exist. Only then compute the closed per-variant
-   `PhaseSLTNodeFactsV1<P>` table in canonical append order, replay source
-   structure, and verify roots/actions/observers, control provenance, phase
-   keys, and coordinated gated registries as one aggregate relation. All raw
-   source/occurrence schemas, aggregate adapters, and input/output relations
-   must already be closed, with adversarial fixtures, before either producer is
-   changed. Then make symbolic evaluation emit module-local
-   roots/actions/observers and complete `SourceControlProvenance` through
-   `SourceArtifactBuilder`; consume the successful relation into
-   `FrozenSourceArtifact` and drop construction state. Only then implement the deterministic
+1. Complete the representation verifier foundation: raw-wire versus
+   phase-typed source/draft/occurrence node IDs, canonical append-order node
+   facts, shared fallible width/lowerability/coercion rules, canonical linear
+   ForFold state layout, verified source/flattened semantic input contexts,
+   checked control namespaces, clone-free canonical AVL interning, structural
+   replay, and the private cache-free frozen shell. There is no gated arena API
+   in this step because gated allocation must be coordinated with provenance.
+   Write malformed-input tests first. Measure structural verifier RSS/time on
+   100k, 1M (including large concat/ForFold keys), and the pinned Heliodor
+   artifact before accepting the cache design. Do not change lowering output,
+   expose standalone freeze/deserialization, or call a mutable arena frozen.
+2. Define complete raw source/occurrence schemas, source semantic snapshots,
+   phase keys, coordinated gated registries, aggregate wire adapters, and all
+   input/output relations. Implement their consuming aggregate verifiers and
+   adversarial fixtures before changing either producer. Then make symbolic
+   evaluation emit module-local roots/actions/observers and complete
+   `SourceControlProvenance` through `SourceArtifactBuilder`; verify source
+   facts, semantic-context completeness, construction keys, roots, actions,
+   and provenance as one relation, consume them into `FrozenSourceArtifact`,
+   and drop construction state. Only then implement the deterministic
    whole-unit draft mapper over that immutable catalog, staged
    `OccurrenceArtifactTxn`, atomization-to-`RootExpansion`, atomic global
    root/action assignment, compressed root-order barriers, ordinary-node-only
@@ -4849,9 +4087,8 @@ input-dependent traversal limit, CFG cap, or legacy correctness fallback.
    planner-ready wire or vector-position root identity.
 3. Build and verify the occurrence-valued `GlobalActionOrderSkeleton`, compose
    and verify `ArtifactControlGraph`, construct SSA memory/environment/effect
-   tokens plus exact boundary overlays for already verified runtime-function
-   programs/call instances and nested ForFold templates. Construct outer,
-   runtime-program-, and template-scoped versioned candidates, verify
+   tokens plus token-only overlays for already verified nested ForFold
+   templates. Construct outer and template-scoped versioned candidates, verify
    their normalized execution-safety classifications, and only then intern
    final `InstValue`/`FoldInstValue` tables. Build the dense occurrence value
    overlays and resolved dynamic-address/ForFold views after those IDs exist,
@@ -4867,20 +4104,12 @@ input-dependent traversal limit, CFG cap, or legacy correctness fallback.
    `GateFormationPlan`/`DecisionFormationPlan`; report the 3,227 currently
    rejected cases. This step does not switch lowering because canonical
    Decision SIR is not available yet.
-4. Centralize SIR instruction/terminator def/use/effect/edge/renumber APIs. Add
-   verified shared `SIRRuntimeFunction`/`SIRRuntimeInvoke` formation, logical
-   call signatures, total program/call output relations, and malformed-input
-   tests; then add verified target call-frame/ABI plans and explicit `MInvoke`
-   constraints to every backend and to scheduling/allocation. Instruction
-   selection consumes `RuntimeCallLoweringPlanV1`, then the completed backend
-   artifact must immediately pass `RuntimeCallLoweringOutputRelationV1` before
-   decision legalization, scheduling, liveness, or allocation. No runtime call
-   is recursively inlined or silently expanded. Next add canonical `Decision`
-   SIR plus malformed-input verifier tests and teach all backends the semantics
-   through explicit trampolines/legal lowering before native jump-table
-   optimization. Re-run the complete step-3 pipeline, runtime-call and
-   gate/decision formation output relations, optimizer origin checks, and
-   backend semantic tests; only then make it the sole source-DAG lowering path.
+4. Centralize SIR terminator use/edge/renumber APIs, then add canonical
+   `Decision` SIR plus malformed-input verifier tests. Teach all backends the
+   semantics through explicit trampolines/legal lowering before any native
+   jump-table optimization. Re-run the complete step-3 pipeline, formation
+   output relations, optimizer decision-origin checks, and backend semantic
+   tests; only then make it the sole source-DAG lowering path.
 5. Add explicit multi-successor native `MDecision` verification and verify
    `DecisionLoweringPlan` plus its `LoweredDecisionWitness` output relation,
    starting with
