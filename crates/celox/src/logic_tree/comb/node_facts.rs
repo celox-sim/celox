@@ -124,20 +124,6 @@ where
         self.widths.get(node.0).copied()
     }
 
-    /// Number of nodes covered by this verified fact artifact.
-    pub(crate) fn node_count(&self) -> usize {
-        self.widths.len()
-    }
-
-    /// Read a semantic node covered by this verified fact artifact.
-    ///
-    /// Downstream verifiers use this accessor instead of accepting a raw
-    /// arena, making canonical graph and width verification an explicit phase
-    /// prerequisite.
-    pub(crate) fn node(&self, node: NodeId) -> Option<&SLTNode<A>> {
-        self.arena.get_checked(node)
-    }
-
     /// Return a verified root width, diagnosing a root that does not belong to
     /// the arena instead of allowing a later unchecked lookup to panic.
     pub fn require_width(

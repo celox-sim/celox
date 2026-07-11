@@ -1,8 +1,7 @@
-//! Phase-neutral scalar rules shared by legacy and phase-typed SLT facts.
+//! Scalar rules shared by SLT fact verification and construction.
 //!
-//! This module deliberately knows neither [`super::node::NodeId`] nor
-//! [`super::phase_arena::PhaseNodeId`].  Callers retain their ID namespace and
-//! attach the rule failure to the appropriate owner.
+//! This module deliberately knows no node-ID type. Callers retain their ID
+//! namespace and attach a rule failure to the appropriate owner.
 
 use num_bigint::BigUint;
 
@@ -117,90 +116,8 @@ pub(super) fn unary_width(op: UnaryOp, inner_width: usize) -> usize {
     }
 }
 
-pub(super) fn binary_signed(op: BinaryOp, lhs_signed: bool, rhs_signed: bool) -> bool {
-    match op {
-        BinaryOp::Eq
-        | BinaryOp::Ne
-        | BinaryOp::LtU
-        | BinaryOp::LtS
-        | BinaryOp::LeU
-        | BinaryOp::LeS
-        | BinaryOp::GtU
-        | BinaryOp::GtS
-        | BinaryOp::GeU
-        | BinaryOp::GeS
-        | BinaryOp::LogicAnd
-        | BinaryOp::LogicOr
-        | BinaryOp::EqWildcard
-        | BinaryOp::NeWildcard => false,
-        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => lhs_signed,
-        BinaryOp::Add
-        | BinaryOp::Sub
-        | BinaryOp::Mul
-        | BinaryOp::Div
-        | BinaryOp::Rem
-        | BinaryOp::And
-        | BinaryOp::Or
-        | BinaryOp::Xor => lhs_signed && rhs_signed,
-    }
-}
-
-pub(super) fn unary_signed(op: UnaryOp, inner_signed: bool) -> bool {
-    match op {
-        UnaryOp::Ident | UnaryOp::Minus | UnaryOp::BitNot => inner_signed,
-        UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => false,
-    }
-}
-
-pub(super) fn mux_signed(then_signed: bool, else_signed: bool) -> bool {
-    then_signed && else_signed
-}
-
 pub(super) fn mux_width(then_width: usize, else_width: usize) -> usize {
     then_width.max(else_width)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RequiredCoercion {
-    Identity,
-    ZeroExtend,
-    SignExtend,
-    Truncate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CoercionBasis {
-    SourceSigned,
-    TargetSigned,
-    SourceAndTargetSigned,
-}
-
-/// Derive a coercion from verified source facts, never from the producer's
-/// claimed coercion kind.
-pub(super) fn required_coercion(
-    source_width: usize,
-    source_signed: bool,
-    target_width: usize,
-    target_signed: bool,
-    basis: CoercionBasis,
-) -> Result<RequiredCoercion, NodeRuleError> {
-    if target_width == 0 {
-        return Err(NodeRuleError::new(
-            "COERCION.TARGET_NON_ZERO",
-            "coercion target width is zero",
-        ));
-    }
-    let sign_extend = match basis {
-        CoercionBasis::SourceSigned => source_signed,
-        CoercionBasis::TargetSigned => target_signed,
-        CoercionBasis::SourceAndTargetSigned => source_signed && target_signed,
-    };
-    Ok(match source_width.cmp(&target_width) {
-        std::cmp::Ordering::Equal => RequiredCoercion::Identity,
-        std::cmp::Ordering::Less if sign_extend => RequiredCoercion::SignExtend,
-        std::cmp::Ordering::Less => RequiredCoercion::ZeroExtend,
-        std::cmp::Ordering::Greater => RequiredCoercion::Truncate,
-    })
 }
 
 pub(super) fn concat_width(
@@ -238,18 +155,6 @@ pub(super) fn slice_width(
         ));
     }
     Ok(width)
-}
-
-pub(super) fn require_nonzero(
-    width: usize,
-    invariant: &'static str,
-    message: impl FnOnce() -> String,
-) -> Result<usize, NodeRuleError> {
-    if width == 0 {
-        Err(NodeRuleError::new(invariant, message()))
-    } else {
-        Ok(width)
-    }
 }
 
 pub(super) fn direct_lowerable(width: usize, has_zero_concat_part: bool) -> bool {
