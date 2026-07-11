@@ -57,6 +57,54 @@ Set `HELIODOR_TIMEOUT_SEC` to override all per-test timeouts. Without a measured
 
 If `veryl` is not on `PATH`, the script installs `cargo install veryl --version 0.20.2 --locked` into `target/heliodor/tools/veryl-0.20.2`. Override with `VERYL_BIN`, `HELIODOR_VERYL_VERSION`, or set `HELIODOR_INSTALL_TOOLS=0` to disable automatic installs.
 
+## Result semantics
+
+`target/heliodor/results/results.tsv` distinguishes the subprocess exit status
+from the simulated test result. Its columns are:
+
+| Column | Meaning |
+|---|---|
+| `runner` | Runner name |
+| `test` | Requested Heliodor test |
+| `status` | Legacy alias of `exit_status`, retained as the third column for existing readers |
+| `elapsed_ns` | Full-pass wall time, or `NA` for every non-pass result |
+| `log` | Full runner log |
+| `semantic_status` | `pass`, `fail`, `compile-only`, `unreported`, or `invalid` |
+| `exit_status` | Subprocess exit status |
+| `process_elapsed_ns` | Wall time of the subprocess, including failed and compile-only runs |
+| `reported_elapsed_ns` | Celox runner's internal elapsed value, or `NA` when unavailable |
+
+The original `runner`, `test`, `status`, `elapsed_ns`, and `log` columns remain
+in their original positions. A speed result exists only when
+`semantic_status=pass`, `exit_status=0`, and `elapsed_ns` is numeric.
+`process_elapsed_ns` and `reported_elapsed_ns` are diagnostics and must not be
+used to claim full-test performance for `compile-only`, `fail`, `unreported`,
+or `invalid` rows.
+
+For Celox, the script requires exactly one complete log line in this form:
+
+```text
+CELOX_TEST_RESULT test=<requested-test> status=pass|fail|compile-only elapsed_ns=<integer>
+```
+
+Malformed, duplicate, missing, wrong-test, mode-inconsistent, or
+exit-status-inconsistent records cannot become a pass. An intentional
+`HELIODOR_CELOX_COMPILE_ONLY=1` run may finish successfully, but its
+`semantic_status` is `compile-only` and its `elapsed_ns` is `NA`.
+
+An existing five-column TSV is migrated atomically on the next run. The script
+keeps its first copy as `results.tsv.v1.bak`, recovers Celox semantics from the
+referenced logs where possible, and marks records without conclusive evidence
+as `unreported` or `invalid`. The migration never promotes process exit zero
+alone to a Celox full pass.
+
+The parser and migration fixtures run without checking out or executing
+Heliodor:
+
+```bash
+bash scripts/tests/run-heliodor-bench-results.sh
+```
+
 ## Current Caveat
 
-Celox currently records pass/fail and wall-clock time for this macro benchmark. Heliodor prints simulated cycle counts with `$display`; the current Celox detailed test runner suppresses display events, so cycle extraction is only available from Veryl runner logs until display forwarding is exposed in the Celox runner.
+Celox currently records the semantic result, process result, and wall-clock time for this macro benchmark. Heliodor prints simulated cycle counts with `$display`; the current Celox detailed test runner suppresses display events, so cycle extraction is only available from Veryl runner logs until display forwarding is exposed in the Celox runner.
