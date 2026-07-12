@@ -817,17 +817,52 @@ fn gvn_bin_rr(op: u8, lhs: VReg, rhs: VReg) -> GvnKey {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MemoryWrite {
+    None,
+    Static {
+        base: BaseReg,
+        offset: i32,
+        byte_len: usize,
+    },
+    Unknown {
+        base: Option<BaseReg>,
+    },
+}
+
+/// Describe the memory written by an instruction. `MemCopy` reads its source
+/// range and writes its destination range; only the latter invalidates an
+/// already-loaded value.
+fn memory_write(inst: &MInst) -> MemoryWrite {
+    match inst {
+        MInst::Store {
+            base, offset, size, ..
+        } => MemoryWrite::Static {
+            base: *base,
+            offset: *offset,
+            byte_len: size.bytes() as usize,
+        },
+        MInst::MemCopy {
+            dst_offset,
+            byte_len,
+            ..
+        } => MemoryWrite::Static {
+            base: BaseReg::SimState,
+            offset: *dst_offset,
+            byte_len: *byte_len,
+        },
+        MInst::StoreIndexed { base, .. } => MemoryWrite::Unknown { base: Some(*base) },
+        MInst::StorePtr { .. }
+        | MInst::ReleaseStorePtr { .. }
+        | MInst::StorePtrIndexed { .. }
+        | MInst::ReleaseStorePtrIndexed { .. } => MemoryWrite::Unknown { base: None },
+        _ => MemoryWrite::None,
+    }
+}
+
 /// Returns true if the instruction could modify memory that Load reads.
 fn is_memory_clobber(inst: &MInst) -> bool {
-    matches!(
-        inst,
-        MInst::Store { .. }
-            | MInst::StorePtr { .. }
-            | MInst::ReleaseStorePtr { .. }
-            | MInst::StoreIndexed { .. }
-            | MInst::StorePtrIndexed { .. }
-            | MInst::ReleaseStorePtrIndexed { .. }
-    )
+    !matches!(memory_write(inst), MemoryWrite::None)
 }
 
 /// Global GVN: dominator-tree-scoped value numbering.
@@ -973,47 +1008,50 @@ fn global_gvn(func: &mut MFunction) {
         for inst_idx in 0..block.insts.len() {
             let inst = &block.insts[inst_idx];
 
-            if is_memory_clobber(inst) {
-                // Only invalidate Load CSE entries that might alias with this Store.
-                // SimState loads/stores at different offsets don't alias.
-                let (store_base, store_off, store_size) = match inst {
-                    MInst::Store {
-                        base, offset, size, ..
-                    } => (Some(*base), *offset, size.bytes() as i32),
-                    MInst::StoreIndexed { .. }
-                    | MInst::StorePtrIndexed { .. }
-                    | MInst::ReleaseStorePtrIndexed { .. } => (None, 0, 0), // dynamic: invalidate all
-                    MInst::StorePtr { .. } | MInst::ReleaseStorePtr { .. } => (None, 0, 0),
-                    _ => (None, 0, 0),
-                };
-                let load_keys: Vec<GvnKey> = value_table
+            let write = memory_write(inst);
+            if !matches!(write, MemoryWrite::None) {
+                // Only invalidate Load CSE entries that overlap a known write.
+                // Dynamic/pointer writes remain conservative full clobbers.
+                let load_keys: HashSet<GvnKey> = value_table
                     .keys()
                     .filter(|k| {
-                        if let GvnKey::Load(base, off, sz) = k {
-                            // Keep if provably non-aliasing (same base, non-overlapping offset)
-                            if let Some(sb) = store_base {
-                                let sb_val = match sb {
+                        let GvnKey::Load(load_base, load_offset, load_size) = k else {
+                            return false;
+                        };
+                        match write {
+                            MemoryWrite::None => false,
+                            MemoryWrite::Unknown { base } => base.is_none_or(|base| {
+                                *load_base
+                                    == match base {
+                                        BaseReg::SimState => 0u8,
+                                        BaseReg::StackFrame => 1u8,
+                                    }
+                            }),
+                            MemoryWrite::Static {
+                                base,
+                                offset,
+                                byte_len,
+                            } => {
+                                let base = match base {
                                     BaseReg::SimState => 0u8,
                                     BaseReg::StackFrame => 1u8,
                                 };
-                                if *base == sb_val {
-                                    let load_bytes = match *sz {
-                                        0 => 1,
-                                        1 => 2,
-                                        2 => 4,
-                                        _ => 8,
-                                    }; // OpSize enum → bytes
-                                    let load_end = *off + load_bytes;
-                                    let store_end = store_off + store_size;
-                                    // Non-overlapping ranges → no alias
-                                    if load_end <= store_off || *off >= store_end {
-                                        return false; // keep this entry
-                                    }
+                                if *load_base != base {
+                                    return false;
                                 }
+                                let load_byte_len = match *load_size {
+                                    0 => 1,
+                                    1 => 2,
+                                    2 => 4,
+                                    _ => 8,
+                                };
+                                byte_ranges_may_overlap(
+                                    *load_offset,
+                                    load_byte_len,
+                                    offset,
+                                    byte_len,
+                                )
                             }
-                            true // might alias → remove
-                        } else {
-                            false // not a Load key
                         }
                     })
                     .cloned()
@@ -1571,34 +1609,41 @@ enum RematKind {
 }
 
 fn may_clobber_static_load(inst: &MInst, base: BaseReg, offset: i32, size: OpSize) -> bool {
-    let load_start = i64::from(offset);
-    let load_end = load_start + i64::from(size.bytes());
-    match inst {
-        MInst::Store {
-            base: store_base,
-            offset: store_offset,
-            size: store_size,
-            ..
-        } if *store_base == base => ranges_overlap(
-            load_start,
-            load_end,
-            i64::from(*store_offset),
-            i64::from(*store_offset) + i64::from(store_size.bytes()),
-        ),
-        MInst::Store { .. } => false,
-        MInst::StoreIndexed {
-            base: store_base, ..
-        } if *store_base == base => true,
-        MInst::StorePtr { .. }
-        | MInst::ReleaseStorePtr { .. }
-        | MInst::StorePtrIndexed { .. }
-        | MInst::ReleaseStorePtrIndexed { .. } => true,
-        _ => false,
+    match memory_write(inst) {
+        MemoryWrite::None => false,
+        MemoryWrite::Unknown { base: write_base } => write_base.is_none_or(|other| other == base),
+        MemoryWrite::Static {
+            base: write_base,
+            offset: write_offset,
+            byte_len,
+        } => {
+            write_base == base
+                && byte_ranges_may_overlap(offset, size.bytes() as usize, write_offset, byte_len)
+        }
     }
 }
 
-fn ranges_overlap(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> bool {
-    a_start < b_end && b_start < a_end
+fn byte_range(offset: i32, byte_len: usize) -> Option<(i64, i64)> {
+    let start = i64::from(offset);
+    let byte_len = i64::try_from(byte_len).ok()?;
+    Some((start, start.checked_add(byte_len)?))
+}
+
+fn byte_ranges_may_overlap(
+    lhs_offset: i32,
+    lhs_byte_len: usize,
+    rhs_offset: i32,
+    rhs_byte_len: usize,
+) -> bool {
+    match (
+        byte_range(lhs_offset, lhs_byte_len),
+        byte_range(rhs_offset, rhs_byte_len),
+    ) {
+        (Some((lhs_start, lhs_end)), Some((rhs_start, rhs_end))) => {
+            lhs_start < rhs_end && rhs_start < lhs_end
+        }
+        _ => true,
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -2845,6 +2890,25 @@ fn forward_local_store_loads(func: &mut MFunction) {
                     available.clear();
                     rewritten.push(inst);
                 }
+                MInst::MemCopy {
+                    src_offset,
+                    dst_offset,
+                    byte_len,
+                } => {
+                    // The source is read but unchanged. Only values cached for
+                    // the written destination range become stale.
+                    invalidate_overlapping_byte_range(
+                        &mut available,
+                        BaseReg::SimState,
+                        dst_offset,
+                        byte_len,
+                    );
+                    rewritten.push(MInst::MemCopy {
+                        src_offset,
+                        dst_offset,
+                        byte_len,
+                    });
+                }
                 other => rewritten.push(other),
             }
         }
@@ -2952,6 +3016,32 @@ fn eliminate_redundant_local_stores(func: &mut MFunction) {
                         size,
                     });
                 }
+                MInst::MemCopy {
+                    src_offset,
+                    dst_offset,
+                    byte_len,
+                } => {
+                    // In reverse order, both ranges are barriers: the source
+                    // is observed by the copy and the destination is changed
+                    // by it. Preserve tracking for unrelated addresses.
+                    invalidate_overlapping_byte_range(
+                        &mut later_stores,
+                        BaseReg::SimState,
+                        src_offset,
+                        byte_len,
+                    );
+                    invalidate_overlapping_byte_range(
+                        &mut later_stores,
+                        BaseReg::SimState,
+                        dst_offset,
+                        byte_len,
+                    );
+                    reversed.push(MInst::MemCopy {
+                        src_offset,
+                        dst_offset,
+                        byte_len,
+                    });
+                }
                 MInst::LoadIndexed { .. }
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::StoreIndexed { .. }
@@ -2959,8 +3049,7 @@ fn eliminate_redundant_local_stores(func: &mut MFunction) {
                 | MInst::ReleaseStorePtrIndexed { .. }
                 | MInst::LoadPtr { .. }
                 | MInst::StorePtr { .. }
-                | MInst::ReleaseStorePtr { .. }
-                | MInst::MemCopy { .. } => {
+                | MInst::ReleaseStorePtr { .. } => {
                     later_stores.clear();
                     reversed.push(inst);
                 }
@@ -2994,8 +3083,19 @@ fn invalidate_overlapping_slots<T>(
     offset: i32,
     size: OpSize,
 ) {
-    let start = offset as i64;
-    let end = start + i64::from(size.bytes());
+    invalidate_overlapping_byte_range(available, base, offset, size.bytes() as usize);
+}
+
+fn invalidate_overlapping_byte_range<T>(
+    available: &mut HashMap<MemorySlot, T>,
+    base: BaseReg,
+    offset: i32,
+    byte_len: usize,
+) {
+    let Some((start, end)) = byte_range(offset, byte_len) else {
+        available.retain(|slot, _| slot.base != base);
+        return;
+    };
     available.retain(|slot, _| {
         if slot.base != base {
             return true;
@@ -4560,6 +4660,328 @@ mod tests {
         sink_loads(&mut func);
 
         assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn memcopy_destination_invalidates_local_load_forwarding() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::MemCopy {
+                    src_offset: 64,
+                    dst_offset: 16,
+                    byte_len: 8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 96,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        forward_local_store_loads(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            }
+        ));
+    }
+
+    #[test]
+    fn memcopy_preserves_nonoverlapping_local_load_forwarding() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 80,
+                    size: OpSize::S64,
+                },
+                MInst::MemCopy {
+                    src_offset: 64,
+                    dst_offset: 16,
+                    byte_len: 8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 80,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 96,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        forward_local_store_loads(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn memcopy_destination_invalidates_global_load_gvn() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::MemCopy {
+                    src_offset: 64,
+                    dst_offset: 16,
+                    byte_len: 8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 96,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        global_gvn(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            }
+        ));
+    }
+
+    #[test]
+    fn memcopy_preserves_nonoverlapping_global_load_gvn() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 80,
+                    size: OpSize::S64,
+                },
+                MInst::MemCopy {
+                    src_offset: 64,
+                    dst_offset: 16,
+                    byte_len: 8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 80,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 96,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        global_gvn(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn memcopy_destination_blocks_static_load_rematerialization() {
+        let mut insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::MemCopy {
+                src_offset: 64,
+                dst_offset: 16,
+                byte_len: 8,
+            },
+        ];
+        insts.extend((1..=24).map(|register| MInst::LoadImm {
+            dst: VReg(register),
+            value: register as u64,
+        }));
+        insts.extend([
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 96,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ]);
+        let mut func = make_func(insts, 60);
+
+        split_live_ranges(&mut func);
+
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::Load {
+                        base: BaseReg::SimState,
+                        offset: 16,
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "{:#?}",
+            func.blocks[0].insts
+        );
+    }
+
+    #[test]
+    fn memcopy_source_read_keeps_preceding_store_live() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 64,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::MemCopy {
+                    src_offset: 64,
+                    dst_offset: 16,
+                    byte_len: 8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 64,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        eliminate_redundant_local_stores(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 64,
+                src: VReg(0),
+                size: OpSize::S64,
+            }
+        )));
+    }
+
+    #[test]
+    fn memcopy_preserves_nonoverlapping_dead_store_elimination() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 80,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::MemCopy {
+                    src_offset: 64,
+                    dst_offset: 16,
+                    byte_len: 8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 80,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        eliminate_redundant_local_stores(&mut func);
+
+        assert!(!func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 80,
+                src: VReg(0),
+                size: OpSize::S64,
+            }
+        )));
     }
 
     #[test]
