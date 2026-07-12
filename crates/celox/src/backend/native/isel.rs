@@ -720,11 +720,16 @@ impl<'a> ISelContext<'a> {
     /// Resolve byte offset for a regioned address + bit offset.
     fn byte_offset(&self, addr: &RegionedAbsoluteAddr, bit_offset: usize) -> i32 {
         let abs_addr = addr.absolute_addr();
-        let base = if addr.region == STABLE_REGION {
-            *self.layout.offsets.get(&abs_addr).unwrap_or(&0)
-        } else {
-            self.layout.working_base_offset
-                + *self.layout.working_offsets.get(&abs_addr).unwrap_or(&0)
+        let base = match addr.region {
+            STABLE_REGION => *self.layout.offsets.get(&abs_addr).unwrap_or(&0),
+            crate::ir::SPARSE_WORKING_REGION => {
+                self.layout.sparse_base_offset
+                    + *self.layout.sparse_offsets.get(&abs_addr).unwrap_or(&0)
+            }
+            _ => {
+                self.layout.working_base_offset
+                    + *self.layout.working_offsets.get(&abs_addr).unwrap_or(&0)
+            }
         };
         (base + bit_offset / 8) as i32
     }
@@ -2666,6 +2671,244 @@ fn lower_four_state_mux_chunk(
     }
 }
 
+fn prepare_sparse_store(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+) {
+    let abs = addr.absolute_addr();
+    let sparse = &ctx.layout.sparse_layouts[&abs];
+    let stable_base = ctx.layout.offsets[&abs] as i32;
+    let sparse_base = (ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&abs]) as i32;
+    let byte_size = crate::backend::get_byte_size(ctx.layout.widths[&abs]) as i32;
+
+    let bit_offset = match offset {
+        SIROffset::Static(value) => {
+            let reg = ctx.alloc_vreg(SpillDesc::remat(*value as u64));
+            block.push(MInst::LoadImm {
+                dst: reg,
+                value: *value as u64,
+            });
+            reg
+        }
+        SIROffset::Dynamic(reg) => ctx.reg_map.get(*reg),
+    };
+    let start_chunk = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShrImm {
+        dst: start_chunk,
+        src: bit_offset,
+        imm: 6,
+    });
+    let width_minus_one = ctx.alloc_vreg(SpillDesc::remat(width.saturating_sub(1) as u64));
+    block.push(MInst::LoadImm {
+        dst: width_minus_one,
+        value: width.saturating_sub(1) as u64,
+    });
+    let end_bit = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Add {
+        dst: end_bit,
+        lhs: bit_offset,
+        rhs: width_minus_one,
+    });
+    let end_chunk = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShrImm {
+        dst: end_chunk,
+        src: end_bit,
+        imm: 6,
+    });
+
+    let max_chunks = match offset {
+        SIROffset::Static(value) => ((value % 64) + width).div_ceil(64),
+        SIROffset::Dynamic(reg) => {
+            let zero_bits = ctx.low_zero_bits.get(reg).copied().unwrap_or(0).min(6);
+            let alignment = 1usize << zero_bits;
+            (width + (64 - alignment)).div_ceil(64)
+        }
+    };
+    for chunk_delta in 0..max_chunks {
+        let delta = ctx.alloc_vreg(SpillDesc::remat(chunk_delta as u64));
+        block.push(MInst::LoadImm {
+            dst: delta,
+            value: chunk_delta as u64,
+        });
+        let candidate = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Add {
+            dst: candidate,
+            lhs: start_chunk,
+            rhs: delta,
+        });
+        let valid = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Cmp {
+            dst: valid,
+            lhs: candidate,
+            rhs: end_chunk,
+            kind: CmpKind::LeU,
+        });
+        let chunk = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Select {
+            dst: chunk,
+            cond: valid,
+            true_val: candidate,
+            false_val: start_chunk,
+        });
+
+        let dirty_word = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShrImm {
+            dst: dirty_word,
+            src: chunk,
+            imm: 6,
+        });
+        let eight = ctx.alloc_vreg(SpillDesc::remat(8));
+        block.push(MInst::LoadImm {
+            dst: eight,
+            value: 8,
+        });
+        let dirty_index = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Mul {
+            dst: dirty_index,
+            lhs: dirty_word,
+            rhs: eight,
+        });
+        let dirty_bits = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: dirty_bits,
+            base: BaseReg::SimState,
+            offset: sparse.dirty_words_offset as i32,
+            index: dirty_index,
+            size: OpSize::S64,
+        });
+        let bit_in_word = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_and_imm(block, bit_in_word, chunk, 63);
+        let one = ctx.alloc_vreg(SpillDesc::remat(1));
+        block.push(MInst::LoadImm { dst: one, value: 1 });
+        let dirty_mask = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Shl {
+            dst: dirty_mask,
+            lhs: one,
+            rhs: bit_in_word,
+        });
+        let dirty_test = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::And {
+            dst: dirty_test,
+            lhs: dirty_bits,
+            rhs: dirty_mask,
+        });
+        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+        block.push(MInst::LoadImm {
+            dst: zero,
+            value: 0,
+        });
+        let was_dirty = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Cmp {
+            dst: was_dirty,
+            lhs: dirty_test,
+            rhs: zero,
+            kind: CmpKind::Ne,
+        });
+
+        let data_index = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Mul {
+            dst: data_index,
+            lhs: chunk,
+            rhs: eight,
+        });
+        for plane_delta in
+            [0, byte_size]
+                .into_iter()
+                .take(if ctx.is_4state_var(addr) { 2 } else { 1 })
+        {
+            let stable = ctx.alloc_vreg(SpillDesc::transient());
+            let working = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::LoadIndexed {
+                dst: stable,
+                base: BaseReg::SimState,
+                offset: stable_base + plane_delta,
+                index: data_index,
+                size: OpSize::S64,
+            });
+            block.push(MInst::LoadIndexed {
+                dst: working,
+                base: BaseReg::SimState,
+                offset: sparse_base + plane_delta,
+                index: data_index,
+                size: OpSize::S64,
+            });
+            let initialized = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select {
+                dst: initialized,
+                cond: was_dirty,
+                true_val: working,
+                false_val: stable,
+            });
+            block.push(MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: sparse_base + plane_delta,
+                index: data_index,
+                src: initialized,
+                size: OpSize::S64,
+            });
+        }
+
+        let new_dirty = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or {
+            dst: new_dirty,
+            lhs: dirty_bits,
+            rhs: dirty_mask,
+        });
+        block.push(MInst::StoreIndexed {
+            base: BaseReg::SimState,
+            offset: sparse.dirty_words_offset as i32,
+            index: dirty_index,
+            src: new_dirty,
+            size: OpSize::S64,
+        });
+
+        let summary_word = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShrImm {
+            dst: summary_word,
+            src: dirty_word,
+            imm: 6,
+        });
+        let summary_index = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Mul {
+            dst: summary_index,
+            lhs: summary_word,
+            rhs: eight,
+        });
+        let summary_bits = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: summary_bits,
+            base: BaseReg::SimState,
+            offset: sparse.summary_words_offset as i32,
+            index: summary_index,
+            size: OpSize::S64,
+        });
+        let summary_bit = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_and_imm(block, summary_bit, dirty_word, 63);
+        let summary_mask = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Shl {
+            dst: summary_mask,
+            lhs: one,
+            rhs: summary_bit,
+        });
+        let new_summary = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or {
+            dst: new_summary,
+            lhs: summary_bits,
+            rhs: summary_mask,
+        });
+        block.push(MInst::StoreIndexed {
+            base: BaseReg::SimState,
+            offset: sparse.summary_words_offset as i32,
+            index: summary_index,
+            src: new_summary,
+            size: OpSize::S64,
+        });
+    }
+}
+
 fn lower_instruction(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -2673,6 +2916,24 @@ fn lower_instruction(
     sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
 ) {
+    if let SIRInstruction::Commit(src, dst, _, _, _) = inst
+        && src.region == crate::ir::SPARSE_WORKING_REGION
+        && dst.region == STABLE_REGION
+    {
+        let abs = src.absolute_addr();
+        let sparse = &ctx.layout.sparse_layouts[&abs];
+        block.push(MInst::SparseCommit {
+            src_offset: (ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&abs]) as i32,
+            dst_offset: ctx.layout.offsets[&abs] as i32,
+            byte_size: crate::backend::get_byte_size(ctx.layout.widths[&abs]),
+            dirty_words_offset: sparse.dirty_words_offset as i32,
+            dirty_word_count: sparse.dirty_word_count,
+            summary_words_offset: sparse.summary_words_offset as i32,
+            summary_word_count: sparse.summary_word_count,
+            four_state: ctx.four_state && ctx.layout.is_4states[&abs],
+        });
+        return;
+    }
     match inst {
         SIRInstruction::RuntimeEvent { site_id, args } => {
             let event_ptr = load_runtime_event_ptr(ctx, block);
@@ -3335,6 +3596,9 @@ fn lower_instruction(
         }
 
         SIRInstruction::Store(addr, offset, width_bits, src_reg, triggers, comb_capture_sites) => {
+            if addr.region == crate::ir::SPARSE_WORKING_REGION && *width_bits != 0 {
+                prepare_sparse_store(ctx, block, addr, offset, *width_bits);
+            }
             // width=0: identity Store optimized away; only emit triggers.
             if *width_bits == 0 {
                 if !triggers.is_empty() {
@@ -10725,6 +10989,9 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: 24,
+            sparse_layouts: HashMap::default(),
             merged_total_size: 24,
             triggered_bits_offset: 24,
             triggered_bits_total_size: 0,
@@ -10920,6 +11187,9 @@ mod tests {
             total_size: state_size,
             working_offsets: HashMap::default(),
             working_base_offset: state_size,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: state_size,
+            sparse_layouts: HashMap::default(),
             merged_total_size: state_size,
             triggered_bits_offset: state_size,
             triggered_bits_total_size: 0,

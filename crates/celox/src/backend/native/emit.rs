@@ -145,6 +145,43 @@ fn mem_operand_ptr_indexed(
     ptr + index + offset
 }
 
+fn emit_sparse_chunk_copy(
+    asm: &mut CodeAssembler,
+    src_offset: i32,
+    dst_offset: i32,
+    index: AsmRegister64,
+    byte_len: usize,
+) -> Result<(), IcedError> {
+    let mut copied = 0usize;
+    for bytes in [8usize, 4, 2, 1] {
+        while copied + bytes <= byte_len {
+            let src = mem_operand_indexed(BaseReg::SimState, src_offset + copied as i32, index);
+            let dst = mem_operand_indexed(BaseReg::SimState, dst_offset + copied as i32, index);
+            match bytes {
+                8 => {
+                    asm.mov(rsi, qword_ptr(src))?;
+                    asm.mov(qword_ptr(dst), rsi)?;
+                }
+                4 => {
+                    asm.mov(esi, dword_ptr(src))?;
+                    asm.mov(dword_ptr(dst), esi)?;
+                }
+                2 => {
+                    asm.mov(si, word_ptr(src))?;
+                    asm.mov(word_ptr(dst), si)?;
+                }
+                1 => {
+                    asm.mov(sil, byte_ptr(src))?;
+                    asm.mov(byte_ptr(dst), sil)?;
+                }
+                _ => unreachable!(),
+            }
+            copied += bytes;
+        }
+    }
+    Ok(())
+}
+
 // ────────────────────────────────────────────────────────────────
 // Callee-saved register tracking
 // ────────────────────────────────────────────────────────────────
@@ -1646,6 +1683,133 @@ fn emit_inst(
             }
         }
 
+        MInst::SparseCommit {
+            src_offset,
+            dst_offset,
+            byte_size,
+            dirty_words_offset,
+            dirty_word_count,
+            summary_words_offset,
+            summary_word_count,
+            four_state,
+        } => {
+            // This pseudo has no MIR operands.  Preserve every scratch register
+            // so values allocated across the commit remain intact.
+            for reg in [rax, rcx, rdx, rsi, rdi, r8, r9] {
+                asm.push(reg)?;
+            }
+            let chunk_count = byte_size.div_ceil(8);
+            let last_chunk = chunk_count.saturating_sub(1);
+            let last_len = byte_size.saturating_sub(last_chunk * 8);
+            let plane_count = if *four_state { 2 } else { 1 };
+
+            for summary_index in 0..*summary_word_count {
+                let summary_offset = *summary_words_offset + (summary_index * 8) as i32;
+                asm.mov(
+                    rax,
+                    qword_ptr(mem_operand(BaseReg::SimState, summary_offset)),
+                )?;
+                asm.mov(
+                    qword_ptr(mem_operand(BaseReg::SimState, summary_offset)),
+                    0i32,
+                )?;
+                let mut summary_loop = asm.create_label();
+                let mut summary_next = asm.create_label();
+                let mut summary_done = asm.create_label();
+                asm.set_label(&mut summary_loop)?;
+                asm.test(rax, rax)?;
+                asm.je(summary_done)?;
+                asm.bsf(rcx, rax)?;
+                asm.btr(rax, rcx)?;
+                asm.mov(rdx, rcx)?;
+                if summary_index != 0 {
+                    asm.add(rdx, (summary_index * 64) as i32)?;
+                }
+                asm.cmp(rdx, *dirty_word_count as i32)?;
+                asm.jae(summary_next)?;
+
+                asm.mov(rdi, rdx)?;
+                asm.shl(rdi, 3)?;
+                asm.mov(
+                    r8,
+                    qword_ptr(mem_operand_indexed(
+                        BaseReg::SimState,
+                        *dirty_words_offset,
+                        rdi,
+                    )),
+                )?;
+                asm.mov(
+                    qword_ptr(mem_operand_indexed(
+                        BaseReg::SimState,
+                        *dirty_words_offset,
+                        rdi,
+                    )),
+                    0i32,
+                )?;
+
+                let mut dirty_loop = asm.create_label();
+                let mut dirty_next = asm.create_label();
+                asm.set_label(&mut dirty_loop)?;
+                asm.test(r8, r8)?;
+                asm.je(summary_next)?;
+                asm.bsf(r9, r8)?;
+                asm.btr(r8, r9)?;
+                asm.mov(rdi, rdx)?;
+                asm.shl(rdi, 6)?;
+                asm.add(rdi, r9)?;
+                asm.cmp(rdi, chunk_count as i32)?;
+                asm.jae(dirty_next)?;
+                asm.shl(rdi, 3)?;
+
+                if last_len == 8 {
+                    for plane in 0..plane_count {
+                        let delta = (plane * *byte_size) as i32;
+                        emit_sparse_chunk_copy(
+                            asm,
+                            *src_offset + delta,
+                            *dst_offset + delta,
+                            rdi,
+                            8,
+                        )?;
+                    }
+                } else {
+                    let mut full = asm.create_label();
+                    asm.cmp(rdi, (last_chunk * 8) as i32)?;
+                    asm.jne(full)?;
+                    for plane in 0..plane_count {
+                        let delta = (plane * *byte_size) as i32;
+                        emit_sparse_chunk_copy(
+                            asm,
+                            *src_offset + delta,
+                            *dst_offset + delta,
+                            rdi,
+                            last_len,
+                        )?;
+                    }
+                    asm.jmp(dirty_next)?;
+                    asm.set_label(&mut full)?;
+                    for plane in 0..plane_count {
+                        let delta = (plane * *byte_size) as i32;
+                        emit_sparse_chunk_copy(
+                            asm,
+                            *src_offset + delta,
+                            *dst_offset + delta,
+                            rdi,
+                            8,
+                        )?;
+                    }
+                }
+                asm.set_label(&mut dirty_next)?;
+                asm.jmp(dirty_loop)?;
+                asm.set_label(&mut summary_next)?;
+                asm.jmp(summary_loop)?;
+                asm.set_label(&mut summary_done)?;
+            }
+            for reg in [r9, r8, rdi, rsi, rdx, rcx, rax] {
+                asm.pop(reg)?;
+            }
+        }
+
         MInst::LoadPtr {
             dst,
             ptr,
@@ -2935,7 +3099,6 @@ pub fn emit_chained_eus(
             &mut merged,
             &boundaries,
         );
-        crate::optimizer::coalescing::commit_ops::inline_commit_forwarding(&mut merged);
         (merged, boundaries)
     } else {
         (units[0].clone(), vec![])
@@ -3160,7 +3323,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 MInst::StoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
                 | MInst::ReleaseStorePtrIndexed { .. } => indexed_store += 1,
-                MInst::MemCopy { .. } => memcopy += 1,
+                MInst::MemCopy { .. } | MInst::SparseCommit { .. } => memcopy += 1,
                 MInst::Add { .. }
                 | MInst::Sub { .. }
                 | MInst::Mul { .. }

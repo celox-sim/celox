@@ -137,6 +137,12 @@ pub(crate) fn eliminate_working_round_trip(
         .map(|(abs, _)| *abs)
         .collect();
 
+    let unsafe_after_store = super::commit_ops::direct_stable_store_hazards(eu);
+    let eligible: std::collections::HashSet<AbsoluteAddr> = eligible
+        .into_iter()
+        .filter(|addr| !unsafe_after_store.contains_addr(*addr))
+        .collect();
+
     if eligible.is_empty() {
         return;
     }

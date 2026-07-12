@@ -497,6 +497,19 @@ pub enum MInst {
         dst_offset: i32,
         byte_len: usize,
     },
+    /// Commit dirty chunks from a sparse FF next-state region.  This is kept
+    /// as one MIR memory barrier and expanded to a bitmap-scanning machine-code
+    /// loop by the emitter.
+    SparseCommit {
+        src_offset: i32,
+        dst_offset: i32,
+        byte_size: usize,
+        dirty_words_offset: i32,
+        dirty_word_count: usize,
+        summary_words_offset: i32,
+        summary_word_count: usize,
+        four_state: bool,
+    },
 
     // ── ALU (3-operand SSA) ────────────────────────────────────
     /// dst = lhs + rhs
@@ -727,6 +740,18 @@ impl fmt::Display for MInst {
                 f,
                 "memcopy [sim + {dst_offset}], [sim + {src_offset}], {byte_len}"
             ),
+            MInst::SparseCommit {
+                src_offset,
+                dst_offset,
+                byte_size,
+                dirty_word_count,
+                summary_word_count,
+                four_state,
+                ..
+            } => write!(
+                f,
+                "sparse_commit [sim + {dst_offset}], [sim + {src_offset}], bytes={byte_size}, dirty_words={dirty_word_count}, summary_words={summary_word_count}, four_state={four_state}"
+            ),
             MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
             MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
             MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
@@ -916,6 +941,7 @@ impl MInst {
             | MInst::StorePtrIndexed { .. }
             | MInst::ReleaseStorePtrIndexed { .. }
             | MInst::MemCopy { .. }
+            | MInst::SparseCommit { .. }
             | MInst::Branch { .. }
             | MInst::Jump { .. }
             | MInst::Return
@@ -931,7 +957,8 @@ impl MInst {
             MInst::LoadImm { .. }
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
-            | MInst::MemCopy { .. } => Uses::none(),
+            | MInst::MemCopy { .. }
+            | MInst::SparseCommit { .. } => Uses::none(),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -1223,6 +1250,7 @@ impl MInst {
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::MemCopy { .. }
+            | MInst::SparseCommit { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}

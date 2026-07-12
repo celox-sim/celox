@@ -45,7 +45,6 @@ use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
 use pass_guarded_region_sinking::GuardedRegionSinkingPass;
 use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
-use pass_inline_commit_forwarding::InlineCommitForwardingPass;
 use pass_loop_idiom::LoopIdiomPass;
 use pass_manager::ExecutionUnitPassManager;
 use pass_optimize_blocks::OptimizeBlocksPass;
@@ -102,6 +101,77 @@ fn unit_group_key(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> String {
         let _ = write!(&mut key, "{unit}");
     }
     key
+}
+
+fn optimize_unified_commit_groups(
+    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    sink: bool,
+    forward: bool,
+) {
+    if !sink && !forward {
+        return;
+    }
+    for units in groups.values_mut() {
+        if units.is_empty() {
+            continue;
+        }
+        // Hazard analysis must see the complete event order, not an individual
+        // always_ff/module EU.  The actual rewrites remain local to each EU.
+        let (merged, _) = crate::ir::merge_sir_eus(units);
+        let hazards = commit_ops::direct_stable_store_hazards(&merged);
+        if sink {
+            pass_commit_sinking::run_complete_event(units, &hazards);
+        }
+        if forward {
+            pass_inline_commit_forwarding::run_complete_event(units, &hazards);
+        }
+    }
+}
+
+fn move_sparse_commits_to_event_tail(
+    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+) {
+    for units in groups.values_mut() {
+        if units.len() <= 1 {
+            continue;
+        }
+        let mut commits = Vec::new();
+        for unit in units.iter_mut() {
+            for block in unit.blocks.values_mut() {
+                block.instructions.retain(|inst| {
+                    if matches!(
+                        inst,
+                        SIRInstruction::Commit(src, dst, ..)
+                            if src.region == SPARSE_WORKING_REGION
+                                && dst.region == STABLE_REGION
+                    ) {
+                        commits.push(inst.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+        }
+        if commits.is_empty() {
+            continue;
+        }
+        let mut blocks = crate::HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: commits,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        units.push(ExecutionUnit {
+            blocks,
+            entry_block_id: BlockId(0),
+            register_map: crate::HashMap::default(),
+        });
+    }
 }
 
 fn dump_mux_chain_stats(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
@@ -277,6 +347,11 @@ fn optimize_with_options(
     // Helper closure to check pass enablement.
     let on = |pass: SirPass| opt.is_enabled(pass);
 
+    // Sparse next-state data must stay invisible until every evaluator for the
+    // event has sampled STABLE.  Keep the commit in the same unified generated
+    // function, but place it in a final EU after all evaluator EUs.
+    move_sparse_commits_to_event_tail(&mut program.eval_apply_ffs);
+
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let phase_start = timing.then(crate::timing::now);
     let mut ff_passes = ExecutionUnitPassManager::new();
@@ -312,28 +387,26 @@ fn optimize_with_options(
     if on(SirPass::SplitWideCommits) {
         ff_passes.add_pass(SplitWideCommitsPass);
     }
-    if on(SirPass::CommitSinking) {
-        ff_passes.add_pass(CommitSinkingPass);
-    }
-    if on(SirPass::InlineCommitForwarding) {
-        ff_passes.add_pass(InlineCommitForwardingPass);
-    }
-    if on(SirPass::EliminateDeadWorkingStores) {
-        ff_passes.add_pass(EliminateDeadWorkingStoresPass);
-    }
-    if on(SirPass::Reschedule) {
-        ff_passes.add_pass(ReschedulePass);
-    }
-    // Split wide Concat+Store back into individual stores after reschedule.
-    // Coalesce_stores combines for fewer memory ops, but for large arrays
-    // the Concat forces all values live simultaneously → spill hell.
-    // Splitting + hoisting stores next to their defs minimizes live ranges.
-    if on(SirPass::SplitCoalescedStores) {
-        ff_passes.add_pass(SplitCoalescedStoresPass);
-    }
-
     let eu_count: usize = program.eval_apply_ffs.values().map(|v| v.len()).sum();
     optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_passes, &options);
+    optimize_unified_commit_groups(
+        &mut program.eval_apply_ffs,
+        on(SirPass::CommitSinking),
+        on(SirPass::InlineCommitForwarding),
+    );
+    let mut ff_post_passes = ExecutionUnitPassManager::new();
+    if on(SirPass::EliminateDeadWorkingStores) {
+        ff_post_passes.add_pass(EliminateDeadWorkingStoresPass);
+    }
+    if on(SirPass::Reschedule) {
+        ff_post_passes.add_pass(ReschedulePass);
+    }
+    // Coalescing reduces memory ops, but keeping a wide Concat live until its
+    // Store can create unnecessary pressure.  Split it after scheduling.
+    if on(SirPass::SplitCoalescedStores) {
+        ff_post_passes.add_pass(SplitCoalescedStoresPass);
+    }
+    optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_post_passes, &options);
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }

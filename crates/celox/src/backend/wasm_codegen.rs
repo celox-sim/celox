@@ -463,18 +463,24 @@ fn compile_instruction(
             );
         }
         SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
-            compile_commit(
-                src_addr,
-                dst_addr,
-                offset,
-                *op_width,
-                triggers,
-                layout,
-                four_state,
-                emit_triggers,
-                locals,
-                instrs,
-            );
+            if src_addr.region == crate::ir::SPARSE_WORKING_REGION {
+                compile_sparse_commit(
+                    src_addr, dst_addr, *op_width, layout, four_state, locals, instrs,
+                );
+            } else {
+                compile_commit(
+                    src_addr,
+                    dst_addr,
+                    offset,
+                    *op_width,
+                    triggers,
+                    layout,
+                    four_state,
+                    emit_triggers,
+                    locals,
+                    instrs,
+                );
+            }
         }
         SIRInstruction::Concat(dst, args) => {
             compile_concat(dst, args, unit, four_state, locals, instrs);
@@ -519,6 +525,201 @@ fn compile_instruction(
         SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
             compile_comb_capture_enable_if_changed(old, new, sites, four_state, locals, instrs);
         }
+    }
+}
+
+fn compile_sparse_chunk_copy(
+    src_base: usize,
+    dst_base: usize,
+    byte_index: u32,
+    byte_len: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let mut copied = 0usize;
+    for bytes in [8usize, 4, 2, 1] {
+        while copied + bytes <= byte_len {
+            for base in [dst_base + copied, src_base + copied] {
+                instrs.push(Instruction::I64Const(base as i64));
+                instrs.push(Instruction::LocalGet(byte_index));
+                instrs.push(Instruction::I64Add);
+                instrs.push(Instruction::I32WrapI64);
+            }
+            let memarg = wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            };
+            match bytes {
+                8 => {
+                    instrs.push(Instruction::I64Load(memarg));
+                    instrs.push(Instruction::I64Store(memarg));
+                }
+                4 => {
+                    instrs.push(Instruction::I32Load(memarg));
+                    instrs.push(Instruction::I32Store(memarg));
+                }
+                2 => {
+                    instrs.push(Instruction::I32Load16U(memarg));
+                    instrs.push(Instruction::I32Store16(memarg));
+                }
+                1 => {
+                    instrs.push(Instruction::I32Load8U(memarg));
+                    instrs.push(Instruction::I32Store8(memarg));
+                }
+                _ => unreachable!(),
+            }
+            copied += bytes;
+        }
+    }
+}
+
+fn compile_sparse_commit(
+    src_addr: &RegionedAbsoluteAddr,
+    dst_addr: &RegionedAbsoluteAddr,
+    _op_width: usize,
+    layout: &MemoryLayout,
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    debug_assert_eq!(src_addr.region, crate::ir::SPARSE_WORKING_REGION);
+    debug_assert_eq!(dst_addr.region, crate::ir::STABLE_REGION);
+    let abs = src_addr.absolute_addr();
+    let sparse = &layout.sparse_layouts[&abs];
+    let byte_size = get_byte_size(layout.widths[&abs]);
+    let src_base = layout.sparse_base_offset + layout.sparse_offsets[&abs];
+    let dst_base = layout.offsets[&abs];
+    let plane_count = if four_state && layout.is_4states[&abs] {
+        2
+    } else {
+        1
+    };
+    let last_chunk = sparse.chunk_count.saturating_sub(1);
+    let last_len = byte_size.saturating_sub(last_chunk * 8);
+    let memarg = wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+
+    let summary_bits = locals.alloc(1);
+    let dirty_bits = locals.alloc(1);
+    let word_index = locals.alloc(1);
+    let chunk = locals.alloc(1);
+    let byte_index = locals.alloc(1);
+
+    for summary_index in 0..sparse.summary_word_count {
+        let summary_addr = sparse.summary_words_offset + summary_index * 8;
+        instrs.push(Instruction::I32Const(summary_addr as i32));
+        instrs.push(Instruction::I64Load(memarg));
+        instrs.push(Instruction::LocalSet(summary_bits));
+        instrs.push(Instruction::I32Const(summary_addr as i32));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Store(memarg));
+
+        instrs.push(Instruction::Block(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::Loop(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::BrIf(1));
+
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::I64Ctz);
+        instrs.push(Instruction::I64Const((summary_index * 64) as i64));
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(word_index));
+        instrs.push(Instruction::I32Const(sparse.dirty_words_offset as i32));
+        instrs.push(Instruction::LocalGet(word_index));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I32Add);
+        instrs.push(Instruction::I64Load(memarg));
+        instrs.push(Instruction::LocalSet(dirty_bits));
+        instrs.push(Instruction::I32Const(sparse.dirty_words_offset as i32));
+        instrs.push(Instruction::LocalGet(word_index));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I32Add);
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Store(memarg));
+
+        instrs.push(Instruction::Block(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::Loop(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::BrIf(1));
+        instrs.push(Instruction::LocalGet(word_index));
+        instrs.push(Instruction::I64Const(64));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::I64Ctz);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalTee(chunk));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::LocalSet(byte_index));
+
+        if last_len == 8 {
+            for plane in 0..plane_count {
+                let delta = plane * byte_size;
+                compile_sparse_chunk_copy(
+                    src_base + delta,
+                    dst_base + delta,
+                    byte_index,
+                    8,
+                    instrs,
+                );
+            }
+        } else {
+            instrs.push(Instruction::LocalGet(chunk));
+            instrs.push(Instruction::I64Const(last_chunk as i64));
+            instrs.push(Instruction::I64Eq);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            for plane in 0..plane_count {
+                let delta = plane * byte_size;
+                compile_sparse_chunk_copy(
+                    src_base + delta,
+                    dst_base + delta,
+                    byte_index,
+                    last_len,
+                    instrs,
+                );
+            }
+            instrs.push(Instruction::Else);
+            for plane in 0..plane_count {
+                let delta = plane * byte_size;
+                compile_sparse_chunk_copy(
+                    src_base + delta,
+                    dst_base + delta,
+                    byte_index,
+                    8,
+                    instrs,
+                );
+            }
+            instrs.push(Instruction::End);
+        }
+
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::I64Sub);
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalSet(dirty_bits));
+        instrs.push(Instruction::Br(0));
+        instrs.push(Instruction::End);
+        instrs.push(Instruction::End);
+
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::I64Sub);
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalSet(summary_bits));
+        instrs.push(Instruction::Br(0));
+        instrs.push(Instruction::End);
+        instrs.push(Instruction::End);
     }
 }
 
@@ -3697,6 +3898,166 @@ fn compile_load_dynamic(
     }
 }
 
+fn compile_prepare_sparse_store(
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    op_width: usize,
+    layout: &MemoryLayout,
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let abs = addr.absolute_addr();
+    let sparse = &layout.sparse_layouts[&abs];
+    let stable_base = layout.offsets[&abs];
+    let sparse_base = layout.sparse_base_offset + layout.sparse_offsets[&abs];
+    let byte_size = get_byte_size(layout.widths[&abs]);
+    let bit_offset = locals.alloc(1);
+    match offset {
+        SIROffset::Static(value) => instrs.push(Instruction::I64Const(*value as i64)),
+        SIROffset::Dynamic(reg) => {
+            instrs.push(Instruction::LocalGet(locals.reg_map[reg].value_idx));
+        }
+    }
+    instrs.push(Instruction::LocalSet(bit_offset));
+    let start_chunk = locals.alloc(1);
+    instrs.push(Instruction::LocalGet(bit_offset));
+    instrs.push(Instruction::I64Const(6));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::LocalSet(start_chunk));
+    let end_chunk = locals.alloc(1);
+    instrs.push(Instruction::LocalGet(bit_offset));
+    instrs.push(Instruction::I64Const(op_width.saturating_sub(1) as i64));
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::I64Const(6));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::LocalSet(end_chunk));
+    let memarg = wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+
+    for delta in 0..(op_width.div_ceil(64) + 1) {
+        let candidate = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(start_chunk));
+        instrs.push(Instruction::I64Const(delta as i64));
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(candidate));
+        let chunk = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(candidate));
+        instrs.push(Instruction::LocalGet(start_chunk));
+        instrs.push(Instruction::LocalGet(candidate));
+        instrs.push(Instruction::LocalGet(end_chunk));
+        instrs.push(Instruction::I64LeU);
+        instrs.push(Instruction::Select);
+        instrs.push(Instruction::LocalSet(chunk));
+
+        let dirty_word = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(chunk));
+        instrs.push(Instruction::I64Const(6));
+        instrs.push(Instruction::I64ShrU);
+        instrs.push(Instruction::LocalSet(dirty_word));
+        let dirty_addr = locals.alloc(1);
+        instrs.push(Instruction::I64Const(sparse.dirty_words_offset as i64));
+        instrs.push(Instruction::LocalGet(dirty_word));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalTee(dirty_addr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I64Load(memarg));
+        let dirty_bits = locals.alloc(1);
+        instrs.push(Instruction::LocalSet(dirty_bits));
+        let dirty_mask = locals.alloc(1);
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::LocalGet(chunk));
+        instrs.push(Instruction::I64Const(63));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Shl);
+        instrs.push(Instruction::LocalSet(dirty_mask));
+        let was_dirty = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::LocalGet(dirty_mask));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(was_dirty));
+
+        for plane_delta in
+            [0, byte_size]
+                .into_iter()
+                .take(if four_state && layout.is_4states[&abs] {
+                    2
+                } else {
+                    1
+                })
+        {
+            let stable = locals.alloc(1);
+            instrs.push(Instruction::I64Const((stable_base + plane_delta) as i64));
+            instrs.push(Instruction::LocalGet(chunk));
+            instrs.push(Instruction::I64Const(8));
+            instrs.push(Instruction::I64Mul);
+            instrs.push(Instruction::I64Add);
+            instrs.push(Instruction::I32WrapI64);
+            instrs.push(Instruction::I64Load(memarg));
+            instrs.push(Instruction::LocalSet(stable));
+            let working = locals.alloc(1);
+            instrs.push(Instruction::I64Const((sparse_base + plane_delta) as i64));
+            instrs.push(Instruction::LocalGet(chunk));
+            instrs.push(Instruction::I64Const(8));
+            instrs.push(Instruction::I64Mul);
+            instrs.push(Instruction::I64Add);
+            instrs.push(Instruction::LocalTee(working));
+            instrs.push(Instruction::I32WrapI64);
+            instrs.push(Instruction::I64Load(memarg));
+            let old_working = locals.alloc(1);
+            instrs.push(Instruction::LocalSet(old_working));
+            instrs.push(Instruction::LocalGet(working));
+            instrs.push(Instruction::I32WrapI64);
+            instrs.push(Instruction::LocalGet(old_working));
+            instrs.push(Instruction::LocalGet(stable));
+            instrs.push(Instruction::LocalGet(was_dirty));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::I64Ne);
+            instrs.push(Instruction::Select);
+            instrs.push(Instruction::I64Store(memarg));
+        }
+
+        instrs.push(Instruction::LocalGet(dirty_addr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::LocalGet(dirty_mask));
+        instrs.push(Instruction::I64Or);
+        instrs.push(Instruction::I64Store(memarg));
+
+        let summary_addr = locals.alloc(1);
+        instrs.push(Instruction::I64Const(sparse.summary_words_offset as i64));
+        instrs.push(Instruction::LocalGet(dirty_word));
+        instrs.push(Instruction::I64Const(6));
+        instrs.push(Instruction::I64ShrU);
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalTee(summary_addr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I64Load(memarg));
+        let summary_bits = locals.alloc(1);
+        instrs.push(Instruction::LocalSet(summary_bits));
+        instrs.push(Instruction::LocalGet(summary_addr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::LocalGet(dirty_word));
+        instrs.push(Instruction::I64Const(63));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Shl);
+        instrs.push(Instruction::I64Or);
+        instrs.push(Instruction::I64Store(memarg));
+    }
+}
+
 fn compile_store(
     addr: &RegionedAbsoluteAddr,
     offset: &SIROffset,
@@ -3716,6 +4077,9 @@ fn compile_store(
             emit_trigger_detection(addr, triggers, layout, locals, instrs);
         }
         return;
+    }
+    if addr.region == crate::ir::SPARSE_WORKING_REGION {
+        compile_prepare_sparse_store(addr, offset, op_width, layout, four_state, locals, instrs);
     }
     let s = locals.reg_map[src].clone();
     let abs = addr.absolute_addr();
@@ -4829,10 +5193,10 @@ fn compile_terminator(
 // ============================================================
 
 fn compute_byte_offset(layout: &MemoryLayout, abs: &AbsoluteAddr, region: u32) -> usize {
-    if region == STABLE_REGION {
-        layout.offsets[abs]
-    } else {
-        layout.working_base_offset + layout.working_offsets[abs]
+    match region {
+        STABLE_REGION => layout.offsets[abs],
+        crate::ir::SPARSE_WORKING_REGION => layout.sparse_base_offset + layout.sparse_offsets[abs],
+        _ => layout.working_base_offset + layout.working_offsets[abs],
     }
 }
 
@@ -5298,6 +5662,9 @@ mod bit_count_tests {
             total_size,
             working_offsets: HashMap::default(),
             working_base_offset,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: working_base_offset,
+            sparse_layouts: HashMap::default(),
             merged_total_size: 65_536,
             triggered_bits_offset: working_base_offset,
             triggered_bits_total_size: 0,

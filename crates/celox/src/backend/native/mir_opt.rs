@@ -851,6 +851,9 @@ fn memory_write(inst: &MInst) -> MemoryWrite {
             offset: *dst_offset,
             byte_len: *byte_len,
         },
+        MInst::SparseCommit { .. } => MemoryWrite::Unknown {
+            base: Some(BaseReg::SimState),
+        },
         MInst::StoreIndexed { base, .. } => MemoryWrite::Unknown { base: Some(*base) },
         MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }

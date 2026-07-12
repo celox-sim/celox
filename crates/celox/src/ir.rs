@@ -401,6 +401,28 @@ impl Program {
 
         addrs
     }
+
+    pub fn collect_sparse_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
+        let mut addrs = std::collections::HashSet::new();
+        for units in self
+            .eval_apply_ffs
+            .values()
+            .chain(self.eval_only_ffs.values())
+        {
+            for eu in units {
+                for block in eu.blocks.values() {
+                    for inst in &block.instructions {
+                        if let SIRInstruction::Store(addr, _, _, _, _, _) = inst
+                            && addr.region == SPARSE_WORKING_REGION
+                        {
+                            addrs.insert(addr.absolute_addr());
+                        }
+                    }
+                }
+            }
+        }
+        addrs
+    }
 }
 
 fn comb_capture_enable_needs_unaliased_old_value(
@@ -572,6 +594,7 @@ pub struct InstancePath(pub Vec<(StrId, usize)>);
 
 pub const STABLE_REGION: u32 = 0;
 pub const WORKING_REGION: u32 = 1;
+pub const SPARSE_WORKING_REGION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RegionedVarAddrBase<V> {

@@ -4,8 +4,8 @@ use std::time::Instant;
 use crate::ir::{
     BinaryOp, BitAccess, BlockId, CombObserver, ExecutionUnit, GlueAddr, GlueBlock,
     InitialMemoryData, InitialMemoryWriteRun, ModuleId, ModuleInitialMemoryValue, RegionedVarAddr,
-    RuntimeEventSite, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, STABLE_REGION,
-    SimModule, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    RuntimeEventSite, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SPARSE_WORKING_REGION,
+    STABLE_REGION, SimModule, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 
 use crate::logic_tree::{
@@ -1041,17 +1041,17 @@ impl<'a> ModuleParser<'a> {
             let ff_group = self.ff_parser.parse_ff_group(decls, &mut builder)?;
             let targets = ff_group.targets;
             let dynamic_write_vars = ff_group.dynamic_write_vars;
-            let commits = build_ff_region_copies(&targets, WORKING_REGION, STABLE_REGION);
-            let eval_apply_commits = build_ff_region_copies_skipping(
+            let mut commits = build_ff_region_copies_skipping(
                 &targets,
                 WORKING_REGION,
                 STABLE_REGION,
                 &dynamic_write_vars,
             );
+            commits.extend(build_sparse_ff_commits(&targets, &dynamic_write_vars));
 
             // Clone before sealing: eval_apply_builder gets the commit instructions appended.
             let mut eval_apply_builder = builder.clone();
-            for commit in &eval_apply_commits {
+            for commit in &commits {
                 eval_apply_builder.emit(commit.clone());
             }
 
@@ -1072,23 +1072,23 @@ impl<'a> ModuleParser<'a> {
                 entry_block_id: BlockId(0),
                 register_map: ea_regs,
             };
-            rewrite_working_accesses_to_stable(&mut eval_apply_eu, &dynamic_write_vars);
+            rewrite_dynamic_ff_stores_to_sparse(&mut eval_only_eu, &dynamic_write_vars);
+            rewrite_dynamic_ff_stores_to_sparse(&mut eval_apply_eu, &dynamic_write_vars);
 
             // Build seeds (STABLE -> WORKING) and prepend to both eval_only and eval_apply.
-            let seeds = build_ff_region_copies(&targets, STABLE_REGION, WORKING_REGION);
-            if let Some(entry) = eval_only_eu.blocks.get_mut(&BlockId(0)) {
-                let mut s = seeds.clone();
-                s.append(&mut entry.instructions);
-                entry.instructions = s;
-            }
-            let eval_apply_seeds = build_ff_region_copies_skipping(
+            let seeds = build_ff_region_copies_skipping(
                 &targets,
                 STABLE_REGION,
                 WORKING_REGION,
                 &dynamic_write_vars,
             );
+            if let Some(entry) = eval_only_eu.blocks.get_mut(&BlockId(0)) {
+                let mut s = seeds.clone();
+                s.append(&mut entry.instructions);
+                entry.instructions = s;
+            }
             if let Some(entry) = eval_apply_eu.blocks.get_mut(&BlockId(0)) {
-                let mut s = eval_apply_seeds;
+                let mut s = seeds;
                 s.append(&mut entry.instructions);
                 entry.instructions = s;
             }
@@ -1161,14 +1161,6 @@ impl<'a> ModuleParser<'a> {
     }
 }
 
-fn build_ff_region_copies(
-    targets: &[VarAtomBase<RegionedVarAddr>],
-    src_region: u32,
-    dst_region: u32,
-) -> Vec<SIRInstruction<RegionedVarAddr>> {
-    build_ff_region_copies_skipping(targets, src_region, dst_region, &HashSet::default())
-}
-
 fn build_ff_region_copies_skipping(
     targets: &[VarAtomBase<RegionedVarAddr>],
     src_region: u32,
@@ -1220,7 +1212,45 @@ fn build_ff_region_copies_skipping(
     copies
 }
 
-fn rewrite_working_accesses_to_stable(
+fn build_sparse_ff_commits(
+    targets: &[VarAtomBase<RegionedVarAddr>],
+    sparse_vars: &HashSet<VarId>,
+) -> Vec<SIRInstruction<RegionedVarAddr>> {
+    let mut widths = HashMap::<VarId, usize>::default();
+    let mut order = Vec::new();
+    for target in targets {
+        if !sparse_vars.contains(&target.id.var_id) {
+            continue;
+        }
+        if !widths.contains_key(&target.id.var_id) {
+            order.push(target.id.var_id);
+        }
+        widths
+            .entry(target.id.var_id)
+            .and_modify(|width| *width = (*width).max(target.access.msb.saturating_add(1)))
+            .or_insert_with(|| target.access.msb.saturating_add(1));
+    }
+    order
+        .into_iter()
+        .map(|var_id| {
+            SIRInstruction::Commit(
+                RegionedVarAddr {
+                    region: SPARSE_WORKING_REGION,
+                    var_id,
+                },
+                RegionedVarAddr {
+                    region: STABLE_REGION,
+                    var_id,
+                },
+                SIROffset::Static(0),
+                widths[&var_id],
+                Vec::new(),
+            )
+        })
+        .collect()
+}
+
+fn rewrite_dynamic_ff_stores_to_sparse(
     eu: &mut ExecutionUnit<RegionedVarAddr>,
     dynamic_write_vars: &HashSet<VarId>,
 ) {
@@ -1229,37 +1259,13 @@ fn rewrite_working_accesses_to_stable(
     }
     for block in eu.blocks.values_mut() {
         for inst in &mut block.instructions {
-            rewrite_inst_working_access_to_stable(inst, dynamic_write_vars);
+            if let SIRInstruction::Store(addr, _, _, _, _, _) = inst
+                && addr.region == WORKING_REGION
+                && dynamic_write_vars.contains(&addr.var_id)
+            {
+                addr.region = SPARSE_WORKING_REGION;
+            }
         }
-    }
-}
-
-fn rewrite_inst_working_access_to_stable(
-    inst: &mut SIRInstruction<RegionedVarAddr>,
-    dynamic_write_vars: &HashSet<VarId>,
-) {
-    let rewrite_addr = |addr: &mut RegionedVarAddr| {
-        if addr.region == WORKING_REGION && dynamic_write_vars.contains(&addr.var_id) {
-            addr.region = STABLE_REGION;
-        }
-    };
-    match inst {
-        SIRInstruction::Load(_, addr, _, _) | SIRInstruction::Store(addr, _, _, _, _, _) => {
-            rewrite_addr(addr);
-        }
-        SIRInstruction::Commit(src, dst, _, _, _) => {
-            rewrite_addr(src);
-            rewrite_addr(dst);
-        }
-        SIRInstruction::Imm(..)
-        | SIRInstruction::Binary(..)
-        | SIRInstruction::Unary(..)
-        | SIRInstruction::Concat(..)
-        | SIRInstruction::Slice(..)
-        | SIRInstruction::Mux(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => {}
     }
 }
 

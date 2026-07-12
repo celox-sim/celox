@@ -1,6 +1,5 @@
 ---
 source: crates/celox/tests/flip_flop.rs
-assertion_line: 2062
 expression: output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -17,7 +16,8 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r1 = Load(addr=i (region=0), offset=0, bits=2)
       r2 = SIRValue(0x8)
       r3 = r1 Mul r2
-      Store(addr=a (region=0), offset=r3, bits=8, src_reg = 0)
+      Store(addr=a (region=2), offset=r3, bits=8, src_reg = 0)
+      Commit(src=a (region=2), dst=a (region=0), offset=0, bits=32)
       Return
 
 === Evaluation Flip-Flops (eval_only_ffs) ===

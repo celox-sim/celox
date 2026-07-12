@@ -1141,8 +1141,8 @@ pub(crate) fn flatten(
     let (
         mut global_arena,
         mut eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
+        mut eval_only_ffs,
+        mut apply_ffs,
         mut comb_blocks,
         mut comb_observers,
         mut runtime_errors,
@@ -1194,6 +1194,8 @@ pub(crate) fn flatten(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
             &mut eval_apply_ffs,
+            &mut eval_only_ffs,
+            &mut apply_ffs,
             &comb_blocks,
             &global_arena,
             &clock_domains,
@@ -1384,14 +1386,15 @@ pub(crate) fn flatten(
         t.scheduled_units = Some(schduled.clone());
     }
 
-    // Conditional Population: only include split blocks if multiple active FF domains exist.
-    // This optimization saves JIT resources for simple designs and designs where only one clock is active.
+    // The unified function is the normal fast path.  Split evaluator/apply
+    // functions are needed only when scheduling can evaluate several active
+    // domains or must cascade through a derived clock.
     let active_ff_domains = eval_apply_ffs
         .values()
-        .filter(|eus| !eus.is_empty())
+        .filter(|units| !units.is_empty())
         .count();
-
-    let (eval_only_ffs, apply_ffs) = if active_ff_domains > 1 {
+    let needs_split_path = active_ff_domains > 1 || !cascaded_clocks.is_empty();
+    let (eval_only_ffs, apply_ffs) = if needs_split_path {
         (eval_only_ffs, apply_ffs)
     } else {
         (HashMap::default(), HashMap::default())
@@ -1993,12 +1996,98 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
                 .map(|(unit, eu)| ("apply_ffs", unit, eu)),
         );
     for (group, unit, eu) in units {
+        verify_region_contract(group, eu).map_err(|error| ParserError::SirVerify {
+            phase,
+            group,
+            unit,
+            error,
+        })?;
         eu.verify_result().map_err(|error| ParserError::SirVerify {
             phase,
             group,
             unit,
             error,
         })?;
+    }
+    Ok(())
+}
+
+fn verify_region_contract(
+    group: &'static str,
+    eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Result<(), crate::ir::verify::SirVerifyError> {
+    use crate::ir::{SIRInstruction, SIROffset, SPARSE_WORKING_REGION};
+
+    for block in eu.blocks.values() {
+        for (index, inst) in block.instructions.iter().enumerate() {
+            match inst {
+                SIRInstruction::Load(_, addr, _, _)
+                | SIRInstruction::Store(addr, _, _, _, _, _)
+                    if addr.region > SPARSE_WORKING_REGION =>
+                {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.KNOWN_MEMORY_REGION",
+                        block.id,
+                        index,
+                        format!("unknown memory region {}", addr.region),
+                    ));
+                }
+                SIRInstruction::Commit(src, dst, _, _, _)
+                    if src.region > SPARSE_WORKING_REGION || dst.region > SPARSE_WORKING_REGION =>
+                {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.KNOWN_MEMORY_REGION",
+                        block.id,
+                        index,
+                        format!("unknown Commit region pair {}→{}", src.region, dst.region),
+                    ));
+                }
+                SIRInstruction::Load(_, addr, _, _) if addr.region == SPARSE_WORKING_REGION => {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.SPARSE_IS_NOT_READABLE",
+                        block.id,
+                        index,
+                        "FF sparse next-state storage cannot be loaded; FF RHS values read STABLE",
+                    ));
+                }
+                SIRInstruction::Store(addr, _, _, _, _, _)
+                    if addr.region == SPARSE_WORKING_REGION
+                        && !matches!(group, "eval_only_ffs" | "eval_apply_ffs") =>
+                {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.SPARSE_STORE_IN_EVALUATOR",
+                        block.id,
+                        index,
+                        format!("SPARSE Store is not valid in {group}"),
+                    ));
+                }
+                SIRInstruction::Commit(src, dst, offset, _, triggers)
+                    if src.region == SPARSE_WORKING_REGION =>
+                {
+                    if dst.region != STABLE_REGION
+                        || !matches!(group, "apply_ffs" | "eval_apply_ffs")
+                        || !matches!(offset, SIROffset::Static(0))
+                        || !triggers.is_empty()
+                    {
+                        return Err(crate::ir::verify::SirVerifyError::instruction(
+                            "REGION.SPARSE_COMMIT_FORM",
+                            block.id,
+                            index,
+                            "SPARSE Commit must be an untriggered full-range SPARSE→STABLE apply",
+                        ));
+                    }
+                }
+                SIRInstruction::Commit(_, dst, _, _, _) if dst.region == SPARSE_WORKING_REGION => {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.SPARSE_IS_NOT_COMMIT_DESTINATION",
+                        block.id,
+                        index,
+                        "SPARSE is populated by Store, not by Commit",
+                    ));
+                }
+                _ => {}
+            }
+        }
     }
     Ok(())
 }
@@ -3008,6 +3097,8 @@ fn atom_overlaps_any<A: Eq + std::hash::Hash + Copy>(
 
 fn analyze_clock_dependencies(
     eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     comb_blocks: &[LogicPath<AbsoluteAddr>],
     arena: &SLTNodeArena<AbsoluteAddr>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -3022,9 +3113,9 @@ fn analyze_clock_dependencies(
 
     // 1. Identify all variables written by FFs (direct sequential outputs)
     let mut ff_outputs: BTreeSet<AbsoluteAddr> = BTreeSet::new();
+    unique_clocks.extend(eval_apply_ffs.keys().copied());
 
     for (domain_clock, eus) in &*eval_apply_ffs {
-        unique_clocks.insert(*domain_clock);
         for eu in eus {
             for bb in eu.blocks.values() {
                 for inst in &bb.instructions {
@@ -3035,7 +3126,9 @@ fn analyze_clock_dependencies(
 
                         ff_outputs.insert(abs);
 
-                        if canonical_target != *domain_clock {
+                        if canonical_target != *domain_clock
+                            && unique_clocks.contains(&canonical_target)
+                        {
                             clock_deps
                                 .entry(canonical_target)
                                 .or_default()
@@ -3172,6 +3265,8 @@ fn analyze_clock_dependencies(
                 let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
                 // Add empty execution units so it becomes a valid event domain for scheduling
                 eval_apply_ffs.entry(canonical).or_default();
+                eval_only_ffs.entry(canonical).or_default();
+                apply_ffs.entry(canonical).or_default();
 
                 if !visited.contains(&canonical) {
                     topo_visit(

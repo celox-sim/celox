@@ -36,7 +36,7 @@ impl SirVerifyError {
         }
     }
 
-    fn instruction(
+    pub(crate) fn instruction(
         invariant: &'static str,
         block: BlockId,
         instruction: usize,

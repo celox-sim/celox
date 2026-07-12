@@ -83,14 +83,168 @@ fn resolve_forward_src_from_pred(
     None
 }
 
-pub(crate) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct DirectStableStoreHazards {
+    ranges: HashMap<AbsoluteAddr, Vec<(usize, usize)>>,
+}
+
+impl DirectStableStoreHazards {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    fn insert(&mut self, addr: AbsoluteAddr, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        let ranges = self.ranges.entry(addr).or_default();
+        ranges.push((start, end));
+        ranges.sort_unstable_by_key(|range| range.0);
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for &(start, end) in ranges.iter() {
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        *ranges = merged;
+    }
+
+    fn merge_from(&mut self, other: &Self) {
+        for (&addr, ranges) in &other.ranges {
+            for &(start, end) in ranges {
+                self.insert(addr, start, end);
+            }
+        }
+    }
+
+    pub(crate) fn overlaps(&self, addr: AbsoluteAddr, start: usize, bits: usize) -> bool {
+        let end = start.saturating_add(bits);
+        self.ranges.get(&addr).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|&(hazard_start, hazard_end)| start < hazard_end && hazard_start < end)
+        })
+    }
+
+    pub(crate) fn contains_addr(&self, addr: AbsoluteAddr) -> bool {
+        self.ranges
+            .get(&addr)
+            .is_some_and(|ranges| !ranges.is_empty())
+    }
+}
+
+fn instruction_range(offset: &SIROffset, bits: usize) -> (usize, usize) {
+    match offset {
+        SIROffset::Static(start) => (*start, start.saturating_add(bits)),
+        SIROffset::Dynamic(_) => (0, usize::MAX),
+    }
+}
+
+fn intersect_read_with_written(
+    hazards: &mut DirectStableStoreHazards,
+    written: &DirectStableStoreHazards,
+    addr: AbsoluteAddr,
+    offset: &SIROffset,
+    bits: usize,
+) {
+    let (read_start, read_end) = instruction_range(offset, bits);
+    if let Some(ranges) = written.ranges.get(&addr) {
+        for &(write_start, write_end) in ranges {
+            let start = read_start.max(write_start);
+            let end = read_end.min(write_end);
+            hazards.insert(addr, start, end);
+        }
+    }
+}
+
+/// Bit ranges for which replacing a WORKING write with an immediate STABLE
+/// write could change an old-state read later in this complete event CFG.
+pub(crate) fn direct_stable_store_hazards(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> DirectStableStoreHazards {
+    use std::collections::VecDeque;
+
+    let mut hazards = DirectStableStoreHazards::default();
+    let mut in_written: HashMap<BlockId, DirectStableStoreHazards> = HashMap::default();
+    let mut worklist = VecDeque::new();
+    in_written.insert(eu.entry_block_id, DirectStableStoreHazards::default());
+    worklist.push_back(eu.entry_block_id);
+
+    while let Some(bid) = worklist.pop_front() {
+        let Some(block) = eu.blocks.get(&bid) else {
+            continue;
+        };
+        let mut written = in_written.get(&bid).cloned().unwrap_or_default();
+        for inst in &block.instructions {
+            match inst {
+                SIRInstruction::Load(_, addr, offset, bits) if addr.region == STABLE_REGION => {
+                    intersect_read_with_written(
+                        &mut hazards,
+                        &written,
+                        addr.absolute_addr(),
+                        offset,
+                        *bits,
+                    );
+                }
+                SIRInstruction::Commit(src, _, offset, bits, _) if src.region == STABLE_REGION => {
+                    intersect_read_with_written(
+                        &mut hazards,
+                        &written,
+                        src.absolute_addr(),
+                        offset,
+                        *bits,
+                    );
+                }
+                SIRInstruction::Store(addr, offset, bits, _, _, _)
+                    if addr.region == WORKING_REGION =>
+                {
+                    let (start, end) = instruction_range(offset, *bits);
+                    written.insert(addr.absolute_addr(), start, end);
+                }
+                _ => {}
+            }
+        }
+
+        let mut propagate = |succ: BlockId| {
+            let is_new = !in_written.contains_key(&succ);
+            let entry = in_written.entry(succ).or_default();
+            let old = entry.clone();
+            entry.merge_from(&written);
+            if is_new || *entry != old {
+                worklist.push_back(succ);
+            }
+        };
+        match &block.terminator {
+            SIRTerminator::Jump(dst, _) => propagate(*dst),
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => {
+                propagate(true_block.0);
+                propagate(false_block.0);
+            }
+            SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
+    }
+    hazards
+}
+
+pub(crate) fn inline_commit_forwarding_with_hazards(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    hazards: &DirectStableStoreHazards,
+) {
     let block_ids: Vec<_> = eu.blocks.keys().copied().collect();
 
     for bid in block_ids {
         let Some(block) = eu.blocks.get(&bid) else {
             continue;
         };
-
         let mut commit_replacements: Vec<(usize, Vec<(usize, RegionedAbsoluteAddr)>)> = Vec::new();
 
         for (ci, inst) in block.instructions.iter().enumerate() {
@@ -100,13 +254,17 @@ pub(crate) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAd
                 }
                 _ => continue,
             };
+            if src_addr.region != WORKING_REGION
+                || dst_addr.region != STABLE_REGION
+                || hazards.overlaps(dst_addr.absolute_addr(), off, bits)
+            {
+                continue;
+            }
 
-            let mut found_stores: Vec<(usize, usize, usize)> = Vec::new();
+            let mut found_stores = Vec::new();
             let mut safe = true;
-
             for si in (0..ci).rev() {
-                let sinst = &block.instructions[si];
-                match sinst {
+                match &block.instructions[si] {
                     SIRInstruction::Store(
                         addr,
                         SIROffset::Static(store_off),
@@ -121,12 +279,7 @@ pub(crate) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAd
                         found_stores.push((si, *store_off, *store_bits));
                     }
                     SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _, _)
-                        if *addr == src_addr =>
-                    {
-                        safe = false;
-                        break;
-                    }
-                    SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), _)
+                    | SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), _)
                         if *addr == src_addr =>
                     {
                         safe = false;
@@ -135,43 +288,39 @@ pub(crate) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAd
                     _ => {}
                 }
             }
-
             if !safe {
                 continue;
             }
-
-            found_stores.sort_by_key(|(_, o, _)| *o);
-            let total: usize = found_stores.iter().map(|(_, _, b)| b).sum();
-            if total != bits {
+            found_stores.sort_by_key(|(_, offset, _)| *offset);
+            if found_stores
+                .iter()
+                .map(|(_, _, width)| *width)
+                .sum::<usize>()
+                != bits
+            {
                 continue;
             }
             let mut expected = off;
-            let mut contiguous = true;
-            for (_, store_off, store_bits) in &found_stores {
-                if *store_off != expected {
-                    contiguous = false;
-                    break;
-                }
-                expected += store_bits;
-            }
-            if !contiguous {
+            if !found_stores.iter().all(|(_, store_off, store_bits)| {
+                let contiguous = *store_off == expected;
+                expected += *store_bits;
+                contiguous
+            }) {
                 continue;
             }
-
-            let store_updates: Vec<(usize, RegionedAbsoluteAddr)> = found_stores
-                .iter()
-                .map(|(idx, _, _)| (*idx, dst_addr))
-                .collect();
-            commit_replacements.push((ci, store_updates));
+            commit_replacements.push((
+                ci,
+                found_stores
+                    .iter()
+                    .map(|(index, _, _)| (*index, dst_addr))
+                    .collect(),
+            ));
         }
 
-        if commit_replacements.is_empty() {
+        let Some(block) = eu.blocks.get_mut(&bid) else {
             continue;
-        }
-
-        let block = eu.blocks.get_mut(&bid).unwrap();
-
-        let mut remove_indices: Vec<usize> = Vec::new();
+        };
+        let mut remove_indices = Vec::new();
         for (ci, store_updates) in &commit_replacements {
             remove_indices.push(*ci);
             for (si, new_dst) in store_updates {
@@ -180,10 +329,10 @@ pub(crate) fn inline_commit_forwarding(eu: &mut ExecutionUnit<RegionedAbsoluteAd
                 }
             }
         }
-
         remove_indices.sort_unstable();
-        for idx in remove_indices.into_iter().rev() {
-            block.instructions.remove(idx);
+        remove_indices.dedup();
+        for index in remove_indices.into_iter().rev() {
+            block.instructions.remove(index);
         }
     }
 }
@@ -336,7 +485,10 @@ pub(super) fn split_wide_commits(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     }
 }
 
-pub(crate) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+pub(crate) fn optimize_commit_sinking_with_hazards(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    hazards: &DirectStableStoreHazards,
+) {
     let block_ids: Vec<_> = eu.blocks.keys().copied().collect();
 
     for merge_id in block_ids {
@@ -377,6 +529,12 @@ pub(crate) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
                 }
                 _ => continue,
             };
+            if src_addr.region != WORKING_REGION
+                || dst_addr.region != STABLE_REGION
+                || hazards.overlaps(dst_addr.absolute_addr(), off, bits)
+            {
+                continue;
+            }
 
             let mut pred_sources = Vec::new();
             let mut ok = true;
@@ -428,5 +586,122 @@ pub(crate) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
                 merge_block.instructions.remove(idx);
             }
         }
+    }
+}
+
+pub(crate) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    let hazards = direct_stable_store_hazards(eu);
+    optimize_commit_sinking_with_hazards(eu, &hazards);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veryl_analyzer::ir::VarId;
+
+    fn addr(region: u32) -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region,
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(0),
+        }
+    }
+
+    fn forwarding_eu(read_old_after: bool) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let stable = addr(STABLE_REGION);
+        let working = addr(WORKING_REGION);
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: vec![
+                    SIRInstruction::Store(
+                        working,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(0),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                    SIRInstruction::Commit(working, stable, SIROffset::Static(0), 8, Vec::new()),
+                ],
+                terminator: if read_old_after {
+                    SIRTerminator::Jump(BlockId(1), Vec::new())
+                } else {
+                    SIRTerminator::Return
+                },
+            },
+        );
+        if read_old_after {
+            blocks.insert(
+                BlockId(1),
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Load(
+                        RegisterId(1),
+                        stable,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            );
+        }
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(0), RegisterType::Logic { width: 8 });
+        register_map.insert(RegisterId(1), RegisterType::Logic { width: 8 });
+        ExecutionUnit {
+            blocks,
+            entry_block_id: BlockId(0),
+            register_map,
+        }
+    }
+
+    #[test]
+    fn forwarding_remains_enabled_when_no_old_stable_read_follows() {
+        let mut eu = forwarding_eu(false);
+        let hazards = direct_stable_store_hazards(&eu);
+        assert!(hazards.is_empty());
+        inline_commit_forwarding_with_hazards(&mut eu, &hazards);
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(matches!(
+            instructions.as_slice(),
+            [SIRInstruction::Store(addr, ..)] if addr.region == STABLE_REGION
+        ));
+    }
+
+    #[test]
+    fn forwarding_preserves_working_commit_when_old_stable_is_read_later() {
+        let mut eu = forwarding_eu(true);
+        let hazards = direct_stable_store_hazards(&eu);
+        assert!(hazards.overlaps(addr(STABLE_REGION).absolute_addr(), 0, 8));
+        inline_commit_forwarding_with_hazards(&mut eu, &hazards);
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(
+            matches!(instructions[0], SIRInstruction::Store(a, ..) if a.region == WORKING_REGION)
+        );
+        assert!(matches!(instructions[1], SIRInstruction::Commit(..)));
+    }
+
+    #[test]
+    fn forwarding_ignores_a_later_read_of_a_disjoint_bit_range() {
+        let mut eu = forwarding_eu(true);
+        let SIRInstruction::Load(_, _, offset, _) =
+            &mut eu.blocks.get_mut(&BlockId(1)).unwrap().instructions[0]
+        else {
+            unreachable!()
+        };
+        *offset = SIROffset::Static(8);
+
+        let hazards = direct_stable_store_hazards(&eu);
+        assert!(!hazards.overlaps(addr(STABLE_REGION).absolute_addr(), 0, 8));
+        inline_commit_forwarding_with_hazards(&mut eu, &hazards);
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Store(addr, ..)] if addr.region == STABLE_REGION
+        ));
     }
 }

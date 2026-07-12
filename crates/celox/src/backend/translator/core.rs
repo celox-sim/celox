@@ -381,7 +381,13 @@ impl SIRTranslator {
                 );
             }
             SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
-                self.translate_commit_inst(state, src_addr, dst_addr, offset, op_width, triggers);
+                if src_addr.region == crate::ir::SPARSE_WORKING_REGION {
+                    self.translate_sparse_commit_inst(state, src_addr, dst_addr, *op_width);
+                } else {
+                    self.translate_commit_inst(
+                        state, src_addr, dst_addr, offset, op_width, triggers,
+                    );
+                }
             }
             SIRInstruction::Slice(dst, src, bit_offset, width) => {
                 self.translate_slice_inst(state, dst, src, *bit_offset, *width);

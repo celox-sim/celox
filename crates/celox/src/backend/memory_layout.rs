@@ -32,6 +32,15 @@ pub struct RuntimeEventSiteLayout {
 }
 
 #[derive(Debug, Clone)]
+pub struct SparseWorkingLayout {
+    pub chunk_count: usize,
+    pub dirty_words_offset: usize,
+    pub dirty_word_count: usize,
+    pub summary_words_offset: usize,
+    pub summary_word_count: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct MemoryLayout {
     pub four_state: bool,
     /// Stable region (region = 0) offsets. Includes all declared variables.
@@ -46,6 +55,10 @@ pub struct MemoryLayout {
     pub working_offsets: HashMap<AbsoluteAddr, usize>,
     /// Base offset (bytes) of the working region inside the unified memory buffer.
     pub working_base_offset: usize,
+    /// Copy-on-write next-state data for dynamically addressed FF targets.
+    pub sparse_offsets: HashMap<AbsoluteAddr, usize>,
+    pub sparse_base_offset: usize,
+    pub sparse_layouts: HashMap<AbsoluteAddr, SparseWorkingLayout>,
     /// Unified memory buffer size in bytes (stable + working).
     pub merged_total_size: usize,
 
@@ -146,12 +159,58 @@ impl MemoryLayout {
             }
         }
 
+        let sparse_addrs = program.collect_sparse_working_region_addrs();
+        let mut sparse_vars_to_layout: Vec<(AbsoluteAddr, usize, bool)> = sparse_addrs
+            .iter()
+            .map(|addr| (*addr, widths[addr], is_4states[addr]))
+            .collect();
+        sparse_vars_to_layout.sort_by_key(|&(_, width, _)| std::cmp::Reverse(get_alignment(width)));
+        let mut sparse_offsets = HashMap::default();
+        let mut sparse_current_offset = 0usize;
+        for (addr, width, _is_4state) in sparse_vars_to_layout {
+            let align = get_alignment(width);
+            let size = get_byte_size(width);
+            sparse_current_offset = (sparse_current_offset + align - 1) & !(align - 1);
+            sparse_offsets.insert(addr, sparse_current_offset);
+            // First-write initialization accesses the final logical chunk as
+            // a u64. Keep its tail inside this variable's slot so it cannot
+            // overwrite the next sparse value or the dirty metadata.
+            let plane_count = if four_state { 2 } else { 1 };
+            let final_chunk_size = (size + 7) & !7;
+            let physical_extent = (plane_count - 1) * size + final_chunk_size;
+            sparse_current_offset += (physical_extent + 7) & !7;
+        }
+
         // Keep working region properly aligned when appended to the stable region.
         let working_base_offset = (current_offset + 7) & !7;
+        let sparse_base_offset = (working_base_offset + working_current_offset + 7) & !7;
+        let mut sparse_metadata_offset = (sparse_base_offset + sparse_current_offset + 7) & !7;
+        let mut sparse_layouts = HashMap::default();
+        let mut sparse_order: Vec<_> = sparse_addrs.into_iter().collect();
+        sparse_order.sort();
+        for addr in sparse_order {
+            let chunk_count = widths[&addr].div_ceil(64);
+            let dirty_word_count = chunk_count.div_ceil(64);
+            let summary_word_count = dirty_word_count.div_ceil(64);
+            let dirty_words_offset = sparse_metadata_offset;
+            sparse_metadata_offset += dirty_word_count * 8;
+            let summary_words_offset = sparse_metadata_offset;
+            sparse_metadata_offset += summary_word_count * 8;
+            sparse_layouts.insert(
+                addr,
+                SparseWorkingLayout {
+                    chunk_count,
+                    dirty_words_offset,
+                    dirty_word_count,
+                    summary_words_offset,
+                    summary_word_count,
+                },
+            );
+        }
 
         // Triggered bits region (1 bit per event canonical ID)
         let num_potential_triggers = program.num_events();
-        let triggered_bits_offset = (working_base_offset + working_current_offset + 7) & !7;
+        let triggered_bits_offset = (sparse_metadata_offset + 7) & !7;
         let triggered_bits_total_size = num_potential_triggers.div_ceil(8);
 
         let scratch_base_offset = (triggered_bits_offset + triggered_bits_total_size + 7) & !7;
@@ -195,6 +254,9 @@ impl MemoryLayout {
             total_size: current_offset,
             working_offsets,
             working_base_offset,
+            sparse_offsets,
+            sparse_base_offset,
+            sparse_layouts,
             merged_total_size,
             triggered_bits_offset,
             triggered_bits_total_size,
