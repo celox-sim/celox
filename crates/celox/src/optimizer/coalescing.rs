@@ -479,11 +479,13 @@ fn optimize_with_options(
         eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
     }
 
-    // Identity Store bypass: detect Store(B, identity_copy_from_A), remove it,
-    // and register B→A alias for memory layout sharing.
+    // Identity Store bypass: share storage when B is unread; otherwise lower
+    // a profitable exact copy directly from A's storage.
     if on(SirPass::IdentityStoreBypass) {
-        let identity_aliases =
-            pass_identity_store_bypass::find_program_aliases(program, options.four_state);
+        let identity_aliases = pass_identity_store_bypass::optimize_program_identity_stores(
+            program,
+            options.four_state,
+        );
         if !identity_aliases.is_empty() {
             // Store alias candidates in program for memory layout validation
             program.address_aliases.extend(identity_aliases);

@@ -1600,28 +1600,25 @@ fn emit_inst(
             if *byte_len == 0 {
                 return Ok(false);
             }
-            asm.push(rax)?;
-            asm.push(rcx)?;
+            let qwords = byte_len / 8;
+            let rem = byte_len % 8;
+            if rem != 0 {
+                asm.push(rax)?;
+            }
+            if qwords != 0 {
+                asm.push(rcx)?;
+            }
             asm.push(rsi)?;
             asm.push(rdi)?;
             asm.lea(rsi, mem_operand(BaseReg::SimState, *src_offset))?;
             asm.lea(rdi, mem_operand(BaseReg::SimState, *dst_offset))?;
-            let qwords = byte_len / 8;
-            let rem = byte_len % 8;
             if qwords > 0 {
-                let mut loop_label = asm.create_label();
-                let mut done_label = asm.create_label();
                 asm.mov(rcx, qwords as i64)?;
-                asm.set_label(&mut loop_label)?;
-                asm.cmp(rcx, 0)?;
-                asm.je(done_label)?;
-                asm.mov(rax, qword_ptr(rsi))?;
-                asm.mov(qword_ptr(rdi), rax)?;
-                asm.add(rsi, 8)?;
-                asm.add(rdi, 8)?;
-                asm.dec(rcx)?;
-                asm.jmp(loop_label)?;
-                asm.set_label(&mut done_label)?;
+                // MOVS has the same forward-copy semantics as the scalar loop
+                // it replaces, while current x86-64 implementations execute
+                // REP MOVS as a dedicated bulk-copy path.  It also avoids one
+                // generated branch and six scalar instructions per qword.
+                asm.rep().movsq()?;
             }
             if rem >= 4 {
                 asm.mov(eax, dword_ptr(rsi))?;
@@ -1641,8 +1638,12 @@ fn emit_inst(
             }
             asm.pop(rdi)?;
             asm.pop(rsi)?;
-            asm.pop(rcx)?;
-            asm.pop(rax)?;
+            if qwords != 0 {
+                asm.pop(rcx)?;
+            }
+            if rem != 0 {
+                asm.pop(rax)?;
+            }
         }
 
         MInst::LoadPtr {
