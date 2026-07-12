@@ -1,4 +1,5 @@
 use celox::SimulatorBuilder;
+use num_bigint::BigUint;
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -63,6 +64,58 @@ fn recovered_unrolled_multi_state_priority(sim) {
             );
         }
     }
+}
+
+fn recovered_unrolled_guard_uses_procedural_four_state_truth(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            cond : input  logic<8>,
+            bits : input  logic<4>,
+            value: output logic<4>,
+        ) {
+            var state: logic<4>;
+            always_comb {
+                state = 4'd0;
+                if cond {
+                    for i in 0..4 {
+                        state[i] = bits[i];
+                    }
+                }
+                value = state;
+            }
+        }
+    "#; }
+    @build SimulatorBuilder::new(code, "Top").four_state(true);
+
+    let cond = sim.signal("cond");
+    let bits = sim.signal("bits");
+    let value = sim.signal("value");
+    let unknown = BigUint::from(1u8) << 2usize;
+
+    sim.modify(|io| {
+        io.set(bits, 0b1010u8);
+        io.set_four_state(cond, unknown.clone(), unknown.clone());
+    })
+    .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(
+        sim.get_four_state(value),
+        (BigUint::from(0u8), BigUint::from(0u8)),
+        "an entirely unknown procedural guard must not enter the recovered loop",
+    );
+
+    let known_one = BigUint::from(1u8) << 7usize;
+    sim.modify(|io| {
+        io.set_four_state(cond, &known_one | &unknown, unknown.clone());
+    })
+    .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(
+        sim.get_four_state(value),
+        (BigUint::from(0b1010u8), BigUint::from(0u8)),
+        "a known one bit must make the procedural guard true despite another unknown bit",
+    );
 }
 
 }

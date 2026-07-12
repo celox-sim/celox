@@ -14,6 +14,7 @@ use std::{collections::BTreeSet, hash::Hash};
 
 use crate::ParserError;
 use crate::logic_tree::range_store::{RangeStore, RangeStoreError};
+use crate::parser::loop_provenance::LoopRecoveryCandidate;
 use crate::parser::{LoweringPhase, case::case_arm_condition_expr, resolve_total_width};
 use crate::{
     HashMap, HashSet,
@@ -38,6 +39,8 @@ pub(crate) use expr::coerce_node_width;
 use expr::{eval_array_literal_expression, eval_function_body_return, merge_boundaries};
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
 use state::{FunctionControlState, LoopControlState};
+
+type ActiveGuard = (NodeId, HashSet<VarAtomBase<VarId>>);
 
 pub(crate) use node::SLTNodeArenaEditError;
 pub use node::{
@@ -76,7 +79,7 @@ pub(crate) fn parse_comb_with_loop_recovery(
     module: &Module,
     decl: &CombDeclaration,
     arena: &mut SLTNodeArena<VarId>,
-    loop_candidates: &[crate::parser::loop_provenance::LoopRecoveryCandidate],
+    loop_candidates: &[LoopRecoveryCandidate],
 ) -> Result<
     (
         Vec<LogicPath<VarId>>,
@@ -115,6 +118,7 @@ pub(crate) fn parse_comb_with_loop_recovery(
         &decl.statements,
         arena,
         loop_candidates,
+        None,
     )?;
     let mut effects = CombEffectCollector::default();
     collect_comb_effects_statements(
@@ -434,6 +438,38 @@ fn eval_statement(
     }
 }
 
+fn eval_statement_with_recovery(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: HashMap<VarId, BTreeSet<usize>>,
+    stmt: &Statement,
+    arena: &mut SLTNodeArena<VarId>,
+    loop_candidates: &[LoopRecoveryCandidate],
+    active_guard: Option<&ActiveGuard>,
+) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
+    match stmt {
+        Statement::If(if_stmt) => eval_if_with_recovery(
+            module,
+            store,
+            boundaries,
+            if_stmt,
+            arena,
+            loop_candidates,
+            active_guard,
+        ),
+        Statement::Case(case_stmt) => eval_case_with_recovery(
+            module,
+            store,
+            boundaries,
+            case_stmt,
+            arena,
+            loop_candidates,
+            active_guard,
+        ),
+        _ => eval_statement(module, store, boundaries, stmt, arena),
+    }
+}
+
 fn eval_statements(
     module: &Module,
     store: SymbolicStore<VarId>,
@@ -446,6 +482,137 @@ fn eval_statements(
         .try_fold((store, boundaries), |(store, boundaries), stmt| {
             eval_statement(module, store, boundaries, stmt, arena)
         })
+}
+
+fn eval_statements_with_recovery(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: BoundaryMap<VarId>,
+    statements: &[Statement],
+    arena: &mut SLTNodeArena<VarId>,
+    loop_candidates: &[LoopRecoveryCandidate],
+    active_guard: Option<&ActiveGuard>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    recover_unrolled::eval_statements(
+        module,
+        store,
+        boundaries,
+        statements,
+        arena,
+        loop_candidates,
+        active_guard,
+    )
+}
+
+fn eval_case_with_recovery(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: BoundaryMap<VarId>,
+    case_stmt: &CaseStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    loop_candidates: &[LoopRecoveryCandidate],
+    active_guard: Option<&ActiveGuard>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    fn eval_from_arm(
+        module: &Module,
+        store: SymbolicStore<VarId>,
+        boundaries: BoundaryMap<VarId>,
+        case_stmt: &CaseStatement,
+        arm_index: usize,
+        arena: &mut SLTNodeArena<VarId>,
+        loop_candidates: &[LoopRecoveryCandidate],
+        active_guard: Option<&ActiveGuard>,
+    ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+        let Some(arm) = case_stmt.arms.get(arm_index) else {
+            return eval_statements_with_recovery(
+                module,
+                store,
+                boundaries,
+                &case_stmt.default,
+                arena,
+                loop_candidates,
+                active_guard,
+            );
+        };
+
+        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
+        let ((cond_expr, cond_sources), cond_bounds) =
+            eval_expression(module, &store, &cond, arena, None)?;
+        let cond_expr = procedural_condition(arena, cond_expr)?;
+        let boundaries = merge_boundaries(boundaries, cond_bounds);
+
+        if let Some(cond_val) = constant_bool(arena, cond_expr) {
+            return if cond_val {
+                eval_statements_with_recovery(
+                    module,
+                    store,
+                    boundaries,
+                    &arm.body,
+                    arena,
+                    loop_candidates,
+                    active_guard,
+                )
+            } else {
+                eval_from_arm(
+                    module,
+                    store,
+                    boundaries,
+                    case_stmt,
+                    arm_index + 1,
+                    arena,
+                    loop_candidates,
+                    active_guard,
+                )
+            };
+        }
+
+        let then_guard = combine_active_guard(arena, active_guard, cond_expr, &cond_sources)?;
+        let false_condition = invert_active_condition(arena, cond_expr)?;
+        let else_guard = combine_active_guard(arena, active_guard, false_condition, &cond_sources)?;
+
+        let (then_store, then_boundaries) = eval_statements_with_recovery(
+            module,
+            store.clone(),
+            boundaries.clone(),
+            &arm.body,
+            arena,
+            loop_candidates,
+            Some(&then_guard),
+        )?;
+        let (else_store, else_boundaries) = eval_from_arm(
+            module,
+            store,
+            boundaries,
+            case_stmt,
+            arm_index + 1,
+            arena,
+            loop_candidates,
+            Some(&else_guard),
+        )?;
+
+        Ok((
+            merge_symbolic_stores(
+                module,
+                &then_store,
+                &else_store,
+                cond_expr,
+                &cond_sources,
+                arena,
+            )?,
+            merge_boundaries(then_boundaries, else_boundaries),
+        ))
+    }
+
+    eval_from_arm(
+        module,
+        store,
+        boundaries,
+        case_stmt,
+        0,
+        arena,
+        loop_candidates,
+        active_guard,
+    )
 }
 
 fn eval_case(
@@ -552,6 +719,28 @@ fn procedural_condition<A: Clone + Eq + Hash>(
     }
     let truth = arena.alloc(SLTNode::Unary(UnaryOp::Or, condition))?;
     arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, truth))
+}
+
+fn combine_active_guard(
+    arena: &mut SLTNodeArena<VarId>,
+    outer: Option<&ActiveGuard>,
+    condition: NodeId,
+    condition_sources: &HashSet<VarAtomBase<VarId>>,
+) -> Result<ActiveGuard, SLTNodeFactsError> {
+    let Some((outer_expr, outer_sources)) = outer else {
+        return Ok((condition, condition_sources.clone()));
+    };
+    let expr = arena.alloc(SLTNode::Binary(*outer_expr, BinaryOp::LogicAnd, condition))?;
+    let mut sources = outer_sources.clone();
+    sources.extend(condition_sources.iter().copied());
+    Ok((expr, sources))
+}
+
+fn invert_active_condition(
+    arena: &mut SLTNodeArena<VarId>,
+    condition: NodeId,
+) -> Result<NodeId, SLTNodeFactsError> {
+    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, condition))
 }
 
 fn merge_control_expr(
@@ -2265,12 +2454,14 @@ fn eval_dynamic_assign(
 
     Ok((store, boundaries))
 }
-fn eval_if(
+fn eval_if_with_recovery(
     module: &Module,
     initial_store: SymbolicStore<VarId>,
     mut boundaries: HashMap<VarId, BTreeSet<usize>>,
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
+    loop_candidates: &[LoopRecoveryCandidate],
+    active_guard: Option<&ActiveGuard>,
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     let ((cond_expr, cond_sources), cond_bounds) =
         eval_expression(module, &initial_store, &stmt.cond, arena, None)?;
@@ -2284,6 +2475,71 @@ fn eval_if(
         } else {
             &stmt.false_side
         };
+        return eval_statements_with_recovery(
+            module,
+            initial_store,
+            boundaries,
+            side,
+            arena,
+            loop_candidates,
+            active_guard,
+        );
+    }
+
+    // Evaluate Then and Else paths independently
+    let then_guard = combine_active_guard(arena, active_guard, cond_expr, &cond_sources)?;
+    let false_condition = invert_active_condition(arena, cond_expr)?;
+    let else_guard = combine_active_guard(arena, active_guard, false_condition, &cond_sources)?;
+    let (then_store, b_then) = eval_statements_with_recovery(
+        module,
+        initial_store.clone(),
+        boundaries.clone(),
+        &stmt.true_side,
+        arena,
+        loop_candidates,
+        Some(&then_guard),
+    )?;
+    let (else_store, b_else) = eval_statements_with_recovery(
+        module,
+        initial_store,
+        b_then,
+        &stmt.false_side,
+        arena,
+        loop_candidates,
+        Some(&else_guard),
+    )?;
+
+    Ok((
+        merge_symbolic_stores(
+            module,
+            &then_store,
+            &else_store,
+            cond_expr,
+            &cond_sources,
+            arena,
+        )?,
+        b_else,
+    ))
+}
+
+fn eval_if(
+    module: &Module,
+    initial_store: SymbolicStore<VarId>,
+    mut boundaries: HashMap<VarId, BTreeSet<usize>>,
+    stmt: &IfStatement,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
+    let ((cond_expr, cond_sources), cond_bounds) =
+        eval_expression(module, &initial_store, &stmt.cond, arena, None)?;
+    let cond_expr = procedural_condition(arena, cond_expr)?;
+    boundaries.extend(cond_bounds);
+
+    if let SLTNode::Constant(val, _, _, _) = arena.get(cond_expr) {
+        let side = if *val != BigUint::from(0u32) {
+            &stmt.true_side
+        } else {
+            &stmt.false_side
+        };
         return side
             .iter()
             .try_fold((initial_store, boundaries), |(s, b), step| {
@@ -2291,7 +2547,6 @@ fn eval_if(
             });
     }
 
-    // Evaluate Then and Else paths independently
     let (then_store, b_then) = stmt.true_side.iter().try_fold(
         (initial_store.clone(), boundaries.clone()),
         |(s, b), step| eval_statement(module, s, b, step, arena),

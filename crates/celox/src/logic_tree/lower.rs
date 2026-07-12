@@ -3540,6 +3540,111 @@ impl SLTToSIRLowerer {
         result
     }
 
+    fn fold_node_is_invariant<A: Hash + Eq + Clone>(
+        node: NodeId,
+        rebound_variables: &crate::HashSet<&A>,
+        arena: &SLTNodeArena<A>,
+        memo: &mut crate::HashMap<NodeId, bool>,
+    ) -> bool {
+        if let Some(&invariant) = memo.get(&node) {
+            return invariant;
+        }
+        let invariant = match arena.get(node) {
+            SLTNode::Input {
+                variable, index, ..
+            } => {
+                !rebound_variables.contains(variable)
+                    && index.iter().all(|entry| {
+                        Self::fold_node_is_invariant(entry.node, rebound_variables, arena, memo)
+                    })
+            }
+            SLTNode::Constant(..) => true,
+            SLTNode::Binary(lhs, _, rhs) => {
+                Self::fold_node_is_invariant(*lhs, rebound_variables, arena, memo)
+                    && Self::fold_node_is_invariant(*rhs, rebound_variables, arena, memo)
+            }
+            SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => {
+                Self::fold_node_is_invariant(*inner, rebound_variables, arena, memo)
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                Self::fold_node_is_invariant(*cond, rebound_variables, arena, memo)
+                    && Self::fold_node_is_invariant(*then_expr, rebound_variables, arena, memo)
+                    && Self::fold_node_is_invariant(*else_expr, rebound_variables, arena, memo)
+            }
+            SLTNode::Concat(parts) => parts.iter().all(|(part, _)| {
+                Self::fold_node_is_invariant(*part, rebound_variables, arena, memo)
+            }),
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => false,
+        };
+        memo.insert(node, invariant);
+        invariant
+    }
+
+    fn fold_capture_is_total<A: Hash + Eq + Clone>(
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+        memo: &mut crate::HashMap<NodeId, bool>,
+    ) -> bool {
+        if let Some(&total) = memo.get(&node) {
+            return total;
+        }
+        let total = match arena.get(node) {
+            SLTNode::Binary(
+                _,
+                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS,
+                _,
+            )
+            | SLTNode::ForFold { .. }
+            | SLTNode::ForFoldGroup { .. } => false,
+            _ => Self::node_children(node, arena)
+                .into_iter()
+                .all(|child| Self::fold_capture_is_total(child, arena, memo)),
+        };
+        memo.insert(node, total);
+        total
+    }
+
+    fn fold_invariant_capture_frontier<A: Hash + Eq + Clone>(
+        specs: &[FoldGroupLowerSpec<'_, A>],
+        arena: &SLTNodeArena<A>,
+    ) -> Vec<NodeId> {
+        let mut rebound_variables = crate::HashSet::default();
+        for spec in specs {
+            rebound_variables.insert(spec.loop_var);
+            rebound_variables.extend(spec.states.iter().map(|state| &state.target.id));
+        }
+        let mut invariant_memo = crate::HashMap::default();
+        let mut total_memo = crate::HashMap::default();
+        let mut captures = crate::HashSet::default();
+        let mut pending = specs
+            .iter()
+            .flat_map(|spec| spec.states.iter().map(|state| state.update))
+            .collect::<Vec<_>>();
+        let mut visited = crate::HashSet::default();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            let invariant =
+                Self::fold_node_is_invariant(node, &rebound_variables, arena, &mut invariant_memo);
+            if invariant
+                && Self::fold_capture_is_total(node, arena, &mut total_memo)
+                && !matches!(arena.get(node), SLTNode::Constant(..))
+            {
+                captures.insert(node);
+                continue;
+            }
+            pending.extend(Self::node_children(node, arena));
+        }
+        let mut captures = captures.into_iter().collect::<Vec<_>>();
+        captures.sort_unstable();
+        captures
+    }
+
     fn contains_div_rem<A: Hash + Eq + Clone + std::fmt::Debug>(
         &self,
         node: NodeId,
@@ -4394,30 +4499,13 @@ impl SLTToSIRLowerer {
         } else {
             vec![None; specs.len()]
         };
-
         let remaining_width =
             (usize::BITS as usize - first.trip_count.leading_zeros() as usize).max(1);
         let initial_remaining = builder.alloc_bit(remaining_width, false);
-        builder.emit(SIRInstruction::Imm(
-            initial_remaining,
-            SIRValue::new(BigUint::from(first.trip_count)),
-        ));
         let zero = builder.alloc_bit(remaining_width, false);
-        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
         let one = builder.alloc_bit(remaining_width, false);
-        builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
-
         let initial_loop_value = builder.alloc_bit(first.loop_width, first.loop_signed);
-        builder.emit(SIRInstruction::Imm(
-            initial_loop_value,
-            SIRValue::new(Self::bigint_payload(first.start, first.loop_width)),
-        ));
         let step_value = builder.alloc_bit(first.loop_width, first.loop_signed);
-        builder.emit(SIRInstruction::Imm(
-            step_value,
-            SIRValue::new(Self::bigint_payload(first.step, first.loop_width)),
-        ));
-
         let body_remaining = builder.alloc_bit(remaining_width, false);
         let body_loop_value = builder.alloc_bit(first.loop_width, first.loop_signed);
         let body_states: Vec<_> = specs
@@ -4438,17 +4526,74 @@ impl SLTToSIRLowerer {
         );
         let exit = builder.new_block_with(exit_states.clone());
 
-        builder.seal_block(SIRTerminator::Branch {
-            cond: guard,
-            true_block: (
-                body,
-                std::iter::once(initial_remaining)
-                    .chain(std::iter::once(initial_loop_value))
-                    .chain(initial_states.iter().copied())
-                    .collect(),
-            ),
-            false_block: (exit, initial_states.clone()),
-        });
+        let capture_nodes = Self::fold_invariant_capture_frontier(specs, arena);
+        let needs_capture_block = !capture_nodes.is_empty()
+            && (!allow_cache || capture_nodes.iter().any(|node| !cache.contains_key(node)));
+        let enter = needs_capture_block.then(|| builder.new_block());
+        let emit_loop_setup = |builder: &mut SIRBuilder<A>| {
+            builder.emit(SIRInstruction::Imm(
+                initial_remaining,
+                SIRValue::new(BigUint::from(first.trip_count)),
+            ));
+            builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+            builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+            builder.emit(SIRInstruction::Imm(
+                initial_loop_value,
+                SIRValue::new(Self::bigint_payload(first.start, first.loop_width)),
+            ));
+            builder.emit(SIRInstruction::Imm(
+                step_value,
+                SIRValue::new(Self::bigint_payload(first.step, first.loop_width)),
+            ));
+        };
+        let initial_body_args = || {
+            std::iter::once(initial_remaining)
+                .chain(std::iter::once(initial_loop_value))
+                .chain(initial_states.iter().copied())
+                .collect::<Vec<_>>()
+        };
+        let mut captured_values = crate::HashMap::default();
+        if let Some(enter) = enter {
+            builder.seal_block(SIRTerminator::Branch {
+                cond: guard,
+                true_block: (enter, Vec::new()),
+                false_block: (exit, initial_states.clone()),
+            });
+            builder.switch_to_block(enter);
+            let capture_transaction = self.cache_transaction();
+            if allow_cache {
+                for node in capture_nodes {
+                    let value = cache.get(&node).copied().unwrap_or_else(|| {
+                        self.lower_inner(builder, node, arena, cache, outer_env, true)
+                    });
+                    captured_values.insert(node, value);
+                }
+                self.rollback_cache(cache, capture_transaction);
+            } else {
+                let mut capture_cache = crate::HashMap::default();
+                for node in capture_nodes {
+                    let value =
+                        self.lower_inner(builder, node, arena, &mut capture_cache, outer_env, true);
+                    captured_values.insert(node, value);
+                }
+                self.rollback_cache(&mut capture_cache, capture_transaction);
+            }
+            emit_loop_setup(builder);
+            builder.seal_block(SIRTerminator::Jump(body, initial_body_args()));
+        } else {
+            for node in capture_nodes {
+                let value = *cache
+                    .get(&node)
+                    .expect("a capture without an enter block must already dominate the loop");
+                captured_values.insert(node, value);
+            }
+            emit_loop_setup(builder);
+            builder.seal_block(SIRTerminator::Branch {
+                cond: guard,
+                true_block: (body, initial_body_args()),
+                false_block: (exit, initial_states.clone()),
+            });
+        }
 
         builder.switch_to_block(body);
         let mut env_inputs = crate::HashMap::default();
@@ -4469,7 +4614,7 @@ impl SLTToSIRLowerer {
             inputs: env_inputs,
             parent: outer_env,
         };
-        let mut local_cache = crate::HashMap::default();
+        let mut local_cache = captured_values;
         let local_cache_transaction = self.cache_transaction();
         let next_states: Vec<_> = specs
             .iter()
@@ -7737,6 +7882,138 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(load_widths, vec![8]);
+    }
+
+    #[test]
+    fn for_fold_group_captures_invariant_work_on_the_true_entry_edge() {
+        let mut arena = SLTNodeArena::new();
+        let guard = input(&mut arena, 40, 1);
+        let initial = constant(&mut arena, 0, 8);
+        let previous = input(&mut arena, 10, 8);
+        let external = input(&mut arena, 30, 8);
+        let two = constant(&mut arena, 2, 8);
+        let invariant = arena
+            .alloc(SLTNode::Binary(external, BinaryOp::Add, two))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(previous, BinaryOp::Add, invariant))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        let SIRTerminator::Branch { true_block, .. } = &eu.blocks[&BlockId(0)].terminator else {
+            panic!("entry must branch around the recovered loop")
+        };
+        assert!(
+            true_block.1.is_empty(),
+            "the true edge must enter the capture block"
+        );
+        let enter = &eu.blocks[&true_block.0];
+        let SIRTerminator::Jump(body, _) = &enter.terminator else {
+            panic!("capture block must jump to the counted body")
+        };
+        let body = *body;
+        assert!(enter.instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Load(_, variable, SIROffset::Static(0), 8) if *variable == 30
+        )));
+        assert!(
+            eu.blocks[&body]
+                .instructions
+                .iter()
+                .all(|instruction| !matches!(
+                    instruction,
+                    SIRInstruction::Load(_, variable, _, _) if *variable == 30
+                ))
+        );
+        assert!(matches!(
+            &eu.blocks[&body].terminator,
+            SIRTerminator::Branch { true_block: (target, _), .. } if *target == body
+        ));
+    }
+
+    #[test]
+    fn for_fold_group_does_not_capture_invariant_division() {
+        let mut arena = SLTNodeArena::new();
+        let guard = input(&mut arena, 40, 1);
+        let initial = constant(&mut arena, 0, 8);
+        let previous = input(&mut arena, 10, 8);
+        let numerator = input(&mut arena, 30, 8);
+        let denominator = input(&mut arena, 31, 8);
+        let quotient = arena
+            .alloc(SLTNode::Binary(numerator, BinaryOp::DivU, denominator))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(previous, BinaryOp::Add, quotient))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Binary(_, _, BinaryOp::DivU, _)
+            )),
+            1,
+        );
+        let division_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(instruction, SIRInstruction::Binary(_, _, BinaryOp::DivU, _))
+                })
+            })
+            .unwrap();
+        assert!(matches!(
+            &division_block.terminator,
+            SIRTerminator::Branch { true_block: (target, _), .. }
+                if *target == division_block.id
+        ));
     }
 
     #[test]

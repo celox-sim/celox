@@ -3,15 +3,16 @@ use std::collections::BTreeSet;
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{ToPrimitive, Zero};
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, Comptime, Expression, Factor, Module, Statement, ValueVariant, VarId,
+    ArrayLiteralItem, Comptime, Expression, Factor, Module, Op, Statement, ValueVariant, VarId,
     VarIndex, VarSelect,
 };
 use veryl_analyzer::value::Value;
 use veryl_parser::token_range::TokenRange;
 
 use super::{
-    BoundaryMap, NodeId, SLTForFoldGroupState, SLTNode, SLTNodeArena, SymbolicStore,
-    combine_parts_with_default, eval_expression, eval_statement, get_width, merge_boundaries,
+    ActiveGuard, BoundaryMap, NodeId, SLTForFoldGroupState, SLTNode, SLTNodeArena, SymbolicStore,
+    combine_active_guard, combine_parts_with_default, eval_expression, eval_statement,
+    eval_statement_with_recovery, get_width, merge_boundaries, procedural_condition,
     range_store_error,
 };
 use crate::ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
@@ -27,6 +28,7 @@ pub(super) fn eval_statements(
     statements: &[Statement],
     arena: &mut SLTNodeArena<VarId>,
     candidates: &[LoopRecoveryCandidate],
+    active_guard: Option<&ActiveGuard>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let mut index = 0usize;
     while index < statements.len() {
@@ -38,12 +40,14 @@ pub(super) fn eval_statements(
                 let candidate = guarded_matches[0];
                 let ((guard, guard_sources), guard_boundaries) =
                     eval_expression(module, &store, &if_stmt.cond, arena, None)?;
+                let guard = procedural_condition(arena, guard)?;
+                let guard = combine_active_guard(arena, active_guard, guard, &guard_sources)?;
                 if let Some((next_store, recovered_boundaries)) = recover_group(
                     module,
                     &store,
                     &if_stmt.true_side,
                     candidate,
-                    Some((guard, guard_sources)),
+                    Some(guard),
                     arena,
                 )? {
                     store = next_store;
@@ -77,7 +81,7 @@ pub(super) fn eval_statements(
                 &store,
                 &statements[index..index + run_len],
                 candidate,
-                None,
+                active_guard.cloned(),
                 arena,
             )? {
                 store = next_store;
@@ -87,7 +91,15 @@ pub(super) fn eval_statements(
             }
         }
 
-        (store, boundaries) = eval_statement(module, store, boundaries, &statements[index], arena)?;
+        (store, boundaries) = eval_statement_with_recovery(
+            module,
+            store,
+            boundaries,
+            &statements[index],
+            arena,
+            candidates,
+            active_guard,
+        )?;
         index += 1;
     }
 
@@ -260,6 +272,10 @@ fn collect_expression_variables(expression: &Expression, out: &mut Vec<VarId>) -
                 collect_index_variables(index, out) && collect_select_variables(select, out)
             }
             Factor::Value(_) => true,
+            Factor::FunctionCall(call) if call.outputs.is_empty() => call
+                .inputs
+                .values()
+                .all(|input| collect_expression_variables(input, out)),
             Factor::SystemFunctionCall(_)
             | Factor::FunctionCall(_)
             | Factor::Anonymous(_)
@@ -501,6 +517,10 @@ fn parameterize_expression(
     variants: &[&Expression],
     candidate: &UnrolledLoopCandidate,
 ) -> Option<bool> {
+    if let Some(affine) = parameterize_affine_folded_value(template, variants, candidate) {
+        *template = affine;
+        return Some(true);
+    }
     match template {
         Expression::Term(template_factor) => {
             let factors = variants
@@ -614,6 +634,109 @@ fn parameterize_expression(
     }
 }
 
+fn parameterize_affine_folded_value(
+    template: &Expression,
+    variants: &[&Expression],
+    candidate: &UnrolledLoopCandidate,
+) -> Option<Expression> {
+    if variants.len() < 2 || variants.len() != candidate.iterations.len() {
+        return None;
+    }
+    let template_comptime = match template {
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::Value(comptime) => comptime,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let width = template_comptime.get_value().ok()?.width();
+    let signed = template_comptime.get_value().ok()?.signed();
+    let values = variants
+        .iter()
+        .map(|expression| match expression {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Value(comptime)
+                    if comptime.get_value().ok()?.width() == width
+                        && comptime.get_value().ok()?.signed() == signed =>
+                {
+                    comptime_known_integer(comptime)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if values.windows(2).all(|pair| pair[0] == pair[1]) {
+        return None;
+    }
+
+    let x0 = BigInt::from(candidate.iterations[0].value);
+    let x1 = BigInt::from(candidate.iterations[1].value);
+    let dx = &x1 - &x0;
+    if dx.is_zero() {
+        return None;
+    }
+    let dy = &values[1] - &values[0];
+    if &dy % &dx != BigInt::zero() {
+        return None;
+    }
+    let slope = dy / dx;
+    let intercept = &values[0] - &slope * &x0;
+    if values
+        .iter()
+        .zip(&candidate.iterations)
+        .any(|(actual, iteration)| actual != &(&slope * BigInt::from(iteration.value) + &intercept))
+    {
+        return None;
+    }
+
+    let expression_comptime = template_comptime.clone();
+    let mut expression = Expression::Term(Box::new(Factor::Variable(
+        candidate.iterations[0].loop_var,
+        VarIndex::default(),
+        VarSelect::default(),
+        expression_comptime.clone(),
+    )));
+    if slope != BigInt::from(1u8) {
+        let factor = Expression::Term(Box::new(Factor::create_value(
+            Value::new_biguint(signed_to_bits(slope, width)?, width, signed),
+            template_comptime.token,
+        )));
+        expression = Expression::Binary(
+            Box::new(expression),
+            Op::Mul,
+            Box::new(factor),
+            Box::new(expression_comptime.clone()),
+        );
+    }
+    if !intercept.is_zero() {
+        let offset = Expression::Term(Box::new(Factor::create_value(
+            Value::new_biguint(signed_to_bits(intercept, width)?, width, signed),
+            template_comptime.token,
+        )));
+        expression = Expression::Binary(
+            Box::new(expression),
+            Op::Add,
+            Box::new(offset),
+            Box::new(expression_comptime),
+        );
+    }
+    Some(expression)
+}
+
+fn comptime_known_integer(comptime: &Comptime) -> Option<BigInt> {
+    let value = comptime.get_value().ok()?;
+    if !value.mask_xz().as_ref().is_zero() || value.width() == 0 {
+        return None;
+    }
+    let payload = value.payload().as_ref().clone();
+    if value.signed() && payload.bit((value.width() - 1).try_into().ok()?) {
+        Some(BigInt::from_biguint(Sign::Plus, payload) - (BigInt::from(1u8) << value.width()))
+    } else {
+        Some(BigInt::from_biguint(Sign::Plus, payload))
+    }
+}
+
 fn parameterize_factor(
     module: &Module,
     template: &mut Factor,
@@ -696,6 +819,31 @@ fn parameterize_factor(
                 comptime,
             );
             Some(true)
+        }
+        Factor::FunctionCall(template_call) if template_call.outputs.is_empty() => {
+            let calls = variants
+                .iter()
+                .map(|factor| match factor {
+                    Factor::FunctionCall(call)
+                        if call.outputs.is_empty()
+                            && call.id == template_call.id
+                            && call.index == template_call.index
+                            && call.inputs.len() == template_call.inputs.len() =>
+                    {
+                        Some(call)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let mut depends = false;
+            for (path, template_input) in &mut template_call.inputs {
+                let inputs = calls
+                    .iter()
+                    .map(|call| call.inputs.get(path))
+                    .collect::<Option<Vec<_>>>()?;
+                depends |= parameterize_expression(module, template_input, &inputs, candidate)?;
+            }
+            Some(depends)
         }
         Factor::SystemFunctionCall(_)
         | Factor::FunctionCall(_)
@@ -787,8 +935,7 @@ fn recover_group(
     let Some(proof) = prove_group(module, initial_store, statements, candidate, arena) else {
         return Ok(None);
     };
-    if guard.is_none()
-        && proof.targets.len() == 1
+    if proof.targets.len() == 1
         && expanded_outputs_are_count_idioms(
             module,
             initial_store,
@@ -1046,7 +1193,7 @@ fn prove_group(
     if !rewrite_statements(&mut dynamic, first_iteration.loop_var, RewriteMode::Dynamic) {
         return None;
     }
-    let (updates, update_sources, boundaries) =
+    let (proof_updates, _, _) =
         eval_chunk_outputs_with_facts(module, &dynamic, &targets, &mut scratch)?;
 
     // Canonical proof bits depend only on an immutable arena node and its bit
@@ -1056,7 +1203,7 @@ fn prove_group(
     let mut proof_bits = ProofBitCanonicalizer::default();
     for (iteration, actual_outputs) in iterations.iter().zip(&actual_outputs_by_iteration) {
         let mut dynamic_cache = HashMap::default();
-        let specialized_updates = updates
+        let specialized_updates = proof_updates
             .iter()
             .map(|&update| {
                 specialize_slt_node(
@@ -1083,6 +1230,17 @@ fn prove_group(
         }
     }
 
+    let (updates, _, boundaries) = eval_chunk_outputs_with_initial_store(
+        module,
+        &dynamic,
+        &targets,
+        first_iteration.loop_var,
+        initial_store,
+        production_arena,
+        &mut scratch,
+    )?;
+    let update_sources = collect_slt_input_sources(&updates, &scratch)?;
+
     let mut input_variables = HashSet::default();
     let mut visited = HashSet::default();
     for &update in &updates {
@@ -1092,7 +1250,11 @@ fn prove_group(
     }
     if input_variables.iter().any(|&variable| {
         variable != first_iteration.loop_var
-            && iteration_owner(module, &candidate.unrolled, variable).is_some()
+            && (iteration_owner(module, &candidate.unrolled, variable).is_some()
+                || (!target_ids.contains(&variable)
+                    && initial_store.get(&variable).is_some_and(|ranges| {
+                        ranges.ranges.values().all(|(value, _, _)| value.is_some())
+                    })))
     }) {
         return None;
     }
@@ -1116,7 +1278,7 @@ fn prove_group(
         statements,
         production_arena,
         &scratch,
-        &updates,
+        &proof_updates,
         &targets,
         first_iteration.loop_var,
         iterations,
@@ -1244,6 +1406,164 @@ fn eval_chunk_outputs_with_facts(
     Some((outputs, sources, boundaries))
 }
 
+fn eval_chunk_outputs_with_initial_store(
+    module: &Module,
+    statements: &[Statement],
+    targets: &[VarAtomBase<VarId>],
+    loop_var: VarId,
+    initial_store: &SymbolicStore<VarId>,
+    source_arena: &SLTNodeArena<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Option<(Vec<NodeId>, HashSet<VarAtomBase<VarId>>, BoundaryMap<VarId>)> {
+    let variables = proof_variable_ids(statements, targets)?;
+    let mut rebound_ids = targets
+        .iter()
+        .map(|target| target.id)
+        .collect::<HashSet<_>>();
+    rebound_ids.insert(loop_var);
+    for variable in variables
+        .iter()
+        .filter(|variable| !rebound_ids.contains(variable))
+    {
+        let ranges = initial_store.get(variable)?;
+        for (value, _, _) in ranges.ranges.values() {
+            let Some((root, sources)) = value else {
+                continue;
+            };
+            if sources
+                .iter()
+                .any(|source| rebound_ids.contains(&source.id))
+                || slt_reaches_input_id(*root, source_arena, &rebound_ids)
+            {
+                // A value captured before the recovered loop may contain an
+                // older version of a loop-carried variable. LowerEnv binds
+                // those variable IDs to the current iteration state, so such
+                // a DAG cannot be embedded without an explicit versioned
+                // capture.
+                return None;
+            }
+        }
+    }
+    let mut store = map_symbolic_store_roots(initial_store, &variables, source_arena, arena)?;
+    for target in targets {
+        let width = target
+            .access
+            .msb
+            .checked_sub(target.access.lsb)?
+            .checked_add(1)?;
+        store.insert(target.id, RangeStore::new(None, width));
+    }
+    let loop_width = resolve_total_width(module, module.variables.get(&loop_var)?).ok()?;
+    store.insert(loop_var, RangeStore::new(None, loop_width));
+
+    let (store, boundaries) = statements
+        .iter()
+        .try_fold(
+            (store, BoundaryMap::default()),
+            |(store, boundaries), statement| {
+                eval_statement(module, store, boundaries, statement, arena)
+            },
+        )
+        .ok()?;
+    let mut outputs = Vec::with_capacity(targets.len());
+    let mut sources = HashSet::default();
+    for target in targets {
+        let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+        let (output, output_sources) =
+            combine_parts_with_default(target.id, target.access.lsb, parts, arena).ok()?;
+        outputs.push(output);
+        sources.extend(output_sources);
+    }
+    Some((outputs, sources, boundaries))
+}
+
+fn slt_reaches_input_id(
+    root: NodeId,
+    arena: &SLTNodeArena<VarId>,
+    variables: &HashSet<VarId>,
+) -> bool {
+    let mut visited = HashSet::default();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Input {
+                variable, index, ..
+            } => {
+                if variables.contains(variable) {
+                    return true;
+                }
+                pending.extend(index.iter().map(|entry| entry.node));
+            }
+            SLTNode::Binary(lhs, _, rhs) => {
+                pending.push(*lhs);
+                pending.push(*rhs);
+            }
+            SLTNode::Unary(_, inner) => pending.push(*inner),
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                pending.push(*cond);
+                pending.push(*then_expr);
+                pending.push(*else_expr);
+            }
+            SLTNode::Concat(parts) => pending.extend(parts.iter().map(|(part, _)| *part)),
+            SLTNode::Slice { expr, .. } => pending.push(*expr),
+            SLTNode::Constant(..) => {}
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return true,
+        }
+    }
+    false
+}
+
+fn collect_slt_input_sources(
+    roots: &[NodeId],
+    arena: &SLTNodeArena<VarId>,
+) -> Option<HashSet<VarAtomBase<VarId>>> {
+    let mut sources = HashSet::default();
+    let mut visited = HashSet::default();
+    let mut pending = roots.to_vec();
+    while let Some(node) = pending.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } => {
+                sources.insert(VarAtomBase::new(*variable, access.lsb, access.msb));
+                pending.extend(index.iter().map(|entry| entry.node));
+            }
+            SLTNode::Binary(lhs, _, rhs) => {
+                pending.push(*lhs);
+                pending.push(*rhs);
+            }
+            SLTNode::Unary(_, inner) => pending.push(*inner),
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                pending.push(*cond);
+                pending.push(*then_expr);
+                pending.push(*else_expr);
+            }
+            SLTNode::Concat(parts) => pending.extend(parts.iter().map(|(part, _)| *part)),
+            SLTNode::Slice { expr, .. } => pending.push(*expr),
+            SLTNode::Constant(..) => {}
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return None,
+        }
+    }
+    Some(sources)
+}
+
 fn whole_fold_matches_expansion(
     module: &Module,
     initial_store: &SymbolicStore<VarId>,
@@ -1291,13 +1611,35 @@ fn whole_fold_matches_expansion(
                 .ok()
         })
         .collect::<Option<Vec<_>>>()?;
-    let initial_values = read_target_outputs(&mapped_initial, targets, &mut proof_arena)?;
-    let mut state_values = targets
+    let target_ids = targets
         .iter()
-        .copied()
-        .zip(initial_values)
-        .map(|(target, value)| (target.id, (target.access, value)))
-        .collect::<HashMap<_, _>>();
+        .map(|target| target.id)
+        .collect::<HashSet<_>>();
+    let mut state_values = HashMap::default();
+    for variable in &variables {
+        if *variable == loop_var || target_ids.contains(variable) {
+            continue;
+        }
+        let width = resolve_total_width(module, module.variables.get(variable)?).ok()?;
+        if width == 0 {
+            return None;
+        }
+        let access = BitAccess::new(0, width - 1);
+        let parts = mapped_initial.get(variable)?.get_parts(access).ok()?;
+        if parts.iter().any(|(value, _)| value.is_none()) {
+            continue;
+        }
+        let (value, _) = combine_parts_with_default(*variable, 0, parts, &mut proof_arena).ok()?;
+        state_values.insert(*variable, (access, value));
+    }
+    let initial_values = read_target_outputs(&mapped_initial, targets, &mut proof_arena)?;
+    state_values.extend(
+        targets
+            .iter()
+            .copied()
+            .zip(initial_values)
+            .map(|(target, value)| (target.id, (target.access, value))),
+    );
 
     for iteration in iterations {
         let mut cache = HashMap::default();
@@ -1313,12 +1655,9 @@ fn whole_fold_matches_expansion(
                 )
             })
             .collect::<Option<Vec<_>>>()?;
-        state_values = targets
-            .iter()
-            .copied()
-            .zip(next_values)
-            .map(|(target, value)| (target.id, (target.access, value)))
-            .collect();
+        for (target, value) in targets.iter().copied().zip(next_values) {
+            state_values.insert(target.id, (target.access, value));
+        }
     }
 
     let composed_outputs = targets
@@ -1422,9 +1761,12 @@ fn specialize_slt_node(
             SLTNode::Input {
                 variable, index, ..
             } => {
-                let substituted = state_values.is_some_and(|values| values.contains_key(&variable))
-                    || loop_value.is_some_and(|(loop_var, _)| variable == loop_var);
-                if !substituted {
+                let substituted_state =
+                    state_values.is_some_and(|values| values.contains_key(&variable));
+                let substituted_loop = loop_value.is_some_and(|(loop_var, _)| variable == loop_var);
+                if substituted_state {
+                    pending.extend(index.into_iter().map(|entry| entry.node));
+                } else if !substituted_loop {
                     pending.extend(index.into_iter().map(|entry| entry.node));
                 }
             }
@@ -1468,24 +1810,71 @@ fn specialize_slt_node(
                 if let Some(&(state_access, state_value)) =
                     state_values.and_then(|values| values.get(&variable))
                 {
-                    if !index.is_empty()
-                        || access.lsb < state_access.lsb
-                        || access.msb > state_access.msb
-                    {
-                        return None;
+                    let mut dynamic_offset = 0usize;
+                    for entry in &index {
+                        let index_node = *cache.get(&entry.node)?;
+                        let constant = specialized_constant(index_node, arena)?;
+                        if !constant.mask.is_zero() {
+                            return None;
+                        }
+                        dynamic_offset = dynamic_offset
+                            .checked_add(constant.value.to_usize()?.checked_mul(entry.stride)?)?;
                     }
-                    if access == state_access {
-                        state_value
+                    let width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
+                    if !index.is_empty() {
+                        let state_width = state_access
+                            .msb
+                            .checked_sub(state_access.lsb)?
+                            .checked_add(1)?;
+                        if width > state_width || access.lsb < state_access.lsb {
+                            return None;
+                        }
+                        let shift = access
+                            .lsb
+                            .checked_sub(state_access.lsb)?
+                            .checked_add(dynamic_offset)?;
+                        let shifted = if shift == 0 {
+                            state_value
+                        } else {
+                            let amount = arena
+                                .alloc(SLTNode::Constant(
+                                    BigUint::from(shift),
+                                    BigUint::zero(),
+                                    state_width,
+                                    false,
+                                ))
+                                .ok()?;
+                            arena
+                                .alloc(SLTNode::Binary(state_value, BinaryOp::Shr, amount))
+                                .ok()?
+                        };
+                        if width == state_width {
+                            shifted
+                        } else {
+                            arena
+                                .alloc(SLTNode::Slice {
+                                    expr: shifted,
+                                    access: BitAccess::new(0, width - 1),
+                                })
+                                .ok()?
+                        }
                     } else {
-                        arena
-                            .alloc(SLTNode::Slice {
-                                expr: state_value,
-                                access: BitAccess::new(
-                                    access.lsb - state_access.lsb,
-                                    access.msb - state_access.lsb,
-                                ),
-                            })
-                            .ok()?
+                        if access.lsb < state_access.lsb || access.msb > state_access.msb {
+                            return None;
+                        }
+                        if access == state_access {
+                            state_value
+                        } else {
+                            arena
+                                .alloc(SLTNode::Slice {
+                                    expr: state_value,
+                                    access: BitAccess::new(
+                                        access.lsb - state_access.lsb,
+                                        access.msb - state_access.lsb,
+                                    ),
+                                })
+                                .ok()?
+                        }
                     }
                 } else if loop_value.is_some_and(|(loop_var, _)| variable == loop_var) {
                     if !index.is_empty() {
@@ -1495,7 +1884,7 @@ fn specialize_slt_node(
                     let width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
                     let value = (BigUint::from(value) >> access.lsb) & width_mask(width);
                     arena
-                        .alloc(SLTNode::Constant(value, BigUint::from(0u8), width, false))
+                        .alloc(SLTNode::Constant(value, BigUint::from(0u8), width, signed))
                         .ok()?
                 } else {
                     let index = index
@@ -1515,13 +1904,8 @@ fn specialize_slt_node(
                         .ok()?
                 }
             }
-            // This arena is a proof-only canonical form. Signed value semantics are
-            // already explicit in the opcode (DivS/RemS, signed comparisons, Sar)
-            // and in coercion nodes, while analyzer-folded constants can retain a
-            // signed tag that a semantically identical Slice-derived constant does
-            // not. Erase that non-value tag so equality compares the generated bits.
-            SLTNode::Constant(value, mask, width, _) => arena
-                .alloc(SLTNode::Constant(value, mask, width, false))
+            SLTNode::Constant(value, mask, width, signed) => arena
+                .alloc(SLTNode::Constant(value, mask, width, signed))
                 .ok()?,
             SLTNode::Binary(lhs, op, rhs) => {
                 let lhs = *cache.get(&lhs)?;
@@ -1663,6 +2047,7 @@ fn specialize_slt_node(
 #[derive(Default)]
 struct ProofBitCanonicalizer {
     bit_cache: HashMap<(NodeId, usize), NodeId>,
+    opaque_bits: HashMap<OpaqueProofKey, NodeId>,
     /// Dense low-to-high mapping for each Concat. Building this once avoids
     /// rescanning an increasingly long part list independently for every bit.
     concat_layouts: HashMap<NodeId, Vec<(NodeId, usize)>>,
@@ -1672,6 +2057,23 @@ struct ProofBitCanonicalizer {
     bit_cache_misses: usize,
     #[cfg(test)]
     concat_layout_builds: usize,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum OpaqueProofKey {
+    Binary {
+        op: BinaryOp,
+        bit: usize,
+        width: usize,
+        lhs: Vec<NodeId>,
+        rhs: Vec<NodeId>,
+    },
+    Unary {
+        op: UnaryOp,
+        bit: usize,
+        width: usize,
+        input: Vec<NodeId>,
+    },
 }
 
 impl ProofBitCanonicalizer {
@@ -1850,10 +2252,162 @@ fn canonicalize_proof_bit(
             canonicalize_proof_bit(expr, access.lsb.checked_add(bit)?, arena, canonicalizer)?
         }
         SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return None,
-        _ => return alloc_opaque_proof_bit(node, bit, arena, canonicalizer),
+        _ => return canonicalize_opaque_proof_bit(node, bit, arena, canonicalizer),
     };
     canonicalizer.bit_cache.insert((node, bit), canonical);
     Some(canonical)
+}
+
+fn canonicalize_opaque_proof_bit(
+    node: NodeId,
+    bit: usize,
+    arena: &mut SLTNodeArena<VarId>,
+    canonicalizer: &mut ProofBitCanonicalizer,
+) -> Option<NodeId> {
+    let key = match arena.get(node).clone() {
+        SLTNode::Binary(lhs, op, rhs) => {
+            let (lhs_bits, rhs_bits) =
+                canonicalize_opaque_binary_operands(lhs, op, rhs, arena, canonicalizer)?;
+            OpaqueProofKey::Binary {
+                op,
+                bit,
+                width: get_width(node, arena),
+                lhs: lhs_bits,
+                rhs: rhs_bits,
+            }
+        }
+        SLTNode::Unary(op, input) => OpaqueProofKey::Unary {
+            op,
+            bit,
+            width: get_width(node, arena),
+            input: (0..get_width(input, arena))
+                .map(|child_bit| canonicalize_proof_bit(input, child_bit, arena, canonicalizer))
+                .collect::<Option<Vec<_>>>()?,
+        },
+        _ => return alloc_opaque_proof_bit(node, bit, arena, canonicalizer),
+    };
+    if let Some(&canonical) = canonicalizer.opaque_bits.get(&key) {
+        canonicalizer.bit_cache.insert((node, bit), canonical);
+        return Some(canonical);
+    }
+    let canonical = alloc_opaque_proof_bit(node, bit, arena, canonicalizer)?;
+    canonicalizer.opaque_bits.insert(key, canonical);
+    Some(canonical)
+}
+
+fn canonicalize_opaque_binary_operands(
+    lhs: NodeId,
+    op: BinaryOp,
+    rhs: NodeId,
+    arena: &mut SLTNodeArena<VarId>,
+    canonicalizer: &mut ProofBitCanonicalizer,
+) -> Option<(Vec<NodeId>, Vec<NodeId>)> {
+    let lhs_width = get_width(lhs, arena);
+    let rhs_width = get_width(rhs, arena);
+    let comparison = matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard
+            | BinaryOp::LtU
+            | BinaryOp::LtS
+            | BinaryOp::LeU
+            | BinaryOp::LeS
+            | BinaryOp::GtU
+            | BinaryOp::GtS
+            | BinaryOp::GeU
+            | BinaryOp::GeS
+    );
+    let operand_width = if comparison {
+        lhs_width.max(rhs_width)
+    } else {
+        0
+    };
+    let sign_extend = matches!(
+        op,
+        BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
+    ) || matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+    ) && proof_node_signed(lhs, arena)
+        && proof_node_signed(rhs, arena);
+
+    let canonicalize_operand = |operand: NodeId,
+                                width: usize,
+                                canonicalizer: &mut ProofBitCanonicalizer,
+                                arena: &mut SLTNodeArena<VarId>|
+     -> Option<Vec<NodeId>> {
+        let target_width = if comparison { operand_width } else { width };
+        let mut bits = (0..width)
+            .map(|child_bit| canonicalize_proof_bit(operand, child_bit, arena, canonicalizer))
+            .collect::<Option<Vec<_>>>()?;
+        let extension = if sign_extend {
+            *bits.last()?
+        } else {
+            alloc_proof_bit_constant(false, arena)?
+        };
+        bits.resize(target_width, extension);
+        Some(bits)
+    };
+
+    Some((
+        canonicalize_operand(lhs, lhs_width, canonicalizer, arena)?,
+        canonicalize_operand(rhs, rhs_width, canonicalizer, arena)?,
+    ))
+}
+
+fn proof_node_signed(node: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
+    match arena.get(node) {
+        SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => *signed,
+        SLTNode::Binary(lhs, op, rhs) => match op {
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard
+            | BinaryOp::LtU
+            | BinaryOp::LtS
+            | BinaryOp::LeU
+            | BinaryOp::LeS
+            | BinaryOp::GtU
+            | BinaryOp::GtS
+            | BinaryOp::GeU
+            | BinaryOp::GeS
+            | BinaryOp::LogicAnd
+            | BinaryOp::LogicOr
+            | BinaryOp::DivU
+            | BinaryOp::RemU => false,
+            BinaryOp::DivS | BinaryOp::RemS => true,
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => proof_node_signed(*lhs, arena),
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Xor => proof_node_signed(*lhs, arena) && proof_node_signed(*rhs, arena),
+        },
+        SLTNode::Unary(
+            UnaryOp::LogicNot
+            | UnaryOp::And
+            | UnaryOp::Or
+            | UnaryOp::Xor
+            | UnaryOp::PopCount
+            | UnaryOp::CountLeadingZeros
+            | UnaryOp::CountTrailingZeros,
+            _,
+        ) => false,
+        SLTNode::Unary(
+            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+            inner,
+        ) => proof_node_signed(*inner, arena),
+        SLTNode::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => proof_node_signed(*then_expr, arena) && proof_node_signed(*else_expr, arena),
+        SLTNode::ForFold { loop_signed, .. } => *loop_signed,
+        SLTNode::ForFoldGroup { .. } | SLTNode::Concat(_) | SLTNode::Slice { .. } => false,
+    }
 }
 
 fn alloc_opaque_proof_bit(
@@ -2038,7 +2592,7 @@ fn alloc_specialized_constant(
             constant.value & width_mask(constant.width),
             constant.mask & width_mask(constant.width),
             constant.width,
-            false,
+            constant.signed,
         ))
         .ok()
 }
@@ -2080,6 +2634,27 @@ fn specialize_binary_constant(
     let mask = width_mask(result_width);
     let shift = rhs.value.to_usize();
     let bool_value = |value: bool| BigUint::from(u8::from(value));
+    let comparison_width = lhs.width.max(rhs.width);
+    let comparison_signed = matches!(
+        op,
+        BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
+    ) || matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+    ) && lhs.signed
+        && rhs.signed;
+    let extend_comparison = |operand: &SpecializedConstant| {
+        if comparison_signed {
+            signed_to_bits(
+                bits_to_signed(&operand.value, operand.width),
+                comparison_width,
+            )
+        } else {
+            Some(&operand.value & width_mask(comparison_width))
+        }
+    };
+    let comparison_lhs = extend_comparison(lhs)?;
+    let comparison_rhs = extend_comparison(rhs)?;
     let value = match op {
         BinaryOp::Add => (&lhs.value + &rhs.value) & &mask,
         BinaryOp::Sub => {
@@ -2138,23 +2713,27 @@ fn specialize_binary_constant(
             }
             None => return None,
         },
-        BinaryOp::Eq | BinaryOp::EqWildcard => bool_value(lhs.value == rhs.value),
-        BinaryOp::Ne | BinaryOp::NeWildcard => bool_value(lhs.value != rhs.value),
-        BinaryOp::LtU => bool_value(lhs.value < rhs.value),
-        BinaryOp::LeU => bool_value(lhs.value <= rhs.value),
-        BinaryOp::GtU => bool_value(lhs.value > rhs.value),
-        BinaryOp::GeU => bool_value(lhs.value >= rhs.value),
+        BinaryOp::Eq | BinaryOp::EqWildcard => bool_value(comparison_lhs == comparison_rhs),
+        BinaryOp::Ne | BinaryOp::NeWildcard => bool_value(comparison_lhs != comparison_rhs),
+        BinaryOp::LtU => bool_value(comparison_lhs < comparison_rhs),
+        BinaryOp::LeU => bool_value(comparison_lhs <= comparison_rhs),
+        BinaryOp::GtU => bool_value(comparison_lhs > comparison_rhs),
+        BinaryOp::GeU => bool_value(comparison_lhs >= comparison_rhs),
         BinaryOp::LtS => bool_value(
-            bits_to_signed(&lhs.value, lhs.width) < bits_to_signed(&rhs.value, rhs.width),
+            bits_to_signed(&comparison_lhs, comparison_width)
+                < bits_to_signed(&comparison_rhs, comparison_width),
         ),
         BinaryOp::LeS => bool_value(
-            bits_to_signed(&lhs.value, lhs.width) <= bits_to_signed(&rhs.value, rhs.width),
+            bits_to_signed(&comparison_lhs, comparison_width)
+                <= bits_to_signed(&comparison_rhs, comparison_width),
         ),
         BinaryOp::GtS => bool_value(
-            bits_to_signed(&lhs.value, lhs.width) > bits_to_signed(&rhs.value, rhs.width),
+            bits_to_signed(&comparison_lhs, comparison_width)
+                > bits_to_signed(&comparison_rhs, comparison_width),
         ),
         BinaryOp::GeS => bool_value(
-            bits_to_signed(&lhs.value, lhs.width) >= bits_to_signed(&rhs.value, rhs.width),
+            bits_to_signed(&comparison_lhs, comparison_width)
+                >= bits_to_signed(&comparison_rhs, comparison_width),
         ),
         BinaryOp::LogicAnd => bool_value(!lhs.value.is_zero() && !rhs.value.is_zero()),
         BinaryOp::LogicOr => bool_value(!lhs.value.is_zero() || !rhs.value.is_zero()),
@@ -2378,6 +2957,16 @@ fn rewrite_expression(
                 self_depends || index_depends || select_depends
             }
             Factor::Value(_) => false,
+            Factor::FunctionCall(call) if call.outputs.is_empty() => {
+                let mut depends = false;
+                for input in call.inputs.values_mut() {
+                    depends |= rewrite_expression(input, loop_var, mode)?;
+                }
+                if depends {
+                    invalidate_dependent_comptime(&mut call.comptime, mode);
+                }
+                depends
+            }
             Factor::SystemFunctionCall(_)
             | Factor::FunctionCall(_)
             | Factor::Anonymous(_)
@@ -2605,12 +3194,9 @@ mod tests {
 
         let mut context = Context::default();
         let mut ir = Ir::default();
-        assert!(
-            analyzer
-                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir))
-                .is_empty(),
-            "pass2 must succeed"
-        );
+        let pass2_errors =
+            analyzer.analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir));
+        assert!(pass2_errors.is_empty(), "pass2 errors: {pass2_errors:?}");
         assert!(
             Analyzer::analyze_post_pass2(&ir).is_empty(),
             "post-pass2 must succeed"
@@ -2810,6 +3396,185 @@ mod tests {
     }
 
     #[test]
+    fn recovers_unrolled_loop_nested_in_case_arm() {
+        let code = r#"
+            module Top (
+                sel  : input  logic<2>,
+                bits : input  logic<4>,
+                value: output logic<4>,
+            ) {
+                var state: logic<4>;
+                always_comb {
+                    state = 4'd0;
+                    case sel {
+                        2'd0: {
+                            for i in 0..4 {
+                                state[i] = bits[i];
+                            }
+                        }
+                        default: {}
+                    }
+                    value = state;
+                }
+            }
+        "#;
+        let (module, provenance) = analyze(code);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let (entry_guard, trip_count, states) = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup {
+                    entry_guard,
+                    trip_count,
+                    states,
+                    ..
+                } => Some((*entry_guard, *trip_count, states)),
+                _ => None,
+            })
+            .expect("case-arm loop must be recovered");
+
+        assert_eq!(trip_count, 4);
+        assert_eq!(states.len(), 1);
+        assert!(
+            !matches!(arena.get(entry_guard), SLTNode::Constant(..)),
+            "the recovered loop must retain the case-arm predicate"
+        );
+        assert_eq!(states[0].target.id, variable(&module, "state"));
+        assert_eq!(states[0].target.access, BitAccess::new(0, 3));
+    }
+
+    #[test]
+    fn guarded_count_idiom_stays_expanded_for_word_lowering() {
+        let code = r#"
+            module Top (
+                en   : input  logic,
+                bits : input  logic<8>,
+                value: output logic<4>,
+            ) {
+                var count: logic<4>;
+                always_comb {
+                    count = 4'd0;
+                    if en {
+                        for i in 0..8 {
+                            count = count + {3'b0, bits[i]};
+                        }
+                    }
+                    value = count;
+                }
+            }
+        "#;
+        let (module, provenance) = analyze(code);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        assert_eq!(
+            group_count(&arena),
+            0,
+            "a guarded count must remain available to the exact word-level matcher",
+        );
+    }
+
+    #[test]
+    fn composes_case_and_if_guards_for_nested_recovered_loop() {
+        let code = r#"
+            module Top (
+                sel  : input  logic<2>,
+                en   : input  logic,
+                bits : input  logic<4>,
+                value: output logic<4>,
+            ) {
+                var state: logic<4>;
+                always_comb {
+                    state = 4'd0;
+                    case sel {
+                        2'd0: {
+                            if en {
+                                for i in 0..4 {
+                                    state[i] = bits[i];
+                                }
+                            } else {
+                                state = 4'hf;
+                            }
+                        }
+                        default: {}
+                    }
+                    value = state;
+                }
+            }
+        "#;
+        let (module, provenance) = analyze(code);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let entry_guard = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup { entry_guard, .. } => Some(*entry_guard),
+                _ => None,
+            })
+            .expect("nested loop must be recovered");
+        let mut visited = HashSet::default();
+        let mut inputs = HashSet::default();
+        assert!(collect_template_inputs(
+            entry_guard,
+            &arena,
+            &mut visited,
+            &mut inputs,
+        ));
+        assert!(inputs.contains(&variable(&module, "sel")));
+        assert!(inputs.contains(&variable(&module, "en")));
+    }
+
+    #[test]
+    fn recovers_loop_with_function_call_expression() {
+        let code = r#"
+            module Top (
+                data : input  logic<32>,
+                seed : input  logic<32>,
+                value: output logic<32>,
+            ) {
+                function lane (
+                    x   : input logic<8>,
+                    bias: input logic<8>,
+                ) -> logic<8> {
+                    return x + bias;
+                }
+
+                var invariant: logic<32>;
+                var state: logic<32>;
+                always_comb {
+                    invariant = data ^ seed;
+                    state = 32'd0;
+                    for i in 0..4 {
+                        state[i*8+:8] = lane(invariant[i*8+:8], (i as 8));
+                    }
+                    value = state;
+                }
+            }
+        "#;
+        let (module, provenance) = analyze(code);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let states = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup { states, .. } => Some(states),
+                _ => None,
+            })
+            .expect("function-call lane loop must be recovered");
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].target.id, variable(&module, "state"));
+        assert_eq!(states[0].target.access, BitAccess::new(0, 31));
+    }
+
+    #[test]
     fn whole_fold_proof_composes_cross_state_updates() {
         let (module, provenance) = analyze(CROSS_STATE_LOOP);
         let candidates = provenance.candidates_for_module(&module);
@@ -2944,6 +3709,79 @@ mod tests {
         )
         .unwrap();
         assert!(recovered.is_none());
+    }
+
+    #[test]
+    fn rejects_temporally_old_state_embedded_as_a_loop_invariant() {
+        let (module, provenance) = analyze(MULTI_STATE_LOOP);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+        let declaration = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .unwrap();
+        let guarded_body = declaration
+            .statements
+            .iter()
+            .find_map(|statement| match statement {
+                Statement::If(statement) => Some(statement.true_side.as_slice()),
+                _ => None,
+            })
+            .unwrap();
+
+        let mut arena = SLTNodeArena::new();
+        let all_variables = module.variables.keys().copied().collect::<HashSet<_>>();
+        let mut initial_store = marker_store(&module, &all_variables).unwrap();
+        for name in ["valid", "age", "data"] {
+            let id = variable(&module, name);
+            let width = resolve_total_width(&module, &module.variables[&id]).unwrap();
+            let zero = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::zero(),
+                    BigUint::zero(),
+                    width,
+                    false,
+                ))
+                .unwrap();
+            initial_store.insert(id, RangeStore::new(Some((zero, HashSet::default())), width));
+        }
+
+        let valid = variable(&module, "valid");
+        let old_valid = arena
+            .alloc(SLTNode::Input {
+                variable: valid,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let captured_bits = arena
+            .alloc(SLTNode::Concat(vec![(old_valid, 1); 4]))
+            .unwrap();
+        let mut captured_sources = HashSet::default();
+        captured_sources.insert(VarAtomBase::new(valid, 0, 0));
+        initial_store.insert(
+            variable(&module, "bits"),
+            RangeStore::new(Some((captured_bits, captured_sources)), 4),
+        );
+
+        let recovered = recover_group(
+            &module,
+            &initial_store,
+            guarded_body,
+            &candidates[0],
+            None,
+            &mut arena,
+        )
+        .unwrap();
+        assert!(
+            recovered.is_none(),
+            "an old state version needs a distinct capture and must not be rebound to loop state",
+        );
     }
 
     #[test]
@@ -3223,6 +4061,81 @@ mod tests {
         );
         assert_eq!(canonicalizer.concat_layout_builds, 1);
         assert_eq!(arena.len(), first_nodes);
+    }
+
+    #[test]
+    fn proof_comparison_canonicalization_preserves_signed_extension() {
+        let (module, _) = analyze(MULTI_STATE_LOOP);
+        let bits = variable(&module, "bits");
+        let mut arena = SLTNodeArena::new();
+        let signed_narrow = arena
+            .alloc(SLTNode::Input {
+                variable: bits,
+                signed: true,
+                index: Vec::new(),
+                access: BitAccess::new(0, 3),
+            })
+            .unwrap();
+        let unsigned_select = arena
+            .alloc(SLTNode::Slice {
+                expr: signed_narrow,
+                access: BitAccess::new(0, 3),
+            })
+            .unwrap();
+        let signed_wide = arena
+            .alloc(SLTNode::Input {
+                variable: bits,
+                signed: true,
+                index: Vec::new(),
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let signed_eq = arena
+            .alloc(SLTNode::Binary(signed_narrow, BinaryOp::Eq, signed_wide))
+            .unwrap();
+        let unsigned_eq = arena
+            .alloc(SLTNode::Binary(unsigned_select, BinaryOp::Eq, signed_wide))
+            .unwrap();
+
+        assert_eq!(
+            proof_outputs_match(
+                &[signed_eq],
+                &[unsigned_eq],
+                &mut arena,
+                &mut ProofBitCanonicalizer::default(),
+            ),
+            Some(false),
+        );
+    }
+
+    #[test]
+    fn constant_comparison_specialization_matches_lowering_extension_rules() {
+        let signed_narrow = SpecializedConstant {
+            value: BigUint::from(0xfu8),
+            mask: BigUint::zero(),
+            width: 4,
+            signed: true,
+        };
+        let unsigned_narrow = SpecializedConstant {
+            signed: false,
+            ..signed_narrow.clone()
+        };
+        let signed_wide = SpecializedConstant {
+            value: BigUint::from(0xffu8),
+            mask: BigUint::zero(),
+            width: 8,
+            signed: true,
+        };
+
+        let signed_eq =
+            specialize_binary_constant(BinaryOp::Eq, &signed_narrow, &signed_wide, 1, false)
+                .unwrap();
+        let unsigned_eq =
+            specialize_binary_constant(BinaryOp::Eq, &unsigned_narrow, &signed_wide, 1, false)
+                .unwrap();
+
+        assert_eq!(signed_eq.value, BigUint::from(1u8));
+        assert_eq!(unsigned_eq.value, BigUint::from(0u8));
     }
 
     #[test]
