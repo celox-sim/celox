@@ -891,6 +891,11 @@ fn run_dead_store_elimination(
     use crate::ir::{AbsoluteAddr, InstancePath};
     let mut externally_live = HashSet::default();
 
+    // Native testbench expressions bypass SIR and read simulator memory
+    // directly. Their inputs are therefore external DSE roots just like
+    // signals named with `live_signal()`.
+    externally_live.extend(crate::testbench::initial_read_addresses(program));
+
     // User-specified live signals
     for (inst_path, var_path) in live_signals {
         let inst_refs: Vec<(&str, usize)> =

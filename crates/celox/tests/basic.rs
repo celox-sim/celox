@@ -1,4 +1,4 @@
-use celox::{DeadStorePolicy, Simulator, SimulatorBuilder};
+use celox::{DeadStorePolicy, OptLevel, Simulator, SimulatorBuilder, TestResult};
 use insta::assert_snapshot;
 
 #[path = "test_utils/mod.rs"]
@@ -898,6 +898,33 @@ fn test_dse_preserve_top_ports() {
 
     sim.modify(|io| io.set(top_in, 0xABu8)).unwrap();
     assert_eq!(sim.get(top_out), 0xABu64.into());
+}
+
+#[test]
+fn test_o2_dse_preserves_signals_read_by_native_testbench() {
+    let result = Simulator::builder(
+        r#"
+#[test(test_o2_dse_preserves_signals_read_by_native_testbench)]
+module test_o2_dse_preserves_signals_read_by_native_testbench {
+    var source: logic;
+    var observed: logic;
+
+    assign observed = ~source;
+
+    initial {
+        source = 1'b0;
+        $assert(observed == 1'b1, "DSE removed a signal read by the testbench");
+        $finish();
+    }
+}
+"#,
+        "test_o2_dse_preserves_signals_read_by_native_testbench",
+    )
+    .opt_level(OptLevel::O2)
+    .run_test()
+    .unwrap();
+
+    assert_eq!(result, TestResult::Pass);
 }
 
 #[test]
