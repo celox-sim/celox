@@ -215,6 +215,10 @@ where
             try_for_each_child(node, |child| child_width(child).map(|_| ()))?;
             checked_access_width(node_id, result.access, "ForFold result")
         }
+        SLTNode::ForFoldGroup { states, .. } => {
+            try_for_each_child(node, |child| child_width(child).map(|_| ()))?;
+            packed_group_width(node_id, states.iter().map(|state| state.target.access))
+        }
         SLTNode::Concat(parts) => {
             let mut total = 0usize;
             for &(child, part_width) in parts {
@@ -264,6 +268,16 @@ where
             format!("cannot reserve lowerability for {node_count} nodes: {error}"),
         )
     })?;
+    let mut unsafe_in_group = Vec::new();
+    unsafe_in_group
+        .try_reserve_exact(node_count)
+        .map_err(|error| {
+            SLTNodeFactsError::new(
+                "FACTS.STORAGE_AVAILABLE",
+                allocation_node,
+                format!("cannot reserve grouped-fold safety facts for {node_count} nodes: {error}"),
+            )
+        })?;
     for (node_index, node) in nodes.iter().enumerate() {
         let node_id = NodeId(node_index);
         let width = compute_width(node_id, node, &widths)?;
@@ -271,6 +285,11 @@ where
             width,
             matches!(node, SLTNode::Concat(parts) if parts.iter().any(|(_, width)| *width == 0)),
         );
+        // Legacy ForFold can emit runtime effects and may terminate through a
+        // stall/error path even when its explicit effect list is empty.  A
+        // grouped fold is a pure, total expression, so neither behavior may be
+        // hidden below one of its value children.
+        let mut node_unsafe_in_group = matches!(node, SLTNode::ForFold { .. });
         try_for_each_child(node, |child| {
             let Some(&child_lowerable) = lowerable.get(child.0) else {
                 return Err(SLTNodeFactsError::new(
@@ -283,10 +302,29 @@ where
                 ));
             };
             node_lowerable &= child_lowerable;
+            let Some(&child_unsafe) = unsafe_in_group.get(child.0) else {
+                return Err(SLTNodeFactsError::new(
+                    "FACTS.CHILD_EFFECT_AVAILABLE",
+                    node_id,
+                    format!(
+                        "group-safety fact of child n{} was not available while evaluating n{}",
+                        child.0, node_id.0
+                    ),
+                ));
+            };
+            node_unsafe_in_group |= child_unsafe;
             Ok(())
         })?;
+        if matches!(node, SLTNode::ForFoldGroup { .. }) && node_unsafe_in_group {
+            return Err(SLTNodeFactsError::new(
+                "FOR_FOLD_GROUP.CHILDREN_PURE_AND_TOTAL",
+                node_id,
+                "ForFoldGroup guard, initial, or update reaches a legacy ForFold that may emit effects or terminate with an error",
+            ));
+        }
         widths.push(width);
         lowerable.push(node_lowerable);
+        unsafe_in_group.push(node_unsafe_in_group);
     }
 
     Ok(VerifiedNodeFacts { widths, lowerable })
@@ -528,6 +566,136 @@ where
             require_nonzero_child(*continue_cond, "ForFold continue condition")?;
             checked_access_width(node_id, result.access, "ForFold result")
         }
+        SLTNode::ForFoldGroup {
+            loop_var,
+            loop_width,
+            loop_signed,
+            start,
+            step,
+            trip_count,
+            entry_guard,
+            states,
+            ..
+        } => {
+            if *loop_width == 0 {
+                return Err(SLTNodeFactsError::new(
+                    "FOR_FOLD_GROUP.LOOP_WIDTH_NON_ZERO",
+                    node_id,
+                    "ForFoldGroup loop width is zero",
+                ));
+            }
+            if *trip_count == 0 {
+                return Err(SLTNodeFactsError::new(
+                    "FOR_FOLD_GROUP.TRIP_COUNT_NON_ZERO",
+                    node_id,
+                    "ForFoldGroup trip count is zero",
+                ));
+            }
+            if states.is_empty() {
+                return Err(SLTNodeFactsError::new(
+                    "FOR_FOLD_GROUP.STATE_NON_EMPTY",
+                    node_id,
+                    "ForFoldGroup has no loop-carried states",
+                ));
+            }
+
+            let guard_width = child_width(*entry_guard)?;
+            if guard_width != 1 {
+                return Err(SLTNodeFactsError::new(
+                    "FOR_FOLD_GROUP.ENTRY_GUARD_ONE_BIT",
+                    node_id,
+                    format!(
+                        "ForFoldGroup entry guard n{} has width {guard_width}, expected 1",
+                        entry_guard.0,
+                    ),
+                ));
+            }
+
+            let last_iteration = start + step * num_bigint::BigInt::from(*trip_count - 1);
+            if !integer_fits_loop_counter(start, *loop_width, *loop_signed)
+                || !integer_fits_loop_counter(&last_iteration, *loop_width, *loop_signed)
+            {
+                return Err(SLTNodeFactsError::new(
+                    "FOR_FOLD_GROUP.ITERATION_ARITHMETIC_REPRESENTABLE",
+                    node_id,
+                    format!(
+                        "ForFoldGroup iteration range {start}..{last_iteration} does not fit its {}-bit {} loop counter",
+                        loop_width,
+                        if *loop_signed { "signed" } else { "unsigned" },
+                    ),
+                ));
+            }
+
+            let mut exact_targets = crate::HashSet::default();
+            let mut target_accesses: crate::HashMap<A, Vec<(BitAccess, usize)>> =
+                crate::HashMap::default();
+            let mut packed_width = 0usize;
+            for (index, state) in states.iter().enumerate() {
+                if state.target.id == *loop_var {
+                    return Err(SLTNodeFactsError::new(
+                        "FOR_FOLD_GROUP.LOOP_VARIABLE_DISJOINT_FROM_STATE_TARGETS",
+                        node_id,
+                        format!(
+                            "ForFoldGroup state target at position {index} aliases its loop variable"
+                        ),
+                    ));
+                }
+                if !exact_targets.insert(state.target.clone()) {
+                    return Err(SLTNodeFactsError::new(
+                        "FOR_FOLD_GROUP.STATE_TARGETS_UNIQUE",
+                        node_id,
+                        format!("ForFoldGroup repeats state target at position {index}"),
+                    ));
+                }
+                let target_width = checked_access_width(
+                    node_id,
+                    state.target.access,
+                    "ForFoldGroup state target",
+                )?;
+                packed_width = packed_width.checked_add(target_width).ok_or_else(|| {
+                    SLTNodeFactsError::new(
+                        "FOR_FOLD_GROUP.PACKED_WIDTH_REPRESENTABLE",
+                        node_id,
+                        format!(
+                            "ForFoldGroup packed width overflows usize while adding state {index} width {target_width}"
+                        ),
+                    )
+                })?;
+                let initial_width = child_width(state.initial)?;
+                let update_width = child_width(state.update)?;
+                if initial_width != target_width || update_width != target_width {
+                    return Err(SLTNodeFactsError::new(
+                        "FOR_FOLD_GROUP.STATE_WIDTHS_MATCH",
+                        node_id,
+                        format!(
+                            "ForFoldGroup state {index} target width {target_width}, initial n{} width {initial_width}, and update n{} width {update_width} do not match",
+                            state.initial.0, state.update.0,
+                        ),
+                    ));
+                }
+                target_accesses
+                    .entry(state.target.id.clone())
+                    .or_default()
+                    .push((state.target.access, index));
+            }
+            for accesses in target_accesses.values_mut() {
+                accesses.sort_unstable_by_key(|(access, _)| (access.lsb, access.msb));
+                for pair in accesses.windows(2) {
+                    let (previous, previous_index) = pair[0];
+                    let (current, current_index) = pair[1];
+                    if previous.msb >= current.lsb {
+                        return Err(SLTNodeFactsError::new(
+                            "FOR_FOLD_GROUP.STATE_TARGETS_DISJOINT",
+                            node_id,
+                            format!(
+                                "ForFoldGroup state targets at positions {previous_index} and {current_index} overlap"
+                            ),
+                        ));
+                    }
+                }
+            }
+            Ok(packed_width)
+        }
         SLTNode::Concat(parts) => node_rules::concat_width(parts.iter().map(|(_, width)| *width))
             .map_err(|error| rule_error(node_id, error)),
         SLTNode::Slice { expr, access } => {
@@ -544,6 +712,51 @@ fn checked_access_width(
     role: &str,
 ) -> Result<usize, SLTNodeFactsError> {
     node_rules::access_width(access, role).map_err(|error| rule_error(node, error))
+}
+
+fn packed_group_width(
+    node: NodeId,
+    accesses: impl IntoIterator<Item = BitAccess>,
+) -> Result<usize, SLTNodeFactsError> {
+    accesses
+        .into_iter()
+        .enumerate()
+        .try_fold(0usize, |total, (index, access)| {
+            let width = checked_access_width(node, access, "ForFoldGroup state target")?;
+            total.checked_add(width).ok_or_else(|| {
+                SLTNodeFactsError::new(
+                    "FOR_FOLD_GROUP.PACKED_WIDTH_REPRESENTABLE",
+                    node,
+                    format!(
+                        "ForFoldGroup packed width overflows usize while adding state {index} width {width}"
+                    ),
+                )
+            })
+        })
+}
+
+/// Test whether an integer can be represented without truncation by the loop
+/// counter type.  This uses the already allocated magnitude instead of
+/// constructing a `1 << width` bound, so hostile oversized widths cannot force
+/// an equally oversized verifier allocation.
+fn integer_fits_loop_counter(value: &num_bigint::BigInt, width: usize, signed: bool) -> bool {
+    use num_bigint::Sign;
+
+    if width == 0 {
+        return false;
+    }
+    let width = u64::try_from(width).unwrap_or(u64::MAX);
+    let bits = value.magnitude().bits();
+    match (signed, value.sign()) {
+        (false, Sign::Minus) => false,
+        (false, _) => bits <= width,
+        (true, Sign::Minus) => {
+            bits < width
+                || (bits == width
+                    && value.magnitude().trailing_zeros() == Some(width.saturating_sub(1)))
+        }
+        (true, Sign::NoSign | Sign::Plus) => bits < width,
+    }
 }
 
 fn rule_error(node: NodeId, error: node_rules::NodeRuleError) -> SLTNodeFactsError {
@@ -609,6 +822,17 @@ where
             }
             visit(*continue_cond)?;
         }
+        SLTNode::ForFoldGroup {
+            entry_guard,
+            states,
+            ..
+        } => {
+            visit(*entry_guard)?;
+            for state in states {
+                visit(state.initial)?;
+                visit(state.update)?;
+            }
+        }
         SLTNode::Concat(parts) => {
             for &(part, _) in parts {
                 visit(part)?;
@@ -621,12 +845,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use num_bigint::BigUint;
+    use num_bigint::{BigInt, BigUint};
 
     use crate::ir::{BinaryOp, UnaryOp, VarAtomBase};
 
     use super::*;
-    use crate::logic_tree::comb::node::{SLTForEffect, SLTForUpdate, SLTStepOp};
+    use crate::logic_tree::comb::node::{
+        SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTStepOp,
+    };
 
     fn arena(nodes: Vec<SLTNode<u32>>) -> SLTNodeArena<u32> {
         SLTNodeArena::try_from_nodes(nodes).expect("test node graph must verify")
@@ -668,6 +894,27 @@ mod tests {
 
     fn verify_for_fold(node: SLTNode<u32>) -> Result<(), SLTNodeFactsError> {
         SLTNodeArena::try_from_nodes(vec![constant(8), constant(1), node]).map(|_| ())
+    }
+
+    fn valid_for_fold_group() -> SLTNode<u32> {
+        SLTNode::ForFoldGroup {
+            loop_var: 1,
+            loop_width: 8,
+            loop_signed: false,
+            start: BigInt::from(0),
+            step: BigInt::from(1),
+            trip_count: 4,
+            entry_guard: NodeId(1),
+            states: vec![SLTForFoldGroupState {
+                target: VarAtomBase::new(2, 0, 7),
+                initial: NodeId(0),
+                update: NodeId(0),
+            }],
+        }
+    }
+
+    fn verify_for_fold_group(node: SLTNode<u32>) -> Result<SLTNodeArena<u32>, SLTNodeFactsError> {
+        SLTNodeArena::try_from_nodes(vec![constant(8), constant(1), node])
     }
 
     #[test]
@@ -902,6 +1149,234 @@ mod tests {
         });
         let error = raw_error(vec![constant(8), constant(1), constant(0), node]);
         assert_eq!(error.invariant, "FOR_FOLD.OPERAND_NON_ZERO");
+    }
+
+    #[test]
+    fn validates_complete_for_fold_group_contract() {
+        let arena = verify_for_fold_group(valid_for_fold_group())
+            .expect("complete ForFoldGroup must verify");
+        assert_eq!(
+            SLTNodeFacts::verify(&arena).unwrap().width(NodeId(2)),
+            Some(8)
+        );
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup { loop_width, .. } = &mut node else {
+            unreachable!()
+        };
+        *loop_width = 0;
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.LOOP_WIDTH_NON_ZERO"
+        );
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup { trip_count, .. } = &mut node else {
+            unreachable!()
+        };
+        *trip_count = 0;
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.TRIP_COUNT_NON_ZERO"
+        );
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup { states, .. } = &mut node else {
+            unreachable!()
+        };
+        states.clear();
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.STATE_NON_EMPTY"
+        );
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup { entry_guard, .. } = &mut node else {
+            unreachable!()
+        };
+        *entry_guard = NodeId(0);
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.ENTRY_GUARD_ONE_BIT"
+        );
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup { states, .. } = &mut node else {
+            unreachable!()
+        };
+        states[0].update = NodeId(1);
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.STATE_WIDTHS_MATCH"
+        );
+    }
+
+    #[test]
+    fn rejects_for_fold_group_loop_state_alias_and_duplicate_or_overlapping_targets() {
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup { states, .. } = &mut node else {
+            unreachable!()
+        };
+        states[0].target.id = 1;
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.LOOP_VARIABLE_DISJOINT_FROM_STATE_TARGETS"
+        );
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup { states, .. } = &mut node else {
+            unreachable!()
+        };
+        states.push(states[0].clone());
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.STATE_TARGETS_UNIQUE"
+        );
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup { states, .. } = &mut node else {
+            unreachable!()
+        };
+        states.push(SLTForFoldGroupState {
+            target: VarAtomBase::new(2, 4, 11),
+            initial: NodeId(0),
+            update: NodeId(0),
+        });
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.STATE_TARGETS_DISJOINT"
+        );
+    }
+
+    #[test]
+    fn checks_for_fold_group_iteration_counter_range() {
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup {
+            start,
+            step,
+            trip_count,
+            ..
+        } = &mut node
+        else {
+            unreachable!()
+        };
+        *start = BigInt::from(250);
+        *step = BigInt::from(3);
+        *trip_count = 3;
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.ITERATION_ARITHMETIC_REPRESENTABLE"
+        );
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup {
+            loop_signed,
+            start,
+            trip_count,
+            ..
+        } = &mut node
+        else {
+            unreachable!()
+        };
+        *loop_signed = true;
+        *start = BigInt::from(-128);
+        *trip_count = 256;
+        verify_for_fold_group(node).expect("signed 8-bit endpoints -128 and 127 must fit");
+
+        let mut node = valid_for_fold_group();
+        let SLTNode::ForFoldGroup {
+            loop_signed, start, ..
+        } = &mut node
+        else {
+            unreachable!()
+        };
+        *loop_signed = true;
+        *start = BigInt::from(-129);
+        assert_eq!(
+            verify_for_fold_group(node).unwrap_err().invariant,
+            "FOR_FOLD_GROUP.ITERATION_ARITHMETIC_REPRESENTABLE"
+        );
+    }
+
+    #[test]
+    fn rejects_for_fold_group_packed_width_overflow() {
+        let huge = BitAccess::new(0, usize::MAX - 1);
+        let node = SLTNode::ForFoldGroup {
+            loop_var: 1,
+            loop_width: 8,
+            loop_signed: false,
+            start: BigInt::from(0),
+            step: BigInt::from(1),
+            trip_count: 1,
+            entry_guard: NodeId(0),
+            states: vec![
+                SLTForFoldGroupState {
+                    target: VarAtomBase::new(2, huge.lsb, huge.msb),
+                    initial: NodeId(1),
+                    update: NodeId(1),
+                },
+                SLTForFoldGroupState {
+                    target: VarAtomBase::new(3, 0, 0),
+                    initial: NodeId(2),
+                    update: NodeId(2),
+                },
+            ],
+        };
+        let error = raw_error(vec![constant(1), constant(usize::MAX), constant(1), node]);
+        assert_eq!(error.invariant, "FOR_FOLD_GROUP.PACKED_WIDTH_REPRESENTABLE");
+    }
+
+    #[test]
+    fn rejects_effectful_descendant_inside_for_fold_group() {
+        let mut effectful = valid_for_fold();
+        let SLTNode::ForFold { effects, .. } = &mut effectful else {
+            unreachable!()
+        };
+        effects.push(SLTForEffect {
+            site_id: 7,
+            guard: None,
+            emit_on_true: true,
+            args: vec![NodeId(0)],
+            fatal_error_code: None,
+        });
+        let group = SLTNode::ForFoldGroup {
+            loop_var: 3,
+            loop_width: 8,
+            loop_signed: false,
+            start: BigInt::from(0),
+            step: BigInt::from(1),
+            trip_count: 1,
+            entry_guard: NodeId(1),
+            states: vec![SLTForFoldGroupState {
+                target: VarAtomBase::new(4, 0, 7),
+                initial: NodeId(2),
+                update: NodeId(2),
+            }],
+        };
+
+        let error = raw_error(vec![constant(8), constant(1), effectful, group]);
+        assert_eq!(error.invariant, "FOR_FOLD_GROUP.CHILDREN_PURE_AND_TOTAL");
+    }
+
+    #[test]
+    fn rejects_error_capable_legacy_fold_inside_for_fold_group() {
+        let group = SLTNode::ForFoldGroup {
+            loop_var: 3,
+            loop_width: 8,
+            loop_signed: false,
+            start: BigInt::from(0),
+            step: BigInt::from(1),
+            trip_count: 1,
+            entry_guard: NodeId(1),
+            states: vec![SLTForFoldGroupState {
+                target: VarAtomBase::new(4, 0, 7),
+                initial: NodeId(2),
+                update: NodeId(2),
+            }],
+        };
+
+        let error = raw_error(vec![constant(8), constant(1), valid_for_fold(), group]);
+        assert_eq!(error.invariant, "FOR_FOLD_GROUP.CHILDREN_PURE_AND_TOTAL");
     }
 
     #[test]

@@ -2911,6 +2911,7 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
         SLTNode::Unary(_, inner) => is_signed(module, *inner, arena),
         SLTNode::Mux { then_expr, .. } => is_signed(module, *then_expr, arena),
         SLTNode::ForFold { result, .. } => module.variables[&result.id].r#type.signed,
+        SLTNode::ForFoldGroup { .. } => false,
         SLTNode::Slice { expr, .. } => is_signed(module, *expr, arena),
         SLTNode::Concat(_) => false,
     }

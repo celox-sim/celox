@@ -2,8 +2,10 @@ use crate::ir::{
     BinaryOp, BitAccess, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
     SIRValue, UnaryOp, VarAtomBase,
 };
-use crate::logic_tree::{NodeId, SLTLoopBound, SLTNode, SLTNodeArena, comb::SLTStepOp};
-use num_bigint::BigUint;
+use crate::logic_tree::{
+    NodeId, SLTForFoldGroupState, SLTLoopBound, SLTNode, SLTNodeArena, comb::SLTStepOp,
+};
+use num_bigint::{BigInt, BigUint};
 use std::cell::RefCell;
 use std::hash::Hash;
 
@@ -948,6 +950,16 @@ fn match_slt_count_idiom<A: Hash + Eq + Clone>(
         .or_else(|| match_slt_popcount(root, arena))
 }
 
+/// Whether the ordinary expanded SLT already matches a native count idiom.
+/// Loop recovery uses this as a semantic priority check so it does not replace
+/// an exact PopCount/CLZ/CTZ plan with a slower counted loop.
+pub(crate) fn matches_slt_count_idiom<A: Hash + Eq + Clone>(
+    root: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    match_slt_count_idiom(root, arena).is_some()
+}
+
 #[derive(Default)]
 struct LoweringCostCache {
     tree_costs: Vec<Option<u128>>,
@@ -1039,8 +1051,13 @@ pub struct SLTToSIRLowerer {
     mux_stats: Option<RefCell<MuxLowerStats>>,
 }
 
-struct LowerEnv<A: Hash + Eq + Clone> {
+struct LowerEnv<'parent, A: Hash + Eq + Clone> {
     inputs: crate::HashMap<VarAtomBase<A>, RegisterId>,
+    /// Lower-priority bindings from an enclosing lowering scope.  Keeping the
+    /// layers separate is important for partial state targets: flattening the
+    /// maps would make overlapping inner/outer ranges depend on HashMap
+    /// iteration order.
+    parent: Option<&'parent LowerEnv<'parent, A>>,
 }
 
 impl SLTToSIRLowerer {
@@ -1083,7 +1100,10 @@ impl SLTToSIRLowerer {
         inputs: crate::HashMap<VarAtomBase<A>, RegisterId>,
     ) -> RegisterId {
         self.reset_cost_cache(node, arena, cache, false);
-        let env = LowerEnv { inputs };
+        let env = LowerEnv {
+            inputs,
+            parent: None,
+        };
         self.lower_inner(builder, node, arena, cache, Some(&env), false)
     }
 
@@ -1292,7 +1312,7 @@ impl SLTToSIRLowerer {
         node: NodeId,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<A>>,
+        env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) -> RegisterId {
         if allow_cache {
@@ -1405,6 +1425,30 @@ impl SLTToSIRLowerer {
                 effects,
                 *continue_cond,
             ),
+            SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start,
+                step,
+                trip_count,
+                entry_guard,
+                states,
+            } => self.lower_for_fold_group(
+                builder,
+                arena,
+                cache,
+                loop_var,
+                *loop_width,
+                *loop_signed,
+                start,
+                step,
+                *trip_count,
+                *entry_guard,
+                states,
+                env,
+                allow_cache,
+            ),
         };
 
         if allow_cache {
@@ -1423,7 +1467,7 @@ impl SLTToSIRLowerer {
         access: &BitAccess,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<A>>,
+        env: Option<&LowerEnv<'_, A>>,
     ) -> RegisterId {
         let width = access.msb - access.lsb + 1;
         let dest = builder.alloc_logic(width);
@@ -1504,7 +1548,7 @@ impl SLTToSIRLowerer {
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<A>>,
+        env: Option<&LowerEnv<'_, A>>,
         index: &[crate::logic_tree::comb::SLTIndex],
         access: &BitAccess,
     ) -> RegisterId {
@@ -1563,39 +1607,55 @@ impl SLTToSIRLowerer {
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: &LowerEnv<A>,
+        env: &LowerEnv<'_, A>,
         id: &A,
         index: &[crate::logic_tree::comb::SLTIndex],
         access: &BitAccess,
     ) -> Option<RegisterId> {
         let exact = VarAtomBase::new(id.clone(), access.lsb, access.msb);
-        if let Some(reg) = env.inputs.get(&exact) {
-            return Some(*reg);
-        }
-
-        for (target, reg) in &env.inputs {
-            if target.id != *id {
-                continue;
+        let mut higher_priority_overlap = false;
+        let mut layer = Some(env);
+        while let Some(current) = layer {
+            if !higher_priority_overlap && let Some(reg) = current.inputs.get(&exact) {
+                return Some(*reg);
             }
-            if target.access.lsb <= access.lsb && access.msb <= target.access.msb {
-                let rel = BitAccess::new(
-                    access.lsb - target.access.lsb,
-                    access.msb - target.access.lsb,
-                );
-                return Some(self.slice_reg(builder, *reg, &rel));
+            for (target, reg) in &current.inputs {
+                if target.id != *id {
+                    continue;
+                }
+                if !higher_priority_overlap
+                    && target.access.lsb <= access.lsb
+                    && access.msb <= target.access.msb
+                {
+                    let rel = BitAccess::new(
+                        access.lsb - target.access.lsb,
+                        access.msb - target.access.lsb,
+                    );
+                    return Some(self.slice_reg(builder, *reg, &rel));
+                }
             }
+            higher_priority_overlap |= current.inputs.keys().any(|target| {
+                target.id == *id
+                    && target.access.lsb <= access.msb
+                    && access.lsb <= target.access.msb
+            });
+            layer = current.parent;
         }
 
         let mut cut_points = vec![access.lsb, access.msb + 1];
-        for target in env.inputs.keys() {
-            if target.id != *id {
-                continue;
+        let mut layer = Some(env);
+        while let Some(current) = layer {
+            for target in current.inputs.keys() {
+                if target.id != *id {
+                    continue;
+                }
+                if target.access.msb < access.lsb || access.msb < target.access.lsb {
+                    continue;
+                }
+                cut_points.push(target.access.lsb.max(access.lsb));
+                cut_points.push((target.access.msb + 1).min(access.msb + 1));
             }
-            if target.access.msb < access.lsb || access.msb < target.access.lsb {
-                continue;
-            }
-            cut_points.push(target.access.lsb.max(access.lsb));
-            cut_points.push((target.access.msb + 1).min(access.msb + 1));
+            layer = current.parent;
         }
         cut_points.sort_unstable();
         cut_points.dedup();
@@ -1607,18 +1667,23 @@ impl SLTToSIRLowerer {
         for window in cut_points.windows(2).rev() {
             let part_access = BitAccess::new(window[0], window[1] - 1);
             let mut part_reg = None;
-            for (target, reg) in &env.inputs {
-                if target.id != *id {
-                    continue;
+            let mut layer = Some(env);
+            'layers: while let Some(current) = layer {
+                for (target, reg) in &current.inputs {
+                    if target.id != *id {
+                        continue;
+                    }
+                    if target.access.lsb <= part_access.lsb && part_access.msb <= target.access.msb
+                    {
+                        let rel = BitAccess::new(
+                            part_access.lsb - target.access.lsb,
+                            part_access.msb - target.access.lsb,
+                        );
+                        part_reg = Some(self.slice_reg(builder, *reg, &rel));
+                        break 'layers;
+                    }
                 }
-                if target.access.lsb <= part_access.lsb && part_access.msb <= target.access.msb {
-                    let rel = BitAccess::new(
-                        part_access.lsb - target.access.lsb,
-                        part_access.msb - target.access.lsb,
-                    );
-                    part_reg = Some(self.slice_reg(builder, *reg, &rel));
-                    break;
-                }
+                layer = current.parent;
             }
             let reg = part_reg.unwrap_or_else(|| {
                 self.lower_input(builder, id, index, &part_access, arena, cache, None)
@@ -1640,80 +1705,103 @@ impl SLTToSIRLowerer {
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: &LowerEnv<A>,
+        env: &LowerEnv<'_, A>,
         id: &A,
         index: &[crate::logic_tree::comb::SLTIndex],
         access: &BitAccess,
     ) -> Option<RegisterId> {
         if !index.is_empty() {
+            let mut layer = Some(env);
+            let mut has_override = false;
+            while let Some(current) = layer {
+                has_override |= current.inputs.keys().any(|target| target.id == *id);
+                layer = current.parent;
+            }
+            if !has_override {
+                return Some(self.lower_input(builder, id, index, access, arena, cache, Some(env)));
+            }
+
             let dynamic_off =
                 self.build_dynamic_offset(builder, arena, cache, Some(env), index, access);
             let mut result = self.lower_input(builder, id, index, access, arena, cache, Some(env));
             let result_width = access.msb - access.lsb + 1;
-            for (target, reg) in &env.inputs {
-                if target.id != *id {
-                    continue;
-                }
-                let range_lo = target.access.lsb.checked_sub(access.lsb);
-                let range_hi = target.access.msb.checked_sub(access.msb);
-                let (Some(range_lo), Some(range_hi)) = (range_lo, range_hi) else {
-                    continue;
-                };
-                if range_lo > range_hi {
-                    continue;
-                }
+            let mut layers = Vec::new();
+            let mut layer = Some(env);
+            while let Some(current) = layer {
+                layers.push(current);
+                layer = current.parent;
+            }
+            // Apply outer bindings first and inner bindings last so an inner
+            // loop-carried range wins whenever scopes overlap.
+            for current in layers.into_iter().rev() {
+                for (target, reg) in &current.inputs {
+                    if target.id != *id {
+                        continue;
+                    }
+                    let range_lo = target.access.lsb;
+                    let Some(range_hi) = target
+                        .access
+                        .msb
+                        .checked_sub(result_width.saturating_sub(1))
+                    else {
+                        continue;
+                    };
+                    if range_lo > range_hi {
+                        continue;
+                    }
 
-                let lo_reg = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Imm(lo_reg, SIRValue::new(range_lo as u64)));
-                let hi_reg = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Imm(hi_reg, SIRValue::new(range_hi as u64)));
+                    let lo_reg = builder.alloc_bit(64, false);
+                    builder.emit(SIRInstruction::Imm(lo_reg, SIRValue::new(range_lo as u64)));
+                    let hi_reg = builder.alloc_bit(64, false);
+                    builder.emit(SIRInstruction::Imm(hi_reg, SIRValue::new(range_hi as u64)));
 
-                let ge_lo = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Binary(
-                    ge_lo,
-                    dynamic_off,
-                    BinaryOp::GeU,
-                    lo_reg,
-                ));
-                let le_hi = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Binary(
-                    le_hi,
-                    dynamic_off,
-                    BinaryOp::LeU,
-                    hi_reg,
-                ));
-                let in_range = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Binary(
-                    in_range,
-                    ge_lo,
-                    BinaryOp::And,
-                    le_hi,
-                ));
-
-                let rel_off = if range_lo == 0 {
-                    dynamic_off
-                } else {
-                    let rel = builder.alloc_bit(64, false);
+                    let ge_lo = builder.alloc_bit(1, false);
                     builder.emit(SIRInstruction::Binary(
-                        rel,
+                        ge_lo,
                         dynamic_off,
-                        BinaryOp::Sub,
+                        BinaryOp::GeU,
                         lo_reg,
                     ));
-                    rel
-                };
+                    let le_hi = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Binary(
+                        le_hi,
+                        dynamic_off,
+                        BinaryOp::LeU,
+                        hi_reg,
+                    ));
+                    let in_range = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Binary(
+                        in_range,
+                        ge_lo,
+                        BinaryOp::And,
+                        le_hi,
+                    ));
 
-                let shifted = builder.alloc_logic(target.access.msb - target.access.lsb + 1);
-                builder.emit(SIRInstruction::Binary(
-                    shifted,
-                    *reg,
-                    BinaryOp::Shr,
-                    rel_off,
-                ));
-                let candidate = self.cast_reg_width(builder, shifted, result_width);
-                let merged = builder.alloc_logic(result_width);
-                builder.emit(SIRInstruction::Mux(merged, in_range, candidate, result));
-                result = merged;
+                    let rel_off = if range_lo == 0 {
+                        dynamic_off
+                    } else {
+                        let rel = builder.alloc_bit(64, false);
+                        builder.emit(SIRInstruction::Binary(
+                            rel,
+                            dynamic_off,
+                            BinaryOp::Sub,
+                            lo_reg,
+                        ));
+                        rel
+                    };
+
+                    let shifted = builder.alloc_logic(target.access.msb - target.access.lsb + 1);
+                    builder.emit(SIRInstruction::Binary(
+                        shifted,
+                        *reg,
+                        BinaryOp::Shr,
+                        rel_off,
+                    ));
+                    let candidate = self.cast_reg_width(builder, shifted, result_width);
+                    let merged = builder.alloc_logic(result_width);
+                    builder.emit(SIRInstruction::Mux(merged, in_range, candidate, result));
+                    result = merged;
+                }
             }
             return Some(result);
         }
@@ -1778,6 +1866,9 @@ impl SLTToSIRLowerer {
                 self.get_bound_signed(*then_expr, arena) && self.get_bound_signed(*else_expr, arena)
             }
             SLTNode::ForFold { loop_signed, .. } => *loop_signed,
+            // The grouped result has concat layout and is therefore unsigned,
+            // independently of the loop counter's signedness.
+            SLTNode::ForFoldGroup { .. } => false,
             // Verilog/Veryl bit- and part-select expressions are unsigned even when
             // the source signal is signed.
             SLTNode::Slice { .. } => false,
@@ -1792,21 +1883,26 @@ impl SLTToSIRLowerer {
         access: &crate::ir::BitAccess,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<A>>,
+        env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) -> RegisterId {
-        if env.is_none()
-            && let SLTNode::Input {
-                variable,
-                index,
-                access: input_access,
-                ..
-            } = arena.get(expr)
+        if let SLTNode::Input {
+            variable,
+            index,
+            access: input_access,
+            ..
+        } = arena.get(expr)
             && !index.is_empty()
-            && input_access.lsb <= access.lsb
-            && access.msb <= input_access.msb
+            && access.msb <= input_access.msb - input_access.lsb
         {
-            return self.lower_input(builder, variable, index, access, arena, cache, env);
+            let composed =
+                BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb);
+            if let Some(env) = env {
+                return self
+                    .lookup_override(builder, arena, cache, env, variable, index, &composed)
+                    .expect("dynamic input lookup always produces a memory fallback");
+            }
+            return self.lower_input(builder, variable, index, &composed, arena, cache, None);
         }
 
         let inner_reg = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
@@ -1889,7 +1985,7 @@ impl SLTToSIRLowerer {
         parts: &[(NodeId, usize)],
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<A>>,
+        env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) -> RegisterId {
         // Fast path: if all parts are constants, fold into a single wide Imm.
@@ -2070,6 +2166,17 @@ impl SLTToSIRLowerer {
                 children.push(*continue_cond);
                 children
             }
+            SLTNode::ForFoldGroup {
+                entry_guard,
+                states,
+                ..
+            } => std::iter::once(*entry_guard)
+                .chain(
+                    states
+                        .iter()
+                        .flat_map(|state| [state.initial, state.update]),
+                )
+                .collect(),
         }
     }
 
@@ -2147,6 +2254,7 @@ impl SLTToSIRLowerer {
             // this fixed cost represents the control operation itself rather
             // than an input-size or iteration cap.
             SLTNode::ForFold { updates, .. } => 8 + 2 * updates.len() as u128,
+            SLTNode::ForFoldGroup { states, .. } => 6 + 2 * states.len() as u128,
         }
     }
 
@@ -2236,6 +2344,7 @@ impl SLTToSIRLowerer {
                 SLTNode::Binary(_, op, _) => Self::binary_operation_cost(*op, 1),
                 SLTNode::Unary(..) => 1,
                 SLTNode::ForFold { updates, .. } => 8 + 2 * updates.len() as u128,
+                SLTNode::ForFoldGroup { states, .. } => 6 + 2 * states.len() as u128,
                 SLTNode::Input { .. }
                 | SLTNode::Constant(..)
                 | SLTNode::Mux { .. }
@@ -2355,14 +2464,16 @@ impl SLTToSIRLowerer {
             return result;
         }
         self.note_analysis_visits(1);
-        // ForFold lowers to runtime loop control, can emit capture effects, and
-        // contains Error exits for non-progress.  It is therefore not a pure
-        // expression for reverse if-conversion even when its effects vector is
-        // empty.  All other SLT nodes lower to read-only/value instructions.
-        let result = !matches!(arena.get(node), SLTNode::ForFold { .. })
-            && Self::node_children(node, arena)
-                .into_iter()
-                .all(|child| self.is_speculatable_pure(child, arena));
+        // Fold nodes carry a scoped loop environment and lower to CFG.  They
+        // must not be hoisted or cloned as an ordinary mux-arm expression;
+        // ForFold can additionally emit effects and Error exits.  All other
+        // SLT nodes lower to read-only/value instructions.
+        let result = !matches!(
+            arena.get(node),
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. }
+        ) && Self::node_children(node, arena)
+            .into_iter()
+            .all(|child| self.is_speculatable_pure(child, arena));
         self.cost_cache.borrow_mut().is_speculatable_pure[node.0] = Some(result);
         result
     }
@@ -2625,7 +2736,7 @@ impl SLTToSIRLowerer {
         plan: &MuxCfgPlan,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<A>>,
+        env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) {
         if !allow_cache {
@@ -2652,7 +2763,7 @@ impl SLTToSIRLowerer {
         else_expr: NodeId,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<A>>,
+        env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) -> RegisterId {
         self.with_mux_stats(|stats| stats.normal_seen += 1);
@@ -2712,7 +2823,7 @@ impl SLTToSIRLowerer {
         result_width: usize,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: Option<&LowerEnv<A>>,
+        env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) -> RegisterId {
         let result = builder.alloc_logic(result_width);
@@ -2965,6 +3076,216 @@ impl SLTToSIRLowerer {
                 base_width.saturating_add(step_bits)
             }
             SLTStepOp::Shl => base_width.saturating_add(step.max(1)),
+        }
+    }
+
+    fn bigint_payload(value: &BigInt, width: usize) -> BigUint {
+        let modulus = BigInt::from(1u8) << width;
+        let mut wrapped = value % &modulus;
+        if wrapped < BigInt::from(0u8) {
+            wrapped += modulus;
+        }
+        wrapped
+            .to_biguint()
+            .expect("a modulo-reduced loop value must be non-negative")
+    }
+
+    fn pack_fold_group_states<A>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        states: &[RegisterId],
+    ) -> RegisterId {
+        debug_assert!(!states.is_empty());
+        let width = states
+            .iter()
+            .map(|state| builder.register(state).width())
+            .sum();
+        let packed = builder.alloc_logic(width);
+        builder.emit(SIRInstruction::Concat(packed, states.to_vec()));
+        packed
+    }
+
+    /// Lower an effect-free, fixed-trip-count multi-state fold.
+    ///
+    /// The loop body sees one immutable set of block parameters, so every
+    /// update is computed from the previous iteration and the backedge applies
+    /// all updates simultaneously.  The counter is a remaining-iteration
+    /// count: it cannot stall and needs neither a safety cap nor an Error exit.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_for_fold_group<'env, A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        loop_var: &A,
+        loop_width: usize,
+        loop_signed: bool,
+        start: &BigInt,
+        step: &BigInt,
+        trip_count: usize,
+        entry_guard: NodeId,
+        states: &[SLTForFoldGroupState<A>],
+        outer_env: Option<&'env LowerEnv<'env, A>>,
+        allow_cache: bool,
+    ) -> RegisterId {
+        debug_assert!(loop_width > 0);
+        debug_assert!(trip_count > 0);
+        debug_assert!(!states.is_empty());
+
+        let guard = self.lower_inner(builder, entry_guard, arena, cache, outer_env, allow_cache);
+        let initial_states: Vec<_> = states
+            .iter()
+            .map(|state| {
+                let initial =
+                    self.lower_inner(builder, state.initial, arena, cache, outer_env, allow_cache);
+                self.cast_reg_width(
+                    builder,
+                    initial,
+                    state.target.access.msb - state.target.access.lsb + 1,
+                )
+            })
+            .collect();
+        let initial_packed = self
+            .four_state
+            .then(|| self.pack_fold_group_states(builder, &initial_states));
+
+        let remaining_width = (usize::BITS as usize - trip_count.leading_zeros() as usize).max(1);
+        let initial_remaining = builder.alloc_bit(remaining_width, false);
+        builder.emit(SIRInstruction::Imm(
+            initial_remaining,
+            SIRValue::new(BigUint::from(trip_count)),
+        ));
+        let zero = builder.alloc_bit(remaining_width, false);
+        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let one = builder.alloc_bit(remaining_width, false);
+        builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+
+        let initial_loop_value = builder.alloc_bit(loop_width, loop_signed);
+        builder.emit(SIRInstruction::Imm(
+            initial_loop_value,
+            SIRValue::new(Self::bigint_payload(start, loop_width)),
+        ));
+        let step_value = builder.alloc_bit(loop_width, loop_signed);
+        builder.emit(SIRInstruction::Imm(
+            step_value,
+            SIRValue::new(Self::bigint_payload(step, loop_width)),
+        ));
+
+        let body_remaining = builder.alloc_bit(remaining_width, false);
+        let body_loop_value = builder.alloc_bit(loop_width, loop_signed);
+        let body_states: Vec<_> = states
+            .iter()
+            .map(|state| builder.alloc_logic(state.target.access.msb - state.target.access.lsb + 1))
+            .collect();
+        let exit_states: Vec<_> = states
+            .iter()
+            .map(|state| builder.alloc_logic(state.target.access.msb - state.target.access.lsb + 1))
+            .collect();
+        let body = builder.new_block_with(
+            std::iter::once(body_remaining)
+                .chain(std::iter::once(body_loop_value))
+                .chain(body_states.iter().copied())
+                .collect(),
+        );
+        let exit = builder.new_block_with(exit_states.clone());
+
+        builder.seal_block(SIRTerminator::Branch {
+            cond: guard,
+            true_block: (
+                body,
+                std::iter::once(initial_remaining)
+                    .chain(std::iter::once(initial_loop_value))
+                    .chain(initial_states.iter().copied())
+                    .collect(),
+            ),
+            false_block: (exit, initial_states.clone()),
+        });
+
+        builder.switch_to_block(body);
+        let mut env_inputs = crate::HashMap::default();
+        for (state, value) in states.iter().zip(body_states.iter().copied()) {
+            env_inputs.insert(state.target.clone(), value);
+        }
+        env_inputs.insert(
+            VarAtomBase::new(loop_var.clone(), 0, loop_width - 1),
+            body_loop_value,
+        );
+        let env = LowerEnv {
+            inputs: env_inputs,
+            parent: outer_env,
+        };
+        let mut local_cache = crate::HashMap::default();
+        let local_cache_transaction = self.cache_transaction();
+        let next_states: Vec<_> = states
+            .iter()
+            .map(|state| {
+                let next = self.lower_inner(
+                    builder,
+                    state.update,
+                    arena,
+                    &mut local_cache,
+                    Some(&env),
+                    true,
+                );
+                self.cast_reg_width(
+                    builder,
+                    next,
+                    state.target.access.msb - state.target.access.lsb + 1,
+                )
+            })
+            .collect();
+        // These entries are valid only under this loop body's state/counter
+        // environment.  Keep the local CSE results, but remove their tracking
+        // records before returning to the caller's global cache transaction.
+        self.cache_insert_log
+            .borrow_mut()
+            .truncate(local_cache_transaction);
+
+        let next_remaining = builder.alloc_bit(remaining_width, false);
+        builder.emit(SIRInstruction::Binary(
+            next_remaining,
+            body_remaining,
+            BinaryOp::Sub,
+            one,
+        ));
+        let has_more = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(
+            has_more,
+            next_remaining,
+            BinaryOp::Ne,
+            zero,
+        ));
+        // The final value of this addition is unobserved when `has_more` is
+        // false. Computing it eagerly lets the conditional edge carry the next
+        // loop parameters directly, avoiding an extra hot advance block and
+        // unconditional jump on every taken iteration.
+        let next_loop_value = builder.alloc_bit(loop_width, loop_signed);
+        builder.emit(SIRInstruction::Binary(
+            next_loop_value,
+            body_loop_value,
+            BinaryOp::Add,
+            step_value,
+        ));
+        builder.seal_block(SIRTerminator::Branch {
+            cond: has_more,
+            true_block: (
+                body,
+                std::iter::once(next_remaining)
+                    .chain(std::iter::once(next_loop_value))
+                    .chain(next_states.iter().copied())
+                    .collect(),
+            ),
+            false_block: (exit, next_states.clone()),
+        });
+
+        builder.switch_to_block(exit);
+        let candidate = self.pack_fold_group_states(builder, &exit_states);
+        if let Some(initial) = initial_packed {
+            let result = builder.alloc_logic(builder.register(&candidate).width());
+            builder.emit(SIRInstruction::Mux(result, guard, candidate, initial));
+            result
+        } else {
+            candidate
         }
     }
 
@@ -3250,7 +3571,10 @@ impl SLTToSIRLowerer {
             VarAtomBase::new(loop_var.clone(), 0, loop_width - 1),
             loop_value_trunc,
         );
-        let env = LowerEnv { inputs: env_inputs };
+        let env = LowerEnv {
+            inputs: env_inputs,
+            parent: None,
+        };
         let mut local_cache = crate::HashMap::default();
         self.lower_for_effects(builder, arena, &mut local_cache, &env, effects);
         let next_states: Vec<_> = updates
@@ -3456,7 +3780,7 @@ impl SLTToSIRLowerer {
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        env: &LowerEnv<A>,
+        env: &LowerEnv<'_, A>,
         effects: &[crate::logic_tree::comb::SLTForEffect],
     ) {
         for effect in effects {
@@ -3608,6 +3932,145 @@ mod tests {
             .values()
             .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
             .count()
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TestSIRValue {
+        payload: BigUint,
+        mask: BigUint,
+    }
+
+    fn width_mask(width: usize) -> BigUint {
+        (BigUint::from(1u8) << width) - BigUint::from(1u8)
+    }
+
+    /// Execute the small, value-only SIR subset emitted by ForFoldGroup.
+    /// Keeping this interpreter local to the lowering tests lets the tests pin
+    /// exact iteration and four-state merge semantics without adding a second
+    /// production execution path.
+    fn execute_fold_group_sir(eu: &ExecutionUnit<u32>) -> crate::HashMap<RegisterId, TestSIRValue> {
+        let mut values = crate::HashMap::default();
+        let mut current = eu.entry_block_id;
+
+        for _ in 0..100 {
+            let block = &eu.blocks[&current];
+            for instruction in &block.instructions {
+                match instruction {
+                    SIRInstruction::Imm(dst, value) => {
+                        values.insert(
+                            *dst,
+                            TestSIRValue {
+                                payload: value.payload.clone(),
+                                mask: value.mask.clone(),
+                            },
+                        );
+                    }
+                    SIRInstruction::Binary(dst, lhs, op, rhs) => {
+                        let lhs = &values[lhs];
+                        let rhs = &values[rhs];
+                        assert_eq!(lhs.mask, BigUint::from(0u8));
+                        assert_eq!(rhs.mask, BigUint::from(0u8));
+                        let width = eu.register_map[dst].width();
+                        let modulus = BigUint::from(1u8) << width;
+                        let payload = match op {
+                            BinaryOp::Add => (&lhs.payload + &rhs.payload) % &modulus,
+                            BinaryOp::Sub => (&lhs.payload + &modulus - &rhs.payload) % &modulus,
+                            BinaryOp::And => &lhs.payload & &rhs.payload,
+                            BinaryOp::Or => &lhs.payload | &rhs.payload,
+                            BinaryOp::Shr => {
+                                let shift =
+                                    rhs.payload.to_u64_digits().first().copied().unwrap_or(0);
+                                if shift > usize::MAX as u64 {
+                                    BigUint::from(0u8)
+                                } else {
+                                    &lhs.payload >> shift as usize
+                                }
+                            }
+                            BinaryOp::Eq => BigUint::from(lhs.payload == rhs.payload),
+                            BinaryOp::Ne => BigUint::from(lhs.payload != rhs.payload),
+                            other => panic!("unexpected grouped-fold binary op {other:?}"),
+                        };
+                        values.insert(
+                            *dst,
+                            TestSIRValue {
+                                payload,
+                                mask: BigUint::from(0u8),
+                            },
+                        );
+                    }
+                    SIRInstruction::Unary(dst, UnaryOp::Ident, src) => {
+                        values.insert(*dst, values[src].clone());
+                    }
+                    SIRInstruction::Concat(dst, args) => {
+                        let mut payload = BigUint::from(0u8);
+                        let mut mask = BigUint::from(0u8);
+                        for arg in args {
+                            let width = eu.register_map[arg].width();
+                            payload = (payload << width) | &values[arg].payload;
+                            mask = (mask << width) | &values[arg].mask;
+                        }
+                        values.insert(*dst, TestSIRValue { payload, mask });
+                    }
+                    SIRInstruction::Slice(dst, src, bit_offset, width) => {
+                        let mask = width_mask(*width);
+                        values.insert(
+                            *dst,
+                            TestSIRValue {
+                                payload: (&values[src].payload >> *bit_offset) & &mask,
+                                mask: (&values[src].mask >> *bit_offset) & mask,
+                            },
+                        );
+                    }
+                    SIRInstruction::Mux(dst, cond, then_value, else_value) => {
+                        let cond = &values[cond];
+                        let selected = if cond.payload == BigUint::from(0u8) {
+                            &values[else_value]
+                        } else {
+                            &values[then_value]
+                        };
+                        let width = eu.register_map[dst].width();
+                        values.insert(
+                            *dst,
+                            TestSIRValue {
+                                payload: &selected.payload & width_mask(width),
+                                mask: if cond.mask == BigUint::from(0u8) {
+                                    &selected.mask & width_mask(width)
+                                } else {
+                                    width_mask(width)
+                                },
+                            },
+                        );
+                    }
+                    other => panic!("unexpected grouped-fold instruction {other:?}"),
+                }
+            }
+
+            let (next, args) = match &block.terminator {
+                SIRTerminator::Jump(target, args) => (*target, args),
+                SIRTerminator::Branch {
+                    cond,
+                    true_block,
+                    false_block,
+                } => {
+                    if values[cond].payload == BigUint::from(0u8) {
+                        (false_block.0, &false_block.1)
+                    } else {
+                        (true_block.0, &true_block.1)
+                    }
+                }
+                SIRTerminator::Return => return values,
+                SIRTerminator::Error(code) => panic!("unexpected Error({code})"),
+            };
+            let arguments = args
+                .iter()
+                .map(|argument| values[argument].clone())
+                .collect::<Vec<_>>();
+            for (&parameter, argument) in eu.blocks[&next].params.iter().zip(arguments) {
+                values.insert(parameter, argument);
+            }
+            current = next;
+        }
+        panic!("grouped fold did not terminate at its exact trip count")
     }
 
     #[test]
@@ -4441,6 +4904,520 @@ mod tests {
             .unwrap();
 
         assert!(!SLTToSIRLowerer::new(false).is_speculatable_pure(fold, &arena));
+    }
+
+    #[test]
+    fn for_fold_group_lowers_swap_updates_as_one_counted_cfg() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let initial_a = constant(&mut arena, 0x12, 8);
+        let initial_b = constant(&mut arena, 0x34, 8);
+        let previous_a = input(&mut arena, 10, 8);
+        let previous_b = input(&mut arena, 11, 8);
+        let target_a = VarAtomBase::new(10, 0, 7);
+        let target_b = VarAtomBase::new(11, 0, 7);
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(2),
+                step: BigInt::from(3),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![
+                    SLTForFoldGroupState {
+                        target: target_a,
+                        initial: initial_a,
+                        update: previous_b,
+                    },
+                    SLTForFoldGroupState {
+                        target: target_b,
+                        initial: initial_b,
+                        update: previous_a,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let result = SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(eu.register_map[&result].width(), 16);
+        assert_eq!(
+            execute_fold_group_sir(&eu)[&result].payload,
+            BigUint::from(0x3412u16),
+            "three simultaneous swaps leave the first state in the MSBs"
+        );
+        assert_eq!(branch_count(&eu), 2, "entry guard plus counted backedge");
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Concat(..))),
+            1,
+            "the final states must be packed once at the common exit"
+        );
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
+            0
+        );
+        assert!(
+            eu.blocks
+                .values()
+                .all(|block| !matches!(block.terminator, SIRTerminator::Error(_)))
+        );
+
+        let body = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block.params.len() == 4 && matches!(block.terminator, SIRTerminator::Branch { .. })
+            })
+            .expect("counted body block");
+        assert_eq!(eu.register_map[&body.params[0]].width(), 2);
+        let SIRTerminator::Branch { true_block, .. } = &body.terminator else {
+            unreachable!()
+        };
+        assert_eq!(true_block.0, body.id);
+        let backedge_args = &true_block.1;
+        assert_eq!(backedge_args[2], body.params[3]);
+        assert_eq!(backedge_args[3], body.params[2]);
+
+        let exit = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block.params.len() == 2
+                    && block
+                        .instructions
+                        .iter()
+                        .any(|inst| matches!(inst, SIRInstruction::Concat(..)))
+            })
+            .expect("packed common exit");
+        let packed_args = exit
+            .instructions
+            .iter()
+            .find_map(|inst| match inst {
+                SIRInstruction::Concat(_, args) => Some(args),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(packed_args, &exit.params, "state zero occupies the MSBs");
+    }
+
+    #[test]
+    fn for_fold_group_executes_exactly_one_and_three_iterations() {
+        for (trip_count, expected) in [(1usize, 1u8), (3, 3)] {
+            let mut arena = SLTNodeArena::new();
+            let guard = constant(&mut arena, 1, 1);
+            let initial = constant(&mut arena, 0, 8);
+            let previous = input(&mut arena, 10, 8);
+            let one = constant(&mut arena, 1, 8);
+            let update = arena
+                .alloc(SLTNode::Binary(previous, BinaryOp::Add, one))
+                .unwrap();
+            let group = arena
+                .alloc(SLTNode::ForFoldGroup {
+                    loop_var: 20,
+                    loop_width: 8,
+                    loop_signed: false,
+                    start: BigInt::from(0),
+                    step: BigInt::from(1),
+                    trip_count,
+                    entry_guard: guard,
+                    states: vec![SLTForFoldGroupState {
+                        target: VarAtomBase::new(10, 0, 7),
+                        initial,
+                        update,
+                    }],
+                })
+                .unwrap();
+
+            let mut builder = SIRBuilder::new();
+            let result = SLTToSIRLowerer::new(false).lower(
+                &mut builder,
+                group,
+                &arena,
+                &mut crate::HashMap::default(),
+            );
+            let eu = finish_lowering(builder);
+
+            assert_eq!(
+                execute_fold_group_sir(&eu)[&result].payload,
+                BigUint::from(expected),
+                "trip_count={trip_count}"
+            );
+            assert!(
+                eu.blocks
+                    .values()
+                    .all(|block| !matches!(block.terminator, SIRTerminator::Error(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn for_fold_group_inherits_outer_inputs_with_inner_partial_state_priority() {
+        let mut arena = SLTNodeArena::new();
+        let guard = input(&mut arena, 20, 1);
+        let initial = constant(&mut arena, 0x12, 8);
+        let outer_wide = input(&mut arena, 10, 16);
+        let update = arena
+            .alloc(SLTNode::Slice {
+                expr: outer_wide,
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 30,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let outer_value = builder.alloc_logic(16);
+        builder.emit(SIRInstruction::Imm(outer_value, SIRValue::new(0xabcdu16)));
+        let outer_guard = builder.alloc_logic(1);
+        builder.emit(SIRInstruction::Imm(outer_guard, SIRValue::new(1u8)));
+        let mut inputs = crate::HashMap::default();
+        inputs.insert(VarAtomBase::new(10, 0, 15), outer_value);
+        inputs.insert(VarAtomBase::new(20, 0, 0), outer_guard);
+
+        let result = SLTToSIRLowerer::new(false).lower_with_inputs(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+            inputs,
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            execute_fold_group_sir(&eu)[&result].payload,
+            BigUint::from(0x12u8),
+            "the inner carried low byte must override the overlapping outer full value"
+        );
+        assert!(eu.blocks.values().all(|block| {
+            block
+                .instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, SIRInstruction::Load(..)))
+        }));
+    }
+
+    #[test]
+    fn for_fold_group_dynamic_array_read_stays_a_narrow_load_under_env() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let initial = constant(&mut arena, 0, 8);
+        let loop_index = input(&mut arena, 20, 8);
+        let raw_array = arena
+            .alloc(SLTNode::Input {
+                variable: 30,
+                signed: false,
+                index: vec![crate::logic_tree::comb::SLTIndex {
+                    node: loop_index,
+                    stride: 8,
+                }],
+                access: BitAccess::new(0, 255),
+            })
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Slice {
+                expr: raw_array,
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        let load_widths = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Load(_, variable, SIROffset::Dynamic(_), width)
+                    if *variable == 30 =>
+                {
+                    Some(*width)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(load_widths, vec![8]);
+    }
+
+    #[test]
+    fn false_for_fold_group_entry_guard_skips_all_updates() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 0, 1);
+        let initial = constant(&mut arena, 0x5a, 8);
+        let previous = input(&mut arena, 10, 8);
+        let one = constant(&mut arena, 1, 8);
+        let update = arena
+            .alloc(SLTNode::Binary(previous, BinaryOp::Add, one))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let result = SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 2);
+        assert_eq!(
+            execute_fold_group_sir(&eu)[&result].payload,
+            BigUint::from(0x5au8)
+        );
+        let SIRTerminator::Branch { false_block, .. } = &eu.blocks[&BlockId(0)].terminator else {
+            panic!("entry must branch around the loop")
+        };
+        assert_eq!(false_block.1.len(), 1);
+        let skipped_to = &eu.blocks[&false_block.0];
+        assert_eq!(skipped_to.params.len(), 1);
+        assert!(
+            skipped_to
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Concat(..)))
+        );
+    }
+
+    #[test]
+    fn four_state_for_fold_group_branches_then_applies_one_packed_mux() {
+        let mut arena = SLTNodeArena::new();
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(1u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let initial_a = constant(&mut arena, 1, 8);
+        let initial_b = constant(&mut arena, 2, 8);
+        let previous_a = input(&mut arena, 10, 8);
+        let previous_b = input(&mut arena, 11, 8);
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(10, 0, 7),
+                        initial: initial_a,
+                        update: previous_b,
+                    },
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(11, 0, 7),
+                        initial: initial_b,
+                        update: previous_a,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let result = SLTToSIRLowerer::new(true).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            execute_fold_group_sir(&eu)[&result].mask,
+            BigUint::from(0xffffu16),
+            "an unknown entry guard must make the packed result all-X"
+        );
+
+        assert_eq!(
+            branch_count(&eu),
+            2,
+            "the guard value plane controls loop entry"
+        );
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Concat(..))),
+            2,
+            "initial and branch-selected candidates are each packed once"
+        );
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
+            1,
+            "one packed Mux must restore X/Z guard semantics"
+        );
+
+        let entry_guard = match &eu.blocks[&BlockId(0)].terminator {
+            SIRTerminator::Branch { cond, .. } => *cond,
+            other => panic!("expected entry guard branch, got {other:?}"),
+        };
+        let mux_guard = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .find_map(|inst| match inst {
+                SIRInstruction::Mux(_, cond, _, _) => Some(*cond),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mux_guard, entry_guard);
+    }
+
+    #[test]
+    fn signed_for_fold_group_uses_a_direct_conditional_backedge() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let initial = constant(&mut arena, 0, 8);
+        let previous = input(&mut arena, 10, 8);
+        let loop_value = arena
+            .alloc(SLTNode::Input {
+                variable: 20,
+                signed: true,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(previous, BinaryOp::Add, loop_value))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: true,
+                start: BigInt::from(-1),
+                step: BigInt::from(-2),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let result = SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            execute_fold_group_sir(&eu)[&result].payload,
+            BigUint::from(0xf7u16),
+            "three iterations must observe -1, -3, and -5 exactly"
+        );
+
+        let body = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block.params.len() == 3 && matches!(block.terminator, SIRTerminator::Branch { .. })
+            })
+            .expect("counted body block");
+        assert!(body.instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::Binary(_, lhs, BinaryOp::Add, rhs)
+                if *lhs == body.params[2] && *rhs == body.params[1]
+        )));
+
+        let step_reg = body
+            .instructions
+            .iter()
+            .find_map(|inst| match inst {
+                SIRInstruction::Binary(_, lhs, BinaryOp::Add, rhs) if *lhs == body.params[1] => {
+                    Some(*rhs)
+                }
+                _ => None,
+            })
+            .expect("loop-value step");
+        let step_payload = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .find_map(|inst| match inst {
+                SIRInstruction::Imm(dst, value) if *dst == step_reg => Some(&value.payload),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(step_payload, &BigUint::from(0xfeu16));
+        let SIRTerminator::Branch { true_block, .. } = &body.terminator else {
+            unreachable!()
+        };
+        assert_eq!(true_block.0, body.id);
+        assert!(eu.blocks.values().all(|block| {
+            !matches!(&block.terminator, SIRTerminator::Jump(target, _) if *target == body.id)
+        }));
+        assert!(
+            eu.blocks
+                .values()
+                .all(|block| !matches!(block.terminator, SIRTerminator::Error(_)))
+        );
     }
 
     #[test]

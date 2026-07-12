@@ -373,8 +373,81 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             collect_inputs_with_window(*continue_cond, None, arena, set, visited);
             set.retain(|atom| atom.id != *loop_var);
         }
+        SLTNode::ForFoldGroup {
+            loop_var,
+            entry_guard,
+            states,
+            ..
+        } => {
+            let mut group_inputs = crate::HashSet::default();
+            let mut group_visited = crate::HashSet::default();
+            collect_inputs_with_window(
+                *entry_guard,
+                None,
+                arena,
+                &mut group_inputs,
+                &mut group_visited,
+            );
+            for state in states {
+                collect_inputs_with_window(
+                    state.initial,
+                    None,
+                    arena,
+                    &mut group_inputs,
+                    &mut group_visited,
+                );
+            }
+            let mut update_inputs = crate::HashSet::default();
+            let mut update_visited = crate::HashSet::default();
+            for state in states {
+                collect_inputs_with_window(
+                    state.update,
+                    None,
+                    arena,
+                    &mut update_inputs,
+                    &mut update_visited,
+                );
+            }
+            update_inputs
+                .retain(|atom| atom.id != *loop_var && !carried_states_cover_atom(atom, states));
+            group_inputs.extend(update_inputs);
+            set.extend(group_inputs);
+        }
         SLTNode::Constant(_, _, _, _) => {}
     }
+}
+
+/// Return whether the union of loop-carried ranges covers every bit of an
+/// input atom.  Matching only on the variable ID is unsound for partial state
+/// targets because uncovered bits still come from the enclosing storage.
+fn carried_states_cover_atom<A: Hash + Eq + Clone>(
+    atom: &VarAtomBase<A>,
+    states: &[crate::logic_tree::SLTForFoldGroupState<A>],
+) -> bool {
+    let mut ranges = states
+        .iter()
+        .filter(|state| state.target.id == atom.id)
+        .map(|state| state.target.access)
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|access| (access.lsb, access.msb));
+
+    let mut next = atom.access.lsb;
+    for range in ranges {
+        if range.msb < next {
+            continue;
+        }
+        if range.lsb > next {
+            return false;
+        }
+        if range.msb >= atom.access.msb {
+            return true;
+        }
+        let Some(after) = range.msb.checked_add(1) else {
+            return false;
+        };
+        next = after;
+    }
+    false
 }
 fn convert_logic_path<
     A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
@@ -500,8 +573,10 @@ fn convert_glue_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ModuleId;
+    use crate::ir::{BinaryOp, ModuleId};
+    use crate::logic_tree::SLTForFoldGroupState;
     use crate::parser::module::ModuleParser;
+    use num_bigint::{BigInt, BigUint};
     use veryl_analyzer::{
         self, Analyzer, Context, attribute_table,
         ir::{Component, Declaration, Ir, VarPath},
@@ -762,5 +837,77 @@ mod tests {
             0,
             0
         )));
+    }
+
+    #[test]
+    fn for_fold_group_inputs_keep_initial_but_hide_loop_scoped_update_bindings() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let input = |arena: &mut SLTNodeArena<u32>, variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                })
+                .unwrap()
+        };
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let initial = input(&mut arena, 2);
+        let state_input = input(&mut arena, 2);
+        let loop_input = input(&mut arena, 1);
+        let external_input = input(&mut arena, 3);
+        let uncovered_state_input = arena
+            .alloc(SLTNode::Input {
+                variable: 2,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(8, 15),
+            })
+            .unwrap();
+        let scoped_sum = arena
+            .alloc(SLTNode::Binary(state_input, BinaryOp::Add, loop_input))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(scoped_sum, BinaryOp::Add, external_input))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(
+                update,
+                BinaryOp::Add,
+                uncovered_state_input,
+            ))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(2, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut inputs = crate::HashSet::default();
+        collect_inputs(group, &arena, &mut inputs);
+
+        assert!(inputs.contains(&VarAtomBase::new(2, 0, 7)));
+        assert!(inputs.contains(&VarAtomBase::new(2, 8, 15)));
+        assert!(inputs.contains(&VarAtomBase::new(3, 0, 7)));
+        assert!(!inputs.iter().any(|atom| atom.id == 1));
     }
 }

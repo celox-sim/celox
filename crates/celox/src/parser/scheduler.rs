@@ -131,6 +131,112 @@ fn calculate_required_iterations(adj: &[Vec<usize>], order: &[usize]) -> usize {
     // Base execution (1) + number of times signals loop back (overall_max_delay)
     overall_max_delay + 1
 }
+
+fn ranges_cover_access(ranges: &[BitAccess], access: BitAccess) -> bool {
+    let mut ranges = ranges.to_vec();
+    ranges.sort_unstable_by_key(|range| (range.lsb, range.msb));
+    let mut next = access.lsb;
+    for range in ranges {
+        if range.msb < next {
+            continue;
+        }
+        if range.lsb > next {
+            return false;
+        }
+        if range.msb >= access.msb {
+            return true;
+        }
+        let Some(after) = range.msb.checked_add(1) else {
+            return false;
+        };
+        next = after;
+    }
+    false
+}
+
+/// Conservatively check that every input of `address` reachable from `root`
+/// is supplied by the carried ranges. Dynamic inputs retain their complete
+/// declared access here; retaining an extra external dependency is safe.
+fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
+    root: NodeId,
+    address: &Addr,
+    ranges: &[BitAccess],
+    arena: &SLTNodeArena<Addr>,
+) -> bool {
+    let mut visited = HashSet::default();
+    let mut work = vec![root];
+    while let Some(node) = work.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } => {
+                if variable == address && !ranges_cover_access(ranges, *access) {
+                    return false;
+                }
+                work.extend(index.iter().map(|entry| entry.node));
+            }
+            SLTNode::Constant(..) => {}
+            SLTNode::Binary(lhs, _, rhs) => {
+                work.push(*lhs);
+                work.push(*rhs);
+            }
+            SLTNode::Unary(_, inner) => work.push(*inner),
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                work.push(*cond);
+                work.push(*then_expr);
+                work.push(*else_expr);
+            }
+            SLTNode::Concat(parts) => work.extend(parts.iter().map(|(part, _)| *part)),
+            SLTNode::Slice { expr, .. } => work.push(*expr),
+            SLTNode::ForFold {
+                start,
+                end,
+                initials,
+                updates,
+                effects,
+                continue_cond,
+                ..
+            } => {
+                if let crate::logic_tree::SLTLoopBound::Expr(node) = start {
+                    work.push(*node);
+                }
+                if let crate::logic_tree::SLTLoopBound::Expr(node) = end {
+                    work.push(*node);
+                }
+                work.extend(initials.iter().map(|state| state.expr));
+                work.extend(updates.iter().map(|state| state.expr));
+                for effect in effects {
+                    work.extend(effect.guard);
+                    work.extend(effect.args.iter().copied());
+                }
+                work.push(*continue_cond);
+            }
+            SLTNode::ForFoldGroup {
+                entry_guard,
+                states,
+                ..
+            } => {
+                work.push(*entry_guard);
+                for state in states {
+                    work.push(state.initial);
+                    work.push(state.update);
+                }
+            }
+        }
+    }
+    true
+}
+
 fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
     node: crate::logic_tree::NodeId,
     arena: &SLTNodeArena<Addr>,
@@ -245,6 +351,49 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                 inverse_memo,
             ));
             set.remove(loop_var);
+            set
+        }
+        crate::logic_tree::SLTNode::ForFoldGroup {
+            loop_var,
+            entry_guard,
+            states,
+            ..
+        } => {
+            let mut set = collect_node_input_deps(*entry_guard, arena, memo, inverse_memo);
+            for state in states {
+                set.extend(collect_node_input_deps(
+                    state.initial,
+                    arena,
+                    memo,
+                    inverse_memo,
+                ));
+            }
+            let mut update_deps = HashSet::default();
+            for state in states {
+                update_deps.extend(collect_node_input_deps(
+                    state.update,
+                    arena,
+                    memo,
+                    inverse_memo,
+                ));
+            }
+            update_deps.remove(loop_var);
+
+            let mut state_ranges: HashMap<Addr, Vec<BitAccess>> = HashMap::default();
+            for state in states {
+                state_ranges
+                    .entry(state.target.id)
+                    .or_default()
+                    .push(state.target.access);
+            }
+            for (state_id, ranges) in state_ranges {
+                if states.iter().all(|state| {
+                    node_reads_only_covered_ranges(state.update, &state_id, &ranges, arena)
+                }) {
+                    update_deps.remove(&state_id);
+                }
+            }
+            set.extend(update_deps);
             set
         }
         crate::logic_tree::SLTNode::Constant(_, _, _, _) => HashSet::default(),
@@ -364,19 +513,23 @@ fn pre_lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Disp
     }
 }
 
-fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     lowerer: &crate::logic_tree::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
+    prepared_result: Option<RegisterId>,
 ) {
     match &path.target {
         LogicPathTarget::Var(target) => {
             for node in &path.pre_lower_nodes {
                 pre_lower_logic_path_node(lowerer, builder, path, *node, arena, lower_cache);
             }
-            let result_reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
+            let result_reg = match prepared_result {
+                Some(result) => result,
+                None => lower_logic_path_expr(lowerer, builder, path, arena, lower_cache),
+            };
             let width = 1 + target.access.msb - target.access.lsb;
             let old_reg = if path.comb_capture_enable_sites.is_empty() {
                 None
@@ -415,6 +568,7 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
             fatal_error_code,
             consume_enabled,
         } => {
+            debug_assert!(prepared_result.is_none());
             if let Some(loop_runner) = loop_runner {
                 lower_logic_path_node(lowerer, builder, path, *loop_runner, arena, lower_cache);
                 return;
@@ -466,6 +620,16 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     }
 }
 
+fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    path: &LogicPath<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+) {
+    emit_logic_path_store_with_result(lowerer, builder, path, arena, lower_cache, None);
+}
+
 fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     path: &LogicPath<Addr>,
     inverse_dep_memo: &HashMap<Addr, HashSet<NodeId>>,
@@ -479,6 +643,66 @@ fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + D
             lower_cache.remove(node);
         }
     }
+}
+
+fn projected_for_fold_group<Addr: Clone + Eq + Hash>(
+    mut node: NodeId,
+    arena: &SLTNodeArena<Addr>,
+) -> Option<NodeId> {
+    loop {
+        match arena.get(node) {
+            SLTNode::ForFoldGroup { .. } => return Some(node),
+            SLTNode::Slice { expr, .. } => node = *expr,
+            _ => return None,
+        }
+    }
+}
+
+/// Materialize every direct output projection of a shared grouped fold before
+/// emitting any of their Stores. A Store may invalidate the ordinary lowering
+/// cache; keeping the registers here preserves the fold's simultaneous-state
+/// semantics and avoids rerunning the counted loop for each projection.
+fn prepare_atomic_fold_group_results<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    indices: &[usize],
+    input: &[LogicPath<Addr>],
+    lowerer: &crate::logic_tree::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+) -> HashMap<usize, RegisterId> {
+    let mut counts = HashMap::default();
+    for &idx in indices {
+        let path = &input[idx];
+        if path.target.var().is_none()
+            || !path.local_inputs.is_empty()
+            || !path.pre_lower_nodes.is_empty()
+        {
+            continue;
+        }
+        if let Some(group) = projected_for_fold_group(path.expr, arena) {
+            *counts.entry(group).or_insert(0usize) += 1;
+        }
+    }
+
+    let mut prepared = HashMap::default();
+    for &idx in indices {
+        let path = &input[idx];
+        if !path.local_inputs.is_empty() || !path.pre_lower_nodes.is_empty() {
+            continue;
+        }
+        let Some(group) = projected_for_fold_group(path.expr, arena) else {
+            continue;
+        };
+        if counts.get(&group).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
+        let result = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
+        prepared.insert(idx, result);
+    }
+    prepared
 }
 
 fn slice_source<Addr: Clone + Eq + Hash>(
@@ -637,6 +861,7 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     lower_cache: &mut HashMap<NodeId, RegisterId>,
     dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
     inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+    prepared_results: &HashMap<usize, RegisterId>,
     four_state: bool,
     var_widths: &HashMap<Addr, usize>,
 ) {
@@ -691,19 +916,23 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 .all(|idx| input[*idx].comb_capture_enable_sites.is_empty());
 
             if contiguous && within_var_width && !has_self_ref && no_comb_capture_enable_sites {
-                if try_emit_common_slice_store(
-                    &sorted_by_lsb,
-                    input,
-                    lowerer,
-                    builder,
-                    arena,
-                    lower_cache,
-                    dep_memo,
-                    inverse_dep_memo,
-                    target_addr,
-                    merged_lsb,
-                    merged_width,
-                ) {
+                if sorted_by_lsb
+                    .iter()
+                    .all(|idx| !prepared_results.contains_key(idx))
+                    && try_emit_common_slice_store(
+                        &sorted_by_lsb,
+                        input,
+                        lowerer,
+                        builder,
+                        arena,
+                        lower_cache,
+                        dep_memo,
+                        inverse_dep_memo,
+                        target_addr,
+                        merged_lsb,
+                        merged_width,
+                    )
+                {
                     if let Some(to_remove) = inverse_dep_memo.get(&target_addr) {
                         for node in to_remove {
                             lower_cache.remove(node);
@@ -730,7 +959,9 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                             lower_cache,
                         );
                     }
-                    let reg = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
+                    let reg = prepared_results.get(&idx).copied().unwrap_or_else(|| {
+                        lower_logic_path_expr(lowerer, builder, path, arena, lower_cache)
+                    });
                     let target = path.target.var().unwrap();
                     let w = 1 + target.access.msb - target.access.lsb;
                     regs.push((reg, w));
@@ -771,7 +1002,14 @@ fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     for &idx in pending.iter() {
         let path = &input[idx];
         collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
-        emit_logic_path_store(lowerer, builder, path, arena, lower_cache);
+        emit_logic_path_store_with_result(
+            lowerer,
+            builder,
+            path,
+            arena,
+            lower_cache,
+            prepared_results.get(&idx).copied(),
+        );
         invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
     }
 
@@ -804,6 +1042,16 @@ fn flush_pending_layer<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         if segment.is_empty() {
             return;
         }
+        let prepared_results = prepare_atomic_fold_group_results(
+            segment,
+            input,
+            lowerer,
+            builder,
+            arena,
+            lower_cache,
+            dep_memo,
+            inverse_dep_memo,
+        );
         let mut groups: Vec<(Addr, Vec<usize>)> = Vec::new();
         for &idx in segment.iter() {
             let target = input[idx].target.var().unwrap().id;
@@ -827,6 +1075,7 @@ fn flush_pending_layer<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 lower_cache,
                 dep_memo,
                 inverse_dep_memo,
+                &prepared_results,
                 four_state,
                 var_widths,
             );
@@ -856,6 +1105,7 @@ fn flush_pending_layer<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 lower_cache,
                 dep_memo,
                 inverse_dep_memo,
+                &HashMap::default(),
                 four_state,
                 var_widths,
             );
@@ -1409,4 +1659,294 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         execution_units: result_eus,
         runtime_errors,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::{BigInt, BigUint};
+
+    use super::{collect_node_input_deps, sort};
+    use crate::ir::{BinaryOp, BitAccess, SIRInstruction, SIRTerminator, VarAtomBase};
+    use crate::logic_tree::{
+        LogicPath, LogicPathTarget, SLTForFoldGroupState, SLTNode, SLTNodeArena,
+    };
+
+    #[test]
+    fn for_fold_group_dependencies_keep_initial_but_hide_loop_scoped_updates() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let input = |arena: &mut SLTNodeArena<u32>, variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                })
+                .unwrap()
+        };
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let initial = input(&mut arena, 2);
+        let state_input = input(&mut arena, 2);
+        let loop_input = input(&mut arena, 1);
+        let external_input = input(&mut arena, 3);
+        let scoped_sum = arena
+            .alloc(SLTNode::Binary(state_input, BinaryOp::Add, loop_input))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(scoped_sum, BinaryOp::Add, external_input))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(2, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+        let mut memo = crate::HashMap::default();
+        let mut inverse_memo = crate::HashMap::default();
+
+        let dependencies = collect_node_input_deps(group, &arena, &mut memo, &mut inverse_memo);
+
+        assert!(
+            dependencies.contains(&2),
+            "initial state is an external dependency"
+        );
+        assert!(
+            dependencies.contains(&3),
+            "ordinary update input remains external"
+        );
+        assert!(
+            !dependencies.contains(&1),
+            "loop variable is supplied by the fold"
+        );
+    }
+
+    #[test]
+    fn partial_for_fold_group_state_keeps_uncovered_variable_dependency() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let initial = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let carried = arena
+            .alloc(SLTNode::Input {
+                variable: 2,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let uncovered = arena
+            .alloc(SLTNode::Input {
+                variable: 2,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(8, 15),
+            })
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(carried, BinaryOp::Add, uncovered))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(2, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+        let mut memo = crate::HashMap::default();
+        let mut inverse_memo = crate::HashMap::default();
+
+        let dependencies = collect_node_input_deps(group, &arena, &mut memo, &mut inverse_memo);
+        assert!(
+            dependencies.contains(&2),
+            "the uncovered high byte remains an external dependency"
+        );
+    }
+
+    #[test]
+    fn shared_for_fold_group_projections_materialize_once_before_stores() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let input = |arena: &mut SLTNodeArena<u32>, variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                })
+                .unwrap()
+        };
+        let initial_a = input(&mut arena, 1);
+        let initial_b = input(&mut arena, 2);
+        let previous_a = input(&mut arena, 1);
+        let previous_b = input(&mut arena, 2);
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 3,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(1, 0, 7),
+                        initial: initial_a,
+                        update: previous_b,
+                    },
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(2, 0, 7),
+                        initial: initial_b,
+                        update: previous_a,
+                    },
+                ],
+            })
+            .unwrap();
+        let high = arena
+            .alloc(SLTNode::Slice {
+                expr: group,
+                access: BitAccess::new(8, 15),
+            })
+            .unwrap();
+        let low = arena
+            .alloc(SLTNode::Slice {
+                expr: group,
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let path = |target, expr| LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
+            // Keep the scheduling graph acyclic in this focused cache test;
+            // dependency memoization still sees both initial reads.
+            sources: crate::HashSet::default(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr,
+        };
+        let mut widths = crate::HashMap::default();
+        widths.insert(1, 8);
+        widths.insert(2, 8);
+
+        let result = sort(
+            vec![path(1, high), path(2, low)],
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &widths,
+            1,
+        )
+        .unwrap();
+        assert_eq!(result.execution_units.len(), 1);
+        let eu = &result.execution_units[0];
+        assert_eq!(
+            eu.blocks
+                .values()
+                .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
+                .count(),
+            2,
+            "one grouped fold has only its entry and counted-loop branches"
+        );
+        assert_eq!(
+            eu.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            2,
+            "both initial values are loaded once, not once per projection"
+        );
+
+        let store_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, SIRInstruction::Store(..)))
+                    .count()
+                    == 2
+            })
+            .expect("both atomic projection stores share the materialization exit");
+        let first_store = store_block
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction, SIRInstruction::Store(..)))
+            .unwrap();
+        let stored_values = store_block
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(_, _, _, value, _, _) => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for value in stored_values {
+            let definition = store_block
+                .instructions
+                .iter()
+                .position(|instruction| match instruction {
+                    SIRInstruction::Binary(dst, ..)
+                    | SIRInstruction::Unary(dst, ..)
+                    | SIRInstruction::Slice(dst, ..)
+                    | SIRInstruction::Concat(dst, ..)
+                    | SIRInstruction::Mux(dst, ..) => *dst == value,
+                    _ => false,
+                })
+                .expect("stored projection has a local definition");
+            assert!(definition < first_store);
+        }
+    }
 }

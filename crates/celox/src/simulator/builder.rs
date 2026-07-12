@@ -45,6 +45,8 @@ fn analyze(
         errors.append(&mut analyzer.analyze_pass1("prj", &parsed.veryl));
         parsers.push(parsed);
     }
+    let loop_sources =
+        parser::loop_provenance::LoopSourceTable::collect(parsers.iter().map(|x| &x.veryl));
 
     // Global post-pass1
     errors.append(&mut Analyzer::analyze_post_pass1());
@@ -77,6 +79,7 @@ fn analyze(
         ));
     }
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
+    let loop_provenance = loop_sources.match_unrolled(&ir);
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
@@ -89,6 +92,7 @@ fn analyze(
     let sir = parser::parse(
         &top,
         &ir,
+        &loop_provenance,
         &build_config,
         ignored_loops,
         true_loops,

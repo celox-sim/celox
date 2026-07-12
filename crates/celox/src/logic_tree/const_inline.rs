@@ -25,6 +25,9 @@ fn is_const_expr<A: Clone + Eq + Hash>(node: NodeId, arena: &SLTNodeArena<A>) ->
         SLTNode::Binary(l, _, r) => is_const_expr(*l, arena) && is_const_expr(*r, arena),
         SLTNode::Unary(_, inner) => is_const_expr(*inner, arena),
         SLTNode::Concat(parts) => parts.iter().all(|(id, _)| is_const_expr(*id, arena)),
+        // The update expressions contain loop-scoped inputs whose values are
+        // supplied by the fold, so child constness alone is not sufficient.
+        SLTNode::ForFoldGroup { .. } => false,
         _ => false,
     }
 }
@@ -124,6 +127,7 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
             };
             (result & &width_mask, BigUint::from(0u32), width)
         }
+        SLTNode::ForFoldGroup { .. } => (BigUint::from(0u32), width_mask, width),
         _ => (BigUint::from(0u32), width_mask, width),
     }
 }
@@ -327,6 +331,59 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
                     then_expr: new_then,
                     else_expr: new_else,
                 })?
+            }
+        }
+        SLTNode::ForFoldGroup {
+            loop_var,
+            loop_width,
+            loop_signed,
+            start,
+            step,
+            trip_count,
+            entry_guard,
+            states,
+        } => {
+            // Never replace the loop variable or loop-carried state bindings
+            // with a module-level constant.  If none of those IDs is a
+            // constant candidate, ordinary child rewriting is context-free
+            // and can share the caller's memoization table safely.
+            let binding_is_constant = const_vars.contains_key(&loop_var)
+                || states
+                    .iter()
+                    .any(|state| const_vars.contains_key(&state.target.id));
+            if binding_is_constant {
+                node
+            } else {
+                let new_entry_guard = rewrite_expr(entry_guard, arena, const_vars, cache)?;
+                let new_states = states
+                    .iter()
+                    .map(|state| {
+                        Ok(crate::logic_tree::comb::SLTForFoldGroupState {
+                            target: state.target.clone(),
+                            initial: rewrite_expr(state.initial, arena, const_vars, cache)?,
+                            update: rewrite_expr(state.update, arena, const_vars, cache)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
+                let unchanged = new_entry_guard == entry_guard
+                    && new_states
+                        .iter()
+                        .zip(&states)
+                        .all(|(new, old)| new.initial == old.initial && new.update == old.update);
+                if unchanged {
+                    node
+                } else {
+                    arena.alloc(SLTNode::ForFoldGroup {
+                        loop_var,
+                        loop_width,
+                        loop_signed,
+                        start,
+                        step,
+                        trip_count,
+                        entry_guard: new_entry_guard,
+                        states: new_states,
+                    })?
+                }
             }
         }
         _ => node,

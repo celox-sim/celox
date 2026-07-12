@@ -4,6 +4,7 @@ mod node;
 mod node_facts;
 mod node_rules;
 mod path;
+mod recover_unrolled;
 mod state;
 
 pub use path::{LogicPath, LogicPathTarget};
@@ -40,7 +41,8 @@ use state::{FunctionControlState, LoopControlState};
 
 pub(crate) use node::SLTNodeArenaEditError;
 pub use node::{
-    NodeId, SLTForEffect, SLTForUpdate, SLTIndex, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
+    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTLoopBound, SLTNode,
+    SLTNodeArena, SLTStepOp,
 };
 pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
 
@@ -52,10 +54,29 @@ pub(super) fn range_store_error(
     ParserError::illegal_context(context, error.to_string(), token)
 }
 
-pub fn parse_comb(
+#[cfg(test)]
+fn parse_comb(
     module: &Module,
     decl: &CombDeclaration,
     arena: &mut SLTNodeArena<VarId>,
+) -> Result<
+    (
+        Vec<LogicPath<VarId>>,
+        SymbolicStore<VarId>,
+        BoundaryMap<VarId>,
+        Vec<CombObserver<VarId>>,
+        Vec<RuntimeEventSite>,
+    ),
+    ParserError,
+> {
+    parse_comb_with_loop_recovery(module, decl, arena, &[])
+}
+
+pub(crate) fn parse_comb_with_loop_recovery(
+    module: &Module,
+    decl: &CombDeclaration,
+    arena: &mut SLTNodeArena<VarId>,
+    loop_candidates: &[crate::parser::loop_provenance::LoopRecoveryCandidate],
 ) -> Result<
     (
         Vec<LogicPath<VarId>>,
@@ -87,12 +108,14 @@ pub fn parse_comb(
 
     // 2. Symbolic Execution: Evaluate statements sequentially to update the symbolic state.
     let effect_initial_store = current_store.clone();
-    let (final_store, boundaries) = decl
-        .statements
-        .iter()
-        .try_fold((current_store, BoundaryMap::default()), |(s, b), stmt| {
-            eval_statement(module, s, b, stmt, arena)
-        })?;
+    let (final_store, boundaries) = recover_unrolled::eval_statements(
+        module,
+        current_store,
+        BoundaryMap::default(),
+        &decl.statements,
+        arena,
+        loop_candidates,
+    )?;
     let mut effects = CombEffectCollector::default();
     collect_comb_effects_statements(
         module,
@@ -339,6 +362,18 @@ fn collect_comb_path_stats(
                 }
             }
             collect_comb_path_stats(*continue_cond, arena, visited, stats);
+        }
+        SLTNode::ForFoldGroup {
+            entry_guard,
+            states,
+            ..
+        } => {
+            stats.for_folds += 1;
+            collect_comb_path_stats(*entry_guard, arena, visited, stats);
+            for state in states {
+                collect_comb_path_stats(state.initial, arena, visited, stats);
+                collect_comb_path_stats(state.update, arena, visited, stats);
+            }
         }
     }
 }

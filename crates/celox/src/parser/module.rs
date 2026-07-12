@@ -10,8 +10,8 @@ use crate::ir::{
 
 use crate::logic_tree::{
     LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SLTNodeFacts, SymbolicStore,
-    coerce_node_width, eval_assignment_expression, eval_expression, get_width, parse_comb,
-    range_store::RangeStore,
+    coerce_node_width, eval_assignment_expression, eval_expression, get_width,
+    parse_comb_with_loop_recovery, range_store::RangeStore,
 };
 use crate::parser::{
     BuildConfig, LoweringPhase, ParserError,
@@ -20,6 +20,7 @@ use crate::parser::{
     },
     bitslicer::BitSlicer,
     ff::FfParser,
+    loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
     registry::get_port_type,
     resolve_total_width,
 };
@@ -48,6 +49,7 @@ pub struct ModuleParser<'a> {
     ff_parser: FfParser<'a>,
     arena: SLTNodeArena<VarId>,
     reset_clock_map: HashMap<VarId, VarId>,
+    loop_candidates: Vec<LoopRecoveryCandidate>,
 }
 
 fn build_dynamic_output_glue(
@@ -420,17 +422,34 @@ fn verify_glue_block(
 }
 
 impl<'a> ModuleParser<'a> {
+    #[cfg(test)]
     pub fn parse(
         module: &'a Module,
         config: &BuildConfig,
         inst_ids: &'a [ModuleId],
     ) -> Result<SimModule, ParserError> {
-        let parser = Self::new(module, config, inst_ids)?;
+        let parser = Self::new(module, Vec::new(), config, inst_ids)?;
+        parser.parse_inner()
+    }
+
+    pub(crate) fn parse_with_loop_provenance(
+        module: &'a Module,
+        loop_provenance: &LoopProvenance,
+        config: &BuildConfig,
+        inst_ids: &'a [ModuleId],
+    ) -> Result<SimModule, ParserError> {
+        let parser = Self::new(
+            module,
+            loop_provenance.candidates_for_module(module),
+            config,
+            inst_ids,
+        )?;
         parser.parse_inner()
     }
 
     fn new(
         module: &'a Module,
+        loop_candidates: Vec<LoopRecoveryCandidate>,
         config: &BuildConfig,
         inst_ids: &'a [ModuleId],
     ) -> Result<Self, ParserError> {
@@ -449,6 +468,7 @@ impl<'a> ModuleParser<'a> {
             ff_parser: FfParser::new(module, *config),
             arena: SLTNodeArena::new(),
             reset_clock_map: HashMap::default(),
+            loop_candidates,
         })
     }
 
@@ -457,8 +477,12 @@ impl<'a> ModuleParser<'a> {
         decl: &veryl_analyzer::ir::CombDeclaration,
     ) -> Result<(), ParserError> {
         let arena_start = self.arena.len();
-        let (paths, store, boundaries, mut observers, sites) =
-            parse_comb(self.module, decl, &mut self.arena)?;
+        let (paths, store, boundaries, mut observers, sites) = parse_comb_with_loop_recovery(
+            self.module,
+            decl,
+            &mut self.arena,
+            &self.loop_candidates,
+        )?;
         let site_offset = self.comb_runtime_event_sites.len();
         for observer in &mut observers {
             observer.site_id += site_offset as u32;
@@ -1104,14 +1128,17 @@ impl<'a> ModuleParser<'a> {
         let mut runtime_event_sites = self.ff_parser.runtime_event_sites().clone();
         runtime_event_sites.extend(self.comb_runtime_event_sites);
         let mut variable_widths = HashMap::default();
+        let mut variable_signedness = HashMap::default();
         for (id, variable) in &self.module.variables {
             variable_widths.insert(*id, resolve_total_width(self.module, variable)?);
+            variable_signedness.insert(*id, variable.r#type.signed);
         }
         super::verify_slt_roots(
             &self.arena,
             &self.comb_blocks,
             &self.comb_observers,
             &variable_widths,
+            &variable_signedness,
             "after module symbolic lowering",
         )?;
         Ok(SimModule {
@@ -1381,8 +1408,59 @@ fn collect_glue_sources_with_window(
             collect_glue_sources_with_window(*continue_cond, None, arena, set);
             set.retain(|atom| atom.id != *loop_var);
         }
+        SLTNode::ForFoldGroup {
+            loop_var,
+            entry_guard,
+            states,
+            ..
+        } => {
+            let mut group_sources = HashSet::default();
+            collect_glue_sources_with_window(*entry_guard, None, arena, &mut group_sources);
+            for state in states {
+                collect_glue_sources_with_window(state.initial, None, arena, &mut group_sources);
+            }
+            let mut update_sources = HashSet::default();
+            for state in states {
+                collect_glue_sources_with_window(state.update, None, arena, &mut update_sources);
+            }
+            update_sources.retain(|atom| {
+                atom.id != *loop_var && !carried_glue_states_cover_atom(atom, states)
+            });
+            group_sources.extend(update_sources);
+            set.extend(group_sources);
+        }
         SLTNode::Constant(_, _, _, _) => {}
     }
+}
+
+fn carried_glue_states_cover_atom(
+    atom: &VarAtomBase<GlueAddr>,
+    states: &[crate::logic_tree::SLTForFoldGroupState<GlueAddr>],
+) -> bool {
+    let mut ranges = states
+        .iter()
+        .filter(|state| state.target.id == atom.id)
+        .map(|state| state.target.access)
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|access| (access.lsb, access.msb));
+
+    let mut next = atom.access.lsb;
+    for range in ranges {
+        if range.msb < next {
+            continue;
+        }
+        if range.lsb > next {
+            return false;
+        }
+        if range.msb >= atom.access.msb {
+            return true;
+        }
+        let Some(after) = range.msb.checked_add(1) else {
+            return false;
+        };
+        next = after;
+    }
+    false
 }
 
 struct ParsedMemoryWrites {
@@ -1600,7 +1678,12 @@ fn resolve_readmem_path_with_fallback(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_readmem_path_with_fallback;
+    use num_bigint::{BigInt, BigUint};
+    use veryl_analyzer::ir::VarId;
+
+    use super::{collect_glue_sources, resolve_readmem_path_with_fallback};
+    use crate::ir::{BinaryOp, BitAccess, GlueAddr, VarAtomBase};
+    use crate::logic_tree::{SLTForFoldGroupState, SLTNode, SLTNodeArena};
 
     #[test]
     fn readmem_path_falls_back_to_project_root() {
@@ -1638,5 +1721,85 @@ mod tests {
         );
 
         assert_eq!(resolved, source_data_dir.join("boot.hex"));
+    }
+
+    #[test]
+    fn for_fold_group_glue_sources_keep_initial_but_hide_scoped_updates() {
+        let loop_id = VarId::default();
+        let mut state_id = loop_id;
+        state_id.inc();
+        let mut external_id = state_id;
+        external_id.inc();
+        let loop_addr = GlueAddr::Parent(loop_id);
+        let state_addr = GlueAddr::Parent(state_id);
+        let external_addr = GlueAddr::Parent(external_id);
+
+        let mut arena = SLTNodeArena::new();
+        let input = |arena: &mut SLTNodeArena<GlueAddr>, variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                })
+                .unwrap()
+        };
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let initial = input(&mut arena, state_addr);
+        let state_input = input(&mut arena, state_addr);
+        let loop_input = input(&mut arena, loop_addr);
+        let external_input = input(&mut arena, external_addr);
+        let uncovered_state_input = arena
+            .alloc(SLTNode::Input {
+                variable: state_addr,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(8, 15),
+            })
+            .unwrap();
+        let scoped_sum = arena
+            .alloc(SLTNode::Binary(state_input, BinaryOp::Add, loop_input))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(scoped_sum, BinaryOp::Add, external_input))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(
+                update,
+                BinaryOp::Add,
+                uncovered_state_input,
+            ))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: loop_addr,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(state_addr, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let sources = collect_glue_sources(group, &arena);
+
+        assert!(sources.contains(&VarAtomBase::new(state_addr, 0, 7)));
+        assert!(sources.contains(&VarAtomBase::new(state_addr, 8, 15)));
+        assert!(sources.contains(&VarAtomBase::new(external_addr, 0, 7)));
+        assert!(!sources.iter().any(|atom| atom.id == loop_addr));
     }
 }

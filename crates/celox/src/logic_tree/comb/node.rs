@@ -1,6 +1,6 @@
 use std::{fmt, hash::Hash};
 
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::node_facts::{SLTNodeFactsError, verify_append, verify_raw_nodes};
@@ -471,6 +471,35 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                 }
                 write!(f, " }}")
             }
+            SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start,
+                step,
+                trip_count,
+                entry_guard,
+                states,
+            } => {
+                write!(
+                    f,
+                    "fold_group {loop_var}:{loop_width}{} = {start} step {step} count {trip_count} if n{}:",
+                    if *loop_signed { "s" } else { "u" },
+                    entry_guard.0,
+                )?;
+                arena.get(*entry_guard).fmt_expression(f, arena)?;
+                write!(f, " [")?;
+                for (index, state) in states.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{} = n{}:", state.target, state.initial.0,)?;
+                    arena.get(state.initial).fmt_expression(f, arena)?;
+                    write!(f, " -> n{}:", state.update.0)?;
+                    arena.get(state.update).fmt_expression(f, arena)?;
+                }
+                write!(f, "]")
+            }
             SLTNode::Concat(parts) => {
                 write!(f, "{{")?;
                 for (i, (part, w)) in parts.iter().enumerate() {
@@ -526,6 +555,23 @@ pub struct SLTForUpdate<A: Hash + Eq + Clone> {
     pub expr: NodeId,
 }
 
+/// One loop-carried state in a grouped fixed-trip-count fold.
+///
+/// `initial` is evaluated before entering the loop and `update` is evaluated
+/// once per iteration with all state targets bound to the previous iteration's
+/// values.  A [`SLTNode::ForFoldGroup`] packs the final values in `states`
+/// order, with the first state occupying the most-significant bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + std::hash::Hash + Eq + Clone",
+    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
+pub struct SLTForFoldGroupState<A: Hash + Eq + Clone> {
+    pub target: VarAtomBase<A>,
+    pub initial: NodeId,
+    pub update: NodeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SLTForEffect {
     pub site_id: u32,
@@ -575,6 +621,18 @@ pub enum SLTNode<A: Hash + Eq + Clone> {
         effects: Vec<SLTForEffect>,
         continue_cond: NodeId,
     },
+    /// A fixed-trip-count fold carrying multiple state values and returning
+    /// their final values as one packed result.
+    ForFoldGroup {
+        loop_var: A,
+        loop_width: usize,
+        loop_signed: bool,
+        start: BigInt,
+        step: BigInt,
+        trip_count: usize,
+        entry_guard: NodeId,
+        states: Vec<SLTForFoldGroupState<A>>,
+    },
     // Concat/Slice are primarily used for RHS expression evaluation.
     // On the LHS (assignments), bit manipulation is handled implicitly by RangeStore atomization.
     Concat(Vec<(NodeId, usize)>),
@@ -622,6 +680,18 @@ enum SLTNodeSerde<A: Hash + Eq + Clone> {
         updates: Vec<SLTForUpdate<A>>,
         effects: Vec<SLTForEffect>,
         continue_cond: NodeId,
+    },
+    ForFoldGroup {
+        loop_var: A,
+        loop_width: usize,
+        loop_signed: bool,
+        /// Signed two's-complement, little-endian representation.
+        start: Vec<u8>,
+        /// Signed two's-complement, little-endian representation.
+        step: Vec<u8>,
+        trip_count: usize,
+        entry_guard: NodeId,
+        states: Vec<SLTForFoldGroupState<A>>,
     },
     Concat(Vec<(NodeId, usize)>),
     Slice {
@@ -691,6 +761,25 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
                 updates,
                 effects,
                 continue_cond,
+            },
+            SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start,
+                step,
+                trip_count,
+                entry_guard,
+                states,
+            } => SLTNodeSerde::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start: start.to_signed_bytes_le(),
+                step: step.to_signed_bytes_le(),
+                trip_count,
+                entry_guard,
+                states,
             },
             SLTNode::Concat(parts) => SLTNodeSerde::Concat(parts),
             SLTNode::Slice { expr, access } => SLTNodeSerde::Slice { expr, access },
@@ -764,6 +853,25 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
                 updates,
                 effects,
                 continue_cond,
+            },
+            SLTNodeSerde::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start,
+                step,
+                trip_count,
+                entry_guard,
+                states,
+            } => SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start: BigInt::from_signed_bytes_le(&start),
+                step: BigInt::from_signed_bytes_le(&step),
+                trip_count,
+                entry_guard,
+                states,
             },
             SLTNodeSerde::Concat(parts) => SLTNode::Concat(parts),
             SLTNodeSerde::Slice { expr, access } => SLTNode::Slice { expr, access },
@@ -986,6 +1094,60 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 }
             }
 
+            SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start,
+                step,
+                trip_count,
+                entry_guard,
+                states,
+            } => {
+                let mapped_states = states
+                    .iter()
+                    .map(|state| {
+                        Ok(SLTForFoldGroupState {
+                            target: VarAtomBase::new(
+                                f(&state.target.id),
+                                state.target.access.lsb,
+                                state.target.access.msb,
+                            ),
+                            initial: arena.get(state.initial).map_addr(
+                                state.initial,
+                                arena,
+                                target_arena,
+                                cache,
+                                f,
+                            )?,
+                            update: arena.get(state.update).map_addr(
+                                state.update,
+                                arena,
+                                target_arena,
+                                cache,
+                                f,
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
+                SLTNode::ForFoldGroup {
+                    loop_var: f(loop_var),
+                    loop_width: *loop_width,
+                    loop_signed: *loop_signed,
+                    start: start.clone(),
+                    step: step.clone(),
+                    trip_count: *trip_count,
+                    entry_guard: arena.get(*entry_guard).map_addr(
+                        *entry_guard,
+                        arena,
+                        target_arena,
+                        cache,
+                        f,
+                    )?,
+                    states: mapped_states,
+                }
+            }
+
             SLTNode::Concat(parts) => {
                 let mapped_parts = parts
                     .iter()
@@ -1020,14 +1182,14 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NodeId, SLTForEffect, SLTIndex, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError,
-        SLTNodeArenaWire, SLTStepOp,
+        NodeId, SLTForEffect, SLTForFoldGroupState, SLTIndex, SLTLoopBound, SLTNode, SLTNodeArena,
+        SLTNodeArenaEditError, SLTNodeArenaWire, SLTStepOp,
     };
     use crate::{
         ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
         logic_tree::comb::{expr::get_width, node_facts::SLTNodeFacts},
     };
-    use num_bigint::BigUint;
+    use num_bigint::{BigInt, BigUint};
 
     fn constant(value: u8) -> SLTNode<u32> {
         SLTNode::Constant(BigUint::from(value), BigUint::from(0u8), 8, false)
@@ -1064,6 +1226,120 @@ mod tests {
         assert_eq!(decoded.len(), node_count);
         assert_eq!(decoded.width(NodeId(1)), Some(8));
         assert_eq!(decoded.widths.len(), decoded.nodes.len());
+    }
+
+    fn arena_with_for_fold_group() -> (SLTNodeArena<u32>, NodeId) {
+        let mut arena = SLTNodeArena::new();
+        let entry_guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let initial_wide = arena.alloc(constant(3)).unwrap();
+        let update_wide = arena.alloc(constant(4)).unwrap();
+        let initial_narrow = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                4,
+                false,
+            ))
+            .unwrap();
+        let update_narrow = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(2u8),
+                BigUint::from(0u8),
+                4,
+                false,
+            ))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 7,
+                loop_width: 8,
+                loop_signed: true,
+                start: BigInt::from(-4),
+                step: BigInt::from(2),
+                trip_count: 3,
+                entry_guard,
+                states: vec![
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(8, 0, 7),
+                        initial: initial_wide,
+                        update: update_wide,
+                    },
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(9, 4, 7),
+                        initial: initial_narrow,
+                        update: update_narrow,
+                    },
+                ],
+            })
+            .unwrap();
+        (arena, group)
+    }
+
+    #[test]
+    fn for_fold_group_json_roundtrip_preserves_signed_iteration_and_width() {
+        let (arena, group) = arena_with_for_fold_group();
+        let facts = SLTNodeFacts::verify(&arena).expect("valid ForFoldGroup must verify");
+        assert_eq!(facts.width(group), Some(12));
+
+        let json = serde_json::to_string(&arena).unwrap();
+        let decoded: SLTNodeArena<u32> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, arena);
+        assert_eq!(decoded.width(group), Some(12));
+        assert_eq!(
+            SLTNodeFacts::verify(&decoded).unwrap().width(group),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn for_fold_group_map_addr_maps_loop_and_state_targets_and_children() {
+        let (arena, group) = arena_with_for_fold_group();
+        let mut mapped_arena = SLTNodeArena::<u64>::new();
+        let mut cache = crate::HashMap::default();
+
+        let mapped_group = arena
+            .get(group)
+            .map_addr(group, &arena, &mut mapped_arena, &mut cache, &|address| {
+                u64::from(*address) + 100
+            })
+            .unwrap();
+
+        let SLTNode::ForFoldGroup {
+            loop_var,
+            start,
+            step,
+            entry_guard,
+            states,
+            ..
+        } = mapped_arena.get(mapped_group)
+        else {
+            panic!("mapped node must remain ForFoldGroup");
+        };
+        assert_eq!(*loop_var, 107);
+        assert_eq!(*start, BigInt::from(-4));
+        assert_eq!(*step, BigInt::from(2));
+        assert_eq!(states[0].target, VarAtomBase::new(108, 0, 7));
+        assert_eq!(states[1].target, VarAtomBase::new(109, 4, 7));
+        assert!(entry_guard.0 < mapped_group.0);
+        assert!(
+            states.iter().all(|state| {
+                state.initial.0 < mapped_group.0 && state.update.0 < mapped_group.0
+            })
+        );
+        assert_eq!(
+            SLTNodeFacts::verify(&mapped_arena)
+                .unwrap()
+                .width(mapped_group),
+            Some(12)
+        );
     }
 
     #[test]
@@ -1523,6 +1799,36 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 arena
                     .get(*continue_cond)
                     .fmt_recursive(f, depth + 2, arena)?;
+                Ok(())
+            }
+            SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start,
+                step,
+                trip_count,
+                entry_guard,
+                states,
+            } => {
+                writeln!(
+                    f,
+                    "{}ForFoldGroup(loop_var={}, width={}, signed={}, start={}, step={}, trip_count={})",
+                    indent, loop_var, loop_width, loop_signed, start, step, trip_count,
+                )?;
+                writeln!(f, "{}entry guard:", child_indent)?;
+                arena.get(*entry_guard).fmt_recursive(f, depth + 2, arena)?;
+                writeln!(f)?;
+                for state in states {
+                    writeln!(f, "{}state {} initial:", child_indent, state.target)?;
+                    arena
+                        .get(state.initial)
+                        .fmt_recursive(f, depth + 2, arena)?;
+                    writeln!(f)?;
+                    writeln!(f, "{}state {} update:", child_indent, state.target)?;
+                    arena.get(state.update).fmt_recursive(f, depth + 2, arena)?;
+                    writeln!(f)?;
+                }
                 Ok(())
             }
             SLTNode::Concat(parts) => {

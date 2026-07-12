@@ -36,6 +36,7 @@ fn verify_slt_roots<A>(
     paths: &[LogicPath<A>],
     observers: &[CombObserver<A>],
     variable_widths: &HashMap<A, usize>,
+    variable_signedness: &HashMap<A, bool>,
     phase: &'static str,
 ) -> Result<(), ParserError>
 where
@@ -114,6 +115,7 @@ where
             crate::logic_tree::SLTNode::ForFold {
                 loop_var,
                 loop_width,
+                loop_signed,
                 result,
                 initials,
                 updates,
@@ -135,12 +137,79 @@ where
                         ),
                     ));
                 }
+                let Some(&declared_loop_signed) = variable_signedness.get(loop_var) else {
+                    return Err(fail(
+                        "FOR_FOLD.LOOP_SIGNEDNESS_EXISTS",
+                        node_id,
+                        "ForFold loop variable signedness is absent from the semantic type table"
+                            .to_string(),
+                    ));
+                };
+                if *loop_signed != declared_loop_signed {
+                    return Err(fail(
+                        "FOR_FOLD.LOOP_SIGNEDNESS_MATCHES_VARIABLE",
+                        node_id,
+                        format!(
+                            "ForFold loop signedness {loop_signed} does not equal declared signedness {declared_loop_signed}"
+                        ),
+                    ));
+                }
                 verify_atom(&result.id, result.access, "ForFold result", node_id)?;
                 for update in initials.iter().chain(updates) {
                     verify_atom(
                         &update.target.id,
                         update.target.access,
                         "ForFold state target",
+                        node_id,
+                    )?;
+                }
+            }
+            crate::logic_tree::SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                states,
+                ..
+            } => {
+                let Some(&declared_loop_width) = variable_widths.get(loop_var) else {
+                    return Err(fail(
+                        "FOR_FOLD_GROUP.LOOP_VARIABLE_EXISTS",
+                        node_id,
+                        "ForFoldGroup loop variable is absent from the semantic type table"
+                            .to_string(),
+                    ));
+                };
+                if *loop_width != declared_loop_width {
+                    return Err(fail(
+                        "FOR_FOLD_GROUP.LOOP_WIDTH_MATCHES_VARIABLE",
+                        node_id,
+                        format!(
+                            "ForFoldGroup loop width {loop_width} does not equal declared width {declared_loop_width}"
+                        ),
+                    ));
+                }
+                let Some(&declared_loop_signed) = variable_signedness.get(loop_var) else {
+                    return Err(fail(
+                        "FOR_FOLD_GROUP.LOOP_SIGNEDNESS_EXISTS",
+                        node_id,
+                        "ForFoldGroup loop variable signedness is absent from the semantic type table"
+                            .to_string(),
+                    ));
+                };
+                if *loop_signed != declared_loop_signed {
+                    return Err(fail(
+                        "FOR_FOLD_GROUP.LOOP_SIGNEDNESS_MATCHES_VARIABLE",
+                        node_id,
+                        format!(
+                            "ForFoldGroup loop signedness {loop_signed} does not equal declared signedness {declared_loop_signed}"
+                        ),
+                    ));
+                }
+                for state in states {
+                    verify_atom(
+                        &state.target.id,
+                        state.target.access,
+                        "ForFoldGroup state target",
                         node_id,
                     )?;
                 }
@@ -290,6 +359,141 @@ where
     Ok(())
 }
 
+#[cfg(test)]
+mod slt_root_verify_tests {
+    use num_bigint::{BigInt, BigUint};
+
+    use super::verify_slt_roots;
+    use crate::ir::VarAtomBase;
+    use crate::logic_tree::{
+        LogicPath, LogicPathTarget, SLTForFoldGroupState, SLTForUpdate, SLTLoopBound, SLTNode,
+        SLTNodeArena, SLTStepOp,
+    };
+
+    fn path(expr: crate::logic_tree::NodeId) -> LogicPath<u32> {
+        LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(2, 0, 7)),
+            sources: crate::HashSet::default(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr,
+        }
+    }
+
+    fn semantic_tables() -> (crate::HashMap<u32, usize>, crate::HashMap<u32, bool>) {
+        (
+            [(1, 8), (2, 8)].into_iter().collect(),
+            [(1, false), (2, false)].into_iter().collect(),
+        )
+    }
+
+    #[test]
+    fn rejects_legacy_for_fold_loop_signedness_mismatch() {
+        let mut arena = SLTNodeArena::new();
+        let value = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let continue_cond = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let target = VarAtomBase::new(2, 0, 7);
+        let fold = arena
+            .alloc(SLTNode::ForFold {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: true,
+                start: SLTLoopBound::Const(0),
+                end: SLTLoopBound::Const(1),
+                inclusive: false,
+                step: 1,
+                step_op: SLTStepOp::Add,
+                reverse: false,
+                result: target,
+                initials: vec![SLTForUpdate {
+                    target,
+                    expr: value,
+                }],
+                updates: vec![SLTForUpdate {
+                    target,
+                    expr: value,
+                }],
+                effects: Vec::new(),
+                continue_cond,
+            })
+            .unwrap();
+        let (widths, signedness) = semantic_tables();
+
+        let error =
+            verify_slt_roots(&arena, &[path(fold)], &[], &widths, &signedness, "test").unwrap_err();
+        let super::ParserError::SltVerify { error, .. } = error else {
+            panic!("expected SLT verifier error")
+        };
+        assert_eq!(error.invariant, "FOR_FOLD.LOOP_SIGNEDNESS_MATCHES_VARIABLE");
+    }
+
+    #[test]
+    fn rejects_for_fold_group_loop_signedness_mismatch() {
+        let mut arena = SLTNodeArena::new();
+        let value = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: true,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(2, 0, 7),
+                    initial: value,
+                    update: value,
+                }],
+            })
+            .unwrap();
+        let (widths, signedness) = semantic_tables();
+
+        let error = verify_slt_roots(&arena, &[path(group)], &[], &widths, &signedness, "test")
+            .unwrap_err();
+        let super::ParserError::SltVerify { error, .. } = error else {
+            panic!("expected SLT verifier error")
+        };
+        assert_eq!(
+            error.invariant,
+            "FOR_FOLD_GROUP.LOOP_SIGNEDNESS_MATCHES_VARIABLE"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BuildConfig {
     pub clock_type: ClockType,
@@ -317,6 +521,7 @@ pub mod bitaccess;
 mod bitslicer;
 pub(crate) mod case;
 pub mod ff;
+pub(crate) mod loop_provenance;
 pub mod module;
 pub mod registry;
 mod scheduler;
@@ -620,8 +825,18 @@ pub struct ParseIrResult<'a> {
     pub root_id: ModuleId,
 }
 
+#[cfg(test)]
 pub fn parse_ir<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
+    config: &BuildConfig,
+    top: &StrId,
+) -> Result<ParseIrResult<'a>, ParserError> {
+    parse_ir_with_loop_provenance(ir, &loop_provenance::LoopProvenance::default(), config, top)
+}
+
+fn parse_ir_with_loop_provenance<'a>(
+    ir: &'a veryl_analyzer::ir::Ir,
+    loop_provenance: &loop_provenance::LoopProvenance,
     config: &BuildConfig,
     top: &StrId,
 ) -> Result<ParseIrResult<'a>, ParserError> {
@@ -738,7 +953,8 @@ pub fn parse_ir<'a>(
     // Parse all discovered modules
     for (mid, ir_module) in &module_ir {
         let inst_ids = inst_sequences.get(mid).map(|v| v.as_slice()).unwrap_or(&[]);
-        let sim_module = ModuleParser::parse(ir_module, config, inst_ids)?;
+        let sim_module =
+            ModuleParser::parse_with_loop_provenance(ir_module, loop_provenance, config, inst_ids)?;
         modules.insert(*mid, sim_module);
     }
 
@@ -1021,6 +1237,23 @@ pub(crate) fn flatten(
             })
         })
         .collect();
+    let var_signedness: HashMap<AbsoluteAddr, bool> = instance_modules
+        .iter()
+        .flat_map(|(&inst_id, &mod_id)| {
+            module_ir[&mod_id]
+                .variables
+                .iter()
+                .map(move |(var_id, var)| {
+                    (
+                        AbsoluteAddr {
+                            instance_id: inst_id,
+                            var_id: *var_id,
+                        },
+                        var.r#type.signed,
+                    )
+                })
+        })
+        .collect();
 
     build_comb_observer_capture_paths(
         &mut comb_blocks,
@@ -1048,6 +1281,7 @@ pub(crate) fn flatten(
         &comb_blocks,
         &comb_observers,
         &var_widths,
+        &var_signedness,
         "after flattening symbolic logic",
     )?;
 
@@ -1772,6 +2006,7 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
 pub fn parse(
     top: &StrId,
     ir: &veryl_analyzer::ir::Ir,
+    loop_provenance: &loop_provenance::LoopProvenance,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -1787,6 +2022,10 @@ pub fn parse(
     mut trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<Program, ParserError> {
+    debug_assert!(
+        loop_provenance.is_consistent_with(ir),
+        "loop provenance must describe the analyzer IR passed to the parser"
+    );
     let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
 
     macro_rules! timed_phase {
@@ -1802,7 +2041,10 @@ pub fn parse(
         }};
     }
 
-    let result = timed_phase!("parse_ir", parse_ir(ir, config, top))?;
+    let result = timed_phase!(
+        "parse_ir",
+        parse_ir_with_loop_provenance(ir, loop_provenance, config, top)
+    )?;
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.analyzer_ir
     {
