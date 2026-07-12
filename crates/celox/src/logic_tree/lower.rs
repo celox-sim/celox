@@ -874,7 +874,8 @@ fn match_slt_priority_count<A: Hash + Eq + Clone>(
                     cond,
                     then_expr,
                     ..
-                } if *cond == gate && *then_expr == default
+                } if unwrap_slt_one_bit_procedural_truth(*cond, arena) == gate
+                    && *then_expr == default
             )
         {
             break;
@@ -962,7 +963,8 @@ fn match_slt_priority_count<A: Hash + Eq + Clone>(
         else {
             return None;
         };
-        (*cond == gate && *then_expr == default).then_some(*else_expr)
+        (unwrap_slt_one_bit_procedural_truth(*cond, arena) == gate && *then_expr == default)
+            .then_some(*else_expr)
     });
     let base_matches = Some(cursor) == default_node || conditional_fallback.is_some();
     let width = default_value as usize;
@@ -6326,6 +6328,22 @@ mod tests {
         assert!(resolve_slt_extended_bit(lsb_extended, &arena).is_some());
         assert!(resolve_slt_extended_bit(msb_shifted, &arena).is_none());
         assert!(resolve_slt_extended_bit(multi_bit_slice, &arena).is_none());
+    }
+
+    #[test]
+    fn procedural_truth_unwrap_keeps_wide_reduction() {
+        let mut arena = SLTNodeArena::new();
+        let wide = input(&mut arena, 0, 4);
+        let truth = arena.alloc(SLTNode::Unary(UnaryOp::Or, wide)).unwrap();
+        let normalized = arena
+            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, truth))
+            .unwrap();
+
+        assert_eq!(
+            unwrap_slt_one_bit_procedural_truth(normalized, &arena),
+            normalized,
+            "a wide reduction is a real booleanization, not an identity"
+        );
     }
 
     #[test]
