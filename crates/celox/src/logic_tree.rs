@@ -9,8 +9,8 @@ pub(crate) use comb::coerce_node_width;
 pub(crate) use comb::parse_comb_with_loop_recovery;
 pub use comb::{LogicPath, LogicPathTarget};
 pub use comb::{
-    NodeId, SLTForFoldGroupState, SLTIndex, SLTNodeArena, SLTNodeFacts, SLTNodeFactsError,
-    SymbolicStore, eval_assignment_expression, eval_expression, get_width,
+    NodeId, SLTForFoldGroupState, SLTNodeArena, SLTNodeFacts, SLTNodeFactsError, SymbolicStore,
+    eval_assignment_expression, eval_expression, get_width,
 };
 #[cfg(test)]
 pub(crate) use comb::{SLTForUpdate, SLTStepOp};

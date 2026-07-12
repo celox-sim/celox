@@ -521,7 +521,6 @@ pub mod bitaccess;
 mod bitslicer;
 pub(crate) mod case;
 pub mod ff;
-mod fold_group_fusion;
 pub(crate) mod loop_provenance;
 pub mod module;
 pub mod registry;

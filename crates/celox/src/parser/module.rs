@@ -20,7 +20,6 @@ use crate::parser::{
     },
     bitslicer::BitSlicer,
     ff::FfParser,
-    fold_group_fusion,
     loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
     registry::get_port_type,
     resolve_total_width,
@@ -1022,12 +1021,6 @@ impl<'a> ModuleParser<'a> {
                 _ => {}
             }
         }
-        fold_group_fusion::fuse_recovered_fold_groups(
-            &mut self.arena,
-            &mut self.comb_blocks,
-            &mut self.store,
-            &self.comb_observers,
-        )?;
 
         // 2. Build FF blocks per trigger set.
         //    parse_ff_group emits only WORKING-region stores (pure eval).
