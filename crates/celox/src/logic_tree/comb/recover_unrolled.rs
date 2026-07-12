@@ -1049,6 +1049,11 @@ fn prove_group(
     let (updates, update_sources, boundaries) =
         eval_chunk_outputs_with_facts(module, &dynamic, &targets, &mut scratch)?;
 
+    // Canonical proof bits depend only on an immutable arena node and its bit
+    // position.  The arena is append-only, so results remain valid while later
+    // iterations add their specialized nodes.  Keep one cache for the whole
+    // proof instead of rebuilding the same input/constant bits per iteration.
+    let mut proof_bits = ProofBitCanonicalizer::default();
     for (iteration, actual_outputs) in iterations.iter().zip(&actual_outputs_by_iteration) {
         let mut dynamic_cache = HashMap::default();
         let specialized_updates = updates
@@ -1068,7 +1073,12 @@ fn prove_group(
             .iter()
             .map(|&actual| specialize_slt_node(actual, None, None, &mut scratch, &mut actual_cache))
             .collect::<Option<Vec<_>>>()?;
-        if !proof_outputs_match(&specialized_updates, &canonical_actual, &mut scratch)? {
+        if !proof_outputs_match(
+            &specialized_updates,
+            &canonical_actual,
+            &mut scratch,
+            &mut proof_bits,
+        )? {
             return None;
         }
     }
@@ -1329,7 +1339,13 @@ fn whole_fold_matches_expansion(
             specialize_slt_node(output, None, None, &mut proof_arena, &mut composed_cache)
         })
         .collect::<Option<Vec<_>>>()?;
-    proof_outputs_match(&canonical_expanded, &canonical_composed, &mut proof_arena)
+    let mut proof_bits = ProofBitCanonicalizer::default();
+    proof_outputs_match(
+        &canonical_expanded,
+        &canonical_composed,
+        &mut proof_arena,
+        &mut proof_bits,
+    )
 }
 
 fn map_symbolic_store_roots(
@@ -1604,10 +1620,63 @@ fn specialize_slt_node(
     Some(specialized)
 }
 
+#[derive(Default)]
+struct ProofBitCanonicalizer {
+    bit_cache: HashMap<(NodeId, usize), NodeId>,
+    /// Dense low-to-high mapping for each Concat. Building this once avoids
+    /// rescanning an increasingly long part list independently for every bit.
+    concat_layouts: HashMap<NodeId, Vec<(NodeId, usize)>>,
+    #[cfg(test)]
+    bit_cache_hits: usize,
+    #[cfg(test)]
+    bit_cache_misses: usize,
+    #[cfg(test)]
+    concat_layout_builds: usize,
+}
+
+impl ProofBitCanonicalizer {
+    fn concat_bit_source(
+        &mut self,
+        node: NodeId,
+        parts: &[(NodeId, usize)],
+        bit: usize,
+    ) -> Option<(NodeId, usize)> {
+        #[cfg(test)]
+        let mut built = false;
+        let source = match self.concat_layouts.entry(node) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                entry.into_mut().get(bit).copied()
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let total_width = parts.iter().try_fold(0usize, |width, (_, part_width)| {
+                    width.checked_add(*part_width)
+                })?;
+                let mut layout = Vec::new();
+                layout.try_reserve_exact(total_width).ok()?;
+                for &(part, part_width) in parts.iter().rev() {
+                    layout.extend((0..part_width).map(|part_bit| (part, part_bit)));
+                }
+                debug_assert_eq!(layout.len(), total_width);
+                #[cfg(test)]
+                {
+                    built = true;
+                }
+                entry.insert(layout).get(bit).copied()
+            }
+        };
+        #[cfg(test)]
+        if built {
+            self.concat_layout_builds += 1;
+        }
+        source
+    }
+}
+
 fn proof_outputs_match(
     lhs: &[NodeId],
     rhs: &[NodeId],
     arena: &mut SLTNodeArena<VarId>,
+    canonicalizer: &mut ProofBitCanonicalizer,
 ) -> Option<bool> {
     // A constant-index LHS is represented as RangeStore slices/concats, while
     // its dynamic template is a full-width mask/shift read-modify-write. Keep
@@ -1620,15 +1689,14 @@ fn proof_outputs_match(
         return Some(false);
     }
 
-    let mut bit_cache = HashMap::default();
     for (&lhs, &rhs) in lhs.iter().zip(rhs) {
         let width = get_width(lhs, arena);
         if width != get_width(rhs, arena) {
             return Some(false);
         }
         for bit in 0..width {
-            let lhs = canonicalize_proof_bit(lhs, bit, arena, &mut bit_cache)?;
-            let rhs = canonicalize_proof_bit(rhs, bit, arena, &mut bit_cache)?;
+            let lhs = canonicalize_proof_bit(lhs, bit, arena, canonicalizer)?;
+            let rhs = canonicalize_proof_bit(rhs, bit, arena, canonicalizer)?;
             if lhs != rhs {
                 return Some(false);
             }
@@ -1641,10 +1709,18 @@ fn canonicalize_proof_bit(
     node: NodeId,
     bit: usize,
     arena: &mut SLTNodeArena<VarId>,
-    cache: &mut HashMap<(NodeId, usize), NodeId>,
+    canonicalizer: &mut ProofBitCanonicalizer,
 ) -> Option<NodeId> {
-    if let Some(&canonical) = cache.get(&(node, bit)) {
+    if let Some(&canonical) = canonicalizer.bit_cache.get(&(node, bit)) {
+        #[cfg(test)]
+        {
+            canonicalizer.bit_cache_hits += 1;
+        }
         return Some(canonical);
+    }
+    #[cfg(test)]
+    {
+        canonicalizer.bit_cache_misses += 1;
     }
     let width = get_width(node, arena);
     if bit >= width {
@@ -1676,8 +1752,8 @@ fn canonicalize_proof_bit(
         SLTNode::Binary(lhs, op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor), rhs)
             if bit < get_width(lhs, arena) && bit < get_width(rhs, arena) =>
         {
-            let lhs = canonicalize_proof_bit(lhs, bit, arena, cache)?;
-            let rhs = canonicalize_proof_bit(rhs, bit, arena, cache)?;
+            let lhs = canonicalize_proof_bit(lhs, bit, arena, canonicalizer)?;
+            let rhs = canonicalize_proof_bit(rhs, bit, arena, canonicalizer)?;
             alloc_proof_bit_binary(lhs, op, rhs, arena)?
         }
         SLTNode::Binary(lhs, op @ (BinaryOp::Shl | BinaryOp::Shr), rhs) => {
@@ -1685,7 +1761,7 @@ fn canonicalize_proof_bit(
                 .filter(|constant| constant.mask.is_zero())
                 .and_then(|constant| constant.value.to_usize())
             else {
-                return alloc_opaque_proof_bit(node, bit, arena, cache);
+                return alloc_opaque_proof_bit(node, bit, arena, canonicalizer);
             };
             let source_bit = match op {
                 BinaryOp::Shl => bit.checked_sub(shift),
@@ -1693,12 +1769,12 @@ fn canonicalize_proof_bit(
                 _ => unreachable!(),
             };
             match source_bit.filter(|&source_bit| source_bit < get_width(lhs, arena)) {
-                Some(source_bit) => canonicalize_proof_bit(lhs, source_bit, arena, cache)?,
+                Some(source_bit) => canonicalize_proof_bit(lhs, source_bit, arena, canonicalizer)?,
                 None => alloc_proof_bit_constant(false, arena)?,
             }
         }
         SLTNode::Unary(UnaryOp::BitNot, inner) if bit < get_width(inner, arena) => {
-            let inner = canonicalize_proof_bit(inner, bit, arena, cache)?;
+            let inner = canonicalize_proof_bit(inner, bit, arena, canonicalizer)?;
             alloc_proof_bit_not(inner, arena)?
         }
         SLTNode::Mux {
@@ -1709,9 +1785,9 @@ fn canonicalize_proof_bit(
             && bit < get_width(then_expr, arena)
             && bit < get_width(else_expr, arena) =>
         {
-            let cond = canonicalize_proof_bit(cond, 0, arena, cache)?;
-            let then_expr = canonicalize_proof_bit(then_expr, bit, arena, cache)?;
-            let else_expr = canonicalize_proof_bit(else_expr, bit, arena, cache)?;
+            let cond = canonicalize_proof_bit(cond, 0, arena, canonicalizer)?;
+            let then_expr = canonicalize_proof_bit(then_expr, bit, arena, canonicalizer)?;
+            let else_expr = canonicalize_proof_bit(else_expr, bit, arena, canonicalizer)?;
             if then_expr == else_expr {
                 then_expr
             } else if let Some(value) = known_proof_bit(cond, arena) {
@@ -1727,25 +1803,16 @@ fn canonicalize_proof_bit(
             }
         }
         SLTNode::Concat(parts) => {
-            let mut part_lsb = 0usize;
-            let mut selected = None;
-            for (part, part_width) in parts.into_iter().rev() {
-                let part_msb = part_lsb.checked_add(part_width)?;
-                if bit < part_msb {
-                    selected = Some(canonicalize_proof_bit(part, bit - part_lsb, arena, cache)?);
-                    break;
-                }
-                part_lsb = part_msb;
-            }
-            selected?
+            let (part, part_bit) = canonicalizer.concat_bit_source(node, &parts, bit)?;
+            canonicalize_proof_bit(part, part_bit, arena, canonicalizer)?
         }
         SLTNode::Slice { expr, access } => {
-            canonicalize_proof_bit(expr, access.lsb.checked_add(bit)?, arena, cache)?
+            canonicalize_proof_bit(expr, access.lsb.checked_add(bit)?, arena, canonicalizer)?
         }
         SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return None,
-        _ => return alloc_opaque_proof_bit(node, bit, arena, cache),
+        _ => return alloc_opaque_proof_bit(node, bit, arena, canonicalizer),
     };
-    cache.insert((node, bit), canonical);
+    canonicalizer.bit_cache.insert((node, bit), canonical);
     Some(canonical)
 }
 
@@ -1753,7 +1820,7 @@ fn alloc_opaque_proof_bit(
     node: NodeId,
     bit: usize,
     arena: &mut SLTNodeArena<VarId>,
-    cache: &mut HashMap<(NodeId, usize), NodeId>,
+    canonicalizer: &mut ProofBitCanonicalizer,
 ) -> Option<NodeId> {
     let canonical = if get_width(node, arena) == 1 {
         node
@@ -1765,7 +1832,7 @@ fn alloc_opaque_proof_bit(
             })
             .ok()?
     };
-    cache.insert((node, bit), canonical);
+    canonicalizer.bit_cache.insert((node, bit), canonical);
     Some(canonical)
 }
 
@@ -2973,6 +3040,71 @@ mod tests {
         assert!(narrow_widths.contains(&1), "missing scalar dynamic load");
         assert!(narrow_widths.contains(&2), "missing size dynamic load");
         assert!(narrow_widths.contains(&64), "missing 64-bit dynamic load");
+    }
+
+    #[test]
+    fn proof_bit_canonicalizer_reuses_bits_and_concat_layouts() {
+        let (module, _) = analyze(MULTI_STATE_LOOP);
+        let bits = variable(&module, "bits");
+        let mut arena = SLTNodeArena::new();
+        let input = arena
+            .alloc(SLTNode::Input {
+                variable: bits,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 3),
+            })
+            .unwrap();
+        let low = arena
+            .alloc(SLTNode::Slice {
+                expr: input,
+                access: BitAccess::new(0, 1),
+            })
+            .unwrap();
+        let high = arena
+            .alloc(SLTNode::Slice {
+                expr: input,
+                access: BitAccess::new(2, 3),
+            })
+            .unwrap();
+        let concat = arena
+            .alloc(SLTNode::Concat(vec![(high, 2), (low, 2)]))
+            .unwrap();
+        let mut canonicalizer = ProofBitCanonicalizer::default();
+
+        assert_eq!(
+            proof_outputs_match(&[concat], &[input], &mut arena, &mut canonicalizer),
+            Some(true)
+        );
+        assert_eq!(canonicalizer.concat_layout_builds, 1);
+        assert_eq!(
+            canonicalizer.concat_layouts[&concat],
+            vec![(low, 0), (low, 1), (high, 0), (high, 1)]
+        );
+        let first_misses = canonicalizer.bit_cache_misses;
+        let first_hits = canonicalizer.bit_cache_hits;
+        let first_nodes = arena.len();
+
+        // The second comparison must be served entirely by the shared bit
+        // cache: four lhs and four rhs root lookups, with no new proof nodes.
+        assert_eq!(
+            proof_outputs_match(&[concat], &[input], &mut arena, &mut canonicalizer),
+            Some(true)
+        );
+        assert_eq!(canonicalizer.bit_cache_misses, first_misses);
+        assert_eq!(canonicalizer.bit_cache_hits - first_hits, 8);
+        assert_eq!(canonicalizer.concat_layout_builds, 1);
+        assert_eq!(arena.len(), first_nodes);
+
+        // Force bit recomputation while retaining the Concat layout. The
+        // layout must still be reused rather than rebuilt or rescanned.
+        canonicalizer.bit_cache.clear();
+        assert_eq!(
+            proof_outputs_match(&[concat], &[input], &mut arena, &mut canonicalizer),
+            Some(true)
+        );
+        assert_eq!(canonicalizer.concat_layout_builds, 1);
+        assert_eq!(arena.len(), first_nodes);
     }
 
     #[test]
