@@ -396,6 +396,8 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::CmpImm { .. } => "cmp_imm",
         MInst::UDiv { .. } => "udiv",
         MInst::URem { .. } => "urem",
+        MInst::SDiv { .. } => "sdiv",
+        MInst::SRem { .. } => "srem",
         MInst::BitNot { .. } => "not",
         MInst::Neg { .. } => "neg",
         MInst::Popcnt { .. } => "popcnt",

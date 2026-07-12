@@ -109,8 +109,10 @@ pub(super) fn binary_result_width(op: BinaryOp, lhs_width: usize, rhs_width: usi
         BinaryOp::Add
         | BinaryOp::Sub
         | BinaryOp::Mul
-        | BinaryOp::Div
-        | BinaryOp::Rem
+        | BinaryOp::DivU
+        | BinaryOp::DivS
+        | BinaryOp::RemU
+        | BinaryOp::RemS
         | BinaryOp::And
         | BinaryOp::Or
         | BinaryOp::Xor => lhs_width.max(rhs_width),

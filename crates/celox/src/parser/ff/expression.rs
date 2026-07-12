@@ -17,6 +17,36 @@ use veryl_analyzer::ir::{
 };
 use veryl_parser::token_range::TokenRange;
 
+fn source_expression_signed(expr: &Expression) -> bool {
+    match expr {
+        Expression::Binary(_, Op::As, rhs, _) => {
+            let Expression::Term(factor) = rhs.as_ref() else {
+                return expr.comptime().expr_context.signed;
+            };
+            let Factor::Value(comptime) = factor.as_ref() else {
+                return expr.comptime().expr_context.signed;
+            };
+            match &comptime.value {
+                ValueVariant::Type(ty) => ty.signed,
+                // Numeric-cast signedness is kept consistent with the current
+                // FF cast lowering until numeric casts are corrected as one
+                // coherent parser change.
+                ValueVariant::Numeric(_) => false,
+                _ => expr.comptime().expr_context.signed,
+            }
+        }
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::SystemFunctionCall(call) => match call.kind {
+                SystemFunctionKind::Signed(_) => true,
+                SystemFunctionKind::Unsigned(_) => false,
+                _ => expr.comptime().r#type.signed,
+            },
+            _ => expr.comptime().r#type.signed,
+        },
+        _ => expr.comptime().expr_context.signed,
+    }
+}
+
 impl<'a> FfParser<'a> {
     fn eval_type_select(
         &self,
@@ -713,7 +743,14 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    pub(super) fn op_binary<A>(&mut self, op: &Op, width: usize, ir_builder: &mut SIRBuilder<A>) {
+    pub(super) fn op_binary<A>(
+        &mut self,
+        op: &Op,
+        width: usize,
+        left_source_signed: bool,
+        right_source_signed: bool,
+        ir_builder: &mut SIRBuilder<A>,
+    ) {
         let right = self.stack.pop_back().expect("invalid ir");
         let left = self.stack.pop_back().expect("invalid ir");
 
@@ -747,13 +784,23 @@ impl<'a> FfParser<'a> {
         }
 
         let dest_reg = ir_builder.alloc_logic(width);
-        let left_is_signed = ir_builder.register(&left).is_signed();
-        let right_is_signed = ir_builder.register(&right).is_signed();
-        let use_signed = left_is_signed && right_is_signed;
+        let use_signed = left_source_signed && right_source_signed;
         let op = match op {
             Op::Pow => unreachable!("Pow must be lowered by parse_binary before op_binary"),
-            Op::Div => BinaryOp::Div,
-            Op::Rem => BinaryOp::Rem,
+            Op::Div => {
+                if use_signed {
+                    BinaryOp::DivS
+                } else {
+                    BinaryOp::DivU
+                }
+            }
+            Op::Rem => {
+                if use_signed {
+                    BinaryOp::RemS
+                } else {
+                    BinaryOp::RemU
+                }
+            }
             Op::Mul => BinaryOp::Mul,
             Op::Add => BinaryOp::Add,
             Op::Sub => BinaryOp::Sub,
@@ -762,7 +809,7 @@ impl<'a> FfParser<'a> {
             Op::LogicShiftL => BinaryOp::Shl,
             // Right shifts differ in how they fill the MSB
             Op::ArithShiftR => {
-                if left_is_signed {
+                if left_source_signed {
                     BinaryOp::Sar
                 } else {
                     BinaryOp::Shr
@@ -1726,6 +1773,8 @@ impl<'a> FfParser<'a> {
             self.get_expression_width(left)
                 .max(self.get_expression_width(right))
         };
+        let left_source_signed = source_expression_signed(left);
+        let right_source_signed = source_expression_signed(right);
         if let Some(w) = context_width {
             let width = width.max(w);
             self.parse_expression(
@@ -1746,7 +1795,13 @@ impl<'a> FfParser<'a> {
                 ir_builder,
                 rhs_context_width,
             )?;
-            self.op_binary(op, width, ir_builder);
+            self.op_binary(
+                op,
+                width,
+                left_source_signed,
+                right_source_signed,
+                ir_builder,
+            );
         } else {
             self.parse_expression(
                 left,
@@ -1766,7 +1821,13 @@ impl<'a> FfParser<'a> {
                 ir_builder,
                 rhs_context_width,
             )?;
-            self.op_binary(op, width, ir_builder);
+            self.op_binary(
+                op,
+                width,
+                left_source_signed,
+                right_source_signed,
+                ir_builder,
+            );
         }
         Ok(())
     }

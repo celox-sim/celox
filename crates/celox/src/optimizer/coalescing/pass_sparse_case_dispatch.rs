@@ -1427,7 +1427,9 @@ fn runtime_instruction_cost(
                 | BinaryOp::LogicOr => n,
                 BinaryOp::Add | BinaryOp::Sub => 3u128.saturating_mul(n),
                 BinaryOp::Mul => 5u128.saturating_mul(n.saturating_mul(n)),
-                BinaryOp::Div | BinaryOp::Rem => 12u128.saturating_mul(n.saturating_mul(n)),
+                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+                    12u128.saturating_mul(n.saturating_mul(n))
+                }
                 BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 4u128.saturating_mul(n),
                 BinaryOp::Eq
                 | BinaryOp::Ne
@@ -2839,7 +2841,7 @@ mod tests {
         let make_value = |builder: &mut FixtureBuilder, seed| {
             let mut value = builder.immediate(usize::MAX, seed);
             for _ in 0..100 {
-                value = builder.binary(usize::MAX, value, BinaryOp::Div, factor);
+                value = builder.binary(usize::MAX, value, BinaryOp::DivU, factor);
             }
             value
         };

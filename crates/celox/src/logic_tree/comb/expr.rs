@@ -2068,12 +2068,14 @@ pub fn eval_expression(
                     eval_expression(module, store, rhs, arena, rhs_context_width)?.1
                 };
 
-                // Extract signedness and width from RHS type/numeric
-                let (target_width, target_signed) = match rhs.as_ref() {
+                // A type cast takes the target type's signedness exactly. A
+                // numeric-width cast changes only the width and preserves the
+                // source expression's signedness.
+                let (target_width, cast_signed) = match rhs.as_ref() {
                     Expression::Term(f) => match f.as_ref() {
                         Factor::Value(v) => match &v.value {
                             ValueVariant::Type(ty) => (ty.total_width(), ty.signed),
-                            ValueVariant::Numeric(n) => (n.to_usize(), false),
+                            ValueVariant::Numeric(n) => (n.to_usize(), source_signed(lhs)),
                             _ => (None, false),
                         },
                         _ => (None, false),
@@ -2090,12 +2092,8 @@ pub fn eval_expression(
                     ));
                 };
 
-                let result_node = coerce_node_width(
-                    arena,
-                    l_expr,
-                    Some(target_width),
-                    target_signed || is_signed(module, l_expr, arena),
-                )?;
+                let result_node =
+                    coerce_node_width(arena, l_expr, Some(target_width), cast_signed)?;
                 return Ok((
                     (result_node, l_sources),
                     merge_boundaries(l_bounds, r_bounds),
@@ -2155,10 +2153,8 @@ pub fn eval_expression(
                     arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))?
                 }
                 Op::Sub => {
-                    let lhs_signed = expression_signed_override(lhs)
-                        .unwrap_or_else(|| is_signed(module, l_expr, arena));
-                    let rhs_signed = expression_signed_override(rhs)
-                        .unwrap_or_else(|| is_signed(module, r_expr, arena));
+                    let lhs_signed = source_signed(lhs);
+                    let rhs_signed = source_signed(rhs);
                     let signed = lhs_signed && rhs_signed;
                     let bin_op = convert_binary_op(op, signed);
                     let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?;
@@ -2173,10 +2169,8 @@ pub fn eval_expression(
                     })?
                 }
                 _ => {
-                    let lhs_signed = expression_signed_override(lhs)
-                        .unwrap_or_else(|| is_signed(module, l_expr, arena));
-                    let rhs_signed = expression_signed_override(rhs)
-                        .unwrap_or_else(|| is_signed(module, r_expr, arena));
+                    let lhs_signed = source_signed(lhs);
+                    let rhs_signed = source_signed(rhs);
                     let signed = lhs_signed && rhs_signed;
                     let bin_op = if matches!(op, Op::ArithShiftR) {
                         if lhs_signed {
@@ -2429,7 +2423,7 @@ pub fn eval_assignment_expression(
     // The RHS expression controls extension.  The destination type does not
     // turn an unsigned value into a sign-extended one.  Explicit casts and the
     // signed/unsigned system functions are retained by the override helper.
-    let signed = expression_signed_override(expr).unwrap_or(expr.comptime().expr_context.signed);
+    let signed = source_signed(expr);
     let node = coerce_node_width(arena, node, Some(target_width), signed)?;
     Ok(((node, sources), boundaries))
 }
@@ -2510,8 +2504,12 @@ fn eval_factor(
                 if has_unassigned {
                     sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
                 }
+                // Symbolic substitution may replace this variable with an
+                // expression whose producer has different signedness. Width
+                // coercion follows the source variable's analyzer context,
+                // not the provenance of the substituted SLT node.
                 let expr =
-                    coerce_node_width(arena, expr, context_width, is_signed(module, expr, arena))?;
+                    coerce_node_width(arena, expr, context_width, comptime.expr_context.signed)?;
                 Ok(((expr, sources), bounds))
             } else {
                 let mut all_sources = HashSet::default();
@@ -2599,7 +2597,7 @@ fn eval_factor(
                     arena,
                     extracted_expr,
                     context_width,
-                    is_signed(module, extracted_expr, arena),
+                    comptime.expr_context.signed,
                 )?;
 
                 let prefix_access = eval_var_select(module, *var_id, index, select)?;
@@ -2902,7 +2900,11 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
     match arena.get(expr) {
         SLTNode::Input { variable: id, .. } => module.variables[id].r#type.signed,
         SLTNode::Constant(_, _, _, signed) => *signed,
-        SLTNode::Binary(lhs, _, _) => is_signed(module, *lhs, arena),
+        SLTNode::Binary(lhs, op, _) => match op {
+            BinaryOp::DivS | BinaryOp::RemS => true,
+            BinaryOp::DivU | BinaryOp::RemU => false,
+            _ => is_signed(module, *lhs, arena),
+        },
         SLTNode::Unary(UnaryOp::Minus, _) => true,
         SLTNode::Unary(
             UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros,
@@ -2946,13 +2948,46 @@ fn expression_signed_override(expr: &Expression) -> Option<bool> {
     }
 }
 
+/// Signedness assigned to this source expression by the Veryl analyzer.
+///
+/// This must not be reconstructed from the evaluated SLT node. A read of an
+/// unsigned variable remains unsigned even when the symbolic store currently
+/// contains a signed RHS expression, and relational operator selection is a
+/// static property of the source expression rather than its assignment
+/// history.
+fn source_signed(expr: &Expression) -> bool {
+    expression_signed_override(expr).unwrap_or_else(|| {
+        if matches!(expr, Expression::Term(_)) {
+            // A sibling explicit cast can cause analyzer 0.20.1 to merge a
+            // false `as` expression context into this term. The term's source
+            // type remains authoritative before the binary operator combines
+            // its operands.
+            expr.comptime().r#type.signed
+        } else {
+            expr.comptime().expr_context.signed
+        }
+    })
+}
+
 pub fn convert_binary_op(op: &Op, use_signed: bool) -> BinaryOp {
     match op {
         Op::Add => BinaryOp::Add,
         Op::Sub => BinaryOp::Sub,
         Op::Mul => BinaryOp::Mul,
-        Op::Div => BinaryOp::Div,
-        Op::Rem => BinaryOp::Rem,
+        Op::Div => {
+            if use_signed {
+                BinaryOp::DivS
+            } else {
+                BinaryOp::DivU
+            }
+        }
+        Op::Rem => {
+            if use_signed {
+                BinaryOp::RemS
+            } else {
+                BinaryOp::RemU
+            }
+        }
         Op::BitAnd => BinaryOp::And,
         Op::BitOr => BinaryOp::Or,
         Op::BitXor => BinaryOp::Xor,

@@ -1839,13 +1839,14 @@ impl SLTToSIRLowerer {
                 | BinaryOp::LogicAnd
                 | BinaryOp::LogicOr
                 | BinaryOp::EqWildcard
-                | BinaryOp::NeWildcard => false,
+                | BinaryOp::NeWildcard
+                | BinaryOp::DivU
+                | BinaryOp::RemU => false,
+                BinaryOp::DivS | BinaryOp::RemS => true,
                 BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => self.get_bound_signed(*lhs, arena),
                 BinaryOp::Add
                 | BinaryOp::Sub
                 | BinaryOp::Mul
-                | BinaryOp::Div
-                | BinaryOp::Rem
                 | BinaryOp::And
                 | BinaryOp::Or
                 | BinaryOp::Xor => {
@@ -2194,7 +2195,9 @@ impl SLTToSIRLowerer {
             | BinaryOp::LogicOr => chunks,
             BinaryOp::Add | BinaryOp::Sub => 3 * chunks,
             BinaryOp::Mul => 5 * chunks.saturating_mul(chunks),
-            BinaryOp::Div | BinaryOp::Rem => 12 * chunks.saturating_mul(chunks),
+            BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+                12 * chunks.saturating_mul(chunks)
+            }
             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 4 * chunks,
             BinaryOp::Eq
             | BinaryOp::Ne
@@ -2495,7 +2498,11 @@ impl SLTToSIRLowerer {
         let result = !excluded
             && (matches!(
                 arena.get(node),
-                SLTNode::Binary(_, BinaryOp::Div | BinaryOp::Rem, _)
+                SLTNode::Binary(
+                    _,
+                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS,
+                    _,
+                )
             ) || Self::node_children(node, arena)
                 .into_iter()
                 .any(|child| self.contains_div_rem(child, arena)));
@@ -4808,7 +4815,7 @@ mod tests {
         let numerator = input(&mut arena, 2, 16);
         let denominator = input(&mut arena, 3, 16);
         let quotient = arena
-            .alloc(SLTNode::Binary(numerator, BinaryOp::Div, denominator))
+            .alloc(SLTNode::Binary(numerator, BinaryOp::DivU, denominator))
             .unwrap();
         let one = constant(&mut arena, 1, 16);
         let deep_division = arena

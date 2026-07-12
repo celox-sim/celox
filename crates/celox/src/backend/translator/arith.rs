@@ -284,12 +284,25 @@ impl SIRTranslator {
         if common_logical_width <= 64 {
             // --- 64-bit or less: Cranelift Native Type Operation ---
             let common_ty = get_cl_type(common_logical_width);
-            let l_is_signed = state.register_map[lhs].is_signed() || matches!(op, BinaryOp::Sar);
+            let signed_divrem = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+            let any_divrem = matches!(
+                op,
+                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+            );
+            // Division signedness is carried by the opcode, not by either
+            // operand's declaration. This also makes mixed signed/unsigned
+            // operands deterministic after width promotion.
+            let l_is_signed = if any_divrem {
+                signed_divrem
+            } else {
+                state.register_map[lhs].is_signed() || matches!(op, BinaryOp::Sar)
+            };
+            let r_is_signed = signed_divrem;
             let l_val = state.regs[lhs].first_value(state.builder);
             let r_val = state.regs[rhs].first_value(state.builder);
 
             let l = promote_to_physical(state, l_val, l_width, l_is_signed, common_ty);
-            let r = promote_to_physical(state, r_val, r_width, false, common_ty);
+            let r = promote_to_physical(state, r_val, r_width, r_is_signed, common_ty);
 
             let build_icmp = |builder: &mut FunctionBuilder, cc: IntCC| {
                 let b1_res = builder.ins().icmp(cc, l, r);
@@ -302,7 +315,7 @@ impl SIRTranslator {
                 BinaryOp::Add => state.builder.ins().iadd(l, r),
                 BinaryOp::Sub => state.builder.ins().isub(l, r),
                 BinaryOp::Mul => state.builder.ins().imul(l, r),
-                BinaryOp::Div => {
+                BinaryOp::DivU => {
                     let zero = state.builder.ins().iconst(common_ty, 0);
                     let one = state.builder.ins().iconst(common_ty, 1);
                     let is_zero = state.builder.ins().icmp(IntCC::Equal, r, zero);
@@ -310,13 +323,36 @@ impl SIRTranslator {
                     let div_result = state.builder.ins().udiv(l, safe_r);
                     state.builder.ins().select(is_zero, zero, div_result)
                 }
-                BinaryOp::Rem => {
+                BinaryOp::RemU => {
                     let zero = state.builder.ins().iconst(common_ty, 0);
                     let one = state.builder.ins().iconst(common_ty, 1);
                     let is_zero = state.builder.ins().icmp(IntCC::Equal, r, zero);
                     let safe_r = state.builder.ins().select(is_zero, one, r);
                     let rem_result = state.builder.ins().urem(l, safe_r);
                     state.builder.ins().select(is_zero, zero, rem_result)
+                }
+                BinaryOp::DivS | BinaryOp::RemS => {
+                    let zero = state.builder.ins().iconst(common_ty, 0);
+                    let one = state.builder.ins().iconst(common_ty, 1);
+                    let neg_one = state.builder.ins().iconst(common_ty, -1);
+                    let physical_bits = common_ty.bits() as usize;
+                    let min_payload = 1u64 << (physical_bits - 1);
+                    let min = state.builder.ins().iconst(common_ty, min_payload as i64);
+                    let is_zero = state.builder.ins().icmp(IntCC::Equal, r, zero);
+                    let is_min = state.builder.ins().icmp(IntCC::Equal, l, min);
+                    let is_neg_one = state.builder.ins().icmp(IntCC::Equal, r, neg_one);
+                    let is_overflow = state.builder.ins().band(is_min, is_neg_one);
+                    let unsafe_divisor = state.builder.ins().bor(is_zero, is_overflow);
+                    // Both exceptional cases can safely execute with divisor +1:
+                    // zero is selected to the SIR-defined zero result below, while
+                    // MIN / -1 naturally produces the wrapped MIN quotient (or 0 rem).
+                    let safe_r = state.builder.ins().select(unsafe_divisor, one, r);
+                    let raw = if matches!(op, BinaryOp::DivS) {
+                        state.builder.ins().sdiv(l, safe_r)
+                    } else {
+                        state.builder.ins().srem(l, safe_r)
+                    };
+                    state.builder.ins().select(is_zero, zero, raw)
                 }
                 BinaryOp::And => state.builder.ins().band(l, r),
                 BinaryOp::Or => state.builder.ins().bor(l, r),
@@ -383,7 +419,7 @@ impl SIRTranslator {
                     .first_mask(state.builder)
                     .unwrap_or_else(|| state.builder.ins().iconst(common_ty, 0));
                 let l_m = promote_to_physical(state, l_m_val, l_width, l_is_signed, common_ty);
-                let r_m = promote_to_physical(state, r_m_val, r_width, false, common_ty);
+                let r_m = promote_to_physical(state, r_m_val, r_width, r_is_signed, common_ty);
 
                 let res_m = match op {
                     BinaryOp::And => {
@@ -790,6 +826,8 @@ impl SIRTranslator {
                         &r_chunks,
                         num_chunks,
                         l_width,
+                        r_width,
+                        common_logical_width,
                     )
                 };
 

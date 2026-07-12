@@ -29,6 +29,8 @@ pub fn emit_wide_binary(
     r_chunks: &[Value],
     num_chunks: usize,
     l_width: usize,
+    r_width: usize,
+    operation_width: usize,
 ) -> Vec<Value> {
     match op {
         // 1. Bitwise operations ─────────────────────────────
@@ -67,9 +69,16 @@ pub fn emit_wide_binary(
         }
 
         // 9. Division / remainder ───────────────────────────
-        BinaryOp::Div | BinaryOp::Rem => {
-            emit_wide_divrem(builder, op, l_chunks, r_chunks, num_chunks)
-        }
+        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => emit_wide_divrem(
+            builder,
+            op,
+            l_chunks,
+            r_chunks,
+            num_chunks,
+            l_width,
+            r_width,
+            operation_width,
+        ),
 
         // In Veryl syntax, `&&` / `||` map to `BinaryOp::LogicAnd` / `BinaryOp::LogicOr`.
         // These are always routed to `emit_wide_logic_andor` by the translator.
@@ -740,7 +749,35 @@ fn emit_wide_divrem(
     l_chunks: &[Value],
     r_chunks: &[Value],
     num_chunks: usize,
+    l_width: usize,
+    r_width: usize,
+    operation_width: usize,
 ) -> Vec<Value> {
+    let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+    let lhs_negative = wide_sign_bit(builder, l_chunks, l_width);
+    let rhs_negative = wide_sign_bit(builder, r_chunks, r_width);
+    let normalized_lhs = if signed {
+        let extended = sign_extend_wide_chunks(builder, l_chunks, l_width, num_chunks);
+        conditional_negate_wide(builder, &extended, lhs_negative, num_chunks)
+    } else {
+        (0..num_chunks)
+            .map(|i| get_chunk_as_i64(builder, l_chunks, i))
+            .collect()
+    };
+    let normalized_rhs = if signed {
+        let extended = sign_extend_wide_chunks(builder, r_chunks, r_width, num_chunks);
+        conditional_negate_wide(builder, &extended, rhs_negative, num_chunks)
+    } else {
+        (0..num_chunks)
+            .map(|i| get_chunk_as_i64(builder, r_chunks, i))
+            .collect()
+    };
+
+    let mut divisor_or = builder.ins().iconst(types::I64, 0);
+    for &chunk in &normalized_rhs {
+        divisor_or = builder.ins().bor(divisor_or, chunk);
+    }
+    let divisor_is_zero = builder.ins().icmp_imm(IntCC::Equal, divisor_or, 0);
     let total_bits = num_chunks * 64;
 
     let mut q_chunks: Vec<Value> = (0..num_chunks)
@@ -766,7 +803,7 @@ fn emit_wide_divrem(
         }
 
         // remainder[0] |= (dividend[chunk_idx] >> bit_idx) & 1
-        let dividend_chunk = get_chunk_as_i64(builder, l_chunks, chunk_idx);
+        let dividend_chunk = normalized_lhs[chunk_idx];
         let extracted = builder.ins().ushr_imm(dividend_chunk, bit_idx as i64);
         let one_bit = builder.ins().band_imm(extracted, 1);
         rem_chunks[0] = builder.ins().bor(rem_chunks[0], one_bit);
@@ -774,7 +811,7 @@ fn emit_wide_divrem(
         // if remainder >= divisor (multi-chunk unsigned GE)
         let mut ge_result = builder.ins().iconst(types::I8, 1);
         for (c, &rc) in rem_chunks.iter().enumerate() {
-            let dc = get_chunk_as_i64(builder, r_chunks, c);
+            let dc = normalized_rhs[c];
             let eq = builder.ins().icmp(IntCC::Equal, rc, dc);
             let gt = builder
                 .ins()
@@ -787,7 +824,7 @@ fn emit_wide_divrem(
         {
             let mut borrow: Option<Value> = None;
             for (c, &rc) in rem_chunks.iter().enumerate() {
-                let dc = get_chunk_as_i64(builder, r_chunks, c);
+                let dc = normalized_rhs[c];
                 let (diff, bout) = match borrow {
                     None => {
                         let d = builder.ins().isub(rc, dc);
@@ -817,11 +854,96 @@ fn emit_wide_divrem(
         q_chunks[chunk_idx] = builder.ins().bor(q_chunks[chunk_idx], masked);
     }
 
-    if matches!(op, BinaryOp::Div) {
-        q_chunks
+    let mut result = if matches!(op, BinaryOp::DivU | BinaryOp::DivS) {
+        if signed {
+            let quotient_negative = builder.ins().bxor(lhs_negative, rhs_negative);
+            conditional_negate_wide(builder, &q_chunks, quotient_negative, num_chunks)
+        } else {
+            q_chunks
+        }
+    } else if signed {
+        // Signed remainder follows the dividend, matching truncation toward zero.
+        conditional_negate_wide(builder, &rem_chunks, lhs_negative, num_chunks)
     } else {
         rem_chunks
+    };
+
+    let zero = builder.ins().iconst(types::I64, 0);
+    for chunk in &mut result {
+        *chunk = builder.ins().select(divisor_is_zero, zero, *chunk);
     }
+
+    // Signed normalization operates in the full physical chunk width. Restore
+    // the declared operation width so padding bits never escape as value bits.
+    let top_bits = operation_width % 64;
+    if top_bits != 0 {
+        let top = operation_width / 64;
+        if let Some(chunk) = result.get_mut(top) {
+            let mask = builder
+                .ins()
+                .iconst(types::I64, ((1u64 << top_bits) - 1) as i64);
+            *chunk = builder.ins().band(*chunk, mask);
+        }
+    }
+    result
+}
+
+fn wide_sign_bit(builder: &mut FunctionBuilder, chunks: &[Value], width: usize) -> Value {
+    if width == 0 {
+        return builder.ins().iconst(types::I8, 0);
+    }
+    let sign_index = width - 1;
+    let chunk = get_chunk_as_i64(builder, chunks, sign_index / 64);
+    let shifted = builder.ins().ushr_imm(chunk, (sign_index % 64) as i64);
+    let bit = builder.ins().band_imm(shifted, 1);
+    builder.ins().icmp_imm(IntCC::NotEqual, bit, 0)
+}
+
+fn sign_extend_wide_chunks(
+    builder: &mut FunctionBuilder,
+    chunks: &[Value],
+    width: usize,
+    num_chunks: usize,
+) -> Vec<Value> {
+    let sign = wide_sign_bit(builder, chunks, width);
+    let all_ones = builder.ins().iconst(types::I64, -1);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let fill = builder.ins().select(sign, all_ones, zero);
+    let source_chunks = width.div_ceil(64);
+    let top_bits = width % 64;
+
+    (0..num_chunks)
+        .map(|index| {
+            if index >= source_chunks {
+                return fill;
+            }
+            let raw = get_chunk_as_i64(builder, chunks, index);
+            if index + 1 != source_chunks || top_bits == 0 {
+                return raw;
+            }
+            let low_mask_value = (1u64 << top_bits) - 1;
+            let low_mask = builder.ins().iconst(types::I64, low_mask_value as i64);
+            let low = builder.ins().band(raw, low_mask);
+            let high_mask = builder.ins().iconst(types::I64, (!low_mask_value) as i64);
+            let high = builder.ins().band(fill, high_mask);
+            builder.ins().bor(low, high)
+        })
+        .collect()
+}
+
+fn conditional_negate_wide(
+    builder: &mut FunctionBuilder,
+    chunks: &[Value],
+    negate: Value,
+    num_chunks: usize,
+) -> Vec<Value> {
+    let negated = emit_wide_negate(builder, chunks, num_chunks);
+    (0..num_chunks)
+        .map(|index| {
+            let original = get_chunk_as_i64(builder, chunks, index);
+            builder.ins().select(negate, negated[index], original)
+        })
+        .collect()
 }
 
 // ═════════════════════════════════════════════════════════

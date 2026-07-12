@@ -133,9 +133,11 @@ pub(super) fn use_constraints(
 /// Returns physical registers clobbered by this instruction (besides dst).
 pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
     match inst {
-        MInst::UDiv { .. } | MInst::URem { .. } | MInst::UMulHi { .. } => {
-            &[PhysReg::RAX, PhysReg::RDX]
-        }
+        MInst::UDiv { .. }
+        | MInst::URem { .. }
+        | MInst::SDiv { .. }
+        | MInst::SRem { .. }
+        | MInst::UMulHi { .. } => &[PhysReg::RAX, PhysReg::RDX],
         _ => &[],
     }
 }

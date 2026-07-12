@@ -557,6 +557,10 @@ pub enum MInst {
     UDiv { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs % rhs (unsigned)
     URem { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = lhs / rhs (signed, truncating toward zero)
+    SDiv { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = lhs % rhs (signed, with the dividend's sign)
+    SRem { dst: VReg, lhs: VReg, rhs: VReg },
 
     // ── Unary ──────────────────────────────────────────────────
     /// dst = ~src (bitwise NOT)
@@ -735,6 +739,8 @@ impl fmt::Display for MInst {
             MInst::Sar { dst, lhs, rhs } => write!(f, "{dst} = sar {lhs}, {rhs}"),
             MInst::UDiv { dst, lhs, rhs } => write!(f, "{dst} = udiv {lhs}, {rhs}"),
             MInst::URem { dst, lhs, rhs } => write!(f, "{dst} = urem {lhs}, {rhs}"),
+            MInst::SDiv { dst, lhs, rhs } => write!(f, "{dst} = sdiv {lhs}, {rhs}"),
+            MInst::SRem { dst, lhs, rhs } => write!(f, "{dst} = srem {lhs}, {rhs}"),
             MInst::AndImm { dst, src, imm } => write!(f, "{dst} = and {src}, {imm:#x}"),
             MInst::OrImm { dst, src, imm } => write!(f, "{dst} = or {src}, {imm:#x}"),
             MInst::ShrImm { dst, src, imm } => write!(f, "{dst} = shr {src}, {imm}"),
@@ -889,6 +895,8 @@ impl MInst {
             | MInst::CmpImm { dst, .. }
             | MInst::UDiv { dst, .. }
             | MInst::URem { dst, .. }
+            | MInst::SDiv { dst, .. }
+            | MInst::SRem { dst, .. }
             | MInst::BitNot { dst, .. }
             | MInst::Neg { dst, .. }
             | MInst::Popcnt { dst, .. }
@@ -949,7 +957,9 @@ impl MInst {
             | MInst::Sar { lhs, rhs, .. }
             | MInst::Cmp { lhs, rhs, .. }
             | MInst::UDiv { lhs, rhs, .. }
-            | MInst::URem { lhs, rhs, .. } => Uses::two(*lhs, *rhs),
+            | MInst::URem { lhs, rhs, .. }
+            | MInst::SDiv { lhs, rhs, .. }
+            | MInst::SRem { lhs, rhs, .. } => Uses::two(*lhs, *rhs),
             MInst::Pext { src, mask, .. } | MInst::Pdep { src, mask, .. } => Uses::two(*src, *mask),
             MInst::AndImm { src, .. }
             | MInst::OrImm { src, .. }
@@ -1089,7 +1099,9 @@ impl MInst {
             | MInst::Sar { lhs, rhs, .. }
             | MInst::Cmp { lhs, rhs, .. }
             | MInst::UDiv { lhs, rhs, .. }
-            | MInst::URem { lhs, rhs, .. } => {
+            | MInst::URem { lhs, rhs, .. }
+            | MInst::SDiv { lhs, rhs, .. }
+            | MInst::SRem { lhs, rhs, .. } => {
                 if *lhs == old {
                     *lhs = new;
                 }
@@ -1730,6 +1742,24 @@ mod tests {
                 expected: vec![a, b],
             },
             UseCase {
+                name: "SDiv",
+                inst: MInst::SDiv {
+                    dst,
+                    lhs: a,
+                    rhs: b,
+                },
+                expected: vec![a, b],
+            },
+            UseCase {
+                name: "SRem",
+                inst: MInst::SRem {
+                    dst,
+                    lhs: a,
+                    rhs: b,
+                },
+                expected: vec![a, b],
+            },
+            UseCase {
                 name: "BitNot",
                 inst: MInst::BitNot { dst, src: a },
                 expected: vec![a],
@@ -1855,7 +1885,7 @@ mod tests {
         let cases = use_cases();
         assert_eq!(
             cases.len(),
-            50,
+            52,
             "the MInst variant table must stay exhaustive"
         );
 

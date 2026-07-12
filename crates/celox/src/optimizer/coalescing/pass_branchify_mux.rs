@@ -480,9 +480,10 @@ fn branchified_instruction_cost(
                 | crate::ir::BinaryOp::LogicOr => operand_chunks,
                 crate::ir::BinaryOp::Add | crate::ir::BinaryOp::Sub => 3 * operand_chunks,
                 crate::ir::BinaryOp::Mul => 5 * operand_chunks.saturating_mul(operand_chunks),
-                crate::ir::BinaryOp::Div | crate::ir::BinaryOp::Rem => {
-                    12 * operand_chunks.saturating_mul(operand_chunks)
-                }
+                crate::ir::BinaryOp::DivU
+                | crate::ir::BinaryOp::DivS
+                | crate::ir::BinaryOp::RemU
+                | crate::ir::BinaryOp::RemS => 12 * operand_chunks.saturating_mul(operand_chunks),
                 crate::ir::BinaryOp::Shl | crate::ir::BinaryOp::Shr | crate::ir::BinaryOp::Sar => {
                     4 * operand_chunks
                 }
@@ -1623,7 +1624,7 @@ mod tests {
         let div = SIRInstruction::Binary(
             RegisterId(2),
             RegisterId(1),
-            crate::ir::BinaryOp::Div,
+            crate::ir::BinaryOp::DivU,
             RegisterId(1),
         );
         assert_eq!(branchified_instruction_cost(&mul, &register_map), 5);

@@ -59,7 +59,7 @@ pub fn estimate_clif_cost(
                 let base = match op {
                     BinaryOp::Add | BinaryOp::Sub => 5,
                     BinaryOp::Mul => 5,
-                    BinaryOp::Div | BinaryOp::Rem => 10,
+                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => 10,
                     BinaryOp::Eq
                     | BinaryOp::Ne
                     | BinaryOp::LtU
@@ -93,7 +93,9 @@ pub fn estimate_clif_cost(
                     // Mul: schoolbook O(n²), ~5*nc² + 5*nc
                     BinaryOp::Mul => 5 * nc * nc + 5 * nc,
                     // Div/Rem: trial division O(n²), ~640*nc² + 384*nc
-                    BinaryOp::Div | BinaryOp::Rem => 640 * nc * nc + 384 * nc,
+                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+                        640 * nc * nc + 384 * nc
+                    }
                     // Comparisons: ~3 per chunk
                     BinaryOp::Eq
                     | BinaryOp::Ne

@@ -392,6 +392,92 @@ assign y = (a as u8) <: (b as u8);
 
     }
 
+    fn test_symbolic_store_preserves_declared_state_signedness(sim) {
+        @setup { let code = r#"
+module Top (
+    sel:           input  logic,
+    signed_value:  input  signed logic<8>,
+    signed_lhs:    input  signed logic<8>,
+    unsigned_cmp:  output logic,
+    unsigned_wide: output logic<16>,
+    signed_cmp:    output logic
+) {
+    var unsigned_state: logic<8>;
+    var signed_state: signed logic<8>;
+    always_comb {
+        unsigned_state = 8'd0;
+        signed_state = signed_value;
+        if sel {
+            unsigned_state = signed_value;
+        }
+        unsigned_cmp = signed_lhs >: unsigned_state;
+        unsigned_wide = unsigned_state;
+        signed_cmp = signed_lhs >: signed_state;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let signed_value = sim.signal("signed_value");
+    let signed_lhs = sim.signal("signed_lhs");
+    let unsigned_cmp = sim.signal("unsigned_cmp");
+    let unsigned_wide = sim.signal("unsigned_wide");
+    let signed_cmp = sim.signal("signed_cmp");
+
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(signed_value, 0xffu8); // -1 as signed logic<8>
+        io.set(signed_lhs, 1u8);
+    })
+    .unwrap();
+
+    // An assignment changes the stored bits, not the declared type of the
+    // variable read by the following expressions.
+    assert_eq!(sim.get(unsigned_cmp), 0u8.into()); // unsigned 1 > 255
+    assert_eq!(sim.get(unsigned_wide), 0x00ffu16.into());
+    assert_eq!(sim.get(signed_cmp), 1u8.into()); // signed 1 > -1
+
+    }
+
+    fn test_unsigned_type_cast_does_not_inherit_source_signedness(sim) {
+        @setup { let code = r#"
+module Top (
+    sel:       input  logic,
+    signed_in: input  signed logic<5>,
+    lhs:       input  signed logic<8>,
+    cmp:       output logic,
+    wide:      output logic<12>
+) {
+    var state: logic<8>;
+    always_comb {
+        state = 8'd0;
+        if sel {
+            state = signed_in as u8;
+        }
+        cmp = lhs >: state;
+        wide = state;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let signed_in = sim.signal("signed_in");
+    let lhs = sim.signal("lhs");
+    let cmp = sim.signal("cmp");
+    let wide = sim.signal("wide");
+
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(signed_in, 0x1fu8); // -1 at the source, 31 after `as u8`
+        io.set(lhs, 0x20u8);
+    })
+    .unwrap();
+
+    assert_eq!(sim.get(cmp), 1u8.into()); // unsigned 32 > 31
+    assert_eq!(sim.get(wide), 0x01fu16.into());
+
+    }
+
     // Basic unsigned division in always_comb.
     fn test_comb_div(sim) {
         @setup { let code = r#"

@@ -2583,6 +2583,60 @@ mod tests {
     }
 
     #[test]
+    fn test_div_rem_parser_selects_explicit_signed_variants() {
+        let code = r#"
+            module Top (
+                ua: input logic<8>,
+                ub: input logic<8>,
+                sa: input signed logic<8>,
+                sb: input signed logic<8>,
+                udiv: output logic<8>,
+                urem: output logic<8>,
+                sdiv: output signed logic<8>,
+                srem: output signed logic<8>,
+                mixed: output logic<8>
+            ) {
+                always_comb {
+                    udiv = ua / ub;
+                    urem = ua % ub;
+                    sdiv = sa / sb;
+                    srem = sa % sb;
+                    mixed = sa / ub;
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(declaration) => Some(declaration),
+                _ => None,
+            })
+            .unwrap();
+        let mut arena = SLTNodeArena::new();
+        let (paths, _, _, _, _) = super::parse_comb(&module, comb_decl, &mut arena).unwrap();
+
+        let op_for = |name| {
+            let target = var_id_of(&module, &[name]);
+            let path = paths
+                .iter()
+                .find(|path| path.target.var().is_some_and(|var| var.id == target))
+                .unwrap();
+            match arena.get(path.expr) {
+                SLTNode::Binary(_, op, _) => *op,
+                node => panic!("expected binary root for {name}, got {node:?}"),
+            }
+        };
+
+        assert_eq!(op_for("udiv"), BinaryOp::DivU);
+        assert_eq!(op_for("urem"), BinaryOp::RemU);
+        assert_eq!(op_for("sdiv"), BinaryOp::DivS);
+        assert_eq!(op_for("srem"), BinaryOp::RemS);
+        assert_eq!(op_for("mixed"), BinaryOp::DivU);
+    }
+
+    #[test]
     fn test_bit_level_self_assignment_dag() {
         let code = r#"
         module Top (i: input logic<8>, o: output logic<8>) {

@@ -1158,6 +1158,12 @@ fn emit_planned(
                 MInst::URem { dst, lhs, rhs } => {
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Rem)?;
                 }
+                MInst::SDiv { dst, lhs, rhs } => {
+                    emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::SDiv)?;
+                }
+                MInst::SRem { dst, lhs, rhs } => {
+                    emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::SRem)?;
+                }
                 _ => {
                     // Skip Cmp/CmpImm if it's fused with the following Branch
                     if let Some(fc) = fused_cmp {
@@ -2171,6 +2177,12 @@ fn emit_inst(
         MInst::URem { dst, lhs, rhs } => {
             emit_divrem(asm, assignment, *dst, *lhs, *rhs, DivOp::Rem)?;
         }
+        MInst::SDiv { dst, lhs, rhs } => {
+            emit_divrem(asm, assignment, *dst, *lhs, *rhs, DivOp::SDiv)?;
+        }
+        MInst::SRem { dst, lhs, rhs } => {
+            emit_divrem(asm, assignment, *dst, *lhs, *rhs, DivOp::SRem)?;
+        }
 
         MInst::Return | MInst::ReturnError { .. } => {
             // Handled in the main emit loop (jumps to shared epilogue)
@@ -2514,13 +2526,16 @@ fn emit_shift(
 }
 
 /// Division operation kind.
+#[derive(Clone, Copy)]
 enum DivOp {
     Div, // quotient in RAX
     Rem, // remainder in RDX
+    SDiv,
+    SRem,
 }
 
-/// Emit unsigned division/remainder: `div r64`
-/// x86-64 `div r64`: RDX:RAX / operand → RAX = quotient, RDX = remainder.
+/// Emit integer division/remainder using unsigned `div` or signed `idiv`.
+/// Both consume RDX:RAX and produce the quotient in RAX and remainder in RDX.
 ///
 /// The assignment phase avoids placing live-across VRegs in RAX/RDX around
 /// div/rem instructions, so no save/restore is needed here.
@@ -2537,9 +2552,10 @@ fn emit_divrem(
     let r = preg_to_reg64(resolve(assignment, rhs));
 
     let result_reg: AsmRegister64 = match op {
-        DivOp::Div => rax,
-        DivOp::Rem => rdx,
+        DivOp::Div | DivOp::SDiv => rax,
+        DivOp::Rem | DivOp::SRem => rdx,
     };
+    let signed = matches!(op, DivOp::SDiv | DivOp::SRem);
 
     // Divisor cannot be read from RAX/RDX because div consumes RDX:RAX.
     // Use a stack copy instead of an unmodeled scratch register clobber.
@@ -2551,10 +2567,20 @@ fn emit_divrem(
     if l != rax {
         asm.mov(rax, l)?;
     }
-    asm.xor(edx, edx)?;
+    if signed {
+        asm.cqo()?;
+    } else {
+        asm.xor(edx, edx)?;
+    }
     if rhs_on_stack {
-        asm.div(qword_ptr(rsp))?;
+        if signed {
+            asm.idiv(qword_ptr(rsp))?;
+        } else {
+            asm.div(qword_ptr(rsp))?;
+        }
         asm.add(rsp, 8)?;
+    } else if signed {
+        asm.idiv(r)?;
     } else {
         asm.div(r)?;
     }
@@ -3152,7 +3178,10 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 | MInst::AddImm { .. }
                 | MInst::SubImm { .. } => alu_imm += 1,
                 MInst::Cmp { .. } | MInst::CmpImm { .. } => cmp += 1,
-                MInst::UDiv { .. } | MInst::URem { .. } => div_rem += 1,
+                MInst::UDiv { .. }
+                | MInst::URem { .. }
+                | MInst::SDiv { .. }
+                | MInst::SRem { .. } => div_rem += 1,
                 MInst::BitNot { .. }
                 | MInst::Neg { .. }
                 | MInst::Popcnt { .. }

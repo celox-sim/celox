@@ -1099,11 +1099,19 @@ fn compile_binary_narrow(
         BinaryOp::Add => instrs.push(Instruction::I64Add),
         BinaryOp::Sub => instrs.push(Instruction::I64Sub),
         BinaryOp::Mul => instrs.push(Instruction::I64Mul),
-        BinaryOp::Div => {
+        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+            let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+            let quotient = matches!(op, BinaryOp::DivU | BinaryOp::DivS);
             let tmp_l = locals.alloc(1);
             let tmp_r = locals.alloc(1);
             instrs.push(Instruction::LocalSet(tmp_r));
             instrs.push(Instruction::LocalSet(tmp_l));
+            if signed {
+                emit_sign_extend(instrs, tmp_l, l_width.max(1));
+                instrs.push(Instruction::LocalSet(tmp_l));
+                emit_sign_extend(instrs, tmp_r, r_width.max(1));
+                instrs.push(Instruction::LocalSet(tmp_r));
+            }
             instrs.push(Instruction::LocalGet(tmp_r));
             instrs.push(Instruction::I64Eqz);
             instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
@@ -1111,26 +1119,42 @@ fn compile_binary_narrow(
             )));
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::Else);
-            instrs.push(Instruction::LocalGet(tmp_l));
-            instrs.push(Instruction::LocalGet(tmp_r));
-            instrs.push(Instruction::I64DivU);
-            instrs.push(Instruction::End);
-        }
-        BinaryOp::Rem => {
-            let tmp_l = locals.alloc(1);
-            let tmp_r = locals.alloc(1);
-            instrs.push(Instruction::LocalSet(tmp_r));
-            instrs.push(Instruction::LocalSet(tmp_l));
-            instrs.push(Instruction::LocalGet(tmp_r));
-            instrs.push(Instruction::I64Eqz);
-            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
-                ValType::I64,
-            )));
-            instrs.push(Instruction::I64Const(0));
-            instrs.push(Instruction::Else);
-            instrs.push(Instruction::LocalGet(tmp_l));
-            instrs.push(Instruction::LocalGet(tmp_r));
-            instrs.push(Instruction::I64RemU);
+            if signed {
+                // WebAssembly signed division traps on MIN / -1. SIR arithmetic
+                // wraps that quotient to MIN and defines the remainder as zero.
+                instrs.push(Instruction::LocalGet(tmp_l));
+                instrs.push(Instruction::I64Const(i64::MIN));
+                instrs.push(Instruction::I64Eq);
+                instrs.push(Instruction::LocalGet(tmp_r));
+                instrs.push(Instruction::I64Const(-1));
+                instrs.push(Instruction::I64Eq);
+                instrs.push(Instruction::I32And);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I64,
+                )));
+                if quotient {
+                    instrs.push(Instruction::LocalGet(tmp_l));
+                } else {
+                    instrs.push(Instruction::I64Const(0));
+                }
+                instrs.push(Instruction::Else);
+                instrs.push(Instruction::LocalGet(tmp_l));
+                instrs.push(Instruction::LocalGet(tmp_r));
+                instrs.push(if quotient {
+                    Instruction::I64DivS
+                } else {
+                    Instruction::I64RemS
+                });
+                instrs.push(Instruction::End);
+            } else {
+                instrs.push(Instruction::LocalGet(tmp_l));
+                instrs.push(Instruction::LocalGet(tmp_r));
+                instrs.push(if quotient {
+                    Instruction::I64DivU
+                } else {
+                    Instruction::I64RemU
+                });
+            }
             instrs.push(Instruction::End);
         }
         BinaryOp::And => instrs.push(Instruction::I64And),
@@ -1271,6 +1295,8 @@ fn compile_binary_wide(
     let l = locals.reg_map[lhs].clone();
     let r = locals.reg_map[rhs].clone();
     let d_chunks = d.num_chunks;
+    let l_width = unit.register_map[lhs].width();
+    let r_width = unit.register_map[rhs].width();
 
     if four_state && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
         let compare_mask = RegLocal {
@@ -1688,7 +1714,29 @@ fn compile_binary_wide(
                 }
             }
         }
-        BinaryOp::Div | BinaryOp::Rem => {
+        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+            let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+            let quotient = matches!(op, BinaryOp::DivU | BinaryOp::DivS);
+            let (dividend, lhs_negative) = if signed {
+                prepare_wide_signed_magnitude(&l, l_width, d_chunks, locals, instrs)
+            } else {
+                (l.clone(), None)
+            };
+            let (divisor, rhs_negative) = if signed {
+                prepare_wide_signed_magnitude(&r, r_width, d_chunks, locals, instrs)
+            } else {
+                (r.clone(), None)
+            };
+            let divisor_is_zero = locals.alloc(1);
+            instrs.push(Instruction::I64Const(0));
+            for c in 0..d_chunks {
+                emit_wide_get_chunk(instrs, &divisor, c);
+                instrs.push(Instruction::I64Or);
+            }
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::I64ExtendI32U);
+            instrs.push(Instruction::LocalSet(divisor_is_zero));
+
             let q = locals.alloc(d_chunks);
             let rem = locals.alloc(d_chunks);
             let cand = locals.alloc(d_chunks);
@@ -1723,7 +1771,7 @@ fn compile_binary_wide(
                 }
 
                 instrs.push(Instruction::LocalGet(rem));
-                emit_wide_get_chunk(instrs, &l, chunk_idx);
+                emit_wide_get_chunk(instrs, &dividend, chunk_idx);
                 instrs.push(Instruction::I64Const(bit_idx as i64));
                 instrs.push(Instruction::I64ShrU);
                 instrs.push(Instruction::I64Const(1));
@@ -1735,11 +1783,11 @@ fn compile_binary_wide(
                 instrs.push(Instruction::LocalSet(ge));
                 for c in 0..d_chunks {
                     instrs.push(Instruction::LocalGet(rem + c as u32));
-                    emit_wide_get_chunk(instrs, &r, c);
+                    emit_wide_get_chunk(instrs, &divisor, c);
                     instrs.push(Instruction::I64Ne);
                     instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
                     instrs.push(Instruction::LocalGet(rem + c as u32));
-                    emit_wide_get_chunk(instrs, &r, c);
+                    emit_wide_get_chunk(instrs, &divisor, c);
                     instrs.push(Instruction::I64GtU);
                     instrs.push(Instruction::I64ExtendI32U);
                     instrs.push(Instruction::LocalSet(ge));
@@ -1750,12 +1798,12 @@ fn compile_binary_wide(
                 instrs.push(Instruction::LocalSet(borrow));
                 for c in 0..d_chunks {
                     instrs.push(Instruction::LocalGet(rem + c as u32));
-                    emit_wide_get_chunk(instrs, &r, c);
+                    emit_wide_get_chunk(instrs, &divisor, c);
                     instrs.push(Instruction::I64Sub);
                     instrs.push(Instruction::LocalSet(d1));
 
                     instrs.push(Instruction::LocalGet(rem + c as u32));
-                    emit_wide_get_chunk(instrs, &r, c);
+                    emit_wide_get_chunk(instrs, &divisor, c);
                     instrs.push(Instruction::I64LtU);
                     instrs.push(Instruction::I64ExtendI32U);
                     instrs.push(Instruction::LocalSet(c1));
@@ -1791,9 +1839,36 @@ fn compile_binary_wide(
                 instrs.push(Instruction::End);
             }
 
-            let src = if matches!(op, BinaryOp::Div) { q } else { rem };
+            let magnitude = RegLocal {
+                value_idx: if quotient { q } else { rem },
+                num_chunks: d_chunks,
+                mask_idx: None,
+            };
+            let signed_result = if signed {
+                let result_negative = if quotient {
+                    let result = locals.alloc(1);
+                    instrs.push(Instruction::LocalGet(lhs_negative.unwrap()));
+                    instrs.push(Instruction::LocalGet(rhs_negative.unwrap()));
+                    instrs.push(Instruction::I64Xor);
+                    instrs.push(Instruction::LocalSet(result));
+                    result
+                } else {
+                    lhs_negative.unwrap()
+                };
+                conditional_negate_wide_local(&magnitude, result_negative, d_chunks, locals, instrs)
+            } else {
+                magnitude
+            };
             for c in 0..d_chunks {
-                instrs.push(Instruction::LocalGet(src + c as u32));
+                instrs.push(Instruction::LocalGet(divisor_is_zero));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I64,
+                )));
+                emit_wide_get_chunk(instrs, &signed_result, c);
+                instrs.push(Instruction::Else);
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::End);
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
             }
         }
@@ -4840,6 +4915,119 @@ fn emit_sign_extend(instrs: &mut Vec<Instruction<'static>>, local_idx: u32, widt
         instrs.push(Instruction::I64Const(shift as i64));
         instrs.push(Instruction::I64ShrS);
     }
+}
+
+fn prepare_wide_signed_magnitude(
+    source: &RegLocal,
+    width: usize,
+    num_chunks: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> (RegLocal, Option<u32>) {
+    debug_assert!(width > 0);
+    let sign = locals.alloc(1);
+    let sign_bit = width - 1;
+    emit_wide_get_chunk(instrs, source, sign_bit / 64);
+    instrs.push(Instruction::I64Const((sign_bit % 64) as i64));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::I64Const(1));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::LocalSet(sign));
+
+    let extended = RegLocal {
+        value_idx: locals.alloc(num_chunks),
+        num_chunks,
+        mask_idx: None,
+    };
+    let source_chunks = width.div_ceil(64);
+    let top_bits = width % 64;
+    for chunk in 0..num_chunks {
+        if chunk >= source_chunks {
+            instrs.push(Instruction::LocalGet(sign));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                ValType::I64,
+            )));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::Else);
+            instrs.push(Instruction::I64Const(-1));
+            instrs.push(Instruction::End);
+        } else {
+            emit_wide_get_chunk(instrs, source, chunk);
+            if chunk + 1 == source_chunks && top_bits != 0 {
+                let low_mask = (1u64 << top_bits) - 1;
+                instrs.push(Instruction::I64Const(low_mask as i64));
+                instrs.push(Instruction::I64And);
+                instrs.push(Instruction::LocalGet(sign));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I64,
+                )));
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::Else);
+                instrs.push(Instruction::I64Const((!low_mask) as i64));
+                instrs.push(Instruction::End);
+                instrs.push(Instruction::I64Or);
+            }
+        }
+        instrs.push(Instruction::LocalSet(extended.value_idx + chunk as u32));
+    }
+
+    (
+        conditional_negate_wide_local(&extended, sign, num_chunks, locals, instrs),
+        Some(sign),
+    )
+}
+
+fn conditional_negate_wide_local(
+    source: &RegLocal,
+    negate: u32,
+    num_chunks: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> RegLocal {
+    let negated = RegLocal {
+        value_idx: locals.alloc(num_chunks),
+        num_chunks,
+        mask_idx: None,
+    };
+    let carry = locals.alloc(1);
+    instrs.push(Instruction::I64Const(1));
+    instrs.push(Instruction::LocalSet(carry));
+    for chunk in 0..num_chunks {
+        emit_wide_get_chunk(instrs, source, chunk);
+        instrs.push(Instruction::I64Const(-1));
+        instrs.push(Instruction::I64Xor);
+        instrs.push(Instruction::LocalGet(carry));
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalTee(negated.value_idx + chunk as u32));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::LocalGet(carry));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I32And);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(carry));
+    }
+
+    let result = RegLocal {
+        value_idx: locals.alloc(num_chunks),
+        num_chunks,
+        mask_idx: None,
+    };
+    for chunk in 0..num_chunks {
+        instrs.push(Instruction::LocalGet(negate));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+            ValType::I64,
+        )));
+        emit_wide_get_chunk(instrs, source, chunk);
+        instrs.push(Instruction::Else);
+        emit_wide_get_chunk(instrs, &negated, chunk);
+        instrs.push(Instruction::End);
+        instrs.push(Instruction::LocalSet(result.value_idx + chunk as u32));
+    }
+    result
 }
 
 fn emit_wide_get_chunk(instrs: &mut Vec<Instruction<'static>>, reg: &RegLocal, chunk: usize) {
