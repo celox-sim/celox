@@ -4031,7 +4031,7 @@ fn compile_store_at_offset(
         // Byte-aligned store. Break remaining bytes into power-of-2
         // sized stores (8/4/2/1) so every byte of the value is written.
         for c in 0..num_chunks {
-            let remaining_bytes = store_bytes - c * 8;
+            let remaining_bytes = (store_bytes - c * 8).min(8);
             let src_local = (c < src.num_chunks).then_some(src.value_idx + c as u32);
             let mut written = 0usize;
             while written < remaining_bytes {

@@ -9,6 +9,26 @@ fn isub_from_imm(state: &mut TranslationState, imm: i64, rhs: Value) -> Value {
     state.builder.ins().isub(lhs, rhs)
 }
 
+fn scalar_access_type(op_width: usize, max_bit_shift: usize) -> Type {
+    let total_bits_needed = op_width.saturating_add(max_bit_shift);
+    if total_bits_needed <= 8 {
+        types::I8
+    } else if total_bits_needed <= 16 {
+        types::I16
+    } else if total_bits_needed <= 32 {
+        types::I32
+    } else {
+        types::I64
+    }
+}
+
+fn max_bit_shift(offset: &SIROffset) -> usize {
+    match offset {
+        SIROffset::Static(bit_offset) => bit_offset & 7,
+        SIROffset::Dynamic(_) => 7,
+    }
+}
+
 impl SIRTranslator {
     pub(super) fn translate_load_inst(
         &self,
@@ -157,6 +177,7 @@ impl SIRTranslator {
                 bit_shift_val,
                 *op_width,
                 d_phys_width,
+                max_bit_shift(offset),
             )]
         } else {
             self.translate_load_multi_word(
@@ -183,6 +204,7 @@ impl SIRTranslator {
                         bit_shift_val,
                         *op_width,
                         d_phys_width,
+                        max_bit_shift(offset),
                     )]
                 } else {
                     self.translate_load_multi_word(
@@ -329,6 +351,7 @@ impl SIRTranslator {
                 bit_shift_val,
                 *op_width,
                 s_phys_width,
+                max_bit_shift(offset),
             )]
         } else {
             let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
@@ -365,6 +388,7 @@ impl SIRTranslator {
                     bit_shift_val,
                     *op_width,
                     s_phys_width,
+                    max_bit_shift(offset),
                 )]
             } else {
                 let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
@@ -427,7 +451,14 @@ impl SIRTranslator {
                     );
                 }
             } else {
-                self.translate_store_native(state, final_addr, bit_shift_val, *op_width, val_v);
+                self.translate_store_native(
+                    state,
+                    final_addr,
+                    bit_shift_val,
+                    *op_width,
+                    val_v,
+                    max_bit_shift(offset),
+                );
                 if self.options.four_state && self.layout.is_4states[&abs] {
                     let var_byte_size = get_byte_size(self.layout.widths[&abs]);
                     let final_addr_m = state
@@ -440,6 +471,7 @@ impl SIRTranslator {
                         bit_shift_val,
                         *op_width,
                         m_chunks[0],
+                        max_bit_shift(offset),
                     );
                 }
             }
@@ -497,6 +529,7 @@ impl SIRTranslator {
                     bit_shift_val,
                     *op_width,
                     s_phys_width,
+                    max_bit_shift(offset),
                 )]
             } else {
                 let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
@@ -533,6 +566,7 @@ impl SIRTranslator {
                         bit_shift_val,
                         *op_width,
                         s_phys_width,
+                        max_bit_shift(offset),
                     )]
                 } else {
                     let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
@@ -785,8 +819,16 @@ impl SIRTranslator {
                 bit_shift_val,
                 *op_width,
                 phys_width,
+                max_bit_shift(offset),
             );
-            self.translate_store_native(state, dst_final_addr, bit_shift_val, *op_width, val);
+            self.translate_store_native(
+                state,
+                dst_final_addr,
+                bit_shift_val,
+                *op_width,
+                val,
+                max_bit_shift(offset),
+            );
 
             if self.options.four_state {
                 let var_byte_size_src = get_byte_size(self.layout.widths[&src_abs]);
@@ -805,6 +847,7 @@ impl SIRTranslator {
                     bit_shift_val,
                     *op_width,
                     phys_width,
+                    max_bit_shift(offset),
                 );
                 self.translate_store_native(
                     state,
@@ -812,6 +855,7 @@ impl SIRTranslator {
                     bit_shift_val,
                     *op_width,
                     val_m,
+                    max_bit_shift(offset),
                 );
             }
         } else {
@@ -925,18 +969,10 @@ impl SIRTranslator {
         bit_shift: Value, // 0 ~ 7 (i64)
         op_width: usize,  // bit width to write
         src_val: Value,   // source
+        max_bit_shift: usize,
     ) {
         // 1. Determine minimum necessary access type
-        let total_bits_needed = op_width + 7;
-        let access_ty = if total_bits_needed <= 8 {
-            types::I8
-        } else if total_bits_needed <= 16 {
-            types::I16
-        } else if total_bits_needed <= 32 {
-            types::I32
-        } else {
-            types::I64
-        };
+        let access_ty = scalar_access_type(op_width, max_bit_shift);
         let m_raw = if op_width >= 64 {
             !0u64
         } else {
@@ -998,18 +1034,10 @@ impl SIRTranslator {
         bit_shift: Value,
         op_width: usize,
         d_phys_width: usize,
+        max_bit_shift: usize,
     ) -> Value {
         // 1. Determine minimum necessary access type
-        let total_bits_needed = op_width + 7;
-        let access_ty = if total_bits_needed <= 8 {
-            types::I8
-        } else if total_bits_needed <= 16 {
-            types::I16
-        } else if total_bits_needed <= 32 {
-            types::I32
-        } else {
-            types::I64
-        };
+        let access_ty = scalar_access_type(op_width, max_bit_shift);
 
         // 2. Load and alignment (right shift)
         let raw_val = state
@@ -1357,8 +1385,14 @@ impl SIRTranslator {
             .ins()
             .iadd_imm(state.mem_ptr, base_offset_bytes as i64);
         let actual_final_addr = state.builder.ins().iadd(actual_final_addr, byte_offset_val);
-        let new_val =
-            self.translate_load_native(state, actual_final_addr, bit_shift_val, *op_width, 64);
+        let new_val = self.translate_load_native(
+            state,
+            actual_final_addr,
+            bit_shift_val,
+            *op_width,
+            64,
+            max_bit_shift(offset),
+        );
 
         // 3. For each trigger, generate edge detection logic
         for trigger in triggers {
@@ -1419,5 +1453,21 @@ impl SIRTranslator {
             state.builder.seal_block(triggered_block);
             state.builder.seal_block(merge_block);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_scalar_access_uses_the_known_intra_byte_shift() {
+        let boundary = SIROffset::Static(186);
+        assert_eq!(max_bit_shift(&boundary), 2);
+        assert_eq!(scalar_access_type(6, max_bit_shift(&boundary)), types::I8);
+
+        let dynamic = SIROffset::Dynamic(RegisterId(0));
+        assert_eq!(max_bit_shift(&dynamic), 7);
+        assert_eq!(scalar_access_type(6, max_bit_shift(&dynamic)), types::I16);
     }
 }
