@@ -1094,12 +1094,42 @@ impl StaticBranchProbability {
             total_weight: self.total_weight,
         }
     }
+
+    fn conjunction(self, rhs: Self) -> Self {
+        let Some(true_weight) = self.true_weight.checked_mul(rhs.true_weight) else {
+            return Self::EVEN;
+        };
+        let Some(total_weight) = self.total_weight.checked_mul(rhs.total_weight) else {
+            return Self::EVEN;
+        };
+        Self {
+            true_weight,
+            total_weight,
+        }
+    }
 }
 
 struct MuxCfgPlan {
     /// Nodes used by both arms which were not already materialized.  They must
     /// be evaluated once in the dominator before the control-flow split.
     shared_nodes: Vec<NodeId>,
+}
+
+#[derive(Clone, Default)]
+struct ZeroControllerFacts {
+    /// The expression is the known two-state value zero independently of any
+    /// runtime predicate.  Such a child imposes no constraint when an outer
+    /// operation requires all of its children to be zero.
+    unconditional_zero: bool,
+    /// One-bit descendants whose false value is sufficient to prove this
+    /// expression is all zero.
+    guards: crate::HashSet<NodeId>,
+}
+
+#[derive(Clone, Copy)]
+struct GuardedConcatPlan {
+    guard: NodeId,
+    net_benefit_scaled: u128,
 }
 
 #[derive(Default)]
@@ -2419,7 +2449,7 @@ impl SLTToSIRLowerer {
                 self.lower_slice_inner(builder, *expr, access, arena, cache, env, allow_cache)
             }
             SLTNode::Concat(parts) => {
-                self.lower_concat_inner(builder, parts, arena, cache, env, allow_cache)
+                self.lower_concat_inner(builder, node, parts, arena, cache, env, allow_cache)
             }
             SLTNode::Mux {
                 cond,
@@ -3020,9 +3050,371 @@ impl SLTToSIRLowerer {
         }
     }
 
+    fn zero_required_from_both(
+        lhs: &ZeroControllerFacts,
+        rhs: &ZeroControllerFacts,
+    ) -> ZeroControllerFacts {
+        match (lhs.unconditional_zero, rhs.unconditional_zero) {
+            (true, true) => ZeroControllerFacts {
+                unconditional_zero: true,
+                guards: crate::HashSet::default(),
+            },
+            (true, false) => rhs.clone(),
+            (false, true) => lhs.clone(),
+            (false, false) => {
+                let (smaller, larger) = if lhs.guards.len() <= rhs.guards.len() {
+                    (&lhs.guards, &rhs.guards)
+                } else {
+                    (&rhs.guards, &lhs.guards)
+                };
+                ZeroControllerFacts {
+                    unconditional_zero: false,
+                    guards: smaller
+                        .iter()
+                        .copied()
+                        .filter(|guard| larger.contains(guard))
+                        .collect(),
+                }
+            }
+        }
+    }
+
+    fn zero_from_either(
+        lhs: &ZeroControllerFacts,
+        rhs: &ZeroControllerFacts,
+    ) -> ZeroControllerFacts {
+        if lhs.unconditional_zero || rhs.unconditional_zero {
+            return ZeroControllerFacts {
+                unconditional_zero: true,
+                guards: crate::HashSet::default(),
+            };
+        }
+        let mut guards = lhs.guards.clone();
+        guards.extend(rhs.guards.iter().copied());
+        ZeroControllerFacts {
+            unconditional_zero: false,
+            guards,
+        }
+    }
+
+    /// Compute exact two-state zero controllers for the small algebra used by
+    /// guarded lane vectors. A controller `g` is present only when assuming
+    /// the one-bit value `g == 0` proves every bit of `node` is zero.
+    fn zero_controller_facts<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        root: NodeId,
+        arena: &SLTNodeArena<A>,
+        memo: &mut crate::HashMap<NodeId, ZeroControllerFacts>,
+    ) -> ZeroControllerFacts {
+        if let Some(facts) = memo.get(&root) {
+            return facts.clone();
+        }
+
+        // Explicit postorder avoids consuming the native stack on procedural
+        // expression chains. Each node in this concat cone is analyzed once.
+        let mut stack = vec![(root, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if memo.contains_key(&node) {
+                continue;
+            }
+            if !expanded {
+                stack.push((node, true));
+                for child in Self::node_children(node, arena).into_iter().rev() {
+                    if !memo.contains_key(&child) {
+                        stack.push((child, false));
+                    }
+                }
+                continue;
+            }
+
+            let child = |node: NodeId| {
+                memo.get(&node)
+                    .cloned()
+                    .expect("zero-controller postorder must analyze children first")
+            };
+            let mut facts = match arena.get(node) {
+                SLTNode::Constant(value, mask, _, _) => ZeroControllerFacts {
+                    unconditional_zero: value.is_zero() && mask.is_zero(),
+                    guards: crate::HashSet::default(),
+                },
+                SLTNode::Input { .. } => ZeroControllerFacts::default(),
+                SLTNode::Binary(lhs, op, rhs) => {
+                    let lhs = child(*lhs);
+                    let rhs = child(*rhs);
+                    match op {
+                        BinaryOp::And | BinaryOp::LogicAnd | BinaryOp::Mul => {
+                            Self::zero_from_either(&lhs, &rhs)
+                        }
+                        BinaryOp::Or
+                        | BinaryOp::Xor
+                        | BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::LogicOr => Self::zero_required_from_both(&lhs, &rhs),
+                        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => lhs,
+                        BinaryOp::Eq
+                        | BinaryOp::Ne
+                        | BinaryOp::EqWildcard
+                        | BinaryOp::NeWildcard
+                        | BinaryOp::LtU
+                        | BinaryOp::LtS
+                        | BinaryOp::LeU
+                        | BinaryOp::LeS
+                        | BinaryOp::GtU
+                        | BinaryOp::GtS
+                        | BinaryOp::GeU
+                        | BinaryOp::GeS
+                        | BinaryOp::DivU
+                        | BinaryOp::DivS
+                        | BinaryOp::RemU
+                        | BinaryOp::RemS => ZeroControllerFacts::default(),
+                    }
+                }
+                SLTNode::Unary(op, inner) => match op {
+                    UnaryOp::Ident
+                    | UnaryOp::ToTwoState
+                    | UnaryOp::Minus
+                    | UnaryOp::And
+                    | UnaryOp::Or
+                    | UnaryOp::Xor
+                    | UnaryOp::PopCount => child(*inner),
+                    UnaryOp::LogicNot
+                    | UnaryOp::BitNot
+                    | UnaryOp::CountLeadingZeros
+                    | UnaryOp::CountTrailingZeros => ZeroControllerFacts::default(),
+                },
+                SLTNode::Slice { expr, .. } => child(*expr),
+                SLTNode::Concat(parts) => {
+                    let mut combined = ZeroControllerFacts {
+                        unconditional_zero: true,
+                        guards: crate::HashSet::default(),
+                    };
+                    for (part, _) in parts {
+                        combined = Self::zero_required_from_both(&combined, &child(*part));
+                    }
+                    combined
+                }
+                SLTNode::Mux {
+                    then_expr,
+                    else_expr,
+                    ..
+                } => Self::zero_required_from_both(&child(*then_expr), &child(*else_expr)),
+                SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => {
+                    ZeroControllerFacts::default()
+                }
+            };
+
+            let shared = self.cost_cache.borrow().fanout[node.0] > 1;
+            if !facts.unconditional_zero
+                && shared
+                && self.get_width(node, arena) == 1
+                && !matches!(arena.get(node), SLTNode::Constant(..))
+            {
+                // This shared compound value covers every zero case of its
+                // descendant controllers and possibly more. Keeping only the
+                // maximal value prevents a leaf from winning on a tiny local
+                // cost difference and keeps deep conjunction sets linear.
+                facts.guards.clear();
+                facts.guards.insert(node);
+            }
+            memo.insert(node, facts);
+        }
+
+        memo.get(&root)
+            .cloned()
+            .expect("zero-controller root must be produced by its postorder")
+    }
+
+    fn guarded_concat_root_is_supported<A: Hash + Eq + Clone>(
+        root: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        let mut visited = crate::HashSet::default();
+        let mut work = vec![root];
+        while let Some(node) = work.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            match arena.get(node) {
+                SLTNode::Binary(
+                    _,
+                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS,
+                    _,
+                )
+                | SLTNode::ForFold { .. }
+                | SLTNode::ForFoldGroup { .. } => return false,
+                _ => work.extend(Self::node_children(node, arena)),
+            }
+        }
+        true
+    }
+
+    fn guarded_concat_region_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        root: NodeId,
+        guard: NodeId,
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+    ) -> (u128, u128) {
+        let mut guard_closure = crate::HashSet::default();
+        let mut guard_work = vec![guard];
+        while let Some(node) = guard_work.pop() {
+            if guard_closure.insert(node) {
+                guard_work.extend(Self::node_children(node, arena));
+            }
+        }
+
+        let mut visited = crate::HashSet::default();
+        let mut live_through = crate::HashSet::default();
+        let mut work = vec![root];
+        let mut cost = 0u128;
+        while let Some(node) = work.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            // The guard and its dependencies are evaluated in the dominator.
+            // If one is also reached outside the guard expression, the true
+            // arm consumes that already-materialized value as a live-through.
+            if guard_closure.contains(&node) || materialized.contains_key(&node) {
+                live_through.insert(node);
+                continue;
+            }
+
+            cost = cost.saturating_add(self.intrinsic_node_cost(node, arena));
+            // A nested Mux may already lower to control flow. Counting only
+            // the Mux itself and none of its condition/arms is a conservative
+            // lower bound on work skipped by the new outer branch.
+            if !matches!(arena.get(node), SLTNode::Mux { .. }) {
+                work.extend(Self::node_children(node, arena));
+            }
+        }
+        let live_through_cost = live_through
+            .into_iter()
+            .map(|node| Self::chunks(self.get_width(node, arena)))
+            .fold(0u128, u128::saturating_add);
+        (cost, live_through_cost)
+    }
+
+    fn guarded_concat_net_benefit<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        root: NodeId,
+        guard: NodeId,
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+    ) -> Option<u128> {
+        const CONTROL_COST: u128 = 3;
+        const MISPREDICT_COST: u128 = 16;
+        const PHI_COPY_COST_PER_CHUNK: u128 = 2;
+        const LIVE_THROUGH_COST_PER_CHUNK: u128 = 1;
+
+        let probability = Self::guarded_true_probability(guard, arena);
+        let false_weight = probability.total_weight - probability.true_weight;
+        let (skippable_cost, live_through_chunks) =
+            self.guarded_concat_region_cost(root, guard, arena, materialized);
+        let result_chunks = Self::chunks(self.get_width(root, arena));
+        let saved_scaled = false_weight.saturating_mul(skippable_cost);
+        let introduced_scaled = probability
+            .total_weight
+            .saturating_mul(
+                CONTROL_COST
+                    .saturating_add(result_chunks.saturating_mul(PHI_COPY_COST_PER_CHUNK))
+                    .saturating_add(
+                        live_through_chunks.saturating_mul(LIVE_THROUGH_COST_PER_CHUNK),
+                    ),
+            )
+            .saturating_add(false_weight.saturating_mul(result_chunks))
+            .saturating_add(
+                probability
+                    .true_weight
+                    .min(false_weight)
+                    .saturating_mul(MISPREDICT_COST),
+            );
+        (saved_scaled > introduced_scaled).then(|| saved_scaled - introduced_scaled)
+    }
+
+    fn guarded_concat_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
+        &self,
+        root: NodeId,
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+    ) -> Option<GuardedConcatPlan> {
+        if self.four_state || !Self::guarded_concat_root_is_supported(root, arena) {
+            return None;
+        }
+
+        let mut memo = crate::HashMap::default();
+        let facts = self.zero_controller_facts(root, arena, &mut memo);
+        if facts.unconditional_zero {
+            return None;
+        }
+        let mut guards = facts.guards.into_iter().collect::<Vec<_>>();
+        guards.sort_unstable();
+
+        let mut best = None;
+        for guard in guards {
+            if guard == root || self.get_width(guard, arena) != 1 {
+                continue;
+            }
+            let Some(net_benefit_scaled) =
+                self.guarded_concat_net_benefit(root, guard, arena, materialized)
+            else {
+                continue;
+            };
+            let candidate = GuardedConcatPlan {
+                guard,
+                net_benefit_scaled,
+            };
+            let replace = best.as_ref().is_none_or(|current: &GuardedConcatPlan| {
+                candidate.net_benefit_scaled > current.net_benefit_scaled
+                    || candidate.net_benefit_scaled == current.net_benefit_scaled
+                        && candidate.guard < current.guard
+            });
+            if replace {
+                best = Some(candidate);
+            }
+        }
+        best
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_guarded_concat_cfg<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        plan: GuardedConcatPlan,
+        parts: &[(NodeId, usize)],
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+    ) -> RegisterId {
+        let guard = self.lower_inner(builder, plan.guard, arena, cache, None, true);
+        let width = parts.iter().map(|(_, width)| *width).sum();
+        let result = builder.alloc_logic(width);
+        let true_block = builder.new_block();
+        let false_block = builder.new_block();
+        let merge_block = builder.new_block_with(vec![result]);
+        builder.seal_block(SIRTerminator::Branch {
+            cond: guard,
+            true_block: (true_block, Vec::new()),
+            false_block: (false_block, Vec::new()),
+        });
+
+        let true_transaction = self.cache_transaction();
+        builder.switch_to_block(true_block);
+        let true_value = self.lower_concat_eager_inner(builder, parts, arena, cache, None, true);
+        builder.seal_block(SIRTerminator::Jump(merge_block, vec![true_value]));
+        self.rollback_cache(cache, true_transaction);
+
+        builder.switch_to_block(false_block);
+        let zero = builder.alloc_logic(width);
+        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+        builder.seal_block(SIRTerminator::Jump(merge_block, vec![zero]));
+
+        builder.switch_to_block(merge_block);
+        result
+    }
+
     fn lower_concat_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
+        node: NodeId,
         parts: &[(NodeId, usize)],
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
@@ -3036,6 +3428,25 @@ impl SLTToSIRLowerer {
             return reg;
         }
 
+        if env.is_none()
+            && allow_cache
+            && let Some(plan) = self.guarded_concat_plan(node, arena, cache)
+        {
+            return self.lower_guarded_concat_cfg(builder, plan, parts, arena, cache);
+        }
+
+        self.lower_concat_eager_inner(builder, parts, arena, cache, env, allow_cache)
+    }
+
+    fn lower_concat_eager_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        parts: &[(NodeId, usize)],
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: Option<&LowerEnv<'_, A>>,
+        allow_cache: bool,
+    ) -> RegisterId {
         // Use SIR Concat instruction directly. This preserves Z bits in 4-state
         // mode (unlike the Shl+Or pattern which converts Z to X through Binary Or
         // normalization). Concat args are [MSB, ..., LSB] — same order as `parts`.
@@ -3706,6 +4117,34 @@ impl SLTToSIRLowerer {
             }
             _ => StaticBranchProbability::EVEN,
         }
+    }
+
+    fn guarded_true_probability<A: Hash + Eq + Clone>(
+        guard: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> StaticBranchProbability {
+        let mut probability = StaticBranchProbability {
+            true_weight: 1,
+            total_weight: 1,
+        };
+        let mut visited = crate::HashSet::default();
+        let mut work = vec![guard];
+        while let Some(node) = work.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            match arena.get(node) {
+                SLTNode::Binary(lhs, BinaryOp::LogicAnd, rhs) => {
+                    work.extend([*lhs, *rhs]);
+                }
+                SLTNode::Unary(UnaryOp::Ident, inner) => work.push(*inner),
+                _ => {
+                    probability =
+                        probability.conjunction(Self::static_true_probability(node, arena));
+                }
+            }
+        }
+        probability
     }
 
     fn mux_cfg_is_profitable(
@@ -5317,6 +5756,39 @@ mod tests {
         value
     }
 
+    fn guarded_lane_concat(
+        arena: &mut SLTNodeArena<u32>,
+        lanes: usize,
+        ungated_lane: Option<usize>,
+    ) -> (NodeId, NodeId, NodeId) {
+        let valid = input(arena, 10_000, 1);
+        let is_store = input(arena, 10_001, 1);
+        let guard = arena
+            .alloc(SLTNode::Binary(valid, BinaryOp::LogicAnd, is_store))
+            .unwrap();
+        let threshold = constant(arena, 0x8000_0000_0000_0000, 64);
+        let mut parts = Vec::with_capacity(lanes);
+        let mut first_predicate = None;
+        for lane in 0..lanes {
+            let source = input(arena, 11_000 + lane as u32, 64);
+            let expensive = operation_chain(arena, source, BinaryOp::Add, 6, 3, 64);
+            let predicate = arena
+                .alloc(SLTNode::Binary(expensive, BinaryOp::GeU, threshold))
+                .unwrap();
+            first_predicate.get_or_insert(predicate);
+            let value = if ungated_lane == Some(lane) {
+                predicate
+            } else {
+                arena
+                    .alloc(SLTNode::Binary(guard, BinaryOp::LogicAnd, predicate))
+                    .unwrap()
+            };
+            parts.push((value, 1));
+        }
+        let root = arena.alloc(SLTNode::Concat(parts)).unwrap();
+        (root, guard, first_predicate.unwrap())
+    }
+
     fn finish_lowering(mut builder: SIRBuilder<u32>) -> ExecutionUnit<u32> {
         builder.seal_block(SIRTerminator::Return);
         let (blocks, register_map, _) = builder.drain();
@@ -5387,58 +5859,106 @@ mod tests {
                         );
                     }
                     SIRInstruction::Binary(dst, lhs, op, rhs) => {
-                        let lhs = &values[lhs];
-                        let rhs = &values[rhs];
-                        assert_eq!(lhs.mask, BigUint::from(0u8));
-                        assert_eq!(rhs.mask, BigUint::from(0u8));
+                        let lhs_reg = *lhs;
+                        let rhs_reg = *rhs;
+                        let lhs = &values[&lhs_reg];
+                        let rhs = &values[&rhs_reg];
                         let width = eu.register_map[dst].width();
                         let modulus = BigUint::from(1u8) << width;
-                        let payload = match op {
-                            BinaryOp::Add => (&lhs.payload + &rhs.payload) % &modulus,
-                            BinaryOp::Mul => (&lhs.payload * &rhs.payload) % &modulus,
-                            BinaryOp::Sub => (&lhs.payload + &modulus - &rhs.payload) % &modulus,
-                            BinaryOp::And => &lhs.payload & &rhs.payload,
-                            BinaryOp::Or => &lhs.payload | &rhs.payload,
-                            BinaryOp::LogicAnd => BigUint::from(
-                                lhs.payload != BigUint::from(0u8)
-                                    && rhs.payload != BigUint::from(0u8),
-                            ),
-                            BinaryOp::LogicOr => BigUint::from(
-                                lhs.payload != BigUint::from(0u8)
-                                    || rhs.payload != BigUint::from(0u8),
-                            ),
-                            BinaryOp::Shl => {
-                                let shift =
-                                    rhs.payload.to_u64_digits().first().copied().unwrap_or(0);
-                                if shift > usize::MAX as u64 {
-                                    BigUint::from(0u8)
-                                } else {
-                                    (&lhs.payload << shift as usize) % &modulus
+                        let (payload, mask) = match op {
+                            BinaryOp::LogicAnd | BinaryOp::LogicOr => {
+                                let truth = |reg: RegisterId, value: &TestSIRValue| {
+                                    let known =
+                                        width_mask(eu.register_map[&reg].width()) ^ &value.mask;
+                                    if (&value.payload & known) != BigUint::from(0u8) {
+                                        Some(true)
+                                    } else if value.mask.is_zero() {
+                                        Some(false)
+                                    } else {
+                                        None
+                                    }
+                                };
+                                let lhs_truth = truth(lhs_reg, lhs);
+                                let rhs_truth = truth(rhs_reg, rhs);
+                                let known = match op {
+                                    BinaryOp::LogicAnd => {
+                                        if lhs_truth == Some(false) || rhs_truth == Some(false) {
+                                            Some(false)
+                                        } else if lhs_truth == Some(true) && rhs_truth == Some(true)
+                                        {
+                                            Some(true)
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    BinaryOp::LogicOr => {
+                                        if lhs_truth == Some(true) || rhs_truth == Some(true) {
+                                            Some(true)
+                                        } else if lhs_truth == Some(false)
+                                            && rhs_truth == Some(false)
+                                        {
+                                            Some(false)
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                match known {
+                                    Some(value) => (BigUint::from(value), BigUint::from(0u8)),
+                                    None => (BigUint::from(0u8), BigUint::from(1u8)),
                                 }
                             }
-                            BinaryOp::Shr => {
-                                let shift =
-                                    rhs.payload.to_u64_digits().first().copied().unwrap_or(0);
-                                if shift > usize::MAX as u64 {
-                                    BigUint::from(0u8)
-                                } else {
-                                    &lhs.payload >> shift as usize
-                                }
+                            _ => {
+                                assert_eq!(lhs.mask, BigUint::from(0u8));
+                                assert_eq!(rhs.mask, BigUint::from(0u8));
+                                let payload = match op {
+                                    BinaryOp::Add => (&lhs.payload + &rhs.payload) % &modulus,
+                                    BinaryOp::Mul => (&lhs.payload * &rhs.payload) % &modulus,
+                                    BinaryOp::Sub => {
+                                        (&lhs.payload + &modulus - &rhs.payload) % &modulus
+                                    }
+                                    BinaryOp::And => &lhs.payload & &rhs.payload,
+                                    BinaryOp::Or => &lhs.payload | &rhs.payload,
+                                    BinaryOp::Shl => {
+                                        let shift = rhs
+                                            .payload
+                                            .to_u64_digits()
+                                            .first()
+                                            .copied()
+                                            .unwrap_or(0);
+                                        if shift > usize::MAX as u64 {
+                                            BigUint::from(0u8)
+                                        } else {
+                                            (&lhs.payload << shift as usize) % &modulus
+                                        }
+                                    }
+                                    BinaryOp::Shr => {
+                                        let shift = rhs
+                                            .payload
+                                            .to_u64_digits()
+                                            .first()
+                                            .copied()
+                                            .unwrap_or(0);
+                                        if shift > usize::MAX as u64 {
+                                            BigUint::from(0u8)
+                                        } else {
+                                            &lhs.payload >> shift as usize
+                                        }
+                                    }
+                                    BinaryOp::Eq | BinaryOp::EqWildcard => {
+                                        BigUint::from(lhs.payload == rhs.payload)
+                                    }
+                                    BinaryOp::Ne => BigUint::from(lhs.payload != rhs.payload),
+                                    BinaryOp::GeU => BigUint::from(lhs.payload >= rhs.payload),
+                                    other => {
+                                        panic!("unexpected grouped-fold binary op {other:?}")
+                                    }
+                                };
+                                (payload, BigUint::from(0u8))
                             }
-                            BinaryOp::Eq | BinaryOp::EqWildcard => {
-                                BigUint::from(lhs.payload == rhs.payload)
-                            }
-                            BinaryOp::Ne => BigUint::from(lhs.payload != rhs.payload),
-                            BinaryOp::GeU => BigUint::from(lhs.payload >= rhs.payload),
-                            other => panic!("unexpected grouped-fold binary op {other:?}"),
                         };
-                        values.insert(
-                            *dst,
-                            TestSIRValue {
-                                payload,
-                                mask: BigUint::from(0u8),
-                            },
-                        );
+                        values.insert(*dst, TestSIRValue { payload, mask });
                     }
                     SIRInstruction::Unary(dst, op, src) => {
                         let width = eu.register_map[dst].width();
@@ -6025,6 +6545,323 @@ mod tests {
         }
         let (eu, _) = lower_synthetic_scan(4, ScanMutation::None, true);
         assert!(branch_count(&eu) > 0);
+    }
+
+    #[test]
+    fn common_zero_controller_guards_rob_sized_lane_concat() {
+        let mut arena = SLTNodeArena::new();
+        let (root, guard, first_predicate) = guarded_lane_concat(&mut arena, 32, None);
+        let lowerer = SLTToSIRLowerer::new(false);
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        lowerer.reset_cost_cache(root, &arena, &cache, true);
+        assert_eq!(
+            lowerer
+                .guarded_concat_plan(root, &arena, &cache)
+                .expect("ROB-sized guarded scan must be profitable")
+                .guard,
+            guard,
+            "the maximal compound guard must dominate its individual leaves"
+        );
+        let result = lowerer.lower(&mut builder, root, &arena, &mut cache);
+
+        assert_eq!(cache.get(&root), Some(&result));
+        assert!(
+            cache.contains_key(&guard),
+            "the compound valid/store guard must dominate the outlined region"
+        );
+        assert!(
+            !cache.contains_key(&first_predicate),
+            "true-only values must be rolled back at the merge"
+        );
+
+        let eu = finish_lowering(builder);
+        assert_eq!(branch_count(&eu), 1, "one guard, not one branch per lane");
+        assert_eq!(eu.blocks.len(), 4);
+        let entry = &eu.blocks[&BlockId(0)];
+        let SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } = &entry.terminator
+        else {
+            panic!("guarded concat entry must branch")
+        };
+        assert_eq!(
+            entry
+                .instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
+                .count(),
+            2,
+            "only valid and is_store may be loaded before the branch"
+        );
+        assert_eq!(
+            eu.blocks[&true_block.0]
+                .instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
+                .count(),
+            32,
+            "all lane inputs belong to the selected arm"
+        );
+        let false_instructions = &eu.blocks[&false_block.0].instructions;
+        assert_eq!(false_instructions.len(), 1);
+        assert!(matches!(
+            &false_instructions[0],
+            SIRInstruction::Imm(_, value) if value.payload.is_zero() && value.mask.is_zero()
+        ));
+        let merge = eu
+            .blocks
+            .values()
+            .find(|block| block.params.contains(&result))
+            .expect("guarded concat result must be a merge parameter");
+        assert_eq!(eu.register_map[&merge.params[0]].width(), 32);
+    }
+
+    #[test]
+    fn guarded_concat_cfg_matches_eager_two_state_truth_table() {
+        const LANES: usize = 4;
+        let mut arena = SLTNodeArena::new();
+        let (root, _, _) = guarded_lane_concat(&mut arena, LANES, None);
+        let mut builder = SIRBuilder::new();
+        let result = SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            root,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        assert_eq!(branch_count(&eu), 1);
+
+        for valid in [false, true] {
+            for is_store in [false, true] {
+                for predicates in 0u8..(1 << LANES) {
+                    let mut memory = crate::HashMap::from_iter([
+                        (
+                            10_000,
+                            TestSIRValue {
+                                payload: u8::from(valid).into(),
+                                mask: 0u8.into(),
+                            },
+                        ),
+                        (
+                            10_001,
+                            TestSIRValue {
+                                payload: u8::from(is_store).into(),
+                                mask: 0u8.into(),
+                            },
+                        ),
+                    ]);
+                    for lane in 0..LANES {
+                        let predicate = predicates & (1 << lane) != 0;
+                        memory.insert(
+                            11_000 + lane as u32,
+                            TestSIRValue {
+                                payload: if predicate {
+                                    BigUint::from(0x8000_0000_0000_0000u64)
+                                } else {
+                                    BigUint::from(0u8)
+                                },
+                                mask: BigUint::from(0u8),
+                            },
+                        );
+                    }
+                    let actual = &execute_fold_group_sir_with_memory(&eu, &memory)[&result];
+                    let mut expected = 0u8;
+                    for lane in 0..LANES {
+                        expected <<= 1;
+                        expected |= u8::from(valid && is_store && predicates & (1 << lane) != 0);
+                    }
+                    assert_eq!(actual.payload, BigUint::from(expected));
+                    assert!(actual.mask.is_zero());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn common_zero_controller_rejects_one_ungated_lane() {
+        let mut arena = SLTNodeArena::new();
+        let (root, _, _) = guarded_lane_concat(&mut arena, 32, Some(17));
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            root,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 0);
+        assert_eq!(eu.blocks.len(), 1);
+    }
+
+    #[test]
+    fn guarded_concat_recomputes_true_only_value_after_merge() {
+        let mut arena = SLTNodeArena::new();
+        let (root, guard, first_predicate) = guarded_lane_concat(&mut arena, 32, None);
+        let lowerer = SLTToSIRLowerer::new(false);
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        lowerer.lower(&mut builder, root, &arena, &mut cache);
+        assert!(cache.contains_key(&guard));
+        assert!(!cache.contains_key(&first_predicate));
+
+        let merge_block = builder.current_block();
+        let predicate = lowerer.lower(&mut builder, first_predicate, &arena, &mut cache);
+        assert_eq!(cache.get(&first_predicate), Some(&predicate));
+        let eu = finish_lowering(builder);
+        assert!(eu.verify_result().is_ok());
+        assert!(eu.blocks[&merge_block].instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Binary(dst, _, BinaryOp::GeU, _) if *dst == predicate
+            )
+        }));
+    }
+
+    #[test]
+    fn four_state_common_zero_controller_stays_eager() {
+        let mut arena = SLTNodeArena::new();
+        let (root, _, first_predicate) = guarded_lane_concat(&mut arena, 32, None);
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        SLTToSIRLowerer::new(true).lower(&mut builder, root, &arena, &mut cache);
+        assert!(cache.contains_key(&first_predicate));
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 0);
+        assert_eq!(eu.blocks.len(), 1);
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Load(..))),
+            34
+        );
+    }
+
+    #[test]
+    fn four_state_guarded_concat_retains_logical_and_mask_semantics() {
+        const LANES: usize = 4;
+        let mut arena = SLTNodeArena::new();
+        let (root, _, _) = guarded_lane_concat(&mut arena, LANES, None);
+        let mut builder = SIRBuilder::new();
+        let result = SLTToSIRLowerer::new(true).lower(
+            &mut builder,
+            root,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        assert_eq!(branch_count(&eu), 0);
+
+        // Veryl encodes X=(payload 0, mask 1), Z=(payload 1, mask 1).
+        for (guard_payload, guard_mask) in [(0u8, 0u8), (1, 0), (0, 1), (1, 1)] {
+            for predicates in 0u8..(1 << LANES) {
+                let mut memory = crate::HashMap::from_iter([
+                    (
+                        10_000,
+                        TestSIRValue {
+                            payload: guard_payload.into(),
+                            mask: guard_mask.into(),
+                        },
+                    ),
+                    (
+                        10_001,
+                        TestSIRValue {
+                            payload: 1u8.into(),
+                            mask: 0u8.into(),
+                        },
+                    ),
+                ]);
+                for lane in 0..LANES {
+                    let predicate = predicates & (1 << lane) != 0;
+                    memory.insert(
+                        11_000 + lane as u32,
+                        TestSIRValue {
+                            payload: if predicate {
+                                BigUint::from(0x8000_0000_0000_0000u64)
+                            } else {
+                                BigUint::from(0u8)
+                            },
+                            mask: BigUint::from(0u8),
+                        },
+                    );
+                }
+
+                let actual = &execute_fold_group_sir_with_memory(&eu, &memory)[&result];
+                let mut expected_payload = 0u8;
+                let mut expected_mask = 0u8;
+                for lane in 0..LANES {
+                    expected_payload <<= 1;
+                    expected_mask <<= 1;
+                    let predicate = predicates & (1 << lane) != 0;
+                    if guard_mask == 0 {
+                        expected_payload |= u8::from(guard_payload != 0 && predicate);
+                    } else if predicate {
+                        expected_mask |= 1;
+                    }
+                }
+                assert_eq!(actual.payload, BigUint::from(expected_payload));
+                assert_eq!(actual.mask, BigUint::from(expected_mask));
+            }
+        }
+    }
+
+    #[test]
+    fn cheap_common_zero_controller_stays_eager() {
+        let mut arena = SLTNodeArena::new();
+        let valid = input(&mut arena, 0, 1);
+        let is_store = input(&mut arena, 1, 1);
+        let guard = arena
+            .alloc(SLTNode::Binary(valid, BinaryOp::LogicAnd, is_store))
+            .unwrap();
+        let payload = input(&mut arena, 2, 1);
+        let lane = arena
+            .alloc(SLTNode::Binary(guard, BinaryOp::LogicAnd, payload))
+            .unwrap();
+        let root = arena.alloc(SLTNode::Concat(vec![(lane, 1)])).unwrap();
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            root,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 0);
+    }
+
+    #[test]
+    fn zero_controller_analysis_uses_iterative_postorder_on_deep_dag() {
+        let mut arena = SLTNodeArena::new();
+        let valid = input(&mut arena, 0, 1);
+        let is_store = input(&mut arena, 1, 1);
+        let guard = arena
+            .alloc(SLTNode::Binary(valid, BinaryOp::LogicAnd, is_store))
+            .unwrap();
+        let mut parts = Vec::new();
+        for lane in 0..2 {
+            let mut payload = input(&mut arena, 100 + lane, 1);
+            for _ in 0..20_000 {
+                payload = arena
+                    .alloc(SLTNode::Unary(UnaryOp::Ident, payload))
+                    .unwrap();
+            }
+            let gated = arena
+                .alloc(SLTNode::Binary(guard, BinaryOp::LogicAnd, payload))
+                .unwrap();
+            parts.push((gated, 1));
+        }
+        let root = arena.alloc(SLTNode::Concat(parts)).unwrap();
+        let lowerer = SLTToSIRLowerer::new(false);
+        let cache = crate::HashMap::default();
+        lowerer.reset_cost_cache(root, &arena, &cache, true);
+
+        let plan = lowerer
+            .guarded_concat_plan(root, &arena, &cache)
+            .expect("deep guarded concat must be analyzed without recursion");
+        assert_eq!(plan.guard, guard);
     }
 
     #[test]
