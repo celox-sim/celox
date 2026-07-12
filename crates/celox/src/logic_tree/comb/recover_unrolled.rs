@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use num_bigint::{BigInt, BigUint, Sign};
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{One, Signed, ToPrimitive, Zero};
 use veryl_analyzer::ir::{
     ArrayLiteralItem, Comptime, Expression, Factor, Module, Op, Statement, ValueVariant, VarId,
     VarIndex, VarSelect,
@@ -521,6 +521,11 @@ fn parameterize_expression(
         *template = affine;
         return Some(true);
     }
+    if let Some((exact, _)) = parameterize_exact_folded_value(module, template, variants, candidate)
+    {
+        *template = exact;
+        return Some(true);
+    }
     match template {
         Expression::Term(template_factor) => {
             let factors = variants
@@ -722,6 +727,446 @@ fn parameterize_affine_folded_value(
         );
     }
     Some(expression)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExactFoldedValueForm {
+    Eq(BigInt),
+    Ne(BigInt),
+    Quotient {
+        divisor: BigInt,
+    },
+    ModuloAffine {
+        slope: BigInt,
+        intercept: BigInt,
+        modulus: BigInt,
+    },
+}
+
+struct FoldedValueSequence<'a> {
+    template_comptime: &'a Comptime,
+    output_width: usize,
+    output_signed: bool,
+    loop_width: usize,
+    loop_signed: bool,
+    domain: Vec<BigInt>,
+    values: Vec<BigInt>,
+}
+
+fn parameterize_exact_folded_value(
+    module: &Module,
+    template: &Expression,
+    variants: &[&Expression],
+    candidate: &UnrolledLoopCandidate,
+) -> Option<(Expression, ExactFoldedValueForm)> {
+    let sequence = folded_value_sequence(module, template, variants, candidate)?;
+    let forms = exact_folded_value_forms(&sequence);
+    for form in forms {
+        if exact_form_matches_sequence(&form, &sequence) {
+            let expression =
+                build_exact_folded_value_expression(module, candidate, &sequence, &form)?;
+            return Some((expression, form));
+        }
+    }
+    None
+}
+
+fn folded_value_sequence<'a>(
+    module: &Module,
+    template: &'a Expression,
+    variants: &[&Expression],
+    candidate: &UnrolledLoopCandidate,
+) -> Option<FoldedValueSequence<'a>> {
+    if variants.len() < 2 || variants.len() != candidate.iterations.len() {
+        return None;
+    }
+    let template_comptime = folded_value_comptime(template)?;
+    let output = template_comptime.get_value().ok()?;
+    let output_width = output.width();
+    let output_signed = output.signed();
+    if output_width == 0 {
+        return None;
+    }
+    let values = variants
+        .iter()
+        .map(|expression| {
+            let comptime = folded_value_comptime(expression)?;
+            let value = comptime.get_value().ok()?;
+            (value.width() == output_width && value.signed() == output_signed)
+                .then(|| comptime_known_integer(comptime))?
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if values.windows(2).all(|pair| pair[0] == pair[1]) {
+        return None;
+    }
+
+    let loop_variable = module.variables.get(&candidate.iterations[0].loop_var)?;
+    let loop_width = resolve_total_width(module, loop_variable).ok()?;
+    if loop_width == 0 {
+        return None;
+    }
+    let loop_signed = loop_variable.r#type.signed;
+    let domain = candidate
+        .iterations
+        .iter()
+        .map(|iteration| {
+            normalize_typed_integer(BigInt::from(iteration.value), loop_width, loop_signed)
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(FoldedValueSequence {
+        template_comptime,
+        output_width,
+        output_signed,
+        loop_width,
+        loop_signed,
+        domain,
+        values,
+    })
+}
+
+fn folded_value_comptime(expression: &Expression) -> Option<&Comptime> {
+    match expression {
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::Value(comptime) => Some(comptime),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn exact_folded_value_forms(sequence: &FoldedValueSequence<'_>) -> Vec<ExactFoldedValueForm> {
+    let mut forms = Vec::new();
+
+    if sequence.output_width == 1
+        && sequence
+            .values
+            .iter()
+            .all(|value| value == &BigInt::zero() || value == &BigInt::one())
+    {
+        let ones = sequence
+            .values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| (value == &BigInt::one()).then_some(index))
+            .collect::<Vec<_>>();
+        if let [index] = ones.as_slice() {
+            forms.push(ExactFoldedValueForm::Eq(sequence.domain[*index].clone()));
+        }
+        let zeros = sequence
+            .values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| value.is_zero().then_some(index))
+            .collect::<Vec<_>>();
+        if let [index] = zeros.as_slice() {
+            forms.push(ExactFoldedValueForm::Ne(sequence.domain[*index].clone()));
+        }
+    }
+
+    if let Some(divisor) = quotient_divisor(sequence)
+        && positive_power_of_two_log2(&divisor).is_some()
+    {
+        forms.push(ExactFoldedValueForm::Quotient { divisor });
+    }
+    forms.extend(modulo_affine_forms(sequence));
+    forms
+}
+
+fn quotient_divisor(sequence: &FoldedValueSequence<'_>) -> Option<BigInt> {
+    if sequence
+        .domain
+        .iter()
+        .chain(sequence.values.iter())
+        .any(|value| value.is_negative())
+    {
+        return None;
+    }
+
+    // For y = floor(x / d):
+    //   y == 0  => d > x
+    //   y > 0   => x/(y+1) < d <= x/y.
+    // Intersect those exact integer intervals; no search bound is needed.
+    let mut lower = BigInt::from(2u8);
+    let mut upper: Option<BigInt> = None;
+    for (x, y) in sequence.domain.iter().zip(&sequence.values) {
+        if y.is_zero() {
+            let candidate = x + BigInt::one();
+            if candidate > lower {
+                lower = candidate;
+            }
+        } else {
+            let candidate_lower = x / (y + BigInt::one()) + BigInt::one();
+            if candidate_lower > lower {
+                lower = candidate_lower;
+            }
+            let candidate_upper = x / y;
+            if upper
+                .as_ref()
+                .is_none_or(|current| candidate_upper < *current)
+            {
+                upper = Some(candidate_upper);
+            }
+        }
+    }
+    upper.is_none_or(|upper| lower <= upper).then_some(lower)
+}
+
+fn modulo_affine_forms(sequence: &FoldedValueSequence<'_>) -> Vec<ExactFoldedValueForm> {
+    if sequence.domain.len() < 3 || sequence.values.iter().any(|value| value.is_negative()) {
+        return Vec::new();
+    }
+    let step = &sequence.domain[1] - &sequence.domain[0];
+    if step.is_zero()
+        || sequence
+            .domain
+            .windows(2)
+            .any(|pair| &pair[1] - &pair[0] != step)
+    {
+        return Vec::new();
+    }
+    let differences = sequence
+        .values
+        .windows(2)
+        .map(|pair| &pair[1] - &pair[0])
+        .collect::<Vec<_>>();
+
+    // For y = (a*x + b) mod m and a constant x step, every adjacent
+    // difference is either r or r-m, where r = a*step mod m.  Thus an exact
+    // sequence has at most two distinct differences, and their distance is
+    // the only possible modulus.  Derive that candidate in one pass instead
+    // of comparing every pair of iterations.
+    let first_difference = &differences[0];
+    let mut second_difference = None;
+    for difference in &differences[1..] {
+        if difference == first_difference {
+            continue;
+        }
+        match &second_difference {
+            None => second_difference = Some(difference),
+            Some(second) if *second == difference => {}
+            Some(_) => return Vec::new(),
+        }
+    }
+    let Some(second_difference) = second_difference else {
+        return Vec::new();
+    };
+    let modulus = (first_difference - second_difference).abs();
+    if modulus <= BigInt::one()
+        || positive_power_of_two_log2(&modulus).is_none()
+        || sequence.values.iter().any(|value| value >= &modulus)
+    {
+        return Vec::new();
+    }
+
+    let mut forms = Vec::new();
+    let residue = positive_modulo(differences[0].clone(), &modulus);
+    if differences
+        .iter()
+        .any(|difference| positive_modulo(difference.clone(), &modulus) != residue)
+    {
+        return Vec::new();
+    }
+    let mut slope_numerators = BTreeSet::new();
+    slope_numerators.insert(residue.clone());
+    slope_numerators.insert(&residue - &modulus);
+    for numerator in slope_numerators {
+        if &numerator % &step != BigInt::zero() {
+            continue;
+        }
+        let slope = numerator / &step;
+        let intercept =
+            positive_modulo(&sequence.values[0] - &slope * &sequence.domain[0], &modulus);
+        forms.push(ExactFoldedValueForm::ModuloAffine {
+            slope,
+            intercept,
+            modulus: modulus.clone(),
+        });
+    }
+    forms
+}
+
+fn exact_form_matches_sequence(
+    form: &ExactFoldedValueForm,
+    sequence: &FoldedValueSequence<'_>,
+) -> bool {
+    sequence
+        .domain
+        .iter()
+        .zip(&sequence.values)
+        .all(|(input, expected)| {
+            evaluate_exact_folded_value_form(form, input, sequence)
+                .is_some_and(|actual| actual == *expected)
+        })
+}
+
+fn evaluate_exact_folded_value_form(
+    form: &ExactFoldedValueForm,
+    input: &BigInt,
+    sequence: &FoldedValueSequence<'_>,
+) -> Option<BigInt> {
+    let input = normalize_typed_integer(input.clone(), sequence.loop_width, sequence.loop_signed)?;
+    let result = match form {
+        ExactFoldedValueForm::Eq(value) => BigInt::from(
+            input
+                == normalize_typed_integer(
+                    value.clone(),
+                    sequence.loop_width,
+                    sequence.loop_signed,
+                )?,
+        ),
+        ExactFoldedValueForm::Ne(value) => BigInt::from(
+            input
+                != normalize_typed_integer(
+                    value.clone(),
+                    sequence.loop_width,
+                    sequence.loop_signed,
+                )?,
+        ),
+        ExactFoldedValueForm::Quotient { divisor } => {
+            let divisor = normalize_typed_integer(
+                divisor.clone(),
+                sequence.loop_width,
+                sequence.loop_signed,
+            )?;
+            if divisor.is_zero() {
+                return None;
+            }
+            input / divisor
+        }
+        ExactFoldedValueForm::ModuloAffine {
+            slope,
+            intercept,
+            modulus,
+        } => {
+            let slope =
+                normalize_typed_integer(slope.clone(), sequence.loop_width, sequence.loop_signed)?;
+            let intercept = normalize_typed_integer(
+                intercept.clone(),
+                sequence.loop_width,
+                sequence.loop_signed,
+            )?;
+            let modulus = normalize_typed_integer(
+                modulus.clone(),
+                sequence.loop_width,
+                sequence.loop_signed,
+            )?;
+            if modulus.is_zero() {
+                return None;
+            }
+            let product =
+                normalize_typed_integer(input * slope, sequence.loop_width, sequence.loop_signed)?;
+            let sum = normalize_typed_integer(
+                product + intercept,
+                sequence.loop_width,
+                sequence.loop_signed,
+            )?;
+            sum % modulus
+        }
+    };
+    normalize_typed_integer(result, sequence.output_width, sequence.output_signed)
+}
+
+fn normalize_typed_integer(value: BigInt, width: usize, signed: bool) -> Option<BigInt> {
+    let bits = signed_to_bits(value, width)?;
+    if signed {
+        Some(bits_to_signed(&bits, width))
+    } else {
+        Some(BigInt::from_biguint(Sign::Plus, bits))
+    }
+}
+
+fn positive_modulo(value: BigInt, modulus: &BigInt) -> BigInt {
+    ((value % modulus) + modulus) % modulus
+}
+
+fn build_exact_folded_value_expression(
+    module: &Module,
+    candidate: &UnrolledLoopCandidate,
+    sequence: &FoldedValueSequence<'_>,
+    form: &ExactFoldedValueForm,
+) -> Option<Expression> {
+    let loop_variable = module.variables.get(&candidate.iterations[0].loop_var)?;
+    let mut loop_comptime = Comptime::from_type(
+        loop_variable.r#type.clone(),
+        sequence.template_comptime.clock_domain,
+        sequence.template_comptime.token,
+    );
+    loop_comptime.expr_context.width = sequence.loop_width;
+    loop_comptime.expr_context.signed = sequence.loop_signed;
+    let loop_value = || {
+        Expression::Term(Box::new(Factor::Variable(
+            candidate.iterations[0].loop_var,
+            VarIndex::default(),
+            VarSelect::default(),
+            loop_comptime.clone(),
+        )))
+    };
+    let constant = |value: &BigInt| {
+        let bits = signed_to_bits(value.clone(), sequence.loop_width)?;
+        Some(Expression::Term(Box::new(Factor::create_value(
+            Value::new_biguint(bits, sequence.loop_width, sequence.loop_signed),
+            sequence.template_comptime.token,
+        ))))
+    };
+    let binary = |lhs: Expression, op: Op, rhs: Expression, comptime: Comptime| {
+        Expression::Binary(Box::new(lhs), op, Box::new(rhs), Box::new(comptime))
+    };
+
+    Some(match form {
+        ExactFoldedValueForm::Eq(value) => binary(
+            loop_value(),
+            Op::Eq,
+            constant(value)?,
+            sequence.template_comptime.clone(),
+        ),
+        ExactFoldedValueForm::Ne(value) => binary(
+            loop_value(),
+            Op::Ne,
+            constant(value)?,
+            sequence.template_comptime.clone(),
+        ),
+        ExactFoldedValueForm::Quotient { divisor } => binary(
+            loop_value(),
+            Op::LogicShiftR,
+            constant(&BigInt::from(positive_power_of_two_log2(divisor)?))?,
+            sequence.template_comptime.clone(),
+        ),
+        ExactFoldedValueForm::ModuloAffine {
+            slope,
+            intercept,
+            modulus,
+        } => {
+            let mut expression = loop_value();
+            if slope != &BigInt::one() {
+                expression = binary(expression, Op::Mul, constant(slope)?, loop_comptime.clone());
+            }
+            if !intercept.is_zero() {
+                expression = binary(
+                    expression,
+                    Op::Add,
+                    constant(intercept)?,
+                    loop_comptime.clone(),
+                );
+            }
+            positive_power_of_two_log2(modulus)?;
+            binary(
+                expression,
+                Op::BitAnd,
+                constant(&(modulus - BigInt::one()))?,
+                sequence.template_comptime.clone(),
+            )
+        }
+    })
+}
+
+fn positive_power_of_two_log2(value: &BigInt) -> Option<usize> {
+    let value = value.to_biguint()?;
+    if value.is_zero() {
+        return None;
+    }
+    let one = BigUint::one();
+    ((&value & (&value - &one)).is_zero()).then(|| value.bits() as usize - 1)
 }
 
 fn comptime_known_integer(comptime: &Comptime) -> Option<BigInt> {
@@ -1157,6 +1602,7 @@ fn prove_group(
     }
     let mut scratch = SLTNodeArena::new();
     let mut actual_outputs_by_iteration = Vec::with_capacity(iterations.len());
+    let mut proof_bits = ProofBitCanonicalizer::default();
     for (iteration_index, (iteration, actual_chunk)) in
         iterations.iter().zip(chunks.iter()).enumerate()
     {
@@ -1171,7 +1617,34 @@ fn prove_group(
             return None;
         }
         let concrete_outputs = eval_chunk_outputs(module, &concrete, &targets, &mut scratch)?;
-        if actual_outputs != concrete_outputs {
+        // Analyzer folding can represent the same concrete iteration either
+        // as a literal or as a constant operation.  Preserve the NodeId fast
+        // path, then compare both DAGs through the same exact bit proof.
+        let concrete_matches = if actual_outputs == concrete_outputs {
+            true
+        } else {
+            let mut actual_cache = HashMap::default();
+            let canonical_actual = actual_outputs
+                .iter()
+                .map(|&actual| {
+                    specialize_slt_node(actual, None, None, &mut scratch, &mut actual_cache)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let mut concrete_cache = HashMap::default();
+            let canonical_concrete = concrete_outputs
+                .iter()
+                .map(|&concrete| {
+                    specialize_slt_node(concrete, None, None, &mut scratch, &mut concrete_cache)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            proof_outputs_match(
+                &canonical_actual,
+                &canonical_concrete,
+                &mut scratch,
+                &mut proof_bits,
+            )?
+        };
+        if !concrete_matches {
             return None;
         }
         actual_outputs_by_iteration.push(actual_outputs);
@@ -1200,7 +1673,6 @@ fn prove_group(
     // position.  The arena is append-only, so results remain valid while later
     // iterations add their specialized nodes.  Keep one cache for the whole
     // proof instead of rebuilding the same input/constant bits per iteration.
-    let mut proof_bits = ProofBitCanonicalizer::default();
     for (iteration, actual_outputs) in iterations.iter().zip(&actual_outputs_by_iteration) {
         let mut dynamic_cache = HashMap::default();
         let specialized_updates = proof_updates
@@ -3214,6 +3686,168 @@ mod tests {
         (module, provenance)
     }
 
+    fn folded_sequence_fixture() -> (Module, UnrolledLoopCandidate) {
+        let (module, provenance) = analyze(
+            r#"
+                module Top (
+                    value: output logic,
+                ) {
+                    var state: logic;
+                    always_comb {
+                        state = 1'b0;
+                        for i in 0..16 {
+                            if i == 15 {
+                                state = 1'b1;
+                            }
+                        }
+                        value = state;
+                    }
+                }
+            "#,
+        );
+        let candidate = provenance
+            .candidates_for_module(&module)
+            .into_iter()
+            .next()
+            .expect("the fixture loop must retain provenance")
+            .unrolled;
+        assert_eq!(candidate.iterations.len(), 16);
+        (module, candidate)
+    }
+
+    fn folded_constant_expressions(
+        values: impl IntoIterator<Item = usize>,
+        width: usize,
+        signed: bool,
+    ) -> Vec<Expression> {
+        values
+            .into_iter()
+            .map(|value| {
+                Expression::Term(Box::new(Factor::create_value(
+                    Value::new(value as u64, width, signed),
+                    TokenRange::default(),
+                )))
+            })
+            .collect()
+    }
+
+    fn parameterize_test_sequence(
+        module: &Module,
+        candidate: &UnrolledLoopCandidate,
+        values: &[Expression],
+    ) -> Option<ExactFoldedValueForm> {
+        let variants = values.iter().collect::<Vec<_>>();
+        parameterize_exact_folded_value(module, &values[0], &variants, candidate)
+            .map(|(_, form)| form)
+    }
+
+    #[test]
+    fn parameterizes_exact_quotient_sequence_and_rejects_a_near_miss() {
+        let (module, candidate) = folded_sequence_fixture();
+        let quotient = folded_constant_expressions((0..16).map(|value| value / 8), 32, true);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &quotient),
+            Some(ExactFoldedValueForm::Quotient {
+                divisor: BigInt::from(8u8),
+            })
+        );
+
+        let mut near_miss = (0..16).map(|value| value / 8).collect::<Vec<_>>();
+        near_miss[7] = 1;
+        let near_miss = folded_constant_expressions(near_miss, 32, true);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &near_miss),
+            None
+        );
+
+        let non_power_of_two =
+            folded_constant_expressions((0..16).map(|value| value / 3), 32, true);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &non_power_of_two),
+            None,
+            "recovery must not introduce a runtime division"
+        );
+    }
+
+    #[test]
+    fn parameterizes_exact_modulo_affine_sequences_and_rejects_a_near_miss() {
+        let (module, candidate) = folded_sequence_fixture();
+        let byte_offsets =
+            folded_constant_expressions((0..16).map(|value| (value % 8) * 8), 32, true);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &byte_offsets),
+            Some(ExactFoldedValueForm::ModuloAffine {
+                slope: BigInt::from(8u8),
+                intercept: BigInt::zero(),
+                modulus: BigInt::from(64u8),
+            })
+        );
+
+        let previous_entry =
+            folded_constant_expressions((0..16).map(|value| (value + 15) % 16), 32, true);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &previous_entry),
+            Some(ExactFoldedValueForm::ModuloAffine {
+                slope: BigInt::one(),
+                intercept: BigInt::from(15u8),
+                modulus: BigInt::from(16u8),
+            })
+        );
+
+        let mut near_miss = (0..16).map(|value| (value % 8) * 8).collect::<Vec<_>>();
+        near_miss[5] += 1;
+        let near_miss = folded_constant_expressions(near_miss, 32, true);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &near_miss),
+            None
+        );
+
+        let non_power_of_two =
+            folded_constant_expressions((0..16).map(|value| (value * 3 + 1) % 10), 32, true);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &non_power_of_two),
+            None,
+            "recovery must not introduce a runtime remainder"
+        );
+    }
+
+    #[test]
+    fn parameterizes_exact_eq_ne_indicators_and_rejects_near_misses() {
+        let (module, candidate) = folded_sequence_fixture();
+        let eq =
+            folded_constant_expressions((0..16).map(|value| usize::from(value == 0)), 1, false);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &eq),
+            Some(ExactFoldedValueForm::Eq(BigInt::zero()))
+        );
+        let ne =
+            folded_constant_expressions((0..16).map(|value| usize::from(value != 0)), 1, false);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &ne),
+            Some(ExactFoldedValueForm::Ne(BigInt::zero()))
+        );
+
+        let mut eq_near_miss = (0..16)
+            .map(|value| usize::from(value == 0))
+            .collect::<Vec<_>>();
+        eq_near_miss[1] = 1;
+        let eq_near_miss = folded_constant_expressions(eq_near_miss, 1, false);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &eq_near_miss),
+            None
+        );
+
+        let mut ne_near_miss = (0..16)
+            .map(|value| usize::from(value != 0))
+            .collect::<Vec<_>>();
+        ne_near_miss[1] = 0;
+        let ne_near_miss = folded_constant_expressions(ne_near_miss, 1, false);
+        assert_eq!(
+            parameterize_test_sequence(&module, &candidate, &ne_near_miss),
+            None
+        );
+    }
+
     fn parse_with_candidates(
         module: &Module,
         candidates: &[LoopRecoveryCandidate],
@@ -3352,6 +3986,39 @@ mod tests {
         }
     "#;
 
+    const PMP_STYLE_PRIORITY_LOOP: &str = r#"
+        module Top (
+            i_pmpcfg : input  logic<64> [2] ,
+            i_pmpaddr: input  logic<64> [16],
+            probe    : input  logic<54>     ,
+            value    : output logic<3>      ,
+        ) {
+            var matched: logic;
+            var allow_w: logic;
+            var any_cfg: logic;
+            always_comb {
+                matched = 1'b0;
+                allow_w = 1'b0;
+                any_cfg = 1'b0;
+                for e in 0..16 {
+                    let cfg   : logic<8>  = i_pmpcfg[e / 8][(e % 8) * 8+:8];
+                    let a     : logic<2>  = cfg[4:3];
+                    let this_a: logic<54> = i_pmpaddr[e][53:0];
+                    let lo    : logic<54> = if e == 0 ? 54'd0 : i_pmpaddr[(e + 15) % 16][53:0];
+                    let hit   : logic     = (probe >= lo) && (probe <: this_a);
+                    if a != 2'd0 {
+                        any_cfg = 1'b1;
+                    }
+                    if !matched && hit {
+                        matched = 1'b1;
+                        allow_w = cfg[0];
+                    }
+                }
+                value = {matched, allow_w, any_cfg};
+            }
+        }
+    "#;
+
     #[test]
     fn recovers_guarded_multi_state_loop_as_one_shared_group() {
         let (module, provenance) = analyze(MULTI_STATE_LOOP);
@@ -3393,6 +4060,45 @@ mod tests {
                 SLTNode::Slice { expr, .. } if *expr == group_id
             ));
         }
+    }
+
+    #[test]
+    fn recovers_pmp_style_quotient_modulo_and_priority_recurrence() {
+        let (module, provenance) = analyze(PMP_STYLE_PRIORITY_LOOP);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        assert!(
+            !arena.iter().any(|node| matches!(
+                node,
+                SLTNode::Binary(
+                    _,
+                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS,
+                    _
+                )
+            )),
+            "power-of-two quotient/modulo recovery must lower to shifts and masks"
+        );
+        let (loop_var, states, trip_count) = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup {
+                    loop_var,
+                    states,
+                    trip_count,
+                    ..
+                } => Some((*loop_var, states, *trip_count)),
+                _ => None,
+            })
+            .expect("the full PMP-style recurrence must be recovered");
+
+        assert_eq!(trip_count, 16);
+        assert_eq!(states.len(), 3);
+        assert!(states.iter().any(|state| {
+            let mut visited = HashSet::default();
+            update_has_dynamic_loop_index(state.update, loop_var, &arena, &mut visited)
+        }));
     }
 
     #[test]
