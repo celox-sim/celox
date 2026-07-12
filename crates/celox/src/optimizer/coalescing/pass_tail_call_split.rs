@@ -593,11 +593,11 @@ fn split_multi_block_eu(
         }
     }
 
-    // 2. Topological sort
-    let topo_order = topological_sort_blocks(&modified_eu.blocks, modified_eu.entry_block_id);
+    // 2. Lay out the CFG with definitions before dominated uses.
+    let block_order = reverse_postorder_blocks(&modified_eu.blocks, modified_eu.entry_block_id);
 
     // 3. Compute per-block costs (both metrics)
-    let block_costs: HashMap<BlockId, (usize, usize)> = topo_order
+    let block_costs: HashMap<BlockId, (usize, usize)> = block_order
         .iter()
         .map(|&bid| {
             (
@@ -616,7 +616,7 @@ fn split_multi_block_eu(
     //    a forward predecessor in a different chunk.
     let chunk_groups = partition_single_pass(
         &modified_eu,
-        &topo_order,
+        &block_order,
         &block_costs,
         inst_threshold,
         value_threshold,
@@ -886,76 +886,64 @@ fn estimate_block_value_count(
     count
 }
 
-/// Topological sort using Kahn's algorithm.
-/// The entry block is always placed first, even if it has back-edges.
-/// Blocks in cycles that never reach in-degree 0 are appended in sorted order.
-pub(crate) fn topological_sort_blocks(
+/// Return a deterministic reverse-postorder CFG layout.
+///
+/// Every reachable dominator precedes the blocks it dominates, including in
+/// cyclic CFGs. The entry component is always emitted first. Invalid callers
+/// may still provide unreachable blocks; those are appended in deterministic
+/// reverse postorder without disturbing the entry component.
+pub(crate) fn reverse_postorder_blocks(
     blocks: &HashMap<BlockId, BasicBlock<RegionedAbsoluteAddr>>,
     entry: BlockId,
 ) -> Vec<BlockId> {
-    let mut in_degree: HashMap<BlockId, usize> = HashMap::default();
-    let mut successors: HashMap<BlockId, Vec<BlockId>> = HashMap::default();
-
-    for (&bid, block) in blocks {
-        in_degree.entry(bid).or_insert(0);
-        for succ in block_successors(&block.terminator) {
-            if blocks.contains_key(&succ) {
-                *in_degree.entry(succ).or_insert(0) += 1;
-                successors.entry(bid).or_default().push(succ);
+    fn visit(
+        blocks: &HashMap<BlockId, BasicBlock<RegionedAbsoluteAddr>>,
+        start: BlockId,
+        visited: &mut crate::HashSet<BlockId>,
+        postorder: &mut Vec<BlockId>,
+    ) {
+        if !blocks.contains_key(&start) {
+            return;
+        }
+        let mut stack = vec![(start, false)];
+        while let Some((block_id, expanded)) = stack.pop() {
+            if expanded {
+                postorder.push(block_id);
+                continue;
             }
-        }
-    }
-
-    // Force entry block to be processed first, even if it has back-edges
-    // (loop headers commonly receive back-edges that inflate their in-degree).
-    *in_degree.entry(entry).or_default() = 0;
-
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(entry);
-
-    // Also add any other blocks with in_degree 0 (sorted for determinism)
-    let mut other_zeros: Vec<BlockId> = in_degree
-        .iter()
-        .filter(|(bid, deg)| **deg == 0 && **bid != entry)
-        .map(|(bid, _)| *bid)
-        .collect();
-    other_zeros.sort();
-    for bid in other_zeros {
-        queue.push_back(bid);
-    }
-
-    let mut visited = crate::HashSet::default();
-    let mut result = Vec::new();
-    while let Some(bid) = queue.pop_front() {
-        if !visited.insert(bid) {
-            continue;
-        }
-        result.push(bid);
-        if let Some(succs) = successors.get(&bid) {
-            let mut sorted_succs = succs.clone();
-            sorted_succs.sort();
-            for succ in sorted_succs {
-                let deg = in_degree.get_mut(&succ).unwrap();
-                *deg = deg.saturating_sub(1);
-                if *deg == 0 {
-                    queue.push_back(succ);
+            if !visited.insert(block_id) {
+                continue;
+            }
+            stack.push((block_id, true));
+            let Some(block) = blocks.get(&block_id) else {
+                continue;
+            };
+            let mut successors = block_successors(&block.terminator);
+            successors.reverse();
+            for successor in successors {
+                if blocks.contains_key(&successor) && !visited.contains(&successor) {
+                    stack.push((successor, false));
                 }
             }
         }
     }
 
-    // Fallback: append any remaining blocks not reached by the sort (due to cycles)
-    if result.len() < blocks.len() {
-        let mut remaining: Vec<BlockId> = blocks
-            .keys()
-            .filter(|b| !visited.contains(b))
-            .copied()
-            .collect();
-        remaining.sort();
-        result.extend(remaining);
-    }
+    let mut visited = crate::HashSet::default();
+    let mut entry_postorder = Vec::new();
+    visit(blocks, entry, &mut visited, &mut entry_postorder);
+    entry_postorder.reverse();
 
-    result
+    let mut remaining_ids = blocks.keys().copied().collect::<Vec<_>>();
+    remaining_ids.sort_unstable();
+    let mut unreachable_postorder = Vec::new();
+    for block_id in remaining_ids {
+        if !visited.contains(&block_id) {
+            visit(blocks, block_id, &mut visited, &mut unreachable_postorder);
+        }
+    }
+    unreachable_postorder.reverse();
+    entry_postorder.extend(unreachable_postorder);
+    entry_postorder
 }
 
 fn block_successors(term: &SIRTerminator) -> Vec<BlockId> {
@@ -990,20 +978,20 @@ fn terminator_targets_with_args(term: &SIRTerminator) -> Vec<(BlockId, Vec<Regis
 ///
 /// 1. Pre-identifies back-edge targets (loop headers) — these must be chunk heads
 ///    because a later block may jump back to them from a different chunk.
-/// 2. Processes blocks in topological order. A new chunk is started when:
+/// 2. Processes blocks in reverse postorder. A new chunk is started when:
 ///    - The block is a back-edge target (loop header)
 ///    - The block has a forward predecessor in a different chunk
 ///    - Adding the block would exceed either cost threshold
 fn partition_single_pass(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    topo_order: &[BlockId],
+    block_order: &[BlockId],
     block_costs: &HashMap<BlockId, (usize, usize)>,
     inst_threshold: usize,
     value_threshold: usize,
 ) -> Vec<Vec<BlockId>> {
     use crate::HashSet;
 
-    let position: HashMap<BlockId, usize> = topo_order
+    let position: HashMap<BlockId, usize> = block_order
         .iter()
         .enumerate()
         .map(|(i, &b)| (b, i))
@@ -1012,7 +1000,7 @@ fn partition_single_pass(
     // Pre-identify back-edge targets: blocks whose predecessor appears later in topo order.
     // These must be chunk heads to guarantee single-entry chunks.
     let mut must_be_head: HashSet<BlockId> = HashSet::default();
-    for &bid in topo_order {
+    for &bid in block_order {
         let block = &eu.blocks[&bid];
         for succ in block_successors(&block.terminator) {
             if let Some(&succ_pos) = position.get(&succ) {
@@ -1026,10 +1014,10 @@ fn partition_single_pass(
 
     // Build forward-predecessor map: for each block, which blocks have forward edges to it?
     let mut forward_preds: HashMap<BlockId, Vec<BlockId>> = HashMap::default();
-    for &bid in topo_order {
+    for &bid in block_order {
         forward_preds.entry(bid).or_default();
     }
-    for &bid in topo_order {
+    for &bid in block_order {
         let block = &eu.blocks[&bid];
         for succ in block_successors(&block.terminator) {
             if let Some(&succ_pos) = position.get(&succ) {
@@ -1047,7 +1035,7 @@ fn partition_single_pass(
     let mut current_value_count = 0usize;
     let mut current_chunk_idx = 0usize;
 
-    for &bid in topo_order {
+    for &bid in block_order {
         let (inst_cost, value_count) = block_costs[&bid];
 
         let force_new_chunk = if current_group.is_empty() {
@@ -1309,6 +1297,54 @@ mod tests {
             instance_id: InstanceId(inst_id),
             var_id: make_var_id(var_id_val),
         }
+    }
+
+    #[test]
+    fn reverse_postorder_places_loop_dominators_before_lower_numbered_uses() {
+        let mut blocks = HashMap::default();
+        let mut insert = |id, terminator| {
+            blocks.insert(
+                BlockId(id),
+                BasicBlock {
+                    id: BlockId(id),
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator,
+                },
+            );
+        };
+        insert(
+            0,
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(3), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        );
+        insert(
+            1,
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        );
+        insert(2, SIRTerminator::Return);
+        insert(3, SIRTerminator::Jump(BlockId(1), Vec::new()));
+        insert(8, SIRTerminator::Return);
+        insert(9, SIRTerminator::Jump(BlockId(8), Vec::new()));
+
+        assert_eq!(
+            reverse_postorder_blocks(&blocks, BlockId(0)),
+            vec![
+                BlockId(0),
+                BlockId(3),
+                BlockId(1),
+                BlockId(2),
+                BlockId(9),
+                BlockId(8),
+            ]
+        );
     }
 
     /// Create a large single-block EU with many Store instructions.
@@ -1632,9 +1668,9 @@ mod tests {
     fn test_partition_single_pass_basic() {
         // Chain: b0 → b1 → b2 → b3 → Return
         let eu = make_multi_block_chain_eu(4, 3);
-        let topo_order = topological_sort_blocks(&eu.blocks, eu.entry_block_id);
+        let block_order = reverse_postorder_blocks(&eu.blocks, eu.entry_block_id);
 
-        let block_costs: HashMap<BlockId, (usize, usize)> = topo_order
+        let block_costs: HashMap<BlockId, (usize, usize)> = block_order
             .iter()
             .map(|&bid| {
                 (
@@ -1650,7 +1686,7 @@ mod tests {
         // Use threshold smaller than any single block cost to force many chunks
         let max_block_cost = block_costs.values().map(|&(ic, _)| ic).max().unwrap_or(1);
         let threshold = max_block_cost; // fits exactly one block per chunk
-        let groups = partition_single_pass(&eu, &topo_order, &block_costs, threshold, usize::MAX);
+        let groups = partition_single_pass(&eu, &block_order, &block_costs, threshold, usize::MAX);
         assert!(
             groups.len() >= 2,
             "Should have multiple chunks with low threshold"

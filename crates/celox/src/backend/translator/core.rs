@@ -11,7 +11,9 @@ use crate::{
         SIRInstruction, STABLE_REGION,
     },
     optimizer::coalescing::TailCallChunk,
-    optimizer::coalescing::pass_tail_call_split::{SpillSlot, SpilledChunk},
+    optimizer::coalescing::pass_tail_call_split::{
+        SpillSlot, SpilledChunk, reverse_postorder_blocks,
+    },
 };
 
 use super::MemoryLayout;
@@ -864,8 +866,7 @@ impl SIRTranslator {
                 block_map.insert(*id, cl_bb);
             }
 
-            let mut block_ids: Vec<_> = unit.blocks.keys().collect();
-            block_ids.sort();
+            let block_ids = reverse_postorder_blocks(&unit.blocks, unit.entry_block_id);
 
             for id in &block_ids {
                 let cl_block = block_map[id];
@@ -1052,8 +1053,7 @@ impl SIRTranslator {
                 block_map.insert(*id, cl_bb);
             }
 
-            let mut block_ids: Vec<_> = unit.blocks.keys().collect();
-            block_ids.sort();
+            let block_ids = reverse_postorder_blocks(&unit.blocks, unit.entry_block_id);
 
             for id in &block_ids {
                 let cl_block = block_map[id];
@@ -1280,13 +1280,7 @@ impl SIRTranslator {
             .collect();
         let cross_chunk_edges = &chunk.cross_chunk_edges;
 
-        // Topological sort within the chunk so definitions precede uses.
-        // (BlockId order worked for the original EU but not after partition_with_single_entry
-        //  which can place high-numbered entry blocks before low-numbered successors.)
-        let block_ids = crate::optimizer::coalescing::pass_tail_call_split::topological_sort_blocks(
-            &eu.blocks,
-            eu.entry_block_id,
-        );
+        let block_ids = reverse_postorder_blocks(&eu.blocks, eu.entry_block_id);
 
         // Create state ONCE for the entire chunk — SIR uses a flat register
         // space per EU, not strict SSA block params.
