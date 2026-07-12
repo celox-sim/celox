@@ -501,6 +501,201 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     true
 }
 
+#[derive(Clone, Copy)]
+struct AvailableStaticLoad {
+    dst: RegisterId,
+    load_offset: usize,
+    load_width: usize,
+    valid_start: usize,
+    valid_end: usize,
+}
+
+/// Remove a statically written range from the still-current portions of prior
+/// loads. A write can split one loaded range into two valid fragments: the
+/// register still contains the old value on both non-overlapping sides.
+fn subtract_static_write(
+    loads: &mut Vec<AvailableStaticLoad>,
+    write_start: usize,
+    write_end: usize,
+) {
+    if write_start >= write_end {
+        return;
+    }
+    let mut retained = Vec::with_capacity(loads.len().saturating_add(1));
+    for load in loads.drain(..) {
+        if write_start >= load.valid_end || load.valid_start >= write_end {
+            retained.push(load);
+            continue;
+        }
+        if load.valid_start < write_start {
+            retained.push(AvailableStaticLoad {
+                valid_end: write_start,
+                ..load
+            });
+        }
+        if write_end < load.valid_end {
+            retained.push(AvailableStaticLoad {
+                valid_start: write_end,
+                ..load
+            });
+        }
+    }
+    *loads = retained;
+}
+
+/// Replace a later static Load with a Slice of a prior wider static Load when
+/// the requested memory range has not changed in between. This keeps the
+/// original destination register (and therefore its Bit/Logic type), while a
+/// Slice preserves both value and mask planes in four-state execution.
+fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
+    instructions: &mut [SIRInstruction<A>],
+    register_map: &HashMap<RegisterId, RegisterType>,
+) -> bool {
+    let mut available: HashMap<A, Vec<AvailableStaticLoad>> = HashMap::default();
+    let mut changed = false;
+
+    for inst in instructions {
+        match inst {
+            SIRInstruction::Load(dst, addr, SIROffset::Static(offset), width) => {
+                let (dst, offset, width) = (*dst, *offset, *width);
+                let Some(end) = offset.checked_add(width) else {
+                    // An unrepresentable range cannot safely participate in
+                    // containment arithmetic. Leave it to the verifier/runtime.
+                    continue;
+                };
+                if width == 0 {
+                    continue;
+                }
+
+                let exact_is_available = available.get(addr).is_some_and(|loads| {
+                    loads.iter().any(|load| {
+                        load.load_offset == offset
+                            && load.load_width == width
+                            && load.valid_start <= offset
+                            && end <= load.valid_end
+                    })
+                });
+                if exact_is_available {
+                    // Preserve the existing exact-load elimination path, which
+                    // aliases the destination instead of introducing a Slice.
+                    continue;
+                }
+
+                let source = available.get(addr).and_then(|loads| {
+                    loads
+                        .iter()
+                        .filter(|load| {
+                            load.load_width > width
+                                && load.valid_start <= offset
+                                && end <= load.valid_end
+                                && match (register_map.get(&load.dst), register_map.get(&dst)) {
+                                    (
+                                        Some(RegisterType::Logic {
+                                            width: source_width,
+                                        }),
+                                        Some(RegisterType::Logic {
+                                            width: destination_width,
+                                        }),
+                                    ) => {
+                                        *source_width == load.load_width
+                                            && *destination_width == width
+                                    }
+                                    (
+                                        Some(RegisterType::Bit {
+                                            width: source_width,
+                                            signed: source_signed,
+                                        }),
+                                        Some(RegisterType::Bit {
+                                            width: destination_width,
+                                            signed: destination_signed,
+                                        }),
+                                    ) => {
+                                        *source_width == load.load_width
+                                            && *destination_width == width
+                                            && source_signed == destination_signed
+                                    }
+                                    _ => false,
+                                }
+                        })
+                        .min_by_key(|load| load.load_width)
+                        .copied()
+                });
+                if let Some(source) = source {
+                    let Some(relative_offset) = offset.checked_sub(source.load_offset) else {
+                        continue;
+                    };
+                    let Some(relative_end) = relative_offset.checked_add(width) else {
+                        continue;
+                    };
+                    if relative_end <= source.load_width {
+                        *inst = SIRInstruction::Slice(dst, source.dst, relative_offset, width);
+                        changed = true;
+                        continue;
+                    }
+                }
+
+                available
+                    .entry(addr.clone())
+                    .or_default()
+                    .push(AvailableStaticLoad {
+                        dst,
+                        load_offset: offset,
+                        load_width: width,
+                        valid_start: offset,
+                        valid_end: end,
+                    });
+            }
+            SIRInstruction::Load(_, _, SIROffset::Dynamic(_), _)
+            | SIRInstruction::Store(_, SIROffset::Dynamic(_), _, _, _, _)
+            | SIRInstruction::Commit(_, _, SIROffset::Dynamic(_), _, _) => {
+                // Dynamic ranges are deliberately a global barrier. The address
+                // is known, but keeping this rule conservative avoids depending
+                // on alias properties not represented in SIR.
+                available.clear();
+            }
+            SIRInstruction::Store(addr, SIROffset::Static(offset), width, _, triggers, sites) => {
+                if !triggers.is_empty() || !sites.is_empty() {
+                    available.clear();
+                    continue;
+                }
+                let Some(write_end) = offset.checked_add(*width) else {
+                    available.clear();
+                    continue;
+                };
+                if let Some(loads) = available.get_mut(addr) {
+                    subtract_static_write(loads, *offset, write_end);
+                }
+            }
+            SIRInstruction::Commit(_, dst, SIROffset::Static(offset), width, triggers) => {
+                if !triggers.is_empty() {
+                    available.clear();
+                    continue;
+                }
+                let Some(write_end) = offset.checked_add(*width) else {
+                    available.clear();
+                    continue;
+                };
+                if let Some(loads) = available.get_mut(dst) {
+                    subtract_static_write(loads, *offset, write_end);
+                }
+            }
+            SIRInstruction::RuntimeEvent { .. }
+            | SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
+                available.clear();
+            }
+            SIRInstruction::Imm(..)
+            | SIRInstruction::Binary(..)
+            | SIRInstruction::Unary(..)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+            | SIRInstruction::Mux(..) => {}
+        }
+    }
+
+    changed
+}
+
 pub(super) fn optimize_block<
     A: Clone + std::fmt::Debug + PartialEq + Eq + Ord + std::hash::Hash,
 >(
@@ -516,8 +711,17 @@ pub(super) fn optimize_block<
     // First pass: coalesce stores that are safe even with intermediate loads present
     coalesce_static_stores(&mut block.instructions, register_map, reg_counter);
 
+    // Reuse already-loaded wide static regions before exact-load forwarding.
+    // Turning contained loads into pure Slices can also make more store groups
+    // eligible for the second coalescing pass below.
+    subsume_static_loads(&mut block.instructions, register_map);
+
     let mut local_replacement_map = HashMap::default();
-    eliminate_redundant_loads(&mut block.instructions, &mut local_replacement_map);
+    eliminate_redundant_loads(
+        &mut block.instructions,
+        &mut local_replacement_map,
+        register_map,
+    );
 
     // Second pass: after eliminate_redundant_loads removed store-forwarded loads,
     // previously-unsafe store groups may now be safe to coalesce
@@ -612,7 +816,10 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
 
         let mut overlap = false;
         for i in 1..sorted.len() {
-            let prev_end = sorted[i - 1].offset + sorted[i - 1].width;
+            let Some(prev_end) = sorted[i - 1].offset.checked_add(sorted[i - 1].width) else {
+                overlap = true;
+                break;
+            };
             if sorted[i].offset < prev_end {
                 overlap = true;
                 break;
@@ -628,7 +835,12 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
                 continue;
             }
             let word_base = (ld.offset / 64) * 64;
-            if ld.offset + ld.width <= word_base + 64 {
+            if ld
+                .offset
+                .checked_add(ld.width)
+                .zip(word_base.checked_add(64))
+                .is_some_and(|(load_end, word_end)| load_end <= word_end)
+            {
                 by_word.entry(word_base).or_default().push(ld);
             }
         }
@@ -740,6 +952,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
 fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::hash::Hash>(
     instructions: &mut Vec<SIRInstruction<A>>,
     replacement_map: &mut HashMap<RegisterId, RegisterId>,
+    register_map: &HashMap<RegisterId, RegisterType>,
 ) {
     let mut known_values: HashMap<(A, SIROffset), (RegisterId, usize)> = HashMap::default();
     let mut new_instructions = Vec::with_capacity(instructions.len());
@@ -800,6 +1013,10 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                 let key = (addr.clone(), offset.clone());
                 if let Some((existing_reg, existing_width)) = known_values.get(&key)
                     && *existing_width == *width
+                    && register_map
+                        .get(existing_reg)
+                        .zip(register_map.get(dst))
+                        .is_some_and(|(existing, destination)| existing == destination)
                 {
                     replacement_map.insert(*dst, *existing_reg);
                     continue;
@@ -877,6 +1094,7 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                 let src_key = (src_addr.clone(), offset.clone());
                 if let Some((src_reg, src_width)) = known_values.get(&src_key).copied()
                     && src_width == *width
+                    && register_map.get(&src_reg) == Some(&RegisterType::Logic { width: *width })
                 {
                     known_values.insert((dst_addr.clone(), offset.clone()), (src_reg, *width));
                     new_instructions.push(SIRInstruction::Store(
@@ -899,4 +1117,400 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
     }
 
     *instructions = new_instructions;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{optimize_block, subsume_static_loads as subsume_static_loads_with_types};
+    use crate::HashMap;
+    use crate::ir::{
+        BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
+        SIRTerminator, SIRValue,
+    };
+
+    fn logic(width: usize) -> RegisterType {
+        RegisterType::Logic { width }
+    }
+
+    fn subsume_static_loads(instructions: &mut [SIRInstruction<u32>]) -> bool {
+        let register_map = instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                SIRInstruction::Load(dst, _, _, width) => Some((*dst, logic(*width))),
+                SIRInstruction::Imm(dst, _) => Some((
+                    *dst,
+                    RegisterType::Bit {
+                        width: 64,
+                        signed: false,
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
+        subsume_static_loads_with_types(instructions, &register_map)
+    }
+
+    fn verify(
+        instructions: Vec<SIRInstruction<u32>>,
+        registers: impl IntoIterator<Item = (RegisterId, RegisterType)>,
+    ) {
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), block)].into_iter().collect(),
+            register_map: registers.into_iter().collect(),
+        };
+        unit.verify_result().unwrap();
+    }
+
+    #[test]
+    fn many_contained_static_loads_become_slices_of_one_full_load() {
+        let mut instructions = vec![SIRInstruction::Load(
+            RegisterId(0),
+            7,
+            SIROffset::Static(0),
+            128,
+        )];
+        let mut registers = vec![(RegisterId(0), logic(128))];
+        for index in 0..1_018usize {
+            let width = index % 127 + 1;
+            let dst = RegisterId(index + 1);
+            instructions.push(SIRInstruction::Load(dst, 7, SIROffset::Static(0), width));
+            registers.push((dst, logic(width)));
+        }
+
+        assert!(subsume_static_loads(&mut instructions));
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Slice(..)))
+                .count(),
+            1_018
+        );
+        verify(instructions, registers);
+    }
+
+    #[test]
+    fn wide_cross_chunk_logic_load_preserves_destination_and_verifies() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(100), 256),
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(163), 129),
+        ];
+
+        assert!(subsume_static_loads(&mut instructions));
+        assert_eq!(
+            instructions[1],
+            SIRInstruction::Slice(RegisterId(1), RegisterId(0), 63, 129)
+        );
+        verify(
+            instructions,
+            [(RegisterId(0), logic(256)), (RegisterId(1), logic(129))],
+        );
+    }
+
+    #[test]
+    fn overlapping_static_store_blocks_subsumption() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(0), 128),
+            SIRInstruction::Store(
+                1,
+                SIROffset::Static(32),
+                8,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(28), 16),
+        ];
+
+        assert!(!subsume_static_loads(&mut instructions));
+        assert!(matches!(instructions[2], SIRInstruction::Load(..)));
+        verify(
+            instructions,
+            [(RegisterId(0), logic(128)), (RegisterId(1), logic(16))],
+        );
+    }
+
+    #[test]
+    fn nonoverlapping_part_survives_static_store_to_same_wide_load() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(0), 128),
+            SIRInstruction::Store(
+                1,
+                SIROffset::Static(64),
+                8,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(0), 16),
+        ];
+
+        assert!(subsume_static_loads(&mut instructions));
+        assert_eq!(
+            instructions[2],
+            SIRInstruction::Slice(RegisterId(1), RegisterId(0), 0, 16)
+        );
+        verify(
+            instructions,
+            [(RegisterId(0), logic(128)), (RegisterId(1), logic(16))],
+        );
+    }
+
+    #[test]
+    fn overlapping_commit_blocks_subsumption() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(0), 128),
+            SIRInstruction::Commit(2, 1, SIROffset::Static(32), 8, Vec::new()),
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(28), 16),
+        ];
+
+        assert!(!subsume_static_loads(&mut instructions));
+        assert!(matches!(instructions[2], SIRInstruction::Load(..)));
+        verify(
+            instructions,
+            [(RegisterId(0), logic(128)), (RegisterId(1), logic(16))],
+        );
+    }
+
+    #[test]
+    fn dynamic_memory_access_is_a_conservative_barrier() {
+        let mut instructions = vec![
+            SIRInstruction::Imm(RegisterId(2), SIRValue::new(0u8)),
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(0), 128),
+            SIRInstruction::Load(RegisterId(3), 9, SIROffset::Dynamic(RegisterId(2)), 8),
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(0), 16),
+        ];
+
+        assert!(!subsume_static_loads(&mut instructions));
+        assert!(matches!(instructions[3], SIRInstruction::Load(..)));
+        verify(
+            instructions,
+            [
+                (RegisterId(0), logic(128)),
+                (RegisterId(1), logic(16)),
+                (
+                    RegisterId(2),
+                    RegisterType::Bit {
+                        width: 64,
+                        signed: false,
+                    },
+                ),
+                (RegisterId(3), logic(8)),
+            ],
+        );
+    }
+
+    #[test]
+    fn event_is_a_conservative_barrier() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(0), 128),
+            SIRInstruction::RuntimeEvent {
+                site_id: 3,
+                args: Vec::new(),
+            },
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(0), 16),
+        ];
+
+        assert!(!subsume_static_loads(&mut instructions));
+        assert!(matches!(instructions[2], SIRInstruction::Load(..)));
+        verify(
+            instructions,
+            [(RegisterId(0), logic(128)), (RegisterId(1), logic(16))],
+        );
+    }
+
+    #[test]
+    fn overflowing_static_range_is_left_unchanged_without_panicking() {
+        let offset = usize::MAX - 3;
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(offset), 8),
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(offset), 4),
+        ];
+
+        assert!(!subsume_static_loads(&mut instructions));
+        assert!(
+            instructions
+                .iter()
+                .all(|inst| matches!(inst, SIRInstruction::Load(..)))
+        );
+        verify(
+            instructions,
+            [(RegisterId(0), logic(8)), (RegisterId(1), logic(4))],
+        );
+    }
+
+    #[test]
+    fn exact_static_load_is_left_for_existing_alias_elimination() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(0), 128),
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(0), 128),
+        ];
+
+        assert!(!subsume_static_loads(&mut instructions));
+        assert!(matches!(instructions[1], SIRInstruction::Load(..)));
+        verify(
+            instructions,
+            [(RegisterId(0), logic(128)), (RegisterId(1), logic(128))],
+        );
+    }
+
+    #[test]
+    fn logic_and_bit_loads_are_not_subsumed_across_value_plane_kinds() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 1, SIROffset::Static(0), 128),
+            SIRInstruction::Load(RegisterId(1), 1, SIROffset::Static(0), 16),
+        ];
+        let register_map = [
+            (
+                RegisterId(0),
+                RegisterType::Bit {
+                    width: 128,
+                    signed: false,
+                },
+            ),
+            (RegisterId(1), logic(16)),
+        ]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+        assert!(!subsume_static_loads_with_types(
+            &mut instructions,
+            &register_map
+        ));
+        assert!(matches!(instructions[1], SIRInstruction::Load(..)));
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn optimize_block_pipeline_applies_subsumption_and_remains_valid() {
+        let mut block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(RegisterId(0), 1u32, SIROffset::Static(0), 128),
+                SIRInstruction::Load(RegisterId(1), 1u32, SIROffset::Static(17), 31),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let mut register_map = [(RegisterId(0), logic(128)), (RegisterId(1), logic(31))]
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let mut replacements = HashMap::default();
+        let mut reg_counter = 1;
+
+        optimize_block(
+            &mut block,
+            &mut register_map,
+            &mut replacements,
+            &mut reg_counter,
+            true,
+        );
+
+        assert!(replacements.is_empty());
+        assert_eq!(
+            block.instructions[1],
+            SIRInstruction::Slice(RegisterId(1), RegisterId(0), 17, 31)
+        );
+        verify(block.instructions, register_map);
+    }
+
+    #[test]
+    fn exact_load_alias_requires_full_register_type_match() {
+        let mut block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(RegisterId(0), 1u32, SIROffset::Static(0), 8),
+                SIRInstruction::Load(RegisterId(1), 1u32, SIROffset::Static(0), 8),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let mut register_map = [
+            (
+                RegisterId(0),
+                RegisterType::Bit {
+                    width: 8,
+                    signed: false,
+                },
+            ),
+            (RegisterId(1), logic(8)),
+        ]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+        let mut replacements = HashMap::default();
+        let mut reg_counter = 1;
+
+        optimize_block(
+            &mut block,
+            &mut register_map,
+            &mut replacements,
+            &mut reg_counter,
+            true,
+        );
+
+        assert!(replacements.is_empty());
+        assert_eq!(
+            block
+                .instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
+                .count(),
+            2
+        );
+        verify(block.instructions, register_map);
+    }
+
+    #[test]
+    fn commit_forwarding_rejects_bit_source_but_accepts_logic_source() {
+        let optimize = |source_type: RegisterType| {
+            let mut block = BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: vec![
+                    SIRInstruction::Load(RegisterId(0), 1u32, SIROffset::Static(0), 8),
+                    SIRInstruction::Commit(1u32, 2u32, SIROffset::Static(0), 8, Vec::new()),
+                ],
+                terminator: SIRTerminator::Return,
+            };
+            let mut register_map = [(RegisterId(0), source_type)]
+                .into_iter()
+                .collect::<HashMap<_, _>>();
+            let mut replacements = HashMap::default();
+            let mut reg_counter = 0;
+            optimize_block(
+                &mut block,
+                &mut register_map,
+                &mut replacements,
+                &mut reg_counter,
+                true,
+            );
+            verify(block.instructions.clone(), register_map);
+            block.instructions
+        };
+
+        let bit_instructions = optimize(RegisterType::Bit {
+            width: 8,
+            signed: false,
+        });
+        assert!(matches!(bit_instructions[1], SIRInstruction::Commit(..)));
+
+        let logic_instructions = optimize(logic(8));
+        assert!(matches!(
+            logic_instructions[1],
+            SIRInstruction::Store(2, SIROffset::Static(0), 8, RegisterId(0), _, _)
+        ));
+    }
 }
