@@ -10,6 +10,7 @@ use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
 use num_bigint::BigUint;
+use num_traits::Zero;
 
 use crate::ir::BitAccess;
 use crate::logic_tree::comb::{LogicPath, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError};
@@ -97,6 +98,46 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
         SLTNode::Unary(op, inner) => {
             use crate::ir::UnaryOp;
             let (v, m, inner_width) = eval_const_expr(*inner, arena);
+            if matches!(op, UnaryOp::ToTwoState) {
+                return (
+                    v & (&width_mask ^ (&m & &width_mask)),
+                    BigUint::from(0u32),
+                    width,
+                );
+            }
+            if matches!(op, UnaryOp::LogicNot | UnaryOp::Or) {
+                let inner_width_mask = if inner_width > 0 {
+                    (BigUint::from(1u32) << inner_width) - 1u32
+                } else {
+                    BigUint::from(0u32)
+                };
+                let unknown = &m & &inner_width_mask;
+                let known = &inner_width_mask ^ &unknown;
+                let definite_ones = (&v & &inner_width_mask) & known;
+                let has_unknown = !unknown.is_zero();
+                let (value, mask) = match op {
+                    UnaryOp::LogicNot => {
+                        if !definite_ones.is_zero() {
+                            (0u8, 0u8)
+                        } else if has_unknown {
+                            (1u8, 1u8)
+                        } else {
+                            (1u8, 0u8)
+                        }
+                    }
+                    UnaryOp::Or => {
+                        if !definite_ones.is_zero() {
+                            (1u8, 0u8)
+                        } else if has_unknown {
+                            (1u8, 1u8)
+                        } else {
+                            (0u8, 0u8)
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                return (BigUint::from(value), BigUint::from(mask), width);
+            }
             if m != BigUint::from(0u32) {
                 return (BigUint::from(0u32), width_mask.clone(), width);
             }
@@ -444,6 +485,61 @@ mod tests {
                 eval_const_expr(node, &arena),
                 (BigUint::from(8u8), BigUint::from(0u8), 4),
             );
+        }
+    }
+
+    #[test]
+    fn logical_not_and_reduction_or_constants_use_dominant_known_one() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let known_one_and_x = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0b1000_0100u8),
+                BigUint::from(0b0000_0100u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let only_x = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0b0000_0100u8),
+                BigUint::from(0b0000_0100u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let only_z = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0b0000_0100u8),
+                8,
+                false,
+            ))
+            .unwrap();
+
+        let known_not = arena
+            .alloc(SLTNode::Unary(UnaryOp::LogicNot, known_one_and_x))
+            .unwrap();
+        let known_or = arena
+            .alloc(SLTNode::Unary(UnaryOp::Or, known_one_and_x))
+            .unwrap();
+        assert_eq!(
+            eval_const_expr(known_not, &arena),
+            (BigUint::from(0u8), BigUint::from(0u8), 1),
+        );
+        assert_eq!(
+            eval_const_expr(known_or, &arena),
+            (BigUint::from(1u8), BigUint::from(0u8), 1),
+        );
+
+        for inner in [only_x, only_z] {
+            for op in [UnaryOp::LogicNot, UnaryOp::Or] {
+                let node = arena.alloc(SLTNode::Unary(op, inner)).unwrap();
+                assert_eq!(
+                    eval_const_expr(node, &arena),
+                    (BigUint::from(1u8), BigUint::from(1u8), 1),
+                    "{op:?}",
+                );
+            }
         }
     }
 }

@@ -8,7 +8,7 @@
 //! moves the closed, pure true-edge region behind that branch.
 
 use super::pass_manager::ExecutionUnitPass;
-use super::shared::def_reg;
+use super::shared::{def_reg, normalize_branch_condition};
 use crate::ir::*;
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
@@ -63,9 +63,9 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
-        // SIR Branch observes only the value plane.  An X/Z mux condition has
-        // different semantics, so no structural proof below can authorize the
-        // conversion in four-state mode.
+        // A four-state Mux bitwise-merges its arms for an X/Z condition, while
+        // control flow selects one edge. No structural proof below authorizes
+        // that conversion in four-state mode.
         if options.four_state || eu.verify_result().is_err() {
             return;
         }
@@ -113,10 +113,11 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
             );
         }
 
+        let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
         for (ordinal, plan) in plans.into_iter().enumerate() {
             let true_id = BlockId(first_new_block + ordinal * 2);
             let false_id = BlockId(first_new_block + ordinal * 2 + 1);
-            apply_plan(eu, plan, true_id, false_id);
+            apply_plan(eu, plan, true_id, false_id, &mut reg_counter);
         }
     }
 }
@@ -506,6 +507,7 @@ fn apply_plan(
     plan: GuardedRegionPlan,
     true_id: BlockId,
     false_id: BlockId,
+    reg_counter: &mut usize,
 ) {
     let original = eu
         .blocks
@@ -530,6 +532,12 @@ fn apply_plan(
             head_instructions.push(inst);
         }
     }
+    let branch_condition = normalize_branch_condition(
+        &mut eu.register_map,
+        &mut head_instructions,
+        plan.condition,
+        reg_counter,
+    );
 
     eu.blocks.insert(
         plan.block_id,
@@ -538,7 +546,7 @@ fn apply_plan(
             params: original.params,
             instructions: head_instructions,
             terminator: SIRTerminator::Branch {
-                cond: plan.condition,
+                cond: branch_condition,
                 true_block: (true_id, Vec::new()),
                 false_block: (false_id, Vec::new()),
             },
@@ -1298,15 +1306,13 @@ mod tests {
     }
 
     #[test]
-    fn multi_bit_guard_is_non_destructive() {
+    fn multi_bit_branch_guard_is_rejected() {
         let mut eu = shared_dag_unit();
         eu.register_map.insert(RegisterId(0), bit(8));
-        eu.verify_result().unwrap();
-        let before = eu.clone();
-
-        GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
-
-        assert_unchanged(&before, &eu);
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "TYPE.BRANCH_CONDITION"
+        );
     }
 
     #[test]
@@ -1314,17 +1320,37 @@ mod tests {
         let mut eu = shared_dag_unit();
         eu.register_map.insert(RegisterId(2), bit(4));
         eu.register_map.insert(RegisterId(8), bit(4));
+        eu.register_map.insert(RegisterId(9), bit(8));
+        let head = eu.blocks.get_mut(&BlockId(0)).unwrap();
+        head.instructions.insert(
+            4,
+            SIRInstruction::Unary(RegisterId(9), UnaryOp::Ident, RegisterId(2)),
+        );
+        let SIRInstruction::Mux(_, _, _, false_value) = &mut head.instructions[5] else {
+            panic!("fixture must contain the distributed mux");
+        };
+        *false_value = RegisterId(9);
         let false_block = eu.blocks.get_mut(&BlockId(2)).unwrap();
         let SIRInstruction::Store(_, _, width, _, _, _) = &mut false_block.instructions[0] else {
             panic!("fixture false block must store its parameter");
         };
         *width = 4;
         eu.verify_result().unwrap();
-        let before = eu.clone();
 
         GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
 
-        assert_unchanged(&before, &eu);
+        eu.verify_result().unwrap();
+        assert!(
+            eu.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .all(|instruction| {
+                    let SIRInstruction::Store(_, _, width, value, _, _) = instruction else {
+                        return true;
+                    };
+                    *width == eu.register_map[value].width()
+                })
+        );
     }
 
     #[test]

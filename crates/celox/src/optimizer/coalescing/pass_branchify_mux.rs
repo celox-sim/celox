@@ -1,5 +1,5 @@
 use super::pass_manager::ExecutionUnitPass;
-use super::shared::def_reg;
+use super::shared::{def_reg, normalize_branch_condition};
 use crate::ir::{
     BasicBlock, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
     SIROffset, SIRTerminator,
@@ -37,9 +37,9 @@ impl ExecutionUnitPass for BranchifyMuxPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
-        // A four-state Mux maps an X/Z condition to an all-X result. SIR Branch
-        // currently tests only the value bits, so replacing that Mux with
-        // control flow would not preserve its semantics.
+        // A four-state Mux bitwise-merges its arms for an X/Z condition.
+        // Control flow selects only one arm, so branchification cannot preserve
+        // that behavior.
         if options.four_state {
             return;
         }
@@ -52,6 +52,7 @@ impl ExecutionUnitPass for BranchifyMuxPass {
         let mut use_counts = count_uses(eu);
         let mut def_blocks = instruction_def_blocks(eu);
         let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
+        let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
         let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
         block_ids.sort_by_key(|id| id.0);
         let mut worklist = VecDeque::from(block_ids);
@@ -73,6 +74,7 @@ impl ExecutionUnitPass for BranchifyMuxPass {
                     &mut use_counts,
                     &mut def_blocks,
                     &mut next_block_id,
+                    &mut reg_counter,
                     trace_reg,
                 );
                 applied += 1;
@@ -701,6 +703,7 @@ fn apply_branchify_mux(
     use_counts: &mut HashMap<RegisterId, usize>,
     def_blocks: &mut HashMap<RegisterId, BlockId>,
     next_block_id: &mut usize,
+    reg_counter: &mut usize,
     trace_reg: Option<RegisterId>,
 ) -> [BlockId; 3] {
     let true_id = BlockId(*next_block_id);
@@ -727,6 +730,12 @@ fn apply_branchify_mux(
             head_insts.push(inst.clone());
         }
     }
+    let branch_cond = normalize_branch_condition(
+        &mut eu.register_map,
+        &mut head_insts,
+        plan.cond,
+        reg_counter,
+    );
     let mut suffix = Vec::new();
     for (idx, inst) in original
         .instructions
@@ -778,7 +787,7 @@ fn apply_branchify_mux(
         params: original.params,
         instructions: head_insts,
         terminator: SIRTerminator::Branch {
-            cond: plan.cond,
+            cond: branch_cond,
             true_block: (true_id, Vec::new()),
             false_block: (false_id, Vec::new()),
         },
@@ -1781,6 +1790,13 @@ mod tests {
             ),
         ]);
         let mut eu = unit(instructions);
+        eu.register_map.insert(
+            RegisterId(14),
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
 
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
 
@@ -2195,6 +2211,13 @@ mod tests {
                 },
             );
         }
+        register_map.insert(
+            RegisterId(5),
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
         let mut blocks = HashMap::default();
         blocks.insert(
             BlockId(0),
@@ -2210,9 +2233,9 @@ mod tests {
             BasicBlock {
                 id: BlockId(1),
                 params: vec![RegisterId(2)],
-                instructions: Vec::new(),
+                instructions: vec![SIRInstruction::Imm(RegisterId(5), SIRValue::new(1u8))],
                 terminator: SIRTerminator::Branch {
-                    cond: RegisterId(1),
+                    cond: RegisterId(5),
                     true_block: (BlockId(2), Vec::new()),
                     false_block: (BlockId(3), Vec::new()),
                 },

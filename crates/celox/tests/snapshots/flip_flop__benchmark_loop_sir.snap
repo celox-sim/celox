@@ -1,6 +1,6 @@
 ---
 source: crates/celox/tests/flip_flop.rs
-assertion_line: 2232
+assertion_line: 2231
 expression: output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -11,44 +11,26 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r0: logic<1>
       r1: bit<1>
       r2: bit<32>
-      r3: bit<32>
-      r4: bit<32>
-      r5: bit<32>
-      r6: bit<32>
-      r7: bit<32>
-      r8: bit<32>
-      r9: bit<32>
-      r10: bit<32>
-      r11: bit<32>
       r12: logic<32>
       r13: bit<32>
       r14: logic<32>
       r15: logic<32>
-      r16: bit<32>
       r17: logic<32>
       r18: logic<32>
-      r19: bit<32>
       r20: logic<32>
       r21: logic<32>
-      r22: bit<32>
       r23: logic<32>
       r24: logic<32>
-      r25: bit<32>
       r26: logic<32>
       r27: logic<32>
-      r28: bit<32>
       r29: logic<32>
       r30: logic<32>
-      r31: bit<32>
       r32: logic<32>
       r33: logic<32>
-      r34: bit<32>
       r35: logic<32>
       r36: logic<32>
-      r37: bit<32>
       r38: logic<32>
       r39: logic<32>
-      r40: bit<32>
       r41: logic<32>
     b0:
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
@@ -109,44 +91,26 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r0: logic<1>
       r1: bit<1>
       r2: bit<32>
-      r3: bit<32>
-      r4: bit<32>
-      r5: bit<32>
-      r6: bit<32>
-      r7: bit<32>
-      r8: bit<32>
-      r9: bit<32>
-      r10: bit<32>
-      r11: bit<32>
       r12: logic<32>
       r13: bit<32>
       r14: logic<32>
       r15: logic<32>
-      r16: bit<32>
       r17: logic<32>
       r18: logic<32>
-      r19: bit<32>
       r20: logic<32>
       r21: logic<32>
-      r22: bit<32>
       r23: logic<32>
       r24: logic<32>
-      r25: bit<32>
       r26: logic<32>
       r27: logic<32>
-      r28: bit<32>
       r29: logic<32>
       r30: logic<32>
-      r31: bit<32>
       r32: logic<32>
       r33: logic<32>
-      r34: bit<32>
       r35: logic<32>
       r36: logic<32>
-      r37: bit<32>
       r38: logic<32>
       r39: logic<32>
-      r40: bit<32>
       r41: logic<32>
     b0:
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
@@ -209,44 +173,26 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r0: logic<1>
       r1: bit<1>
       r2: bit<32>
-      r3: bit<32>
-      r4: bit<32>
-      r5: bit<32>
-      r6: bit<32>
-      r7: bit<32>
-      r8: bit<32>
-      r9: bit<32>
-      r10: bit<32>
-      r11: bit<32>
       r12: logic<32>
       r13: bit<32>
       r14: logic<32>
       r15: logic<32>
-      r16: bit<32>
       r17: logic<32>
       r18: logic<32>
-      r19: bit<32>
       r20: logic<32>
       r21: logic<32>
-      r22: bit<32>
       r23: logic<32>
       r24: logic<32>
-      r25: bit<32>
       r26: logic<32>
       r27: logic<32>
-      r28: bit<32>
       r29: logic<32>
       r30: logic<32>
-      r31: bit<32>
       r32: logic<32>
       r33: logic<32>
-      r34: bit<32>
       r35: logic<32>
       r36: logic<32>
-      r37: bit<32>
       r38: logic<32>
       r39: logic<32>
-      r40: bit<32>
       r41: logic<32>
     b0:
       Commit(src=cnt (region=0), dst=cnt (region=1), offset=0, bits=320)
@@ -308,44 +254,26 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r0: logic<1>
       r1: bit<1>
       r2: bit<32>
-      r3: bit<32>
-      r4: bit<32>
-      r5: bit<32>
-      r6: bit<32>
-      r7: bit<32>
-      r8: bit<32>
-      r9: bit<32>
-      r10: bit<32>
-      r11: bit<32>
       r12: logic<32>
       r13: bit<32>
       r14: logic<32>
       r15: logic<32>
-      r16: bit<32>
       r17: logic<32>
       r18: logic<32>
-      r19: bit<32>
       r20: logic<32>
       r21: logic<32>
-      r22: bit<32>
       r23: logic<32>
       r24: logic<32>
-      r25: bit<32>
       r26: logic<32>
       r27: logic<32>
-      r28: bit<32>
       r29: logic<32>
       r30: logic<32>
-      r31: bit<32>
       r32: logic<32>
       r33: logic<32>
-      r34: bit<32>
       r35: logic<32>
       r36: logic<32>
-      r37: bit<32>
       r38: logic<32>
       r39: logic<32>
-      r40: bit<32>
       r41: logic<32>
     b0:
       Commit(src=cnt (region=0), dst=cnt (region=1), offset=0, bits=320)

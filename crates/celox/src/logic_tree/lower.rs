@@ -1,11 +1,12 @@
 use crate::ir::{
-    BinaryOp, BitAccess, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue, UnaryOp, VarAtomBase,
+    BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
+    SIRTerminator, SIRValue, UnaryOp, VarAtomBase,
 };
 use crate::logic_tree::{
     NodeId, SLTForFoldGroupState, SLTLoopBound, SLTNode, SLTNodeArena, comb::SLTStepOp,
 };
 use num_bigint::{BigInt, BigUint};
+use num_traits::Zero;
 use std::cell::RefCell;
 use std::hash::Hash;
 
@@ -2309,7 +2310,11 @@ impl SLTToSIRLowerer {
                 }
             }
             SLTNode::Constant(val, mask, width, _signed) => {
-                let reg = builder.alloc_bit(*width, false);
+                let reg = if mask.is_zero() {
+                    builder.alloc_bit(*width, false)
+                } else {
+                    builder.alloc_logic(*width)
+                };
                 builder.emit(SIRInstruction::Imm(
                     reg,
                     SIRValue::new_four_state(val.clone(), mask.clone()),
@@ -2317,9 +2322,46 @@ impl SLTToSIRLowerer {
                 reg
             }
             SLTNode::Binary(lhs, op, rhs) => {
-                let l = self.lower_inner(builder, *lhs, arena, cache, env, allow_cache);
-                let r = self.lower_inner(builder, *rhs, arena, cache, env, allow_cache);
+                let mut l = self.lower_inner(builder, *lhs, arena, cache, env, allow_cache);
+                let mut r = self.lower_inner(builder, *rhs, arena, cache, env, allow_cache);
                 let width = self.get_width(node, arena);
+                if matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::Ne
+                        | BinaryOp::LtU
+                        | BinaryOp::LtS
+                        | BinaryOp::LeU
+                        | BinaryOp::LeS
+                        | BinaryOp::GtU
+                        | BinaryOp::GtS
+                        | BinaryOp::GeU
+                        | BinaryOp::GeS
+                        | BinaryOp::EqWildcard
+                        | BinaryOp::NeWildcard
+                ) {
+                    let operand_width = builder
+                        .register(&l)
+                        .width()
+                        .max(builder.register(&r).width());
+                    let signed = matches!(
+                        op,
+                        BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
+                    ) || matches!(
+                        op,
+                        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+                    ) && self.get_bound_signed(*lhs, arena)
+                        && self.get_bound_signed(*rhs, arena);
+                    l = self.cast_reg_width_ext(builder, l, operand_width, signed);
+                    r = self.cast_reg_width_ext(builder, r, operand_width, signed);
+                } else if matches!(
+                    op,
+                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+                ) {
+                    let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+                    l = self.cast_reg_width_ext(builder, l, width, signed);
+                    r = self.cast_reg_width_ext(builder, r, width, signed);
+                }
                 let dest = builder.alloc_logic(width);
                 builder.emit(SIRInstruction::Binary(dest, l, *op, r));
                 dest
@@ -2327,7 +2369,11 @@ impl SLTToSIRLowerer {
             SLTNode::Unary(op, inner) => {
                 let i = self.lower_inner(builder, *inner, arena, cache, env, allow_cache);
                 let width = self.get_width(node, arena);
-                let dest = builder.alloc_logic(width);
+                let dest = if matches!(op, UnaryOp::ToTwoState) {
+                    builder.alloc_bit(width, self.get_bound_signed(node, arena))
+                } else {
+                    builder.alloc_logic(width)
+                };
                 builder.emit(SIRInstruction::Unary(dest, *op, i));
                 dest
             }
@@ -2801,12 +2847,20 @@ impl SLTToSIRLowerer {
                     self.get_bound_signed(*lhs, arena) && self.get_bound_signed(*rhs, arena)
                 }
             },
-            SLTNode::Unary(UnaryOp::Minus, _) => true,
             SLTNode::Unary(
-                UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros,
+                UnaryOp::LogicNot
+                | UnaryOp::And
+                | UnaryOp::Or
+                | UnaryOp::Xor
+                | UnaryOp::PopCount
+                | UnaryOp::CountLeadingZeros
+                | UnaryOp::CountTrailingZeros,
                 _,
             ) => false,
-            SLTNode::Unary(_, inner) => self.get_bound_signed(*inner, arena),
+            SLTNode::Unary(
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+                inner,
+            ) => self.get_bound_signed(*inner, arena),
             SLTNode::Mux {
                 then_expr,
                 else_expr,
@@ -2989,7 +3043,11 @@ impl SLTToSIRLowerer {
             total_width += *width;
         }
 
-        let reg = builder.alloc_bit(total_width, false);
+        let reg = if combined_mask.is_zero() {
+            builder.alloc_bit(total_width, false)
+        } else {
+            builder.alloc_logic(total_width)
+        };
         builder.emit(SIRInstruction::Imm(
             reg,
             SIRValue::new_four_state(combined_val, combined_mask),
@@ -3574,9 +3632,9 @@ impl SLTToSIRLowerer {
         } else {
             &empty_materialized
         };
-        // Branch observes only the value plane, while a four-state Mux merges
-        // value and mask planes for X/Z conditions.  No expression shape may
-        // bypass this semantic policy.
+        // Control flow selects one arm, while a four-state Mux bitwise-merges
+        // both arms for X/Z conditions. No expression shape may bypass this
+        // semantic policy.
         if self.four_state {
             self.with_mux_stats(|stats| stats.kept_four_state += 1);
             return None;
@@ -3946,7 +4004,12 @@ impl SLTToSIRLowerer {
         width: usize,
         signed: bool,
     ) -> RegisterId {
-        let current_width = builder.register(&reg).width();
+        let source_type = builder.register(&reg).clone();
+        let current_width = source_type.width();
+        let alloc_like_source = |builder: &mut SIRBuilder<A>, width, signed| match &source_type {
+            RegisterType::Logic { .. } => builder.alloc_logic(width),
+            RegisterType::Bit { .. } => builder.alloc_bit(width, signed),
+        };
         if current_width == width {
             return reg;
         }
@@ -3961,7 +4024,7 @@ impl SLTToSIRLowerer {
                 if pad_width == 1 {
                     sign
                 } else {
-                    let ext = builder.alloc_bit(pad_width, true);
+                    let ext = alloc_like_source(builder, pad_width, true);
                     builder.emit(SIRInstruction::Concat(
                         ext,
                         std::iter::repeat_n(sign, pad_width).collect(),
@@ -3973,7 +4036,7 @@ impl SLTToSIRLowerer {
                 builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
                 zero
             };
-            let dest = builder.alloc_bit(width, signed);
+            let dest = alloc_like_source(builder, width, signed);
             builder.emit(SIRInstruction::Concat(dest, vec![pad, reg]));
             return dest;
         }
@@ -3981,10 +4044,10 @@ impl SLTToSIRLowerer {
         let mask_val = (BigUint::from(1u64) << width) - BigUint::from(1u64);
         let mask_reg = builder.alloc_bit(current_width, false);
         builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
-        let masked = builder.alloc_bit(current_width, false);
+        let masked = alloc_like_source(builder, current_width, signed);
         builder.emit(SIRInstruction::Binary(masked, reg, BinaryOp::And, mask_reg));
         let sliced = self.slice_reg(builder, masked, &BitAccess::new(0, width - 1));
-        let dest = builder.alloc_bit(width, signed);
+        let dest = alloc_like_source(builder, width, signed);
         builder.emit(SIRInstruction::Unary(
             dest,
             crate::ir::UnaryOp::Ident,
@@ -5079,7 +5142,8 @@ mod tests {
             blocks,
             register_map,
         };
-        eu.verify_result().unwrap();
+        eu.verify_result()
+            .unwrap_or_else(|error| panic!("{error}\n{eu}"));
         eu
     }
 
@@ -5196,28 +5260,37 @@ mod tests {
                     SIRInstruction::Unary(dst, op, src) => {
                         let width = eu.register_map[dst].width();
                         let value = &values[src];
-                        let payload = match op {
-                            UnaryOp::Ident => value.payload.clone(),
-                            UnaryOp::BitNot => &width_mask(width) ^ &value.payload,
-                            UnaryOp::LogicNot => BigUint::from(value.payload == BigUint::from(0u8)),
-                            UnaryOp::Or => BigUint::from(value.payload != BigUint::from(0u8)),
-                            UnaryOp::PopCount => BigUint::from(
-                                value
-                                    .payload
-                                    .to_u64_digits()
-                                    .iter()
-                                    .map(|word| word.count_ones() as u64)
-                                    .sum::<u64>(),
+                        let (payload, mask) = match op {
+                            UnaryOp::Ident => (value.payload.clone(), value.mask.clone()),
+                            UnaryOp::ToTwoState => {
+                                let known = width_mask(width) ^ &value.mask;
+                                (&value.payload & known, BigUint::from(0u8))
+                            }
+                            UnaryOp::BitNot => {
+                                (&width_mask(width) ^ &value.payload, value.mask.clone())
+                            }
+                            UnaryOp::LogicNot => (
+                                BigUint::from(value.payload == BigUint::from(0u8)),
+                                value.mask.clone(),
+                            ),
+                            UnaryOp::Or => (
+                                BigUint::from(value.payload != BigUint::from(0u8)),
+                                value.mask.clone(),
+                            ),
+                            UnaryOp::PopCount => (
+                                BigUint::from(
+                                    value
+                                        .payload
+                                        .to_u64_digits()
+                                        .iter()
+                                        .map(|word| word.count_ones() as u64)
+                                        .sum::<u64>(),
+                                ),
+                                value.mask.clone(),
                             ),
                             other => panic!("unexpected grouped-fold unary op {other:?}"),
                         };
-                        values.insert(
-                            *dst,
-                            TestSIRValue {
-                                payload,
-                                mask: value.mask.clone(),
-                            },
-                        );
+                        values.insert(*dst, TestSIRValue { payload, mask });
                     }
                     SIRInstruction::Load(dst, address, offset, width) => {
                         let offset = match offset {
@@ -7750,7 +7823,13 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(mux_guard, entry_guard);
+        assert!(eu.blocks[&BlockId(0)].instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Unary(dst, UnaryOp::ToTwoState, src)
+                    if *dst == entry_guard && *src == mux_guard
+            )
+        }));
     }
 
     #[test]
@@ -8008,6 +8087,63 @@ mod tests {
     }
 
     #[test]
+    fn unary_value_operators_preserve_operand_expression_signedness() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let signed = arena
+            .alloc(SLTNode::Input {
+                variable: 0,
+                signed: true,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let unsigned = arena
+            .alloc(SLTNode::Input {
+                variable: 1,
+                signed: false,
+                index: vec![],
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let lowerer = SLTToSIRLowerer::new(false);
+
+        for op in [
+            UnaryOp::Ident,
+            UnaryOp::ToTwoState,
+            UnaryOp::Minus,
+            UnaryOp::BitNot,
+        ] {
+            let signed_result = arena.alloc(SLTNode::Unary(op, signed)).unwrap();
+            let unsigned_result = arena.alloc(SLTNode::Unary(op, unsigned)).unwrap();
+            assert!(lowerer.get_bound_signed(signed_result, &arena), "{op}");
+            assert!(!lowerer.get_bound_signed(unsigned_result, &arena), "{op}");
+        }
+    }
+
+    #[test]
+    fn width_materialization_preserves_four_state_register_kind() {
+        let lowerer = SLTToSIRLowerer::new(true);
+        let mut builder = SIRBuilder::<usize>::new();
+        let source = builder.alloc_logic(5);
+        builder.emit(SIRInstruction::Imm(
+            source,
+            SIRValue::new_four_state(0x11u8, 0x10u8),
+        ));
+
+        let widened = lowerer.cast_reg_width_ext(&mut builder, source, 8, true);
+        let narrowed = lowerer.cast_reg_width_ext(&mut builder, widened, 4, true);
+
+        assert!(matches!(
+            builder.register(&widened),
+            RegisterType::Logic { width: 8 }
+        ));
+        assert!(matches!(
+            builder.register(&narrowed),
+            RegisterType::Logic { width: 4 }
+        ));
+    }
+
+    #[test]
     fn mixed_sign_subtraction_bound_is_unsigned() {
         let mut arena = SLTNodeArena::<u32>::new();
         let lhs = arena
@@ -8088,7 +8224,7 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_target_bound_zero_extends_signed_slice() {
+    fn unsigned_target_bound_zero_extends_signed_slice_without_losing_state_kind() {
         let mut arena = SLTNodeArena::<u32>::new();
         let inner = arena
             .alloc(SLTNode::Input {
@@ -8116,10 +8252,10 @@ mod tests {
             &arena,
             &mut cache,
         );
-        match builder.register(&reg) {
-            crate::ir::RegisterType::Bit { signed, .. } => assert!(!signed),
-            other => panic!("expected bit register, got {other:?}"),
-        }
+        assert!(matches!(
+            builder.register(&reg),
+            crate::ir::RegisterType::Logic { width: 9 }
+        ));
         assert!(!lowerer.get_bound_signed(casted, &arena));
     }
 }

@@ -587,7 +587,8 @@ fn test_four_state_mux_x_condition(sim) {
     let id_b = sim.signal("b");
     let id_y = sim.signal("y");
 
-    // sel = X (v=1,m=1), a = 0xAA, b = 0xBB → cond uncertain → all-X
+    // sel = X (v=1,m=1), a = 0xAA, b = 0xBB. Equal branch bits are
+    // preserved; only differing bits become X.
     sim.modify(|io| {
         io.set_four_state(id_sel, BigUint::from(1u32), BigUint::from(1u32));
         io.set_four_state(id_a, BigUint::from(0xAAu32), BigUint::from(0u32));
@@ -595,11 +596,12 @@ fn test_four_state_mux_x_condition(sim) {
     })
     .unwrap();
 
-    let (_, m_y) = sim.get_four_state(id_y);
+    let (v_y, m_y) = sim.get_four_state(id_y);
+    assert_eq!(v_y, BigUint::from(0xBBu32));
     assert_eq!(
         m_y,
-        BigUint::from(0xFFu32),
-        "Mux with X condition → all bits uncertain"
+        BigUint::from(0x11u32),
+        "Mux with X condition must merge branch bits"
     );
 }
 
@@ -2966,6 +2968,80 @@ fn test_four_state_ne_wildcard_value_at_wildcard_pos(sim) {
         "!=? with definite mismatch should be definite"
     );
     assert_eq!(v, BigUint::from(1u32), "!=? with mismatch = 1");
+}
+
+fn test_four_state_wide_wildcard_equality(sim) {
+    @ignore_on(veryl);
+    @setup {
+    let code = r#"
+        module Top (
+            a: input logic<130>,
+            b: input logic<130>,
+            y_eq: output logic,
+            y_ne: output logic
+        ) {
+            assign y_eq = a ==? b;
+            assign y_ne = a !=? b;
+        }
+    "#;
+    }
+    @build SimulatorBuilder::new(code, "Top")
+        .four_state(true);
+
+    let id_a = sim.signal("a");
+    let id_b = sim.signal("b");
+    let id_y_eq = sim.signal("y_eq");
+    let id_y_ne = sim.signal("y_ne");
+    let bit_64 = BigUint::from(1u32) << 64usize;
+    let bit_65 = BigUint::from(1u32) << 65usize;
+    let bit_129 = BigUint::from(1u32) << 129usize;
+    let rhs_value = &bit_64 | &bit_129;
+
+    // A difference at an RHS wildcard in the second chunk is ignored.
+    sim.modify(|io| {
+        io.set_four_state(id_a, &rhs_value | &bit_65, BigUint::from(0u32));
+        io.set_four_state(id_b, rhs_value.clone(), bit_65.clone());
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(id_y_eq),
+        (BigUint::from(1u32), BigUint::from(0u32))
+    );
+    assert_eq!(
+        sim.get_four_state(id_y_ne),
+        (BigUint::from(0u32), BigUint::from(0u32))
+    );
+
+    // An unknown LHS bit at a non-wildcard position in the top chunk makes
+    // both wildcard equality results unknown.
+    sim.modify(|io| {
+        io.set_four_state(id_a, rhs_value.clone(), bit_129.clone());
+        io.set_four_state(id_b, rhs_value.clone(), bit_65.clone());
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(id_y_eq),
+        (BigUint::from(1u32), BigUint::from(1u32))
+    );
+    assert_eq!(
+        sim.get_four_state(id_y_ne),
+        (BigUint::from(1u32), BigUint::from(1u32))
+    );
+
+    // A definite mismatch in another high chunk dominates that unknown.
+    sim.modify(|io| {
+        io.set_four_state(id_a, bit_129.clone(), bit_129.clone());
+        io.set_four_state(id_b, rhs_value.clone(), bit_65.clone());
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(id_y_eq),
+        (BigUint::from(0u32), BigUint::from(0u32))
+    );
+    assert_eq!(
+        sim.get_four_state(id_y_ne),
+        (BigUint::from(1u32), BigUint::from(0u32))
+    );
 }
 
 // ==========================================================================

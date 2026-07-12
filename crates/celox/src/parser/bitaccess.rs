@@ -20,7 +20,60 @@ pub fn celox_value_from_comptime(comptime: &Comptime) -> Option<(BigUint, BigUin
     let val = comptime.get_value().ok()?;
     let mask_xz = val.mask_xz().into_owned();
     let payload = val.payload().into_owned();
-    Some((&payload ^ &mask_xz, mask_xz, val.width(), val.signed()))
+    let width = val.width();
+    let celox_value = &payload ^ &mask_xz;
+
+    if comptime.r#type.is_2state() {
+        let width_mask = if width == 0 {
+            // Unsized fill literals use bit 0 as the value to replicate once
+            // an enclosing context supplies their width.
+            BigUint::from(1u8)
+        } else {
+            (BigUint::from(1u8) << width) - BigUint::from(1u8)
+        };
+        let defined = &width_mask ^ (&mask_xz & &width_mask);
+        Some((
+            celox_value & defined,
+            BigUint::from(0u8),
+            width,
+            val.signed(),
+        ))
+    } else {
+        Some((celox_value, mask_xz, width, val.signed()))
+    }
+}
+
+/// Materialize a compile-time value in its expression context.
+///
+/// Veryl represents the context-dependent fill literals (`'0`, `'1`, `'x`,
+/// and `'z`) with width zero and keeps their seed in bit 0. A zero-width
+/// value must never reach SLT or SIR: in a sized context the seed fills that
+/// width, while in a self-determined context the literal is one bit wide.
+pub fn celox_value_from_comptime_in_context(
+    comptime: &Comptime,
+    context_width: Option<usize>,
+) -> Option<(BigUint, BigUint, usize, bool)> {
+    let (value, mask_xz, width, signed) = celox_value_from_comptime(comptime)?;
+    if width != 0 {
+        return Some((value, mask_xz, width, signed));
+    }
+
+    // A zero-sized destination is invalid independently of the literal. Use
+    // the self-determined width here so the later destination-width check
+    // reports that error without first constructing a zero-width IR value.
+    let width = context_width.filter(|width| *width != 0).unwrap_or(1);
+    let fill_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+    let value = if value.bit(0) {
+        fill_mask.clone()
+    } else {
+        BigUint::from(0u8)
+    };
+    let mask_xz = if mask_xz.bit(0) {
+        fill_mask
+    } else {
+        BigUint::from(0u8)
+    };
+    Some((value, mask_xz, width, signed))
 }
 
 pub fn eval_constexpr(expr: &Expression) -> Option<BigUint> {

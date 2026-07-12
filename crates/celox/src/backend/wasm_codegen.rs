@@ -925,96 +925,175 @@ fn compile_mux(
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     let d_width = unit.register_map[dst].width();
+    let cond_width = unit.register_map[cond].width();
     let d_chunks = locals.reg_map[dst].num_chunks;
     let dst_reg = locals.reg_map[dst].clone();
     let cond_reg = locals.reg_map[cond].clone();
     let then_reg = locals.reg_map[then_val].clone();
     let else_reg = locals.reg_map[else_val].clone();
-    let cond_local = cond_reg.value_idx;
 
-    // Allocate temps for cond_bc and not_cond_bc
-    let tmp_cbc = locals.alloc(1);
-    let tmp_ncbc = locals.alloc(1);
-
-    // cond_bc = 0 - cond (all ones if cond=1, all zeros if cond=0)
+    // A condition is definitely true when any bit is a known one.  If there
+    // is no known one but at least one X/Z bit, the condition is unknown;
+    // otherwise it is definitely false.  Reduce every condition chunk so a
+    // wide condition has the same semantics as a narrow one.
+    let cond_is_true = locals.alloc(1);
     instrs.push(Instruction::I64Const(0));
-    instrs.push(Instruction::LocalGet(cond_local));
-    instrs.push(Instruction::I64Sub);
-    instrs.push(Instruction::LocalTee(tmp_cbc));
+    instrs.push(Instruction::LocalSet(cond_is_true));
 
-    // not_cond_bc = ~cond_bc
+    let cond_is_unknown = if four_state {
+        let cond_mask = cond_reg.mask_idx.expect("four-state condition mask");
+        let cond_has_unknown = locals.alloc(1);
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(cond_has_unknown));
+
+        for i in 0..cond_reg.num_chunks {
+            // Accumulate known-one bits: cond_value & !cond_mask.
+            instrs.push(Instruction::LocalGet(cond_is_true));
+            instrs.push(Instruction::LocalGet(cond_reg.value_idx + i as u32));
+            instrs.push(Instruction::LocalGet(cond_mask + i as u32));
+            instrs.push(Instruction::I64Const(-1));
+            instrs.push(Instruction::I64Xor);
+            instrs.push(Instruction::I64And);
+            emit_chunk_mask_to_width(instrs, i, cond_reg.num_chunks, cond_width);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(cond_is_true));
+
+            // Accumulate X/Z bits independently.  A known one dominates them.
+            instrs.push(Instruction::LocalGet(cond_has_unknown));
+            instrs.push(Instruction::LocalGet(cond_mask + i as u32));
+            emit_chunk_mask_to_width(instrs, i, cond_reg.num_chunks, cond_width);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(cond_has_unknown));
+        }
+
+        // Canonicalize the reductions to i64 booleans.
+        instrs.push(Instruction::LocalGet(cond_is_true));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(cond_is_true));
+
+        let is_unknown = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(cond_has_unknown));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::LocalGet(cond_is_true));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::I32And);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(is_unknown));
+        Some(is_unknown)
+    } else {
+        for i in 0..cond_reg.num_chunks {
+            instrs.push(Instruction::LocalGet(cond_is_true));
+            instrs.push(Instruction::LocalGet(cond_reg.value_idx + i as u32));
+            emit_chunk_mask_to_width(instrs, i, cond_reg.num_chunks, cond_width);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(cond_is_true));
+        }
+        instrs.push(Instruction::LocalGet(cond_is_true));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(cond_is_true));
+        None
+    };
+
+    let branch_masks = if four_state {
+        Some((
+            then_reg.mask_idx.expect("four-state then-value mask"),
+            else_reg.mask_idx.expect("four-state else-value mask"),
+            dst_reg.mask_idx.expect("four-state destination mask"),
+        ))
+    } else {
+        None
+    };
+    let diff = branch_masks.map(|_| locals.alloc(1));
+
+    // Broadcast each mutually-exclusive condition state to an i64 selection
+    // mask so the per-chunk merge stays branchless.
+    let true_bc = locals.alloc(1);
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::LocalGet(cond_is_true));
+    instrs.push(Instruction::I64Sub);
+    instrs.push(Instruction::LocalSet(true_bc));
+
+    let unknown_bc = cond_is_unknown.map(|cond_is_unknown| {
+        let local = locals.alloc(1);
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalGet(cond_is_unknown));
+        instrs.push(Instruction::I64Sub);
+        instrs.push(Instruction::LocalSet(local));
+        local
+    });
+
+    let false_bc = locals.alloc(1);
+    instrs.push(Instruction::LocalGet(true_bc));
+    if let Some(unknown_bc) = unknown_bc {
+        instrs.push(Instruction::LocalGet(unknown_bc));
+        instrs.push(Instruction::I64Or);
+    }
     instrs.push(Instruction::I64Const(-1));
     instrs.push(Instruction::I64Xor);
-    instrs.push(Instruction::LocalSet(tmp_ncbc));
+    instrs.push(Instruction::LocalSet(false_bc));
 
     for i in 0..d_chunks {
         let tv_local = then_reg.value_idx + i as u32;
         let ev_local = else_reg.value_idx + i as u32;
         let dst_local = dst_reg.value_idx + i as u32;
 
-        // masked_then = cond_bc & then_val
-        instrs.push(Instruction::LocalGet(tmp_cbc));
-        instrs.push(Instruction::LocalGet(tv_local));
-        instrs.push(Instruction::I64And);
-
-        // masked_else = ~cond_bc & else_val
-        instrs.push(Instruction::LocalGet(tmp_ncbc));
-        instrs.push(Instruction::LocalGet(ev_local));
-        instrs.push(Instruction::I64And);
-
-        // result = masked_then | masked_else
-        instrs.push(Instruction::I64Or);
-
-        // Width mask for last chunk
-        if i == d_chunks - 1 {
-            let last_bits = d_width % 64;
-            if last_bits != 0 {
-                let mask = (1u64 << last_bits) - 1;
-                instrs.push(Instruction::I64Const(mask as i64));
-                instrs.push(Instruction::I64And);
-            }
+        if let (Some((then_mask, else_mask, _)), Some(diff)) = (branch_masks, diff) {
+            // For an unknown condition, bits that differ in either value or
+            // mask become X: diff = (tv ^ ev) | (tm ^ em).
+            instrs.push(Instruction::LocalGet(tv_local));
+            instrs.push(Instruction::LocalGet(ev_local));
+            instrs.push(Instruction::I64Xor);
+            instrs.push(Instruction::LocalGet(then_mask + i as u32));
+            instrs.push(Instruction::LocalGet(else_mask + i as u32));
+            instrs.push(Instruction::I64Xor);
+            instrs.push(Instruction::I64Or);
+            emit_chunk_mask_to_width(instrs, i, d_chunks, d_width);
+            instrs.push(Instruction::LocalSet(diff));
         }
 
+        // Definite true/false selects the corresponding value.  An unknown
+        // condition contributes the bitwise merge value.
+        instrs.push(Instruction::LocalGet(true_bc));
+        instrs.push(Instruction::LocalGet(tv_local));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalGet(false_bc));
+        instrs.push(Instruction::LocalGet(ev_local));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Or);
+        if let (Some(unknown_bc), Some(diff)) = (unknown_bc, diff) {
+            instrs.push(Instruction::LocalGet(unknown_bc));
+            instrs.push(Instruction::LocalGet(tv_local));
+            instrs.push(Instruction::LocalGet(diff));
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::I64Or);
+        }
+        emit_chunk_mask_to_width(instrs, i, d_chunks, d_width);
         instrs.push(Instruction::LocalSet(dst_local));
-    }
 
-    if four_state {
-        let (Some(dst_mask), Some(cond_mask), Some(then_mask), Some(else_mask)) = (
-            dst_reg.mask_idx,
-            cond_reg.mask_idx,
-            then_reg.mask_idx,
-            else_reg.mask_idx,
-        ) else {
-            return;
-        };
-
-        let cond_has_x = locals.alloc(1);
-        instrs.push(Instruction::LocalGet(cond_mask));
-        instrs.push(Instruction::I64Const(0));
-        instrs.push(Instruction::I64Ne);
-        instrs.push(Instruction::I64ExtendI32U);
-        instrs.push(Instruction::LocalSet(cond_has_x));
-
-        for i in 0..d_chunks {
-            let chunk_mask = chunk_mask_for_width(i, d_chunks, d_width);
-            instrs.push(Instruction::LocalGet(cond_has_x));
-            instrs.push(Instruction::I64Eqz);
-            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
-
-            instrs.push(Instruction::LocalGet(tmp_cbc));
+        if let (Some((then_mask, else_mask, dst_mask)), Some(unknown_bc), Some(diff)) =
+            (branch_masks, unknown_bc, diff)
+        {
+            instrs.push(Instruction::LocalGet(true_bc));
             instrs.push(Instruction::LocalGet(then_mask + i as u32));
             instrs.push(Instruction::I64And);
-            instrs.push(Instruction::LocalGet(tmp_ncbc));
+            instrs.push(Instruction::LocalGet(false_bc));
             instrs.push(Instruction::LocalGet(else_mask + i as u32));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalGet(unknown_bc));
+            instrs.push(Instruction::LocalGet(then_mask + i as u32));
+            instrs.push(Instruction::LocalGet(diff));
+            instrs.push(Instruction::I64Or);
             instrs.push(Instruction::I64And);
             instrs.push(Instruction::I64Or);
             emit_chunk_mask_to_width(instrs, i, d_chunks, d_width);
             instrs.push(Instruction::LocalSet(dst_mask + i as u32));
-
-            instrs.push(Instruction::Else);
-            instrs.push(Instruction::I64Const(chunk_mask as i64));
-            instrs.push(Instruction::LocalSet(dst_mask + i as u32));
-            instrs.push(Instruction::End);
         }
     }
 }
@@ -1086,7 +1165,16 @@ fn compile_binary_narrow(
         emit_mask_to_width(instrs, d_width);
         instrs.push(Instruction::LocalSet(d.value_idx));
 
-        compile_binary_mask_narrow(&d, &l, op, &r, d_width, locals, instrs);
+        compile_binary_mask_narrow(
+            &d,
+            &l,
+            op,
+            &r,
+            d_width,
+            l_width.max(r_width),
+            locals,
+            instrs,
+        );
         normalize_reg_with_mask(&d, d_width, instrs);
         return;
     }
@@ -1275,7 +1363,16 @@ fn compile_binary_narrow(
     instrs.push(Instruction::LocalSet(d.value_idx));
 
     if four_state {
-        compile_binary_mask_narrow(&d, &l, op, &r, d_width, locals, instrs);
+        compile_binary_mask_narrow(
+            &d,
+            &l,
+            op,
+            &r,
+            d_width,
+            l_width.max(r_width),
+            locals,
+            instrs,
+        );
         normalize_reg_with_mask(&d, d_width, instrs);
     }
 }
@@ -1299,29 +1396,31 @@ fn compile_binary_wide(
     let r_width = unit.register_map[rhs].width();
 
     if four_state && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
+        let operand_width = l_width.max(r_width);
+        let operand_chunks = l.num_chunks.max(r.num_chunks);
         let compare_mask = RegLocal {
-            value_idx: locals.alloc(d_chunks),
-            num_chunks: d_chunks,
+            value_idx: locals.alloc(operand_chunks),
+            num_chunks: operand_chunks,
             mask_idx: None,
         };
-        for c in 0..d_chunks {
+        for c in 0..operand_chunks {
             if c < r.num_chunks {
                 instrs.push(Instruction::LocalGet(
                     r.mask_idx.expect("four-state rhs mask") + c as u32,
                 ));
                 instrs.push(Instruction::I64Const(-1));
                 instrs.push(Instruction::I64Xor);
-                emit_chunk_mask_to_width(instrs, c, d_chunks, d_width);
+                emit_chunk_mask_to_width(instrs, c, operand_chunks, operand_width);
                 instrs.push(Instruction::LocalSet(compare_mask.value_idx + c as u32));
             } else {
-                let chunk_mask = chunk_mask_for_width(c, d_chunks, d_width);
+                let chunk_mask = chunk_mask_for_width(c, operand_chunks, operand_width);
                 instrs.push(Instruction::I64Const(chunk_mask as i64));
                 instrs.push(Instruction::LocalSet(compare_mask.value_idx + c as u32));
             }
         }
 
         instrs.push(Instruction::I64Const(1));
-        for c in 0..d_chunks {
+        for c in 0..operand_chunks {
             emit_wide_get_chunk(instrs, &l, c);
             emit_wide_get_chunk(instrs, &compare_mask, c);
             instrs.push(Instruction::I64And);
@@ -1342,7 +1441,7 @@ fn compile_binary_wide(
             instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
         }
 
-        compile_binary_mask_wide(&d, &l, op, &r, d_width, locals, instrs);
+        compile_binary_mask_wide(&d, &l, op, &r, d_width, operand_width, locals, instrs);
         normalize_reg_with_mask(&d, d_width, instrs);
         return;
     }
@@ -1886,7 +1985,16 @@ fn compile_binary_wide(
     }
 
     if four_state {
-        compile_binary_mask_wide(&d, &l, op, &r, d_width, locals, instrs);
+        compile_binary_mask_wide(
+            &d,
+            &l,
+            op,
+            &r,
+            d_width,
+            l_width.max(r_width),
+            locals,
+            instrs,
+        );
         normalize_reg_with_mask(&d, d_width, instrs);
     }
 }
@@ -1897,6 +2005,7 @@ fn compile_binary_mask_narrow(
     op: &BinaryOp,
     rhs: &RegLocal,
     d_width: usize,
+    operand_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -2076,7 +2185,7 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::LocalGet(rhs_mask));
             instrs.push(Instruction::I64Const(-1));
             instrs.push(Instruction::I64Xor);
-            emit_mask_to_width(instrs, d_width);
+            emit_mask_to_width(instrs, operand_width);
             instrs.push(Instruction::LocalSet(compare_mask));
 
             instrs.push(Instruction::LocalGet(lhs_mask));
@@ -2139,6 +2248,7 @@ fn compile_binary_mask_wide(
     op: &BinaryOp,
     rhs: &RegLocal,
     d_width: usize,
+    operand_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -2405,18 +2515,19 @@ fn compile_binary_mask_wide(
         BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
             let any_unknown = locals.alloc(1);
             let any_mismatch = locals.alloc(1);
+            let operand_chunks = lhs.num_chunks.max(rhs.num_chunks);
 
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(any_unknown));
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(any_mismatch));
 
-            for c in 0..dst.num_chunks.max(lhs.num_chunks).max(rhs.num_chunks) {
+            for c in 0..operand_chunks {
                 let compare_mask = locals.alloc(1);
                 emit_wide_get_chunk(instrs, &rhs_mask, c);
                 instrs.push(Instruction::I64Const(-1));
                 instrs.push(Instruction::I64Xor);
-                emit_chunk_mask_to_width(instrs, c, dst.num_chunks, d_width);
+                emit_chunk_mask_to_width(instrs, c, operand_chunks, operand_width);
                 instrs.push(Instruction::LocalSet(compare_mask));
 
                 emit_wide_get_chunk(instrs, &lhs_mask, c);
@@ -2813,9 +2924,23 @@ fn compile_unary(
     let s_width = unit.register_map[src].width();
 
     match op {
-        UnaryOp::Ident => {
+        UnaryOp::Ident | UnaryOp::ToTwoState => {
             for c in 0..d.num_chunks {
                 emit_wide_get_chunk(instrs, &s, c);
+                if matches!(op, UnaryOp::ToTwoState)
+                    && four_state
+                    && let Some(src_mask) = s.mask_idx
+                {
+                    if c < s.num_chunks {
+                        instrs.push(Instruction::LocalGet(src_mask + c as u32));
+                    } else {
+                        instrs.push(Instruction::I64Const(0));
+                    }
+                    instrs.push(Instruction::I64Const(-1));
+                    instrs.push(Instruction::I64Xor);
+                    instrs.push(Instruction::I64And);
+                }
+                emit_chunk_mask_to_width(instrs, c, d.num_chunks, d_width);
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
             }
         }
@@ -2970,7 +3095,7 @@ fn compile_unary(
 
     if four_state {
         compile_unary_mask(&d, op, &s, d_width, s_width, locals, instrs);
-        if !matches!(op, UnaryOp::Ident | UnaryOp::BitNot) {
+        if !matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot) {
             normalize_reg_with_mask(&d, d_width, instrs);
         }
     }
@@ -3002,7 +3127,13 @@ fn compile_unary_mask(
                 instrs.push(Instruction::LocalSet(dst_mask + c as u32));
             }
         }
-        UnaryOp::Minus | UnaryOp::LogicNot => {
+        UnaryOp::ToTwoState => {
+            for c in 0..dst.num_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(dst_mask + c as u32));
+            }
+        }
+        UnaryOp::Minus => {
             let has_x = locals.alloc(1);
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(has_x));
@@ -3057,7 +3188,7 @@ fn compile_unary_mask(
             }
             instrs.push(Instruction::End);
         }
-        UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => {
+        UnaryOp::And | UnaryOp::LogicNot | UnaryOp::Or | UnaryOp::Xor => {
             let has_x = locals.alloc(1);
             let definite = locals.alloc(1);
             instrs.push(Instruction::I64Const(0));
@@ -3094,7 +3225,7 @@ fn compile_unary_mask(
                         instrs.push(Instruction::I64Or);
                         instrs.push(Instruction::LocalSet(definite));
                     }
-                    UnaryOp::Or => {
+                    UnaryOp::LogicNot | UnaryOp::Or => {
                         instrs.push(Instruction::LocalGet(definite));
                         instrs.push(Instruction::LocalGet(src.value_idx + c as u32));
                         instrs.push(Instruction::LocalGet(src_mask + c as u32));
@@ -3114,7 +3245,7 @@ fn compile_unary_mask(
             }
 
             match op {
-                UnaryOp::And | UnaryOp::Or => {
+                UnaryOp::And | UnaryOp::LogicNot | UnaryOp::Or => {
                     instrs.push(Instruction::LocalGet(definite));
                     instrs.push(Instruction::I64Eqz);
                     instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
@@ -3684,20 +3815,6 @@ fn compile_store(
                         // TODO: implement dynamic zero store
                     }
                 }
-            }
-        }
-    }
-
-    // 4-state type boundary enforcement:
-    // When storing to a 2-state variable, subsequent users of the same source
-    // register must observe the mask-cleared value. This mirrors the native
-    // backend and is required because combinational lowering can reuse the same
-    // source register across expressions that conceptually flow through a bit variable.
-    if four_state && !layout.is_4states.get(&abs).copied().unwrap_or(false) {
-        if let Some(mask_idx) = s.mask_idx {
-            for c in 0..s.num_chunks {
-                instrs.push(Instruction::I64Const(0));
-                instrs.push(Instruction::LocalSet(mask_idx + c as u32));
             }
         }
     }

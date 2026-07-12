@@ -41,6 +41,33 @@ fn assert_comb_loop_analyzer_or_sir(
     }
 }
 
+fn assert_ff_non_progress_analyzer_or_runtime(code: &str) {
+    let mut sim = match Simulator::builder(code, "Top").build() {
+        Ok(sim) => sim,
+        Err(err) => {
+            match err.kind() {
+                SimulatorErrorKind::Analyzer(errors) => assert!(
+                    errors.iter().any(|error| matches!(
+                        error,
+                        veryl_analyzer::AnalyzerError::InvalidForStep { .. }
+                    )),
+                    "Expected InvalidForStep analyzer error, got: {errors:?}"
+                ),
+                other => panic!("Expected Analyzer or runtime loop error, got: {other:?}"),
+            }
+            return;
+        }
+    };
+    let clk = sim.event("clk");
+    let count = sim.signal("count");
+    sim.modify(|io| io.set(count, 4u8)).unwrap();
+    let err = sim.tick(clk).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}
+
 #[test]
 fn test_scheduler_loop_detection() {
     let code = r#"
@@ -328,15 +355,7 @@ fn test_always_ff_runtime_for_non_progress_is_rejected() {
         }
     "#;
 
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
-    let clk = sim.event("clk");
-    let count = sim.signal("count");
-    sim.modify(|io| io.set(count, 4u8)).unwrap();
-    let err = sim.tick(clk).unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "Non-progressing for loop in always_ff (loop variable `i`): i"
-    );
+    assert_ff_non_progress_analyzer_or_runtime(code);
 }
 
 #[test]
@@ -356,15 +375,38 @@ fn test_always_ff_runtime_for_zero_start_mul_non_progress_is_rejected() {
         }
     "#;
 
-    let mut sim = Simulator::builder(code, "Top").build().unwrap();
-    let clk = sim.event("clk");
-    let count = sim.signal("count");
-    sim.modify(|io| io.set(count, 4u8)).unwrap();
-    let err = sim.tick(clk).unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "Non-progressing for loop in always_ff (loop variable `i`): i"
-    );
+    assert_ff_non_progress_analyzer_or_runtime(code);
+}
+
+#[test]
+fn test_zero_step_for_loop_is_rejected_by_analyzer() {
+    let code = r#"
+        module Top (
+            count: input logic<8>,
+            o: output logic<8>
+        ) {
+            always_comb {
+                o = 0;
+                for i in 0..count step += 0 {
+                    o = i as 8;
+                }
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("a zero-step loop must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::Analyzer(errors) => assert!(errors.iter().any(|error| matches!(
+            error,
+            veryl_analyzer::AnalyzerError::InvalidForStep {
+                cause: veryl_analyzer::analyzer_error::InvalidForStepKind::ZeroStep,
+                ..
+            }
+        ))),
+        other => panic!("Expected InvalidForStep::ZeroStep, got: {other:?}"),
+    }
 }
 
 #[test]

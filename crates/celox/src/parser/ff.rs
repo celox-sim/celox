@@ -7,8 +7,7 @@ use crate::ir::{
 use crate::{
     HashMap, HashSet,
     parser::{
-        BuildConfig, LoweringPhase, ParserError,
-        bitaccess::{eval_constexpr, get_access_width},
+        BuildConfig, LoweringPhase, ParserError, bitaccess::eval_constexpr,
         case::case_arm_condition_expr,
     },
 };
@@ -17,9 +16,9 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
 
 use veryl_analyzer::ir::{
-    AssertKind, CaseStatement, Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange,
+    AssertKind, CaseStatement, Expression, FfDeclaration, FfReset, ForBound, ForRange,
     ForStatement, IfResetStatement, IfStatement, Module, Op, Statement, SystemFunctionCall,
-    SystemFunctionInput, SystemFunctionKind, TypeKind, ValueVariant, VarId,
+    SystemFunctionInput, SystemFunctionKind, TypeKind, VarId,
 };
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
@@ -390,29 +389,6 @@ impl<'a> FfParser<'a> {
         eval_constexpr(expr)?.to_u64()
     }
 
-    fn get_cast_target_info(&self, expr: &Expression) -> Option<(usize, bool, bool)> {
-        let Expression::Term(factor) = expr else {
-            return None;
-        };
-        let Factor::Value(comptime) = factor.as_ref() else {
-            return None;
-        };
-        match &comptime.value {
-            ValueVariant::Type(ty) => {
-                let width = ty.total_width()?;
-                let signed = ty.signed;
-                let is_2state = ty.is_2state();
-                Some((width, signed, is_2state))
-            }
-            ValueVariant::Numeric(v) => {
-                let width = v.to_usize()?;
-                // Numeric width cast is unsigned, 2-state (bit)
-                Some((width, false, true))
-            }
-            _ => None,
-        }
-    }
-
     fn cast_reg_width_ext<A>(
         &self,
         ir_builder: &mut SIRBuilder<A>,
@@ -420,19 +396,24 @@ impl<'a> FfParser<'a> {
         target_width: usize,
         signed: bool,
     ) -> RegisterId {
-        let src_width = ir_builder.register(&reg).width();
+        let src_type = ir_builder.register(&reg).clone();
+        let src_width = src_type.width();
+        let alloc_like_source = |builder: &mut SIRBuilder<A>, width, signed| match &src_type {
+            RegisterType::Logic { .. } => builder.alloc_logic(width),
+            RegisterType::Bit { .. } => builder.alloc_bit(width, signed),
+        };
         if src_width == target_width {
             reg
         } else if src_width < target_width {
-            let dest = ir_builder.alloc_bit(target_width, signed);
+            let dest = alloc_like_source(ir_builder, target_width, signed);
             if signed {
-                let sign = ir_builder.alloc_bit(1, false);
+                let sign = alloc_like_source(ir_builder, 1, false);
                 ir_builder.emit(SIRInstruction::Slice(sign, reg, src_width - 1, 1));
                 let pad_width = target_width - src_width;
                 let pad = if pad_width == 1 {
                     sign
                 } else {
-                    let ext = ir_builder.alloc_bit(pad_width, true);
+                    let ext = alloc_like_source(ir_builder, pad_width, true);
                     ir_builder.emit(SIRInstruction::Concat(
                         ext,
                         std::iter::repeat_n(sign, pad_width).collect(),
@@ -452,7 +433,7 @@ impl<'a> FfParser<'a> {
                 mask,
                 crate::ir::SIRValue::new(mask_val),
             ));
-            let dest = ir_builder.alloc_bit(target_width, signed);
+            let dest = alloc_like_source(ir_builder, target_width, signed);
             ir_builder.emit(SIRInstruction::Binary(
                 dest,
                 reg,
@@ -464,76 +445,9 @@ impl<'a> FfParser<'a> {
     }
 
     fn get_expression_width(&self, expr: &Expression) -> usize {
-        match expr {
-            Expression::Binary(left, op, right, _) => {
-                let lw = self.get_expression_width(left);
-                let rw = self.get_expression_width(right);
-                match op {
-                    Op::Eq
-                    | Op::Ne
-                    | Op::Less
-                    | Op::LessEq
-                    | Op::Greater
-                    | Op::GreaterEq
-                    | Op::LogicAnd
-                    | Op::LogicOr
-                    | Op::LogicNot => 1,
-                    // Shift/pow result width is determined by the LHS only
-                    // (IEEE 1800-2023 §11.4.10).
-                    Op::LogicShiftL
-                    | Op::LogicShiftR
-                    | Op::ArithShiftL
-                    | Op::ArithShiftR
-                    | Op::Pow => lw,
-                    _ => lw.max(rw),
-                }
-            }
-            Expression::Unary(op, expr, _) => match op {
-                Op::LogicNot
-                | Op::BitAnd
-                | Op::BitOr
-                | Op::BitXor
-                | Op::BitXnor
-                | Op::BitNand
-                | Op::BitNor => 1,
-                _ => self.get_expression_width(expr),
-            },
-            Expression::Term(factor) => self.get_factor_width(factor),
-            Expression::Ternary(_, then, els, _) => self
-                .get_expression_width(then)
-                .max(self.get_expression_width(els)),
-            Expression::Concatenation(exprs, _) => {
-                let mut total = 0;
-                for (expr, replication) in exprs {
-                    let w = self.get_expression_width(expr);
-                    let rep = if let Some(rep_expr) = replication {
-                        self.get_constant_value(rep_expr).unwrap_or(1) as usize
-                    } else {
-                        1
-                    };
-                    total += w * rep;
-                }
-                total
-            }
-            _ => 64,
-        }
-    }
-
-    fn get_factor_width(&self, factor: &Factor) -> usize {
-        match factor {
-            Factor::Variable(var_id, index, select, _) => {
-                get_access_width(self.module, *var_id, index, select).unwrap_or(64)
-            }
-            Factor::Value(comptime) => {
-                if let Ok(v) = comptime.get_value() {
-                    v.width()
-                } else {
-                    64
-                }
-            }
-            Factor::FunctionCall(call) => call.comptime.r#type.total_width().unwrap_or(64),
-            _ => 64,
-        }
+        crate::context_width::get_expr_width(expr)
+            .or_else(|| expr.comptime().r#type.total_width())
+            .unwrap_or(64)
     }
 
     // expression / function-call lowering is split into submodules:

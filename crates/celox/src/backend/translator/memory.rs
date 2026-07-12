@@ -489,24 +489,6 @@ impl SIRTranslator {
             }
         }
 
-        // 4-state type boundary enforcement:
-        // When storing to a 2-state variable, replace the source register's mask with zeros.
-        // This is critical because the combinational analysis inlines intermediate variables,
-        // making subsequent LogicPaths that share expression nodes (via lower_cache) reuse
-        // the same registers. Without this, X masks would propagate through 2-state variables.
-        if self.options.four_state && !self.layout.is_4states[&abs] {
-            let zero_masks: Vec<_> = v_chunks
-                .iter()
-                .map(|_| state.builder.ins().iconst(get_cl_type(s_phys_width), 0))
-                .collect();
-            state.regs.insert(
-                *src_reg,
-                TransValue::FourState {
-                    values: v_chunks,
-                    masks: zero_masks,
-                },
-            );
-        }
         if !comb_capture_sites.is_empty() {
             let new_value_chunks = if s_phys_width <= 64 {
                 vec![self.translate_load_native(

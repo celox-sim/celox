@@ -379,6 +379,7 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
             SLTNode::Unary(op, inner) => {
                 let op_str = match op {
                     crate::ir::UnaryOp::Ident => "",
+                    crate::ir::UnaryOp::ToTwoState => "2state",
                     crate::ir::UnaryOp::Minus => "-",
                     crate::ir::UnaryOp::BitNot => "~",
                     crate::ir::UnaryOp::LogicNot => "!",

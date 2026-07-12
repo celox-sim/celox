@@ -2319,7 +2319,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_width_changing_constant_casts_and_wide_comparison_results() {
+    fn rejects_width_changing_constant_casts() {
         let mut cast_key = FixtureBuilder::new();
         let selector = cast_key.register(8);
         let factor = cast_key.immediate(64, 3);
@@ -2368,50 +2368,42 @@ mod tests {
         let factor = cast_selector.immediate(64, 3);
         let mut previous = cast_selector.expensive_value(1, factor);
         for key in 8..12 {
-            // Verifier-valid today: the backend compares at the 8-bit common
-            // width, while incorrectly stripping selector_cast would make the
-            // matcher compare the 4-bit source against this 4-bit key.
-            let key_reg = cast_selector.immediate(4, key);
+            // Keep the comparison itself canonical. Incorrectly stripping the
+            // selector cast would still change the four-bit source's meaning.
+            let key_reg = cast_selector.immediate(8, key);
             let cond = cast_selector.binary(1, selector_cast, BinaryOp::Eq, key_reg);
             let value = cast_selector.expensive_value(20 + key, factor);
             previous = cast_selector.mux(cond, value, previous);
         }
-        cast_selector.ident(previous);
+        let output = cast_selector.ident(previous);
+        cast_selector.observe(output);
         let mut cast_selector = cast_selector.finish(vec![selector_source]);
         cast_selector.verify();
         let original = cast_selector.clone();
+        let expected = (0..16)
+            .map(|value| evaluate(&original, selector_source, value, output))
+            .collect::<Vec<_>>();
 
         SparseCaseDispatchPass::default().run(&mut cast_selector, &PassOptions::default());
 
-        assert_eq!(cast_selector.blocks, original.blocks);
-
-        let mut wide_compare = FixtureBuilder::new();
-        let selector = wide_compare.register(4);
-        wide_compare.register_map.insert(
-            selector,
-            RegisterType::Bit {
-                width: 4,
-                signed: true,
-            },
+        cast_selector.verify();
+        assert_ne!(cast_selector.blocks, original.blocks);
+        assert!(
+            cast_selector.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Unary(dst, UnaryOp::Ident, src)
+                        if *dst == selector_cast && *src == selector_source
+                ))
         );
-        let factor = wide_compare.immediate(64, 3);
-        let mut previous = wide_compare.expensive_value(1, factor);
-        for key in 8..12 {
-            let key_reg = wide_compare.immediate(4, key);
-            // The backend's common comparison width is 8 here, so the signed
-            // selector is extended before equality is evaluated.
-            let cond = wide_compare.binary(8, selector, BinaryOp::Eq, key_reg);
-            let value = wide_compare.expensive_value(30 + key, factor);
-            previous = wide_compare.mux(cond, value, previous);
-        }
-        wide_compare.ident(previous);
-        let mut wide_compare = wide_compare.finish(vec![selector]);
-        wide_compare.verify();
-        let original = wide_compare.clone();
-
-        SparseCaseDispatchPass::default().run(&mut wide_compare, &PassOptions::default());
-
-        assert_eq!(wide_compare.blocks, original.blocks);
+        assert_eq!(
+            (0..16)
+                .map(|value| evaluate(&cast_selector, selector_source, value, output))
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[test]

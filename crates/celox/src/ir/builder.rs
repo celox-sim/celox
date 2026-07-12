@@ -1,5 +1,7 @@
 use crate::HashMap;
-use crate::ir::{BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator};
+use crate::ir::{
+    BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, UnaryOp,
+};
 
 #[derive(Clone)]
 pub(crate) struct SIRBuilder<Addr> {
@@ -96,7 +98,10 @@ impl<Addr> SIRBuilder<Addr> {
         self.current_block_id = Some(block);
     }
 
-    pub fn seal_block(&mut self, terminator: SIRTerminator) -> BlockId {
+    pub fn seal_block(&mut self, mut terminator: SIRTerminator) -> BlockId {
+        if let SIRTerminator::Branch { cond, .. } = &mut terminator {
+            *cond = self.normalize_branch_condition(*cond);
+        }
         let id = self
             .current_block_id
             .take()
@@ -104,8 +109,33 @@ impl<Addr> SIRBuilder<Addr> {
         self.blocks.get_mut(&id).unwrap().terminator = terminator;
         id
     }
-    pub fn set_block_params(&mut self, block: BlockId, params: Vec<RegisterId>) {
-        self.blocks.get_mut(&block).unwrap().params = params;
+
+    fn normalize_branch_condition(&mut self, cond: RegisterId) -> RegisterId {
+        let cond_type = self.register(&cond).clone();
+        if matches!(
+            cond_type,
+            RegisterType::Bit {
+                width: 1,
+                signed: false
+            }
+        ) {
+            return cond;
+        }
+
+        let truth = if cond_type.width() == 1 {
+            cond
+        } else {
+            let truth = self.alloc_logic(1);
+            self.emit(SIRInstruction::Unary(truth, UnaryOp::Or, cond));
+            truth
+        };
+        let normalized = self.alloc_bit(1, false);
+        self.emit(SIRInstruction::Unary(
+            normalized,
+            UnaryOp::ToTwoState,
+            truth,
+        ));
+        normalized
     }
     /// Get the current block ID
     pub fn current_block(&self) -> BlockId {
@@ -168,5 +198,74 @@ impl<Addr> SIRBuilder<Addr> {
             blocks,
             register_map: regs,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ir::{SIRValue, UnaryOp};
+
+    use super::*;
+
+    fn branch_unit(condition_type: RegisterType) -> crate::ir::ExecutionUnit<usize> {
+        let mut builder = SIRBuilder::new();
+        let cond = builder.alloc_reg(condition_type);
+        builder.emit(SIRInstruction::Imm(cond, SIRValue::new(0u8)));
+        let then_block = builder.new_block();
+        let else_block = builder.new_block();
+        builder.seal_block(SIRTerminator::Branch {
+            cond,
+            true_block: (then_block, vec![]),
+            false_block: (else_block, vec![]),
+        });
+        builder.switch_to_block(then_block);
+        builder.seal_block(SIRTerminator::Return);
+        builder.switch_to_block(else_block);
+        builder.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = builder.drain();
+        crate::ir::ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
+    #[test]
+    fn canonicalizes_logic_branch_condition() {
+        let unit = branch_unit(RegisterType::Logic { width: 8 });
+        let entry = &unit.blocks[&BlockId(0)];
+        assert!(matches!(
+            &entry.instructions[1..],
+            [
+                SIRInstruction::Unary(_, UnaryOp::Or, RegisterId(0)),
+                SIRInstruction::Unary(_, UnaryOp::ToTwoState, _)
+            ]
+        ));
+        assert!(matches!(
+            entry.terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(2),
+                ..
+            }
+        ));
+        unit.verify();
+    }
+
+    #[test]
+    fn preserves_canonical_bit_branch_condition() {
+        let unit = branch_unit(RegisterType::Bit {
+            width: 1,
+            signed: false,
+        });
+        let entry = &unit.blocks[&BlockId(0)];
+        assert_eq!(entry.instructions.len(), 1);
+        assert!(matches!(
+            entry.terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                ..
+            }
+        ));
+        unit.verify();
     }
 }

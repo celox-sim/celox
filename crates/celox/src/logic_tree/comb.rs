@@ -1534,7 +1534,9 @@ fn update_assignment_range(
     store: &mut SymbolicStore<VarId>,
     destination: &veryl_analyzer::ir::AssignDestination,
     access: BitAccess,
-    value: (NodeId, HashSet<VarAtomBase<VarId>>),
+    mut value: (NodeId, HashSet<VarAtomBase<VarId>>),
+    source_is_2state: bool,
+    arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(), ParserError> {
     let variable = module.variables.get(&destination.id).ok_or_else(|| {
         ParserError::illegal_context(
@@ -1553,6 +1555,9 @@ fn update_assignment_range(
             ),
             Some(&destination.token),
         ));
+    }
+    if variable.r#type.is_2state() && !source_is_2state {
+        value.0 = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, value.0))?;
     }
     let range_store = store.get_mut(&destination.id).ok_or_else(|| {
         ParserError::illegal_context(
@@ -1574,6 +1579,7 @@ fn eval_assign(
     stmt: &AssignStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    let rhs_is_2state = stmt.expr.comptime().r#type.is_2state();
     let rhs_expected_width = checked_destination_width(
         module,
         &stmt.dst,
@@ -1618,6 +1624,8 @@ fn eval_assign(
                 dst,
                 access,
                 (rhs_expr, rhs_sources.clone()),
+                rhs_is_2state,
+                arena,
             )?;
         } else {
             let (s, b) = eval_dynamic_assign(
@@ -1627,6 +1635,7 @@ fn eval_assign(
                 dst,
                 rhs_expr,
                 rhs_sources.clone(),
+                rhs_is_2state,
                 arena,
             )?;
             return Ok((s, b));
@@ -1662,6 +1671,8 @@ fn eval_assign(
                     dst,
                     access,
                     (slice_expr, rhs_sources.clone()),
+                    rhs_is_2state,
+                    arena,
                 )?;
             } else {
                 let (s, b) = eval_dynamic_assign(
@@ -1671,6 +1682,7 @@ fn eval_assign(
                     dst,
                     slice_expr,
                     rhs_sources.clone(),
+                    rhs_is_2state,
                     arena,
                 )?;
                 store = s;
@@ -1699,6 +1711,7 @@ fn assign_node_to_dsts(
     dsts: &[veryl_analyzer::ir::AssignDestination],
     rhs_expr: NodeId,
     rhs_sources: HashSet<VarAtomBase<VarId>>,
+    source_is_2state: bool,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let destination_width = checked_destination_width(
@@ -1723,12 +1736,29 @@ fn assign_node_to_dsts(
         if crate::parser::bitaccess::is_static_access(&dst.index, &dst.select) {
             let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
             record_assignment_boundary(&mut boundaries, dst, access)?;
-            update_assignment_range(module, &mut store, dst, access, (rhs_expr, rhs_sources))?;
+            update_assignment_range(
+                module,
+                &mut store,
+                dst,
+                access,
+                (rhs_expr, rhs_sources),
+                source_is_2state,
+                arena,
+            )?;
 
             return Ok((store, boundaries));
         }
 
-        return eval_dynamic_assign(module, store, boundaries, dst, rhs_expr, rhs_sources, arena);
+        return eval_dynamic_assign(
+            module,
+            store,
+            boundaries,
+            dst,
+            rhs_expr,
+            rhs_sources,
+            source_is_2state,
+            arena,
+        );
     }
 
     let mut current_offset = 0;
@@ -1752,6 +1782,8 @@ fn assign_node_to_dsts(
                 dst,
                 access,
                 (slice_expr, rhs_sources.clone()),
+                source_is_2state,
+                arena,
             )?;
         } else {
             let (next_store, next_boundaries) = eval_dynamic_assign(
@@ -1761,6 +1793,7 @@ fn assign_node_to_dsts(
                 dst,
                 slice_expr,
                 rhs_sources.clone(),
+                source_is_2state,
                 arena,
             )?;
             store = next_store;
@@ -1851,6 +1884,11 @@ fn eval_statement_form_function_call(
         let arg_width = resolve_total_width(module, formal)?;
         let ((arg_node, arg_sources), arg_bounds) =
             eval_assignment_expression(module, &store, arg_expr, arena, arg_width)?;
+        let arg_node = if formal.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
+            arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
+        } else {
+            arg_node
+        };
         boundaries = merge_boundaries(boundaries, arg_bounds);
         local_store.insert(
             *arg_id,
@@ -1917,6 +1955,7 @@ fn eval_statement_form_function_call(
             dsts,
             output_expr,
             output_sources,
+            formal.r#type.is_2state(),
             arena,
         )?;
         store = next_store;
@@ -2087,6 +2126,7 @@ fn eval_dynamic_assign(
     dst: &veryl_analyzer::ir::AssignDestination,
     rhs_expr: NodeId,
     rhs_sources: HashSet<VarAtomBase<VarId>>,
+    source_is_2state: bool,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let mut all_sources = rhs_sources;
@@ -2151,6 +2191,11 @@ fn eval_dynamic_assign(
     // destination.  Otherwise discarded high RHS bits can corrupt neighbours.
     let rhs_signed = expr::is_signed(module, rhs_expr, arena);
     let rhs_expr = coerce_node_width(arena, rhs_expr, Some(access_width), rhs_signed)?;
+    let rhs_expr = if var.r#type.is_2state() && !source_is_2state {
+        arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, rhs_expr))?
+    } else {
+        rhs_expr
+    };
     let rhs_widened = if access_width < width {
         let padding = width - access_width;
         let zero = arena.alloc(SLTNode::Constant(

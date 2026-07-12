@@ -1407,217 +1407,257 @@ fn specialize_slt_node(
         return Some(specialized);
     }
 
-    let original_width = get_width(node, arena);
-    let specialized = match arena.get(node).clone() {
-        SLTNode::Input {
-            variable,
-            signed,
-            index,
-            access,
-        } => {
-            if let Some(&(state_access, state_value)) =
-                state_values.and_then(|values| values.get(&variable))
-            {
-                if !index.is_empty()
-                    || access.lsb < state_access.lsb
-                    || access.msb > state_access.msb
-                {
-                    return None;
+    // Arena edges always point to older nodes. Collect the reachable DAG and
+    // specialize it in NodeId order instead of recursively walking the tree.
+    // Large generated mux/concat trees can be thousands of nodes deep and
+    // must not depend on the host thread's stack size.
+    let mut pending = vec![node];
+    let mut seen = HashSet::default();
+    let mut reachable = Vec::new();
+    while let Some(current) = pending.pop() {
+        if cache.contains_key(&current) || !seen.insert(current) {
+            continue;
+        }
+        match arena.get(current).clone() {
+            SLTNode::Input {
+                variable, index, ..
+            } => {
+                let substituted = state_values.is_some_and(|values| values.contains_key(&variable))
+                    || loop_value.is_some_and(|(loop_var, _)| variable == loop_var);
+                if !substituted {
+                    pending.extend(index.into_iter().map(|entry| entry.node));
                 }
-                if access == state_access {
-                    state_value
-                } else {
-                    arena
-                        .alloc(SLTNode::Slice {
-                            expr: state_value,
-                            access: BitAccess::new(
-                                access.lsb - state_access.lsb,
-                                access.msb - state_access.lsb,
-                            ),
-                        })
-                        .ok()?
-                }
-            } else if loop_value.is_some_and(|(loop_var, _)| variable == loop_var) {
-                if !index.is_empty() {
-                    return None;
-                }
-                let (_, value) = loop_value?;
-                let width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
-                let value = (BigUint::from(value) >> access.lsb) & width_mask(width);
-                arena
-                    .alloc(SLTNode::Constant(value, BigUint::from(0u8), width, false))
-                    .ok()?
-            } else {
-                let index = index
-                    .into_iter()
-                    .map(|mut entry| {
-                        entry.node = specialize_slt_node(
-                            entry.node,
-                            loop_value,
-                            state_values,
-                            arena,
-                            cache,
-                        )?;
-                        Some(entry)
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                arena
-                    .alloc(SLTNode::Input {
-                        variable,
-                        signed,
-                        index,
-                        access,
-                    })
-                    .ok()?
             }
-        }
-        // This arena is a proof-only canonical form. Signed value semantics are
-        // already explicit in the opcode (DivS/RemS, signed comparisons, Sar)
-        // and in coercion nodes, while analyzer-folded constants can retain a
-        // signed tag that a semantically identical Slice-derived constant does
-        // not. Erase that non-value tag so equality compares the generated bits.
-        SLTNode::Constant(value, mask, width, _) => arena
-            .alloc(SLTNode::Constant(value, mask, width, false))
-            .ok()?,
-        SLTNode::Binary(lhs, op, rhs) => {
-            let lhs = specialize_slt_node(lhs, loop_value, state_values, arena, cache)?;
-            let rhs = specialize_slt_node(rhs, loop_value, state_values, arena, cache)?;
-            if let (Some(lhs_constant), Some(rhs_constant)) = (
-                specialized_constant(lhs, arena),
-                specialized_constant(rhs, arena),
-            ) && let Some(result) = specialize_binary_constant(
-                op,
-                &lhs_constant,
-                &rhs_constant,
-                original_width,
-                specialized_binary_result_signed(op, &lhs_constant, &rhs_constant),
-            ) {
-                alloc_specialized_constant(result, arena)?
-            } else {
-                arena.alloc(SLTNode::Binary(lhs, op, rhs)).ok()?
+            SLTNode::Constant(..) => {}
+            SLTNode::Binary(lhs, _, rhs) => {
+                pending.push(lhs);
+                pending.push(rhs);
             }
-        }
-        SLTNode::Unary(op, inner) => {
-            let inner = specialize_slt_node(inner, loop_value, state_values, arena, cache)?;
-            if let Some(inner_constant) = specialized_constant(inner, arena)
-                && let Some(result) = specialize_unary_constant(
-                    op,
-                    &inner_constant,
-                    original_width,
-                    specialized_unary_result_signed(op, &inner_constant),
-                )
-            {
-                alloc_specialized_constant(result, arena)?
-            } else {
-                arena.alloc(SLTNode::Unary(op, inner)).ok()?
+            SLTNode::Unary(_, inner) => pending.push(inner),
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                pending.push(cond);
+                pending.push(then_expr);
+                pending.push(else_expr);
             }
-        }
-        SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            let cond = specialize_slt_node(cond, loop_value, state_values, arena, cache)?;
-            let then_expr = specialize_slt_node(then_expr, loop_value, state_values, arena, cache)?;
-            let else_expr = specialize_slt_node(else_expr, loop_value, state_values, arena, cache)?;
-            if let Some(cond) = specialized_constant(cond, arena)
-                && cond.mask.is_zero()
-            {
-                let selected = if cond.value.is_zero() {
-                    else_expr
-                } else {
-                    then_expr
-                };
-                zero_extend_specialized(selected, original_width, arena)?
-            } else {
-                arena
-                    .alloc(SLTNode::Mux {
-                        cond,
-                        then_expr,
-                        else_expr,
-                    })
-                    .ok()?
+            SLTNode::Concat(parts) => {
+                pending.extend(parts.into_iter().map(|(part, _)| part));
             }
+            SLTNode::Slice { expr, .. } => pending.push(expr),
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return None,
         }
-        SLTNode::Concat(parts) => {
-            let parts = parts
-                .into_iter()
-                .map(|(part, width)| {
-                    Some((
-                        specialize_slt_node(part, loop_value, state_values, arena, cache)?,
-                        width,
-                    ))
-                })
-                .collect::<Option<Vec<_>>>()?;
-            if let Some(result) = specialize_concat_constant(&parts, arena) {
-                alloc_specialized_constant(result, arena)?
-            } else {
-                arena.alloc(SLTNode::Concat(parts)).ok()?
-            }
+        reachable.push(current);
+    }
+    reachable.sort_unstable();
+
+    for node in reachable {
+        if cache.contains_key(&node) {
+            continue;
         }
-        SLTNode::Slice { expr, access } => {
-            let expr = specialize_slt_node(expr, loop_value, state_values, arena, cache)?;
-            if let Some(constant) = specialized_constant(expr, arena) {
-                let width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
-                alloc_specialized_constant(
-                    SpecializedConstant {
-                        value: (&constant.value >> access.lsb) & width_mask(width),
-                        mask: (&constant.mask >> access.lsb) & width_mask(width),
-                        width,
-                        signed: false,
-                    },
-                    arena,
-                )?
-            } else if let SLTNode::Input {
+        let original_width = get_width(node, arena);
+        let specialized = match arena.get(node).clone() {
+            SLTNode::Input {
                 variable,
-                signed: _,
+                signed,
                 index,
-                access: input_access,
-            } = arena.get(expr).clone()
-            {
-                let mut offset = 0usize;
-                let mut all_indices_constant = true;
-                for entry in &index {
-                    let Some(value) = specialized_constant(entry.node, arena)
-                        .filter(|value| value.mask.is_zero())
-                        .and_then(|value| value.value.to_usize())
-                    else {
-                        all_indices_constant = false;
-                        break;
-                    };
-                    offset = offset.checked_add(value.checked_mul(entry.stride)?)?;
-                }
-                if all_indices_constant {
-                    let lsb = input_access
-                        .lsb
-                        .checked_add(offset)?
-                        .checked_add(access.lsb)?;
-                    let msb = input_access
-                        .lsb
-                        .checked_add(offset)?
-                        .checked_add(access.msb)?;
-                    if msb > input_access.msb {
+                access,
+            } => {
+                if let Some(&(state_access, state_value)) =
+                    state_values.and_then(|values| values.get(&variable))
+                {
+                    if !index.is_empty()
+                        || access.lsb < state_access.lsb
+                        || access.msb > state_access.msb
+                    {
                         return None;
                     }
+                    if access == state_access {
+                        state_value
+                    } else {
+                        arena
+                            .alloc(SLTNode::Slice {
+                                expr: state_value,
+                                access: BitAccess::new(
+                                    access.lsb - state_access.lsb,
+                                    access.msb - state_access.lsb,
+                                ),
+                            })
+                            .ok()?
+                    }
+                } else if loop_value.is_some_and(|(loop_var, _)| variable == loop_var) {
+                    if !index.is_empty() {
+                        return None;
+                    }
+                    let (_, value) = loop_value?;
+                    let width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
+                    let value = (BigUint::from(value) >> access.lsb) & width_mask(width);
+                    arena
+                        .alloc(SLTNode::Constant(value, BigUint::from(0u8), width, false))
+                        .ok()?
+                } else {
+                    let index = index
+                        .into_iter()
+                        .map(|mut entry| {
+                            entry.node = *cache.get(&entry.node)?;
+                            Some(entry)
+                        })
+                        .collect::<Option<Vec<_>>>()?;
                     arena
                         .alloc(SLTNode::Input {
                             variable,
-                            signed: false,
-                            index: Vec::new(),
-                            access: BitAccess::new(lsb, msb),
+                            signed,
+                            index,
+                            access,
                         })
                         .ok()?
+                }
+            }
+            // This arena is a proof-only canonical form. Signed value semantics are
+            // already explicit in the opcode (DivS/RemS, signed comparisons, Sar)
+            // and in coercion nodes, while analyzer-folded constants can retain a
+            // signed tag that a semantically identical Slice-derived constant does
+            // not. Erase that non-value tag so equality compares the generated bits.
+            SLTNode::Constant(value, mask, width, _) => arena
+                .alloc(SLTNode::Constant(value, mask, width, false))
+                .ok()?,
+            SLTNode::Binary(lhs, op, rhs) => {
+                let lhs = *cache.get(&lhs)?;
+                let rhs = *cache.get(&rhs)?;
+                if let (Some(lhs_constant), Some(rhs_constant)) = (
+                    specialized_constant(lhs, arena),
+                    specialized_constant(rhs, arena),
+                ) && let Some(result) = specialize_binary_constant(
+                    op,
+                    &lhs_constant,
+                    &rhs_constant,
+                    original_width,
+                    specialized_binary_result_signed(op, &lhs_constant, &rhs_constant),
+                ) {
+                    alloc_specialized_constant(result, arena)?
+                } else {
+                    arena.alloc(SLTNode::Binary(lhs, op, rhs)).ok()?
+                }
+            }
+            SLTNode::Unary(op, inner) => {
+                let inner = *cache.get(&inner)?;
+                if let Some(inner_constant) = specialized_constant(inner, arena)
+                    && let Some(result) = specialize_unary_constant(
+                        op,
+                        &inner_constant,
+                        original_width,
+                        specialized_unary_result_signed(op, &inner_constant),
+                    )
+                {
+                    alloc_specialized_constant(result, arena)?
+                } else {
+                    arena.alloc(SLTNode::Unary(op, inner)).ok()?
+                }
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let cond = *cache.get(&cond)?;
+                let then_expr = *cache.get(&then_expr)?;
+                let else_expr = *cache.get(&else_expr)?;
+                if let Some(cond) = specialized_constant(cond, arena)
+                    && cond.mask.is_zero()
+                {
+                    let selected = if cond.value.is_zero() {
+                        else_expr
+                    } else {
+                        then_expr
+                    };
+                    zero_extend_specialized(selected, original_width, arena)?
+                } else {
+                    arena
+                        .alloc(SLTNode::Mux {
+                            cond,
+                            then_expr,
+                            else_expr,
+                        })
+                        .ok()?
+                }
+            }
+            SLTNode::Concat(parts) => {
+                let parts = parts
+                    .into_iter()
+                    .map(|(part, width)| Some((*cache.get(&part)?, width)))
+                    .collect::<Option<Vec<_>>>()?;
+                if let Some(result) = specialize_concat_constant(&parts, arena) {
+                    alloc_specialized_constant(result, arena)?
+                } else {
+                    arena.alloc(SLTNode::Concat(parts)).ok()?
+                }
+            }
+            SLTNode::Slice { expr, access } => {
+                let expr = *cache.get(&expr)?;
+                if let Some(constant) = specialized_constant(expr, arena) {
+                    let width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
+                    alloc_specialized_constant(
+                        SpecializedConstant {
+                            value: (&constant.value >> access.lsb) & width_mask(width),
+                            mask: (&constant.mask >> access.lsb) & width_mask(width),
+                            width,
+                            signed: false,
+                        },
+                        arena,
+                    )?
+                } else if let SLTNode::Input {
+                    variable,
+                    signed: _,
+                    index,
+                    access: input_access,
+                } = arena.get(expr).clone()
+                {
+                    let mut offset = 0usize;
+                    let mut all_indices_constant = true;
+                    for entry in &index {
+                        let Some(value) = specialized_constant(entry.node, arena)
+                            .filter(|value| value.mask.is_zero())
+                            .and_then(|value| value.value.to_usize())
+                        else {
+                            all_indices_constant = false;
+                            break;
+                        };
+                        offset = offset.checked_add(value.checked_mul(entry.stride)?)?;
+                    }
+                    if all_indices_constant {
+                        let lsb = input_access
+                            .lsb
+                            .checked_add(offset)?
+                            .checked_add(access.lsb)?;
+                        let msb = input_access
+                            .lsb
+                            .checked_add(offset)?
+                            .checked_add(access.msb)?;
+                        if msb > input_access.msb {
+                            return None;
+                        }
+                        arena
+                            .alloc(SLTNode::Input {
+                                variable,
+                                signed: false,
+                                index: Vec::new(),
+                                access: BitAccess::new(lsb, msb),
+                            })
+                            .ok()?
+                    } else {
+                        arena.alloc(SLTNode::Slice { expr, access }).ok()?
+                    }
                 } else {
                     arena.alloc(SLTNode::Slice { expr, access }).ok()?
                 }
-            } else {
-                arena.alloc(SLTNode::Slice { expr, access }).ok()?
             }
-        }
-        SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return None,
-    };
-    cache.insert(node, specialized);
-    Some(specialized)
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return None,
+        };
+        cache.insert(node, specialized);
+    }
+    cache.get(&node).copied()
 }
 
 #[derive(Default)]
@@ -1944,8 +1984,7 @@ fn specialized_binary_result_signed(
 
 fn specialized_unary_result_signed(op: UnaryOp, inner: &SpecializedConstant) -> bool {
     match op {
-        UnaryOp::Minus => true,
-        UnaryOp::Ident | UnaryOp::BitNot => inner.signed,
+        UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => inner.signed,
         UnaryOp::LogicNot
         | UnaryOp::And
         | UnaryOp::Or
@@ -2150,12 +2189,46 @@ fn specialize_unary_constant(
     result_width: usize,
     result_signed: bool,
 ) -> Option<SpecializedConstant> {
-    if !inner.mask.is_zero() || result_width == 0 {
+    if result_width == 0 {
         return None;
     }
     let result_mask = width_mask(result_width);
+    if !inner.mask.is_zero() {
+        if matches!(op, UnaryOp::ToTwoState) {
+            let unknown = &inner.mask & &result_mask;
+            return Some(SpecializedConstant {
+                value: (&inner.value & &result_mask) & (&result_mask ^ unknown),
+                mask: BigUint::from(0u8),
+                width: result_width,
+                signed: result_signed,
+            });
+        }
+        if matches!(op, UnaryOp::LogicNot | UnaryOp::Or) {
+            let inner_width_mask = width_mask(inner.width);
+            let unknown = &inner.mask & &inner_width_mask;
+            let known = &inner_width_mask ^ &unknown;
+            let definite_ones = (&inner.value & &inner_width_mask) & known;
+            let has_definite_one = !definite_ones.is_zero();
+            let has_unknown = !unknown.is_zero();
+            let (value, mask) = match op {
+                UnaryOp::LogicNot if has_definite_one => (0u8, 0u8),
+                UnaryOp::Or if has_definite_one => (1u8, 0u8),
+                _ if has_unknown => (1u8, 1u8),
+                UnaryOp::LogicNot => (1u8, 0u8),
+                UnaryOp::Or => (0u8, 0u8),
+                _ => unreachable!(),
+            };
+            return Some(SpecializedConstant {
+                value: BigUint::from(value) & &result_mask,
+                mask: BigUint::from(mask) & &result_mask,
+                width: result_width,
+                signed: false,
+            });
+        }
+        return None;
+    }
     let value = match op {
-        UnaryOp::Ident => inner.value.clone(),
+        UnaryOp::Ident | UnaryOp::ToTwoState => inner.value.clone(),
         UnaryOp::Minus => {
             let modulus = BigUint::from(1u8) << result_width;
             (&modulus - (&inner.value & &result_mask)) & &result_mask
@@ -2202,7 +2275,10 @@ fn specialize_unary_constant(
         value: value & result_mask,
         mask: BigUint::from(0u8),
         width: result_width,
-        signed: matches!(op, UnaryOp::Ident | UnaryOp::Minus | UnaryOp::BitNot) && result_signed,
+        signed: matches!(
+            op,
+            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot
+        ) && result_signed,
     })
 }
 
@@ -2468,6 +2544,48 @@ mod tests {
         assert_eq!(rem_s.value, BigUint::from(0xfdu8));
         assert!(!div_u.signed && !rem_u.signed);
         assert!(div_s.signed && rem_s.signed);
+    }
+
+    #[test]
+    fn two_state_constant_specialization_clears_unknown_bits() {
+        let inner = SpecializedConstant {
+            value: BigUint::from(0b1110_1101u8),
+            mask: BigUint::from(0b1010_0100u8),
+            width: 8,
+            signed: true,
+        };
+
+        let result = specialize_unary_constant(UnaryOp::ToTwoState, &inner, 8, true).unwrap();
+        assert_eq!(result.value, BigUint::from(0b0100_1001u8));
+        assert_eq!(result.mask, BigUint::from(0u8));
+        assert!(result.signed);
+        assert!(specialize_unary_constant(UnaryOp::Ident, &inner, 8, true).is_none());
+    }
+
+    #[test]
+    fn boolean_constant_specialization_uses_dominant_known_one() {
+        for (value, expected_not, expected_or) in [
+            (0b1000_0100u8, (0u8, 0u8), (1u8, 0u8)),
+            (0b0000_0100u8, (1u8, 1u8), (1u8, 1u8)),
+            (0u8, (1u8, 1u8), (1u8, 1u8)),
+        ] {
+            let inner = SpecializedConstant {
+                value: BigUint::from(value),
+                mask: BigUint::from(0b0000_0100u8),
+                width: 8,
+                signed: false,
+            };
+
+            let logic_not = specialize_unary_constant(UnaryOp::LogicNot, &inner, 1, false).unwrap();
+            assert_eq!(logic_not.value, BigUint::from(expected_not.0));
+            assert_eq!(logic_not.mask, BigUint::from(expected_not.1));
+            assert!(!logic_not.signed);
+
+            let reduction_or = specialize_unary_constant(UnaryOp::Or, &inner, 1, false).unwrap();
+            assert_eq!(reduction_or.value, BigUint::from(expected_or.0));
+            assert_eq!(reduction_or.mask, BigUint::from(expected_or.1));
+            assert!(!reduction_or.signed);
+        }
     }
 
     fn analyze(code: &str) -> (Module, LoopProvenance) {
@@ -3148,6 +3266,29 @@ mod tests {
             arena.get(specialized),
             SLTNode::Constant(value, mask, 8, false)
                 if value == &BigUint::from(5u8) && mask.is_zero()
+        ));
+    }
+
+    #[test]
+    fn specializes_deep_dag_without_using_the_call_stack() {
+        let mut arena = SLTNodeArena::new();
+        let mut root = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        for _ in 0..20_000 {
+            root = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, root)).unwrap();
+        }
+
+        let specialized =
+            specialize_slt_node(root, None, None, &mut arena, &mut HashMap::default()).unwrap();
+        assert!(matches!(
+            arena.get(specialized),
+            SLTNode::Constant(value, mask, 1, false) if value.is_zero() && mask.is_zero()
         ));
     }
 

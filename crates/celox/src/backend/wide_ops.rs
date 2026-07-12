@@ -154,7 +154,7 @@ pub fn emit_wide_unary(
 ) -> Vec<Value> {
     match op {
         UnaryOp::Minus => emit_wide_negate(builder, r_chunks, num_chunks),
-        UnaryOp::Ident => emit_wide_ident(builder, r_chunks, num_chunks),
+        UnaryOp::Ident | UnaryOp::ToTwoState => emit_wide_ident(builder, r_chunks, num_chunks),
         UnaryOp::BitNot => emit_wide_bitnot(builder, r_chunks, num_chunks),
         UnaryOp::LogicNot => emit_wide_logical_not(builder, r_chunks, num_chunks),
         UnaryOp::Or => emit_wide_reduction_or(builder, r_chunks, num_chunks),

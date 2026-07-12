@@ -204,7 +204,23 @@ fn verify_edges<A>(eu: &ExecutionUnit<A>, block: &BasicBlock<A>) -> Result<(), S
             true_block,
             false_block,
         } => {
-            register_type(eu, block.id, None, *cond)?;
+            let cond_ty = register_type(eu, block.id, None, *cond)?;
+            if !matches!(
+                cond_ty,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false
+                }
+            ) {
+                return Err(SirVerifyError::block(
+                    "TYPE.BRANCH_CONDITION",
+                    block.id,
+                    format!(
+                        "branch condition r{} has type {cond_ty:?}, expected unsigned bit<1>",
+                        cond.0
+                    ),
+                ));
+            }
             vec![
                 (true_block.0, true_block.1.as_slice()),
                 (false_block.0, false_block.1.as_slice()),
@@ -276,16 +292,48 @@ fn verify_instruction_types<A>(
         }
         Ok(())
     };
+    let exact_width = |reg: RegisterId, expected: usize, invariant| -> Result<(), SirVerifyError> {
+        let actual = ty(reg)?.width();
+        if actual != expected {
+            return Err(SirVerifyError::instruction(
+                invariant,
+                block,
+                index,
+                format!("r{} has width {actual}, expected {expected}", reg.0),
+            ));
+        }
+        Ok(())
+    };
+    let unsigned_if_bit = |reg: RegisterId, invariant| -> Result<(), SirVerifyError> {
+        if matches!(ty(reg)?, RegisterType::Bit { signed: true, .. }) {
+            return Err(SirVerifyError::instruction(
+                invariant,
+                block,
+                index,
+                format!("r{} is a signed Bit result", reg.0),
+            ));
+        }
+        Ok(())
+    };
 
     match inst {
         SIRInstruction::Imm(dst, value) => {
-            let width = ty(*dst)?.width();
+            let dst_ty = ty(*dst)?;
+            let width = dst_ty.width();
             if !fits_width(&value.payload, width) || !fits_width(&value.mask, width) {
                 return Err(SirVerifyError::instruction(
                     "TYPE.IMMEDIATE_FITS_DESTINATION",
                     block,
                     index,
                     format!("immediate does not fit r{} width {width}", dst.0),
+                ));
+            }
+            if matches!(dst_ty, RegisterType::Bit { .. }) && !value.mask.is_zero() {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.BIT_IMMEDIATE_MASK",
+                    block,
+                    index,
+                    format!("two-state r{} has a nonzero immediate mask", dst.0),
                 ));
             }
         }
@@ -302,14 +350,19 @@ fn verify_instruction_types<A>(
             | BinaryOp::GeS
             | BinaryOp::EqWildcard
             | BinaryOp::NeWildcard => {
-                ty(*dst)?;
+                exact_width(*dst, 1, "TYPE.COMPARISON_RESULT_WIDTH")?;
+                unsigned_if_bit(*dst, "TYPE.BOOLEAN_RESULT_UNSIGNED")?;
+                same_width(*lhs, *rhs, "TYPE.COMPARISON_OPERAND_WIDTH")?;
+            }
+            BinaryOp::LogicAnd | BinaryOp::LogicOr => {
+                exact_width(*dst, 1, "TYPE.LOGICAL_RESULT_WIDTH")?;
+                unsigned_if_bit(*dst, "TYPE.BOOLEAN_RESULT_UNSIGNED")?;
                 ty(*lhs)?;
                 ty(*rhs)?;
             }
-            BinaryOp::LogicAnd | BinaryOp::LogicOr => {
-                ty(*dst)?;
-                ty(*lhs)?;
-                ty(*rhs)?;
+            BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+                same_width(*dst, *lhs, "TYPE.DIVREM_LHS_WIDTH")?;
+                same_width(*dst, *rhs, "TYPE.DIVREM_RHS_WIDTH")?;
             }
             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
                 ty(*dst)?;
@@ -324,10 +377,25 @@ fn verify_instruction_types<A>(
         },
         SIRInstruction::Unary(dst, op, src) => match op {
             UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => {
-                ty(*dst)?;
+                exact_width(*dst, 1, "TYPE.REDUCTION_RESULT_WIDTH")?;
+                unsigned_if_bit(*dst, "TYPE.BOOLEAN_RESULT_UNSIGNED")?;
                 ty(*src)?;
             }
-            UnaryOp::Ident | UnaryOp::Minus | UnaryOp::BitNot => {
+            UnaryOp::ToTwoState => {
+                same_width(*dst, *src, "TYPE.TWO_STATE_WIDTH")?;
+                if !matches!(ty(*dst)?, RegisterType::Bit { .. }) {
+                    return Err(SirVerifyError::instruction(
+                        "TYPE.TWO_STATE_DESTINATION",
+                        block,
+                        index,
+                        format!("r{} is not a Bit register", dst.0),
+                    ));
+                }
+            }
+            UnaryOp::Minus | UnaryOp::BitNot => {
+                same_width(*dst, *src, "TYPE.UNARY_VALUE_WIDTH")?;
+            }
+            UnaryOp::Ident => {
                 ty(*dst)?;
                 ty(*src)?;
             }
@@ -462,10 +530,9 @@ fn verify_instruction_types<A>(
             }
         }
         SIRInstruction::Mux(dst, cond, then_value, else_value) => {
-            ty(*dst)?;
             ty(*cond)?;
-            ty(*then_value)?;
-            ty(*else_value)?;
+            same_width(*dst, *then_value, "TYPE.MUX_THEN_WIDTH")?;
+            same_width(*dst, *else_value, "TYPE.MUX_ELSE_WIDTH")?;
         }
         SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => {
@@ -827,6 +894,17 @@ mod tests {
         }
     }
 
+    fn signed_bit(width: usize) -> RegisterType {
+        RegisterType::Bit {
+            width,
+            signed: true,
+        }
+    }
+
+    fn logic(width: usize) -> RegisterType {
+        RegisterType::Logic { width }
+    }
+
     fn unit(
         blocks: impl IntoIterator<Item = BasicBlock<usize>>,
         registers: impl IntoIterator<Item = (RegisterId, RegisterType)>,
@@ -938,6 +1016,280 @@ mod tests {
             eu.verify_result().unwrap_err().invariant,
             "TYPE.EDGE_ARGUMENT"
         );
+    }
+
+    #[test]
+    fn rejects_mux_arm_width_mismatch() {
+        let eu = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![SIRInstruction::Mux(
+                    RegisterId(0),
+                    RegisterId(1),
+                    RegisterId(2),
+                    RegisterId(3),
+                )],
+                terminator: SIRTerminator::Return,
+            }],
+            [
+                (RegisterId(0), bit(8)),
+                (RegisterId(1), bit(1)),
+                (RegisterId(2), bit(8)),
+                (RegisterId(3), bit(7)),
+            ],
+        );
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "TYPE.MUX_ELSE_WIDTH"
+        );
+    }
+
+    #[test]
+    fn rejects_non_boolean_operator_results() {
+        let comparison = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![SIRInstruction::Binary(
+                    RegisterId(0),
+                    RegisterId(1),
+                    BinaryOp::LtU,
+                    RegisterId(2),
+                )],
+                terminator: SIRTerminator::Return,
+            }],
+            [
+                (RegisterId(0), bit(8)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+            ],
+        );
+        assert_eq!(
+            comparison.verify_result().unwrap_err().invariant,
+            "TYPE.COMPARISON_RESULT_WIDTH"
+        );
+
+        let reduction = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![SIRInstruction::Unary(
+                    RegisterId(0),
+                    UnaryOp::Or,
+                    RegisterId(1),
+                )],
+                terminator: SIRTerminator::Return,
+            }],
+            [(RegisterId(0), bit(8)), (RegisterId(1), bit(8))],
+        );
+        assert_eq!(
+            reduction.verify_result().unwrap_err().invariant,
+            "TYPE.REDUCTION_RESULT_WIDTH"
+        );
+    }
+
+    #[test]
+    fn rejects_width_changing_two_state_conversion() {
+        let eu = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![SIRInstruction::Unary(
+                    RegisterId(0),
+                    UnaryOp::ToTwoState,
+                    RegisterId(1),
+                )],
+                terminator: SIRTerminator::Return,
+            }],
+            [(RegisterId(0), bit(8)), (RegisterId(1), bit(4))],
+        );
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "TYPE.TWO_STATE_WIDTH"
+        );
+    }
+
+    #[test]
+    fn rejects_non_bit_two_state_destination() {
+        let eu = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![SIRInstruction::Unary(
+                    RegisterId(0),
+                    UnaryOp::ToTwoState,
+                    RegisterId(1),
+                )],
+                terminator: SIRTerminator::Return,
+            }],
+            [(RegisterId(0), logic(8)), (RegisterId(1), logic(8))],
+        );
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "TYPE.TWO_STATE_DESTINATION"
+        );
+    }
+
+    #[test]
+    fn rejects_width_changing_value_unary() {
+        for op in [UnaryOp::Minus, UnaryOp::BitNot] {
+            let eu = unit(
+                [BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Unary(RegisterId(0), op, RegisterId(1))],
+                    terminator: SIRTerminator::Return,
+                }],
+                [(RegisterId(0), bit(8)), (RegisterId(1), bit(4))],
+            );
+            assert_eq!(
+                eu.verify_result().unwrap_err().invariant,
+                "TYPE.UNARY_VALUE_WIDTH"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_signed_bit_boolean_result() {
+        let eu = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![SIRInstruction::Binary(
+                    RegisterId(0),
+                    RegisterId(1),
+                    BinaryOp::Eq,
+                    RegisterId(2),
+                )],
+                terminator: SIRTerminator::Return,
+            }],
+            [
+                (RegisterId(0), signed_bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+            ],
+        );
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "TYPE.BOOLEAN_RESULT_UNSIGNED"
+        );
+    }
+
+    #[test]
+    fn rejects_comparison_operand_width_mismatch() {
+        let eu = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![SIRInstruction::Binary(
+                    RegisterId(0),
+                    RegisterId(1),
+                    BinaryOp::LtS,
+                    RegisterId(2),
+                )],
+                terminator: SIRTerminator::Return,
+            }],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(4)),
+            ],
+        );
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "TYPE.COMPARISON_OPERAND_WIDTH"
+        );
+    }
+
+    #[test]
+    fn rejects_divrem_width_mismatch() {
+        for op in [
+            BinaryOp::DivU,
+            BinaryOp::DivS,
+            BinaryOp::RemU,
+            BinaryOp::RemS,
+        ] {
+            let eu = unit(
+                [BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Binary(
+                        RegisterId(0),
+                        RegisterId(1),
+                        op,
+                        RegisterId(2),
+                    )],
+                    terminator: SIRTerminator::Return,
+                }],
+                [
+                    (RegisterId(0), bit(8)),
+                    (RegisterId(1), bit(8)),
+                    (RegisterId(2), bit(4)),
+                ],
+            );
+            assert_eq!(
+                eu.verify_result().unwrap_err().invariant,
+                "TYPE.DIVREM_RHS_WIDTH"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_masked_bit_immediate() {
+        let eu = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![SIRInstruction::Imm(
+                    RegisterId(0),
+                    SIRValue::new_four_state(1u8, 1u8),
+                )],
+                terminator: SIRTerminator::Return,
+            }],
+            [(RegisterId(0), bit(1))],
+        );
+        assert_eq!(
+            eu.verify_result().unwrap_err().invariant,
+            "TYPE.BIT_IMMEDIATE_MASK"
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_branch_condition() {
+        for condition_type in [logic(1), bit(2), signed_bit(1)] {
+            let eu = unit(
+                [
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![],
+                        instructions: vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8))],
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(1), vec![]),
+                            false_block: (BlockId(2), vec![]),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: vec![],
+                        instructions: vec![],
+                        terminator: SIRTerminator::Return,
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        params: vec![],
+                        instructions: vec![],
+                        terminator: SIRTerminator::Return,
+                    },
+                ],
+                [(RegisterId(0), condition_type)],
+            );
+            assert_eq!(
+                eu.verify_result().unwrap_err().invariant,
+                "TYPE.BRANCH_CONDITION"
+            );
+        }
     }
 
     fn bit_count_unit(

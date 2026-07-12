@@ -13,6 +13,49 @@ fn next_register_id(
     RegisterId(*counter)
 }
 
+/// Append the canonical four-state-to-control conversion required by SIR
+/// `Branch`, returning an unsigned one-bit condition register.
+pub(super) fn normalize_branch_condition<A>(
+    register_map: &mut HashMap<RegisterId, RegisterType>,
+    instructions: &mut Vec<SIRInstruction<A>>,
+    cond: RegisterId,
+    reg_counter: &mut usize,
+) -> RegisterId {
+    let cond_type = register_map[&cond].clone();
+    if matches!(
+        cond_type,
+        RegisterType::Bit {
+            width: 1,
+            signed: false
+        }
+    ) {
+        return cond;
+    }
+
+    let truth = if cond_type.width() == 1 {
+        cond
+    } else {
+        let truth = next_register_id(register_map, reg_counter);
+        register_map.insert(truth, RegisterType::Logic { width: 1 });
+        instructions.push(SIRInstruction::Unary(truth, UnaryOp::Or, cond));
+        truth
+    };
+    let normalized = next_register_id(register_map, reg_counter);
+    register_map.insert(
+        normalized,
+        RegisterType::Bit {
+            width: 1,
+            signed: false,
+        },
+    );
+    instructions.push(SIRInstruction::Unary(
+        normalized,
+        UnaryOp::ToTwoState,
+        truth,
+    ));
+    normalized
+}
+
 /// Returns `Some(RegisterId)` for instructions that define a register.
 pub(super) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
     match inst {

@@ -12,6 +12,9 @@ use crate::backend::memory_layout::{
     RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
 };
 use crate::backend::traits::SimBackend;
+use crate::context_width::{
+    ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
+};
 use crate::display_format::{DisplayFormatArg, format_display_arg};
 use crate::ir::{AbsoluteAddr, Program, RuntimeEventKind, RuntimeEventSite, SignalRef};
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
@@ -167,9 +170,40 @@ enum TbOpcode {
         width: usize,
     },
     /// Binary operation: pop two values, push result.
+    ///
+    /// This is reserved for the compiler's unsigned address/concatenation
+    /// plumbing. Source-language expressions use `TypedBinOp` below.
     BinOp(Op),
-    /// Unary operation: pop one value, push result.
-    UnaryOp(Op),
+    /// Source-language binary operation with its resolved common width and
+    /// operand signedness.
+    TypedBinOp {
+        op: Op,
+        lhs_width: usize,
+        rhs_width: usize,
+        result_width: usize,
+        lhs_signed: bool,
+        rhs_signed: bool,
+    },
+    /// Source-language unary operation. Reductions have a one-bit result even
+    /// though their operand retains `operand_width`.
+    TypedUnary {
+        op: Op,
+        operand_width: usize,
+        result_width: usize,
+    },
+    /// Resize a value in its resolved expression context. The context's
+    /// effective signedness controls widening; resizing never changes bits
+    /// merely to reinterpret the result type.
+    Resize {
+        source_width: usize,
+        target_width: usize,
+        signed: bool,
+    },
+    /// Append a self-determined concatenation item to the accumulator.
+    ConcatPart {
+        part_width: usize,
+        result_width: usize,
+    },
     /// Conditional: pop condition; if non-zero execute `then_len` ops,
     /// otherwise skip them and execute `else_len` ops.
     Ternary { then_len: usize, else_len: usize },
@@ -305,11 +339,86 @@ impl CompiledExpr {
                 stack.push(eval_binop(l, *op, r));
                 *pc += 1;
             }
-            TbOpcode::UnaryOp(op) => {
+            TbOpcode::TypedBinOp {
+                op,
+                lhs_width,
+                rhs_width,
+                result_width,
+                lhs_signed,
+                rhs_signed,
+            } => {
+                let r = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: TypedBinOp rhs underflow");
+                    TbValue::U64(0)
+                });
+                let l = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: TypedBinOp lhs underflow");
+                    TbValue::U64(0)
+                });
+                stack.push(eval_typed_binop(
+                    l,
+                    *op,
+                    r,
+                    *lhs_width,
+                    *rhs_width,
+                    *result_width,
+                    *lhs_signed,
+                    *rhs_signed,
+                ));
+                *pc += 1;
+            }
+            TbOpcode::TypedUnary {
+                op,
+                operand_width,
+                result_width,
+            } => {
                 if let Some(top) = stack.last_mut() {
-                    *top = eval_unop(*op, top);
+                    *top = eval_typed_unop(*op, top, *operand_width, *result_width);
                 } else {
-                    debug_assert!(false, "testbench bytecode: UnaryOp underflow");
+                    debug_assert!(false, "testbench bytecode: TypedUnary underflow");
+                }
+                *pc += 1;
+            }
+            TbOpcode::Resize {
+                source_width,
+                target_width,
+                signed,
+            } => {
+                if let Some(top) = stack.last_mut() {
+                    *top = resize_tb_value(top, *source_width, *target_width, *signed);
+                } else {
+                    debug_assert!(false, "testbench bytecode: Resize underflow");
+                }
+                *pc += 1;
+            }
+            TbOpcode::ConcatPart {
+                part_width,
+                result_width,
+            } => {
+                let part = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(false, "testbench bytecode: ConcatPart value underflow");
+                    TbValue::U64(0)
+                });
+                let accumulator = stack.pop().unwrap_or_else(|| {
+                    debug_assert!(
+                        false,
+                        "testbench bytecode: ConcatPart accumulator underflow"
+                    );
+                    TbValue::U64(0)
+                });
+                if let (TbValue::U64(accumulator), TbValue::U64(part)) = (&accumulator, &part)
+                    && *result_width <= 64
+                {
+                    let shifted = if *part_width >= 64 {
+                        0
+                    } else {
+                        accumulator << part_width
+                    };
+                    stack.push(TbValue::U64(shifted | (part & width_mask_u64(*part_width))));
+                } else {
+                    let value = (accumulator.to_biguint() << part_width)
+                        | normalized_bits(&part, *part_width);
+                    stack.push(tb_value_from_bits(value, *result_width));
                 }
                 *pc += 1;
             }
@@ -419,7 +528,7 @@ fn compile_assert_arg<B: SimBackend>(
     CompiledAssertArg {
         expr: ec.compile(expr),
         width,
-        signed: expr.comptime().expr_context.signed,
+        signed: expression_signed(expr),
         is_string: expr.comptime().r#type.is_string(),
     }
 }
@@ -463,7 +572,7 @@ fn runtime_event_site_for_assert(
         arg_widths: value_args.iter().map(assert_arg_width).collect(),
         arg_signed: value_args
             .iter()
-            .map(|arg| arg.0.comptime().expr_context.signed)
+            .map(|arg| expression_signed(&arg.0))
             .collect(),
         arg_is_string: value_args
             .iter()
@@ -710,19 +819,407 @@ fn eval_binop(l: TbValue, op: Op, r: TbValue) -> TbValue {
     }
 }
 
+fn width_mask(width: usize) -> BigUint {
+    if width == 0 {
+        BigUint::ZERO
+    } else {
+        (BigUint::from(1u8) << width) - BigUint::from(1u8)
+    }
+}
+
 #[inline]
-fn eval_unop(op: Op, val: &TbValue) -> TbValue {
-    match val {
-        TbValue::U64(v) => TbValue::U64(eval_unop_u64(op, *v)),
-        TbValue::Wide(v) => match op {
-            Op::LogicNot => TbValue::U64((*v == BigUint::ZERO) as u64),
-            Op::BitNot => {
-                // For wide values, bitwise NOT without width info is ill-defined.
-                // Return logical NOT as a safe default.
-                TbValue::U64((*v == BigUint::ZERO) as u64)
+fn width_mask_u64(width: usize) -> u64 {
+    match width {
+        0 => 0,
+        1..=63 => (1u64 << width) - 1,
+        _ => u64::MAX,
+    }
+}
+
+#[inline]
+fn signed_i128(value: u64, width: usize) -> i128 {
+    let value = value & width_mask_u64(width);
+    if width == 0 || width >= 64 {
+        (value as i64) as i128
+    } else if value & (1u64 << (width - 1)) == 0 {
+        value as i128
+    } else {
+        value as i128 - (1i128 << width)
+    }
+}
+
+fn normalized_bits(value: &TbValue, width: usize) -> BigUint {
+    value.to_biguint() & width_mask(width)
+}
+
+fn tb_value_from_bits(value: BigUint, width: usize) -> TbValue {
+    let value = value & width_mask(width);
+    if width <= 64 {
+        TbValue::U64(value.to_u64().unwrap_or(0))
+    } else {
+        TbValue::Wide(value)
+    }
+}
+
+fn signed_bigint(value: &TbValue, width: usize) -> BigInt {
+    let raw = normalized_bits(value, width);
+    if width == 0 || !raw.bit((width - 1) as u64) {
+        BigInt::from(raw)
+    } else {
+        BigInt::from(raw) - (BigInt::from(1u8) << width)
+    }
+}
+
+fn signed_bits(value: BigInt, width: usize) -> BigUint {
+    if width == 0 {
+        return BigUint::ZERO;
+    }
+    let modulus = BigUint::from(1u8) << width;
+    match value.sign() {
+        Sign::Minus => {
+            let magnitude = (-value).to_biguint().unwrap_or_default() % &modulus;
+            if magnitude == BigUint::ZERO {
+                BigUint::ZERO
+            } else {
+                modulus - magnitude
             }
-            _ => TbValue::Wide(v.clone()),
-        },
+        }
+        _ => value.to_biguint().unwrap_or_default() % modulus,
+    }
+}
+
+fn resize_tb_value(
+    value: &TbValue,
+    source_width: usize,
+    target_width: usize,
+    signed: bool,
+) -> TbValue {
+    if target_width == 0 {
+        return TbValue::U64(0);
+    }
+    if source_width == 0 {
+        let fill = if value.to_u64() & 1 == 0 {
+            BigUint::ZERO
+        } else {
+            width_mask(target_width)
+        };
+        return tb_value_from_bits(fill, target_width);
+    }
+
+    if let TbValue::U64(value) = value
+        && source_width <= 64
+        && target_width <= 64
+    {
+        let mut value = value & width_mask_u64(source_width);
+        if target_width > source_width && signed && value & (1u64 << (source_width - 1)) != 0 {
+            value |= width_mask_u64(target_width) ^ width_mask_u64(source_width);
+        }
+        return TbValue::U64(value & width_mask_u64(target_width));
+    }
+
+    let mut value = normalized_bits(value, source_width);
+    if target_width > source_width && signed && value.bit((source_width - 1) as u64) {
+        value |= width_mask(target_width) ^ width_mask(source_width);
+    }
+    tb_value_from_bits(value, target_width)
+}
+
+fn eval_typed_binop_u64(
+    l: u64,
+    op: Op,
+    r: u64,
+    lhs_width: usize,
+    rhs_width: usize,
+    result_width: usize,
+    lhs_signed: bool,
+    rhs_signed: bool,
+) -> u64 {
+    let l = l & width_mask_u64(lhs_width);
+    let r = r & width_mask_u64(rhs_width);
+    let result_mask = width_mask_u64(result_width);
+    let signed = lhs_signed && rhs_signed;
+    let bool_value = |value: bool| u64::from(value);
+
+    match op {
+        Op::Eq | Op::EqWildcard => bool_value(l == r),
+        Op::Ne | Op::NeWildcard => bool_value(l != r),
+        Op::Less if signed => bool_value(signed_i128(l, lhs_width) < signed_i128(r, rhs_width)),
+        Op::Less => bool_value(l < r),
+        Op::LessEq if signed => bool_value(signed_i128(l, lhs_width) <= signed_i128(r, rhs_width)),
+        Op::LessEq => bool_value(l <= r),
+        Op::Greater if signed => bool_value(signed_i128(l, lhs_width) > signed_i128(r, rhs_width)),
+        Op::Greater => bool_value(l > r),
+        Op::GreaterEq if signed => {
+            bool_value(signed_i128(l, lhs_width) >= signed_i128(r, rhs_width))
+        }
+        Op::GreaterEq => bool_value(l >= r),
+        Op::LogicAnd => bool_value(l != 0 && r != 0),
+        Op::LogicOr => bool_value(l != 0 || r != 0),
+        Op::Add => l.wrapping_add(r) & result_mask,
+        Op::Sub => l.wrapping_sub(r) & result_mask,
+        Op::Mul => l.wrapping_mul(r) & result_mask,
+        Op::Div if signed => {
+            let divisor = signed_i128(r, rhs_width);
+            if divisor == 0 {
+                0
+            } else {
+                (signed_i128(l, lhs_width) / divisor) as u64 & result_mask
+            }
+        }
+        Op::Div => l.checked_div(r).unwrap_or(0) & result_mask,
+        Op::Rem if signed => {
+            let divisor = signed_i128(r, rhs_width);
+            if divisor == 0 {
+                0
+            } else {
+                (signed_i128(l, lhs_width) % divisor) as u64 & result_mask
+            }
+        }
+        Op::Rem => l.checked_rem(r).unwrap_or(0) & result_mask,
+        Op::Pow => {
+            let mut exponent = r;
+            let mut base = l & result_mask;
+            let mut value = 1u64 & result_mask;
+            while exponent != 0 {
+                if exponent & 1 != 0 {
+                    value = ((value as u128 * base as u128) as u64) & result_mask;
+                }
+                exponent >>= 1;
+                if exponent != 0 {
+                    base = ((base as u128 * base as u128) as u64) & result_mask;
+                }
+            }
+            value
+        }
+        Op::BitAnd => (l & r) & result_mask,
+        Op::BitOr => (l | r) & result_mask,
+        Op::BitXor => (l ^ r) & result_mask,
+        Op::BitXnor => (!(l ^ r)) & result_mask,
+        Op::BitNand => (!(l & r)) & result_mask,
+        Op::BitNor => (!(l | r)) & result_mask,
+        Op::LogicShiftL | Op::ArithShiftL => {
+            if r >= result_width as u64 {
+                0
+            } else {
+                l.wrapping_shl(r as u32) & result_mask
+            }
+        }
+        Op::LogicShiftR => {
+            if r >= result_width as u64 {
+                0
+            } else {
+                (l >> r) & result_mask
+            }
+        }
+        Op::ArithShiftR if lhs_signed => {
+            let value = signed_i128(l, lhs_width);
+            if r >= result_width as u64 {
+                if value < 0 { result_mask } else { 0 }
+            } else {
+                ((value >> r) as u64) & result_mask
+            }
+        }
+        Op::ArithShiftR => {
+            if r >= result_width as u64 {
+                0
+            } else {
+                (l >> r) & result_mask
+            }
+        }
+        _ => unreachable!("operator is not a source-language binary op: {op:?}"),
+    }
+}
+
+fn eval_typed_binop(
+    l: TbValue,
+    op: Op,
+    r: TbValue,
+    lhs_width: usize,
+    rhs_width: usize,
+    result_width: usize,
+    lhs_signed: bool,
+    rhs_signed: bool,
+) -> TbValue {
+    if let (TbValue::U64(l), TbValue::U64(r)) = (&l, &r)
+        && lhs_width <= 64
+        && rhs_width <= 64
+        && result_width <= 64
+    {
+        return TbValue::U64(eval_typed_binop_u64(
+            *l,
+            op,
+            *r,
+            lhs_width,
+            rhs_width,
+            result_width,
+            lhs_signed,
+            rhs_signed,
+        ));
+    }
+    let lb = normalized_bits(&l, lhs_width);
+    let rb = normalized_bits(&r, rhs_width);
+    let signed = lhs_signed && rhs_signed;
+
+    let comparison = |value: bool| TbValue::U64(u64::from(value));
+    match op {
+        Op::Eq | Op::EqWildcard => comparison(lb == rb),
+        Op::Ne | Op::NeWildcard => comparison(lb != rb),
+        Op::Less if signed => {
+            comparison(signed_bigint(&l, lhs_width) < signed_bigint(&r, rhs_width))
+        }
+        Op::Less => comparison(lb < rb),
+        Op::LessEq if signed => {
+            comparison(signed_bigint(&l, lhs_width) <= signed_bigint(&r, rhs_width))
+        }
+        Op::LessEq => comparison(lb <= rb),
+        Op::Greater if signed => {
+            comparison(signed_bigint(&l, lhs_width) > signed_bigint(&r, rhs_width))
+        }
+        Op::Greater => comparison(lb > rb),
+        Op::GreaterEq if signed => {
+            comparison(signed_bigint(&l, lhs_width) >= signed_bigint(&r, rhs_width))
+        }
+        Op::GreaterEq => comparison(lb >= rb),
+        Op::LogicAnd => comparison(lb != BigUint::ZERO && rb != BigUint::ZERO),
+        Op::LogicOr => comparison(lb != BigUint::ZERO || rb != BigUint::ZERO),
+        Op::Add => tb_value_from_bits(lb + rb, result_width),
+        Op::Sub => tb_value_from_bits(
+            signed_bits(BigInt::from(lb) - BigInt::from(rb), result_width),
+            result_width,
+        ),
+        Op::Mul => tb_value_from_bits(lb * rb, result_width),
+        Op::Div if signed => {
+            let divisor = signed_bigint(&r, rhs_width);
+            if divisor == BigInt::from(0u8) {
+                TbValue::U64(0)
+            } else {
+                let quotient = signed_bigint(&l, lhs_width) / divisor;
+                tb_value_from_bits(signed_bits(quotient, result_width), result_width)
+            }
+        }
+        Op::Div => {
+            if rb == BigUint::ZERO {
+                TbValue::U64(0)
+            } else {
+                tb_value_from_bits(lb / rb, result_width)
+            }
+        }
+        Op::Rem if signed => {
+            let divisor = signed_bigint(&r, rhs_width);
+            if divisor == BigInt::from(0u8) {
+                TbValue::U64(0)
+            } else {
+                let remainder = signed_bigint(&l, lhs_width) % divisor;
+                tb_value_from_bits(signed_bits(remainder, result_width), result_width)
+            }
+        }
+        Op::Rem => {
+            if rb == BigUint::ZERO {
+                TbValue::U64(0)
+            } else {
+                tb_value_from_bits(lb % rb, result_width)
+            }
+        }
+        Op::Pow => {
+            if result_width == 0 {
+                TbValue::U64(0)
+            } else {
+                let modulus = BigUint::from(1u8) << result_width;
+                tb_value_from_bits(lb.modpow(&rb, &modulus), result_width)
+            }
+        }
+        Op::BitAnd => tb_value_from_bits(lb & rb, result_width),
+        Op::BitOr => tb_value_from_bits(lb | rb, result_width),
+        Op::BitXor => tb_value_from_bits(lb ^ rb, result_width),
+        Op::BitXnor => tb_value_from_bits((lb ^ rb) ^ width_mask(result_width), result_width),
+        Op::LogicShiftL | Op::ArithShiftL => {
+            let shift = rb.to_usize().unwrap_or(usize::MAX);
+            if shift >= result_width {
+                TbValue::U64(0)
+            } else {
+                tb_value_from_bits(lb << shift, result_width)
+            }
+        }
+        Op::LogicShiftR => {
+            let shift = rb.to_usize().unwrap_or(usize::MAX);
+            if shift >= result_width {
+                TbValue::U64(0)
+            } else {
+                tb_value_from_bits(lb >> shift, result_width)
+            }
+        }
+        Op::ArithShiftR if lhs_signed => {
+            let shift = rb.to_usize().unwrap_or(usize::MAX);
+            let value = signed_bigint(&l, lhs_width);
+            let shifted = if shift >= result_width {
+                if value.sign() == Sign::Minus {
+                    BigInt::from(-1)
+                } else {
+                    BigInt::from(0)
+                }
+            } else {
+                value >> shift
+            };
+            tb_value_from_bits(signed_bits(shifted, result_width), result_width)
+        }
+        Op::ArithShiftR => {
+            let shift = rb.to_usize().unwrap_or(usize::MAX);
+            if shift >= result_width {
+                TbValue::U64(0)
+            } else {
+                tb_value_from_bits(lb >> shift, result_width)
+            }
+        }
+        Op::BitNand => tb_value_from_bits((lb & rb) ^ width_mask(result_width), result_width),
+        Op::BitNor => tb_value_from_bits((lb | rb) ^ width_mask(result_width), result_width),
+        _ => unreachable!("operator is not a source-language binary op: {op:?}"),
+    }
+}
+
+fn eval_typed_unop(op: Op, value: &TbValue, operand_width: usize, result_width: usize) -> TbValue {
+    if let TbValue::U64(value) = value
+        && operand_width <= 64
+        && result_width <= 64
+    {
+        let bits = value & width_mask_u64(operand_width);
+        let value = match op {
+            Op::LogicNot => u64::from(bits == 0),
+            Op::BitAnd => u64::from(bits == width_mask_u64(operand_width)),
+            Op::BitNand => u64::from(bits != width_mask_u64(operand_width)),
+            Op::BitOr => u64::from(bits != 0),
+            Op::BitNor => u64::from(bits == 0),
+            Op::BitXor => u64::from(bits.count_ones() % 2 != 0),
+            Op::BitXnor => u64::from(bits.count_ones() % 2 == 0),
+            Op::Add => bits & width_mask_u64(result_width),
+            Op::Sub => bits.wrapping_neg() & width_mask_u64(result_width),
+            Op::BitNot => !bits & width_mask_u64(result_width),
+            _ => unreachable!("operator is not a source-language unary op: {op:?}"),
+        };
+        return TbValue::U64(value);
+    }
+
+    let bits = normalized_bits(value, operand_width);
+    let reduced = match op {
+        Op::LogicNot => Some(bits == BigUint::ZERO),
+        Op::BitAnd => Some(bits == width_mask(operand_width)),
+        Op::BitNand => Some(bits != width_mask(operand_width)),
+        Op::BitOr => Some(bits != BigUint::ZERO),
+        Op::BitNor => Some(bits == BigUint::ZERO),
+        Op::BitXor | Op::BitXnor => {
+            let odd = bits.iter_u64_digits().map(u64::count_ones).sum::<u32>() % 2 != 0;
+            Some(if matches!(op, Op::BitXor) { odd } else { !odd })
+        }
+        _ => None,
+    };
+    if let Some(value) = reduced {
+        return TbValue::U64(u64::from(value));
+    }
+
+    match op {
+        Op::Add => tb_value_from_bits(bits, result_width),
+        Op::Sub => tb_value_from_bits(signed_bits(-BigInt::from(bits), result_width), result_width),
+        Op::BitNot => tb_value_from_bits(bits ^ width_mask(operand_width), result_width),
+        _ => unreachable!("operator is not a source-language unary op: {op:?}"),
     }
 }
 
@@ -773,16 +1270,7 @@ fn eval_binop_u64(l: u64, op: Op, r: u64) -> u64 {
         Op::GreaterEq => (l >= r) as u64,
         Op::LogicAnd => ((l != 0) && (r != 0)) as u64,
         Op::LogicOr => ((l != 0) || (r != 0)) as u64,
-        _ => 0,
-    }
-}
-
-#[inline]
-fn eval_unop_u64(op: Op, val: u64) -> u64 {
-    match op {
-        Op::LogicNot => (val == 0) as u64,
-        Op::BitNot => !val,
-        _ => val,
+        _ => unreachable!("operator is not testbench bytecode plumbing: {op:?}"),
     }
 }
 
@@ -822,7 +1310,7 @@ fn eval_binop_wide(l: BigUint, op: Op, r: BigUint) -> BigUint {
             let s: u64 = (&r).try_into().unwrap_or(256);
             l >> s
         }
-        _ => BigUint::ZERO,
+        _ => unreachable!("operator is not wide testbench bytecode plumbing: {op:?}"),
     }
 }
 
@@ -836,7 +1324,7 @@ fn eval_binop_wide_cmp(l: &BigUint, op: Op, r: &BigUint) -> u64 {
         Op::GreaterEq => (l >= r) as u64,
         Op::LogicAnd => ((*l != BigUint::ZERO) && (*r != BigUint::ZERO)) as u64,
         Op::LogicOr => ((*l != BigUint::ZERO) || (*r != BigUint::ZERO)) as u64,
-        _ => 0,
+        _ => unreachable!("operator is not testbench comparison plumbing: {op:?}"),
     }
 }
 
@@ -856,84 +1344,297 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         CompiledExpr { ops }
     }
 
+    fn compile_with_width(&self, expr: &Expression, width: usize) -> CompiledExpr {
+        let mut ops = Vec::new();
+        self.emit_in_context(
+            expr,
+            &mut ops,
+            Some(ValueContext {
+                width,
+                signed: expression_signed(expr),
+            }),
+        );
+        CompiledExpr { ops }
+    }
+
+    fn natural_width(&self, expr: &Expression) -> usize {
+        get_expr_width(expr)
+            .filter(|width| *width != 0)
+            .unwrap_or_else(|| self.infer_expr_width(expr).max(1))
+    }
+
+    fn root_context(&self, expr: &Expression) -> ValueContext {
+        ValueContext {
+            width: self
+                .natural_width(expr)
+                .max(expr.comptime().expr_context.width),
+            signed: expression_signed(expr),
+        }
+    }
+
     fn emit(&self, expr: &Expression, ops: &mut Vec<TbOpcode>) {
+        self.emit_in_context(expr, ops, Some(self.root_context(expr)));
+    }
+
+    fn resize_result(
+        &self,
+        ops: &mut Vec<TbOpcode>,
+        source: ValueContext,
+        target: Option<ValueContext>,
+    ) -> ValueContext {
+        let Some(target) = target else {
+            return source;
+        };
+        if source.width != target.width {
+            ops.push(TbOpcode::Resize {
+                source_width: source.width,
+                target_width: target.width,
+                signed: target.signed,
+            });
+        }
+        target
+    }
+
+    fn emit_in_context(
+        &self,
+        expr: &Expression,
+        ops: &mut Vec<TbOpcode>,
+        context: Option<ValueContext>,
+    ) -> ValueContext {
         match expr {
-            Expression::Term(f) => self.emit_factor(f, ops),
+            Expression::Term(f) => {
+                self.emit_factor(f, ops);
+                let source = ValueContext {
+                    width: self.natural_width(expr),
+                    signed: expression_signed(expr),
+                };
+                self.resize_result(ops, source, context)
+            }
             Expression::Unary(op, inner, _) => {
-                self.emit(inner, ops);
-                ops.push(TbOpcode::UnaryOp(*op));
+                let reduction = matches!(
+                    op,
+                    Op::BitAnd
+                        | Op::BitNand
+                        | Op::BitOr
+                        | Op::BitNor
+                        | Op::BitXor
+                        | Op::BitXnor
+                        | Op::LogicNot
+                );
+                let natural_width = self.natural_width(inner);
+                let operand_context = if reduction {
+                    None
+                } else {
+                    Some(ValueContext {
+                        width: natural_width.max(context.map(|x| x.width).unwrap_or(0)),
+                        signed: context
+                            .map(|x| x.signed)
+                            .unwrap_or_else(|| expression_signed(inner)),
+                    })
+                };
+                let operand = self.emit_in_context(inner, ops, operand_context);
+                let result_width = if reduction { 1 } else { operand.width };
+                match op {
+                    Op::Add
+                    | Op::Sub
+                    | Op::BitNot
+                    | Op::BitAnd
+                    | Op::BitNand
+                    | Op::BitOr
+                    | Op::BitNor
+                    | Op::BitXor
+                    | Op::BitXnor
+                    | Op::LogicNot => ops.push(TbOpcode::TypedUnary {
+                        op: *op,
+                        operand_width: operand.width,
+                        result_width,
+                    }),
+                    _ => unreachable!("operator is not unary in a testbench expression: {op:?}"),
+                }
+                let result = ValueContext {
+                    width: result_width,
+                    signed: if reduction { false } else { operand.signed },
+                };
+                self.resize_result(ops, result, context)
             }
             Expression::Binary(lhs, op, rhs, _) => {
-                self.emit(lhs, ops);
-                self.emit(rhs, ops);
-                ops.push(TbOpcode::BinOp(*op));
+                if matches!(op, Op::As) {
+                    let cast = cast_semantics(lhs, rhs)
+                        .expect("analyzed testbench cast must have a concrete target");
+                    let source = self.emit_in_context(
+                        lhs,
+                        ops,
+                        Some(ValueContext {
+                            width: cast.width,
+                            signed: cast.source_signed,
+                        }),
+                    );
+                    let casted = ValueContext {
+                        width: source.width,
+                        signed: cast.result_signed,
+                    };
+                    return self.resize_result(ops, casted, context);
+                }
+
+                let lhs_width = self.natural_width(lhs);
+                let rhs_width = self.natural_width(rhs);
+                let semantics = binary_semantics(
+                    *op,
+                    lhs_width,
+                    rhs_width,
+                    expression_signed(lhs),
+                    expression_signed(rhs),
+                    context,
+                );
+                let lhs = self.emit_in_context(lhs, ops, semantics.lhs_context);
+                let rhs = self.emit_in_context(rhs, ops, semantics.rhs_context);
+                match op {
+                    Op::Pow
+                    | Op::Div
+                    | Op::Rem
+                    | Op::Mul
+                    | Op::Add
+                    | Op::Sub
+                    | Op::ArithShiftL
+                    | Op::ArithShiftR
+                    | Op::LogicShiftL
+                    | Op::LogicShiftR
+                    | Op::LessEq
+                    | Op::GreaterEq
+                    | Op::Less
+                    | Op::Greater
+                    | Op::Eq
+                    | Op::EqWildcard
+                    | Op::Ne
+                    | Op::NeWildcard
+                    | Op::BitAnd
+                    | Op::BitOr
+                    | Op::BitXor
+                    | Op::BitXnor
+                    | Op::LogicAnd
+                    | Op::LogicOr => ops.push(TbOpcode::TypedBinOp {
+                        op: *op,
+                        lhs_width: lhs.width,
+                        rhs_width: rhs.width,
+                        result_width: semantics.result_width,
+                        lhs_signed: semantics.lhs_signed,
+                        rhs_signed: semantics.rhs_signed,
+                    }),
+                    _ => unreachable!("operator is not binary in a testbench expression: {op:?}"),
+                }
+                let result = ValueContext {
+                    width: semantics.result_width,
+                    signed: semantics.result_signed,
+                };
+                self.resize_result(ops, result, context)
             }
             Expression::Ternary(cond, then_expr, else_expr, _) => {
-                self.emit(cond, ops);
+                self.emit_in_context(cond, ops, None);
+                let branch_context = ValueContext {
+                    width: self
+                        .natural_width(then_expr)
+                        .max(self.natural_width(else_expr))
+                        .max(context.map(|x| x.width).unwrap_or(0)),
+                    signed: context.map(|x| x.signed).unwrap_or_else(|| {
+                        expression_signed(then_expr) && expression_signed(else_expr)
+                    }),
+                };
                 let mut then_ops = Vec::new();
-                self.emit(then_expr, &mut then_ops);
+                self.emit_in_context(then_expr, &mut then_ops, Some(branch_context));
                 let mut else_ops = Vec::new();
-                self.emit(else_expr, &mut else_ops);
+                self.emit_in_context(else_expr, &mut else_ops, Some(branch_context));
                 ops.push(TbOpcode::Ternary {
                     then_len: then_ops.len(),
                     else_len: else_ops.len(),
                 });
                 ops.extend(then_ops);
                 ops.extend(else_ops);
+                branch_context
             }
             Expression::Concatenation(parts, _) => {
-                // Build from MSB (first) to LSB (last):
-                //   acc = 0; for part: acc = (acc << width) | part
                 ops.push(TbOpcode::ConstU64(0));
+                let mut result_width = 0usize;
                 for (val_expr, repeat_expr) in parts {
-                    let part_width = self.infer_expr_width(val_expr);
+                    let part_width = self.natural_width(val_expr);
                     let repeat = repeat_expr
                         .as_ref()
                         .and_then(|e| Self::try_const_usize(e))
                         .unwrap_or(1);
                     for _ in 0..repeat {
-                        if part_width > 0 {
-                            ops.push(TbOpcode::ConstU64(part_width as u64));
-                            ops.push(TbOpcode::BinOp(Op::LogicShiftL));
-                        }
-                        self.emit(val_expr, ops);
-                        if part_width > 0 && part_width < 64 {
-                            ops.push(TbOpcode::ConstU64((1u64 << part_width) - 1));
-                            ops.push(TbOpcode::BinOp(Op::BitAnd));
-                        }
-                        ops.push(TbOpcode::BinOp(Op::BitOr));
+                        self.emit_in_context(val_expr, ops, None);
+                        result_width = result_width.saturating_add(part_width);
+                        ops.push(TbOpcode::ConcatPart {
+                            part_width,
+                            result_width,
+                        });
                     }
                 }
+                self.resize_result(
+                    ops,
+                    ValueContext {
+                        width: result_width.max(1),
+                        signed: false,
+                    },
+                    context,
+                )
             }
-            _ => ops.push(TbOpcode::ConstU64(0)),
+            Expression::ArrayLiteral(..) | Expression::StructConstructor(..) => {
+                unreachable!("aggregate testbench expressions must be lowered before bytecode")
+            }
         }
     }
 
     fn emit_factor(&self, factor: &Factor, ops: &mut Vec<TbOpcode>) {
         match factor {
-            Factor::Variable(var_id, index, select, _) => {
-                if let Some(sig) = self.resolve_var(var_id) {
+            Factor::Variable(var_id, index, select, comptime) => {
+                if comptime.is_const
+                    && let Ok(value) = comptime.get_value()
+                {
+                    self.emit_constant_value(value, ops);
+                } else if let Some(sig) = self.resolve_var(var_id) {
                     self.emit_var_access(var_id, sig, index, select, ops);
+                } else if let Ok(value) = comptime.get_value() {
+                    self.emit_constant_value(value, ops);
                 } else {
-                    ops.push(TbOpcode::ConstU64(0));
+                    unreachable!("unresolved non-constant testbench variable {var_id:?}");
                 }
             }
             Factor::Value(comptime) => {
                 if let Ok(val) = comptime.get_value() {
-                    let width = comptime.expr_context.width;
-                    if width <= 64 {
-                        ops.push(TbOpcode::ConstU64(val.payload_u64()));
-                    } else {
-                        ops.push(TbOpcode::ConstWide(val.payload().into_owned()));
-                    }
+                    self.emit_constant_value(val, ops);
                 } else {
-                    ops.push(TbOpcode::ConstU64(0));
+                    unreachable!("analyzed testbench literal has no value");
                 }
             }
             Factor::FunctionCall(fc) => {
                 self.emit_function_call(fc, ops);
             }
-            _ => ops.push(TbOpcode::ConstU64(0)),
+            Factor::SystemFunctionCall(call) => match &call.kind {
+                SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
+                    self.emit(&input.0, ops);
+                }
+                _ => {
+                    let value = call
+                        .comptime
+                        .get_value()
+                        .expect("testbench system function must be compile-time evaluable");
+                    self.emit_constant_value(value, ops);
+                }
+            },
+            Factor::Anonymous(comptime) | Factor::Unknown(comptime) => {
+                let value = comptime
+                    .get_value()
+                    .expect("resolved testbench factor must have a value");
+                self.emit_constant_value(value, ops);
+            }
+        }
+    }
+
+    fn emit_constant_value(&self, value: &veryl_analyzer::value::Value, ops: &mut Vec<TbOpcode>) {
+        if value.width() <= 64 {
+            ops.push(TbOpcode::ConstU64(value.payload_u64()));
+        } else {
+            ops.push(TbOpcode::ConstWide(value.payload().into_owned()));
         }
     }
 
@@ -964,7 +1665,14 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         for (arg_path, arg_expr) in &fc.inputs {
             if let Some(&arg_var_id) = func_body.arg_map.get(arg_path) {
                 if let Some(sig) = self.resolve_var(&arg_var_id) {
-                    self.emit(arg_expr, ops);
+                    self.emit_in_context(
+                        arg_expr,
+                        ops,
+                        Some(ValueContext {
+                            width: sig.width,
+                            signed: expression_signed(arg_expr),
+                        }),
+                    );
                     ops.push(TbOpcode::StoreU64 {
                         offset: sig.offset,
                         byte_size: get_byte_size(sig.width),
@@ -978,7 +1686,14 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
             if let veryl_analyzer::ir::Statement::Assign(a) = stmt {
                 if let Some(first_dst) = a.dst.first() {
                     if let Some(dst_sig) = self.resolve_var(&first_dst.id) {
-                        self.emit(&a.expr, ops);
+                        self.emit_in_context(
+                            &a.expr,
+                            ops,
+                            Some(ValueContext {
+                                width: dst_sig.width,
+                                signed: expression_signed(&a.expr),
+                            }),
+                        );
                         ops.push(TbOpcode::StoreU64 {
                             offset: dst_sig.offset,
                             byte_size: get_byte_size(dst_sig.width),
@@ -1285,9 +2000,6 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         match expr {
             Expression::Term(f) => match f.as_ref() {
                 Factor::Value(c) => c.get_value().ok().map(|v| v.payload_u64() as usize),
-                Factor::Variable(_, _, _, c) => {
-                    c.get_value().ok().map(|v| v.payload_u64() as usize)
-                }
                 _ => None,
             },
             _ => None,
@@ -1410,8 +2122,8 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                 ForBound::Const(x) => LoopBound::Static(*x),
                 ForBound::Expression(expr) => LoopBound::Dynamic {
                     expr: ec.compile(expr.as_ref()),
-                    width: expr.comptime().expr_context.width,
-                    signed: expr.comptime().expr_context.signed,
+                    width: ec.root_context(expr).width,
+                    signed: expression_signed(expr),
                 },
             }
         }
@@ -1504,16 +2216,14 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     }),
                 }
             }
-            Statement::Assign(a) => {
-                let compiled = ec.compile(&a.expr);
-                a.dst
-                    .first()
-                    .and_then(|d| ec.resolve_var(&d.id))
-                    .map(|dst| TestbenchStatement::Assign {
-                        dst,
-                        expr: compiled,
-                    })
-            }
+            Statement::Assign(a) => a
+                .dst
+                .first()
+                .and_then(|d| ec.resolve_var(&d.id))
+                .map(|dst| TestbenchStatement::Assign {
+                    dst,
+                    expr: ec.compile_with_width(&a.expr, dst.width),
+                }),
             Statement::Break => Some(TestbenchStatement::Break),
             Statement::FunctionCall(fc) => self.convert_function_call(fc, ec, next_assert_site_id),
             _ => None,
@@ -1542,11 +2252,10 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         // Bind input arguments
         for (arg_path, arg_expr) in &fc.inputs {
             if let Some(&arg_var_id) = func_body.arg_map.get(arg_path) {
-                let compiled = ec.compile(arg_expr);
                 if let Some(sig) = ec.resolve_var(&arg_var_id) {
                     stmts.push(TestbenchStatement::Assign {
                         dst: sig,
-                        expr: compiled,
+                        expr: ec.compile_with_width(arg_expr, sig.width),
                     });
                 }
             }

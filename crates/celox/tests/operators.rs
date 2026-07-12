@@ -372,6 +372,9 @@ assign y = (a as i8) <: (b as i8);
     }
 
     fn test_cast_signed_to_unsigned_affects_comparison(sim) {
+        // Veryl 0.20.2's runtime keeps the source signedness for this cast;
+        // the analyzer and emitted SystemVerilog make the result unsigned.
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (a: input i8, b: input i8, y: output logic) {
 assign y = (a as u8) <: (b as u8);
@@ -440,6 +443,9 @@ module Top (
     }
 
     fn test_unsigned_type_cast_does_not_inherit_source_signedness(sim) {
+        // Veryl 0.20.2's runtime lowerer zero-extends this widening cast,
+        // contrary to its analyzer, emitter, and SystemVerilog cast rules.
+        @omit_veryl;
         @setup { let code = r#"
 module Top (
     sel:       input  logic,
@@ -468,13 +474,15 @@ module Top (
 
     sim.modify(|io| {
         io.set(sel, 1u8);
-        io.set(signed_in, 0x1fu8); // -1 at the source, 31 after `as u8`
+        // Resizing to u8 first preserves the signed source bits (0xff), then
+        // the result is reinterpreted as unsigned.
+        io.set(signed_in, 0x1fu8);
         io.set(lhs, 0x20u8);
     })
     .unwrap();
 
-    assert_eq!(sim.get(cmp), 1u8.into()); // unsigned 32 > 31
-    assert_eq!(sim.get(wide), 0x01fu16.into());
+    assert_eq!(sim.get(cmp), 0u8.into()); // unsigned 32 > 255 is false
+    assert_eq!(sim.get(wide), 0x00ffu16.into());
 
     }
 

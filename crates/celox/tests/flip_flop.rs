@@ -550,8 +550,7 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
     assert_eq!(sim.get(q), 1u32.into());
 }
 
-fn test_ff_runtime_for_reverse_zero_step_singleton_exits_cleanly(sim) {
-    @ignore_on(veryl);
+fn test_ff_runtime_for_reverse_singleton_exits_cleanly(sim) {
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -561,7 +560,7 @@ fn test_ff_runtime_for_reverse_zero_step_singleton_exits_cleanly(sim) {
         ) {
             always_ff (clk) {
                 q = 8'hee;
-                for i in rev start..=count step += 0 {
+                for i in rev start..=count {
                     q = i as 8;
                 }
             }

@@ -1,49 +1,86 @@
 use super::{Domain, FfParser};
+use crate::context_width::{
+    ValueContext, binary_semantics, cast_semantics, contains_numeric_width_cast, expression_signed,
+    resolve_binary_op,
+};
 use crate::ir::{
     BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
     SIRTerminator, SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use crate::parser::{
     LoweringPhase, ParserError,
-    bitaccess::{celox_value_from_comptime, eval_var_select, get_access_width, is_static_access},
+    bitaccess::{
+        celox_value_from_comptime, celox_value_from_comptime_in_context, eval_var_select,
+        get_access_width, is_static_access,
+    },
     resolve_total_width,
 };
 use num_bigint::BigUint;
+use num_traits::Zero;
 
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignDestination, AssignStatement, Comptime, Expression, Factor, Op,
+    ArrayLiteralItem, AssignDestination, AssignStatement, Expression, Factor, Op,
     SystemFunctionCall, SystemFunctionKind, Type, ValueVariant, VarId, VarIndex, VarSelect,
     VarSelectOp,
 };
-use veryl_parser::token_range::TokenRange;
 
-fn source_expression_signed(expr: &Expression) -> bool {
+fn expression_has_side_effect(expr: &Expression) -> bool {
+    let input_has_side_effect =
+        |input: &veryl_analyzer::ir::SystemFunctionInput| expression_has_side_effect(&input.0);
     match expr {
-        Expression::Binary(_, Op::As, rhs, _) => {
-            let Expression::Term(factor) = rhs.as_ref() else {
-                return expr.comptime().expr_context.signed;
-            };
-            let Factor::Value(comptime) = factor.as_ref() else {
-                return expr.comptime().expr_context.signed;
-            };
-            match &comptime.value {
-                ValueVariant::Type(ty) => ty.signed,
-                // Numeric-cast signedness is kept consistent with the current
-                // FF cast lowering until numeric casts are corrected as one
-                // coherent parser change.
-                ValueVariant::Numeric(_) => false,
-                _ => expr.comptime().expr_context.signed,
-            }
-        }
         Expression::Term(factor) => match factor.as_ref() {
-            Factor::SystemFunctionCall(call) => match call.kind {
-                SystemFunctionKind::Signed(_) => true,
-                SystemFunctionKind::Unsigned(_) => false,
-                _ => expr.comptime().r#type.signed,
+            Factor::Variable(_, index, select, _) => {
+                index.0.iter().any(expression_has_side_effect)
+                    || select.0.iter().any(expression_has_side_effect)
+                    || select
+                        .1
+                        .as_ref()
+                        .is_some_and(|(_, expr)| expression_has_side_effect(expr))
+            }
+            Factor::FunctionCall(call) => {
+                !call.outputs.is_empty() || call.inputs.values().any(expression_has_side_effect)
+            }
+            Factor::SystemFunctionCall(call) => match &call.kind {
+                SystemFunctionKind::Bits(input)
+                | SystemFunctionKind::Size(input)
+                | SystemFunctionKind::Clog2(input)
+                | SystemFunctionKind::Onehot(input)
+                | SystemFunctionKind::Signed(input)
+                | SystemFunctionKind::Unsigned(input) => input_has_side_effect(input),
+                // These are rejected in expression position, but classifying
+                // them as effectful keeps eager lowering from becoming valid by
+                // accident if that restriction changes.
+                SystemFunctionKind::Readmemh(_, _)
+                | SystemFunctionKind::Display(_)
+                | SystemFunctionKind::Write(_)
+                | SystemFunctionKind::Assert { .. }
+                | SystemFunctionKind::Finish => true,
             },
-            _ => expr.comptime().r#type.signed,
+            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
         },
-        _ => expr.comptime().expr_context.signed,
+        Expression::Binary(lhs, _, rhs, _) => {
+            expression_has_side_effect(lhs) || expression_has_side_effect(rhs)
+        }
+        Expression::Unary(_, inner, _) => expression_has_side_effect(inner),
+        Expression::Ternary(cond, then_expr, else_expr, _) => {
+            expression_has_side_effect(cond)
+                || expression_has_side_effect(then_expr)
+                || expression_has_side_effect(else_expr)
+        }
+        Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
+            expression_has_side_effect(expr)
+                || repeat.as_ref().is_some_and(expression_has_side_effect)
+        }),
+        Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
+            ArrayLiteralItem::Value(expr, repeat) => {
+                expression_has_side_effect(expr)
+                    || repeat.as_deref().is_some_and(expression_has_side_effect)
+            }
+            ArrayLiteralItem::Defaul(expr) => expression_has_side_effect(expr),
+        }),
+        Expression::StructConstructor(_, fields, _) => fields
+            .iter()
+            .any(|(_, expr)| expression_has_side_effect(expr)),
     }
 }
 
@@ -238,43 +275,31 @@ impl<'a> FfParser<'a> {
         let widened = self.cast_reg_width_ext(ir_builder, reg, target_width, extend_signed);
         if target_is_2state {
             match ir_builder.register(&widened) {
-                crate::ir::RegisterType::Bit { width, signed }
+                RegisterType::Bit { width, signed }
                     if *width == target_width && *signed == result_signed =>
                 {
                     widened
                 }
-                _ => {
+                RegisterType::Bit { .. } => {
                     let bit_reg = ir_builder.alloc_bit(target_width, result_signed);
                     ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::Ident, widened));
                     bit_reg
                 }
+                RegisterType::Logic { .. } => {
+                    let bit_reg = ir_builder.alloc_bit(target_width, result_signed);
+                    ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::ToTwoState, widened));
+                    bit_reg
+                }
             }
+        } else if matches!(ir_builder.register(&widened), RegisterType::Logic { .. }) {
+            widened
         } else {
-            if result_signed {
-                match ir_builder.register(&widened) {
-                    crate::ir::RegisterType::Bit { width, signed }
-                        if *width == target_width && *signed =>
-                    {
-                        widened
-                    }
-                    _ => {
-                        let signed_reg = ir_builder.alloc_bit(target_width, true);
-                        ir_builder.emit(SIRInstruction::Unary(signed_reg, UnaryOp::Ident, widened));
-                        signed_reg
-                    }
-                }
-            } else {
-                if matches!(
-                    ir_builder.register(&widened),
-                    crate::ir::RegisterType::Logic { .. }
-                ) {
-                    widened
-                } else {
-                    let logic_reg = ir_builder.alloc_logic(target_width);
-                    ir_builder.emit(SIRInstruction::Unary(logic_reg, UnaryOp::Ident, widened));
-                    logic_reg
-                }
-            }
+            // Four-state signedness is carried by the expression context. A
+            // Bit register here would incorrectly discard the formal's X/Z
+            // state merely to encode its signed flag.
+            let logic_reg = ir_builder.alloc_logic(target_width);
+            ir_builder.emit(SIRInstruction::Unary(logic_reg, UnaryOp::Ident, widened));
+            logic_reg
         }
     }
 
@@ -647,8 +672,9 @@ impl<'a> FfParser<'a> {
         // eval_var_select returns the full-level range for dynamic indices, which is too
         // wide for Load/Store instructions.
         let width = get_access_width(self.module, var_id, index, select)?;
-        let dest_reg = if self.module.variables[&var_id].r#type.signed {
-            ir_builder.alloc_bit(width, true)
+        let source_type = &self.module.variables[&var_id].r#type;
+        let dest_reg = if source_type.is_2state() {
+            ir_builder.alloc_bit(width, source_type.signed)
         } else {
             ir_builder.alloc_logic(width)
         };
@@ -709,6 +735,20 @@ impl<'a> FfParser<'a> {
         )?;
         // Use get_access_width for actual element width (correct for dynamic array indices).
         let target_width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
+        let target_type = &self.module.variables[&dst.id].r#type;
+        let src_reg = if target_type.is_2state()
+            && matches!(ir_builder.register(&src_reg), RegisterType::Logic { .. })
+        {
+            let converted = ir_builder.alloc_bit(target_width, target_type.signed);
+            ir_builder.emit(SIRInstruction::Unary(
+                converted,
+                UnaryOp::ToTwoState,
+                src_reg,
+            ));
+            converted
+        } else {
+            src_reg
+        };
         ir_builder.emit(SIRInstruction::Store(
             convert(dst.id, domain.region()),
             offset,
@@ -784,97 +824,12 @@ impl<'a> FfParser<'a> {
         }
 
         let dest_reg = ir_builder.alloc_logic(width);
-        let use_signed = left_source_signed && right_source_signed;
-        let op = match op {
-            Op::Pow => unreachable!("Pow must be lowered by parse_binary before op_binary"),
-            Op::Div => {
-                if use_signed {
-                    BinaryOp::DivS
-                } else {
-                    BinaryOp::DivU
-                }
-            }
-            Op::Rem => {
-                if use_signed {
-                    BinaryOp::RemS
-                } else {
-                    BinaryOp::RemU
-                }
-            }
-            Op::Mul => BinaryOp::Mul,
-            Op::Add => BinaryOp::Add,
-            Op::Sub => BinaryOp::Sub,
-            // Logic Shift Left and Arithmetic Shift Left are identical (fill with 0)
-            Op::ArithShiftL => BinaryOp::Shl,
-            Op::LogicShiftL => BinaryOp::Shl,
-            // Right shifts differ in how they fill the MSB
-            Op::ArithShiftR => {
-                if left_source_signed {
-                    BinaryOp::Sar
-                } else {
-                    BinaryOp::Shr
-                }
-            }
-            Op::LogicShiftR => BinaryOp::Shr,
-            Op::Less => {
-                if use_signed {
-                    BinaryOp::LtS
-                } else {
-                    BinaryOp::LtU
-                }
-            }
-            Op::LessEq => {
-                if use_signed {
-                    BinaryOp::LeS
-                } else {
-                    BinaryOp::LeU
-                }
-            }
-            Op::Greater => {
-                if use_signed {
-                    BinaryOp::GtS
-                } else {
-                    BinaryOp::GtU
-                }
-            }
-            Op::GreaterEq => {
-                if use_signed {
-                    BinaryOp::GeS
-                } else {
-                    BinaryOp::GeU
-                }
-            }
-            Op::Eq => BinaryOp::Eq,
-            Op::EqWildcard => BinaryOp::EqWildcard,
-            Op::Ne => BinaryOp::Ne,
-            Op::NeWildcard => BinaryOp::NeWildcard,
-            Op::LogicAnd => BinaryOp::LogicAnd,
-            Op::LogicOr => BinaryOp::LogicOr,
-            Op::LogicNot => {
-                unreachable!("LogicNot is unary and must not be lowered by op_binary")
-            }
-            Op::BitAnd => BinaryOp::And,
-            Op::BitOr => BinaryOp::Or,
-            Op::BitXor => BinaryOp::Xor,
-            // BitXnor, BitNand, BitNor are handled above via decomposition
-            Op::BitXnor | Op::BitNand | Op::BitNor => unreachable!(),
-            Op::BitNot => unreachable!("BitNot is unary and must not be lowered by op_binary"),
-            Op::As => unreachable!("As must be lowered by parse_binary before op_binary"),
-            Op::Ternary => {
-                unreachable!("Ternary expression must be lowered by ternary-specific path")
-            }
-            Op::Concatenation => {
-                unreachable!("Concatenation must be lowered by concat-specific path")
-            }
-            Op::ArrayLiteral => unreachable!("Array literal must not be lowered by op_binary"),
-            Op::Condition => unreachable!("Condition node must not be lowered by op_binary"),
-            Op::Repeat => unreachable!("Repeat node must be lowered by repeat-specific path"),
-        };
+        let op = resolve_binary_op(*op, left_source_signed, right_source_signed);
         ir_builder.emit(SIRInstruction::Binary(dest_reg, left, op, right));
         self.stack.push_back(dest_reg);
     }
 
-    pub(super) fn parse_logic_op<A>(
+    fn parse_logic_op<A>(
         &mut self,
         is_and: bool,
         left: &Expression,
@@ -885,65 +840,82 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
-        // 1. Evaluate LHS
-        self.parse_expression(left, targets, domain, convert, sources, ir_builder, None)?;
-        let lhs_reg = self.stack.pop_back().unwrap();
+        self.parse_expression_in_context(
+            left, targets, domain, convert, sources, ir_builder, None,
+        )?;
+        let lhs = self.stack.pop_back().unwrap();
+        let pre_rhs_state = expression_has_side_effect(right).then(|| {
+            (
+                self.defined_ranges.clone(),
+                self.dynamic_defined_vars.clone(),
+            )
+        });
 
-        let rhs_bb = ir_builder.new_block();
-        let merge_bb = ir_builder.new_block();
-
-        // SSA register (1-bit) to receive result after merging
-        let res_reg = ir_builder.alloc_bit(1, false);
-        ir_builder.set_block_params(merge_bb, vec![res_reg]);
-
-        // 2. Prepare value for shortcutting
-        // Shortcut with 0 for AND, 1 for OR
-        let shortcut_val = if is_and { 0u32 } else { 1u32 };
-        let shortcut_reg = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(SIRInstruction::Imm(
-            shortcut_reg,
-            SIRValue::new(shortcut_val),
-        ));
-
-        // 3. Conditional branch
-        // AND: If LHS is True, evaluate RHS (rhs_bb). If False, go to Merge with 0.
-        // OR : If LHS is False, evaluate RHS (rhs_bb). If True, go to Merge with 1.
-        if is_and {
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: lhs_reg,
-                true_block: (rhs_bb, vec![]),
-                false_block: (merge_bb, vec![shortcut_reg]), // Merge with 0
-            });
+        // Only a definite dominant value may short-circuit.  Logical-not
+        // produces a one-bit 4-state truth value; ToTwoState maps its X result
+        // to zero so an indeterminate LHS continues into the full operation.
+        let not_lhs = ir_builder.alloc_logic(1);
+        ir_builder.emit(SIRInstruction::Unary(not_lhs, UnaryOp::LogicNot, lhs));
+        let shortcut_truth = if is_and {
+            not_lhs
         } else {
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: lhs_reg,
-                true_block: (merge_bb, vec![shortcut_reg]), // Merge with 1
-                false_block: (rhs_bb, vec![]),
-            });
-        }
-
-        // --- RHS Block (RHS evaluation path) ---
-        ir_builder.switch_to_block(rhs_bb);
-        self.parse_expression(right, targets, domain, convert, sources, ir_builder, None)?;
-        let rhs_val = self.stack.pop_back().unwrap();
-
-        // Normalize RHS value to 0/1 (!!rhs_val)
-        let tmp_reg = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(SIRInstruction::Unary(tmp_reg, UnaryOp::LogicNot, rhs_val));
-
-        let normalized_rhs_reg = ir_builder.alloc_bit(1, false);
+            let truth = ir_builder.alloc_logic(1);
+            ir_builder.emit(SIRInstruction::Unary(truth, UnaryOp::LogicNot, not_lhs));
+            truth
+        };
+        let shortcut = ir_builder.alloc_bit(1, false);
         ir_builder.emit(SIRInstruction::Unary(
-            normalized_rhs_reg,
-            UnaryOp::LogicNot,
-            tmp_reg,
+            shortcut,
+            UnaryOp::ToTwoState,
+            shortcut_truth,
         ));
 
-        // Merge with evaluation result of RHS
-        ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![normalized_rhs_reg]));
+        let rhs_block = ir_builder.new_block();
+        let result_param = ir_builder.alloc_logic(1);
+        let merge_block = ir_builder.new_block_with(vec![result_param]);
+        let shortcut_value = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Imm(
+            shortcut_value,
+            SIRValue::new(if is_and { 0u8 } else { 1u8 }),
+        ));
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: shortcut,
+            true_block: (merge_block, vec![shortcut_value]),
+            false_block: (rhs_block, vec![]),
+        });
 
-        // --- Merge Block ---
-        ir_builder.switch_to_block(merge_bb);
-        self.stack.push_back(res_reg);
+        ir_builder.switch_to_block(rhs_block);
+        self.parse_expression_in_context(
+            right, targets, domain, convert, sources, ir_builder, None,
+        )?;
+        let rhs = self.stack.pop_back().unwrap();
+        let rhs_state = pre_rhs_state.as_ref().map(|(pre_defined, pre_dynamic)| {
+            (
+                std::mem::replace(&mut self.defined_ranges, pre_defined.clone()),
+                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone()),
+            )
+        });
+        let evaluated = ir_builder.alloc_logic(1);
+        ir_builder.emit(SIRInstruction::Binary(
+            evaluated,
+            lhs,
+            if is_and {
+                BinaryOp::LogicAnd
+            } else {
+                BinaryOp::LogicOr
+            },
+            rhs,
+        ));
+        ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![evaluated]));
+
+        ir_builder.switch_to_block(merge_block);
+        if let (Some((pre_defined, pre_dynamic)), Some((rhs_defined, rhs_dynamic))) =
+            (pre_rhs_state, rhs_state)
+        {
+            self.defined_ranges = self.intersect_defined_states(pre_defined, rhs_defined);
+            self.dynamic_defined_vars = self.intersect_dynamic_vars(pre_dynamic, rhs_dynamic);
+        }
+        self.stack.push_back(result_param);
         Ok(())
     }
 
@@ -1119,42 +1091,15 @@ impl<'a> FfParser<'a> {
             .map(|dst| get_access_width(self.module, dst.id, &dst.index, &dst.select))
             .sum::<Result<usize, ParserError>>()?;
 
-        match &assign_statement.expr {
-            Expression::ArrayLiteral(items, _) => {
-                self.parse_array_literal(
-                    items,
-                    Some(expected_width),
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                )?;
-            }
-            Expression::StructConstructor(ty, fields, _) => {
-                self.parse_struct_constructor(
-                    ty,
-                    fields,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    Some(expected_width),
-                )?;
-            }
-            _ => {
-                self.parse_expression(
-                    &assign_statement.expr,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    Some(expected_width),
-                )?;
-            }
-        }
+        self.parse_expression(
+            &assign_statement.expr,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+            Some(expected_width),
+        )?;
         let rhs_reg = self.stack.pop_back().expect("Invalid RHS");
         self.emit_multi_dst_assign(
             rhs_reg,
@@ -1173,7 +1118,11 @@ impl<'a> FfParser<'a> {
         width: usize,
         ir_builder: &mut SIRBuilder<A>,
     ) {
-        let reg = ir_builder.alloc_bit(width, false);
+        let reg = if v.mask.is_zero() {
+            ir_builder.alloc_bit(width, false)
+        } else {
+            ir_builder.alloc_logic(width)
+        };
 
         ir_builder.emit(SIRInstruction::Imm(reg, v));
         self.stack.push_back(reg);
@@ -1322,7 +1271,10 @@ impl<'a> FfParser<'a> {
                     .expect("Invalid $signed/$unsigned input");
                 let width = ir_builder.register(&src).width();
                 let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
-                let casted = ir_builder.alloc_reg(RegisterType::Bit { width, signed });
+                let casted = match ir_builder.register(&src) {
+                    RegisterType::Logic { .. } => ir_builder.alloc_logic(width),
+                    RegisterType::Bit { .. } => ir_builder.alloc_bit(width, signed),
+                };
                 ir_builder.emit(SIRInstruction::Unary(casted, UnaryOp::Ident, src));
                 self.stack.push_back(casted);
                 Ok(())
@@ -1347,8 +1299,9 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-        context_width: Option<usize>,
+        context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
+        let context_width = context.map(|context| context.width);
         match factor {
             Factor::Variable(var_id, var_index, var_select, comptime) => {
                 // Compile-time constant parameter: emit as constant instead of loading
@@ -1358,13 +1311,23 @@ impl<'a> FfParser<'a> {
                         var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none();
                     if is_bare {
                         if let Some((celox_value, mask_xz, width, _)) =
-                            celox_value_from_comptime(comptime)
+                            celox_value_from_comptime_in_context(comptime, context_width)
                         {
                             self.op_constant(
                                 SIRValue::new_four_state(celox_value, mask_xz),
-                                context_width.unwrap_or(width),
+                                width,
                                 ir_builder,
                             );
+                            if let Some(context) = context {
+                                let src = self.stack.pop_back().unwrap();
+                                let adjusted = self.cast_reg_width_ext(
+                                    ir_builder,
+                                    src,
+                                    context.width,
+                                    context.signed,
+                                );
+                                self.stack.push_back(adjusted);
+                            }
                             return Ok(());
                         }
                     } else if is_static_access(var_index, var_select) {
@@ -1381,9 +1344,19 @@ impl<'a> FfParser<'a> {
                                 let extracted_mask = (&mask_xz >> access.lsb) & &mask;
                                 self.op_constant(
                                     SIRValue::new_four_state(extracted_val, extracted_mask),
-                                    context_width.unwrap_or(extracted_width),
+                                    extracted_width,
                                     ir_builder,
                                 );
+                                if let Some(context) = context {
+                                    let src = self.stack.pop_back().unwrap();
+                                    let adjusted = self.cast_reg_width_ext(
+                                        ir_builder,
+                                        src,
+                                        context.width,
+                                        context.signed,
+                                    );
+                                    self.stack.push_back(adjusted);
+                                }
                                 return Ok(());
                             }
                         }
@@ -1392,15 +1365,28 @@ impl<'a> FfParser<'a> {
                 if let Some(bound_expr) = self.get_bound_function_arg_expr(*var_id) {
                     let bound_expr = bound_expr.clone();
                     if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
-                        self.parse_expression(
+                        let formal_width =
+                            resolve_total_width(self.module, &self.module.variables[var_id])?;
+                        self.materialize_bound_function_access(
+                            *var_id,
                             &bound_expr,
+                            BitAccess::new(0, formal_width - 1),
                             targets,
                             domain,
                             convert,
                             sources,
                             ir_builder,
-                            context_width,
                         )?;
+                        if let Some(context) = context {
+                            let formal = self.stack.pop_back().unwrap();
+                            let adjusted = self.cast_reg_width_ext(
+                                ir_builder,
+                                formal,
+                                context.width,
+                                context.signed,
+                            );
+                            self.stack.push_back(adjusted);
+                        }
                         return Ok(());
                     }
 
@@ -1522,29 +1508,9 @@ impl<'a> FfParser<'a> {
                 }
             }
             Factor::Value(comptime) => {
-                let (celox_value, mask_xz, width, _) = celox_value_from_comptime(comptime)
-                    .expect("Factor::Value should always have a numeric value");
-                // Fill-literals (`'0`, `'1`, `'x`, `'z`) have width 0 from
-                // the analyzer.  Per IEEE 1800-2023 §5.7.1, replicate bit 0
-                // across the context width (or 1 bit in self-determined
-                // contexts) so that e.g. '1 becomes all-ones, not 0x01.
-                let (celox_value, mask_xz, width) = if width == 0 {
-                    let ew = context_width.unwrap_or(1);
-                    let fill_mask = (BigUint::from(1u64) << ew) - BigUint::from(1u64);
-                    let cv = if celox_value.bit(0) {
-                        fill_mask.clone()
-                    } else {
-                        BigUint::from(0u8)
-                    };
-                    let mxz = if mask_xz.bit(0) {
-                        fill_mask
-                    } else {
-                        BigUint::from(0u8)
-                    };
-                    (cv, mxz, ew)
-                } else {
-                    (celox_value, mask_xz, width)
-                };
+                let (celox_value, mask_xz, width, _) =
+                    celox_value_from_comptime_in_context(comptime, context_width)
+                        .expect("Factor::Value should always have a numeric value");
                 self.op_constant(
                     SIRValue::new_four_state(celox_value, mask_xz),
                     width,
@@ -1565,35 +1531,10 @@ impl<'a> FfParser<'a> {
         }
 
         // Apply context_width adjustment
-        if let Some(target_width) = context_width {
+        if let Some(context) = context {
             let src_reg = self.stack.pop_back().unwrap();
-            let adjusted = match ir_builder.register(&src_reg) {
-                crate::ir::RegisterType::Bit { signed, .. } => {
-                    self.cast_reg_width_ext(ir_builder, src_reg, target_width, *signed)
-                }
-                crate::ir::RegisterType::Logic { width } => {
-                    if *width < target_width {
-                        let dest_reg = ir_builder.alloc_logic(target_width);
-                        ir_builder.emit(SIRInstruction::Unary(dest_reg, UnaryOp::Ident, src_reg));
-                        dest_reg
-                    } else if *width > target_width {
-                        let mask_val = (BigUint::from(1u64) << target_width) - BigUint::from(1u64);
-                        let mask_reg = ir_builder.alloc_bit(target_width, false);
-                        ir_builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
-
-                        let trunc_reg = ir_builder.alloc_logic(target_width);
-                        ir_builder.emit(SIRInstruction::Binary(
-                            trunc_reg,
-                            src_reg,
-                            BinaryOp::And,
-                            mask_reg,
-                        ));
-                        trunc_reg
-                    } else {
-                        src_reg
-                    }
-                }
-            };
+            let adjusted =
+                self.cast_reg_width_ext(ir_builder, src_reg, context.width, context.signed);
             self.stack.push_back(adjusted);
         }
 
@@ -1610,95 +1551,30 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-        context_width: Option<usize>,
+        context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
-        let parent_expr = Expression::Binary(
-            Box::new(left.clone()),
-            *op,
-            Box::new(right.clone()),
-            Box::new(Comptime::create_unknown(TokenRange::default())),
-        );
-        if matches!(op, Op::LogicAnd) {
+        if matches!(op, Op::LogicAnd | Op::LogicOr) {
             self.parse_logic_op(
-                true, left, right, targets, domain, convert, sources, ir_builder,
-            )?;
-            return Ok(());
-        }
-        if matches!(op, Op::LogicOr) {
-            self.parse_logic_op(
-                false, left, right, targets, domain, convert, sources, ir_builder,
-            )?;
-            return Ok(());
-        }
-
-        let (lhs_context_width, rhs_context_width) = if matches!(op, Op::As) {
-            // `as` cast: LHS inherits target width from RHS type/numeric, RHS is metadata
-            let target_width = if let Expression::Term(f) = right {
-                if let Factor::Value(v) = f.as_ref() {
-                    match &v.value {
-                        ValueVariant::Type(ty) => ty.total_width(),
-                        ValueVariant::Numeric(n) => n.to_usize(),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            (target_width, None)
-        } else if matches!(op, Op::LogicAnd | Op::LogicOr | Op::LogicNot) {
-            (None, None)
-        } else if matches!(
-            op,
-            Op::LogicShiftL | Op::LogicShiftR | Op::ArithShiftL | Op::ArithShiftR | Op::Pow
-        ) {
-            // Shift result width is determined by the LHS only (IEEE 1800-2023 §11.4.10).
-            // The RHS (shift amount) must not widen the result.
-            (
-                crate::context_width::get_context_width(&parent_expr, context_width),
-                None,
-            )
-        } else if matches!(
-            op,
-            Op::Less
-                | Op::LessEq
-                | Op::Greater
-                | Op::GreaterEq
-                | Op::Eq
-                | Op::Ne
-                | Op::EqWildcard
-                | Op::NeWildcard
-        ) {
-            let cw = self
-                .get_expression_width(left)
-                .max(self.get_expression_width(right));
-            (Some(cw), Some(cw))
-        } else {
-            (
-                crate::context_width::get_context_width(&parent_expr, context_width),
-                crate::context_width::get_context_width(&parent_expr, context_width),
-            )
-        };
-
-        if matches!(op, Op::As) {
-            self.parse_expression(
+                matches!(op, Op::LogicAnd),
                 left,
+                right,
                 targets,
                 domain,
                 convert,
                 sources,
                 ir_builder,
-                lhs_context_width,
             )?;
-            let src = self
-                .stack
-                .pop_back()
-                .expect("Invalid cast source expression");
+            if let Some(context) = context {
+                let result = self.stack.pop_back().unwrap();
+                let result =
+                    self.cast_reg_width_ext(ir_builder, result, context.width, context.signed);
+                self.stack.push_back(result);
+            }
+            return Ok(());
+        }
 
-            let Some((target_width, target_signed, target_is_2state)) =
-                self.get_cast_target_info(right)
-            else {
+        if matches!(op, Op::As) {
+            let Some(cast) = cast_semantics(left, right) else {
                 return Err(ParserError::unsupported(
                     68,
                     LoweringPhase::FfLowering,
@@ -1707,16 +1583,49 @@ impl<'a> FfParser<'a> {
                     Some(&right.token_range()),
                 ));
             };
+            self.parse_expression_in_context(
+                left,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                Some(ValueContext {
+                    width: cast.width,
+                    signed: cast.source_signed,
+                }),
+            )?;
+            let src = self
+                .stack
+                .pop_back()
+                .expect("Invalid cast source expression");
 
-            let casted = if target_is_2state {
-                ir_builder.alloc_bit(target_width, target_signed)
+            let casted = if cast.result_is_2state {
+                ir_builder.alloc_bit(cast.width, cast.result_signed)
             } else {
-                ir_builder.alloc_logic(target_width)
+                ir_builder.alloc_logic(cast.width)
             };
-            ir_builder.emit(SIRInstruction::Unary(casted, UnaryOp::Ident, src));
+            let cast_op = if cast.result_is_2state && !cast.source_is_2state {
+                UnaryOp::ToTwoState
+            } else {
+                UnaryOp::Ident
+            };
+            ir_builder.emit(SIRInstruction::Unary(casted, cast_op, src));
+            let casted = if let Some(context) = context {
+                self.cast_reg_width_ext(ir_builder, casted, context.width, context.signed)
+            } else {
+                casted
+            };
             self.stack.push_back(casted);
             return Ok(());
         }
+
+        let lhs_width = self.get_expression_width(left);
+        let rhs_width = self.get_expression_width(right);
+        let lhs_signed = expression_signed(left);
+        let rhs_signed = expression_signed(right);
+        let semantics =
+            binary_semantics(*op, lhs_width, rhs_width, lhs_signed, rhs_signed, context);
 
         if matches!(op, Op::Pow) {
             let Some(exp) = self.get_constant_value(right) else {
@@ -1729,15 +1638,15 @@ impl<'a> FfParser<'a> {
                 ));
             };
 
-            let width = self.get_expression_width(left);
-            self.parse_expression(
+            let width = semantics.result_width;
+            self.parse_expression_in_context(
                 left,
                 targets,
                 domain,
                 convert,
                 sources,
                 ir_builder,
-                lhs_context_width,
+                semantics.lhs_context,
             )?;
             let base = self
                 .stack
@@ -1758,76 +1667,44 @@ impl<'a> FfParser<'a> {
                 acc
             };
 
+            let result = if let Some(context) = context {
+                self.cast_reg_width_ext(ir_builder, result, context.width, context.signed)
+            } else {
+                result
+            };
             self.stack.push_back(result);
             return Ok(());
         }
 
-        let is_shift = matches!(
+        self.parse_expression_in_context(
+            left,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+            semantics.lhs_context,
+        )?;
+        self.parse_expression_in_context(
+            right,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+            semantics.rhs_context,
+        )?;
+        self.op_binary(
             op,
-            Op::LogicShiftL | Op::LogicShiftR | Op::ArithShiftL | Op::ArithShiftR | Op::Pow
+            semantics.result_width,
+            semantics.lhs_signed,
+            semantics.rhs_signed,
+            ir_builder,
         );
-        let width = if is_shift {
-            // Shift result width is determined by the LHS only.
-            self.get_expression_width(left)
-        } else {
-            self.get_expression_width(left)
-                .max(self.get_expression_width(right))
-        };
-        let left_source_signed = source_expression_signed(left);
-        let right_source_signed = source_expression_signed(right);
-        if let Some(w) = context_width {
-            let width = width.max(w);
-            self.parse_expression(
-                left,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-                lhs_context_width,
-            )?;
-            self.parse_expression(
-                right,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-                rhs_context_width,
-            )?;
-            self.op_binary(
-                op,
-                width,
-                left_source_signed,
-                right_source_signed,
-                ir_builder,
-            );
-        } else {
-            self.parse_expression(
-                left,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-                lhs_context_width,
-            )?;
-            self.parse_expression(
-                right,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-                rhs_context_width,
-            )?;
-            self.op_binary(
-                op,
-                width,
-                left_source_signed,
-                right_source_signed,
-                ir_builder,
-            );
+        if let Some(context) = context {
+            let result = self.stack.pop_back().unwrap();
+            let result = self.cast_reg_width_ext(ir_builder, result, context.width, context.signed);
+            self.stack.push_back(result);
         }
         Ok(())
     }
@@ -1841,24 +1718,30 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-        context_width: Option<usize>,
+        context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
-        let width = self.get_expression_width(expr);
+        let is_reduction = matches!(
+            op,
+            Op::BitAnd
+                | Op::BitOr
+                | Op::BitXor
+                | Op::BitNand
+                | Op::BitNor
+                | Op::BitXnor
+                | Op::LogicNot
+        );
+        let width = if is_reduction {
+            1
+        } else {
+            self.get_expression_width(expr)
+                .max(context.map(|context| context.width).unwrap_or(0))
+        };
         // Reduction and logical-not operators reduce a multi-bit operand to 1 bit.
         // The operand must be evaluated at its own natural width, not the (narrower)
         // context width of the result — otherwise the input gets truncated before
         // the reduction is applied.
-        let operand_context = match op {
-            Op::BitAnd
-            | Op::BitOr
-            | Op::BitXor
-            | Op::BitNand
-            | Op::BitNor
-            | Op::BitXnor
-            | Op::LogicNot => None,
-            _ => context_width,
-        };
-        self.parse_expression(
+        let operand_context = if is_reduction { None } else { context };
+        self.parse_expression_in_context(
             expr,
             targets,
             domain,
@@ -1868,6 +1751,11 @@ impl<'a> FfParser<'a> {
             operand_context,
         )?;
         self.op_unary(op, width, ir_builder);
+        if is_reduction && let Some(context) = context {
+            let result = self.stack.pop_back().unwrap();
+            let result = self.cast_reg_width_ext(ir_builder, result, context.width, context.signed);
+            self.stack.push_back(result);
+        }
         Ok(())
     }
 
@@ -1881,66 +1769,150 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-        context_width: Option<usize>,
+        context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
-        // 1. Parse condition expression
-        self.parse_expression(cond, targets, domain, convert, sources, ir_builder, None)?;
+        let branch_context = Some(ValueContext {
+            width: self
+                .get_expression_width(then)
+                .max(self.get_expression_width(els))
+                .max(context.map(|context| context.width).unwrap_or(0)),
+            signed: context
+                .map(|context| context.signed)
+                .unwrap_or_else(|| expression_signed(then) && expression_signed(els)),
+        });
+        let result_width = branch_context.unwrap().width;
+        self.parse_expression_in_context(
+            cond, targets, domain, convert, sources, ir_builder, None,
+        )?;
         let cond_reg = self.stack.pop_back().unwrap();
 
-        // 2. Reserve blocks
-        let then_bb = ir_builder.new_block();
-        let else_bb = ir_builder.new_block();
-        let merge_bb = ir_builder.new_block(); // Don't add params yet
+        if !expression_has_side_effect(then) && !expression_has_side_effect(els) {
+            self.parse_expression_in_context(
+                then,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                branch_context,
+            )?;
+            let then_val = self.stack.pop_back().unwrap();
+            self.parse_expression_in_context(
+                els,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                branch_context,
+            )?;
+            let else_val = self.stack.pop_back().unwrap();
+            let result = ir_builder.alloc_logic(result_width);
+            ir_builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
+            self.stack.push_back(result);
+            return Ok(());
+        }
 
-        // Terminate current BB with branch
+        let pre_ternary_defined = self.defined_ranges.clone();
+        let pre_ternary_dynamic = self.dynamic_defined_vars.clone();
+
+        // A known condition evaluates only the selected arm. An X/Z
+        // condition evaluates both arms and merges their bits.
+        let not_cond = ir_builder.alloc_logic(1);
+        ir_builder.emit(SIRInstruction::Unary(not_cond, UnaryOp::LogicNot, cond_reg));
+        let known_false = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Unary(
+            known_false,
+            UnaryOp::ToTwoState,
+            not_cond,
+        ));
+        let true_truth = ir_builder.alloc_logic(1);
+        ir_builder.emit(SIRInstruction::Unary(
+            true_truth,
+            UnaryOp::LogicNot,
+            not_cond,
+        ));
+        let known_true = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Unary(
+            known_true,
+            UnaryOp::ToTwoState,
+            true_truth,
+        ));
+
+        let dummy_then = ir_builder.alloc_logic(result_width);
+        ir_builder.emit(SIRInstruction::Imm(dummy_then, SIRValue::new(0u8)));
+        let direct_else = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Imm(direct_else, SIRValue::new(0u8)));
+        let merge_else = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Imm(merge_else, SIRValue::new(1u8)));
+
+        let then_block = ir_builder.new_block();
+        let carried_then = ir_builder.alloc_logic(result_width);
+        let needs_merge = ir_builder.alloc_bit(1, false);
+        let else_block = ir_builder.new_block_with(vec![carried_then, needs_merge]);
+        let result = ir_builder.alloc_logic(result_width);
+        let merge_block = ir_builder.new_block_with(vec![result]);
+
         ir_builder.seal_block(SIRTerminator::Branch {
-            cond: cond_reg,
-            true_block: (then_bb, vec![]),
-            false_block: (else_bb, vec![]),
+            cond: known_false,
+            true_block: (else_block, vec![dummy_then, direct_else]),
+            false_block: (then_block, vec![]),
         });
 
-        // --- Then Block ---
-        ir_builder.switch_to_block(then_bb);
-        self.parse_expression(
+        ir_builder.switch_to_block(then_block);
+        self.parse_expression_in_context(
             then,
             targets,
             domain,
             convert,
             sources,
             ir_builder,
-            context_width,
+            branch_context,
         )?;
         let then_val = self.stack.pop_back().unwrap();
-        let then_width = ir_builder.register(&then_val).width();
-        ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![then_val]));
+        let then_defined = std::mem::replace(&mut self.defined_ranges, pre_ternary_defined.clone());
+        let then_dynamic =
+            std::mem::replace(&mut self.dynamic_defined_vars, pre_ternary_dynamic.clone());
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: known_true,
+            true_block: (merge_block, vec![then_val]),
+            false_block: (else_block, vec![then_val, merge_else]),
+        });
 
-        // --- Else Block ---
-        ir_builder.switch_to_block(else_bb);
-        self.parse_expression(
+        ir_builder.switch_to_block(else_block);
+        self.parse_expression_in_context(
             els,
             targets,
             domain,
             convert,
             sources,
             ir_builder,
-            context_width,
+            branch_context,
         )?;
         let else_val = self.stack.pop_back().unwrap();
-        let else_width = ir_builder.register(&else_val).width();
-        ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![else_val]));
+        let else_defined = std::mem::take(&mut self.defined_ranges);
+        let else_dynamic = std::mem::take(&mut self.dynamic_defined_vars);
+        let merged = ir_builder.alloc_logic(result_width);
+        ir_builder.emit(SIRInstruction::Mux(
+            merged,
+            cond_reg,
+            carried_then,
+            else_val,
+        ));
+        let direct_else_block = ir_builder.new_block();
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: needs_merge,
+            true_block: (merge_block, vec![merged]),
+            false_block: (direct_else_block, vec![]),
+        });
 
-        // 3. Determine width and allocate res_reg
-        // Use the larger width of Then and Else
-        let res_width = then_width.max(else_width);
-        let res_reg = ir_builder.alloc_logic(res_width);
+        ir_builder.switch_to_block(direct_else_block);
+        ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_val]));
 
-        // 4. Set parameters to merge_bb (inject params later)
-        // * Assuming SIRBuilder has a method for this
-        ir_builder.set_block_params(merge_bb, vec![res_reg]);
-
-        // 5. Merge
-        self.stack.push_back(res_reg);
-        ir_builder.switch_to_block(merge_bb);
+        ir_builder.switch_to_block(merge_block);
+        self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
+        self.dynamic_defined_vars = self.intersect_dynamic_vars(then_dynamic, else_dynamic);
+        self.stack.push_back(result);
         Ok(())
     }
 
@@ -2119,7 +2091,7 @@ impl<'a> FfParser<'a> {
                 ir_builder,
                 reg,
                 member_width,
-                expr.comptime().r#type.signed,
+                expression_signed(expr),
                 member_type.signed,
                 member_type.is_2state(),
             );
@@ -2247,18 +2219,46 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context_width: Option<usize>,
     ) -> Result<(), ParserError> {
+        let context = context_width.map(|width| ValueContext {
+            width,
+            signed: expression_signed(expr),
+        });
+        self.parse_expression_in_context(
+            expr, targets, domain, convert, sources, ir_builder, context,
+        )
+    }
+
+    fn parse_expression_in_context<A>(
+        &mut self,
+        expr: &Expression,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+        context: Option<ValueContext>,
+    ) -> Result<(), ParserError> {
+        let context_width = context.map(|context| context.width);
         // Short-circuit: compile-time constant compound expression → emit constant value.
         // Unlike the SLT path (comb.rs), the SIR path requires the register width to
         // match context_width because emit_multi_dst_assign assumes rhs_width >= part_width.
         if !matches!(expr, Expression::Term(_)) {
             let ct = expr.comptime();
-            if ct.is_const {
-                if let Some((celox_value, mask_xz, width, _)) = celox_value_from_comptime(ct) {
+            if ct.is_const && !contains_numeric_width_cast(expr) {
+                if let Some((celox_value, mask_xz, width, _)) =
+                    celox_value_from_comptime_in_context(ct, context_width)
+                {
                     self.op_constant(
                         SIRValue::new_four_state(celox_value, mask_xz),
-                        context_width.unwrap_or(width),
+                        width,
                         ir_builder,
                     );
+                    if let Some(context) = context {
+                        let src = self.stack.pop_back().unwrap();
+                        let adjusted =
+                            self.cast_reg_width_ext(ir_builder, src, context.width, context.signed);
+                        self.stack.push_back(adjusted);
+                    }
                     return Ok(());
                 }
             }
@@ -2267,51 +2267,22 @@ impl<'a> FfParser<'a> {
         match expr {
             Expression::Term(factor) => {
                 self.parse_factor(
-                    factor,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    context_width,
+                    factor, targets, domain, convert, sources, ir_builder, context,
                 )?;
             }
             Expression::Binary(left, op, right, _) => {
                 self.parse_binary(
-                    op,
-                    left,
-                    right,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    context_width,
+                    op, left, right, targets, domain, convert, sources, ir_builder, context,
                 )?;
             }
             Expression::Unary(op, expr, _) => {
                 self.parse_unary(
-                    op,
-                    expr,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    context_width,
+                    op, expr, targets, domain, convert, sources, ir_builder, context,
                 )?;
             }
             Expression::Ternary(cond, then, els, _) => {
                 self.parse_ternary(
-                    cond,
-                    then,
-                    els,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    context_width,
+                    cond, then, els, targets, domain, convert, sources, ir_builder, context,
                 )?;
             }
             Expression::Concatenation(exprs, _) => {
@@ -2341,6 +2312,121 @@ impl<'a> FfParser<'a> {
                 )?;
             }
         }
+        if matches!(
+            expr,
+            Expression::Concatenation(..)
+                | Expression::ArrayLiteral(..)
+                | Expression::StructConstructor(..)
+        ) && let Some(context) = context
+        {
+            let result = self.stack.pop_back().unwrap();
+            let result = self.cast_reg_width_ext(ir_builder, result, context.width, context.signed);
+            self.stack.push_back(result);
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::BuildConfig;
+    use veryl_analyzer::{
+        Analyzer, Context, attribute_table,
+        ir::{Component, Declaration, Ir},
+        symbol_table,
+    };
+    use veryl_metadata::Metadata;
+    use veryl_parser::Parser;
+
+    #[test]
+    fn conditional_expression_effects_are_not_definitely_defined_after_merge() {
+        symbol_table::clear();
+        attribute_table::clear();
+        let code = r#"
+module Top (
+    clk: input clock,
+    guard: input logic,
+    sel: input logic,
+    and_result: output logic,
+    ternary_result: output logic,
+    after_and: output logic,
+    after_then: output logic,
+    after_else: output logic,
+) {
+    var and_side: logic;
+    var then_side: logic;
+    var else_side: logic;
+    function touch (value: output logic) -> logic {
+        value = 1'b1;
+        return 1'b1;
+    }
+    always_ff (clk) {
+        and_result = guard && touch(and_side);
+        ternary_result = if sel ? touch(then_side) : touch(else_side);
+        after_and = and_side;
+        after_then = then_side;
+        after_else = else_side;
+    }
+}
+"#;
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parsed = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+        assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        assert!(
+            analyzer
+                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
+
+        let module = ir
+            .components
+            .into_iter()
+            .find_map(|component| match component {
+                Component::Module(module) => Some(module),
+                _ => None,
+            })
+            .unwrap();
+        let declarations = module
+            .declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Ff(declaration) => Some(declaration.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let effect_ids = module
+            .variables
+            .iter()
+            .filter_map(|(&id, variable)| {
+                matches!(
+                    variable.path.to_string().as_str(),
+                    "and_side" | "then_side" | "else_side"
+                )
+                .then_some(id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(effect_ids.len(), 3);
+
+        let mut parser = FfParser::new(&module, BuildConfig::default());
+        let mut builder = SIRBuilder::new();
+        parser.parse_ff_group(&declarations, &mut builder).unwrap();
+        builder.flush_eu().unwrap().verify();
+
+        for id in effect_ids {
+            assert!(
+                parser
+                    .defined_ranges
+                    .get(&id)
+                    .is_none_or(|bits| bits.is_empty()),
+                "conditional output argument must not be definitely defined: {id:?}"
+            );
+            assert!(!parser.dynamic_defined_vars.contains(&id));
+        }
     }
 }

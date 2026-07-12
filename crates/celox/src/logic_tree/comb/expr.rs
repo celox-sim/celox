@@ -1,8 +1,14 @@
 use super::*;
 
 use crate::{
-    context_width::get_context_width,
-    parser::{bitaccess::celox_value_from_comptime, case::case_arm_condition_expr},
+    context_width::{
+        ValueContext, binary_semantics, cast_semantics, contains_numeric_width_cast,
+        expression_signed, get_expr_width, resolve_binary_op,
+    },
+    parser::{
+        bitaccess::{celox_value_from_comptime, celox_value_from_comptime_in_context},
+        case::case_arm_condition_expr,
+    },
 };
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{CasePattern, Type, ValueVariant};
@@ -1963,6 +1969,11 @@ fn eval_function_call_expression(
         let arg_width = resolve_total_width(module, arg_var)?;
         let ((arg_node, sources), bounds) =
             eval_assignment_expression(module, store, arg_expr, arena, arg_width)?;
+        let arg_node = if arg_var.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
+            arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
+        } else {
+            arg_node
+        };
         arg_bounds = merge_boundaries(arg_bounds, bounds);
         local_store.insert(
             *arg_id,
@@ -1985,104 +1996,48 @@ pub fn eval_expression(
     arena: &mut SLTNodeArena<VarId>,
     context_width: Option<usize>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context = context_width.map(|width| ValueContext {
+        width,
+        signed: expression_signed(expr),
+    });
+    eval_expression_in_context(module, store, expr, arena, context)
+}
+
+fn eval_expression_in_context(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    context: Option<ValueContext>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context_width = context.map(|context| context.width);
     // Short-circuit: compile-time constant compound expression → emit Constant node.
     // The folded value still participates in its enclosing width context.  Skipping
     // that coercion used to produce mismatched wildcard operands for enum cases and
     // can also lose carry bits when a folded operand is widened by its parent.
     if !matches!(expr, Expression::Term(_)) {
         let ct = expr.comptime();
-        if ct.is_const {
-            if let Some((celox_value, mask_xz, width, signed)) = celox_value_from_comptime(ct) {
+        if ct.is_const && !contains_numeric_width_cast(expr) {
+            if let Some((celox_value, mask_xz, width, signed)) =
+                celox_value_from_comptime_in_context(ct, context_width)
+            {
                 let node = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed))?;
-                let node = coerce_node_width(arena, node, context_width, signed)?;
+                let node = coerce_node_width(
+                    arena,
+                    node,
+                    context_width,
+                    context.map(|context| context.signed).unwrap_or(signed),
+                )?;
                 return Ok(((node, HashSet::default()), BoundaryMap::default()));
             }
         }
     }
 
     match expr {
-        Expression::Term(factor) => eval_factor(module, store, factor, arena, context_width),
+        Expression::Term(factor) => eval_factor(module, store, factor, arena, context),
         Expression::Binary(lhs, op, rhs, _) => {
-            let (lhs_context_width, rhs_context_width) = if matches!(op, Op::As) {
-                // `as` cast: LHS inherits target width from RHS type/numeric, RHS is metadata
-                let target_width = if let Expression::Term(f) = rhs.as_ref() {
-                    if let Factor::Value(v) = f.as_ref() {
-                        match &v.value {
-                            ValueVariant::Type(ty) => ty.total_width(),
-                            ValueVariant::Numeric(n) => n.to_usize(),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                (target_width, None)
-            } else if matches!(
-                op,
-                Op::LogicShiftL | Op::LogicShiftR | Op::ArithShiftL | Op::ArithShiftR | Op::Pow
-            ) {
-                (get_context_width(lhs, context_width), None)
-            } else {
-                let context_width = if matches!(
-                    op,
-                    Op::Less
-                        | Op::LessEq
-                        | Op::Greater
-                        | Op::GreaterEq
-                        | Op::Eq
-                        | Op::Ne
-                        | Op::EqWildcard
-                        | Op::NeWildcard
-                        | Op::LogicAnd
-                        | Op::LogicOr
-                ) {
-                    None
-                } else {
-                    context_width
-                };
-                let lw = get_context_width(lhs, context_width);
-                let rw = get_context_width(rhs, context_width);
-                let w = lw.and_then(|lw| rw.map(|rw| lw.max(rw)));
-                (w, w)
-            };
-
-            // `as` cast: use RHS type for context width and signedness.
             if matches!(op, Op::As) {
-                let ((l_expr, l_sources), l_bounds) =
-                    eval_expression(module, store, lhs, arena, lhs_context_width)?;
-
-                // For RHS, if it's a type or numeric width, we don't evaluate it as an expression.
-                let r_bounds = if let Expression::Term(f) = rhs.as_ref() {
-                    if let Factor::Value(v) = f.as_ref() {
-                        if matches!(v.value, ValueVariant::Type(_) | ValueVariant::Numeric(_)) {
-                            BoundaryMap::default()
-                        } else {
-                            eval_expression(module, store, rhs, arena, rhs_context_width)?.1
-                        }
-                    } else {
-                        eval_expression(module, store, rhs, arena, rhs_context_width)?.1
-                    }
-                } else {
-                    eval_expression(module, store, rhs, arena, rhs_context_width)?.1
-                };
-
-                // A type cast takes the target type's signedness exactly. A
-                // numeric-width cast changes only the width and preserves the
-                // source expression's signedness.
-                let (target_width, cast_signed) = match rhs.as_ref() {
-                    Expression::Term(f) => match f.as_ref() {
-                        Factor::Value(v) => match &v.value {
-                            ValueVariant::Type(ty) => (ty.total_width(), ty.signed),
-                            ValueVariant::Numeric(n) => (n.to_usize(), source_signed(lhs)),
-                            _ => (None, false),
-                        },
-                        _ => (None, false),
-                    },
-                    _ => (None, false),
-                };
-                let Some(target_width) = target_width else {
+                let Some(cast) = cast_semantics(lhs, rhs) else {
                     return Err(ParserError::unsupported(
                         67,
                         LoweringPhase::CombLowering,
@@ -2091,18 +2046,70 @@ pub fn eval_expression(
                         Some(&rhs.token_range()),
                     ));
                 };
+                let ((l_expr, l_sources), l_bounds) = eval_expression_in_context(
+                    module,
+                    store,
+                    lhs,
+                    arena,
+                    Some(ValueContext {
+                        width: cast.width,
+                        signed: cast.source_signed,
+                    }),
+                )?;
 
-                let result_node =
-                    coerce_node_width(arena, l_expr, Some(target_width), cast_signed)?;
+                // For RHS, if it's a type or numeric width, we don't evaluate it as an expression.
+                let r_bounds = if let Expression::Term(f) = rhs.as_ref() {
+                    if let Factor::Value(v) = f.as_ref() {
+                        if matches!(v.value, ValueVariant::Type(_) | ValueVariant::Numeric(_)) {
+                            BoundaryMap::default()
+                        } else {
+                            eval_expression_in_context(module, store, rhs, arena, None)?.1
+                        }
+                    } else {
+                        eval_expression_in_context(module, store, rhs, arena, None)?.1
+                    }
+                } else {
+                    eval_expression_in_context(module, store, rhs, arena, None)?.1
+                };
+
+                // Resize uses the source signedness.  Reinterpretation changes
+                // the signedness seen by the enclosing context, not the bits.
+                let cast_value =
+                    coerce_node_width(arena, l_expr, Some(cast.width), cast.source_signed)?;
+                let cast_value = if cast.result_is_2state && !cast.source_is_2state {
+                    arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, cast_value))?
+                } else {
+                    cast_value
+                };
+                let result_node = coerce_node_width(
+                    arena,
+                    cast_value,
+                    context_width,
+                    context
+                        .map(|context| context.signed)
+                        .unwrap_or(cast.result_signed),
+                )?;
                 return Ok((
                     (result_node, l_sources),
                     merge_boundaries(l_bounds, r_bounds),
                 ));
             }
+
+            let lhs_width = get_expr_width(lhs)
+                .or_else(|| lhs.comptime().r#type.total_width())
+                .unwrap_or(1);
+            let rhs_width = get_expr_width(rhs)
+                .or_else(|| rhs.comptime().r#type.total_width())
+                .unwrap_or(1);
+            let lhs_signed = expression_signed(lhs);
+            let rhs_signed = expression_signed(rhs);
+            let semantics =
+                binary_semantics(*op, lhs_width, rhs_width, lhs_signed, rhs_signed, context);
+
             // `pow`: currently lowered for constant exponent only.
             if matches!(op, Op::Pow) {
                 let ((l_expr, l_sources), l_bounds) =
-                    eval_expression(module, store, lhs, arena, lhs_context_width)?;
+                    eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
                 let Some(exp) = eval_constexpr(rhs).and_then(|x| x.to_u64().map(|v| v as usize))
                 else {
                     return Err(ParserError::unsupported(
@@ -2128,12 +2135,20 @@ pub fn eval_expression(
                     }
                     acc
                 };
+                let result_node = coerce_node_width(
+                    arena,
+                    result_node,
+                    context_width,
+                    context
+                        .map(|context| context.signed)
+                        .unwrap_or(semantics.result_signed),
+                )?;
                 return Ok(((result_node, l_sources), l_bounds));
             }
             let ((l_expr, l_sources), l_bounds) =
-                eval_expression(module, store, lhs, arena, lhs_context_width)?;
+                eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
             let ((r_expr, r_sources), r_bounds) =
-                eval_expression(module, store, rhs, arena, rhs_context_width)?;
+                eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?;
 
             let mut sources = l_sources;
             sources.extend(r_sources);
@@ -2153,10 +2168,7 @@ pub fn eval_expression(
                     arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))?
                 }
                 Op::Sub => {
-                    let lhs_signed = source_signed(lhs);
-                    let rhs_signed = source_signed(rhs);
-                    let signed = lhs_signed && rhs_signed;
-                    let bin_op = convert_binary_op(op, signed);
+                    let bin_op = resolve_binary_op(*op, semantics.lhs_signed, semantics.rhs_signed);
                     let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?;
                     let width = {
                         let lw = get_width(l_expr, arena);
@@ -2169,73 +2181,25 @@ pub fn eval_expression(
                     })?
                 }
                 _ => {
-                    let lhs_signed = source_signed(lhs);
-                    let rhs_signed = source_signed(rhs);
-                    let signed = lhs_signed && rhs_signed;
-                    let bin_op = if matches!(op, Op::ArithShiftR) {
-                        if lhs_signed {
-                            BinaryOp::Sar
-                        } else {
-                            BinaryOp::Shr
-                        }
-                    } else {
-                        convert_binary_op(op, signed)
-                    };
-                    let res = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?;
-                    if matches!(
-                        op,
-                        Op::Less
-                            | Op::LessEq
-                            | Op::Greater
-                            | Op::GreaterEq
-                            | Op::Eq
-                            | Op::Ne
-                            | Op::EqWildcard
-                            | Op::NeWildcard
-                    ) && context_width.map(|cw| cw != 1).unwrap_or(false)
-                    {
-                        let width = context_width.unwrap();
-                        let zero = arena.alloc(SLTNode::Constant(
-                            BigUint::from(0u8),
-                            BigUint::from(0u32),
-                            width - 1,
-                            false,
-                        ))?;
-                        arena.alloc(SLTNode::Concat(vec![(zero, width - 1), (res, 1)]))?
-                    } else if matches!(
-                        op,
-                        Op::ArithShiftL
-                            | Op::ArithShiftR
-                            | Op::LogicShiftL
-                            | Op::LogicShiftR
-                            | Op::Pow
-                    ) {
-                        let res_width = get_width(res, arena);
-                        let width = context_width.unwrap_or(res_width);
-                        if res_width > width {
-                            arena.alloc(SLTNode::Slice {
-                                expr: res,
-                                access: BitAccess::new(0, width - 1),
-                            })?
-                        } else if res_width < width {
-                            let zero = arena.alloc(SLTNode::Constant(
-                                BigUint::from(0u8),
-                                BigUint::from(0u32),
-                                res_width - 1,
-                                false,
-                            ))?;
-                            arena.alloc(SLTNode::Concat(vec![
-                                (zero, width - res_width),
-                                (res, res_width),
-                            ]))?
-                        } else {
-                            res
-                        }
-                    } else {
-                        res
-                    }
+                    let bin_op = resolve_binary_op(*op, semantics.lhs_signed, semantics.rhs_signed);
+                    arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?
                 }
             };
+
+            let result_node = coerce_node_width(
+                arena,
+                result_node,
+                Some(semantics.result_width),
+                semantics.result_signed,
+            )?;
+            let result_node = coerce_node_width(
+                arena,
+                result_node,
+                context_width,
+                context
+                    .map(|context| context.signed)
+                    .unwrap_or(semantics.result_signed),
+            )?;
 
             Ok(((result_node, sources), merge_boundaries(l_bounds, r_bounds)))
         }
@@ -2246,7 +2210,7 @@ pub fn eval_expression(
 
             for (sub_expr, repeat) in exprs {
                 let ((part_expr, part_sources), p_bounds) =
-                    eval_expression(module, store, sub_expr, arena, None)?;
+                    eval_expression_in_context(module, store, sub_expr, arena, None)?;
                 all_bounds = merge_boundaries(all_bounds, p_bounds);
                 let width = get_width(part_expr, arena);
 
@@ -2273,13 +2237,33 @@ pub fn eval_expression(
                     parts.push((part_expr, width));
                 }
             }
-            Ok((
-                (arena.alloc(SLTNode::Concat(parts))?, total_sources),
-                all_bounds,
-            ))
+            let result = arena.alloc(SLTNode::Concat(parts))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
+            Ok(((result, total_sources), all_bounds))
         }
         Expression::Unary(op, expr, _) => {
-            let ((expr, sources), bounds) = eval_expression(module, store, expr, arena, None)?;
+            let result_signed = expression_signed(expr);
+            let operand_context = if matches!(
+                op,
+                Op::BitAnd
+                    | Op::BitNand
+                    | Op::BitOr
+                    | Op::BitNor
+                    | Op::BitXor
+                    | Op::BitXnor
+                    | Op::LogicNot
+            ) {
+                None
+            } else {
+                context
+            };
+            let ((expr, sources), bounds) =
+                eval_expression_in_context(module, store, expr, arena, operand_context)?;
             // Reduction Nand/Nor/Xnor は既存のリダクション + Not に分解
             let result_node = match op {
                 Op::BitNand => {
@@ -2296,15 +2280,38 @@ pub fn eval_expression(
                 }
                 _ => arena.alloc(SLTNode::Unary(convert_unary_op(op), expr))?,
             };
+            let result_node = coerce_node_width(
+                arena,
+                result_node,
+                context_width,
+                context
+                    .map(|context| context.signed)
+                    .unwrap_or(result_signed),
+            )?;
             Ok(((result_node, sources), bounds))
         }
         Expression::Ternary(cond, then_expr, else_expr, _) => {
+            let branch_width = get_expr_width(then_expr)
+                .or_else(|| then_expr.comptime().r#type.total_width())
+                .unwrap_or(1)
+                .max(
+                    get_expr_width(else_expr)
+                        .or_else(|| else_expr.comptime().r#type.total_width())
+                        .unwrap_or(1),
+                )
+                .max(context_width.unwrap_or(0));
+            let branch_context = Some(ValueContext {
+                width: branch_width,
+                signed: context.map(|context| context.signed).unwrap_or_else(|| {
+                    expression_signed(then_expr) && expression_signed(else_expr)
+                }),
+            });
             let ((cond_expr, cond_sources), cond_bounds) =
-                eval_expression(module, store, cond, arena, context_width)?;
+                eval_expression_in_context(module, store, cond, arena, None)?;
             let ((then_expr, then_sources), then_bounds) =
-                eval_expression(module, store, then_expr, arena, context_width)?;
+                eval_expression_in_context(module, store, then_expr, arena, branch_context)?;
             let ((else_expr, else_sources), else_bounds) =
-                eval_expression(module, store, else_expr, arena, context_width)?;
+                eval_expression_in_context(module, store, else_expr, arena, branch_context)?;
 
             let mut sources = cond_sources;
             sources.extend(then_sources);
@@ -2328,11 +2335,6 @@ pub fn eval_expression(
             let mut total_sources = HashSet::default();
 
             for (name, field_expr) in fields {
-                let ((mut part_expr, part_sources), p_bounds) =
-                    eval_expression(module, store, field_expr, arena, context_width)?;
-                all_bounds = merge_boundaries(all_bounds, p_bounds);
-                total_sources.extend(part_sources);
-
                 let Some(member_type) = ty.get_member_type(*name) else {
                     return Err(ParserError::unsupported(
                         67,
@@ -2352,36 +2354,53 @@ pub fn eval_expression(
                     ));
                 };
 
-                let part_width = get_width(part_expr, arena);
-                if part_width > member_width {
-                    part_expr = arena.alloc(SLTNode::Slice {
-                        expr: part_expr,
-                        access: BitAccess::new(0, member_width - 1),
-                    })?;
-                } else if part_width < member_width {
-                    let pad_width = member_width - part_width;
-                    let pad = arena.alloc(SLTNode::Constant(
-                        BigUint::from(0u8),
-                        BigUint::from(0u32),
-                        pad_width,
-                        false,
-                    ))?;
-                    part_expr = arena.alloc(SLTNode::Concat(vec![
-                        (pad, pad_width),
-                        (part_expr, part_width),
-                    ]))?;
-                }
+                let ((part_expr, part_sources), p_bounds) = eval_expression_in_context(
+                    module,
+                    store,
+                    field_expr,
+                    arena,
+                    Some(ValueContext {
+                        width: member_width,
+                        signed: expression_signed(field_expr),
+                    }),
+                )?;
+                all_bounds = merge_boundaries(all_bounds, p_bounds);
+                total_sources.extend(part_sources);
+                let part_expr = coerce_node_width(
+                    arena,
+                    part_expr,
+                    Some(member_width),
+                    expression_signed(field_expr),
+                )?;
+                let part_expr =
+                    if member_type.is_2state() && !field_expr.comptime().r#type.is_2state() {
+                        arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, part_expr))?
+                    } else {
+                        part_expr
+                    };
 
                 parts.push((part_expr, member_width));
             }
 
-            Ok((
-                (arena.alloc(SLTNode::Concat(parts))?, total_sources),
-                all_bounds,
-            ))
+            let result = arena.alloc(SLTNode::Concat(parts))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(ty.signed),
+            )?;
+            Ok(((result, total_sources), all_bounds))
         }
         Expression::ArrayLiteral(items, _) => {
-            eval_array_literal_expression(module, store, items, None, arena)
+            let ((result, sources), bounds) =
+                eval_array_literal_expression(module, store, items, context_width, arena)?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
+            Ok(((result, sources), bounds))
         }
     }
 }
@@ -2423,7 +2442,7 @@ pub fn eval_assignment_expression(
     // The RHS expression controls extension.  The destination type does not
     // turn an unsigned value into a sign-extended one.  Explicit casts and the
     // signed/unsigned system functions are retained by the override helper.
-    let signed = source_signed(expr);
+    let signed = expression_signed(expr);
     let node = coerce_node_width(arena, node, Some(target_width), signed)?;
     Ok(((node, sources), boundaries))
 }
@@ -2433,8 +2452,12 @@ fn eval_factor(
     store: &SymbolicStore<VarId>,
     factor: &Factor,
     arena: &mut SLTNodeArena<VarId>,
-    context_width: Option<usize>,
+    context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context_width = context.map(|context| context.width);
+    let context_signed = context
+        .map(|context| context.signed)
+        .unwrap_or_else(|| crate::context_width::factor_signed(factor));
     match factor {
         Factor::Variable(var_id, index, select, comptime) => {
             // Compile-time constant (e.g. genvar inside generate block): emit a
@@ -2445,9 +2468,13 @@ fn eval_factor(
                 let is_static_sel =
                     !is_bare && crate::parser::bitaccess::is_static_access(index, select);
 
+                let constant = if is_bare {
+                    celox_value_from_comptime_in_context(comptime, context_width)
+                } else {
+                    celox_value_from_comptime(comptime)
+                };
                 if (is_bare || is_static_sel)
-                    && let Some((celox_value, mask_xz, full_width, signed)) =
-                        celox_value_from_comptime(comptime)
+                    && let Some((celox_value, mask_xz, full_width, signed)) = constant
                 {
                     let (val, mask, width) = if is_bare {
                         (celox_value, mask_xz, full_width)
@@ -2464,7 +2491,8 @@ fn eval_factor(
 
                     let expr =
                         arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare))?;
-                    let expr = coerce_node_width(arena, expr, context_width, signed && is_bare)?;
+                    let expr =
+                        coerce_node_width(arena, expr, context_width, context_signed && is_bare)?;
                     return Ok(((expr, HashSet::default()), BoundaryMap::default()));
                 }
             }
@@ -2508,8 +2536,7 @@ fn eval_factor(
                 // expression whose producer has different signedness. Width
                 // coercion follows the source variable's analyzer context,
                 // not the provenance of the substituted SLT node.
-                let expr =
-                    coerce_node_width(arena, expr, context_width, comptime.expr_context.signed)?;
+                let expr = coerce_node_width(arena, expr, context_width, context_signed)?;
                 Ok(((expr, sources), bounds))
             } else {
                 let mut all_sources = HashSet::default();
@@ -2593,12 +2620,8 @@ fn eval_factor(
                     })?
                 };
 
-                let extracted_expr = coerce_node_width(
-                    arena,
-                    extracted_expr,
-                    context_width,
-                    comptime.expr_context.signed,
-                )?;
+                let extracted_expr =
+                    coerce_node_width(arena, extracted_expr, context_width, context_signed)?;
 
                 let prefix_access = eval_var_select(module, *var_id, index, select)?;
                 all_sources.insert(VarAtomBase::new(
@@ -2610,52 +2633,27 @@ fn eval_factor(
             }
         }
         Factor::Value(v) => {
-            let (celox_value, mask_xz, width, signed) = celox_value_from_comptime(v)
-                .expect("Factor::Value should always have a numeric value");
-            // Fill-literals (`'0`, `'1`, `'x`, `'z`) have width 0 from the
-            // analyzer (context-dependent).  Per IEEE 1800-2023 §5.7.1:
-            //   "All bits of the unsized value shall be set to the value of
-            //    the specified bit. In a self-determined context, it shall
-            //    have a width of 1 bit."
-            // Use context_width when available; fall back to 1 bit for
-            // self-determined contexts.  Without this, a 0-width Constant
-            // in the RangeStore causes Mux lowering to produce 0-bit masks
-            // that zero out the else-arm.
-            //
-            // The analyzer stores fill-literals with only bit 0 set in
-            // payload and mask_xz (e.g. '1 → payload=1, mask_xz=0).
-            // We replicate bit 0 across the full width so '1 → all-ones,
-            // 'x → all-X, etc.
-            let (celox_value, mask_xz, effective_width) = if width == 0 {
-                let ew = context_width.unwrap_or(1);
-                let fill_mask = (BigUint::from(1u64) << ew) - BigUint::from(1u64);
-                let cv = if celox_value.bit(0) {
-                    fill_mask.clone()
-                } else {
-                    BigUint::from(0u8)
-                };
-                let mxz = if mask_xz.bit(0) {
-                    fill_mask
-                } else {
-                    BigUint::from(0u8)
-                };
-                (cv, mxz, ew)
-            } else {
-                (celox_value, mask_xz, width)
-            };
+            let (celox_value, mask_xz, effective_width, signed) =
+                celox_value_from_comptime_in_context(v, context_width)
+                    .expect("Factor::Value should always have a numeric value");
             let node = arena.alloc(SLTNode::Constant(
                 celox_value,
                 mask_xz,
                 effective_width,
                 signed,
             ))?;
-            let node = coerce_node_width(arena, node, context_width, signed)?;
+            let node = coerce_node_width(arena, node, context_width, context_signed)?;
             Ok(((node, HashSet::default()), BoundaryMap::default()))
         }
         Factor::SystemFunctionCall(call) => {
-            eval_system_function_call(module, store, call, arena, context_width)
+            eval_system_function_call(module, store, call, arena, context)
         }
-        Factor::FunctionCall(call) => eval_function_call_expression(module, store, call, arena),
+        Factor::FunctionCall(call) => {
+            let ((node, sources), bounds) =
+                eval_function_call_expression(module, store, call, arena)?;
+            let node = coerce_node_width(arena, node, context_width, context_signed)?;
+            Ok(((node, sources), bounds))
+        }
         Factor::Anonymous(_) | Factor::Unknown(_) => Err(ParserError::unsupported(
             67,
             LoweringPhase::CombLowering,
@@ -2748,8 +2746,9 @@ fn eval_system_function_call(
     store: &SymbolicStore<VarId>,
     call: &SystemFunctionCall,
     arena: &mut SLTNodeArena<VarId>,
-    context_width: Option<usize>,
+    context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context_width = context.map(|context| context.width);
     match &call.kind {
         SystemFunctionKind::Bits(input) => {
             let width = system_function_input_bits_width(module, store, &input.0, arena)?;
@@ -2759,6 +2758,12 @@ fn eval_system_function_call(
                 32,
                 false,
             ))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
             Ok(((result, HashSet::default()), HashMap::default()))
         }
         SystemFunctionKind::Size(input) => {
@@ -2769,6 +2774,12 @@ fn eval_system_function_call(
                 32,
                 false,
             ))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
             Ok(((result, HashSet::default()), HashMap::default()))
         }
         SystemFunctionKind::Clog2(input) => {
@@ -2800,6 +2811,12 @@ fn eval_system_function_call(
                     else_expr: result,
                 })?;
             }
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
             Ok(((result, sources), bounds))
         }
         SystemFunctionKind::Onehot(input) => {
@@ -2822,6 +2839,12 @@ fn eval_system_function_call(
             let non_zero = arena.alloc(SLTNode::Binary(arg, BinaryOp::Ne, zero))?;
             let no_overlap = arena.alloc(SLTNode::Binary(overlap, BinaryOp::Eq, zero))?;
             let result = arena.alloc(SLTNode::Binary(non_zero, BinaryOp::LogicAnd, no_overlap))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
             Ok(((result, sources), bounds))
         }
         SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
@@ -2829,7 +2852,12 @@ fn eval_system_function_call(
             let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
             Ok((
                 (
-                    coerce_node_width(arena, arg, context_width, signed)?,
+                    coerce_node_width(
+                        arena,
+                        arg,
+                        context_width,
+                        context.map(|context| context.signed).unwrap_or(signed),
+                    )?,
                     sources,
                 ),
                 bounds,
@@ -2900,163 +2928,58 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
     match arena.get(expr) {
         SLTNode::Input { variable: id, .. } => module.variables[id].r#type.signed,
         SLTNode::Constant(_, _, _, signed) => *signed,
-        SLTNode::Binary(lhs, op, _) => match op {
+        SLTNode::Binary(lhs, op, rhs) => match op {
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::LtU
+            | BinaryOp::LtS
+            | BinaryOp::LeU
+            | BinaryOp::LeS
+            | BinaryOp::GtU
+            | BinaryOp::GtS
+            | BinaryOp::GeU
+            | BinaryOp::GeS
+            | BinaryOp::LogicAnd
+            | BinaryOp::LogicOr
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard
+            | BinaryOp::DivU
+            | BinaryOp::RemU => false,
             BinaryOp::DivS | BinaryOp::RemS => true,
-            BinaryOp::DivU | BinaryOp::RemU => false,
-            _ => is_signed(module, *lhs, arena),
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => is_signed(module, *lhs, arena),
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Xor => is_signed(module, *lhs, arena) && is_signed(module, *rhs, arena),
         },
-        SLTNode::Unary(UnaryOp::Minus, _) => true,
         SLTNode::Unary(
-            UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros,
+            UnaryOp::LogicNot
+            | UnaryOp::And
+            | UnaryOp::Or
+            | UnaryOp::Xor
+            | UnaryOp::PopCount
+            | UnaryOp::CountLeadingZeros
+            | UnaryOp::CountTrailingZeros,
             _,
         ) => false,
-        SLTNode::Unary(_, inner) => is_signed(module, *inner, arena),
-        SLTNode::Mux { then_expr, .. } => is_signed(module, *then_expr, arena),
+        SLTNode::Unary(
+            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+            inner,
+        ) => is_signed(module, *inner, arena),
+        SLTNode::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => is_signed(module, *then_expr, arena) && is_signed(module, *else_expr, arena),
         SLTNode::ForFold { result, .. } => module.variables[&result.id].r#type.signed,
         SLTNode::ForFoldGroup { .. } => false,
-        SLTNode::Slice { expr, .. } => is_signed(module, *expr, arena),
+        SLTNode::Slice { .. } => false,
         SLTNode::Concat(_) => false,
     }
 }
 
-fn expression_signed_override(expr: &Expression) -> Option<bool> {
-    match expr {
-        Expression::Binary(_, Op::As, rhs, _) => {
-            let Expression::Term(factor) = rhs.as_ref() else {
-                return None;
-            };
-            let Factor::Value(comptime) = factor.as_ref() else {
-                return None;
-            };
-            match &comptime.value {
-                ValueVariant::Type(ty) => Some(ty.signed),
-                ValueVariant::Numeric(_) => Some(false),
-                _ => None,
-            }
-        }
-        Expression::Term(factor) => {
-            let Factor::SystemFunctionCall(call) = factor.as_ref() else {
-                return None;
-            };
-            match call.kind {
-                SystemFunctionKind::Signed(_) => Some(true),
-                SystemFunctionKind::Unsigned(_) => Some(false),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Signedness assigned to this source expression by the Veryl analyzer.
-///
-/// This must not be reconstructed from the evaluated SLT node. A read of an
-/// unsigned variable remains unsigned even when the symbolic store currently
-/// contains a signed RHS expression, and relational operator selection is a
-/// static property of the source expression rather than its assignment
-/// history.
-fn source_signed(expr: &Expression) -> bool {
-    expression_signed_override(expr).unwrap_or_else(|| {
-        if matches!(expr, Expression::Term(_)) {
-            // A sibling explicit cast can cause analyzer 0.20.1 to merge a
-            // false `as` expression context into this term. The term's source
-            // type remains authoritative before the binary operator combines
-            // its operands.
-            expr.comptime().r#type.signed
-        } else {
-            expr.comptime().expr_context.signed
-        }
-    })
-}
-
-pub fn convert_binary_op(op: &Op, use_signed: bool) -> BinaryOp {
-    match op {
-        Op::Add => BinaryOp::Add,
-        Op::Sub => BinaryOp::Sub,
-        Op::Mul => BinaryOp::Mul,
-        Op::Div => {
-            if use_signed {
-                BinaryOp::DivS
-            } else {
-                BinaryOp::DivU
-            }
-        }
-        Op::Rem => {
-            if use_signed {
-                BinaryOp::RemS
-            } else {
-                BinaryOp::RemU
-            }
-        }
-        Op::BitAnd => BinaryOp::And,
-        Op::BitOr => BinaryOp::Or,
-        Op::BitXor => BinaryOp::Xor,
-        Op::LogicShiftL | Op::ArithShiftL => BinaryOp::Shl,
-        Op::LogicShiftR => BinaryOp::Shr,
-        Op::ArithShiftR => BinaryOp::Sar,
-        Op::Eq => BinaryOp::Eq,
-        Op::EqWildcard => BinaryOp::EqWildcard,
-        Op::Ne => BinaryOp::Ne,
-        Op::NeWildcard => BinaryOp::NeWildcard,
-        Op::Less => {
-            if use_signed {
-                BinaryOp::LtS
-            } else {
-                BinaryOp::LtU
-            }
-        }
-        Op::LessEq => {
-            if use_signed {
-                BinaryOp::LeS
-            } else {
-                BinaryOp::LeU
-            }
-        }
-        Op::Greater => {
-            if use_signed {
-                BinaryOp::GtS
-            } else {
-                BinaryOp::GtU
-            }
-        }
-        Op::GreaterEq => {
-            if use_signed {
-                BinaryOp::GeS
-            } else {
-                BinaryOp::GeU
-            }
-        }
-        Op::LogicAnd => BinaryOp::LogicAnd,
-        Op::LogicOr => BinaryOp::LogicOr,
-        // Unary-only operators
-        Op::LogicNot | Op::BitNot => {
-            unreachable!(
-                "unary operator must not be lowered by convert_binary_op: {:?}",
-                op
-            )
-        }
-        // Binary-expression nodes lowered by dedicated paths
-        Op::BitXnor | Op::BitNand | Op::BitNor => {
-            unreachable!(
-                "bitwise derived op must be lowered before convert_binary_op: {:?}",
-                op
-            )
-        }
-        Op::Ternary => unreachable!("ternary expression must not be lowered by convert_binary_op"),
-        Op::Concatenation => {
-            unreachable!("concatenation must be lowered by concat-specific path")
-        }
-        Op::ArrayLiteral => {
-            unreachable!("array literal must not be lowered by convert_binary_op")
-        }
-        Op::Condition => unreachable!("condition node must not be lowered by convert_binary_op"),
-        Op::Repeat => unreachable!("repeat node must be lowered by repeat-specific path"),
-        // Handled by pre-lowering in eval_expression.
-        Op::Pow | Op::As => {
-            unreachable!("operator must be pre-lowered before conversion: {:?}", op)
-        }
-    }
-}
 pub fn convert_unary_op(op: &Op) -> UnaryOp {
     match op {
         Op::Add => UnaryOp::Ident,

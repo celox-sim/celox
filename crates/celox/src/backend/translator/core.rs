@@ -850,7 +850,11 @@ impl SIRTranslator {
                     let nc = width.div_ceil(64).max(1);
                     for chunk_idx in 0..nc {
                         let chunk_width = (width - chunk_idx * 64).min(64);
-                        let ty = get_cl_type(chunk_width);
+                        let ty = if nc > 1 {
+                            types::I64
+                        } else {
+                            get_cl_type(chunk_width)
+                        };
                         state.builder.append_block_param(cl_bb, ty);
                         if self.options.four_state {
                             state.builder.append_block_param(cl_bb, ty);
@@ -1034,7 +1038,11 @@ impl SIRTranslator {
                     let nc = width.div_ceil(64).max(1);
                     for chunk_idx in 0..nc {
                         let chunk_width = (width - chunk_idx * 64).min(64);
-                        let ty = get_cl_type(chunk_width);
+                        let ty = if nc > 1 {
+                            types::I64
+                        } else {
+                            get_cl_type(chunk_width)
+                        };
                         state.builder.append_block_param(cl_bb, ty);
                         if self.options.four_state {
                             state.builder.append_block_param(cl_bb, ty);
@@ -1207,7 +1215,11 @@ impl SIRTranslator {
                 let nc = width.div_ceil(64).max(1);
                 for chunk_idx in 0..nc {
                     let chunk_width = (width - chunk_idx * 64).min(64);
-                    let ty = get_cl_type(chunk_width);
+                    let ty = if nc > 1 {
+                        types::I64
+                    } else {
+                        get_cl_type(chunk_width)
+                    };
                     builder.append_block_param(cl_bb, ty);
                     if self.options.four_state {
                         builder.append_block_param(cl_bb, ty);
@@ -1245,7 +1257,11 @@ impl SIRTranslator {
                 let nc = width.div_ceil(64).max(1);
                 for chunk_idx in 0..nc {
                     let chunk_width = (width - chunk_idx * 64).min(64);
-                    let ty = get_cl_type(chunk_width);
+                    let ty = if nc > 1 {
+                        types::I64
+                    } else {
+                        get_cl_type(chunk_width)
+                    };
                     let zero = builder.ins().iconst(ty, 0);
                     entry_args.push(BlockArg::Value(zero));
                     if self.options.four_state {

@@ -1135,6 +1135,9 @@ impl fmt::Display for BinaryOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnaryOp {
     Ident,
+    /// Convert a four-state value to two-state form. Unknown bits become zero:
+    /// `(value, mask) -> (value & !mask, 0)`.
+    ToTwoState,
     Minus,
     BitNot,
     LogicNot,
@@ -1156,7 +1159,9 @@ impl UnaryOp {
     pub fn result_width(self, operand_width: usize) -> usize {
         match self {
             UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
-            UnaryOp::Ident | UnaryOp::Minus | UnaryOp::BitNot => operand_width,
+            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => {
+                operand_width
+            }
             UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
                 usize::BITS as usize - operand_width.leading_zeros() as usize
             }
@@ -1168,6 +1173,7 @@ impl fmt::Display for UnaryOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let op_str = match self {
             UnaryOp::Ident => "Ident",
+            UnaryOp::ToTwoState => "ToTwoState",
             UnaryOp::Minus => "Minus",
             UnaryOp::BitNot => "BitNot",
             UnaryOp::LogicNot => "LogicNot",
@@ -1256,7 +1262,8 @@ pub enum SIRInstruction<Addr> {
     Slice(RegisterId, RegisterId, usize, usize), // dst, src, bit_offset, width
     /// Mux: dst = if cond { then_val } else { else_val }.
     /// In 4-state mode, preserves exact mask bits (including Z) of the selected branch.
-    /// When cond has X/Z bits, result is all-X.
+    /// A known one in `cond` selects `then_val`. If `cond` has no known one but
+    /// contains X/Z, equal arm bits are preserved and differing bits become X.
     Mux(RegisterId, RegisterId, RegisterId, RegisterId), // dst, cond, then_val, else_val
     RuntimeEvent {
         site_id: u32,
