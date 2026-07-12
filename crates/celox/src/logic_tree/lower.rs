@@ -140,6 +140,9 @@ struct SLTCountPlan<A: Hash + Eq + Clone> {
 
 enum SLTCountPost {
     Direct,
+    /// Add a newly recovered population-count delta to an exact accumulator
+    /// value that already dominates the current lowering point.
+    AddTo(NodeId),
     /// Turn `clz(predicates)` into the selected last-write index.  With an
     /// all-ones default, `N - 1 - clz(0)` naturally wraps to that sentinel.
     SubtractFrom(u64),
@@ -165,8 +168,30 @@ fn slt_const_u64<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) ->
     }
 }
 
+fn slt_literal_u64<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> Option<u64> {
+    let SLTNode::Constant(value, mask, _, _) = arena.get(node) else {
+        return None;
+    };
+    if mask != &BigUint::from(0u8) {
+        return None;
+    }
+    match value.to_u64_digits().as_slice() {
+        [] => Some(0),
+        [value] => Some(*value),
+        _ => None,
+    }
+}
+
 fn slt_width<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> usize {
     crate::logic_tree::comb::get_width(node, arena)
+}
+
+fn slt_literal_zero_of_width<A: Hash + Eq + Clone>(
+    node: NodeId,
+    width: usize,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    slt_width(node, arena) == width && slt_literal_u64(node, arena) == Some(0)
 }
 
 fn slt_width_can_represent(width: usize, maximum: usize) -> bool {
@@ -238,20 +263,18 @@ fn resolve_slt_extended_bit<A: Hash + Eq + Clone>(
     match arena.get(node) {
         SLTNode::Unary(UnaryOp::Ident, inner) => resolve_slt_extended_bit(*inner, arena),
         SLTNode::Concat(parts) => {
-            let mut term = None;
-            for (part, _) in parts {
-                if slt_const_u64(*part, arena) == Some(0) {
-                    continue;
-                }
-                let candidate = resolve_slt_extended_bit(*part, arena)?;
-                if term.is_some() {
-                    return None;
-                }
-                term = Some(candidate);
+            // A numeric conditional increment must be exactly a zero-extended
+            // bit in the LSB position.  Merely finding one nonzero one-bit
+            // part is insufficient: `{bit, 0...}` contributes 2^K, not 1.
+            let (least_significant, leading) = parts.split_last()?;
+            if leading
+                .iter()
+                .any(|(part, _)| slt_literal_u64(*part, arena) != Some(0))
+            {
+                return None;
             }
-            term
+            resolve_slt_extended_bit(least_significant.0, arena)
         }
-        SLTNode::Slice { expr, .. } => resolve_slt_extended_bit(*expr, arena),
         _ => None,
     }
 }
@@ -422,17 +445,27 @@ fn match_slt_increment<A: Hash + Eq + Clone>(
     let SLTNode::Binary(lhs, BinaryOp::Add, rhs) = arena.get(value) else {
         return false;
     };
-    *lhs == accumulator && slt_const_u64(*rhs, arena) == Some(1)
-        || *rhs == accumulator && slt_const_u64(*lhs, arena) == Some(1)
+    *lhs == accumulator && slt_literal_u64(*rhs, arena) == Some(1)
+        || *rhs == accumulator && slt_literal_u64(*lhs, arena) == Some(1)
 }
 
 fn collect_slt_conditional_increments<A: Hash + Eq + Clone>(
     mut cursor: NodeId,
     accumulator_width: usize,
     arena: &SLTNodeArena<A>,
-) -> Option<Vec<SLTBitTerm<A>>> {
+    materialized: Option<&crate::HashMap<NodeId, RegisterId>>,
+) -> Option<(Vec<SLTBitTerm<A>>, Option<NodeId>)> {
     let mut terms = Vec::new();
     loop {
+        // Only reuse the immediate predecessor.  A longer partial suffix can
+        // destroy a profitable whole-vector count shape; one exact +1 delta
+        // is always the recurrence edge we are replacing.
+        if terms.len() == 1
+            && materialized.is_some_and(|cache| cache.contains_key(&cursor))
+            && slt_width(cursor, arena) == accumulator_width
+        {
+            return Some((terms, Some(cursor)));
+        }
         let SLTNode::Mux {
             cond,
             then_expr,
@@ -452,23 +485,30 @@ fn collect_slt_conditional_increments<A: Hash + Eq + Clone>(
             origin: resolve_slt_bit_origin(*cond, arena),
         });
         cursor = *else_expr;
-        if slt_width(cursor, arena) == accumulator_width && slt_const_u64(cursor, arena) == Some(0)
-        {
+        if slt_literal_zero_of_width(cursor, accumulator_width, arena) {
             break;
         }
     }
-    Some(terms)
+    Some((terms, None))
 }
 
 fn collect_slt_additive_bits<A: Hash + Eq + Clone>(
     mut cursor: NodeId,
     accumulator_width: usize,
     arena: &SLTNodeArena<A>,
-) -> Option<Vec<SLTBitTerm<A>>> {
+    materialized: Option<&crate::HashMap<NodeId, RegisterId>>,
+) -> Option<(Vec<SLTBitTerm<A>>, Option<NodeId>)> {
     let mut terms = Vec::new();
     loop {
-        if slt_width(cursor, arena) == accumulator_width && slt_const_u64(cursor, arena) == Some(0)
+        // See the conditional form above: a materialized immediate
+        // predecessor is an exact delta edge, not an arbitrary split point.
+        if terms.len() == 1
+            && materialized.is_some_and(|cache| cache.contains_key(&cursor))
+            && slt_width(cursor, arena) == accumulator_width
         {
+            return Some((terms, Some(cursor)));
+        }
+        if slt_literal_zero_of_width(cursor, accumulator_width, arena) {
             break;
         }
         let SLTNode::Binary(lhs, BinaryOp::Add, rhs) = arena.get(cursor) else {
@@ -491,22 +531,26 @@ fn collect_slt_additive_bits<A: Hash + Eq + Clone>(
             _ => return None,
         }
     }
-    Some(terms)
+    Some((terms, None))
 }
 
 fn match_slt_popcount<A: Hash + Eq + Clone>(
     root: NodeId,
     arena: &SLTNodeArena<A>,
+    materialized: Option<&crate::HashMap<NodeId, RegisterId>>,
 ) -> Option<SLTCountPlan<A>> {
     let result_width = slt_width(root, arena);
-    let terms = match arena.get(root) {
-        SLTNode::Mux { .. } => collect_slt_conditional_increments(root, result_width, arena)?,
+    let (terms, base) = match arena.get(root) {
+        SLTNode::Mux { .. } => {
+            collect_slt_conditional_increments(root, result_width, arena, materialized)?
+        }
         SLTNode::Binary(_, BinaryOp::Add, _) => {
-            collect_slt_additive_bits(root, result_width, arena)?
+            collect_slt_additive_bits(root, result_width, arena, materialized)?
         }
         _ => return None,
     };
-    if terms.len() < 4 || !slt_width_can_represent(result_width, terms.len()) {
+    let minimum_terms = if base.is_some() { 1 } else { 4 };
+    if terms.len() < minimum_terms || !slt_width_can_represent(result_width, terms.len()) {
         return None;
     }
     let input_width = terms.len();
@@ -532,7 +576,7 @@ fn match_slt_popcount<A: Hash + Eq + Clone>(
         op: UnaryOp::PopCount,
         input_width,
         input,
-        post: SLTCountPost::Direct,
+        post: base.map_or(SLTCountPost::Direct, SLTCountPost::AddTo),
     })
 }
 
@@ -966,7 +1010,17 @@ fn match_slt_count_idiom<A: Hash + Eq + Clone>(
 ) -> Option<SLTCountPlan<A>> {
     match_slt_found_reduction(root, arena)
         .or_else(|| match_slt_priority_count(root, arena))
-        .or_else(|| match_slt_popcount(root, arena))
+        .or_else(|| match_slt_popcount(root, arena, None))
+}
+
+fn match_slt_count_idiom_with_materialized<A: Hash + Eq + Clone>(
+    root: NodeId,
+    arena: &SLTNodeArena<A>,
+    materialized: &crate::HashMap<NodeId, RegisterId>,
+) -> Option<SLTCountPlan<A>> {
+    match_slt_found_reduction(root, arena)
+        .or_else(|| match_slt_priority_count(root, arena))
+        .or_else(|| match_slt_popcount(root, arena, Some(materialized)))
 }
 
 /// Whether the ordinary expanded SLT already matches a native count idiom.
@@ -2066,7 +2120,17 @@ impl SLTToSIRLowerer {
         if self.four_state {
             return None;
         }
-        let plan = match_slt_count_idiom(node, arena)?;
+        let plan = if allow_cache {
+            match_slt_count_idiom_with_materialized(node, arena, cache)?
+        } else {
+            match_slt_count_idiom(node, arena)?
+        };
+        if let SLTCountPost::AddTo(base) = &plan.post {
+            let base = cache.get(base)?;
+            if builder.register(base).width() != self.get_width(node, arena) {
+                return None;
+            }
+        }
         let source = match plan.input {
             SLTCountInput::Origin(SLTBitOrigin::Node(source)) => {
                 self.lower_inner(builder, source, arena, cache, None, allow_cache)
@@ -2125,6 +2189,22 @@ impl SLTToSIRLowerer {
             SLTCountPost::Direct => {
                 let result = builder.alloc_logic(result_width);
                 builder.emit(SIRInstruction::Unary(result, plan.op, source));
+                Some(result)
+            }
+            SLTCountPost::AddTo(base) => {
+                let delta = if plan.op == UnaryOp::PopCount && plan.input_width == 1 {
+                    source
+                } else {
+                    let delta = builder.alloc_logic(result_width);
+                    builder.emit(SIRInstruction::Unary(delta, plan.op, source));
+                    delta
+                };
+                let delta = self.cast_reg_width_ext(builder, delta, result_width, false);
+                let base = *cache
+                    .get(&base)
+                    .expect("validated materialized count base must remain cached");
+                let result = builder.alloc_logic(result_width);
+                builder.emit(SIRInstruction::Binary(result, base, BinaryOp::Add, delta));
                 Some(result)
             }
             SLTCountPost::SubtractFrom(minuend) => {
@@ -5121,6 +5201,14 @@ mod tests {
                             UnaryOp::BitNot => &width_mask(width) ^ &value.payload,
                             UnaryOp::LogicNot => BigUint::from(value.payload == BigUint::from(0u8)),
                             UnaryOp::Or => BigUint::from(value.payload != BigUint::from(0u8)),
+                            UnaryOp::PopCount => BigUint::from(
+                                value
+                                    .payload
+                                    .to_u64_digits()
+                                    .iter()
+                                    .map(|word| word.count_ones() as u64)
+                                    .sum::<u64>(),
+                            ),
                             other => panic!("unexpected grouped-fold unary op {other:?}"),
                         };
                         values.insert(
@@ -6105,6 +6193,301 @@ mod tests {
     fn conditional_priority_rejects_reordered_bit_or_value() {
         assert_conditional_priority_rejected(ConditionalPriorityCorruption::BitOrder(3));
         assert_conditional_priority_rejected(ConditionalPriorityCorruption::ValueOrder(3));
+    }
+
+    #[test]
+    fn additive_popcount_accepts_only_lsb_zero_extension() {
+        let mut arena = SLTNodeArena::new();
+        let bit = input(&mut arena, 0, 1);
+        let zero3 = constant(&mut arena, 0, 3);
+        let lsb_extended = arena
+            .alloc(SLTNode::Concat(vec![(zero3, 3), (bit, 1)]))
+            .unwrap();
+        let msb_shifted = arena
+            .alloc(SLTNode::Concat(vec![(bit, 1), (zero3, 3)]))
+            .unwrap();
+        let wide = input(&mut arena, 1, 4);
+        let multi_bit_slice = arena
+            .alloc(SLTNode::Slice {
+                expr: wide,
+                access: BitAccess::new(0, 1),
+            })
+            .unwrap();
+
+        assert!(resolve_slt_extended_bit(lsb_extended, &arena).is_some());
+        assert!(resolve_slt_extended_bit(msb_shifted, &arena).is_none());
+        assert!(resolve_slt_extended_bit(multi_bit_slice, &arena).is_none());
+    }
+
+    #[test]
+    fn cached_popcount_accumulator_only_lowers_new_increment() {
+        let width = 8;
+        let result_width = 4;
+        let mut arena = SLTNodeArena::new();
+        let source = input(&mut arena, 0, width);
+        let one = constant(&mut arena, 1, result_width);
+        let mut base = constant(&mut arena, 0, result_width);
+        for bit in 0..width {
+            let predicate = arena
+                .alloc(SLTNode::Slice {
+                    expr: source,
+                    access: BitAccess::new(bit, bit),
+                })
+                .unwrap();
+            let incremented = arena
+                .alloc(SLTNode::Binary(base, BinaryOp::Add, one))
+                .unwrap();
+            base = arena
+                .alloc(SLTNode::Mux {
+                    cond: predicate,
+                    then_expr: incremented,
+                    else_expr: base,
+                })
+                .unwrap();
+        }
+
+        let delta = input(&mut arena, 1, 1);
+        let incremented = arena
+            .alloc(SLTNode::Binary(base, BinaryOp::Add, one))
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Mux {
+                cond: delta,
+                then_expr: incremented,
+                else_expr: base,
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        let lowerer = SLTToSIRLowerer::new(false);
+        let base_reg = lowerer.lower(&mut builder, base, &arena, &mut cache);
+        let root_reg = lowerer.lower(&mut builder, root, &arena, &mut cache);
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Unary(_, UnaryOp::PopCount, _)
+            )),
+            1,
+            "the already materialized population count must not be rebuilt"
+        );
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Concat(_, arguments) if arguments.len() == width + 1
+            )),
+            0
+        );
+        assert!(
+            eu.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Binary(dst, lhs, BinaryOp::Add, _)
+                        if *dst == root_reg && *lhs == base_reg
+                ))
+        );
+    }
+
+    #[test]
+    fn cached_additive_popcount_accumulator_only_lowers_new_bit() {
+        let width = 8;
+        let result_width = 4;
+        let mut arena = SLTNodeArena::new();
+        let source = input(&mut arena, 0, width);
+        let zero = constant(&mut arena, 0, result_width);
+        let padding = constant(&mut arena, 0, result_width - 1);
+        let mut base = zero;
+        for bit in 0..width {
+            let predicate = arena
+                .alloc(SLTNode::Slice {
+                    expr: source,
+                    access: BitAccess::new(bit, bit),
+                })
+                .unwrap();
+            let extended = arena
+                .alloc(SLTNode::Concat(vec![
+                    (padding, result_width - 1),
+                    (predicate, 1),
+                ]))
+                .unwrap();
+            base = arena
+                .alloc(SLTNode::Binary(base, BinaryOp::Add, extended))
+                .unwrap();
+        }
+
+        let delta = input(&mut arena, 1, 1);
+        let extended_delta = arena
+            .alloc(SLTNode::Concat(vec![
+                (padding, result_width - 1),
+                (delta, 1),
+            ]))
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Binary(base, BinaryOp::Add, extended_delta))
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        let lowerer = SLTToSIRLowerer::new(false);
+        let base_reg = lowerer.lower(&mut builder, base, &arena, &mut cache);
+        let root_reg = lowerer.lower(&mut builder, root, &arena, &mut cache);
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Unary(_, UnaryOp::PopCount, _)
+            )),
+            1
+        );
+        assert!(
+            eu.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Binary(dst, lhs, BinaryOp::Add, _)
+                        if *dst == root_reg && *lhs == base_reg
+                ))
+        );
+    }
+
+    #[test]
+    fn cached_popcount_delta_preserves_wrapping_semantics() {
+        let width = 7;
+        let result_width = 3;
+        let mut arena = SLTNodeArena::new();
+        let source = input(&mut arena, 0, width);
+        let one = constant(&mut arena, 1, result_width);
+        let mut base = constant(&mut arena, 0, result_width);
+        for bit in 0..width {
+            let predicate = arena
+                .alloc(SLTNode::Slice {
+                    expr: source,
+                    access: BitAccess::new(bit, bit),
+                })
+                .unwrap();
+            let incremented = arena
+                .alloc(SLTNode::Binary(base, BinaryOp::Add, one))
+                .unwrap();
+            base = arena
+                .alloc(SLTNode::Mux {
+                    cond: predicate,
+                    then_expr: incremented,
+                    else_expr: base,
+                })
+                .unwrap();
+        }
+        let delta = input(&mut arena, 1, 1);
+        let incremented = arena
+            .alloc(SLTNode::Binary(base, BinaryOp::Add, one))
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Mux {
+                cond: delta,
+                then_expr: incremented,
+                else_expr: base,
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        let lowerer = SLTToSIRLowerer::new(false);
+        lowerer.lower(&mut builder, base, &arena, &mut cache);
+        let result = lowerer.lower(&mut builder, root, &arena, &mut cache);
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Unary(_, UnaryOp::PopCount, _)
+            )),
+            1
+        );
+
+        for source_value in 0u64..(1 << width) {
+            for delta_value in 0u64..=1 {
+                let mut memory = crate::HashMap::default();
+                memory.insert(
+                    0u32,
+                    TestSIRValue {
+                        payload: source_value.into(),
+                        mask: 0u8.into(),
+                    },
+                );
+                memory.insert(
+                    1u32,
+                    TestSIRValue {
+                        payload: delta_value.into(),
+                        mask: 0u8.into(),
+                    },
+                );
+                let actual = &execute_fold_group_sir_with_memory(&eu, &memory)[&result].payload;
+                let expected =
+                    (source_value.count_ones() as u64 + delta_value) & ((1 << result_width) - 1);
+                assert_eq!(actual, &BigUint::from(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn cached_accumulator_is_not_reused_for_non_unit_update() {
+        let width = 8;
+        let result_width = 4;
+        let mut arena = SLTNodeArena::new();
+        let source = input(&mut arena, 0, width);
+        let one = constant(&mut arena, 1, result_width);
+        let two = constant(&mut arena, 2, result_width);
+        let mut base = constant(&mut arena, 0, result_width);
+        for bit in 0..width {
+            let predicate = arena
+                .alloc(SLTNode::Slice {
+                    expr: source,
+                    access: BitAccess::new(bit, bit),
+                })
+                .unwrap();
+            let incremented = arena
+                .alloc(SLTNode::Binary(base, BinaryOp::Add, one))
+                .unwrap();
+            base = arena
+                .alloc(SLTNode::Mux {
+                    cond: predicate,
+                    then_expr: incremented,
+                    else_expr: base,
+                })
+                .unwrap();
+        }
+        let delta = input(&mut arena, 1, 1);
+        let incremented = arena
+            .alloc(SLTNode::Binary(base, BinaryOp::Add, two))
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Mux {
+                cond: delta,
+                then_expr: incremented,
+                else_expr: base,
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        let lowerer = SLTToSIRLowerer::new(false);
+        lowerer.lower(&mut builder, base, &arena, &mut cache);
+        lowerer.lower(&mut builder, root, &arena, &mut cache);
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Mux(..)
+            )),
+            1,
+            "only an exact conditional +1 update may become a count delta"
+        );
     }
 
     #[test]
