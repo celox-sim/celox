@@ -9,6 +9,10 @@ use num_bigint::{BigInt, BigUint};
 use std::cell::RefCell;
 use std::hash::Hash;
 
+fn slt_value_mask(width: usize) -> BigUint {
+    (BigUint::from(1u8) << width) - BigUint::from(1u8)
+}
+
 /// Try to evaluate an SLT node as a compile-time constant.
 /// Returns `Some((value, mask))` if the entire subtree is constant, `None` otherwise.
 fn try_const_eval<A: Hash + Eq + Clone>(
@@ -16,7 +20,10 @@ fn try_const_eval<A: Hash + Eq + Clone>(
     arena: &SLTNodeArena<A>,
 ) -> Option<(BigUint, BigUint)> {
     match arena.get(node_id) {
-        SLTNode::Constant(val, mask, _width, _signed) => Some((val.clone(), mask.clone())),
+        SLTNode::Constant(val, mask, width, _signed) => {
+            let width_mask = slt_value_mask(*width);
+            Some((val & &width_mask, mask & width_mask))
+        }
         SLTNode::Binary(lhs, op, rhs) => {
             let (lv, lm) = try_const_eval(*lhs, arena)?;
             let (rv, rm) = try_const_eval(*rhs, arena)?;
@@ -24,16 +31,20 @@ fn try_const_eval<A: Hash + Eq + Clone>(
             if lm != BigUint::from(0u32) || rm != BigUint::from(0u32) {
                 return None;
             }
+            let width = crate::logic_tree::comb::get_width(node_id, arena);
+            let width_mask = slt_value_mask(width);
             let result = match op {
                 BinaryOp::And => &lv & &rv,
                 BinaryOp::Or => &lv | &rv,
                 BinaryOp::Xor => &lv ^ &rv,
                 BinaryOp::Add => &lv + &rv,
-                BinaryOp::Sub if lv >= rv => &lv - &rv,
-                BinaryOp::Sub => return None,
+                BinaryOp::Sub => {
+                    let modulus = BigUint::from(1u8) << width;
+                    (&lv + modulus - &rv) & &width_mask
+                }
                 _ => return None,
             };
-            Some((result, BigUint::from(0u32)))
+            Some((result & width_mask, BigUint::from(0u32)))
         }
         SLTNode::Unary(_, _) => None,
         SLTNode::Concat(parts) => {
@@ -95,10 +106,18 @@ enum SLTCountPredicate {
 
 enum SLTVectorExpr<A: Hash + Eq + Clone> {
     Origin(SLTBitOrigin<A>),
+    /// A packed input reconstructed from a proven identity-indexed bit read.
+    /// Unlike `SLTBitOrigin::Input`, this deliberately drops the dynamic lane
+    /// index and loads the complete packed word at its static base offset.
+    StaticInput {
+        variable: A,
+        access: BitAccess,
+    },
     Broadcast(NodeId),
     LowOnes {
         bound: NodeId,
     },
+    Not(Box<SLTVectorExpr<A>>),
     Binary {
         lhs: Box<SLTVectorExpr<A>>,
         op: BinaryOp,
@@ -1100,6 +1119,578 @@ impl<'arena, A: Hash + Eq + Clone> FoldGroupLowerSpec<'arena, A> {
     }
 }
 
+/// A proven fixed-width first-true scan.  This is deliberately a transient
+/// lowering plan rather than another SLT node: `ForFoldGroup` remains the
+/// semantic representation and every near miss uses its generic counted-loop
+/// lowering.
+struct SLTOrScanPlan<A: Hash + Eq + Clone> {
+    vector_state: usize,
+    found_state: usize,
+    width: usize,
+    active: SLTVectorExpr<A>,
+    source: SLTVectorExpr<A>,
+    select_before: NodeId,
+    select_first: NodeId,
+}
+
+fn slt_tree_reads_any_variable<A: Hash + Eq + Clone>(
+    root: NodeId,
+    variables: &[&A],
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    let mut visited = crate::HashSet::default();
+    let mut work = vec![root];
+    while let Some(node) = work.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Input {
+                variable, index, ..
+            } => {
+                if variables.iter().any(|candidate| *candidate == variable) {
+                    return true;
+                }
+                work.extend(index.iter().map(|entry| entry.node));
+            }
+            SLTNode::Constant(..) => {}
+            SLTNode::Binary(lhs, _, rhs) => work.extend([*lhs, *rhs]),
+            SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => {
+                work.push(*inner);
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => work.extend([*cond, *then_expr, *else_expr]),
+            SLTNode::Concat(parts) => work.extend(parts.iter().map(|(part, _)| *part)),
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return true,
+        }
+    }
+    false
+}
+
+fn slt_is_exact_state_input<A: Hash + Eq + Clone>(
+    node: NodeId,
+    state: &SLTForFoldGroupState<A>,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    match arena.get(node) {
+        SLTNode::Input {
+            variable,
+            index,
+            access,
+            ..
+        } => variable == &state.target.id && index.is_empty() && access == &state.target.access,
+        SLTNode::Unary(UnaryOp::Ident, inner) => slt_is_exact_state_input(*inner, state, arena),
+        _ => false,
+    }
+}
+
+fn slt_scan_lane_bits(trip_count: usize) -> usize {
+    let maximum = trip_count.saturating_sub(1);
+    (usize::BITS as usize - maximum.leading_zeros() as usize).max(1)
+}
+
+fn slt_scan_domain_preserves_identity<A: Hash + Eq + Clone>(
+    spec: &FoldGroupLowerSpec<'_, A>,
+) -> bool {
+    if spec.loop_width == 0
+        || spec.start != &BigInt::from(0u8)
+        || spec.step != &BigInt::from(1u8)
+        || spec.trip_count == 0
+    {
+        return false;
+    }
+
+    // The matcher treats the induction value as the unsigned lane number.
+    // A signed counter is equivalent on this finite domain only while every
+    // value 0..trip_count-1 remains in its non-negative representable range.
+    let maximum = spec.trip_count - 1;
+    let required_bits = usize::BITS as usize - maximum.leading_zeros() as usize;
+    let available_value_bits = spec.loop_width - usize::from(spec.loop_signed);
+    required_bits <= available_value_bits
+}
+
+fn slt_scan_low_mask_preserves_domain<A: Hash + Eq + Clone>(
+    node: NodeId,
+    trip_count: usize,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    let required_bits = slt_scan_lane_bits(trip_count);
+    let required_mask = if required_bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << required_bits) - 1
+    };
+    slt_const_u64(node, arena).is_some_and(|mask| mask & required_mask == required_mask)
+}
+
+fn slt_is_scan_loop_value<A: Hash + Eq + Clone>(
+    node: NodeId,
+    spec: &FoldGroupLowerSpec<'_, A>,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    match arena.get(node) {
+        SLTNode::Input {
+            variable,
+            index,
+            access,
+            ..
+        } => {
+            variable == spec.loop_var
+                && index.is_empty()
+                && access.lsb == 0
+                && access.msb + 1 == spec.loop_width
+        }
+        SLTNode::Unary(UnaryOp::Ident, inner) => slt_is_scan_loop_value(*inner, spec, arena),
+        SLTNode::Slice { expr, access }
+            if access.lsb == 0 && access.msb + 1 >= slt_scan_lane_bits(spec.trip_count) =>
+        {
+            slt_is_scan_loop_value(*expr, spec, arena)
+        }
+        SLTNode::Concat(parts) if !parts.is_empty() => {
+            let (low, low_width) = parts.last().copied().expect("non-empty concat");
+            low_width >= slt_scan_lane_bits(spec.trip_count)
+                && slt_is_scan_loop_value(low, spec, arena)
+                && parts[..parts.len() - 1]
+                    .iter()
+                    .all(|(part, _)| slt_const_u64(*part, arena) == Some(0))
+        }
+        SLTNode::Binary(lhs, BinaryOp::Add, rhs) => {
+            slt_const_u64(*lhs, arena) == Some(0) && slt_is_scan_loop_value(*rhs, spec, arena)
+                || slt_const_u64(*rhs, arena) == Some(0)
+                    && slt_is_scan_loop_value(*lhs, spec, arena)
+        }
+        SLTNode::Binary(lhs, BinaryOp::Mul, rhs) => {
+            slt_const_u64(*lhs, arena) == Some(1) && slt_is_scan_loop_value(*rhs, spec, arena)
+                || slt_const_u64(*rhs, arena) == Some(1)
+                    && slt_is_scan_loop_value(*lhs, spec, arena)
+        }
+        // Analyzer casts of a non-negative unrolled IV commonly survive as
+        // `iv & low_mask`.  It is still the identity over this exact finite
+        // trip domain iff every bit needed to represent `0..trip_count` is
+        // retained.  Reject masks that drop even one such bit.
+        SLTNode::Binary(lhs, BinaryOp::And, rhs) => {
+            slt_scan_low_mask_preserves_domain(*lhs, spec.trip_count, arena)
+                && slt_is_scan_loop_value(*rhs, spec, arena)
+                || slt_scan_low_mask_preserves_domain(*rhs, spec.trip_count, arena)
+                    && slt_is_scan_loop_value(*lhs, spec, arena)
+        }
+        _ => false,
+    }
+}
+
+fn match_slt_scan_indexed_input<A: Hash + Eq + Clone>(
+    variable: &A,
+    index: &[crate::logic_tree::comb::SLTIndex],
+    input_access: BitAccess,
+    spec: &FoldGroupLowerSpec<'_, A>,
+    state_variables: &[&A],
+    arena: &SLTNodeArena<A>,
+) -> Option<SLTVectorExpr<A>> {
+    let [entry] = index else {
+        return None;
+    };
+    if entry.stride != 1
+        || variable == spec.loop_var
+        || state_variables
+            .iter()
+            .any(|candidate| *candidate == variable)
+        || !slt_is_scan_loop_value(entry.node, spec, arena)
+    {
+        return None;
+    }
+    let packed_access = if input_access == BitAccess::new(0, 0) {
+        // A direct narrow indexed input denotes `variable[iv]`; the complete
+        // identity traversal therefore reconstructs bits `0..trip_count-1`.
+        BitAccess::new(0, spec.trip_count - 1)
+    } else if input_access.lsb == 0 && input_access.msb + 1 == spec.trip_count {
+        input_access
+    } else {
+        return None;
+    };
+    Some(SLTVectorExpr::StaticInput {
+        variable: variable.clone(),
+        access: packed_access,
+    })
+}
+
+fn match_slt_scan_indexed_bit<A: Hash + Eq + Clone>(
+    node: NodeId,
+    spec: &FoldGroupLowerSpec<'_, A>,
+    state_variables: &[&A],
+    arena: &SLTNodeArena<A>,
+) -> Option<SLTVectorExpr<A>> {
+    match arena.get(node) {
+        SLTNode::Unary(UnaryOp::Ident, inner) => {
+            match_slt_scan_indexed_bit(*inner, spec, state_variables, arena)
+        }
+        SLTNode::Input {
+            variable,
+            index,
+            access,
+            ..
+        } if *access == BitAccess::new(0, 0) => {
+            match_slt_scan_indexed_input(variable, index, *access, spec, state_variables, arena)
+        }
+        SLTNode::Slice { expr, access } if *access == BitAccess::new(0, 0) => {
+            let SLTNode::Input {
+                variable,
+                index,
+                access: input_access,
+                ..
+            } = arena.get(*expr)
+            else {
+                return None;
+            };
+            match_slt_scan_indexed_input(
+                variable,
+                index,
+                *input_access,
+                spec,
+                state_variables,
+                arena,
+            )
+        }
+        _ => None,
+    }
+}
+
+fn lift_slt_scan_lane_expr<A: Hash + Eq + Clone>(
+    node: NodeId,
+    spec: &FoldGroupLowerSpec<'_, A>,
+    state_variables: &[&A],
+    arena: &SLTNodeArena<A>,
+) -> Option<SLTVectorExpr<A>> {
+    if let Some(input) = match_slt_scan_indexed_bit(node, spec, state_variables, arena) {
+        return Some(input);
+    }
+    let mut forbidden = Vec::with_capacity(state_variables.len() + 1);
+    forbidden.push(spec.loop_var);
+    forbidden.extend_from_slice(state_variables);
+    if slt_width(node, arena) == 1 && !slt_tree_reads_any_variable(node, &forbidden, arena) {
+        return Some(SLTVectorExpr::Broadcast(node));
+    }
+    match arena.get(node) {
+        SLTNode::Binary(index, BinaryOp::LtU, bound)
+            if slt_is_scan_loop_value(*index, spec, arena)
+                && !slt_tree_reads_any_variable(*bound, &forbidden, arena) =>
+        {
+            Some(SLTVectorExpr::LowOnes { bound: *bound })
+        }
+        SLTNode::Binary(lhs, op, rhs) => {
+            let op = normalized_slt_lane_op(*op)?;
+            Some(SLTVectorExpr::Binary {
+                lhs: Box::new(lift_slt_scan_lane_expr(*lhs, spec, state_variables, arena)?),
+                op,
+                rhs: Box::new(lift_slt_scan_lane_expr(*rhs, spec, state_variables, arena)?),
+            })
+        }
+        SLTNode::Unary(UnaryOp::LogicNot | UnaryOp::BitNot, inner) => {
+            Some(SLTVectorExpr::Not(Box::new(lift_slt_scan_lane_expr(
+                *inner,
+                spec,
+                state_variables,
+                arena,
+            )?)))
+        }
+        _ => None,
+    }
+}
+
+fn slt_binary_operands<A: Hash + Eq + Clone>(
+    node: NodeId,
+    op: BinaryOp,
+    arena: &SLTNodeArena<A>,
+) -> Option<(NodeId, NodeId)> {
+    let SLTNode::Binary(lhs, actual, rhs) = arena.get(node) else {
+        return None;
+    };
+    (*actual == op).then_some((*lhs, *rhs))
+}
+
+fn slt_matches_commutative_pair<A: Hash + Eq + Clone>(
+    node: NodeId,
+    ops: &[BinaryOp],
+    lhs: NodeId,
+    rhs: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    matches!(
+        arena.get(node),
+        SLTNode::Binary(actual_lhs, op, actual_rhs)
+            if ops.contains(op)
+                && ((*actual_lhs == lhs && *actual_rhs == rhs)
+                    || (*actual_lhs == rhs && *actual_rhs == lhs))
+    )
+}
+
+fn match_slt_scan_found_update<A: Hash + Eq + Clone>(
+    state: &SLTForFoldGroupState<A>,
+    arena: &SLTNodeArena<A>,
+) -> Option<(NodeId, NodeId, NodeId)> {
+    if state.target.access != BitAccess::new(0, 0) || slt_const_u64(state.initial, arena) != Some(0)
+    {
+        return None;
+    }
+    let SLTNode::Mux {
+        cond,
+        then_expr,
+        else_expr,
+    } = arena.get(state.update)
+    else {
+        return None;
+    };
+    if !slt_is_exact_state_input(*else_expr, state, arena) {
+        return None;
+    }
+    let SLTNode::Binary(lhs, BinaryOp::Or | BinaryOp::LogicOr, rhs) = arena.get(*then_expr) else {
+        return None;
+    };
+    let source = if slt_is_exact_state_input(*lhs, state, arena) {
+        *rhs
+    } else if slt_is_exact_state_input(*rhs, state, arena) {
+        *lhs
+    } else {
+        return None;
+    };
+    (slt_width(source, arena) == 1).then_some((*cond, source, *else_expr))
+}
+
+fn match_slt_scan_offset<A: Hash + Eq + Clone>(
+    node: NodeId,
+    spec: &FoldGroupLowerSpec<'_, A>,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    slt_is_scan_loop_value(node, spec, arena)
+}
+
+fn match_slt_scan_zext_bit<A: Hash + Eq + Clone>(
+    node: NodeId,
+    width: usize,
+    arena: &SLTNodeArena<A>,
+) -> Option<NodeId> {
+    if width == 1 && slt_width(node, arena) == 1 {
+        return Some(node);
+    }
+    let SLTNode::Concat(parts) = arena.get(node) else {
+        return None;
+    };
+    let (bit, bit_width) = parts.last().copied()?;
+    (bit_width == 1
+        && slt_width(bit, arena) == 1
+        && parts
+            .iter()
+            .map(|(_, part_width)| *part_width)
+            .sum::<usize>()
+            == width
+        && parts[..parts.len() - 1]
+            .iter()
+            .all(|(part, _)| slt_const_u64(*part, arena) == Some(0)))
+    .then_some(bit)
+}
+
+fn match_slt_scan_insert<A: Hash + Eq + Clone>(
+    node: NodeId,
+    old: NodeId,
+    width: usize,
+    spec: &FoldGroupLowerSpec<'_, A>,
+    arena: &SLTNodeArena<A>,
+) -> Option<NodeId> {
+    let (lhs, rhs) = slt_binary_operands(node, BinaryOp::Or, arena)?;
+    for (old_masked, new_masked) in [(lhs, rhs), (rhs, lhs)] {
+        let (old_lhs, old_rhs) = slt_binary_operands(old_masked, BinaryOp::And, arena)?;
+        let inverted_mask = if old_lhs == old {
+            old_rhs
+        } else if old_rhs == old {
+            old_lhs
+        } else {
+            continue;
+        };
+        let SLTNode::Unary(UnaryOp::BitNot, mask) = arena.get(inverted_mask) else {
+            continue;
+        };
+        let SLTNode::Binary(one, BinaryOp::Shl, offset) = arena.get(*mask) else {
+            continue;
+        };
+        if slt_width(*mask, arena) != width
+            || slt_const_u64(*one, arena) != Some(1)
+            || slt_width(*one, arena) != width
+            || !match_slt_scan_offset(*offset, spec, arena)
+        {
+            continue;
+        }
+        let (new_lhs, new_rhs) = slt_binary_operands(new_masked, BinaryOp::And, arena)?;
+        let shifted = if new_lhs == *mask {
+            new_rhs
+        } else if new_rhs == *mask {
+            new_lhs
+        } else {
+            continue;
+        };
+        let SLTNode::Binary(value, BinaryOp::Shl, value_offset) = arena.get(shifted) else {
+            continue;
+        };
+        if value_offset != offset {
+            continue;
+        }
+        if let Some(bit) = match_slt_scan_zext_bit(*value, width, arena) {
+            return Some(bit);
+        }
+    }
+    None
+}
+
+fn match_slt_scan_mode_test<A: Hash + Eq + Clone>(
+    node: NodeId,
+    expected: u64,
+    forbidden: &[&A],
+    arena: &SLTNodeArena<A>,
+) -> Option<NodeId> {
+    let SLTNode::Binary(lhs, BinaryOp::Eq | BinaryOp::EqWildcard, rhs) = arena.get(node) else {
+        return None;
+    };
+    let mode = if slt_const_u64(*lhs, arena) == Some(expected) {
+        *rhs
+    } else if slt_const_u64(*rhs, arena) == Some(expected) {
+        *lhs
+    } else {
+        return None;
+    };
+    (slt_width(mode, arena) == 2 && !slt_tree_reads_any_variable(mode, forbidden, arena))
+        .then_some(mode)
+}
+
+fn match_slt_scan_selected_bit<A: Hash + Eq + Clone>(
+    node: NodeId,
+    found: NodeId,
+    source: NodeId,
+    forbidden: &[&A],
+    arena: &SLTNodeArena<A>,
+) -> Option<(NodeId, NodeId)> {
+    let not_found = match_slt_boolean_not(node, arena).filter(|inner| *inner == found);
+    if not_found.is_some() {
+        return None;
+    }
+    let SLTNode::Mux {
+        cond: before_cond,
+        then_expr: before,
+        else_expr,
+    } = arena.get(node)
+    else {
+        return None;
+    };
+    let SLTNode::Mux {
+        cond: first_cond,
+        then_expr: first,
+        else_expr: through,
+    } = arena.get(*else_expr)
+    else {
+        return None;
+    };
+    let not_found = match_slt_boolean_not(*through, arena)?;
+    if not_found != found {
+        return None;
+    }
+    let before_matches = match arena.get(*before) {
+        SLTNode::Binary(lhs, BinaryOp::And | BinaryOp::LogicAnd, rhs) => {
+            (match_slt_boolean_not(*lhs, arena) == Some(found)
+                && match_slt_boolean_not(*rhs, arena) == Some(source))
+                || (match_slt_boolean_not(*rhs, arena) == Some(found)
+                    && match_slt_boolean_not(*lhs, arena) == Some(source))
+        }
+        _ => false,
+    };
+    if !before_matches
+        || !slt_matches_commutative_pair(
+            *first,
+            &[BinaryOp::And, BinaryOp::LogicAnd],
+            *through,
+            source,
+            arena,
+        )
+    {
+        return None;
+    }
+    let before_mode = match_slt_scan_mode_test(*before_cond, 1, forbidden, arena)?;
+    let first_mode = match_slt_scan_mode_test(*first_cond, 2, forbidden, arena)?;
+    (before_mode == first_mode).then_some((*before_cond, *first_cond))
+}
+
+fn match_slt_or_scan_plan<A: Hash + Eq + Clone>(
+    spec: &FoldGroupLowerSpec<'_, A>,
+    arena: &SLTNodeArena<A>,
+) -> Option<SLTOrScanPlan<A>> {
+    if !slt_scan_domain_preserves_identity(spec) || spec.states.len() != 2 {
+        return None;
+    }
+    let state_variables = spec
+        .states
+        .iter()
+        .map(|state| &state.target.id)
+        .collect::<Vec<_>>();
+    for (found_state, found) in spec.states.iter().enumerate() {
+        let Some((active, source, old_found)) = match_slt_scan_found_update(found, arena) else {
+            continue;
+        };
+        let vector_state = 1 - found_state;
+        let vector = &spec.states[vector_state];
+        let width = vector.target.access.msb - vector.target.access.lsb + 1;
+        if vector.target.access.lsb != 0
+            || width != spec.trip_count
+            || slt_width(vector.initial, arena) != width
+        {
+            continue;
+        }
+        let SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } = arena.get(vector.update)
+        else {
+            continue;
+        };
+        if *cond != active || !slt_is_exact_state_input(*else_expr, vector, arena) {
+            continue;
+        }
+        let Some(new_bit) = match_slt_scan_insert(*then_expr, *else_expr, width, spec, arena)
+        else {
+            continue;
+        };
+        let mut forbidden = Vec::with_capacity(state_variables.len() + 1);
+        forbidden.push(spec.loop_var);
+        forbidden.extend(state_variables.iter().copied());
+        let Some((select_before, select_first)) =
+            match_slt_scan_selected_bit(new_bit, old_found, source, &forbidden, arena)
+        else {
+            continue;
+        };
+        let active = lift_slt_scan_lane_expr(active, spec, &state_variables, arena)?;
+        let source = match_slt_scan_indexed_bit(source, spec, &state_variables, arena)?;
+        return Some(SLTOrScanPlan {
+            vector_state,
+            found_state,
+            width,
+            active,
+            source,
+            select_before,
+            select_first,
+        });
+    }
+    None
+}
+
+#[cfg(test)]
+pub(crate) fn matches_slt_or_scan_group<A: Hash + Eq + Clone>(
+    root: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    FoldGroupLowerSpec::from_root(root, arena)
+        .and_then(|spec| match_slt_or_scan_plan(&spec, arena))
+        .is_some()
+}
+
 impl SLTToSIRLowerer {
     pub fn new(four_state: bool) -> Self {
         Self {
@@ -1161,6 +1752,17 @@ impl SLTToSIRLowerer {
         else {
             return false;
         };
+        // A word-level scan is strictly cheaper than putting this group back
+        // into a shared counted loop.  Leave it for ordinary single-root
+        // lowering, which can apply the algebraic plan without weakening the
+        // joint-lowering transaction.
+        if !self.four_state
+            && specs
+                .iter()
+                .any(|spec| match_slt_or_scan_plan(spec, arena).is_some())
+        {
+            return false;
+        }
         if !Self::joint_fold_group_specs_are_legal(&specs, arena) {
             return false;
         }
@@ -1365,6 +1967,9 @@ impl SLTToSIRLowerer {
                 cache,
                 None,
             ),
+            SLTVectorExpr::StaticInput { variable, access } => {
+                self.lower_input(builder, &variable, &[], &access, arena, cache, None)
+            }
             SLTVectorExpr::Broadcast(bit) => {
                 let bit = self.lower_inner(builder, bit, arena, cache, None, allow_cache);
                 if width == 1 {
@@ -1391,8 +1996,51 @@ impl SLTToSIRLowerer {
                 builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
                 let shifted = builder.alloc_bit(width, false);
                 builder.emit(SIRInstruction::Binary(shifted, one, BinaryOp::Shl, bound));
+                let low_ones = builder.alloc_bit(width, false);
+                builder.emit(SIRInstruction::Binary(
+                    low_ones,
+                    shifted,
+                    BinaryOp::Sub,
+                    one,
+                ));
+
+                // A shift count wider than the host word may have non-zero
+                // high limbs even when its low limb is zero.  Saturate from a
+                // full-width unsigned comparison instead of relying on the
+                // legalized shift to distinguish that case.
+                let bound_width = builder.register(&bound).width();
+                let width_bits = (usize::BITS as usize - width.leading_zeros() as usize).max(1);
+                if bound_width < width_bits {
+                    return low_ones;
+                }
+                let compare_width = bound_width.max(width_bits);
+                let extended_bound = self.cast_reg_width_ext(builder, bound, compare_width, false);
+                let width_value = builder.alloc_bit(compare_width, false);
+                builder.emit(SIRInstruction::Imm(
+                    width_value,
+                    SIRValue::new(BigUint::from(width)),
+                ));
+                let saturated = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    saturated,
+                    extended_bound,
+                    BinaryOp::GeU,
+                    width_value,
+                ));
+                let all_ones = builder.alloc_bit(width, false);
+                builder.emit(SIRInstruction::Imm(
+                    all_ones,
+                    SIRValue::new((BigUint::from(1u8) << width) - BigUint::from(1u8)),
+                ));
                 let result = builder.alloc_bit(width, false);
-                builder.emit(SIRInstruction::Binary(result, shifted, BinaryOp::Sub, one));
+                builder.emit(SIRInstruction::Mux(result, saturated, all_ones, low_ones));
+                result
+            }
+            SLTVectorExpr::Not(inner) => {
+                let inner =
+                    self.lower_slt_vector_expr(builder, *inner, width, arena, cache, allow_cache);
+                let result = builder.alloc_bit(width, false);
+                builder.emit(SIRInstruction::Unary(result, UnaryOp::BitNot, inner));
                 result
             }
             SLTVectorExpr::Binary { lhs, op, rhs } => {
@@ -3347,6 +3995,146 @@ impl SLTToSIRLowerer {
         packed
     }
 
+    fn lower_or_scan_plan<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        spec: &FoldGroupLowerSpec<'_, A>,
+        plan: SLTOrScanPlan<A>,
+        allow_cache: bool,
+    ) -> RegisterId {
+        debug_assert!(!self.four_state);
+        let initial_states = spec
+            .states
+            .iter()
+            .map(|state| {
+                let initial =
+                    self.lower_inner(builder, state.initial, arena, cache, None, allow_cache);
+                self.cast_reg_width(
+                    builder,
+                    initial,
+                    state.target.access.msb - state.target.access.lsb + 1,
+                )
+            })
+            .collect::<Vec<_>>();
+        let guard = self.lower_inner(builder, spec.entry_guard, arena, cache, None, allow_cache);
+        let active =
+            self.lower_slt_vector_expr(builder, plan.active, plan.width, arena, cache, allow_cache);
+        let source =
+            self.lower_slt_vector_expr(builder, plan.source, plan.width, arena, cache, allow_cache);
+
+        let hits = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(hits, active, BinaryOp::And, source));
+        let zero = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let negated_hits = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(
+            negated_hits,
+            zero,
+            BinaryOp::Sub,
+            hits,
+        ));
+        let first = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(
+            first,
+            hits,
+            BinaryOp::And,
+            negated_hits,
+        ));
+        let one = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let before = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(before, first, BinaryOp::Sub, one));
+        // `before | first` is true exactly through the first hit.  It is all
+        // ones when `hits` is zero, matching the sequential `!found` state.
+        let through = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(through, before, BinaryOp::Or, first));
+
+        let not_source = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Unary(not_source, UnaryOp::BitNot, source));
+        let before_bits = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(
+            before_bits,
+            through,
+            BinaryOp::And,
+            not_source,
+        ));
+        let first_bits = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(
+            first_bits,
+            through,
+            BinaryOp::And,
+            source,
+        ));
+        let select_first =
+            self.lower_inner(builder, plan.select_first, arena, cache, None, allow_cache);
+        let first_or_through = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Mux(
+            first_or_through,
+            select_first,
+            first_bits,
+            through,
+        ));
+        let select_before =
+            self.lower_inner(builder, plan.select_before, arena, cache, None, allow_cache);
+        let selected = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Mux(
+            selected,
+            select_before,
+            before_bits,
+            first_or_through,
+        ));
+
+        let not_active = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Unary(not_active, UnaryOp::BitNot, active));
+        let preserved = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(
+            preserved,
+            initial_states[plan.vector_state],
+            BinaryOp::And,
+            not_active,
+        ));
+        let replaced = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(
+            replaced,
+            selected,
+            BinaryOp::And,
+            active,
+        ));
+        let vector_result = builder.alloc_bit(plan.width, false);
+        builder.emit(SIRInstruction::Binary(
+            vector_result,
+            preserved,
+            BinaryOp::Or,
+            replaced,
+        ));
+        let found_result = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Unary(found_result, UnaryOp::Or, hits));
+
+        let mut candidates = initial_states.clone();
+        candidates[plan.vector_state] = vector_result;
+        candidates[plan.found_state] = found_result;
+        let final_states = candidates
+            .into_iter()
+            .zip(initial_states)
+            .zip(spec.states)
+            .map(
+                |((candidate, initial), state)| match slt_const_u64(spec.entry_guard, arena) {
+                    Some(0) => initial,
+                    Some(_) => candidate,
+                    None => {
+                        let result = builder
+                            .alloc_logic(state.target.access.msb - state.target.access.lsb + 1);
+                        builder.emit(SIRInstruction::Mux(result, guard, candidate, initial));
+                        result
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        self.pack_fold_group_states(builder, &final_states)
+    }
+
     /// Lower one or more independent, fixed-trip-count multi-state folds.
     ///
     /// The loop body sees one immutable set of block parameters, so every
@@ -3376,6 +4164,14 @@ impl SLTToSIRLowerer {
                 && spec.trip_count == first.trip_count
                 && spec.entry_guard == first.entry_guard
         }));
+
+        if !self.four_state
+            && outer_env.is_none()
+            && specs.len() == 1
+            && let Some(plan) = match_slt_or_scan_plan(first, arena)
+        {
+            return vec![self.lower_or_scan_plan(builder, arena, cache, first, plan, allow_cache)];
+        }
 
         let guard = self.lower_inner(
             builder,
@@ -4240,6 +5036,13 @@ mod tests {
     /// exact iteration and four-state merge semantics without adding a second
     /// production execution path.
     fn execute_fold_group_sir(eu: &ExecutionUnit<u32>) -> crate::HashMap<RegisterId, TestSIRValue> {
+        execute_fold_group_sir_with_memory(eu, &crate::HashMap::default())
+    }
+
+    fn execute_fold_group_sir_with_memory(
+        eu: &ExecutionUnit<u32>,
+        memory: &crate::HashMap<u32, TestSIRValue>,
+    ) -> crate::HashMap<RegisterId, TestSIRValue> {
         let mut values = crate::HashMap::default();
         let mut current = eu.entry_block_id;
 
@@ -4265,9 +5068,27 @@ mod tests {
                         let modulus = BigUint::from(1u8) << width;
                         let payload = match op {
                             BinaryOp::Add => (&lhs.payload + &rhs.payload) % &modulus,
+                            BinaryOp::Mul => (&lhs.payload * &rhs.payload) % &modulus,
                             BinaryOp::Sub => (&lhs.payload + &modulus - &rhs.payload) % &modulus,
                             BinaryOp::And => &lhs.payload & &rhs.payload,
                             BinaryOp::Or => &lhs.payload | &rhs.payload,
+                            BinaryOp::LogicAnd => BigUint::from(
+                                lhs.payload != BigUint::from(0u8)
+                                    && rhs.payload != BigUint::from(0u8),
+                            ),
+                            BinaryOp::LogicOr => BigUint::from(
+                                lhs.payload != BigUint::from(0u8)
+                                    || rhs.payload != BigUint::from(0u8),
+                            ),
+                            BinaryOp::Shl => {
+                                let shift =
+                                    rhs.payload.to_u64_digits().first().copied().unwrap_or(0);
+                                if shift > usize::MAX as u64 {
+                                    BigUint::from(0u8)
+                                } else {
+                                    (&lhs.payload << shift as usize) % &modulus
+                                }
+                            }
                             BinaryOp::Shr => {
                                 let shift =
                                     rhs.payload.to_u64_digits().first().copied().unwrap_or(0);
@@ -4277,8 +5098,11 @@ mod tests {
                                     &lhs.payload >> shift as usize
                                 }
                             }
-                            BinaryOp::Eq => BigUint::from(lhs.payload == rhs.payload),
+                            BinaryOp::Eq | BinaryOp::EqWildcard => {
+                                BigUint::from(lhs.payload == rhs.payload)
+                            }
                             BinaryOp::Ne => BigUint::from(lhs.payload != rhs.payload),
+                            BinaryOp::GeU => BigUint::from(lhs.payload >= rhs.payload),
                             other => panic!("unexpected grouped-fold binary op {other:?}"),
                         };
                         values.insert(
@@ -4289,8 +5113,46 @@ mod tests {
                             },
                         );
                     }
-                    SIRInstruction::Unary(dst, UnaryOp::Ident, src) => {
-                        values.insert(*dst, values[src].clone());
+                    SIRInstruction::Unary(dst, op, src) => {
+                        let width = eu.register_map[dst].width();
+                        let value = &values[src];
+                        let payload = match op {
+                            UnaryOp::Ident => value.payload.clone(),
+                            UnaryOp::BitNot => &width_mask(width) ^ &value.payload,
+                            UnaryOp::LogicNot => BigUint::from(value.payload == BigUint::from(0u8)),
+                            UnaryOp::Or => BigUint::from(value.payload != BigUint::from(0u8)),
+                            other => panic!("unexpected grouped-fold unary op {other:?}"),
+                        };
+                        values.insert(
+                            *dst,
+                            TestSIRValue {
+                                payload,
+                                mask: value.mask.clone(),
+                            },
+                        );
+                    }
+                    SIRInstruction::Load(dst, address, offset, width) => {
+                        let offset = match offset {
+                            SIROffset::Static(offset) => *offset,
+                            SIROffset::Dynamic(offset) => values[offset]
+                                .payload
+                                .to_u64_digits()
+                                .first()
+                                .copied()
+                                .unwrap_or(0)
+                                as usize,
+                        };
+                        let source = memory
+                            .get(address)
+                            .unwrap_or_else(|| panic!("missing test memory value at {address}"));
+                        let mask = width_mask(*width);
+                        values.insert(
+                            *dst,
+                            TestSIRValue {
+                                payload: (&source.payload >> offset) & &mask,
+                                mask: (&source.mask >> offset) & mask,
+                            },
+                        );
                     }
                     SIRInstruction::Concat(dst, args) => {
                         let mut payload = BigUint::from(0u8);
@@ -4362,6 +5224,463 @@ mod tests {
             current = next;
         }
         panic!("grouped fold did not terminate at its exact trip count")
+    }
+
+    const SCAN_VECTOR_STATE: u32 = 100;
+    const SCAN_FOUND_STATE: u32 = 101;
+    const SCAN_SOURCE: u32 = 102;
+    const SCAN_MASK: u32 = 103;
+    const SCAN_BOUND: u32 = 104;
+    const SCAN_UNMASKED: u32 = 105;
+    const SCAN_MODE: u32 = 106;
+    const SCAN_GUARD: u32 = 107;
+    const SCAN_LOOP: u32 = 108;
+
+    #[derive(Clone, Copy)]
+    enum ScanMutation {
+        None,
+        OverflowFalseGuard,
+        DifferentActive,
+        NonIdentityOffset,
+        NonIdentityInputStride,
+        NarrowLoopMask,
+        WrongBeforeValue,
+    }
+
+    fn scan_dynamic_bit(
+        arena: &mut SLTNodeArena<u32>,
+        variable: u32,
+        loop_value: NodeId,
+        width: usize,
+        stride: usize,
+    ) -> NodeId {
+        let _ = width;
+        arena
+            .alloc(SLTNode::Input {
+                variable,
+                signed: false,
+                index: vec![crate::logic_tree::comb::SLTIndex {
+                    node: loop_value,
+                    stride,
+                }],
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap()
+    }
+
+    fn synthetic_or_scan_group(
+        width: usize,
+        mutation: ScanMutation,
+    ) -> (SLTNodeArena<u32>, NodeId) {
+        let mut arena = SLTNodeArena::new();
+        let loop_value = input(&mut arena, SCAN_LOOP, 64);
+        let old_vector = input(&mut arena, SCAN_VECTOR_STATE, width);
+        let old_found = input(&mut arena, SCAN_FOUND_STATE, 1);
+        let source = scan_dynamic_bit(
+            &mut arena,
+            SCAN_SOURCE,
+            loop_value,
+            width,
+            if matches!(mutation, ScanMutation::NonIdentityInputStride) {
+                2
+            } else {
+                1
+            },
+        );
+        let mask = scan_dynamic_bit(&mut arena, SCAN_MASK, loop_value, width, 1);
+        let bound = input(&mut arena, SCAN_BOUND, 8);
+        let unmasked = input(&mut arena, SCAN_UNMASKED, 1);
+        let mode = input(&mut arena, SCAN_MODE, 2);
+        let guard = if matches!(mutation, ScanMutation::OverflowFalseGuard) {
+            let one = constant(&mut arena, 1, 1);
+            arena
+                .alloc(SLTNode::Binary(one, BinaryOp::Add, one))
+                .unwrap()
+        } else {
+            input(&mut arena, SCAN_GUARD, 1)
+        };
+
+        let lane_bits = slt_scan_lane_bits(width);
+        let valid_lane_mask = (1u64 << lane_bits) - 1;
+        let lane_mask = constant(
+            &mut arena,
+            if matches!(mutation, ScanMutation::NarrowLoopMask) {
+                valid_lane_mask >> 1
+            } else {
+                0xff
+            },
+            64,
+        );
+        let truncated_loop = arena
+            .alloc(SLTNode::Binary(loop_value, BinaryOp::And, lane_mask))
+            .unwrap();
+        let in_range = arena
+            .alloc(SLTNode::Binary(truncated_loop, BinaryOp::LtU, bound))
+            .unwrap();
+        let enabled = arena
+            .alloc(SLTNode::Binary(unmasked, BinaryOp::LogicOr, mask))
+            .unwrap();
+        let active = arena
+            .alloc(SLTNode::Binary(in_range, BinaryOp::LogicAnd, enabled))
+            .unwrap();
+        let found_next = arena
+            .alloc(SLTNode::Binary(old_found, BinaryOp::LogicOr, source))
+            .unwrap();
+        let found_update = arena
+            .alloc(SLTNode::Mux {
+                cond: active,
+                then_expr: found_next,
+                else_expr: old_found,
+            })
+            .unwrap();
+
+        let not_found = arena
+            .alloc(SLTNode::Unary(UnaryOp::LogicNot, old_found))
+            .unwrap();
+        let not_source = arena
+            .alloc(SLTNode::Unary(UnaryOp::LogicNot, source))
+            .unwrap();
+        let before = arena
+            .alloc(SLTNode::Binary(
+                not_found,
+                BinaryOp::LogicAnd,
+                if matches!(mutation, ScanMutation::WrongBeforeValue) {
+                    source
+                } else {
+                    not_source
+                },
+            ))
+            .unwrap();
+        let first = arena
+            .alloc(SLTNode::Binary(not_found, BinaryOp::LogicAnd, source))
+            .unwrap();
+        let one_mode = constant(&mut arena, 1, 2);
+        let two_mode = constant(&mut arena, 2, 2);
+        let is_before = arena
+            .alloc(SLTNode::Binary(mode, BinaryOp::EqWildcard, one_mode))
+            .unwrap();
+        let is_first = arena
+            .alloc(SLTNode::Binary(mode, BinaryOp::EqWildcard, two_mode))
+            .unwrap();
+        let first_or_through = arena
+            .alloc(SLTNode::Mux {
+                cond: is_first,
+                then_expr: first,
+                else_expr: not_found,
+            })
+            .unwrap();
+        let selected = arena
+            .alloc(SLTNode::Mux {
+                cond: is_before,
+                then_expr: before,
+                else_expr: first_or_through,
+            })
+            .unwrap();
+
+        let zero64 = constant(&mut arena, 0, 64);
+        let one64 = constant(&mut arena, 1, 64);
+        let scaled = arena
+            .alloc(SLTNode::Binary(loop_value, BinaryOp::Mul, one64))
+            .unwrap();
+        let identity_offset = arena
+            .alloc(SLTNode::Binary(zero64, BinaryOp::Add, scaled))
+            .unwrap();
+        let offset = if matches!(mutation, ScanMutation::NonIdentityOffset) {
+            arena
+                .alloc(SLTNode::Binary(identity_offset, BinaryOp::Add, one64))
+                .unwrap()
+        } else {
+            identity_offset
+        };
+        let one = constant(&mut arena, 1, width);
+        let bit_mask = arena
+            .alloc(SLTNode::Binary(one, BinaryOp::Shl, offset))
+            .unwrap();
+        let inverted_mask = arena
+            .alloc(SLTNode::Unary(UnaryOp::BitNot, bit_mask))
+            .unwrap();
+        let preserved = arena
+            .alloc(SLTNode::Binary(old_vector, BinaryOp::And, inverted_mask))
+            .unwrap();
+        let extended = if width == 1 {
+            selected
+        } else {
+            let zero = constant(&mut arena, 0, width - 1);
+            arena
+                .alloc(SLTNode::Concat(vec![(zero, width - 1), (selected, 1)]))
+                .unwrap()
+        };
+        let shifted = arena
+            .alloc(SLTNode::Binary(extended, BinaryOp::Shl, offset))
+            .unwrap();
+        let inserted_bit = arena
+            .alloc(SLTNode::Binary(shifted, BinaryOp::And, bit_mask))
+            .unwrap();
+        let inserted = arena
+            .alloc(SLTNode::Binary(preserved, BinaryOp::Or, inserted_bit))
+            .unwrap();
+        let vector_update = arena
+            .alloc(SLTNode::Mux {
+                cond: if matches!(mutation, ScanMutation::DifferentActive) {
+                    source
+                } else {
+                    active
+                },
+                then_expr: inserted,
+                else_expr: old_vector,
+            })
+            .unwrap();
+        let initial_vector = input(&mut arena, SCAN_VECTOR_STATE, width);
+        let initial_found = constant(&mut arena, 0, 1);
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: SCAN_LOOP,
+                loop_width: 64,
+                loop_signed: false,
+                start: BigInt::from(0u8),
+                step: BigInt::from(1u8),
+                trip_count: width,
+                entry_guard: guard,
+                states: vec![
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(SCAN_VECTOR_STATE, 0, width - 1),
+                        initial: initial_vector,
+                        update: vector_update,
+                    },
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(SCAN_FOUND_STATE, 0, 0),
+                        initial: initial_found,
+                        update: found_update,
+                    },
+                ],
+            })
+            .unwrap();
+        (arena, group)
+    }
+
+    fn lower_synthetic_scan(
+        width: usize,
+        mutation: ScanMutation,
+        four_state: bool,
+    ) -> (ExecutionUnit<u32>, RegisterId) {
+        let (arena, group) = synthetic_or_scan_group(width, mutation);
+        let mut builder = SIRBuilder::new();
+        let result = SLTToSIRLowerer::new(four_state).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        (finish_lowering(builder), result)
+    }
+
+    fn scan_reference(
+        width: usize,
+        source: u64,
+        mask: u64,
+        old: u64,
+        bound: u64,
+        unmasked: bool,
+        mode: u64,
+        guard: bool,
+    ) -> (u64, bool) {
+        if !guard {
+            return (old, false);
+        }
+        let mut result = old;
+        let mut found = false;
+        for lane in 0..width {
+            let active = (lane as u64) < bound && (unmasked || (mask >> lane) & 1 != 0);
+            if active {
+                let bit = (source >> lane) & 1 != 0;
+                let selected = match mode {
+                    1 => !found && !bit,
+                    2 => !found && bit,
+                    _ => !found,
+                };
+                let lane_mask = 1u64 << lane;
+                result = if selected {
+                    result | lane_mask
+                } else {
+                    result & !lane_mask
+                };
+                found |= bit;
+            }
+        }
+        (result, found)
+    }
+
+    #[test]
+    fn exact_two_state_or_scan_lowers_without_a_runtime_loop() {
+        let (eu, _) = lower_synthetic_scan(8, ScanMutation::None, false);
+        assert_eq!(branch_count(&eu), 0);
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Unary(_, UnaryOp::Or, _)
+            )),
+            1
+        );
+    }
+
+    #[test]
+    fn scan_entry_guard_constant_evaluation_uses_bitvector_width() {
+        let width = 4;
+        let old = 0b1010u64;
+        let (eu, result) = lower_synthetic_scan(width, ScanMutation::OverflowFalseGuard, false);
+        let memory = crate::HashMap::from_iter([
+            (
+                SCAN_VECTOR_STATE,
+                TestSIRValue {
+                    payload: old.into(),
+                    mask: 0u8.into(),
+                },
+            ),
+            (
+                SCAN_SOURCE,
+                TestSIRValue {
+                    payload: 0b1111u8.into(),
+                    mask: 0u8.into(),
+                },
+            ),
+            (
+                SCAN_MASK,
+                TestSIRValue {
+                    payload: 0b1111u8.into(),
+                    mask: 0u8.into(),
+                },
+            ),
+            (
+                SCAN_BOUND,
+                TestSIRValue {
+                    payload: width.into(),
+                    mask: 0u8.into(),
+                },
+            ),
+            (
+                SCAN_UNMASKED,
+                TestSIRValue {
+                    payload: 1u8.into(),
+                    mask: 0u8.into(),
+                },
+            ),
+            (
+                SCAN_MODE,
+                TestSIRValue {
+                    payload: 2u8.into(),
+                    mask: 0u8.into(),
+                },
+            ),
+        ]);
+
+        assert_eq!(branch_count(&eu), 0);
+        assert_eq!(
+            execute_fold_group_sir_with_memory(&eu, &memory)[&result].payload,
+            BigUint::from(old << 1)
+        );
+    }
+
+    #[test]
+    fn word_scan_matches_the_sequential_first_true_semantics_exhaustively() {
+        for width in 1..=4 {
+            let (eu, result) = lower_synthetic_scan(width, ScanMutation::None, false);
+            let values = 1u64 << width;
+            for source in 0..values {
+                for mask in 0..values {
+                    for old in 0..values {
+                        for bound in 0..=width as u64 {
+                            for unmasked in [false, true] {
+                                for mode in 1..=3 {
+                                    for guard in [false, true] {
+                                        let memory = crate::HashMap::from_iter([
+                                            (
+                                                SCAN_VECTOR_STATE,
+                                                TestSIRValue {
+                                                    payload: old.into(),
+                                                    mask: 0u8.into(),
+                                                },
+                                            ),
+                                            (
+                                                SCAN_SOURCE,
+                                                TestSIRValue {
+                                                    payload: source.into(),
+                                                    mask: 0u8.into(),
+                                                },
+                                            ),
+                                            (
+                                                SCAN_MASK,
+                                                TestSIRValue {
+                                                    payload: mask.into(),
+                                                    mask: 0u8.into(),
+                                                },
+                                            ),
+                                            (
+                                                SCAN_BOUND,
+                                                TestSIRValue {
+                                                    payload: bound.into(),
+                                                    mask: 0u8.into(),
+                                                },
+                                            ),
+                                            (
+                                                SCAN_UNMASKED,
+                                                TestSIRValue {
+                                                    payload: u8::from(unmasked).into(),
+                                                    mask: 0u8.into(),
+                                                },
+                                            ),
+                                            (
+                                                SCAN_MODE,
+                                                TestSIRValue {
+                                                    payload: mode.into(),
+                                                    mask: 0u8.into(),
+                                                },
+                                            ),
+                                            (
+                                                SCAN_GUARD,
+                                                TestSIRValue {
+                                                    payload: u8::from(guard).into(),
+                                                    mask: 0u8.into(),
+                                                },
+                                            ),
+                                        ]);
+                                        let actual =
+                                            &execute_fold_group_sir_with_memory(&eu, &memory)
+                                                [&result]
+                                                .payload;
+                                        let (expected_vector, expected_found) = scan_reference(
+                                            width, source, mask, old, bound, unmasked, mode, guard,
+                                        );
+                                        let expected =
+                                            (expected_vector << 1) | u64::from(expected_found);
+                                        assert_eq!(
+                                            actual,
+                                            &BigUint::from(expected),
+                                            "width={width} source={source:#x} mask={mask:#x} old={old:#x} bound={bound} unmasked={unmasked} mode={mode} guard={guard}",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn or_scan_matcher_rejects_every_near_miss_and_four_state_mode() {
+        for mutation in [
+            ScanMutation::DifferentActive,
+            ScanMutation::NonIdentityOffset,
+            ScanMutation::NonIdentityInputStride,
+            ScanMutation::NarrowLoopMask,
+            ScanMutation::WrongBeforeValue,
+        ] {
+            let (eu, _) = lower_synthetic_scan(4, mutation, false);
+            assert!(branch_count(&eu) > 0);
+        }
+        let (eu, _) = lower_synthetic_scan(4, ScanMutation::None, true);
+        assert!(branch_count(&eu) > 0);
     }
 
     #[test]
@@ -4852,7 +6171,8 @@ mod tests {
         );
         assert_eq!(
             instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
-            0
+            1,
+            "the saturated low-ones mask needs one word-level select"
         );
         assert_eq!(
             instruction_count(&eu, |inst| matches!(
@@ -4861,6 +6181,41 @@ mod tests {
             )),
             0,
             "the scalar active predicates must not be reassembled one bit at a time"
+        );
+    }
+
+    #[test]
+    fn low_ones_saturates_when_only_a_wide_bound_high_limb_is_set() {
+        let mut arena = SLTNodeArena::new();
+        let bound = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8) << 64,
+                BigUint::from(0u8),
+                128,
+                false,
+            ))
+            .unwrap();
+        let mut builder = SIRBuilder::new();
+        let result = SLTToSIRLowerer::new(false).lower_slt_vector_expr(
+            &mut builder,
+            SLTVectorExpr::LowOnes { bound },
+            8,
+            &arena,
+            &mut crate::HashMap::default(),
+            true,
+        );
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            execute_fold_group_sir(&eu)[&result].payload,
+            BigUint::from(0xffu8)
+        );
+        assert_eq!(
+            instruction_count(&eu, |instruction| matches!(
+                instruction,
+                SIRInstruction::Binary(_, _, BinaryOp::GeU, _)
+            )),
+            1
         );
     }
 
@@ -4915,7 +6270,8 @@ mod tests {
         );
         assert_eq!(
             instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
-            0
+            1,
+            "the saturated low-ones mask needs one word-level select"
         );
         assert_eq!(
             instruction_count(&eu, |inst| matches!(

@@ -16,7 +16,6 @@ use super::{
 };
 use crate::ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
 use crate::logic_tree::range_store::RangeStore;
-use crate::parser::bitaccess::is_static_access;
 use crate::parser::loop_provenance::{LoopRecoveryCandidate, UnrolledLoopCandidate};
 use crate::parser::resolve_total_width;
 use crate::{HashMap, HashSet, ParserError};
@@ -210,9 +209,7 @@ fn collect_statement_variables(statement: &Statement, out: &mut Vec<VarId>) -> b
             }
             let dst = &assign.dst[0];
             out.push(dst.id);
-            is_static_access(&dst.index, &dst.select)
-                && collect_index_variables(&dst.index, out)
-                && collect_select_variables(&dst.select, out)
+            collect_index_variables(&dst.index, out) && collect_select_variables(&dst.select, out)
         }
         Statement::If(statement) => {
             collect_expression_variables(&statement.cond, out)
@@ -1071,7 +1068,7 @@ fn prove_group(
             .iter()
             .map(|&actual| specialize_slt_node(actual, None, None, &mut scratch, &mut actual_cache))
             .collect::<Option<Vec<_>>>()?;
-        if specialized_updates != canonical_actual {
+        if !proof_outputs_match(&specialized_updates, &canonical_actual, &mut scratch)? {
             return None;
         }
     }
@@ -1145,19 +1142,10 @@ fn persistent_full_width_targets(
             continue;
         }
         let width = resolve_total_width(module, module.variables.get(&destination.id)?).ok()?;
-        if width == 0 || !is_static_access(&destination.index, &destination.select) {
+        if width == 0 {
             return None;
         }
-        let access = crate::parser::bitaccess::eval_var_select(
-            module,
-            destination.id,
-            &destination.index,
-            &destination.select,
-        )
-        .ok()?;
-        if access != BitAccess::new(0, width - 1) {
-            return None;
-        }
+        let access = BitAccess::new(0, width - 1);
         targets.insert((destination.id, access.lsb, access.msb));
     }
     Some(
@@ -1341,7 +1329,7 @@ fn whole_fold_matches_expansion(
             specialize_slt_node(output, None, None, &mut proof_arena, &mut composed_cache)
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(canonical_expanded == canonical_composed)
+    proof_outputs_match(&canonical_expanded, &canonical_composed, &mut proof_arena)
 }
 
 fn map_symbolic_store_roots(
@@ -1614,6 +1602,232 @@ fn specialize_slt_node(
     };
     cache.insert(node, specialized);
     Some(specialized)
+}
+
+fn proof_outputs_match(
+    lhs: &[NodeId],
+    rhs: &[NodeId],
+    arena: &mut SLTNodeArena<VarId>,
+) -> Option<bool> {
+    // A constant-index LHS is represented as RangeStore slices/concats, while
+    // its dynamic template is a full-width mask/shift read-modify-write. Keep
+    // the proof exact by comparing their per-bit canonical forms. Operations
+    // that are not safely bit-decomposable remain opaque slices.
+    if lhs == rhs {
+        return Some(true);
+    }
+    if lhs.len() != rhs.len() {
+        return Some(false);
+    }
+
+    let mut bit_cache = HashMap::default();
+    for (&lhs, &rhs) in lhs.iter().zip(rhs) {
+        let width = get_width(lhs, arena);
+        if width != get_width(rhs, arena) {
+            return Some(false);
+        }
+        for bit in 0..width {
+            let lhs = canonicalize_proof_bit(lhs, bit, arena, &mut bit_cache)?;
+            let rhs = canonicalize_proof_bit(rhs, bit, arena, &mut bit_cache)?;
+            if lhs != rhs {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
+}
+
+fn canonicalize_proof_bit(
+    node: NodeId,
+    bit: usize,
+    arena: &mut SLTNodeArena<VarId>,
+    cache: &mut HashMap<(NodeId, usize), NodeId>,
+) -> Option<NodeId> {
+    if let Some(&canonical) = cache.get(&(node, bit)) {
+        return Some(canonical);
+    }
+    let width = get_width(node, arena);
+    if bit >= width {
+        return None;
+    }
+
+    let canonical = match arena.get(node).clone() {
+        SLTNode::Input {
+            variable,
+            index,
+            access,
+            ..
+        } if index.is_empty() => arena
+            .alloc(SLTNode::Input {
+                variable,
+                signed: false,
+                index,
+                access: BitAccess::new(access.lsb.checked_add(bit)?, access.lsb.checked_add(bit)?),
+            })
+            .ok()?,
+        SLTNode::Constant(value, mask, _, _) => arena
+            .alloc(SLTNode::Constant(
+                (&value >> bit) & BigUint::from(1u8),
+                (&mask >> bit) & BigUint::from(1u8),
+                1,
+                false,
+            ))
+            .ok()?,
+        SLTNode::Binary(lhs, op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor), rhs)
+            if bit < get_width(lhs, arena) && bit < get_width(rhs, arena) =>
+        {
+            let lhs = canonicalize_proof_bit(lhs, bit, arena, cache)?;
+            let rhs = canonicalize_proof_bit(rhs, bit, arena, cache)?;
+            alloc_proof_bit_binary(lhs, op, rhs, arena)?
+        }
+        SLTNode::Binary(lhs, op @ (BinaryOp::Shl | BinaryOp::Shr), rhs) => {
+            let Some(shift) = specialized_constant(rhs, arena)
+                .filter(|constant| constant.mask.is_zero())
+                .and_then(|constant| constant.value.to_usize())
+            else {
+                return alloc_opaque_proof_bit(node, bit, arena, cache);
+            };
+            let source_bit = match op {
+                BinaryOp::Shl => bit.checked_sub(shift),
+                BinaryOp::Shr => bit.checked_add(shift),
+                _ => unreachable!(),
+            };
+            match source_bit.filter(|&source_bit| source_bit < get_width(lhs, arena)) {
+                Some(source_bit) => canonicalize_proof_bit(lhs, source_bit, arena, cache)?,
+                None => alloc_proof_bit_constant(false, arena)?,
+            }
+        }
+        SLTNode::Unary(UnaryOp::BitNot, inner) if bit < get_width(inner, arena) => {
+            let inner = canonicalize_proof_bit(inner, bit, arena, cache)?;
+            alloc_proof_bit_not(inner, arena)?
+        }
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } if get_width(cond, arena) == 1
+            && bit < get_width(then_expr, arena)
+            && bit < get_width(else_expr, arena) =>
+        {
+            let cond = canonicalize_proof_bit(cond, 0, arena, cache)?;
+            let then_expr = canonicalize_proof_bit(then_expr, bit, arena, cache)?;
+            let else_expr = canonicalize_proof_bit(else_expr, bit, arena, cache)?;
+            if then_expr == else_expr {
+                then_expr
+            } else if let Some(value) = known_proof_bit(cond, arena) {
+                if value { then_expr } else { else_expr }
+            } else {
+                arena
+                    .alloc(SLTNode::Mux {
+                        cond,
+                        then_expr,
+                        else_expr,
+                    })
+                    .ok()?
+            }
+        }
+        SLTNode::Concat(parts) => {
+            let mut part_lsb = 0usize;
+            let mut selected = None;
+            for (part, part_width) in parts.into_iter().rev() {
+                let part_msb = part_lsb.checked_add(part_width)?;
+                if bit < part_msb {
+                    selected = Some(canonicalize_proof_bit(part, bit - part_lsb, arena, cache)?);
+                    break;
+                }
+                part_lsb = part_msb;
+            }
+            selected?
+        }
+        SLTNode::Slice { expr, access } => {
+            canonicalize_proof_bit(expr, access.lsb.checked_add(bit)?, arena, cache)?
+        }
+        SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return None,
+        _ => return alloc_opaque_proof_bit(node, bit, arena, cache),
+    };
+    cache.insert((node, bit), canonical);
+    Some(canonical)
+}
+
+fn alloc_opaque_proof_bit(
+    node: NodeId,
+    bit: usize,
+    arena: &mut SLTNodeArena<VarId>,
+    cache: &mut HashMap<(NodeId, usize), NodeId>,
+) -> Option<NodeId> {
+    let canonical = if get_width(node, arena) == 1 {
+        node
+    } else {
+        arena
+            .alloc(SLTNode::Slice {
+                expr: node,
+                access: BitAccess::new(bit, bit),
+            })
+            .ok()?
+    };
+    cache.insert((node, bit), canonical);
+    Some(canonical)
+}
+
+fn alloc_proof_bit_constant(value: bool, arena: &mut SLTNodeArena<VarId>) -> Option<NodeId> {
+    arena
+        .alloc(SLTNode::Constant(
+            BigUint::from(u8::from(value)),
+            BigUint::from(0u8),
+            1,
+            false,
+        ))
+        .ok()
+}
+
+fn known_proof_bit(node: NodeId, arena: &SLTNodeArena<VarId>) -> Option<bool> {
+    let constant = specialized_constant(node, arena)?;
+    (constant.width == 1 && constant.mask.is_zero()).then(|| !constant.value.is_zero())
+}
+
+fn alloc_proof_bit_binary(
+    lhs: NodeId,
+    op: BinaryOp,
+    rhs: NodeId,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Option<NodeId> {
+    let lhs_known = known_proof_bit(lhs, arena);
+    let rhs_known = known_proof_bit(rhs, arena);
+    match op {
+        BinaryOp::And => {
+            if lhs_known == Some(false) || rhs_known == Some(false) {
+                return alloc_proof_bit_constant(false, arena);
+            }
+            if lhs_known == Some(true) {
+                return Some(rhs);
+            }
+            if rhs_known == Some(true) {
+                return Some(lhs);
+            }
+        }
+        BinaryOp::Or => {
+            if lhs_known == Some(true) || rhs_known == Some(true) {
+                return alloc_proof_bit_constant(true, arena);
+            }
+            if lhs_known == Some(false) {
+                return Some(rhs);
+            }
+            if rhs_known == Some(false) {
+                return Some(lhs);
+            }
+        }
+        BinaryOp::Xor => {}
+        _ => return None,
+    }
+    arena.alloc(SLTNode::Binary(lhs, op, rhs)).ok()
+}
+
+fn alloc_proof_bit_not(inner: NodeId, arena: &mut SLTNodeArena<VarId>) -> Option<NodeId> {
+    if let Some(value) = known_proof_bit(inner, arena) {
+        alloc_proof_bit_constant(!value, arena)
+    } else {
+        arena.alloc(SLTNode::Unary(UnaryOp::BitNot, inner)).ok()
+    }
 }
 
 fn specialized_constant(node: NodeId, arena: &SLTNodeArena<VarId>) -> Option<SpecializedConstant> {
@@ -1964,9 +2178,9 @@ fn rewrite_statement(statement: &mut Statement, loop_var: VarId, mode: &RewriteM
     match statement {
         Statement::Assign(assign) if assign.dst.len() == 1 => {
             let destination = &mut assign.dst[0];
-            let destination_depends = rewrite_index(&mut destination.index, loop_var, mode)
-                | rewrite_select(&mut destination.select, loop_var, mode);
-            !destination_depends && rewrite_expression(&mut assign.expr, loop_var, mode).is_some()
+            rewrite_index(&mut destination.index, loop_var, mode).is_some()
+                && rewrite_select(&mut destination.select, loop_var, mode).is_some()
+                && rewrite_expression(&mut assign.expr, loop_var, mode).is_some()
         }
         Statement::If(statement) => {
             rewrite_expression(&mut statement.cond, loop_var, mode).is_some()
@@ -1983,30 +2197,23 @@ fn rewrite_statement(statement: &mut Statement, loop_var: VarId, mode: &RewriteM
     }
 }
 
-fn rewrite_index(index: &mut VarIndex, loop_var: VarId, mode: &RewriteMode) -> bool {
-    index
-        .0
-        .iter_mut()
-        .filter_map(|expression| rewrite_expression(expression, loop_var, mode))
-        .fold(false, |depends, expression_depends| {
-            depends | expression_depends
-        })
+fn rewrite_index(index: &mut VarIndex, loop_var: VarId, mode: &RewriteMode) -> Option<bool> {
+    let mut depends = false;
+    for expression in &mut index.0 {
+        depends |= rewrite_expression(expression, loop_var, mode)?;
+    }
+    Some(depends)
 }
 
-fn rewrite_select(select: &mut VarSelect, loop_var: VarId, mode: &RewriteMode) -> bool {
-    let mut depends = select
-        .0
-        .iter_mut()
-        .filter_map(|expression| rewrite_expression(expression, loop_var, mode))
-        .fold(false, |depends, expression_depends| {
-            depends | expression_depends
-        });
-    if let Some((_, expression)) = &mut select.1
-        && let Some(expression_depends) = rewrite_expression(expression, loop_var, mode)
-    {
-        depends |= expression_depends;
+fn rewrite_select(select: &mut VarSelect, loop_var: VarId, mode: &RewriteMode) -> Option<bool> {
+    let mut depends = false;
+    for expression in &mut select.0 {
+        depends |= rewrite_expression(expression, loop_var, mode)?;
     }
-    depends
+    if let Some((_, expression)) = &mut select.1 {
+        depends |= rewrite_expression(expression, loop_var, mode)?;
+    }
+    Some(depends)
 }
 
 fn rewrite_expression(
@@ -2017,8 +2224,8 @@ fn rewrite_expression(
     let depends = match expression {
         Expression::Term(factor) => match factor.as_mut() {
             Factor::Variable(variable, index, select, comptime) => {
-                let index_depends = rewrite_index(index, loop_var, mode);
-                let select_depends = rewrite_select(select, loop_var, mode);
+                let index_depends = rewrite_index(index, loop_var, mode)?;
+                let select_depends = rewrite_select(select, loop_var, mode)?;
                 let self_depends = *variable == loop_var;
                 if self_depends {
                     rewrite_loop_leaf(comptime, mode);
@@ -2320,6 +2527,60 @@ mod tests {
         }
     "#;
 
+    const PARTIAL_FOUND_LOOP: &str = r#"
+        module Top (
+            source: input  logic<4>,
+            mask  : input  logic<4>,
+            old   : input  logic<4>,
+            bound : input  logic<3>,
+            vm    : input  logic,
+            mode  : input  logic<2>,
+            value : output logic<5>,
+        ) {
+            var found   : logic;
+            var selected: logic<4>;
+            always_comb {
+                found    = 1'b0;
+                selected = old;
+                for i in 0..4 {
+                    if ((i as 3) <: bound) && (vm || mask[i]) {
+                        let bf : logic = !found && !source[i];
+                        let of : logic = !found && source[i];
+                        let sif: logic = !found;
+                        selected[i] = case mode {
+                            2'b01  : bf,
+                            2'b10  : of,
+                            default: sif,
+                        };
+                        found = found || source[i];
+                    }
+                }
+                value = {found, selected};
+            }
+        }
+    "#;
+
+    const MULTIPLE_PARTIAL_WRITES_LOOP: &str = r#"
+        module Top (
+            low  : input  logic<4>,
+            high : input  logic<4>,
+            value: output logic<8>,
+        ) {
+            var state: logic<2> [4];
+            always_comb {
+                state[0] = 2'b00;
+                state[1] = 2'b00;
+                state[2] = 2'b00;
+                state[3] = 2'b00;
+                for i in 0..4 {
+                    state[i][0] = low[i];
+                    state[i][1] = high[i];
+                }
+                value = {state[3], state[2], state[1], state[0]};
+            }
+        }
+    "#;
+
     #[test]
     fn recovers_guarded_multi_state_loop_as_one_shared_group() {
         let (module, provenance) = analyze(MULTI_STATE_LOOP);
@@ -2501,7 +2762,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_loop_dependent_destination() {
+    fn recovers_loop_dependent_destination_as_full_width_state() {
         let code = r#"
             module Top (
                 bits : input  logic<4>,
@@ -2519,6 +2780,104 @@ mod tests {
         "#;
         let (module, provenance) = analyze(code);
         let candidates = provenance.candidates_for_module(&module);
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let states = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup { states, .. } => Some(states),
+                _ => None,
+            })
+            .expect("dynamic partial write must be recovered");
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].target.id, variable(&module, "state"));
+        assert_eq!(states[0].target.access, BitAccess::new(0, 3));
+    }
+
+    #[test]
+    fn recovers_partial_dynamic_write_with_cross_state_found_recurrence() {
+        let (module, provenance) = analyze(PARTIAL_FOUND_LOOP);
+        let candidates = provenance.candidates_for_module(&module);
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let (group, states, loop_width, loop_signed, start, step, trip_count) = arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| match node {
+                SLTNode::ForFoldGroup {
+                    loop_width,
+                    loop_signed,
+                    start,
+                    step,
+                    trip_count,
+                    states,
+                    ..
+                } => Some((
+                    NodeId(index),
+                    states,
+                    *loop_width,
+                    *loop_signed,
+                    start,
+                    step,
+                    *trip_count,
+                )),
+                _ => None,
+            })
+            .expect("cross-state partial writes must be recovered");
+
+        assert_eq!(loop_width, 32);
+        assert!(loop_signed, "Veryl's recovered for-loop IV is signed");
+        assert_eq!(start, &BigInt::from(0u8));
+        assert_eq!(step, &BigInt::from(1u8));
+        assert_eq!(trip_count, 4);
+        assert_eq!(states.len(), 2);
+        let targets = states
+            .iter()
+            .map(|state| (state.target.id, state.target.access))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            targets.get(&variable(&module, "found")),
+            Some(&BitAccess::new(0, 0))
+        );
+        assert_eq!(
+            targets.get(&variable(&module, "selected")),
+            Some(&BitAccess::new(0, 3))
+        );
+        assert!(
+            crate::logic_tree::matches_slt_or_scan_group(group, &arena),
+            "the exact recovered Veryl scan must enter the word-scan lowering"
+        );
+    }
+
+    #[test]
+    fn deduplicates_multiple_partial_writes_to_the_same_base_state() {
+        let (module, provenance) = analyze(MULTIPLE_PARTIAL_WRITES_LOOP);
+        let candidates = provenance.candidates_for_module(&module);
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let states = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup { states, .. } => Some(states),
+                _ => None,
+            })
+            .expect("multiple writes to one base must be recovered");
+
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].target.id, variable(&module, "state"));
+        assert_eq!(states[0].target.access, BitAccess::new(0, 7));
+    }
+
+    #[test]
+    fn rejects_wrong_affine_provenance_for_partial_dynamic_writes() {
+        let (module, provenance) = analyze(PARTIAL_FOUND_LOOP);
+        let mut candidates = provenance.candidates_for_module(&module);
+        for (iteration, wrong_value) in candidates[0]
+            .unrolled
+            .iterations
+            .iter_mut()
+            .zip([3, 2, 1, 0])
+        {
+            iteration.value = wrong_value;
+        }
+
         let (_, arena) = parse_with_candidates(&module, &candidates);
         assert_eq!(group_count(&arena), 0);
     }

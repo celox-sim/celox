@@ -16,3 +16,5 @@ pub use comb::{
 pub(crate) use comb::{SLTForUpdate, SLTStepOp};
 pub use lower::SLTToSIRLowerer;
 pub(crate) use lower::matches_slt_count_idiom;
+#[cfg(test)]
+pub(crate) use lower::matches_slt_or_scan_group;
