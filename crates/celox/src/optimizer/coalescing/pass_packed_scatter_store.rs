@@ -1,9 +1,9 @@
 //! Recover a packed dynamic lane store from an analyzer-expanded static ladder.
 //!
 //! A common HDL workaround spells `packed[index] = value` as one static
-//! equality and Mux per lane.  Once those lanes feed a single Store, retaining
-//! the value-level ladder is unnecessary: copy the packed base and perform one
-//! guarded dynamic Store into the selected lane.
+//! equality and Mux per lane. Once those lanes feed only a contiguous group of
+//! equivalent Stores, retaining the value-level ladder is unnecessary: copy
+//! the packed base and perform one guarded dynamic lane update at every sink.
 
 use super::cost_model::estimate_clif_cost;
 use super::pass_manager::ExecutionUnitPass;
@@ -57,7 +57,7 @@ struct Rewrite {
 #[derive(Clone)]
 struct StaticUpdate {
     condition: RegisterId,
-    store: SIRInstruction<RegionedAbsoluteAddr>,
+    stores: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
 }
 
 #[derive(Clone)]
@@ -71,6 +71,7 @@ struct GeneratedBlocks {
 struct ScatterPlan {
     block: BlockId,
     store_index: usize,
+    store_count: usize,
     dead: HashSet<DefSite>,
     rewrite: Rewrite,
     new_blocks: Option<GeneratedBlocks>,
@@ -90,12 +91,13 @@ impl ExecutionUnitPass for PackedScatterStorePass {
             return;
         }
 
-        // Applying a rewrite can make another Concat a sole Store source only
-        // after the old closed DAG is swept. Alternate discovery and DCE to a
-        // structural fixed point. Every rewrite removes the current Concat
-        // Store source; if the copied base is itself a Concat, it is a strict
-        // SSA ancestor of that source, so repeated recovery still makes
-        // structural progress without an iteration budget.
+        // Applying a rewrite can make another Concat observable only through
+        // equivalent Stores after the old closed DAG is swept. Alternate
+        // discovery and DCE to a structural fixed point. Every rewrite removes
+        // the current Concat Store source; if the copied base is itself a
+        // Concat, it is a strict SSA ancestor of that source, so repeated
+        // recovery still makes structural progress without an iteration
+        // budget.
         let mut pending_dce = false;
         loop {
             if let Some(plan) = find_best_plan(eu) {
@@ -148,7 +150,7 @@ fn plan_store(
     uses: &HashMap<RegisterId, usize>,
 ) -> Option<ScatterPlan> {
     let SIRInstruction::Store(
-        address,
+        _,
         SIROffset::Static(destination_start),
         width,
         packed,
@@ -162,10 +164,36 @@ fn plan_store(
         return None;
     }
     destination_start.checked_add(*width)?;
-    // The packed value must have exactly one observable sink. Otherwise a
-    // memory-only replacement would not preserve its other value uses.
-    if uses.get(packed).copied() != Some(1) {
-        return None;
+    // Every observable use must be one member of a single contiguous group of
+    // identical stores. The value-level ladder can then be replaced at all of
+    // its sinks without materializing the packed value. Matching the use count
+    // also rejects an instruction or CFG edge that observes the source
+    // elsewhere.
+    let store_count = uses.get(packed).copied()?;
+    let store_end = store_index.checked_add(store_count)?;
+    let store_group = block.instructions.get(store_index..store_end)?;
+    let mut addresses = Vec::with_capacity(store_count);
+    for instruction in store_group {
+        let SIRInstruction::Store(
+            address,
+            SIROffset::Static(candidate_start),
+            candidate_width,
+            candidate_packed,
+            candidate_triggers,
+            candidate_capture_sites,
+        ) = instruction
+        else {
+            return None;
+        };
+        if candidate_start != destination_start
+            || candidate_width != width
+            || candidate_packed != packed
+            || !candidate_triggers.is_empty()
+            || !candidate_capture_sites.is_empty()
+        {
+            return None;
+        }
+        addresses.push(*address);
     }
     let concat_site = *defs.get(packed)?;
     if concat_site.block != block.id || concat_site.index >= store_index {
@@ -299,7 +327,7 @@ fn plan_store(
             ]
         })
         .collect::<HashSet<_>>();
-    let dead = dead_after_removing_store_source(eu, defs, uses, *packed, &protected)?;
+    let dead = dead_after_removing_store_sources(eu, defs, uses, *packed, store_count, &protected)?;
     if !dead.contains(&concat_site) {
         return None;
     }
@@ -313,7 +341,7 @@ fn plan_store(
 
     let rewrite = build_rewrite(
         eu,
-        *address,
+        &addresses,
         *destination_start,
         *width,
         lane_width,
@@ -353,20 +381,26 @@ fn plan_store(
     };
     let mut cost_registers = eu.register_map.clone();
     cost_registers.extend(rewrite.registers.iter().cloned());
+    let removed_store_cost = store_group
+        .iter()
+        .map(|instruction| estimate_clif_cost(instruction, &eu.register_map, false) as u128)
+        .fold(0u128, u128::saturating_add);
     let removed_cost = dead
         .iter()
         .map(|site| {
             estimate_clif_cost(instruction_at(eu, *site).unwrap(), &eu.register_map, false) as u128
         })
-        .fold(
-            estimate_clif_cost(&block.instructions[store_index], &eu.register_map, false) as u128,
-            u128::saturating_add,
-        );
+        .fold(removed_store_cost, u128::saturating_add);
     let instruction_cost = rewrite
         .head
         .iter()
         .chain(rewrite.update.iter())
-        .chain(rewrite.static_updates.iter().map(|update| &update.store))
+        .chain(
+            rewrite
+                .static_updates
+                .iter()
+                .flat_map(|update| update.stores.iter()),
+        )
         .map(|instruction| estimate_clif_cost(instruction, &cost_registers, false) as u128)
         .fold(0u128, u128::saturating_add);
     let control_cost = if rewrite.condition.is_some() {
@@ -384,6 +418,7 @@ fn plan_store(
     Some(ScatterPlan {
         block: block.id,
         store_index,
+        store_count,
         dead,
         rewrite,
         new_blocks,
@@ -703,7 +738,7 @@ fn exact_constant_inner(
 #[allow(clippy::too_many_arguments)]
 fn build_rewrite(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    address: RegionedAbsoluteAddr,
+    addresses: &[RegionedAbsoluteAddr],
     destination_start: usize,
     width: usize,
     lane_width: usize,
@@ -857,37 +892,55 @@ fn build_rewrite(
         let bit_offset = destination_start.checked_add(lane_width.checked_mul(lane)?)?;
         static_updates.push(StaticUpdate {
             condition: peeled_condition,
-            store: SIRInstruction::Store(
-                address,
-                SIROffset::Static(bit_offset),
+            stores: addresses
+                .iter()
+                .map(|address| {
+                    SIRInstruction::Store(
+                        *address,
+                        SIROffset::Static(bit_offset),
+                        lane_width,
+                        value,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+        });
+    }
+
+    // Distinct canonical storage bases are disjoint. Address aliases share a
+    // base, and the matched static offset and width are identical, so aliases
+    // touch exactly the same range. The original stores are contiguous and
+    // carry no trigger/capture observation: stores to distinct bases commute,
+    // while aliases (including duplicate addresses) receive identical base and
+    // patch values. Retaining address order therefore preserves final memory.
+    head.extend(addresses.iter().map(|address| {
+        SIRInstruction::Store(
+            *address,
+            SIROffset::Static(destination_start),
+            width,
+            base,
+            Vec::new(),
+            Vec::new(),
+        )
+    }));
+    let dynamic = addresses
+        .iter()
+        .map(|address| {
+            SIRInstruction::Store(
+                *address,
+                SIROffset::Dynamic(offset),
                 lane_width,
                 value,
                 Vec::new(),
                 Vec::new(),
-            ),
-        });
-    }
-
-    head.push(SIRInstruction::Store(
-        address,
-        SIROffset::Static(destination_start),
-        width,
-        base,
-        Vec::new(),
-        Vec::new(),
-    ));
-    let dynamic = SIRInstruction::Store(
-        address,
-        SIROffset::Dynamic(offset),
-        lane_width,
-        value,
-        Vec::new(),
-        Vec::new(),
-    );
+            )
+        })
+        .collect::<Vec<_>>();
     let update = if condition.is_some() {
-        vec![dynamic]
+        dynamic
     } else {
-        head.push(dynamic);
+        head.extend(dynamic);
         Vec::new()
     };
     Some(Rewrite {
@@ -921,16 +974,17 @@ fn combine_condition(
     Some(Some(combined))
 }
 
-fn dead_after_removing_store_source(
+fn dead_after_removing_store_sources(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, DefSite>,
     uses: &HashMap<RegisterId, usize>,
     source: RegisterId,
+    removed_uses: usize,
     protected: &HashSet<RegisterId>,
 ) -> Option<HashSet<DefSite>> {
     let mut remaining = uses.clone();
     let count = remaining.get_mut(&source)?;
-    *count = count.checked_sub(1)?;
+    *count = count.checked_sub(removed_uses)?;
     let mut work = vec![source];
     let mut dead = HashSet::default();
     while let Some(register) = work.pop() {
@@ -969,6 +1023,7 @@ fn apply_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: ScatterPlan) {
         return;
     }
     let original = eu.blocks[&plan.block].clone();
+    let suffix_start = plan.store_index + plan.store_count;
     eu.register_map.extend(plan.rewrite.registers);
 
     if let Some((condition, blocks)) = conditional {
@@ -1030,7 +1085,7 @@ fn apply_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: ScatterPlan) {
                 BasicBlock {
                     id: update_id,
                     params: Vec::new(),
-                    instructions: vec![static_update.store],
+                    instructions: static_update.stores,
                     terminator: SIRTerminator::Jump(blocks.suffix, Vec::new()),
                 },
             );
@@ -1040,7 +1095,7 @@ fn apply_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: ScatterPlan) {
             BasicBlock {
                 id: blocks.suffix,
                 params: Vec::new(),
-                instructions: original.instructions[plan.store_index + 1..].to_vec(),
+                instructions: original.instructions[suffix_start..].to_vec(),
                 terminator: original.terminator,
             },
         );
@@ -1048,7 +1103,7 @@ fn apply_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: ScatterPlan) {
         let block = eu.blocks.get_mut(&plan.block).unwrap();
         let mut instructions = original.instructions[..plan.store_index].to_vec();
         instructions.extend(plan.rewrite.head);
-        instructions.extend_from_slice(&original.instructions[plan.store_index + 1..]);
+        instructions.extend_from_slice(&original.instructions[suffix_start..]);
         block.instructions = instructions;
     }
 
@@ -1225,12 +1280,16 @@ mod tests {
     const LANE_COUNT: usize = 31;
     const PACKED_WIDTH: usize = 192;
 
-    fn address() -> RegionedAbsoluteAddr {
+    fn address_with_var(raw: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {
             region: STABLE_REGION,
             instance_id: InstanceId(0),
-            var_id: VarId::default(),
+            var_id: VarId::from_raw(raw),
         }
+    }
+
+    fn address() -> RegionedAbsoluteAddr {
+        address_with_var(0)
     }
 
     struct FixtureBuilder {
@@ -1402,6 +1461,24 @@ mod tests {
         }
     }
 
+    fn append_store_sink(
+        eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+        address: RegionedAbsoluteAddr,
+    ) {
+        let block = eu.blocks.get_mut(&BlockId(0)).unwrap();
+        let store_index = block
+            .instructions
+            .iter()
+            .rposition(|instruction| matches!(instruction, SIRInstruction::Store(..)))
+            .unwrap();
+        let mut store = block.instructions[store_index].clone();
+        let SIRInstruction::Store(candidate, ..) = &mut store else {
+            unreachable!();
+        };
+        *candidate = address;
+        block.instructions.insert(store_index + 1, store);
+    }
+
     fn canonical_keys() -> Vec<u64> {
         (1..=LANE_COUNT as u64).collect()
     }
@@ -1411,8 +1488,24 @@ mod tests {
         inputs: &HashMap<RegisterId, BigUint>,
         initial_memory: BigUint,
     ) -> BigUint {
+        execute_memories(
+            eu,
+            inputs,
+            [(address(), initial_memory)].into_iter().collect(),
+        )
+        .remove(&address())
+        .unwrap()
+    }
+
+    fn execute_memories(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        inputs: &HashMap<RegisterId, BigUint>,
+        mut memories: HashMap<RegionedAbsoluteAddr, BigUint>,
+    ) -> HashMap<RegionedAbsoluteAddr, BigUint> {
         let mut registers = inputs.clone();
-        let mut memory = truncate(initial_memory, PACKED_WIDTH);
+        for memory in memories.values_mut() {
+            *memory = truncate(memory.clone(), PACKED_WIDTH);
+        }
         let mut block = eu.entry_block_id;
         let mut steps = 0usize;
         loop {
@@ -1485,22 +1578,28 @@ mod tests {
                         };
                         registers.insert(*destination, selected);
                     }
-                    SIRInstruction::Store(_, offset, width, source, triggers, captures) => {
+                    SIRInstruction::Store(address, offset, width, source, triggers, captures) => {
                         assert!(triggers.is_empty() && captures.is_empty());
                         let offset = match offset {
                             SIROffset::Static(offset) => *offset,
                             SIROffset::Dynamic(offset) => registers[offset].to_usize().unwrap(),
                         };
+                        let memory = memories.entry(*address).or_insert_with(BigUint::zero);
                         let field_mask = low_mask(*width) << offset;
                         let preserved = low_mask(PACKED_WIDTH) ^ &field_mask;
-                        memory = (&memory & preserved)
+                        *memory = (&*memory & preserved)
                             | ((registers[source].clone() & low_mask(*width)) << offset);
                     }
                     other => panic!("unsupported test instruction {other:?}"),
                 }
             }
             match &current.terminator {
-                SIRTerminator::Return => return truncate(memory, PACKED_WIDTH),
+                SIRTerminator::Return => {
+                    for memory in memories.values_mut() {
+                        *memory = truncate(memory.clone(), PACKED_WIDTH);
+                    }
+                    return memories;
+                }
                 SIRTerminator::Jump(next, args) => {
                     assert!(args.is_empty());
                     block = *next;
@@ -1649,6 +1748,70 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_two_store_sinks_in_order_for_distinct_and_duplicate_addresses() {
+        let first = address();
+        let second = address_with_var(1);
+        for addresses in [[first, second], [first, first]] {
+            let mut fixture = fixture(&canonical_keys(), Vec::new(), false);
+            append_store_sink(&mut fixture.eu, addresses[1]);
+            fixture.eu.verify();
+            let original = fixture.eu.clone();
+            let mut optimized = fixture.eu.clone();
+            PackedScatterStorePass.run(&mut optimized, &PassOptions::default());
+            optimized.verify();
+
+            let store_groups = optimized
+                .blocks
+                .values()
+                .filter_map(|block| {
+                    let stores = block
+                        .instructions
+                        .iter()
+                        .filter_map(|instruction| match instruction {
+                            SIRInstruction::Store(address, ..) => Some(*address),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    (!stores.is_empty()).then_some(stores)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(store_groups.len(), 3);
+            assert!(store_groups.iter().all(|stores| stores == &addresses));
+
+            for seed in 0..2u64 {
+                let base = packed_pattern(seed + 1);
+                let mut initial = HashMap::default();
+                initial.insert(first, packed_pattern(seed + 11));
+                if addresses[1] != first {
+                    initial.insert(addresses[1], packed_pattern(seed + 21));
+                }
+                for enable in 0..=1u8 {
+                    for selector in 0..32u64 {
+                        let value = (seed.wrapping_mul(13).wrapping_add(selector * 7)) & 0x3f;
+                        let inputs = [
+                            (fixture.base, base.clone()),
+                            (fixture.selector, BigUint::from(selector)),
+                            (fixture.value, BigUint::from(value)),
+                            (fixture.gate, BigUint::from(enable)),
+                        ]
+                        .into_iter()
+                        .collect::<HashMap<_, _>>();
+                        assert_eq!(
+                            execute_memories(&optimized, &inputs, initial.clone()),
+                            execute_memories(&original, &inputs, initial.clone()),
+                            "addresses={addresses:?} seed={seed} enable={enable} selector={selector}"
+                        );
+                    }
+                }
+            }
+
+            let once = format!("{optimized}");
+            PackedScatterStorePass.run(&mut optimized, &PassOptions::default());
+            assert_eq!(format!("{optimized}"), once);
+        }
+    }
+
+    #[test]
     fn rejects_non_contiguous_keys_extra_sink_and_capture_store() {
         let mut keys = canonical_keys();
         keys[9] = keys[10];
@@ -1676,6 +1839,77 @@ mod tests {
             fixture(&canonical_keys(), vec![7], false),
             triggered,
         ] {
+            let before = format!("{}", fixture.eu);
+            PackedScatterStorePass.run(&mut fixture.eu, &PassOptions::default());
+            assert_eq!(format!("{}", fixture.eu), before);
+            fixture.eu.verify();
+        }
+    }
+
+    #[test]
+    fn rejects_non_contiguous_or_heterogeneous_store_sink_groups_atomically() {
+        let mut interrupted = fixture(&canonical_keys(), Vec::new(), false);
+        append_store_sink(&mut interrupted.eu, address_with_var(1));
+        let marker = RegisterId(
+            interrupted
+                .eu
+                .register_map
+                .keys()
+                .map(|register| register.0)
+                .max()
+                .unwrap()
+                + 1,
+        );
+        interrupted.eu.register_map.insert(
+            marker,
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        let block = interrupted.eu.blocks.get_mut(&BlockId(0)).unwrap();
+        let first_store = block
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction, SIRInstruction::Store(..)))
+            .unwrap();
+        block.instructions.insert(
+            first_store + 1,
+            SIRInstruction::Imm(marker, SIRValue::new(0u8)),
+        );
+
+        let mut different_offset = fixture(&canonical_keys(), Vec::new(), false);
+        append_store_sink(&mut different_offset.eu, address_with_var(1));
+        let SIRInstruction::Store(_, offset, ..) = different_offset
+            .eu
+            .blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .instructions
+            .last_mut()
+            .unwrap()
+        else {
+            unreachable!();
+        };
+        *offset = SIROffset::Static(LANE_WIDTH + 1);
+
+        let mut different_width = fixture(&canonical_keys(), Vec::new(), false);
+        append_store_sink(&mut different_width.eu, address_with_var(1));
+        let SIRInstruction::Store(_, _, width, ..) = different_width
+            .eu
+            .blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .instructions
+            .last_mut()
+            .unwrap()
+        else {
+            unreachable!();
+        };
+        *width -= 1;
+
+        for mut fixture in [interrupted, different_offset, different_width] {
+            fixture.eu.verify();
             let before = format!("{}", fixture.eu);
             PackedScatterStorePass.run(&mut fixture.eu, &PassOptions::default());
             assert_eq!(format!("{}", fixture.eu), before);
@@ -1770,6 +2004,7 @@ mod tests {
     #[test]
     fn identifier_overflow_is_non_destructive() {
         let mut block_overflow = fixture(&canonical_keys(), Vec::new(), false);
+        append_store_sink(&mut block_overflow.eu, address_with_var(1));
         let mut block = block_overflow.eu.blocks.remove(&BlockId(0)).unwrap();
         block.id = BlockId(usize::MAX);
         block_overflow.eu.entry_block_id = block.id;
@@ -1777,6 +2012,7 @@ mod tests {
         block_overflow.eu.verify();
 
         let mut native_block_overflow = fixture(&canonical_keys(), Vec::new(), false);
+        append_store_sink(&mut native_block_overflow.eu, address_with_var(1));
         let mut block = native_block_overflow.eu.blocks.remove(&BlockId(0)).unwrap();
         block.id = BlockId(u32::MAX as usize);
         native_block_overflow.eu.entry_block_id = block.id;
@@ -1784,6 +2020,7 @@ mod tests {
         native_block_overflow.eu.verify();
 
         let mut register_overflow = fixture(&canonical_keys(), Vec::new(), false);
+        append_store_sink(&mut register_overflow.eu, address_with_var(1));
         let overflow = RegisterId(usize::MAX);
         register_overflow.eu.register_map.insert(
             overflow,
