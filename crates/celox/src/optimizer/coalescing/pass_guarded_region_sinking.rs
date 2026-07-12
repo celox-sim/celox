@@ -57,6 +57,30 @@ struct GuardedRegionPlan {
     removable_muxes: HashSet<usize>,
 }
 
+/// One reverse-if-conversion of a pure, single-block same-predicate region.
+///
+/// `true_owned` and `false_owned` are closed backwards slices which are used
+/// only by the corresponding Mux arms. `cofactor` is the forward slice which
+/// depends on at least one removed Mux result. It is rebuilt once on each edge,
+/// so only `live_outs` cross the merge instead of every individual Mux result.
+#[derive(Clone)]
+struct SamePredicatePlan {
+    block_id: BlockId,
+    segment_start: usize,
+    segment_end: usize,
+    condition: RegisterId,
+    muxes: HashSet<usize>,
+    true_muxes: HashSet<usize>,
+    false_muxes: HashSet<usize>,
+    true_owned: HashSet<usize>,
+    false_owned: HashSet<usize>,
+    cofactor: HashSet<usize>,
+    true_cofactor: HashSet<usize>,
+    false_cofactor: HashSet<usize>,
+    live_outs: Vec<RegisterId>,
+    net_benefit_scaled: u128,
+}
+
 impl ExecutionUnitPass for GuardedRegionSinkingPass {
     fn name(&self) -> &'static str {
         "guarded_region_sinking"
@@ -69,6 +93,17 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         if options.four_state || eu.verify_result().is_err() {
             return;
         }
+
+        // First recover a branch shared by all Muxes with the same predicate
+        // in a pure SIR region. This is deliberately planned from the input
+        // CFG and applies at most one best region per input block. Generated
+        // blocks are not candidates in this run, so termination needs neither
+        // an iteration limit nor a function-size budget.
+        form_same_predicate_regions(eu);
+
+        // Recompute CFG facts after region formation. The existing edge
+        // sinking transform remains independent and can consume either an
+        // original branch or a branch introduced above.
 
         let predecessors = predecessor_map(eu);
         let dominators = Dominators::compute(eu, &predecessors);
@@ -120,6 +155,778 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
             apply_plan(eu, plan, true_id, false_id, &mut reg_counter);
         }
     }
+}
+
+fn form_same_predicate_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    let uses = collect_uses(eu);
+    let mut input_blocks = eu.blocks.keys().copied().collect::<Vec<_>>();
+    input_blocks.sort_unstable_by_key(|id| id.0);
+    let plans = input_blocks
+        .into_iter()
+        .filter_map(|block| best_same_predicate_plan(eu, block, &uses))
+        .collect::<Vec<_>>();
+    if plans.is_empty() {
+        return;
+    }
+
+    // A region adds true, false, and merge blocks. Reserve all IDs before
+    // changing the EU so overflow leaves the input untouched.
+    let Some(additional_blocks) = plans.len().checked_mul(3) else {
+        return;
+    };
+    let max_block = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0);
+    let Some(first_new_block) = max_block.checked_add(1) else {
+        return;
+    };
+    let Some(last_new_block) = max_block.checked_add(additional_blocks) else {
+        return;
+    };
+    if last_new_block > u32::MAX as usize {
+        return;
+    }
+
+    // Every moved or cofactored instruction is rebuilt with one edge-local
+    // destination. Branch normalization can allocate at most two more values
+    // per plan. Check the complete register range before applying any plan.
+    let additional_registers = plans.iter().try_fold(0usize, |total, plan| {
+        total
+            .checked_add(plan.true_owned.len())?
+            .checked_add(plan.false_owned.len())?
+            .checked_add(plan.true_cofactor.len())?
+            .checked_add(plan.false_cofactor.len())?
+            .checked_add(2)
+    });
+    let Some(additional_registers) = additional_registers else {
+        return;
+    };
+    let max_register = eu.register_map.keys().map(|id| id.0).max().unwrap_or(0);
+    if max_register.checked_add(additional_registers).is_none() {
+        return;
+    }
+
+    if std::env::var_os("CELOX_PASS_TIMING").is_some() {
+        let muxes = plans.iter().map(|plan| plan.muxes.len()).sum::<usize>();
+        let true_owned = plans
+            .iter()
+            .map(|plan| plan.true_owned.len())
+            .sum::<usize>();
+        let false_owned = plans
+            .iter()
+            .map(|plan| plan.false_owned.len())
+            .sum::<usize>();
+        let live_outs = plans.iter().map(|plan| plan.live_outs.len()).sum::<usize>();
+        eprintln!(
+            "[same-predicate-regions] regions={} muxes={muxes} true_owned={true_owned} false_owned={false_owned} live_outs={live_outs}",
+            plans.len(),
+        );
+        for plan in &plans {
+            eprintln!(
+                "[same-predicate-region] block={} cond=r{} segment={}..{} muxes={} true_owned={} false_owned={} true_cofactor={} false_cofactor={} live_outs={} benefit_scaled={}",
+                plan.block_id.0,
+                plan.condition.0,
+                plan.segment_start,
+                plan.segment_end,
+                plan.muxes.len(),
+                plan.true_owned.len(),
+                plan.false_owned.len(),
+                plan.true_cofactor.len(),
+                plan.false_cofactor.len(),
+                plan.live_outs.len(),
+                plan.net_benefit_scaled,
+            );
+        }
+    }
+
+    let mut reg_counter = max_register;
+    for (ordinal, plan) in plans.into_iter().enumerate() {
+        let true_id = BlockId(first_new_block + ordinal * 3);
+        let false_id = BlockId(first_new_block + ordinal * 3 + 1);
+        let merge_id = BlockId(first_new_block + ordinal * 3 + 2);
+        apply_same_predicate_plan(eu, plan, true_id, false_id, merge_id, &mut reg_counter);
+    }
+}
+
+fn best_same_predicate_plan(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    uses: &HashMap<RegisterId, Vec<UseSite>>,
+) -> Option<SamePredicatePlan> {
+    let block = eu.blocks.get(&block_id)?;
+    let mut best: Option<SamePredicatePlan> = None;
+    let mut segment_start = 0usize;
+    while segment_start < block.instructions.len() {
+        while segment_start < block.instructions.len()
+            && !instruction_is_same_predicate_region_value(&block.instructions[segment_start])
+        {
+            segment_start += 1;
+        }
+        if segment_start == block.instructions.len() {
+            break;
+        }
+        let mut segment_end = segment_start;
+        while segment_end < block.instructions.len()
+            && instruction_is_same_predicate_region_value(&block.instructions[segment_end])
+        {
+            segment_end += 1;
+        }
+
+        let mut groups = BTreeMap::<RegisterId, Vec<usize>>::new();
+        for index in segment_start..segment_end {
+            if let SIRInstruction::Mux(_, condition, _, _) = block.instructions[index] {
+                groups.entry(condition).or_default().push(index);
+            }
+        }
+        for (condition, muxes) in groups {
+            // One Mux is already handled by ordinary cost-directed lowering;
+            // this transform exists to share one branch across a region.
+            if muxes.len() < 2 {
+                continue;
+            }
+            let Some(candidate) = plan_same_predicate_region(
+                eu,
+                block_id,
+                segment_start,
+                segment_end,
+                condition,
+                &muxes,
+                uses,
+            ) else {
+                continue;
+            };
+            let replace = best.as_ref().is_none_or(|current| {
+                candidate.net_benefit_scaled > current.net_benefit_scaled
+                    || candidate.net_benefit_scaled == current.net_benefit_scaled
+                        && (candidate.segment_start, candidate.condition)
+                            < (current.segment_start, current.condition)
+            });
+            if replace {
+                best = Some(candidate);
+            }
+        }
+        segment_start = segment_end.saturating_add(1);
+    }
+    best
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_same_predicate_region(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    segment_start: usize,
+    segment_end: usize,
+    condition: RegisterId,
+    mux_indices: &[usize],
+    uses: &HashMap<RegisterId, Vec<UseSite>>,
+) -> Option<SamePredicatePlan> {
+    let block = eu.blocks.get(&block_id)?;
+    if eu.register_map.get(&condition).map(RegisterType::width) != Some(1) {
+        return None;
+    }
+    let local_defs = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, inst)| def_reg(inst).map(|reg| (reg, index)))
+        .collect::<HashMap<_, _>>();
+    let mut muxes = mux_indices.iter().copied().collect::<HashSet<_>>();
+
+    // Forward-cofactor every pure value which depends on a group Mux. This is
+    // what turns many scalar Mux outputs which later reconverge in a Concat
+    // into a small live-out frontier instead of one block parameter per Mux.
+    let mut affected = HashSet::<RegisterId>::default();
+    let mut cofactor = HashSet::<usize>::default();
+    for index in segment_start..segment_end {
+        let inst = &block.instructions[index];
+        let dst = def_reg(inst)?;
+        if muxes.contains(&index) {
+            affected.insert(dst);
+        } else if instruction_uses(inst)
+            .into_iter()
+            .any(|operand| affected.contains(&operand))
+        {
+            affected.insert(dst);
+            cofactor.insert(index);
+        }
+    }
+
+    let mut live_outs = affected
+        .iter()
+        .copied()
+        .filter(|value| {
+            uses.get(value).into_iter().flatten().any(|site| {
+                !matches!(
+                    site,
+                    UseSite::Instruction { block, index }
+                        if *block == block_id
+                            && (muxes.contains(index) || cofactor.contains(index))
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    live_outs.sort_unstable();
+    live_outs.dedup();
+    if live_outs.is_empty() {
+        return None;
+    }
+
+    // Specialize the forward slice separately on each edge. At a group Mux,
+    // follow only that edge's selected operand. This both removes dead source
+    // Muxes and avoids cloning a nested unselected cofactor chain.
+    let (true_muxes, true_cofactor) =
+        specialize_region_needed(&live_outs, true, &muxes, &cofactor, &local_defs, block);
+    let (false_muxes, false_cofactor) =
+        specialize_region_needed(&live_outs, false, &muxes, &cofactor, &local_defs, block);
+    muxes = true_muxes
+        .union(&false_muxes)
+        .copied()
+        .collect::<HashSet<_>>();
+    cofactor = true_cofactor
+        .union(&false_cofactor)
+        .copied()
+        .collect::<HashSet<_>>();
+    if muxes.len() < 2 {
+        return None;
+    }
+
+    let mut true_roots = Vec::with_capacity(true_muxes.len());
+    let mut false_roots = Vec::with_capacity(false_muxes.len());
+    for &index in &muxes {
+        let SIRInstruction::Mux(_, mux_condition, true_value, false_value) =
+            block.instructions[index]
+        else {
+            return None;
+        };
+        if mux_condition != condition {
+            return None;
+        }
+        if true_muxes.contains(&index) {
+            true_roots.push(true_value);
+        }
+        if false_muxes.contains(&index) {
+            false_roots.push(false_value);
+        }
+    }
+    let true_reachable = collect_region_reachable_defs(
+        &true_roots,
+        segment_start,
+        segment_end,
+        &local_defs,
+        block,
+        &muxes,
+    );
+    let false_reachable = collect_region_reachable_defs(
+        &false_roots,
+        segment_start,
+        segment_end,
+        &local_defs,
+        block,
+        &muxes,
+    );
+    let shared = true_reachable
+        .intersection(&false_reachable)
+        .copied()
+        .collect::<HashSet<_>>();
+    let removed_forward = muxes
+        .iter()
+        .chain(cofactor.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut true_owned = true_reachable
+        .difference(&shared)
+        .copied()
+        .filter(|index| !removed_forward.contains(index))
+        .collect::<HashSet<_>>();
+    let mut false_owned = false_reachable
+        .difference(&shared)
+        .copied()
+        .filter(|index| !removed_forward.contains(index))
+        .collect::<HashSet<_>>();
+    close_region_arm(&mut true_owned, true, block_id, block, &true_muxes, uses);
+    close_region_arm(&mut false_owned, false, block_id, block, &false_muxes, uses);
+    if !true_owned.is_disjoint(&false_owned) {
+        return None;
+    }
+
+    let plan = SamePredicatePlan {
+        block_id,
+        segment_start,
+        segment_end,
+        condition,
+        muxes,
+        true_muxes,
+        false_muxes,
+        true_owned,
+        false_owned,
+        cofactor,
+        true_cofactor,
+        false_cofactor,
+        live_outs,
+        net_benefit_scaled: 0,
+    };
+    if !same_predicate_arm_is_closed(block, &plan, true)
+        || !same_predicate_arm_is_closed(block, &plan, false)
+    {
+        return None;
+    }
+    let net_benefit_scaled = same_predicate_net_benefit(eu, block, &plan)?;
+    Some(SamePredicatePlan {
+        net_benefit_scaled,
+        ..plan
+    })
+}
+
+fn collect_region_reachable_defs(
+    roots: &[RegisterId],
+    segment_start: usize,
+    segment_end: usize,
+    local_defs: &HashMap<RegisterId, usize>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    source_muxes: &HashSet<usize>,
+) -> HashSet<usize> {
+    let mut result = HashSet::default();
+    let mut work = roots.to_vec();
+    let mut visited = HashSet::default();
+    while let Some(value) = work.pop() {
+        if !visited.insert(value) {
+            continue;
+        }
+        let Some(&index) = local_defs.get(&value) else {
+            continue;
+        };
+        if index < segment_start || index >= segment_end || source_muxes.contains(&index) {
+            continue;
+        }
+        if result.insert(index) {
+            work.extend(instruction_uses(&block.instructions[index]));
+        }
+    }
+    result
+}
+
+fn specialize_region_needed(
+    live_outs: &[RegisterId],
+    true_arm: bool,
+    source_muxes: &HashSet<usize>,
+    cofactor: &HashSet<usize>,
+    local_defs: &HashMap<RegisterId, usize>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+) -> (HashSet<usize>, HashSet<usize>) {
+    let mut needed_muxes = HashSet::default();
+    let mut needed_cofactor = HashSet::default();
+    let mut work = live_outs.to_vec();
+    let mut visited = HashSet::default();
+    while let Some(value) = work.pop() {
+        if !visited.insert(value) {
+            continue;
+        }
+        let Some(&index) = local_defs.get(&value) else {
+            continue;
+        };
+        if source_muxes.contains(&index) {
+            needed_muxes.insert(index);
+            let SIRInstruction::Mux(_, _, true_value, false_value) = block.instructions[index]
+            else {
+                continue;
+            };
+            work.push(if true_arm { true_value } else { false_value });
+        } else if cofactor.contains(&index) && needed_cofactor.insert(index) {
+            work.extend(instruction_uses(&block.instructions[index]));
+        }
+    }
+    (needed_muxes, needed_cofactor)
+}
+
+fn close_region_arm(
+    owned: &mut HashSet<usize>,
+    true_arm: bool,
+    block_id: BlockId,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    source_muxes: &HashSet<usize>,
+    uses: &HashMap<RegisterId, Vec<UseSite>>,
+) {
+    loop {
+        let rejected = owned
+            .iter()
+            .copied()
+            .filter(|index| {
+                let Some(dst) = def_reg(&block.instructions[*index]) else {
+                    return true;
+                };
+                uses.get(&dst)
+                    .into_iter()
+                    .flatten()
+                    .any(|site| match *site {
+                        UseSite::Instruction {
+                            block: use_block,
+                            index: use_index,
+                        } if use_block == block_id => {
+                            if owned.contains(&use_index) {
+                                return false;
+                            }
+                            if !source_muxes.contains(&use_index) {
+                                return true;
+                            }
+                            match block.instructions[use_index] {
+                                SIRInstruction::Mux(_, condition, true_value, false_value) => {
+                                    condition == dst
+                                        || (if true_arm { true_value } else { false_value }) != dst
+                                }
+                                _ => true,
+                            }
+                        }
+                        _ => true,
+                    })
+            })
+            .collect::<Vec<_>>();
+        if rejected.is_empty() {
+            break;
+        }
+        for index in rejected {
+            owned.remove(&index);
+        }
+    }
+}
+
+fn same_predicate_arm_is_closed(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    plan: &SamePredicatePlan,
+    true_arm: bool,
+) -> bool {
+    let owned = if true_arm {
+        &plan.true_owned
+    } else {
+        &plan.false_owned
+    };
+    let arm_muxes = if true_arm {
+        &plan.true_muxes
+    } else {
+        &plan.false_muxes
+    };
+    let arm_cofactor = if true_arm {
+        &plan.true_cofactor
+    } else {
+        &plan.false_cofactor
+    };
+    let removed = plan
+        .true_owned
+        .iter()
+        .chain(plan.false_owned.iter())
+        .chain(plan.muxes.iter())
+        .chain(plan.cofactor.iter())
+        .filter_map(|index| def_reg(&block.instructions[*index]))
+        .collect::<HashSet<_>>();
+    let mut mapped = HashSet::default();
+    for index in plan.segment_start..plan.segment_end {
+        if owned.contains(&index) || arm_cofactor.contains(&index) {
+            if instruction_uses(&block.instructions[index])
+                .into_iter()
+                .any(|operand| removed.contains(&operand) && !mapped.contains(&operand))
+            {
+                return false;
+            }
+            if let Some(dst) = def_reg(&block.instructions[index]) {
+                mapped.insert(dst);
+            }
+        } else if arm_muxes.contains(&index) {
+            let SIRInstruction::Mux(_, _, true_value, false_value) = block.instructions[index]
+            else {
+                return false;
+            };
+            let selected = if true_arm { true_value } else { false_value };
+            if removed.contains(&selected) && !mapped.contains(&selected) {
+                return false;
+            }
+            if let Some(dst) = def_reg(&block.instructions[index]) {
+                mapped.insert(dst);
+            }
+        }
+    }
+    plan.live_outs.iter().all(|value| mapped.contains(value))
+}
+
+fn register_chunks(register_map: &HashMap<RegisterId, RegisterType>, value: RegisterId) -> u128 {
+    register_map
+        .get(&value)
+        .map(|ty| ty.width().div_ceil(64).max(1) as u128)
+        .unwrap_or(1)
+}
+
+fn same_predicate_net_benefit(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    plan: &SamePredicatePlan,
+) -> Option<u128> {
+    const BRANCH_CONTROL_COST: u128 = 3;
+    const MISPREDICT_COST: u128 = 16;
+    const PHI_COPY_COST_PER_CHUNK: u128 = 2;
+    const LIVE_THROUGH_COST_PER_CHUNK: u128 = 1;
+
+    let instruction_cost = |index: usize| {
+        super::cost_model::estimate_clif_cost(&block.instructions[index], &eu.register_map, false)
+            as u128
+    };
+    let true_cost = plan
+        .true_owned
+        .iter()
+        .copied()
+        .map(instruction_cost)
+        .fold(0u128, u128::saturating_add);
+    let false_cost = plan
+        .false_owned
+        .iter()
+        .copied()
+        .map(instruction_cost)
+        .fold(0u128, u128::saturating_add);
+    let mux_cost = plan
+        .muxes
+        .iter()
+        .copied()
+        .map(instruction_cost)
+        .fold(0u128, u128::saturating_add);
+
+    let region_defs = plan
+        .true_owned
+        .iter()
+        .chain(plan.false_owned.iter())
+        .chain(plan.muxes.iter())
+        .chain(plan.cofactor.iter())
+        .filter_map(|index| def_reg(&block.instructions[*index]))
+        .collect::<HashSet<_>>();
+    let mut live_through = HashSet::default();
+    for &index in plan
+        .true_owned
+        .iter()
+        .chain(plan.false_owned.iter())
+        .chain(plan.cofactor.iter())
+    {
+        for operand in instruction_uses(&block.instructions[index]) {
+            if !region_defs.contains(&operand) {
+                live_through.insert(operand);
+            }
+        }
+    }
+    let live_through_chunks = live_through
+        .into_iter()
+        .map(|value| register_chunks(&eu.register_map, value))
+        .fold(0u128, u128::saturating_add);
+    let phi_chunks = plan
+        .live_outs
+        .iter()
+        .copied()
+        .map(|value| register_chunks(&eu.register_map, value))
+        .fold(0u128, u128::saturating_add);
+
+    // Exact 50/50 integer expected-cost comparison. All values are scaled by
+    // two: each arm is skipped on one edge, every removed Mux is saved on both,
+    // and one of the two equally-likely outcomes pays the modeled miss.
+    let saved_scaled = true_cost
+        .saturating_add(false_cost)
+        .saturating_add(mux_cost.saturating_mul(2));
+    let introduced_scaled = BRANCH_CONTROL_COST
+        .saturating_add(phi_chunks.saturating_mul(PHI_COPY_COST_PER_CHUNK))
+        .saturating_add(live_through_chunks.saturating_mul(LIVE_THROUGH_COST_PER_CHUNK))
+        .saturating_mul(2)
+        .saturating_add(MISPREDICT_COST);
+    (saved_scaled > introduced_scaled).then(|| saved_scaled - introduced_scaled)
+}
+
+fn apply_same_predicate_plan(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: SamePredicatePlan,
+    true_id: BlockId,
+    false_id: BlockId,
+    merge_id: BlockId,
+    reg_counter: &mut usize,
+) {
+    let original = eu
+        .blocks
+        .remove(&plan.block_id)
+        .expect("planned same-predicate block must remain present");
+    let mut head_instructions = original.instructions[..plan.segment_start].to_vec();
+    for index in plan.segment_start..plan.segment_end {
+        if !plan.true_owned.contains(&index)
+            && !plan.false_owned.contains(&index)
+            && !plan.muxes.contains(&index)
+            && !plan.cofactor.contains(&index)
+        {
+            head_instructions.push(original.instructions[index].clone());
+        }
+    }
+    let merge_instructions = original.instructions[plan.segment_end..].to_vec();
+
+    // These original SSA definitions are replaced by edge-local clones or by
+    // merge parameters. Keeping the dead IDs in register_map is not benign:
+    // native isel allocates a VReg for every entry before it sees any use.
+    let live_outs = plan.live_outs.iter().copied().collect::<HashSet<_>>();
+    let dead_originals = plan
+        .true_owned
+        .iter()
+        .chain(plan.false_owned.iter())
+        .chain(plan.muxes.iter())
+        .chain(plan.cofactor.iter())
+        .filter_map(|index| def_reg(&original.instructions[*index]))
+        .filter(|value| !live_outs.contains(value))
+        .collect::<HashSet<_>>();
+
+    let (true_instructions, true_arguments) =
+        build_same_predicate_arm(eu, &original, &plan, true, reg_counter);
+    let (false_instructions, false_arguments) =
+        build_same_predicate_arm(eu, &original, &plan, false, reg_counter);
+    let branch_condition = normalize_branch_condition(
+        &mut eu.register_map,
+        &mut head_instructions,
+        plan.condition,
+        reg_counter,
+    );
+
+    eu.blocks.insert(
+        plan.block_id,
+        BasicBlock {
+            id: plan.block_id,
+            params: original.params,
+            instructions: head_instructions,
+            terminator: SIRTerminator::Branch {
+                cond: branch_condition,
+                true_block: (true_id, Vec::new()),
+                false_block: (false_id, Vec::new()),
+            },
+        },
+    );
+    eu.blocks.insert(
+        true_id,
+        BasicBlock {
+            id: true_id,
+            params: Vec::new(),
+            instructions: true_instructions,
+            terminator: SIRTerminator::Jump(merge_id, true_arguments),
+        },
+    );
+    eu.blocks.insert(
+        false_id,
+        BasicBlock {
+            id: false_id,
+            params: Vec::new(),
+            instructions: false_instructions,
+            terminator: SIRTerminator::Jump(merge_id, false_arguments),
+        },
+    );
+    eu.blocks.insert(
+        merge_id,
+        BasicBlock {
+            id: merge_id,
+            params: plan.live_outs,
+            instructions: merge_instructions,
+            terminator: original.terminator,
+        },
+    );
+    for value in dead_originals {
+        eu.register_map.remove(&value);
+    }
+}
+
+fn build_same_predicate_arm(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    original: &BasicBlock<RegionedAbsoluteAddr>,
+    plan: &SamePredicatePlan,
+    true_arm: bool,
+    reg_counter: &mut usize,
+) -> (Vec<SIRInstruction<RegionedAbsoluteAddr>>, Vec<RegisterId>) {
+    let owned = if true_arm {
+        &plan.true_owned
+    } else {
+        &plan.false_owned
+    };
+    let arm_muxes = if true_arm {
+        &plan.true_muxes
+    } else {
+        &plan.false_muxes
+    };
+    let arm_cofactor = if true_arm {
+        &plan.true_cofactor
+    } else {
+        &plan.false_cofactor
+    };
+    let mut instructions = Vec::new();
+    let mut replacements = HashMap::<RegisterId, RegisterId>::default();
+    for index in plan.segment_start..plan.segment_end {
+        let inst = &original.instructions[index];
+        if owned.contains(&index) || arm_cofactor.contains(&index) {
+            let old_dst = def_reg(inst).expect("pure region instruction must define a value");
+            *reg_counter += 1;
+            let new_dst = RegisterId(*reg_counter);
+            eu.register_map
+                .insert(new_dst, eu.register_map[&old_dst].clone());
+            instructions.push(
+                clone_pure_instruction(inst, new_dst, &replacements)
+                    .expect("planned region contains only pure instructions"),
+            );
+            replacements.insert(old_dst, new_dst);
+        } else if arm_muxes.contains(&index) {
+            let SIRInstruction::Mux(dst, _, true_value, false_value) = *inst else {
+                unreachable!("same-predicate source must remain a Mux")
+            };
+            let selected = if true_arm { true_value } else { false_value };
+            replacements.insert(
+                dst,
+                replacements.get(&selected).copied().unwrap_or(selected),
+            );
+        }
+    }
+    let arguments = plan
+        .live_outs
+        .iter()
+        .map(|value| {
+            *replacements
+                .get(value)
+                .expect("closed cofactor must define every live-out on both edges")
+        })
+        .collect();
+    (instructions, arguments)
+}
+
+fn clone_pure_instruction(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    dst: RegisterId,
+    replacements: &HashMap<RegisterId, RegisterId>,
+) -> Option<SIRInstruction<RegionedAbsoluteAddr>> {
+    let mapped = |value: RegisterId| replacements.get(&value).copied().unwrap_or(value);
+    Some(match inst {
+        SIRInstruction::Imm(_, value) => SIRInstruction::Imm(dst, value.clone()),
+        SIRInstruction::Binary(_, lhs, op, rhs) => {
+            SIRInstruction::Binary(dst, mapped(*lhs), *op, mapped(*rhs))
+        }
+        SIRInstruction::Unary(_, op, source) => SIRInstruction::Unary(dst, *op, mapped(*source)),
+        SIRInstruction::Concat(_, args) => {
+            SIRInstruction::Concat(dst, args.iter().copied().map(mapped).collect())
+        }
+        SIRInstruction::Slice(_, source, lsb, width) => {
+            SIRInstruction::Slice(dst, mapped(*source), *lsb, *width)
+        }
+        SIRInstruction::Mux(_, condition, true_value, false_value) => SIRInstruction::Mux(
+            dst,
+            mapped(*condition),
+            mapped(*true_value),
+            mapped(*false_value),
+        ),
+        SIRInstruction::Load(_, address, offset, width) => SIRInstruction::Load(
+            dst,
+            *address,
+            match offset {
+                SIROffset::Static(offset) => SIROffset::Static(*offset),
+                SIROffset::Dynamic(offset) => SIROffset::Dynamic(mapped(*offset)),
+            },
+            *width,
+        ),
+        SIRInstruction::Store(..)
+        | SIRInstruction::Commit(..)
+        | SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => return None,
+    })
+}
+
+fn instruction_is_same_predicate_region_value(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    instruction_is_movable(inst) || matches!(inst, SIRInstruction::Load(..))
 }
 
 fn plan_block(
@@ -943,6 +1750,47 @@ mod tests {
         }
     }
 
+    fn repeated_predicate_unit() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(0), bit(1));
+        for reg in 1..=11 {
+            register_map.insert(RegisterId(reg), bit(8));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+            vec![
+                // Two closed arm DAGs. The selected values are postprocessed
+                // and reconverge before their one external Store.
+                SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(4), RegisterId(2), BinaryOp::Add, RegisterId(2)),
+                SIRInstruction::Mux(RegisterId(5), RegisterId(0), RegisterId(3), RegisterId(4)),
+                SIRInstruction::Binary(RegisterId(6), RegisterId(5), BinaryOp::And, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(7), RegisterId(3), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(8), RegisterId(4), BinaryOp::Add, RegisterId(2)),
+                SIRInstruction::Mux(RegisterId(9), RegisterId(0), RegisterId(7), RegisterId(8)),
+                SIRInstruction::Binary(RegisterId(10), RegisterId(9), BinaryOp::Or, RegisterId(2)),
+                SIRInstruction::Binary(RegisterId(11), RegisterId(6), BinaryOp::Or, RegisterId(10)),
+                SIRInstruction::Store(
+                    address(40),
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(11),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            SIRTerminator::Return,
+        );
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct ExecutionTrace {
         stores: Vec<(RegionedAbsoluteAddr, usize, usize, u64)>,
@@ -956,6 +1804,7 @@ mod tests {
         let mut registers = HashMap::default();
         registers.insert(RegisterId(0), condition);
         registers.insert(RegisterId(1), input);
+        registers.insert(RegisterId(2), input);
         let mut memory = HashMap::<(RegionedAbsoluteAddr, usize), u64>::default();
         let mut stores = Vec::new();
         let mut current = eu.entry_block_id;
@@ -990,11 +1839,27 @@ mod tests {
                         };
                         registers.insert(*dst, value & mask);
                     }
-                    SIRInstruction::Unary(dst, UnaryOp::Ident, source) => {
-                        registers.insert(*dst, registers[source]);
+                    SIRInstruction::Unary(dst, op, source) => {
+                        let width = eu.register_map[dst].width();
+                        let mask = if width >= 64 {
+                            u64::MAX
+                        } else {
+                            (1u64 << width) - 1
+                        };
+                        let value = match op {
+                            UnaryOp::Ident => registers[source],
+                            UnaryOp::BitNot => !registers[source],
+                            UnaryOp::Minus => registers[source].wrapping_neg(),
+                            other => panic!("unsupported test unary op {other:?}"),
+                        };
+                        registers.insert(*dst, value & mask);
                     }
-                    SIRInstruction::Load(dst, addr, SIROffset::Static(offset), _) => {
-                        registers.insert(*dst, memory.get(&(*addr, *offset)).copied().unwrap_or(0));
+                    SIRInstruction::Load(dst, addr, offset, _) => {
+                        let offset = match offset {
+                            SIROffset::Static(offset) => *offset,
+                            SIROffset::Dynamic(offset) => registers[offset] as usize,
+                        };
+                        registers.insert(*dst, memory.get(&(*addr, offset)).copied().unwrap_or(0));
                     }
                     SIRInstruction::Mux(dst, cond, true_value, false_value) => {
                         let selected = if registers[cond] != 0 {
@@ -1104,6 +1969,283 @@ mod tests {
                 matches!(inst, SIRInstruction::Store(_, _, 8, RegisterId(2), _, _))
             })
         );
+    }
+
+    #[test]
+    fn one_branch_specializes_a_repeated_predicate_and_merges_only_the_live_out() {
+        let mut eu = repeated_predicate_unit();
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+
+        GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        for condition in [0, 1] {
+            for input in [3, 5, 7, 11] {
+                assert_eq!(
+                    execute(&before, condition, input),
+                    execute(&eu, condition, input),
+                );
+            }
+        }
+        let head = &eu.blocks[&BlockId(0)];
+        let SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } = &head.terminator
+        else {
+            panic!("the repeated predicate must form one shared branch");
+        };
+        assert!(
+            eu.blocks[&true_block.0]
+                .instructions
+                .iter()
+                .all(|inst| !matches!(inst, SIRInstruction::Mux(_, RegisterId(0), ..)))
+        );
+        assert!(
+            eu.blocks[&false_block.0]
+                .instructions
+                .iter()
+                .all(|inst| !matches!(inst, SIRInstruction::Mux(_, RegisterId(0), ..)))
+        );
+        let merge = match &eu.blocks[&true_block.0].terminator {
+            SIRTerminator::Jump(merge, args) => {
+                assert_eq!(
+                    args.len(),
+                    1,
+                    "only the reconverged result crosses the edge"
+                );
+                *merge
+            }
+            other => panic!("unexpected true-edge terminator: {other:?}"),
+        };
+        assert_eq!(eu.blocks[&merge].params, vec![RegisterId(11)]);
+        assert!(matches!(
+            eu.blocks[&merge].instructions.as_slice(),
+            [SIRInstruction::Store(_, _, 8, RegisterId(11), _, _)]
+        ));
+        for dead in 3..=10 {
+            assert!(
+                !eu.register_map.contains_key(&RegisterId(dead)),
+                "replaced original r{dead} must not allocate a native VReg"
+            );
+        }
+        assert!(
+            eu.register_map.contains_key(&RegisterId(11)),
+            "the merge parameter keeps its original register type"
+        );
+    }
+
+    #[test]
+    fn same_predicate_region_moves_static_and_dynamic_loads_with_their_arms() {
+        let mut eu = repeated_predicate_unit();
+        eu.register_map.insert(RegisterId(12), bit(8));
+        eu.register_map.insert(RegisterId(13), bit(8));
+        let block = eu.blocks.get_mut(&BlockId(0)).unwrap();
+        block.instructions.insert(
+            0,
+            SIRInstruction::Load(RegisterId(12), address(50), SIROffset::Static(0), 8),
+        );
+        block.instructions.insert(
+            1,
+            SIRInstruction::Load(
+                RegisterId(13),
+                address(51),
+                SIROffset::Dynamic(RegisterId(2)),
+                8,
+            ),
+        );
+        let SIRInstruction::Binary(_, true_lhs, _, _) = &mut block.instructions[2] else {
+            panic!("fixture true arm must start with a binary operation");
+        };
+        *true_lhs = RegisterId(12);
+        let SIRInstruction::Binary(_, false_lhs, _, _) = &mut block.instructions[3] else {
+            panic!("fixture false arm must start with a binary operation");
+        };
+        *false_lhs = RegisterId(13);
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+
+        GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        for condition in [0, 1] {
+            assert_eq!(execute(&before, condition, 7), execute(&eu, condition, 7));
+        }
+        let SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } = &eu.blocks[&BlockId(0)].terminator
+        else {
+            panic!("load-bearing repeated predicate must branch");
+        };
+        assert!(
+            eu.blocks[&true_block.0]
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Load(_, _, SIROffset::Static(0), 8)))
+        );
+        assert!(
+            eu.blocks[&false_block.0].instructions.iter().any(|inst| {
+                matches!(inst, SIRInstruction::Load(_, _, SIROffset::Dynamic(_), 8))
+            })
+        );
+    }
+
+    #[test]
+    fn nested_same_predicate_mux_drops_the_unselected_cofactor() {
+        let mut eu = repeated_predicate_unit();
+        for reg in 12..=14 {
+            eu.register_map.insert(RegisterId(reg), bit(8));
+        }
+        let block = eu.blocks.get_mut(&BlockId(0)).unwrap();
+        let store = block.instructions.pop().unwrap();
+        block.instructions.extend([
+            SIRInstruction::Unary(RegisterId(12), UnaryOp::BitNot, RegisterId(11)),
+            SIRInstruction::Unary(RegisterId(13), UnaryOp::Minus, RegisterId(11)),
+            SIRInstruction::Mux(
+                RegisterId(14),
+                RegisterId(0),
+                RegisterId(12),
+                RegisterId(13),
+            ),
+        ]);
+        let SIRInstruction::Store(address, offset, width, _, triggers, sites) = store else {
+            panic!("fixture must end in a Store");
+        };
+        block.instructions.push(SIRInstruction::Store(
+            address,
+            offset,
+            width,
+            RegisterId(14),
+            triggers,
+            sites,
+        ));
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+
+        GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        for condition in [0, 1] {
+            assert_eq!(execute(&before, condition, 9), execute(&eu, condition, 9));
+        }
+        let SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } = &eu.blocks[&BlockId(0)].terminator
+        else {
+            panic!("nested repeated predicate must branch");
+        };
+        assert!(
+            eu.blocks[&true_block.0]
+                .instructions
+                .iter()
+                .any(|inst| { matches!(inst, SIRInstruction::Unary(_, UnaryOp::BitNot, _)) })
+        );
+        assert!(
+            !eu.blocks[&true_block.0]
+                .instructions
+                .iter()
+                .any(|inst| { matches!(inst, SIRInstruction::Unary(_, UnaryOp::Minus, _)) })
+        );
+        assert!(
+            eu.blocks[&false_block.0]
+                .instructions
+                .iter()
+                .any(|inst| { matches!(inst, SIRInstruction::Unary(_, UnaryOp::Minus, _)) })
+        );
+        assert!(
+            !eu.blocks[&false_block.0]
+                .instructions
+                .iter()
+                .any(|inst| { matches!(inst, SIRInstruction::Unary(_, UnaryOp::BitNot, _)) })
+        );
+    }
+
+    #[test]
+    fn keeps_a_locally_defined_predicate_before_the_recovered_branch() {
+        let mut register_map = HashMap::default();
+        for reg in 0..=14 {
+            register_map.insert(RegisterId(reg), bit(1));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+            vec![
+                SIRInstruction::Unary(RegisterId(3), UnaryOp::Ident, RegisterId(0)),
+                SIRInstruction::Binary(RegisterId(4), RegisterId(1), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(5), RegisterId(4), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(6), RegisterId(5), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(7), RegisterId(6), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(8), RegisterId(2), BinaryOp::Mul, RegisterId(2)),
+                SIRInstruction::Binary(RegisterId(9), RegisterId(8), BinaryOp::Mul, RegisterId(2)),
+                SIRInstruction::Binary(RegisterId(10), RegisterId(9), BinaryOp::Mul, RegisterId(2)),
+                SIRInstruction::Binary(
+                    RegisterId(11),
+                    RegisterId(10),
+                    BinaryOp::Mul,
+                    RegisterId(2),
+                ),
+                // The predicate is also selected as data. Moving r3 into the
+                // true arm would leave the newly introduced Branch undefined.
+                SIRInstruction::Mux(RegisterId(12), RegisterId(3), RegisterId(3), RegisterId(7)),
+                SIRInstruction::Mux(RegisterId(13), RegisterId(3), RegisterId(3), RegisterId(11)),
+                SIRInstruction::Binary(
+                    RegisterId(14),
+                    RegisterId(12),
+                    BinaryOp::Or,
+                    RegisterId(13),
+                ),
+                SIRInstruction::Store(
+                    address(42),
+                    SIROffset::Static(0),
+                    1,
+                    RegisterId(14),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            SIRTerminator::Return,
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+
+        GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        for condition in [0, 1] {
+            for input in [0, 1] {
+                assert_eq!(
+                    execute(&before, condition, input),
+                    execute(&eu, condition, input),
+                );
+            }
+        }
+        let head = &eu.blocks[&BlockId(0)];
+        assert!(head.instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Unary(RegisterId(3), UnaryOp::Ident, RegisterId(0))
+            )
+        }));
+        assert!(matches!(
+            head.terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(3),
+                ..
+            }
+        ));
     }
 
     #[test]
