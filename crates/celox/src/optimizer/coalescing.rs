@@ -22,6 +22,7 @@ mod pass_inline_commit_forwarding;
 mod pass_loop_idiom;
 mod pass_manager;
 mod pass_optimize_blocks;
+mod pass_packed_scatter_store;
 mod pass_partial_forward;
 mod pass_reschedule;
 mod pass_sparse_case_dispatch;
@@ -48,6 +49,7 @@ use pass_inline_commit_forwarding::InlineCommitForwardingPass;
 use pass_loop_idiom::LoopIdiomPass;
 use pass_manager::ExecutionUnitPassManager;
 use pass_optimize_blocks::OptimizeBlocksPass;
+use pass_packed_scatter_store::PackedScatterStorePass;
 use pass_partial_forward::PartialForwardPass;
 use pass_reschedule::ReschedulePass;
 use pass_sparse_case_dispatch::SparseCaseDispatchPass;
@@ -499,6 +501,11 @@ fn optimize_with_options(
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, &options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&PackedScatterStorePass, eu, &options);
         }
     }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
