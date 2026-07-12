@@ -5,11 +5,11 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-const GIT_IGNORE: &'static str = r#"
+const GIT_IGNORE: &str = r#"
 Veryl.lock
 "#;
 
-const TEST_TOML: &'static str = r#"
+const TEST_TOML: &str = r#"
 [project]
 name = "test"
 version = "0.1.0"
@@ -25,7 +25,35 @@ target = {type = "source"}
 indent_width = 4
 "#;
 
-const MAIN_TOML: &'static str = r#"
+const EXTENSION_EXTERNAL_TOOL_TOML: &str = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[metadata.external_tool]
+files = ["src/**/*.v"]
+attrs = { role = "core" }
+"#;
+
+const EXTENSION_OTHER_TOOL_TOML: &str = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[metadata.other_tool]
+enabled = true
+"#;
+
+const UNKNOWN_TOP_LEVEL_TOML: &str = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[unknown]
+value = true
+"#;
+
+const MAIN_TOML: &str = r#"
 [project]
 name = "main"
 version = "0.1.0"
@@ -39,7 +67,7 @@ sub4   = {path = "../sub4"}
 sub6   = {path = "../sub6"}
 "#;
 
-const SUB1_TOML: &'static str = r#"
+const SUB1_TOML: &str = r#"
 [project]
 name = "sub1"
 version = "0.1.0"
@@ -52,7 +80,7 @@ publish_commit = true
 sub2 = {git = "file://{}/sub2", version = "1.0.0"}
 "#;
 
-const SUB2_TOML: &'static str = r#"
+const SUB2_TOML: &str = r#"
 [project]
 name = "sub2"
 version = "0.1.0"
@@ -62,7 +90,7 @@ bump_commit = true
 publish_commit = true
 "#;
 
-const SUB3_TOML: &'static str = r#"
+const SUB3_TOML: &str = r#"
 [project]
 name = "sub3"
 version = "0.1.0"
@@ -75,7 +103,7 @@ publish_commit = true
 sub1 = {git = "file://{}/sub1", version = "0.1.0"}
 "#;
 
-const SUB4_TOML: &'static str = r#"
+const SUB4_TOML: &str = r#"
 [project]
 name = "sub4"
 version = "0.4.0"
@@ -89,7 +117,7 @@ sub5 = {path = "./sub5"}
 sub6 = {path = "../sub6"}
 "#;
 
-const SUB5_TOML: &'static str = r#"
+const SUB5_TOML: &str = r#"
 [project]
 name = "sub5"
 version = "0.5.0"
@@ -99,7 +127,7 @@ bump_commit = true
 publish_commit = true
 "#;
 
-const SUB6_TOML: &'static str = r#"
+const SUB6_TOML: &str = r#"
 [project]
 name = "sub6"
 version = "0.6.0"
@@ -129,7 +157,7 @@ fn create_metadata_multi() -> (Metadata, TempDir) {
     (metadata, tempdir)
 }
 
-const INNER_A_TOML: &'static str = r#"
+const INNER_A_TOML: &str = r#"
 [project]
 name = "inner_a"
 version = "0.1.0"
@@ -139,7 +167,7 @@ bump_commit = true
 publish_commit = true
 "#;
 
-const INNER_B_TOML: &'static str = r#"
+const INNER_B_TOML: &str = r#"
 [project]
 name = "inner_b"
 version = "0.1.0"
@@ -178,7 +206,7 @@ fn create_metadata_inner_repo() -> (Metadata, TempDir) {
     git.add(&gitignore_path).unwrap();
     git.add(&a_toml_path).unwrap();
     git.add(&b_toml_path).unwrap();
-    git.commit(&"Add inner projects").unwrap();
+    git.commit("Add inner projects").unwrap();
 
     let mut a_metadata = Metadata::load(&a_toml_path).unwrap();
     a_metadata.publish().unwrap();
@@ -215,7 +243,7 @@ fn create_project(root: &Path, name: &str, toml: &str, publish: bool) -> Metadat
     let toml_path = path.join("Veryl.toml");
     fs::write(
         &toml_path,
-        &toml.replace("{}", &root.to_string_lossy().replace("\\", "/")),
+        toml.replace("{}", &root.to_string_lossy().replace("\\", "/")),
     )
     .unwrap();
     let git_ignore_path = path.join(".gitignore");
@@ -223,7 +251,7 @@ fn create_project(root: &Path, name: &str, toml: &str, publish: bool) -> Metadat
     let git = Git::init(&path).unwrap();
     git.add(&toml_path).unwrap();
     git.add(&git_ignore_path).unwrap();
-    git.commit(&"Add Veryl.toml").unwrap();
+    git.commit("Add Veryl.toml").unwrap();
     let mut metadata = Metadata::load(&toml_path).unwrap();
     if publish {
         metadata.publish().unwrap();
@@ -256,6 +284,192 @@ fn check_toml() {
     assert!(metadata.build.reset_low_prefix.is_none());
     assert_eq!(metadata.build.reset_low_suffix.unwrap(), "_n");
     assert_eq!(metadata.format.indent_width, 4);
+}
+
+#[test]
+fn load_extension_namespace_metadata() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let toml_path = tempdir.path().join("Veryl.toml");
+    fs::write(&toml_path, EXTENSION_EXTERNAL_TOOL_TOML).unwrap();
+
+    let metadata = Metadata::load(&toml_path).unwrap();
+    let external_tool = metadata
+        .metadata
+        .get("external_tool")
+        .unwrap()
+        .as_table()
+        .unwrap();
+
+    assert_eq!(
+        external_tool.get("files").unwrap().as_array().unwrap()[0]
+            .as_str()
+            .unwrap(),
+        "src/**/*.v"
+    );
+    assert_eq!(
+        external_tool
+            .get("attrs")
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .get("role")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "core"
+    );
+}
+
+#[test]
+fn load_extension_namespace_other_tool() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let toml_path = tempdir.path().join("Veryl.toml");
+    fs::write(&toml_path, EXTENSION_OTHER_TOOL_TOML).unwrap();
+
+    let metadata = Metadata::load(&toml_path).unwrap();
+
+    assert!(metadata.metadata.contains_key("other_tool"));
+    assert!(
+        metadata
+            .metadata
+            .get("other_tool")
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .get("enabled")
+            .unwrap()
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[test]
+fn reject_unknown_top_level_table() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let toml_path = tempdir.path().join("Veryl.toml");
+    fs::write(&toml_path, UNKNOWN_TOP_LEVEL_TOML).unwrap();
+
+    assert!(Metadata::load(&toml_path).is_err());
+}
+
+#[test]
+fn metadata_output_v2_simple_project() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let metadata = create_project(tempdir.path(), "test", EXTENSION_EXTERNAL_TOOL_TOML, false);
+    let project_path = tempdir.path().join("test").canonicalize().unwrap();
+
+    let output = MetadataOutputV2::from_metadata(&metadata).unwrap();
+    let encoded = serde_json::to_string(&output).unwrap();
+    let value = serde_json::to_value(&output).unwrap();
+
+    assert_eq!(output.format_version, 2);
+    assert_eq!(value["format_version"], 2);
+    assert_eq!(output.root.name, "test");
+    assert_eq!(output.root.version, Some(Version::parse("0.1.0").unwrap()));
+    assert_eq!(output.root.local_path, project_path);
+    assert_eq!(
+        output
+            .root
+            .metadata
+            .get("external_tool")
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .get("attrs")
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .get("role")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "core"
+    );
+    assert!(output.dependencies.is_empty());
+    assert_eq!(value["root"]["name"], "test");
+    assert_eq!(
+        value["root"]["local_path"].as_str().unwrap(),
+        project_path.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        value["root"]["metadata"]["external_tool"]["attrs"]["role"],
+        "core"
+    );
+    assert!(value.get("metadata").is_none());
+    assert!(!encoded.contains("metadata_path"));
+    assert!(!encoded.contains("lockfile_path"));
+    assert!(!encoded.contains("pubfile_path"));
+    assert!(!encoded.contains("build_info"));
+}
+
+#[test]
+fn metadata_output_v2_multi_dependency_deterministic() {
+    let (mut metadata, _tempdir) = create_metadata_multi();
+    metadata.update_lockfile().unwrap();
+
+    let output = MetadataOutputV2::from_metadata(&metadata).unwrap();
+    let repeated = MetadataOutputV2::from_metadata(&metadata).unwrap();
+    let encoded = serde_json::to_string(&output).unwrap();
+    let repeated_encoded = serde_json::to_string(&repeated).unwrap();
+    let value = serde_json::to_value(&output).unwrap();
+    let ids = output
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(encoded, repeated_encoded);
+    assert_eq!(value["format_version"], 2);
+    assert!(!output.dependencies.is_empty());
+    assert!(ids.windows(2).all(|window| window[0] <= window[1]));
+    assert!(ids.contains(&"dep:sub1"));
+    assert!(ids.contains(&"dep:sub2"));
+    assert!(ids.contains(&"dep:sub2_0"));
+    assert!(output.dependencies.iter().any(|dependency| {
+        dependency.id == "dep:sub1" && dependency.dependencies.contains(&"dep:sub2_0".to_string())
+    }));
+    assert!(output.dependencies.iter().any(|dependency| {
+        matches!(dependency.source, MetadataSourceV2::Repository { .. })
+            && !dependency.local_path.as_os_str().is_empty()
+    }));
+    assert!(output.dependencies.iter().any(|dependency| {
+        matches!(dependency.source, MetadataSourceV2::Path { .. })
+            && !dependency.local_path.as_os_str().is_empty()
+    }));
+    assert!(
+        output
+            .dependencies
+            .iter()
+            .all(|dependency| dependency.local_path.is_absolute())
+    );
+    assert!(
+        output
+            .dependencies
+            .iter()
+            .all(|dependency| dependency.metadata.is_empty())
+    );
+    assert!(
+        output
+            .dependencies
+            .iter()
+            .all(|dependency| !dependency.local_path.as_os_str().is_empty())
+    );
+    assert!(
+        value["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|dependency| {
+                dependency
+                    .get("local_path")
+                    .and_then(|local_path| local_path.as_str())
+                    .is_some_and(|local_path| !local_path.is_empty())
+            })
+    );
+    assert!(!encoded.contains("metadata_path"));
+    assert!(!encoded.contains("lockfile_path"));
+    assert!(!encoded.contains("pubfile_path"));
+    assert!(!encoded.contains("build_info"));
 }
 
 #[test]
@@ -463,4 +677,44 @@ fn lockfile_inner_projects() {
         .expect("paths() should resolve inner-project metadata");
 
     let _ = lockfile.clear_cache();
+}
+
+// Concurrent test functions each rewrite the same Veryl.lock via Lockfile::save
+// while others read it; a non-atomic (truncate-then-write) save let a reader
+// observe an empty file and fail with "missing field `projects`".
+#[test]
+fn lockfile_save_is_atomic() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let path = tempdir.path().join("Veryl.lock");
+    Lockfile::default().save(&path).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let readers: Vec<_> = (0..1)
+        .map(|_| {
+            let path = path.clone();
+            let stop = stop.clone();
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // On Windows a read can transiently fail during the atomic
+                    // replace; only a successful read must never be truncated.
+                    if let Ok(text) = fs::read_to_string(&path) {
+                        toml::from_str::<Lockfile>(&text)
+                            .unwrap_or_else(|e| panic!("read a partial lock file ({e}): {text:?}"));
+                    }
+                }
+            })
+        })
+        .collect();
+
+    for _ in 0..2000 {
+        Lockfile::default().save(&path).unwrap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    for r in readers {
+        r.join().unwrap();
+    }
 }

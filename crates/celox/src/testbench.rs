@@ -1358,6 +1358,10 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                             clks.push(*clock);
                         }
                     }
+                    TbMethod::FileOpen { .. }
+                    | TbMethod::FileWrite { .. }
+                    | TbMethod::FileClose
+                    | TbMethod::FileFlush => {}
                 },
                 Statement::If(s) => {
                     Self::scan_tb_methods(&s.true_side, clks, rsts);
@@ -1613,6 +1617,10 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     deassert_value,
                 })
             }
+            TbMethod::FileOpen { .. }
+            | TbMethod::FileWrite { .. }
+            | TbMethod::FileClose
+            | TbMethod::FileFlush => None,
         }
     }
 

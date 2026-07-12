@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "veryl-metadata"
-version = "0.20.1"
+version = "0.20.2"
 authors = ["dalance@gmail.com"]
 build = "build.rs"
 autolib = false
@@ -44,7 +44,7 @@ name = "veryl_metadata"
 path = "src/lib.rs"
 
 [dependencies.log]
-version = "0.4.30"
+version = "0.4.32"
 
 [dependencies.once_cell]
 version = "1.21"
@@ -53,7 +53,7 @@ version = "1.21"
 version = "0.2.3"
 
 [dependencies.regex]
-version = "1.12.3"
+version = "1.12.4"
 
 [dependencies.semver]
 version = "1.0"
@@ -64,7 +64,7 @@ version = "1.0"
 features = ["derive"]
 
 [dependencies.serde_regex]
-version = "1.1"
+version = "1.2"
 
 [dependencies.spdx]
 version = "0.13.4"
@@ -88,22 +88,25 @@ features = [
 default-features = false
 
 [dependencies.veryl-parser]
-version = "0.20.1"
+version = "0.20.2"
 
 [dependencies.veryl-path]
-version = "0.20.1"
+version = "0.20.2"
 
 [dependencies.veryl-std]
-version = "0.20.1"
+version = "0.20.2"
 
 [dependencies.walkdir]
 version = "2.5.0"
+
+[dev-dependencies.serde_json]
+version = "1.0"
 
 [dev-dependencies.tempfile]
 version = "3.26"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.gix]
-version = "0.84.0"
+version = "0.85.0"
 features = [
     "blocking-network-client",
     "blocking-http-transport-reqwest-rust-tls",

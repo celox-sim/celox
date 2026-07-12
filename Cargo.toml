@@ -22,13 +22,13 @@ description = "Celox HDL Simulator"
 rust-version = "1.97.0"
 
 [workspace.dependencies]
-veryl-analyzer = "0.20.0"
-veryl-emitter  = "0.20.0"
-veryl-metadata = "0.20.0"
-veryl-parser   = { version = "0.20.0", default-features = false }
-veryl-path      = "0.20.0"
-veryl-simulator = "0.20.0"
-veryl-std       = "0.20.0"
+veryl-analyzer = "0.20.2"
+veryl-emitter  = "0.20.2"
+veryl-metadata = "0.20.2"
+veryl-parser   = { version = "0.20.2", default-features = false }
+veryl-path      = "0.20.2"
+veryl-simulator = "0.20.2"
+veryl-std       = "0.20.2"
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }
