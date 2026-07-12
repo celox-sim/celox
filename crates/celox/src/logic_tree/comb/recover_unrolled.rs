@@ -1399,7 +1399,7 @@ fn collect_template_inputs(
 
 #[cfg(test)]
 mod tests {
-    use veryl_analyzer::ir::{Component, Declaration, Ir, VarPath};
+    use veryl_analyzer::ir::{Component, Declaration, Ir, VarKind, VarPath};
     use veryl_analyzer::{Analyzer, Context, attribute_table, symbol_table};
     use veryl_metadata::Metadata;
     use veryl_parser::Parser;
@@ -1417,10 +1417,8 @@ mod tests {
         let analyzer = Analyzer::new(&metadata);
         let parsed = Parser::parse(code, &"").expect("test source must parse");
         let loop_sources = LoopSourceTable::collect([&parsed.veryl]);
-        assert!(
-            analyzer.analyze_pass1("prj", &parsed.veryl).is_empty(),
-            "pass1 must succeed"
-        );
+        let pass1_errors = analyzer.analyze_pass1("prj", &parsed.veryl);
+        assert!(pass1_errors.is_empty(), "pass1 errors: {pass1_errors:?}");
         assert!(
             Analyzer::analyze_post_pass1().is_empty(),
             "post-pass1 must succeed"
@@ -1663,6 +1661,99 @@ mod tests {
         assert_eq!(group_count(&arena), 0);
     }
 
+    #[test]
+    fn recovers_heliodor_shaped_32_iteration_array_fold() {
+        let code = r#"
+            module Top (
+                en        : input  logic,
+                load_age  : input  logic<5>,
+                load_addr : input  logic<64>,
+                store_addr: input  logic<64> [32],
+                store_data: input  logic<64> [32],
+                store_size: input  logic<2>  [32],
+                store_fwd : input  logic     [32],
+                value     : output logic<8>,
+            ) {
+                var found: logic;
+                var age  : logic<5>;
+                var selected: logic<8>;
+
+                always_comb {
+                    found = 1'b0;
+                    age   = 5'd0;
+                    selected = 8'd0;
+                    if en {
+                        for i in 0..32 {
+                            let age_i: logic<5>  = (i as 5);
+                            let sa   : logic<64> = store_addr[i];
+                            let la   : logic<64> = load_addr;
+                            let cov  : logic = store_fwd[i]
+                                && (age_i <: load_age)
+                                && (la >= sa)
+                                && (la <: sa + ((5'd1 << store_size[i]) as 64));
+                            let off  : logic<64> = la - sa;
+                            let byt  : logic<64> = store_data[i] >> {off[2:0], 3'b000};
+                            if cov && (!found || age_i >: age) {
+                                found = 1'b1;
+                                age   = age_i;
+                                selected = byt[7:0];
+                            }
+                        }
+                    }
+                    value = selected;
+                }
+            }
+        "#;
+        let (module, provenance) = analyze(code);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].unrolled.iterations.len(), 32);
+        for iteration in &candidates[0].unrolled.iterations {
+            let local_lets = module
+                .variables
+                .values()
+                .filter(|variable| {
+                    variable.kind == VarKind::Let
+                        && variable.path.0.len() > iteration.hierarchy.len()
+                        && variable.path.0.starts_with(&iteration.hierarchy)
+                })
+                .count();
+            assert_eq!(local_lets, 6);
+        }
+
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        assert_eq!(group_count(&arena), 1);
+        let (loop_var, states, trip_count) = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup {
+                    loop_var,
+                    states,
+                    trip_count,
+                    ..
+                } => Some((*loop_var, states, *trip_count)),
+                _ => None,
+            })
+            .expect("recovered group must exist");
+        assert_eq!(trip_count, 32);
+        assert_eq!(states.len(), 3);
+
+        let mut narrow_widths = BTreeSet::new();
+        let mut visited = HashSet::default();
+        for state in states {
+            collect_narrow_dynamic_input_widths(
+                state.update,
+                loop_var,
+                &arena,
+                &mut visited,
+                &mut narrow_widths,
+            );
+        }
+        assert!(narrow_widths.contains(&1), "missing scalar dynamic load");
+        assert!(narrow_widths.contains(&2), "missing size dynamic load");
+        assert!(narrow_widths.contains(&64), "missing 64-bit dynamic load");
+    }
+
     fn update_has_dynamic_loop_index(
         root: NodeId,
         loop_var: VarId,
@@ -1702,6 +1793,70 @@ mod tests {
                 update_has_dynamic_loop_index(*expr, loop_var, arena, visited)
             }
             SLTNode::Constant(..) | SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => false,
+        }
+    }
+
+    fn collect_narrow_dynamic_input_widths(
+        root: NodeId,
+        loop_var: VarId,
+        arena: &SLTNodeArena<VarId>,
+        visited: &mut HashSet<NodeId>,
+        widths: &mut BTreeSet<usize>,
+    ) {
+        if !visited.insert(root) {
+            return;
+        }
+        match arena.get(root) {
+            SLTNode::Input { index, .. } => {
+                for entry in index {
+                    collect_narrow_dynamic_input_widths(
+                        entry.node, loop_var, arena, visited, widths,
+                    );
+                }
+            }
+            SLTNode::Slice { expr, access } => {
+                if let SLTNode::Input {
+                    index,
+                    access: raw_access,
+                    ..
+                } = arena.get(*expr)
+                    && !index.is_empty()
+                    && index.iter().any(|entry| {
+                        let mut inputs = HashSet::default();
+                        let mut index_visited = HashSet::default();
+                        collect_template_inputs(entry.node, arena, &mut index_visited, &mut inputs)
+                            && inputs.contains(&loop_var)
+                    })
+                {
+                    let width = access.msb - access.lsb + 1;
+                    let raw_width = raw_access.msb - raw_access.lsb + 1;
+                    assert!(width < raw_width, "dynamic array read was not narrowed");
+                    widths.insert(width);
+                }
+                collect_narrow_dynamic_input_widths(*expr, loop_var, arena, visited, widths);
+            }
+            SLTNode::Binary(lhs, _, rhs) => {
+                collect_narrow_dynamic_input_widths(*lhs, loop_var, arena, visited, widths);
+                collect_narrow_dynamic_input_widths(*rhs, loop_var, arena, visited, widths);
+            }
+            SLTNode::Unary(_, inner) => {
+                collect_narrow_dynamic_input_widths(*inner, loop_var, arena, visited, widths)
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                collect_narrow_dynamic_input_widths(*cond, loop_var, arena, visited, widths);
+                collect_narrow_dynamic_input_widths(*then_expr, loop_var, arena, visited, widths);
+                collect_narrow_dynamic_input_widths(*else_expr, loop_var, arena, visited, widths);
+            }
+            SLTNode::Concat(parts) => {
+                for (part, _) in parts {
+                    collect_narrow_dynamic_input_widths(*part, loop_var, arena, visited, widths);
+                }
+            }
+            SLTNode::Constant(..) | SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => {}
         }
     }
 }
